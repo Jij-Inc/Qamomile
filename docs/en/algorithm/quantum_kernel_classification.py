@@ -47,7 +47,7 @@
 # classifier such as an SVM.
 
 # %%
-# !pip install qamomile scikit-learn
+# # !pip install qamomile scikit-learn
 
 # %% [markdown]
 # ## Hyperparameters
@@ -544,4 +544,58 @@ ax.legend()
 
 plt.tight_layout()
 plt.show()
+
+# %% [markdown]
+# ## Interpreting the Results
+#
+# The visualization above shows how well the quantum kernel classifier captures the nonlinear class structure of `make_circles`.
+#
+# The **upper-left panel** (training data) shows that the two classes have a concentric-circle structure that cannot be separated by a straight line.
+# In fact, the linear SVC achieved a test accuracy of 0.5 in this run, which is close to random guessing.
+# This is because a linear decision boundary in the raw 2D coordinates cannot represent the concentric-circle class structure.
+#
+# The **upper-right panel** (quantum kernel matrix) displays the Gram matrix of pairwise similarities
+#
+# $$
+# k(x, x') =
+# \left|
+# \langle 0^n |
+# U(f(x'))^\dagger U(f(x))
+# |0^n\rangle
+# \right|^2
+# $$
+#
+# computed over the training set.
+# Diagonal entries are always 1 (each point is identical to itself).
+# Off-diagonal entries indicate how close two data points are in the quantum feature space.
+# Since the matrix rows are not sorted by class label, we cannot read a clear block structure directly.
+# Nevertheless, when this matrix is passed to the SVM, it enables classification of data that is not linearly separable in the original 2D space.
+#
+# The **lower-left panel** (quantum kernel SVC boundary) shows a nonlinear decision boundary in input space.
+# In this run, the quantum kernel SVC achieved a test accuracy of 1.0.
+# This indicates that, for this small `make_circles` dataset, the quantum feature map we designed provides an effective similarity measure.
+#
+# The **lower-right panel** (RBF SVC) also forms a nonlinear decision boundary.
+# In this run, the RBF SVC likewise achieved a test accuracy of 1.0.
+# Thus, on this dataset both the quantum kernel SVC and the RBF SVC correctly classified all test points.
+# However, the RBF SVC boundary is relatively smooth, whereas the quantum kernel SVC boundary appears somewhat rougher.
+# This may be due to the small visualization grid (`GRID_SIZE = 15`) and the estimation of kernel values from `SHOTS = 1024` samples.
+#
+# In summary, the results of this experiment are:
+#
+# - Linear SVC: 0.5
+# - Quantum kernel SVC: 1.0
+# - RBF SVC: 1.0
+#
+# The quantum kernel SVC clearly outperformed the linear SVC and matched the test accuracy of the RBF SVC.
+#
+# However, this result alone does not demonstrate quantum advantage.
+# The dataset is small-scale for visualization purposes, and classical feature lifting is also applied.
+# What this notebook demonstrates is:
+# "We can construct a quantum kernel matrix with Qamomile and feed it to an SVM for nonlinear binary classification."
+# Discussing whether a quantum kernel is inherently superior to classical kernels would require larger datasets, multiple random seeds, shot-count dependence, layer-depth dependence, and detailed comparisons with classical kernels.
+#
+# Also note that the quantum kernel evaluation executes a quantum circuit for each pair of data points.
+# For a training set of size $n$, computing the training kernel matrix requires roughly $O(n^2)$ kernel evaluations.
+# This is not an issue for small datasets like ours, but the computational cost grows rapidly as the dataset size increases.
 
