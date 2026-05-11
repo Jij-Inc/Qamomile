@@ -178,6 +178,49 @@ p = 5  # number of QAOA layers
 executable = converter.transpile(transpiler, p=p)
 
 # %% [markdown]
+# ## Visualize the QAOA Circuit
+#
+# Qamomile's `MatplotlibDrawer` (via `kernel.draw()`) renders the QAOA
+# circuit's structure. The sampling qkernel that `QAOAConverter.transpile()`
+# builds internally is not exposed as a public API, so for visualization we
+# define an equivalent qkernel here and reuse `quad`/`linear` from the
+# converter's spin model. We render with `p=2` so the layered structure is
+# easy to read.
+
+# %%
+import qamomile.circuit as qmc
+
+
+@qmc.qkernel
+def qaoa_demo(
+    n: qmc.UInt,
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+    for layer in qmc.range(p):
+        for (i, j), Jij in quad.items():
+            q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * gammas[layer])
+        for i, hi in linear.items():
+            q[i] = qmc.rz(q[i], angle=hi * gammas[layer])
+        for i in qmc.range(n):
+            q[i] = qmc.rx(q[i], angle=2.0 * betas[layer])
+    return qmc.measure(q)
+
+
+qaoa_demo.draw(
+    n=converter.spin_model.num_bits,
+    p=2,
+    quad=converter.spin_model.quad,
+    linear=converter.spin_model.linear,
+)
+
+# %% [markdown]
 # ## Optimize the QAOA Parameters
 #
 # We use `executable.sample()` to evaluate the cost at each iteration of the
