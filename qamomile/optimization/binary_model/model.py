@@ -151,7 +151,7 @@ class BinaryModel(Generic[VT]):
         """
         expr = BinaryExpr(vartype=VarType.BINARY, constant=constant, coefficients={})
         for indices, coeff in hubo.items():
-            key = tuple(sorted(set(indices)))
+            key = BinaryExpr.reduce_indices(VarType.BINARY, indices)
             if len(key) != len(indices):
                 warnings.warn(
                     "Duplicate variable indices in HUBO term "
@@ -210,10 +210,7 @@ class BinaryModel(Generic[VT]):
         """
         expr = BinaryExpr(vartype=VarType.SPIN, constant=constant, coefficients={})
         for indices, coeff in higher_ising.items():
-            counts: dict[int, int] = {}
-            for i in indices:
-                counts[i] = counts.get(i, 0) + 1
-            reduced = tuple(sorted(i for i, c in counts.items() if c % 2 == 1))
+            reduced = BinaryExpr.reduce_indices(VarType.SPIN, indices)
             if len(reduced) != len(indices):
                 warnings.warn(
                     "Duplicate variable indices in higher Ising term "
