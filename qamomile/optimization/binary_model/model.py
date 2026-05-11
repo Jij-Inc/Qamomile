@@ -206,7 +206,7 @@ class BinaryModel(Generic[VT]):
             ...     constant=0.25,
             ... )
             >>> model.vartype
-            <VarType.SPIN: 'spin'>
+            <VarType.SPIN: 'SPIN'>
         """
         expr = BinaryExpr(vartype=VarType.SPIN, constant=constant, coefficients={})
         for indices, coeff in higher_ising.items():
