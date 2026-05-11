@@ -424,17 +424,26 @@ class GateEmitter(Protocol[T]):
     ) -> Any:
         """Start a native if context.
 
-        The ``clbit_or_expr`` parameter is normally an ``int`` (the
-        physical clbit index of a single measurement bit). Source-text
-        backends (currently CUDA-Q's ``CudaqKernelEmitter``) also
-        accept a pre-built Python source-text expression (``str``)
-        produced by ``StandardEmitPass._emit_runtime_classical_expr``
-        — this lets compound predicates like ``s0 and s1`` flow
-        through the same control-flow protocol without a separate
-        method. Backends that don't support compound predicates may
-        ignore the ``str`` case (e.g. Qiskit takes a different
-        override path that bypasses this method for compound
-        conditions).
+        The ``clbit_or_expr`` parameter is normally an ``int`` — the
+        physical clbit index of a single measurement bit, the value
+        ``StandardEmitPass._emit_if`` passes when the condition is a
+        direct ``qmc.measure(q)`` result. Source-text backends
+        (currently CUDA-Q's ``CudaqKernelEmitter``) also accept a
+        pre-built backend source-text expression (``str``) lowered
+        from a compound qkernel predicate such as ``s0 & s1`` /
+        ``~s0`` / ``s0 | s1`` — the qkernel surface uses bitwise
+        ``&`` / ``|`` / ``~`` because Python's ``and`` / ``or`` /
+        ``not`` cannot be overloaded on user types. The ``str`` form
+        is produced by a backend override of
+        ``StandardEmitPass._emit_runtime_classical_expr`` (the
+        default implementation raises ``EmitError``); see
+        ``CudaqEmitPass._emit_runtime_classical_expr`` for the
+        CUDA-Q lowering that targets ``cudaq.kernel`` source.
+        Backends that don't support compound predicates can simply
+        leave the ``str`` case unimplemented — Qiskit takes a
+        different override path that bypasses this method for
+        compound conditions and builds the predicate directly via
+        ``qiskit.circuit.classical.expr``.
 
         Returns context for the if/else block.
         """
