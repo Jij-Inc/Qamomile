@@ -12,7 +12,7 @@ LANGS=(en ja)
 # integration is excluded because those notebooks may require API keys
 # and can't be automatically synced/executed.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
-TARGET_DIRS=(tutorial algorithm usage)
+TARGET_DIRS=(tutorial algorithm optimization vqa usage)
 
 # Color output
 RED='\033[0;31m'
