@@ -2018,6 +2018,23 @@ class CircuitAnalyzer:
                 return str(pv)
             if isinstance(pv, str):
                 return pv
+        # Loop variable: ForOperation/ForItemsOperation unrolling writes
+        # `_loop_<var>` entries keyed by the variable *name* rather than the
+        # operand's logical_id, so loop-bound operands like ``Jij`` are not
+        # found by the logical_id lookup above. Mirror the same fallback
+        # ``_evaluate_value`` already uses so concrete entry values (e.g.
+        # ``0.5``) substitute into rendered angle expressions instead of
+        # leaking the loop-variable name (``Jij*gamma``).
+        if value.name:
+            loop_key = f"_loop_{value.name}"
+            if loop_key in param_values:
+                pv = param_values[loop_key]
+                if isinstance(pv, (int, float)):
+                    if isinstance(pv, float) and pv == int(pv):
+                        return str(int(pv))
+                    return str(pv)
+                if isinstance(pv, str):
+                    return pv
         # Constant
         const = value.get_const()
         if const is not None:
