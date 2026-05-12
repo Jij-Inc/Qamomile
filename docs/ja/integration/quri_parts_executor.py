@@ -31,10 +31,11 @@
 # QURI Parts連携の説明に集中するため、[MaxCutに対するQAOAチュートリアル](../algorithm/qaoa_maxcut.ipynb)と同じ5ノードの小さなグラフを再利用します。$\sum_{(i,j) \in E}(1 - s_i s_j)/2$を最大化することは、定数項を除いて、反強磁性Isingハミルトニアン$H_C = \sum_{(i,j) \in E} s_i s_j$を*最小化*することと等価です。重みなしMaxCutではすべての$J_{ij} = 1$、$h_i = 0$なので、これらの係数をそのまま`BinaryModel.from_ising`に渡します。
 
 # %%
+import os
+
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-import os
 
 from qamomile.optimization.binary_model import BinaryModel
 
