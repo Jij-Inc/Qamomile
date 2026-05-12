@@ -4,6 +4,7 @@ slug: release-notes
 
 # Release Notes
 
+- [v0.12.1](v0_12_1) — single-qubit gate broadcast over `Vector[Qubit]`, scalar literal promotion at sub-`@qkernel` call sites, QURI Parts symbolic-parameter arithmetic fix
 - [v0.12.0](v0_12_0) — Suzuki–Trotter time evolution, `qamomile.linalg`, self-recursive `@qkernel`, OMMX `SampleSet` output from optimization converters
 - [v0.11.1](v0_11_1) — Python 3.11 support
 - [v0.11.0](v0_11_0) — Parametric Vector QAOA hardening, `cx_entangling_layer`, compiler-core cleanup
