@@ -1742,7 +1742,7 @@ class TestRound4Reviewer:
         )
         # Verify the measured qubits are the root-space {1, 3, 5, 7}.
         measured_q = sorted(
-            inst.qubits[0]._index
+            qc.find_bit(inst.qubits[0]).index
             for inst in qc.data
             if inst.operation.name == "measure"
         )
@@ -1782,7 +1782,7 @@ class TestRound4Reviewer:
         exe = transpiler.transpile(kern, bindings={})
         qc = exe.compiled_quantum[0].circuit
         measured_q = sorted(
-            inst.qubits[0]._index
+            qc.find_bit(inst.qubits[0]).index
             for inst in qc.data
             if inst.operation.name == "measure"
         )
@@ -1886,7 +1886,7 @@ class TestRound4Reviewer:
             return [
                 (
                     type(inst.operation).__name__,
-                    tuple(q._index for q in inst.qubits),
+                    tuple(circuit.find_bit(q).index for q in inst.qubits),
                 )
                 for inst in circuit.data
             ]
@@ -1918,7 +1918,7 @@ class TestRound4Reviewer:
         exe = transpiler.transpile(kern, bindings={"lo": 1, "hi": 5})
         qc = exe.compiled_quantum[0].circuit
         measured_q = sorted(
-            inst.qubits[0]._index
+            qc.find_bit(inst.qubits[0]).index
             for inst in qc.data
             if inst.operation.name == "measure"
         )

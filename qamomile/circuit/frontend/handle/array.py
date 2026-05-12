@@ -68,15 +68,22 @@ class ArrayBase(Handle, Generic[T]):
     # element borrows and slice (view) borrows live here because they
     # encode the same invariant: "this slot has an outstanding return
     # obligation, so the parent can't touch it directly".  The owner
-    # differs — a tuple of ``UInt`` handles for a direct borrow (used
-    # for error formatting and kept for backward compatibility), or the
-    # owning ``VectorView`` itself for a slice borrow (used by
-    # ``validate_all_returned`` to detect drained views).  For slice
-    # borrows, only constant indices are registered; symbolic slices
-    # skip registration (best-effort linearity).
-    _borrowed_indices: dict[tuple[str, ...], "tuple[UInt, ...] | ArrayBase[T]"] = (
-        dataclasses.field(default_factory=dict)
-    )
+    # has three runtime variants distinguished by ``isinstance``:
+    #   * ``tuple[UInt, ...]`` — direct element borrow (the index handles
+    #     borrowed).  Kept for error formatting and back-compat.
+    #   * ``ArrayBase[T]`` — slice view ownership (the ``VectorView``
+    #     itself; used by ``validate_all_returned`` to detect drained
+    #     views).  For slice borrows only constant indices are
+    #     registered; symbolic slices skip registration (best-effort
+    #     linearity).
+    #   * ``_ConsumedSlotMarker`` — destructive view consume sentinel.
+    #     Installed by ``VectorView.consume(operation_name)`` when the
+    #     operation is in ``_DESTRUCTIVE_CONSUME_OPS``.  Any subsequent
+    #     access to that slot raises ``QubitConsumedError``.
+    _borrowed_indices: dict[
+        tuple[str, ...],
+        "tuple[UInt, ...] | ArrayBase[T] | _ConsumedSlotMarker",
+    ] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up the array."""
