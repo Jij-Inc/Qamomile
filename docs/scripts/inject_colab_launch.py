@@ -2,11 +2,11 @@
 """Post-build HTML patches for the Qamomile docs.
 
 Originally just a colab-launch script-tag injector; the script has
-since absorbed four more passes that all run against the same set of
+since absorbed five more passes that all run against the same set of
 ``docs/<lang>/_build/html/*.html`` (and ``*.json``) files, so they live
 together for a single rglob walk.
 
-The five passes:
+The six passes:
 
 1. Rewrite build-dir paths in GitHub URLs (HTML + JSON). ``./build.sh
    build`` runs mystmd from ``docs/_build_src/<lang>/`` so the
@@ -56,6 +56,13 @@ The five passes:
    native Ctrl/Cmd + scroll to zoom further. SPA-aware via a
    MutationObserver so client-side navigations also pick up freshly
    hydrated outputs.
+
+6. Sanitize bibliography ``<li id="cite-…">`` ids to React-safe
+   chars. mystmd renders DOI-resolved citations with HTML ids
+   containing ``/`` / ``:`` / ``.``, which cascade into ~150 React
+   #418 hydration-mismatch errors and a visible flicker around the
+   bibliography. Replacing the unsafe chars with ``-`` makes the SSR
+   id match what React computes on the client.
 """
 
 from __future__ import annotations
@@ -244,10 +251,12 @@ THEME_INIT_SCRIPT = (
 # style-pass that interprets the rest of the theme overrides. The
 # ``html.qamomile-preloading`` class is set by THEME_INIT_SCRIPT a
 # moment earlier (inline <script> at the start of <head>), so the
-# first paint already has these rules in effect. Once
-# ``qamomile-preloading`` is removed (post-load + 2 RAF, or a 2-second
-# safety timeout, whichever comes first), the rules stop matching and
-# normal styling / transitions resume.
+# first paint already has these rules in effect. The class is later
+# removed by THEME_INIT_SCRIPT itself — once React hydration has
+# quiesced (250ms with no DOM mutations after ``load``), or, as a
+# safety net, after ``load + 5s`` or a 10-second wall-clock cap.
+# Once removed, these rules stop matching and normal styling /
+# transitions resume.
 #
 # Two layers of suppression:
 #
@@ -665,10 +674,29 @@ def patch_language_build(
        React hydration to fail-and-recover in a cascade visible as a
        multi-second flicker around the bibliography.
 
+    Args:
+        docs_root (Path): Repository ``docs/`` directory. The function
+            reads its source assets from ``docs/assets/`` and writes
+            into ``docs/<language>/_build/html/``.
+        language (str): Language slug — ``"en"`` or ``"ja"``. Drives
+            both the build-output directory and the source-path
+            rewrite needle.
+
     Returns:
-        ``(injected_count, rewritten_count, css_inlined_count,
-        theme_init_count, lightbox_count, cite_sanitized_count,
-        total_html, total_json)``.
+        tuple[int, int, int, int, int, int, int, int]: An 8-tuple of
+            counters in the form ``(injected_count, rewritten_count,
+            css_inlined_count, theme_init_count, lightbox_count,
+            cite_sanitized_count, total_html, total_json)``. The
+            first six are how many files each pass actually rewrote;
+            the last two are the universe sizes the passes iterated
+            over (every ``*.html`` / ``*.json`` under the build
+            output) and are reported alongside so the audit print in
+            ``main`` can render ``X/Y`` ratios.
+
+    Raises:
+        RuntimeError: If the language's build directory or one of the
+            source asset scripts (``colab-launch.js`` /
+            ``lightbox.js``) is missing.
     """
     html_root = docs_root / language / "_build" / "html"
     if not html_root.exists():
