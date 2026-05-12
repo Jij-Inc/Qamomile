@@ -2,11 +2,11 @@
 """Post-build HTML patches for the Qamomile docs.
 
 Originally just a colab-launch script-tag injector; the script has
-since absorbed three more passes that all run against the same set of
+since absorbed four more passes that all run against the same set of
 ``docs/<lang>/_build/html/*.html`` (and ``*.json``) files, so they live
 together for a single rglob walk.
 
-The four passes:
+The five passes:
 
 1. Rewrite build-dir paths in GitHub URLs (HTML + JSON). ``./build.sh
    build`` runs mystmd from ``docs/_build_src/<lang>/`` so the
@@ -48,6 +48,14 @@ The four passes:
    on every HTML. The script then renders the "Open in Colab" button
    client-side, gated to ``.ipynb``-derived pages by the path check
    that pass 1 protects.
+
+5. Inject the lightbox ``<script>`` tag right before ``</head>`` on
+   every HTML. The script binds a click handler to every cell-output
+   ``<img>`` / ``<svg>`` and opens an overlay modal that shows the
+   figure at its natural size; the user can then use the browser's
+   native Ctrl/Cmd + scroll to zoom further. SPA-aware via a
+   MutationObserver so client-side navigations also pick up freshly
+   hydrated outputs.
 """
 
 from __future__ import annotations
@@ -59,9 +67,18 @@ import shutil
 import sys
 from pathlib import Path
 
-
 SCRIPT_TAG_ID = "qamomile-colab-launch-script"
 SCRIPT_FILE_NAME = "colab-launch.js"
+
+# Companion lightbox helper. Same copy/inject mechanism as the colab
+# launch script: the source lives at docs/assets/lightbox.js, gets
+# copied into each language's _build/html/build/, and a defer-loaded
+# <script> tag with this id is inserted before </head>. The helper
+# turns every <img>/<svg> in a cell output into a click-to-zoom modal
+# so wide circuit diagrams stay inspectable on RTD without per-page
+# wrapper boilerplate.
+LIGHTBOX_TAG_ID = "qamomile-lightbox-script"
+LIGHTBOX_FILE_NAME = "lightbox.js"
 
 # Match ``<head>`` even if it grows attributes (e.g. ``<head prefix="og: ...">``).
 # We anchor on the literal ``<head`` followed by a word boundary so we don't
@@ -138,8 +155,8 @@ THEME_INIT_SCRIPT = (
     # invert ``matches("(prefers-color-scheme: light)")``.
     "try{"
     'var stored=localStorage.getItem("myst:theme");'
-    "var dark=stored===\"dark\"||(stored!==\"light\"&&"
-    "!window.matchMedia(\"(prefers-color-scheme: light)\").matches);"
+    'var dark=stored==="dark"||(stored!=="light"&&'
+    '!window.matchMedia("(prefers-color-scheme: light)").matches);'
     'if(dark)d.classList.add("dark");'
     "}catch(e){}"
     # Reveal: lift the preloading class once everything's settled.
@@ -363,9 +380,7 @@ def init_theme_script(html_path: Path) -> bool:
     insert_at = _head_insertion_point(content)
     if insert_at is None:
         return False
-    script_block = (
-        f'<script id="{THEME_INIT_SCRIPT_ID}">{THEME_INIT_SCRIPT}</script>'
-    )
+    script_block = f'<script id="{THEME_INIT_SCRIPT_ID}">{THEME_INIT_SCRIPT}</script>'
     new = content[:insert_at] + script_block + content[insert_at:]
     html_path.write_text(new, encoding="utf-8")
     return True
@@ -388,6 +403,40 @@ def inject_script_tag(html_path: Path, script_src: str) -> bool:
 
     script_tag = (
         f'<script defer src="{script_src}" id="{SCRIPT_TAG_ID}"></script>{closing_head}'
+    )
+    updated = content.replace(closing_head, script_tag, 1)
+    html_path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
+    """Insert the lightbox ``<script>`` tag right before ``</head>``.
+
+    Mirrors :func:`inject_script_tag` but for ``lightbox.js``, using a
+    distinct id (``LIGHTBOX_TAG_ID``) so the two injections are
+    independent and idempotent. Returns True when a tag was added; False
+    when the page already carries the tag or has no ``</head>`` to
+    anchor against.
+
+    Args:
+        html_path (Path): The HTML file to patch in place.
+        script_src (str): Relative URL (from the HTML page) at which the
+            lightbox script is served.
+
+    Returns:
+        bool: True if the file was rewritten, False otherwise.
+    """
+    content = html_path.read_text(encoding="utf-8")
+    if LIGHTBOX_TAG_ID in content:
+        return False
+
+    closing_head = "</head>"
+    if closing_head not in content:
+        return False
+
+    script_tag = (
+        f'<script defer src="{script_src}" id="{LIGHTBOX_TAG_ID}"></script>'
+        f"{closing_head}"
     )
     updated = content.replace(closing_head, script_tag, 1)
     html_path.write_text(updated, encoding="utf-8")
@@ -426,7 +475,7 @@ def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
 
 def patch_language_build(
     docs_root: Path, language: str
-) -> tuple[int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int, int]:
     """Run all post-build patches for one language's build output.
 
     Patches applied:
@@ -443,10 +492,14 @@ def patch_language_build(
        transition animation.
     4. Inject the colab-launch ``<script>`` tag right before
        ``</head>`` on every ``*.html`` (see :func:`inject_script_tag`).
+    5. Inject the lightbox ``<script>`` tag right before ``</head>``
+       on every ``*.html`` (see :func:`inject_lightbox_script_tag`)
+       so wide cell-output images become click-to-zoom modals on the
+       rendered page.
 
     Returns:
         ``(injected_count, rewritten_count, css_inlined_count,
-        theme_init_count, total_html, total_json)``.
+        theme_init_count, lightbox_count, total_html, total_json)``.
     """
     html_root = docs_root / language / "_build" / "html"
     if not html_root.exists():
@@ -460,6 +513,12 @@ def patch_language_build(
     output_script.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_script, output_script)
 
+    source_lightbox = docs_root / "assets" / LIGHTBOX_FILE_NAME
+    if not source_lightbox.exists():
+        raise RuntimeError(f"Missing source script: {source_lightbox}")
+    output_lightbox = html_root / "build" / LIGHTBOX_FILE_NAME
+    shutil.copy2(source_lightbox, output_lightbox)
+
     theme_css = _read_theme_css(docs_root)
 
     html_files = sorted(html_root.rglob("*.html"))
@@ -468,6 +527,7 @@ def patch_language_build(
     rewritten_count = 0
     css_inlined_count = 0
     theme_init_count = 0
+    lightbox_count = 0
 
     # Rewrite build-dir paths across HTML + JSON. JSON is the SPA's data
     # layer; without rewriting it, post-navigation re-hydration puts the
@@ -496,12 +556,17 @@ def patch_language_build(
         relative_script = Path(relative_script).as_posix()
         if inject_script_tag(html_file, relative_script):
             injected_count += 1
+        relative_lightbox = os.path.relpath(output_lightbox, html_file.parent)
+        relative_lightbox = Path(relative_lightbox).as_posix()
+        if inject_lightbox_script_tag(html_file, relative_lightbox):
+            lightbox_count += 1
 
     return (
         injected_count,
         rewritten_count,
         css_inlined_count,
         theme_init_count,
+        lightbox_count,
         len(html_files),
         len(json_files),
     )
@@ -518,11 +583,13 @@ def main() -> int:
             rewritten_count,
             css_inlined_count,
             theme_init_count,
+            lightbox_count,
             total_html,
             total_json,
         ) = patch_language_build(docs_root, language)
         print(
             f"{language}: injected script tag into {injected_count}/{total_html} HTML, "
+            f"injected lightbox script into {lightbox_count}/{total_html} HTML, "
             f"inlined theme CSS into {css_inlined_count}/{total_html} HTML, "
             f"injected theme-init script into {theme_init_count}/{total_html} HTML, "
             f"rewrote build-dir paths in {rewritten_count}/{total_html + total_json} "
