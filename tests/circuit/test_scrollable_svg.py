@@ -108,8 +108,7 @@ class TestScrollableSvg:
         # The opening `<svg ...>` tag must include our style override.
         opening = body[body.index("<svg") : body.index(">", body.index("<svg")) + 1]
         assert "max-width:none" in opening, (
-            f"Expected `max-width:none` in <svg> style; got opening tag: "
-            f"{opening!r}"
+            f"Expected `max-width:none` in <svg> style; got opening tag: {opening!r}"
         )
         assert "display:block" in opening
 
