@@ -80,7 +80,7 @@ def _(problem: jm.DecoratedProblem):
     )
 
     # Constraint: equal partition sizes
-    problem += problem.Constraint("EqualPartition", x.sum() == V / 2)
+    problem += problem.Constraint("Equal Partition", x.sum() == V / 2)
 
 
 problem
