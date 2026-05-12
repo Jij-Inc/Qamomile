@@ -446,6 +446,14 @@ def _emit_mottonen_gates(
     ``Vector[Float]`` with a Python ``int`` produces a ``Float`` handle
     that ``qmc.ry`` / ``qmc.rz`` accept directly.
 
+    For the concrete-sequence and ``np.ndarray`` cases, each element is
+    coerced to a builtin ``float`` before being handed to ``rotation``
+    so that the angle stored in IR metadata stays a plain Python
+    ``float`` — not a NumPy scalar (``np.float64``), which would slip
+    past ``Value.get_const()``-based ``isinstance(c, float)`` checks
+    downstream.  ``Vector[Float]`` indexing returns a ``Float`` handle
+    and is forwarded as-is.
+
     Args:
         qubits (list[Qubit]): Mutable list of length ``num_qubits`` of
             qubit handles.  Entries are overwritten as gates are applied.
@@ -470,17 +478,23 @@ def _emit_mottonen_gates(
         case _:
             raise ValueError(f"gate must be 'ry' or 'rz', got {gate!r}")
 
+    def _angle(at: int) -> Float | float:
+        """Return ``angles[at]`` as the right type for ``rotation``."""
+        if isinstance(angles, Vector):
+            return angles[at]
+        return float(angles[at])
+
     idx = 0
     for k in range(num_qubits):
         tgt = num_qubits - 1 - k
         if k == 0:
-            qubits[tgt] = rotation(qubits[tgt], angles[idx])
+            qubits[tgt] = rotation(qubits[tgt], _angle(idx))
             idx += 1
             continue
 
         cnot_seq = _get_cnot_controls(k)
         for step in range(2**k):
-            qubits[tgt] = rotation(qubits[tgt], angles[idx])
+            qubits[tgt] = rotation(qubits[tgt], _angle(idx))
             idx += 1
             ctrl = num_qubits - 1 - cnot_seq[step]
             qubits[ctrl], qubits[tgt] = cx(qubits[ctrl], qubits[tgt])

@@ -1007,6 +1007,44 @@ class TestParametricInputValidation:
         with pytest.raises(ValueError, match="rz_angles must have length"):
             kernel.build()
 
+    def test_ndarray_angles_stored_as_python_float(self) -> None:
+        """``np.ndarray`` angle inputs land in IR metadata as ``float``, not ``np.float64``.
+
+        Regression: ``angles[idx]`` on a NumPy array is ``np.float64``,
+        which slips past downstream ``isinstance(c, float)`` checks on
+        ``Value.get_const()``.  ``_emit_mottonen_gates`` must coerce
+        each per-element angle to ``float`` before handing it to the
+        rotation gate.
+        """
+        from qamomile.circuit.ir.operation.gate import GateOperation
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            ry = compute_mottonen_amplitude_encoding_ry_angles([1.0, 2.0, 3.0, 4.0])
+            assert isinstance(ry, np.ndarray)
+            q = amplitude_encoding_from_angles(q, ry)
+            return qmc.measure(q)
+
+        block = kernel.build()
+        rotation_consts: list[object] = []
+        for op in block.operations:
+            if not isinstance(op, GateOperation):
+                continue
+            theta = getattr(op, "theta", None)
+            if theta is None:
+                continue
+            const = theta.get_const()
+            if const is not None:
+                rotation_consts.append(const)
+
+        # 2 qubits → 2**n - 1 = 3 RY rotations should land in the IR.
+        assert len(rotation_consts) == 3
+        for c in rotation_consts:
+            assert type(c) is float, (
+                f"angle stored as {type(c).__name__}, expected builtin float"
+            )
+
 
 class TestParametricEncodingQiskit:
     """Statevector + sampler verification of the parametric path on Qiskit.
