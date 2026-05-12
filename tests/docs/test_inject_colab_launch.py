@@ -277,3 +277,104 @@ def test_sanitize_does_not_touch_outbound_doi_href(tmp_path, mod):
     assert 'id="cite-https-doi-org-x"' in out
     # External link still points to the real DOI URL.
     assert 'href="https://doi.org/x"' in out
+
+
+# ----------------------------------------------------------------- #
+# Class-token correctness — ``not-myst-bibliography`` must NOT match #
+# ----------------------------------------------------------------- #
+
+
+def test_sanitize_does_not_match_substring_class_token(tmp_path, mod):
+    """A ``<section>`` whose class contains ``not-myst-bibliography``
+    (or any other ``…myst-bibliography`` superstring) is NOT treated
+    as a bibliography section.
+
+    A naive ``\\bmyst-bibliography\\b`` regex finds a match inside
+    ``not-myst-bibliography`` because the hyphen counts as a word
+    boundary, which would silently sanitize ids in unrelated
+    sections. We split the class attribute on whitespace and look for
+    ``myst-bibliography`` as an exact token instead.
+    """
+    html = """
+<html><body>
+<section class="not-myst-bibliography prose">
+  <li id="cite-https://doi.org/x">should NOT be rewritten</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is False
+    out = p.read_text(encoding="utf-8")
+    assert 'id="cite-https://doi.org/x"' in out
+
+
+def test_sanitize_matches_class_token_with_neighbors(tmp_path, mod):
+    """``myst-bibliography`` is found when it shares the ``class``
+    attribute with other unrelated tokens (the realistic mystmd
+    case)."""
+    html = """
+<html><body>
+<section id="references" class="prose myst-bibliography subgrid-gap">
+  <li id="cite-https://doi.org/x">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'id="cite-https-doi-org-x"' in out
+
+
+# ----------------------------------------------------------------- #
+# HTML entity decoding — id raws and href fragments                  #
+# ----------------------------------------------------------------- #
+
+
+def test_sanitize_decodes_html_entity_in_id(tmp_path, mod):
+    """``id="cite-a&amp;b"`` is sanitized as if the literal label is
+    ``a&b``.
+
+    React computes the bibliography id from the citation's decoded
+    label (the JSON ``label`` field, post-entity-decode), not from
+    the raw SSR encoding. We must therefore decode entities BEFORE
+    sanitizing so the SSR and client agree on the result. Without
+    decoding, ``a&amp;b`` would collapse to ``a-amp-b`` while React
+    would produce ``a-b``, reintroducing the very mismatch this pass
+    is supposed to eliminate.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-a&amp;b">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'id="cite-a-b"' in out
+
+
+def test_sanitize_resolves_both_percent_and_entity_href_forms(tmp_path, mod):
+    """Percent-encoded and HTML-entity-encoded ``href="#cite-…"`` both
+    decode to the same map key and rewrite consistently.
+
+    Some renderers emit fragment identifiers with percent-encoding
+    (``#cite-a%26b``); others emit HTML entities (``#cite-a&amp;b``);
+    both must resolve to the same ``<li>`` and pick up the same
+    sanitized form.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-a&amp;b">x</li>
+</section>
+<a href="#cite-a%26b">percent-encoded ref</a>
+<a href="#cite-a&amp;b">entity ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # Both encoded forms point at the same sanitized id.
+    assert out.count('href="#cite-a-b"') == 2
