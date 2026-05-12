@@ -34,6 +34,7 @@
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import os
 
 from qamomile.optimization.binary_model import BinaryModel
 
@@ -103,11 +104,14 @@ rng = np.random.default_rng(42)
 init_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 init_gammas = list(init_params[:p])
 init_betas = list(init_params[p:])
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 256 if docs_test_mode else 2000
+maxiter = 20 if docs_test_mode else 100
 
 sample_result = executable.sample(
     executor,
     bindings={"gammas": init_gammas, "betas": init_betas},
-    shots=2000,
+    shots=sample_shots,
 ).result()
 
 decoded = converter.decode_to_binary_sampleset(sample_result)
@@ -128,14 +132,14 @@ def cost_fn(params: np.ndarray) -> float:
     result = executable.sample(
         executor,
         bindings={"gammas": list(params[:p]), "betas": list(params[p:])},
-        shots=2000,
+        shots=sample_shots,
     ).result()
     energy = converter.decode_to_binary_sampleset(result).energy_mean()
     cost_history.append(energy)
     return energy
 
 
-res = minimize(cost_fn, init_params, method="COBYLA", options={"maxiter": 100})
+res = minimize(cost_fn, init_params, method="COBYLA", options={"maxiter": maxiter})
 
 opt_gammas = list(res.x[:p])
 opt_betas = list(res.x[p:])
