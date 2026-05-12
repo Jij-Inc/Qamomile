@@ -33,8 +33,18 @@ TUTORIAL_PATTERNS = [
     "docs/ja/usage/**/*.py",
     "docs/en/usage/**/*.ipynb",
     "docs/ja/usage/**/*.ipynb",
+    # Most integration/ articles require API keys and have side effects, so
+    # they are excluded by default. Individual files that run purely against
+    # a local simulator (e.g. the QURI Parts tutorial below) are opted in
+    # explicitly and gated on their optional dependency via
+    # OPTIONAL_SKIP_MODULES.
+    "docs/en/integration/quri_parts_executor.py",
+    "docs/ja/integration/quri_parts_executor.py",
+    "docs/en/integration/quri_parts_executor.ipynb",
+    "docs/ja/integration/quri_parts_executor.ipynb",
     # We will not execute the following directories:
-    # - integration: they may require API keys and may have side effects.
+    # - integration: most articles may require API keys and may have side
+    #   effects; opt-in additions live above.
     # - release_notes: markdown-only; nothing to execute.
 ]
 
@@ -43,6 +53,7 @@ TUTORIAL_PATTERNS = [
 OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
     "qsci": "quri_parts",
+    "quri_parts_executor": "quri_parts",
 }
 
 
