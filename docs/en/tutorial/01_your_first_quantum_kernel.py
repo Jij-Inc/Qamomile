@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Your First Quantum Kernel
 #
 # This chapter introduces the basic workflow for a first-time Qamomile user to define and run a quantum kernel. Note that this chapter does not dive into quantum computing fundamentals or quantum algorithm details.

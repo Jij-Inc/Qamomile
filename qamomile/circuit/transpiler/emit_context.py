@@ -173,21 +173,18 @@ class EmitContext(dict):
                 user-chosen names (e.g. nested ``for i``) get distinct
                 UUIDs and therefore never collide here.
             value: The bound iteration value (int / Hamiltonian item / etc.).
-            display_name: Optional name for debug printing. Also written
-                to the flat-dict view for legacy name-fallback readers
-                during the migration period; remove once all readers
-                use UUID lookup.
+            display_name: Reserved for future debug-only use. Currently
+                unused — loop variables are looked up exclusively by
+                UUID, so the display name is never written into the
+                bindings dict. Defaults to None.
 
         Note: this *adds* a binding to the existing context. Loop
         unrollers typically copy the parent context first so the binding
         is local to one iteration; this method does not copy.
         """
+        del display_name
         self._loop_vars[uuid] = value
         self[uuid] = value
-        if display_name:
-            # Migration shim: legacy readers still look up by name.
-            # Remove once Phase 3 of #7 lands and all readers use UUID.
-            self[display_name] = value
 
     def get_loop_var(self, uuid: str) -> Any:
         """Get a loop variable binding by Value UUID, or None if absent."""

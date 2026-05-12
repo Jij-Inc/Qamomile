@@ -117,21 +117,37 @@ def _bind_loop_var(
 
     Single source of truth for "how is a loop iteration variable bound
     into the emit context". Always writes UUID-keyed (the canonical
-    identity) and additionally writes name-keyed for legacy readers
-    during the Phase-3 migration. Once name-fallback resolution is
-    removed (Phase 3 of #7), the name-keyed write also goes away.
+    identity). Nested loops with identical display names (e.g. outer
+    and inner ``for i``) coexist safely because each ``ForOperation``
+    carries its own ``loop_var_value`` with a distinct UUID.
+
+    Args:
+        loop_bindings: The emit context to receive the binding.
+            ``EmitContext`` instances are written via ``push_loop_var``;
+            plain dicts get a UUID-keyed write.
+        op: The ``ForOperation`` whose iteration variable is being bound.
+            ``op.loop_var_value`` must not be None.
+        value: The bound iteration value (int / Hamiltonian item /
+            backend loop parameter / etc.).
+
+    Raises:
+        EmitError: If ``op.loop_var_value`` is None — the IR predates
+            the UUID-keyed binding migration. Such IR cannot be emitted
+            correctly because the loop variable has no stable identity.
     """
-    uuid = op.loop_var_value.uuid if op.loop_var_value is not None else None
+    if op.loop_var_value is None:
+        raise EmitError(
+            f"ForOperation '{op.loop_var or '<unnamed>'}' has no "
+            "loop_var_value; cannot bind the iteration variable. The IR "
+            "must be re-built with the current frontend.",
+            operation="ForOperation",
+        )
+    uuid = op.loop_var_value.uuid
     push_loop_var = getattr(loop_bindings, "push_loop_var", None)
-    if callable(push_loop_var) and uuid is not None:
+    if callable(push_loop_var):
         push_loop_var(uuid, value, display_name=op.loop_var or None)
     else:
-        # Legacy fallback: plain dict context, or IR built without
-        # loop_var_value (should not happen post-migration).
-        if uuid is not None:
-            loop_bindings[uuid] = value
-        if op.loop_var:
-            loop_bindings[op.loop_var] = value
+        loop_bindings[uuid] = value
 
 
 # ---------------------------------------------------------------------------
@@ -224,14 +240,22 @@ def emit_for_items(
             _push=push,
             _ctx=loop_bindings,
         ) -> None:
-            """Bind a key/value loop variable both UUID-keyed and (legacy) name-keyed."""
+            """Bind a for-items key/value variable.
+
+            For-items key variables and dim0-shape entries are read by
+            name from ``_index_into_array`` (the container lookup is
+            ``bindings.get(parent.name)``), so the name-keyed write
+            stays here even though scalar ``for`` loop variables no
+            longer write by name. UUID-keyed writes happen alongside
+            for canonical identity tracking.
+            """
             if callable(_push) and uuid is not None:
                 _push(uuid, v, display_name=display_name or None)
             else:
                 if uuid is not None:
                     _ctx[uuid] = v
-                if display_name:
-                    _ctx[display_name] = v
+            if display_name:
+                _ctx[display_name] = v
 
         # Bind key variables (tuple unpacking)
         if len(op.key_vars) > 1:
