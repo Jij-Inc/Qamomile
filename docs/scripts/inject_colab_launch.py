@@ -134,13 +134,18 @@ META_CHARSET_RE = re.compile(
 #     ``preload-class`` pattern: add ``html.qamomile-preloading`` at
 #     the very start of head, the inline <style> below contains a
 #     blanket ``transition: none !important`` rule scoped to that
-#     class, and after ``window.load`` we observe DOM mutations and
-#     remove the class once 250ms passes without any mutation, i.e.
-#     once React hydration has quiesced. Bounded by a 5-second
-#     hard-cap after ``load`` and a 10-second wall-clock safety net
-#     so a runaway page can never stay hidden forever. See the
-#     comment on the reveal logic inside ``THEME_INIT_SCRIPT`` below
-#     for the trade-offs that led to this idle-detection scheme.
+#     class, and once the page has settled the class is removed.
+#     "Settled" is detected by observing DOM mutations from script
+#     init onward and revealing once a minimum 500 ms has elapsed
+#     since script start AND 250 ms has elapsed since the last
+#     mutation — i.e. hydration has quiesced. Bounded by an 8-second
+#     hard-cap from observer start and a 10-second wall-clock safety
+#     net so a runaway page can never stay hidden forever. We
+#     deliberately do NOT wait for ``window.load`` (slow image / CDN
+#     resources can push it well past hydration end and turn the
+#     guard into a multi-second blank screen). See the comment on
+#     the reveal logic inside ``THEME_INIT_SCRIPT`` below for the
+#     trade-offs that led to this idle-detection scheme.
 THEME_INIT_SCRIPT_ID = "qamomile-theme-init"
 THEME_INIT_SCRIPT = (
     "(function(){"
@@ -170,40 +175,49 @@ THEME_INIT_SCRIPT = (
     "}catch(e){}"
     # Reveal: lift the preloading class once hydration has settled.
     #
-    # Older strategy raced three triggers: ``window.load + 2 RAF``, a
-    # 2-second safety timeout, and the first user-driven event
-    # (mousemove / click / keydown / touch). All three turned out to be
-    # unreliable on pages whose React hydration kept mutating the DOM
-    # past the ``load`` event:
-    #   - ``load + 2 RAF`` only buys ~32ms after ``load``; on heavy
-    #     pages (mottonen, the section landings) React is still doing
-    #     hydration-mismatch recovery (client-rendering whole subtrees)
-    #     well past that point, so the guard lifts mid-storm and the
-    #     user sees cell outputs flicker into place.
-    #   - The 2-second safety timeout measures from script start, not
-    #     from ``load``; on the same heavy pages ``load`` itself fires
-    #     several seconds after the script runs, so the timeout always
-    #     fires first and never actually saves the user from anything.
-    #   - The user-driven-event trigger is hostile by design: any mouse
-    #     movement during the multi-second hidden phase races the guard
-    #     down and exposes the in-progress hydration. This is exactly
-    #     the ちらつき regression contributors keep reporting.
+    # Earlier iterations gated the reveal on ``window.load`` (raced
+    # against a few additional triggers). That turned out to be wrong
+    # on every axis:
+    #   - ``load`` on heavy mystmd pages can fire well past hydration
+    #     end (the mottonen page measures ``loadEventEnd`` near 8s in
+    #     production thanks to lazy-loaded images and external CDN
+    #     assets). Waiting for ``load`` turns the guard into a multi-
+    #     second blank screen even after React has already settled.
+    #   - The user-driven-event fallback (``mousemove`` / ``click`` /
+    #     etc.) was hostile by design: any mouse movement during the
+    #     hidden phase raced the guard down and exposed the in-
+    #     progress hydration. That's the ちらつき regression we keep
+    #     getting reported.
+    #   - A 2-second safety timeout measured from script start always
+    #     fired before ``load`` did, defeating its own purpose.
     #
-    # New strategy: after ``load``, install a MutationObserver on
-    # documentElement (subtree, attributes, characterData) and reveal
-    # once 250ms passes without any mutation — that is, hydration has
-    # quiesced. Two safety nets bound the worst case so a misbehaving
-    # page can never stay blank forever:
-    #   1. ``hardCap``: 5 seconds after ``load``. By that point any
-    #      reasonable hydration-mismatch recovery has finished; a page
-    #      that's still mutating after 5s past ``load`` is in a runaway
-    #      state and the user is better served by seeing it than by an
-    #      indefinitely hidden body.
+    # Current strategy: install the ``MutationObserver`` as soon as
+    # this script runs (top of ``<head>``) and reveal once the DOM
+    # has been quiet for 250 ms AND at least 500 ms has elapsed since
+    # script start. The 500 ms floor is a defense against the
+    # degenerate "hydration hasn't started yet" race — at script time
+    # the body is not parsed and the observer would otherwise see no
+    # mutations and immediately reveal. Once the body starts parsing,
+    # mutations flood in (head→body parse, then React hydration), so
+    # ``lastMut`` is bumped continuously through parsing and into
+    # hydration; reveal fires 250 ms after the last mutation, which
+    # for typical pages is just after React finishes its hydration-
+    # mismatch recovery.
+    #
+    # Two safety nets bound the worst case so a runaway page never
+    # stays blank forever:
+    #   1. ``hardCap``: 8 seconds from observer start. A page still
+    #      mutating past 8 s is in a runaway state and the user is
+    #      better served by seeing it than by an indefinitely hidden
+    #      body.
     #   2. ``wallClock``: 10 seconds from script start. Covers the
-    #      degenerate case where ``load`` never fires at all (broken
-    #      network, blocked resource, etc.). Independent of the first
-    #      net because if ``load`` never fires, the inner listener
-    #      never runs and ``hardCap`` is never installed.
+    #      degenerate case where the observer never installs at all
+    #      (older browsers without ``MutationObserver`` /
+    #      ``requestAnimationFrame`` / ``performance.now``).
+    #
+    # Feature detection: if any of the three APIs are missing, fall
+    # back to a 1-second blanket reveal. Better than waiting for the
+    # 10 s wall clock and far better than crashing in flight.
     "var revealed=false;"
     "function reveal(){"
     "if(revealed)return;"
@@ -211,9 +225,16 @@ THEME_INIT_SCRIPT = (
     'd.classList.remove("qamomile-preloading");'
     "}"
     "setTimeout(reveal,10000);"
-    'window.addEventListener("load",function(){'
-    "var lastMut=performance.now();"
-    "var hardCap=setTimeout(reveal,5000);"
+    "if(typeof MutationObserver!=='function'"
+    "||typeof requestAnimationFrame!=='function'"
+    "||typeof performance==='undefined'"
+    "||typeof performance.now!=='function'){"
+    "setTimeout(reveal,1000);"
+    "return;"
+    "}"
+    "var observerStart=performance.now();"
+    "var lastMut=observerStart;"
+    "var hardCap=setTimeout(reveal,8000);"
     "var obs=new MutationObserver(function(){"
     "lastMut=performance.now();"
     "});"
@@ -225,7 +246,12 @@ THEME_INIT_SCRIPT = (
     "});"
     "function checkIdle(){"
     "if(revealed){obs.disconnect();return;}"
-    "if(performance.now()-lastMut>=250){"
+    "var now=performance.now();"
+    # Floor of 500 ms since observer start protects against an early
+    # reveal when the body isn't parsed yet (initial lastMut == start,
+    # so without the floor we would reveal at the very first rAF tick
+    # where ``now - lastMut`` already crosses 250 ms).
+    "if(now-observerStart>=500&&now-lastMut>=250){"
     "obs.disconnect();"
     "clearTimeout(hardCap);"
     "reveal();"
@@ -233,16 +259,7 @@ THEME_INIT_SCRIPT = (
     "requestAnimationFrame(checkIdle);"
     "}"
     "}"
-    # Skip one rAF before starting the idle probe so React has a
-    # chance to start its hydration work — otherwise the very first
-    # ``checkIdle`` call sees ``performance.now() - lastMut`` already
-    # well above 250ms (because we haven't observed any mutation yet)
-    # and we'd reveal before hydration even begins.
-    "requestAnimationFrame(function(){"
-    "lastMut=performance.now();"
     "requestAnimationFrame(checkIdle);"
-    "});"
-    "});"
     "})();"
 )
 
@@ -252,11 +269,11 @@ THEME_INIT_SCRIPT = (
 # ``html.qamomile-preloading`` class is set by THEME_INIT_SCRIPT a
 # moment earlier (inline <script> at the start of <head>), so the
 # first paint already has these rules in effect. The class is later
-# removed by THEME_INIT_SCRIPT itself — once React hydration has
-# quiesced (250ms with no DOM mutations after ``load``), or, as a
-# safety net, after ``load + 5s`` or a 10-second wall-clock cap.
-# Once removed, these rules stop matching and normal styling /
-# transitions resume.
+# removed by THEME_INIT_SCRIPT itself — once the DOM has been quiet
+# for 250 ms AND at least 500 ms has elapsed since the script
+# started, or, as safety nets, after 8 s from observer start or
+# 10 s wall-clock from script start. Once removed, these rules stop
+# matching and normal styling / transitions resume.
 #
 # Two layers of suppression:
 #
@@ -504,35 +521,48 @@ def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
     return True
 
 
-# Match ``id="cite-…"`` on the rendered bibliography ``<li>``. mystmd
-# derives ``…`` from the citation's label, which for DOI-resolved
-# citations is the full URL (e.g.
-# ``cite-https://doi.org/10.48550/arxiv.quant-ph/0407010``). The ``/``,
-# ``:`` and ``.`` chars in that string cause React's client-side
-# hydration to fail to reconcile the SSR ``<li>`` against its computed
-# tree, and the failure cascades: a single citation `<li>` produces on
-# the order of 150 React #418 errors during hydration, each of which
-# is a hydration-mismatch recovery that re-renders the surrounding
-# subtree client-side and is visible to the user as a flicker on the
-# affected cell outputs. Replacing the unsafe chars with ``-`` so the
-# id matches what React would compute on the client eliminates the
-# mismatch.
+# Match the SSR'd bibliography section. mystmd emits exactly one
+# ``<section ... class="...myst-bibliography...">`` per page, wrapping
+# the entire list of citation ``<li>`` items. We rewrite ids only
+# inside that scope so an unrelated ``id="cite-foo"`` appearing in a
+# code example, a custom HTML cell, or any other anchor stays
+# untouched.
+_BIBLIOGRAPHY_SECTION_RE = re.compile(
+    r'<section\b[^>]*\bclass\s*=\s*"[^"]*\bmyst-bibliography\b[^"]*"[^>]*>'
+    r".*?"
+    r"</section>",
+    re.IGNORECASE | re.DOTALL,
+)
+# Match ``id="cite-…"`` on the rendered bibliography ``<li>`` (scoped
+# by the section regex above). mystmd derives ``…`` from the
+# citation's label, which for DOI-resolved citations is the full URL
+# (e.g. ``cite-https://doi.org/10.48550/arxiv.quant-ph/0407010``). The
+# ``/``, ``:``, and ``.`` chars in that string cause the SSR ``id``
+# attribute to disagree with what React computes on the client during
+# hydration, and the failure cascades: a single citation ``<li>``
+# produces on the order of 150 React #418 errors during hydration,
+# each of which is a hydration-mismatch recovery that re-renders the
+# surrounding subtree client-side and is visible to the user as a
+# flicker on the affected cell outputs. Collapsing the unsafe chars
+# to ``-`` aligns the SSR id with the client computation and
+# eliminates the mismatch.
 #
 # We anchor on the ``id=`` prefix so the regex does not accidentally
 # rewrite the citation's visible label text (which legitimately
 # contains ``https://`` etc.) or the ``href`` of the citation link
 # (which legitimately points at the doi.org URL).
-_CITE_ID_RE = re.compile(r'(?P<prefix>\sid=")cite-(?P<value>[^"]+)"', re.IGNORECASE)
-# Cross-references back into the bibliography ``<li>`` use a fragment
-# of the form ``href="#cite-…"``. mystmd doesn't emit these in our
-# tagged-pill citation style today, but the upstream renderer can add
-# them, and our sanitization needs to keep the two in sync so anchors
-# still resolve.
-_CITE_HREF_RE = re.compile(r'(?P<prefix>href=")#cite-(?P<value>[^"]+)"', re.IGNORECASE)
-# Chars React's hydration tolerates in attribute values; everything
-# else gets collapsed to a single ``-``. Underscore is included
-# because it is HTML5-id-safe and appears in some upstream citation
-# labels.
+_CITE_ID_IN_BIB_RE = re.compile(r'(\sid=")cite-([^"]+)"')
+# Cross-references back into the bibliography use a fragment of the
+# form ``href="#cite-…"``. mystmd doesn't emit these in our
+# tagged-pill citation style today, but the upstream renderer can
+# (e.g. footnote-style citation pills), and rewritten ids must stay
+# in sync with their cross-references so the fragment anchor still
+# resolves to its ``<li>`` after sanitization.
+_CITE_HREF_RE = re.compile(r'(href=")#cite-([^"]+)"', re.IGNORECASE)
+# Chars HTML5 + React + CSS-selector use safely in id values;
+# everything else gets collapsed to a single ``-``. Underscore is
+# included because it is HTML5-id-safe and appears in some upstream
+# citation labels.
 _UNSAFE_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 
 
@@ -558,58 +588,129 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     Background: mystmd renders bibliography entries with HTML ids of
     the form ``id="cite-<label>"``. For citations resolved by DOI, the
     ``<label>`` is the full URL — containing ``/``, ``:``, and ``.``,
-    all of which sit outside what React's hydration is willing to
-    treat as equivalent across SSR vs client computation. The result
-    on every page that ships a DOI-style citation (mottonen,
-    qsci, …) is a cascade of ~150 React #418 hydration-mismatch
-    errors, each of which recovers by re-rendering its enclosing
-    subtree client-side, which manifests to the user as a multi-second
-    flicker of the cell outputs sitting near the bibliography. The
-    surrounding preload guard (see ``THEME_INIT_SCRIPT``) is bounded
-    to a ~5 s hard cap, so on slow networks the flicker re-emerges
-    past the cap and is back in the user's face. Removing it at the
-    source is the structural fix.
+    none of which the SSR'd HTML and React's client computation agree
+    on during hydration. The result on every page that ships a
+    DOI-style citation (mottonen, qsci, …) is a cascade of ~150 React
+    #418 hydration-mismatch errors, each of which recovers by re-
+    rendering its enclosing subtree client-side, which manifests to
+    the user as a multi-second flicker of the cell outputs sitting
+    near the bibliography. Removing it at the source is the
+    structural fix.
 
-    Strategy: rewrite ``id="cite-<unsafe>"`` to
-    ``id="cite-<unsafe-collapsed-to-A-Za-z0-9_->"`` in place, and
-    keep any matching ``href="#cite-…"`` cross-references in sync so
-    fragment anchors still resolve. Idempotent: a second run on the
-    same HTML is a no-op because the sanitized form contains no
-    unsafe chars to collapse.
+    Strategy: only touch the SSR ``<section class="…myst-bibliography
+    …">`` block. Within that scope, collect every
+    ``id="cite-<raw>"``, compute its sanitized form, and build a
+    one-pass ``{raw → sanitized}`` map. Then:
+
+    1. Rewrite the ``id`` attributes inside the bibliography section
+       using the map.
+    2. Rewrite any matching ``href="#cite-…"`` fragment cross-
+       references anywhere in the document using the same map. A
+       fragment whose raw label does not appear in the map is left
+       alone — it points at something that isn't a bibliography
+       ``<li>`` and isn't ours to rewrite. URL-encoded forms
+       (``#cite-https%3A%2F%2F…``) are decoded before lookup so they
+       still match the original ``<li>`` label.
+
+    Collisions: if two distinct raw labels collapse to the same
+    sanitized form, we'd ship duplicate ``id`` attributes and break
+    both HTML validity and fragment navigation. The function raises
+    ``RuntimeError`` so the build fails loud rather than silently
+    producing broken HTML.
+
+    Idempotent: re-running on a sanitized HTML is a no-op — the
+    sanitized labels match the unchanged sanitized form, and no
+    ``id`` / ``href`` ends up actually rewritten.
 
     Args:
         html_path (Path): The HTML file to patch in place.
 
     Returns:
         bool: True if at least one ``id`` or ``href`` was rewritten,
-            False otherwise (page carries no citation ids, or the ids
-            were already sanitized).
+            False otherwise (page carries no bibliography section,
+            no citation ids inside it, or the ids were already
+            sanitized).
+
+    Raises:
+        RuntimeError: If two distinct raw citation labels collapse to
+            the same sanitized form (would create duplicate ``id``
+            attributes on the page).
     """
+    from urllib.parse import unquote
+
     content = html_path.read_text(encoding="utf-8")
-    changed = False
 
+    # Pass 1: collect raw → sanitized mapping from bibliography
+    # sections only.
+    raw_to_sanitized: dict[str, str] = {}
+    sanitized_origins: dict[str, list[str]] = {}
+    bibliography_spans: list[tuple[int, int]] = []
+    for section_match in _BIBLIOGRAPHY_SECTION_RE.finditer(content):
+        bibliography_spans.append((section_match.start(), section_match.end()))
+        for id_match in _CITE_ID_IN_BIB_RE.finditer(section_match.group(0)):
+            raw = id_match.group(2)
+            if raw in raw_to_sanitized:
+                continue
+            sanitized = _sanitize_cite_id(raw)
+            raw_to_sanitized[raw] = sanitized
+            sanitized_origins.setdefault(sanitized, []).append(raw)
+
+    if not raw_to_sanitized:
+        return False  # no bibliography or no cite ids inside one
+
+    # Collision check before we mutate anything: if two distinct
+    # raw labels collapse to the same sanitized form, fail loudly.
+    collisions = {s: rs for s, rs in sanitized_origins.items() if len(rs) > 1}
+    if collisions:
+        details = "; ".join(
+            f"{sanitized!r} <- {sorted(raws)!r}"
+            for sanitized, raws in sorted(collisions.items())
+        )
+        raise RuntimeError(
+            f"{html_path}: distinct citation labels collapse to the same "
+            f"sanitized id, which would produce duplicate id attributes "
+            f"on the page: {details}"
+        )
+
+    # If every raw is already its own sanitized form, no rewriting
+    # is needed — early-exit to keep idempotency cheap.
+    if all(raw == sanitized for raw, sanitized in raw_to_sanitized.items()):
+        return False
+
+    # Pass 2: rewrite ids only inside bibliography section spans.
     def _id_repl(match: re.Match[str]) -> str:
-        nonlocal changed
-        original = match.group("value")
-        sanitized = _sanitize_cite_id(original)
-        if sanitized == original:
-            return match.group(0)
-        changed = True
-        return f'{match.group("prefix")}cite-{sanitized}"'
+        raw = match.group(2)
+        sanitized = raw_to_sanitized.get(raw, raw)
+        return f'{match.group(1)}cite-{sanitized}"'
 
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in bibliography_spans:
+        pieces.append(content[cursor:start])
+        pieces.append(_CITE_ID_IN_BIB_RE.sub(_id_repl, content[start:end]))
+        cursor = end
+    pieces.append(content[cursor:])
+    new_content = "".join(pieces)
+
+    # Pass 3: rewrite fragment cross-references anywhere using the
+    # same map. Unknown fragments (raw label not in the map) are
+    # passed through — they point at non-bibliography anchors.
     def _href_repl(match: re.Match[str]) -> str:
-        nonlocal changed
-        original = match.group("value")
-        sanitized = _sanitize_cite_id(original)
-        if sanitized == original:
+        raw_href = match.group(2)
+        sanitized = raw_to_sanitized.get(raw_href)
+        if sanitized is None:
+            # Try decoding percent-encoding in case the upstream
+            # emitted the fragment in URL-encoded form.
+            decoded = unquote(raw_href)
+            if decoded != raw_href:
+                sanitized = raw_to_sanitized.get(decoded)
+        if sanitized is None or sanitized == raw_href:
             return match.group(0)
-        changed = True
-        return f'{match.group("prefix")}#cite-{sanitized}"'
+        return f'{match.group(1)}#cite-{sanitized}"'
 
-    new_content = _CITE_ID_RE.sub(_id_repl, content)
     new_content = _CITE_HREF_RE.sub(_href_repl, new_content)
 
-    if not changed:
+    if new_content == content:
         return False
     html_path.write_text(new_content, encoding="utf-8")
     return True
