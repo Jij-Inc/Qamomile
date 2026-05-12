@@ -227,6 +227,41 @@ block = transpiler.inline(block)
 MatplotlibDrawer(block).draw(fold_loops=False)
 
 # %% [markdown]
+# ### Inspecting the Building Blocks
+#
+# Inside `qaoa_sampling` we call `qaoa_state`, and `qaoa_state` itself
+# is the composition of three smaller qkernels:
+#
+# - `superposition_vector(n)` — applies `H` to every qubit, preparing
+#   the initial state $|+\rangle^{\otimes n}$.
+# - `ising_cost(quad, linear, q, gamma)` — the cost layer: one `RZZ`
+#   per quadratic entry in `quad` and one `RZ` per linear entry in
+#   `linear`. The graph-partition spin model has no linear terms
+#   (`linear={}`), so only `RZZ` gates appear.
+# - `x_mixer(q, beta)` — the mixer layer: applies `RX(2\beta)` to every
+#   qubit.
+#
+# `qaoa_layers(p, ...)` is just the alternation of `ising_cost` and
+# `x_mixer`, repeated `p` times. Below we render each piece on its own.
+
+# %%
+from qamomile.circuit.algorithm.basic import superposition_vector
+from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
+
+superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
+
+# %%
+ising_cost.draw(
+    q=converter.spin_model.num_bits,
+    quad=converter.spin_model.quad,
+    linear=converter.spin_model.linear,
+    fold_loops=False,
+)
+
+# %%
+x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
+
+# %% [markdown]
 # ## Optimize the QAOA Parameters
 #
 # We use `executable.sample()` to evaluate the cost at each iteration of the

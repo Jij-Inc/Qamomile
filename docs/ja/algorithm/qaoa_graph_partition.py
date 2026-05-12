@@ -208,6 +208,34 @@ block = transpiler.inline(block)
 MatplotlibDrawer(block).draw(fold_loops=False)
 
 # %% [markdown]
+# ### 内部の構成要素を見る
+#
+# `qaoa_sampling` の中では `qaoa_state` を呼んでいますが、`qaoa_state` 自体は次の3つの組み合わせで構成されています:
+#
+# - `superposition_vector(n)` — 全ビットに `H` を作用させて初期状態 $|+\rangle^{\otimes n}$ を準備する。
+# - `ising_cost(quad, linear, q, gamma)` — 二次項 `quad` の各エントリに対して `RZZ`、線形項 `linear` の各エントリに対して `RZ` を作用させるコスト層。今回の問題では線形項がない(`linear={}`)ので `RZZ` だけが現れる。
+# - `x_mixer(q, beta)` — 全ビットに `RX(2\beta)` を作用させるミキサー層。
+#
+# `qaoa_layers(p, ...)` はこの `ising_cost` と `x_mixer` を `p` 回交互に作用させているだけです。各部品を個別に描画して中身を確認します。
+
+# %%
+from qamomile.circuit.algorithm.basic import superposition_vector
+from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
+
+superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
+
+# %%
+ising_cost.draw(
+    q=converter.spin_model.num_bits,
+    quad=converter.spin_model.quad,
+    linear=converter.spin_model.linear,
+    fold_loops=False,
+)
+
+# %%
+x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
+
+# %% [markdown]
 # ## QAOA パラメータの最適化
 #
 # `executable.sample()` を使って各イテレーションでコストを評価します。オプティマイザはサンプリングされたビット列の平均エネルギーを最小化する `gammas` と `betas` を探索します。
