@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block
@@ -2005,9 +2006,35 @@ class CircuitAnalyzer:
     def _format_binop_operand(self, value: Value, param_values: dict) -> str | None:
         """Format a BinOp operand as a symbolic string.
 
-        Returns a human-readable string for the operand, or None if
-        unresolvable. Numeric values are formatted as numbers, symbolic
-        parameters use their name (with Greek letter mapping).
+        Resolution order: ``param_values[logical_id]`` → ``_loop_<name>``
+        fallback for ForOperation/ForItemsOperation loop variables →
+        constant → array element access (``arr[i,j]``, recursing on each
+        index so loop-bound indices substitute) → named parameter →
+        display-name fallback (rejecting IR-internal placeholders).
+
+        The array-element branch is checked *before* ``is_parameter()``
+        because an element access on a parameter array reports
+        ``is_parameter()`` True and ``parameter_name() == "gammas[layer]"``
+        — i.e. the parameter name is the pre-formatted string with the
+        unsubstituted loop variable baked in. Returning that verbatim
+        would leak ``layer`` into the rendered expression even though
+        ForOperation unrolling has already provided the concrete index
+        via ``_loop_layer``. Trying the recursive array-element formatter
+        first lets the index resolution see those concrete values
+        (``gammas[0]``, ``gammas[1]``).
+
+        Args:
+            value (Value): IR Value used as a BinOp operand (lhs or rhs).
+            param_values (dict): Mapping from ``logical_id`` (or ``_loop_<var>``
+                / parameter name) to a resolved entry — either a numeric value
+                or a previously-built symbolic string. Numeric values are
+                formatted as integers when float-equal to an integer
+                (``2.0`` → ``"2"``); otherwise as ``str(value)``.
+
+        Returns:
+            str | None: Human-readable string for the operand, or ``None``
+                when the operand cannot be resolved by any of the rules
+                above (caller treats ``None`` as "give up on this BinOp").
         """
         # Check param_values first (may contain number or symbolic string)
         if value.logical_id in param_values:
@@ -2018,26 +2045,51 @@ class CircuitAnalyzer:
                 return str(pv)
             if isinstance(pv, str):
                 return pv
+        # Loop variable: ForOperation/ForItemsOperation unrolling writes
+        # `_loop_<var>` entries keyed by the variable *name* rather than the
+        # operand's logical_id, so loop-bound operands like ``Jij`` are not
+        # found by the logical_id lookup above. Mirror the same fallback
+        # ``_evaluate_value`` already uses so concrete entry values (e.g.
+        # ``0.5``) substitute into rendered angle expressions instead of
+        # leaking the loop-variable name (``Jij*gamma``).
+        if value.name:
+            loop_key = f"_loop_{value.name}"
+            if loop_key in param_values:
+                pv = param_values[loop_key]
+                if isinstance(pv, (int, float)):
+                    if isinstance(pv, float) and pv == int(pv):
+                        return str(int(pv))
+                    return str(pv)
+                if isinstance(pv, str):
+                    return pv
         # Constant
         const = value.get_const()
         if const is not None:
             if isinstance(const, float) and const == int(const):
                 return str(int(const))
             return str(const)
+        # Array element (e.g., weights[e]). Checked before is_parameter()
+        # so unrolled loop indices substitute (`gammas[layer]` →
+        # `gammas[0]`) instead of leaking via the pre-formatted
+        # parameter_name string `value.parameter_name()` returns for
+        # element accesses on parameter arrays.
+        if (
+            hasattr(value, "parent_array")
+            and value.parent_array is not None
+            and hasattr(value, "element_indices")
+            and value.element_indices
+        ):
+            array_name = value.parent_array.name or "arr"
+            idx_parts = []
+            for idx_val in value.element_indices:
+                idx = self._format_binop_operand(idx_val, param_values) or "?"
+                idx_parts.append(idx)
+            return f"{array_name}[{','.join(idx_parts)}]"
         # Named parameter
         if value.is_parameter():
             name = value.parameter_name() or value.name
             if name and not self._is_internal_temp_name(name):
                 return name
-        # Array element (e.g., weights[e])
-        if hasattr(value, "parent_array") and value.parent_array is not None:
-            array_name = value.parent_array.name or "arr"
-            if hasattr(value, "element_indices") and value.element_indices:
-                idx_parts = []
-                for idx_val in value.element_indices:
-                    idx = self._format_binop_operand(idx_val, param_values) or "?"
-                    idx_parts.append(idx)
-                return f"{array_name}[{','.join(idx_parts)}]"
 
         # Fallback: name (refuse IR-internal placeholders so that
         # "uint_tmp"/"float_tmp"/"bit_tmp" never leak into rendered
@@ -2809,23 +2861,77 @@ class CircuitAnalyzer:
     @staticmethod
     def _materialize_dict_entries(
         dict_value: Value,
-    ) -> list[tuple] | None:
-        """Extract entries from DictValue, including bound_data in metadata.
+    ) -> Sequence[tuple] | None:
+        """Extract entries from a DictValue from either IR or runtime metadata.
 
-        DictValue.entries is typically empty when data is bound at build
-        time; the actual data lives in typed runtime metadata. This helper
-        materializes those entries into a plain list of (key, value) tuples
-        where keys and values are raw Python objects (not IR Values).
+        A ``DictValue`` carries entries in one of two complementary
+        encodings depending on how it was constructed:
 
-        Returns None if the dict is truly unbound (no data available).
+        * **IR-level**: ``DictValue.entries`` is a tuple of
+          ``(TupleValue | Value, Value)`` pairs — IR Values, not
+          plain Python objects. Used when the dict was built inside a
+          kernel (e.g. literal ``{i: x[i]}`` against symbolic
+          parameters).
+        * **Runtime metadata**: ``DictValue.metadata.dict_runtime.bound_data``
+          holds a tuple of ``(raw_key, raw_value)`` Python pairs. Used
+          when the dict was bound at ``transpile`` / ``draw`` time via
+          ``bindings={"d": {0: 1.0, ...}}``.
+
+        The runtime-metadata branch distinguishes "bound but empty" by
+        checking ``metadata.dict_runtime is not None`` directly (so a
+        dict bound to ``{}`` returns ``[]`` and renders as ``VSkip``).
+        The IR-entries branch only fires when ``DictValue.entries`` is
+        truthy: an empty IR ``entries`` tuple is treated as the
+        "unbound parameter placeholder" case (every kernel-parameter
+        ``Dict`` is constructed with ``entries=()``) and falls through
+        to ``None``, which the caller renders as a folded box. There
+        is currently no way for a kernel to declare a literal empty
+        ``DictValue`` whose contents are knowable to be empty without
+        also setting ``dict_runtime`` — if that ever becomes possible
+        the IR-entries branch needs the same "is the entries field
+        explicitly empty?" check the runtime branch already does.
+
+        Callers (`_build_vfor_items`, `build_qubit_map`'s ForItems
+        branch) handle the union shape by sniffing each pair —
+        ``hasattr(entry_key, "elements")`` for ``TupleValue``,
+        ``hasattr(entry_key, "get_const")`` for scalar IR Values,
+        otherwise treating the pair as raw Python.
+
+        Args:
+            dict_value (Value): The DictValue (or compatible Value)
+                whose entries should be materialized. Should carry
+                IR-level ``entries`` or runtime ``dict_runtime``
+                metadata; otherwise treated as truly unbound.
+
+        Returns:
+            Sequence[tuple] | None: A sequence of ``(key, value)``
+                pairs whose element types depend on the encoding above
+                (IR Values for the IR-level branch, raw Python objects
+                for the runtime branch). Returns ``[]`` for a dict
+                that is bound to an empty mapping so callers can
+                render zero iterations as a ``VSkip`` rather than a
+                folded box. Returns ``None`` only when the dict is
+                truly unbound — no IR-level entries AND no runtime
+                metadata.
         """
-        # Try IR-level entries first
+        # IR-level entries: a tuple of (TupleValue | Value, Value)
+        # pairs. Returned as-is so the caller can resolve each operand
+        # against `param_values` and pull symbolic / constant info as
+        # appropriate.
         if hasattr(dict_value, "entries") and dict_value.entries:
             return dict_value.entries
 
-        bound_items = dict_value.get_bound_data_items()
-        if bound_items:
-            return list(bound_items)
+        # Runtime metadata: a tuple of (raw_key, raw_value) Python
+        # pairs. Distinguish "bound but empty" from "never bound" — a
+        # truthy check on get_bound_data_items() would conflate the
+        # two (both return the empty tuple), which made ForItems over
+        # an empty bound Dict render as a folded box even when
+        # fold_loops=False.
+        if (
+            hasattr(dict_value, "metadata")
+            and dict_value.metadata.dict_runtime is not None
+        ):
+            return list(dict_value.get_bound_data_items())
 
         return None
 

@@ -80,7 +80,7 @@ def _(problem: jm.DecoratedProblem):
     )
 
     # Constraint: equal partition sizes
-    problem += problem.Constraint("equal_partition", x.sum() == V / 2)
+    problem += problem.Constraint("Equal Partition", x.sum() == V / 2)
 
 
 problem
@@ -176,6 +176,93 @@ from qamomile.qiskit import QiskitTranspiler
 transpiler = QiskitTranspiler()
 p = 5  # number of QAOA layers
 executable = converter.transpile(transpiler, p=p)
+
+# %% [markdown]
+# ## Visualize the QAOA Circuit
+#
+# `QAOAConverter._transpile_quadratic()` internally builds the sampling
+# qkernel below and feeds it to the transpiler. For visualization we
+# restate that qkernel *verbatim*, then trace it through the early
+# pipeline (`Transpiler.to_block` to lower it into an IR Block,
+# `Transpiler.inline` to expand the sub-qkernel calls) before handing
+# the resulting Block to `MatplotlibDrawer.draw`. This renders exactly
+# the Block structure the converter works with internally, with `p=2`
+# for readability.
+
+# %%
+import qamomile.circuit as qmc
+from qamomile.circuit.algorithm.qaoa import qaoa_state
+from qamomile.circuit.visualization import MatplotlibDrawer
+
+
+@qmc.qkernel
+def qaoa_sampling(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
+    return qmc.measure(q)
+
+
+block = transpiler.to_block(
+    qaoa_sampling,
+    bindings={
+        "linear": converter.spin_model.linear,
+        "quad": converter.spin_model.quad,
+        "n": converter.spin_model.num_bits,
+        "p": 2,
+    },
+    parameters=["gammas", "betas"],
+)
+block = transpiler.inline(block)
+# `fold_loops=False` unrolls every loop (`for layer`,
+# `for (i,j),Jij in quad`, and the per-qubit range loops) so each gate
+# is rendered explicitly. `linear` is the empty dict `{}` for graph
+# partition (no linear Ising terms), so its ForItems loop has zero
+# iterations and is rendered as nothing rather than as a folded box.
+# The result is wide; the docs build injects a lightbox script that
+# turns each cell-output image into a click-to-zoom modal so the wide
+# rendering stays inspectable on ReadTheDocs.
+MatplotlibDrawer(block).draw(fold_loops=False)
+
+# %% [markdown]
+# ### Inspecting the Building Blocks
+#
+# Inside `qaoa_sampling` we call `qaoa_state`, and `qaoa_state` itself
+# is the composition of three smaller qkernels:
+#
+# - `superposition_vector(n)` — applies `H` to every qubit, preparing
+#   the initial state $|+\rangle^{\otimes n}$.
+# - `ising_cost(quad, linear, q, gamma)` — the cost layer: one `RZZ`
+#   per quadratic entry in `quad` and one `RZ` per linear entry in
+#   `linear`. The graph-partition spin model has no linear terms
+#   (`linear={}`), so only `RZZ` gates appear.
+# - `x_mixer(q, beta)` — the mixer layer: applies `RX(2\beta)` to every
+#   qubit.
+#
+# `qaoa_layers(p, ...)` is just the alternation of `ising_cost` and
+# `x_mixer`, repeated `p` times. Below we render each piece on its own.
+
+# %%
+from qamomile.circuit.algorithm.basic import superposition_vector
+from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
+
+superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
+
+# %%
+ising_cost.draw(
+    q=converter.spin_model.num_bits,
+    quad=converter.spin_model.quad,
+    linear=converter.spin_model.linear,
+    fold_loops=False,
+)
+
+# %%
+x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
 
 # %% [markdown]
 # ## Optimize the QAOA Parameters
