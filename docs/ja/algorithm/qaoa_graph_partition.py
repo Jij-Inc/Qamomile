@@ -77,7 +77,7 @@ def _(problem: jm.DecoratedProblem):
     )
 
     # 制約条件：均等な分割サイズ
-    problem += problem.Constraint("equal_partition", x.sum() == V / 2)
+    problem += problem.Constraint("EqualPartition", x.sum() == V / 2)
 
 
 problem
