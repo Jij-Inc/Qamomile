@@ -64,7 +64,6 @@ from qiskit.quantum_info import Statevector
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import (
-    MottonenAmplitudeEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
     compute_mottonen_amplitude_encoding_ry_angles,
@@ -325,22 +324,10 @@ for n in (2, 3, 4, 5):
 # the assertion above is the right reference.
 
 # %% [markdown]
-# `MottonenAmplitudeEncoding` is also exposed directly when you want
-# the composite gate as a first-class object — for instance to read
-# `num_target_qubits` or to feed it into a custom decomposition
-# strategy without first building a kernel.  Constructing it bypasses
-# the kernel pipeline but runs the same `_validate_and_normalize` →
-# angle-precomputation path internally:
-
-# %%
-gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
-print(f"num_target_qubits = {gate.num_target_qubits}")
-assert gate.num_target_qubits == 2
-
-# %% [markdown]
 # ## 4. Public API surface — when to reach for which entry point
 #
-# The state-preparation package exposes five public names. The table
+# The state-preparation package exposes four user-facing entry points
+# (the ones you import from `qamomile.circuit.algorithm`).  The table
 # below summarises which one to use for which job, and the trade-off
 # each makes.
 #
@@ -350,8 +337,13 @@ assert gate.num_target_qubits == 2
 # | `amplitude_encoding(q, amps)` + `bindings={"amps": [...]}` | You'd rather expose `amps: Vector[Float]` as a kernel parameter (for documentation, sweeping, or to keep the kernel free of magic numbers), but the values are still resolved at compile time. | Same IR shape and merits as the concrete-sequence form; no need to pre-compute Möttönen angles. The implementation reads the bound concrete data at trace time via `amps.value.get_const_array()`. | Real-only (a `Vector[Float]` cannot carry complex values). `parameters=["amps"]` is rejected by design — see the angles-based runtime path below. |
 # | `amplitude_encoding_from_angles(q, ry_angles, rz_angles=None)` + `bindings={...}` | You have already pre-computed Möttönen angles (e.g. shared across multiple kernels) and want to bind them at compile time. | Compile-time bound, same recompile-per-vector cost as the routes above; works for both real (rz_angles=None) and complex inputs. | Skips the `MottonenAmplitudeEncoding` composite-gate wrapping and emits the elementary `RY` / `RZ` / `CNOT` gates directly into the IR — resource estimation sees the elementary gates rather than the high-level op. |
 # | `amplitude_encoding_from_angles(q, ry_a, rz_a)` + `parameters=[...]` | You need the **same compiled circuit** to be re-bound to many amplitude vectors at run time (hybrid optimisation loops, parameter sweeps). | Compile once, sample many times via `executable.sample(bindings={...})` — the dominant cost is no longer recompilation. The only path that supports runtime-symbolic angles. | The user (your code) must call `compute_mottonen_amplitude_encoding_*_angles(...)` per iteration to translate amplitudes → angles. Same flat-IR caveat as the bindings form. |
-# | `MottonenAmplitudeEncoding(amplitudes)` (class) | You want the composite gate as a first-class object — typically for resource estimation outside a kernel, or to plug into a custom decomposition strategy. | Direct access to `gate.num_target_qubits` and the IR-side composite-gate object. | Most user code is better served by `amplitude_encoding`, which wraps the construction. |
 # | `compute_mottonen_amplitude_encoding_ry_angles(amps)` / `compute_mottonen_amplitude_encoding_rz_angles(amps)` | You need the Gray-walk Ry / Rz angles classically — to feed the runtime-parametric path above, to cache across kernels, or to reason about the angle values directly. | Fast pure-Python / NumPy preprocessing; keeps the angle computation outside the kernel build. Real inputs always return all-zeros from the Rz helper. | Requires understanding that the returned arrays already include the bit-reverse + $M^{(k)}$ Gray-walk transform — they are not the raw per-control-state angles. |
+#
+# The package also exposes `MottonenAmplitudeEncoding` (the underlying
+# `CompositeGate` subclass) for library authors who want to embed
+# amplitude encoding into their own composite-gate decomposition; in
+# typical user code prefer `amplitude_encoding`, which is just a thin
+# `Vector[Qubit]` adapter around it.
 #
 # The next two cells exercise the two non-trivial bindings/parameters
 # entry points so you can see them in action.

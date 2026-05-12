@@ -49,7 +49,6 @@ from qiskit.quantum_info import Statevector
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import (
-    MottonenAmplitudeEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
     compute_mottonen_amplitude_encoding_ry_angles,
@@ -267,17 +266,9 @@ for n in (2, 3, 4, 5):
 # 上記は **基本** のMöttönen-Vartiainen Gray符号カウントです。同じ論文の後半および後続研究では、ステージ間のCNOTキャンセルにより複素の場合の最適漸近コストを $2^{n+1} - 2n$ まで下げる方法が記述されています。Qamomileの実装は明確さと移植性のため、これらのキャンセル最適化を適用していません — 各ステージごとの素直な分解で留めています。したがって上のassertが正しい参照値です。
 
 # %% [markdown]
-# `MottonenAmplitudeEncoding`はコンポジットゲートをファーストクラスのオブジェクトとして直接公開しています — 例えばカーネルを構築する前に`num_target_qubits`を読みたい、カスタム分解戦略に食わせたい、といった場合に使えます。直接構築はカーネルパイプラインを経由しませんが、内部では同じ`_validate_and_normalize` → 角度事前計算のパスを走ります:
-
-# %%
-gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
-print(f"num_target_qubits = {gate.num_target_qubits}")
-assert gate.num_target_qubits == 2
-
-# %% [markdown]
 # ## 4. 公開API表面 — どの場面でどれを使うか
 #
-# state_preparationパッケージは5つの公開名を提供します。下表は「どの仕事にどれを使うか」と「それぞれのトレードオフ」をまとめたものです。
+# state_preparationパッケージはユーザ向けに4つのエントリポイントを提供します (`qamomile.circuit.algorithm`からimportするもの)。下表は「どの仕事にどれを使うか」と「それぞれのトレードオフ」をまとめたものです。
 #
 # | API | こういう時に使う | メリット | デメリット |
 # |---|---|---|---|
@@ -285,8 +276,9 @@ assert gate.num_target_qubits == 2
 # | `amplitude_encoding(q, amps)` + `bindings={"amps": [...]}` | 振幅をカーネルパラメータ`amps: Vector[Float]`として宣言したい（ドキュメント目的、掃引、マジックナンバー回避）。値はコンパイル時に解決する。 | IRの形と利点は具体シーケンス版と同じ。Möttönen角度を事前計算する必要なし。実装は`amps.value.get_const_array()`でtrace時にバインド済み具体データを読み出す。 | 実数のみ（`Vector[Float]`は複素数を運べない）。`parameters=["amps"]`は意図的に拒否される — 以下の角度ベースのrun-time pathを参照。 |
 # | `amplitude_encoding_from_angles(q, ry_angles, rz_angles=None)` + `bindings={...}` | Möttönen角度を既に事前計算済みで（複数カーネルで共有など）、コンパイル時にバインドしたい場合。 | コンパイル時バインド、再コンパイルコストは上の経路と同じ。実数 (`rz_angles=None`) でも複素入力でも動く。 | `MottonenAmplitudeEncoding`コンポジットゲートのラッピングをスキップし、基本`RY` / `RZ` / `CNOT`ゲートを直接IRに発行する — リソース推定は高レベルopではなく基本ゲート列を見ることになる。 |
 # | `amplitude_encoding_from_angles(q, ry_a, rz_a)` + `parameters=[...]` | **同じコンパイル済み回路** をrun-timeで多くの異なる振幅ベクトルに再バインドしたい場合（ハイブリッド最適化ループ、パラメータ掃引）。 | 1度コンパイル、`executable.sample(bindings={...})`で何度でもサンプル — 支配的なコストが再コンパイルでなくなる。runtime symbolic 角度をサポートする唯一の経路。 | 呼び出し側 (ユーザコード) が反復ごとに`compute_mottonen_amplitude_encoding_*_angles(...)`を呼んで振幅 → 角度の変換をする必要がある。同じflat-IRの caveat も該当。 |
-# | `MottonenAmplitudeEncoding(amplitudes)` (クラス) | コンポジットゲートをファーストクラスのオブジェクトとして欲しい場合 — 典型的にはカーネル外でのリソース推定や、カスタム分解戦略への組み込み。 | `gate.num_target_qubits`やIR側のコンポジットゲートオブジェクトに直接アクセスできる。 | ほとんどのユーザコードは構築をラップする`amplitude_encoding`の方が使いやすい。 |
 # | `compute_mottonen_amplitude_encoding_ry_angles(amps)` / `compute_mottonen_amplitude_encoding_rz_angles(amps)` | Gray-walk Ry / Rz角度を古典的に得たい場合 — 上のrun-time parametric pathに食わせる、複数カーネル間でキャッシュする、角度値そのものを推論したいなど。 | 純粋なPython / NumPyの前処理として高速。角度計算をカーネルbuildの外側に保てる。実数入力ではRzヘルパは常にゼロ配列を返す。 | 返ってくる配列が既にbit-reverse + $M^{(k)}$ Gray-walk変換済みであることを理解しておく必要あり — 生のper-control-state角度ではない。 |
+#
+# パッケージは`MottonenAmplitudeEncoding` (内部の`CompositeGate`サブクラス) も公開していますが、これは自分のコンポジットゲート分解の中に振幅エンコーディングを埋め込みたいライブラリ作者向けの低レベルエントリです。通常のユーザコードでは、その薄い`Vector[Qubit]`アダプタである`amplitude_encoding`を使ってください。
 #
 # 次の2セルでは、上記表のうち非自明な`bindings` / `parameters`の入口を実際に動かして見せます。
 
