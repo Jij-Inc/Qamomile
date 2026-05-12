@@ -267,6 +267,14 @@ for n in (2, 3, 4, 5):
 # 上記は **基本** のMöttönen-Vartiainen Gray符号カウントです。同じ論文の後半および後続研究では、ステージ間のCNOTキャンセルにより複素の場合の最適漸近コストを $2^{n+1} - 2n$ まで下げる方法が記述されています。Qamomileの実装は明確さと移植性のため、これらのキャンセル最適化を適用していません — 各ステージごとの素直な分解で留めています。したがって上のassertが正しい参照値です。
 
 # %% [markdown]
+# `MottonenAmplitudeEncoding`はコンポジットゲートをファーストクラスのオブジェクトとして直接公開しています — 例えばカーネルを構築する前に`num_target_qubits`を読みたい、カスタム分解戦略に食わせたい、といった場合に使えます。直接構築はカーネルパイプラインを経由しませんが、内部では同じ`_validate_and_normalize` → 角度事前計算のパスを走ります:
+
+# %%
+gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
+print(f"num_target_qubits = {gate.num_target_qubits}")
+assert gate.num_target_qubits == 2
+
+# %% [markdown]
 # ## 4. 公開API表面 — どの場面でどれを使うか
 #
 # state_preparationパッケージは5つの公開名を提供します。下表は「どの仕事にどれを使うか」と「それぞれのトレードオフ」をまとめたものです。

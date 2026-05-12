@@ -325,6 +325,19 @@ for n in (2, 3, 4, 5):
 # the assertion above is the right reference.
 
 # %% [markdown]
+# `MottonenAmplitudeEncoding` is also exposed directly when you want
+# the composite gate as a first-class object — for instance to read
+# `num_target_qubits` or to feed it into a custom decomposition
+# strategy without first building a kernel.  Constructing it bypasses
+# the kernel pipeline but runs the same `_validate_and_normalize` →
+# angle-precomputation path internally:
+
+# %%
+gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
+print(f"num_target_qubits = {gate.num_target_qubits}")
+assert gate.num_target_qubits == 2
+
+# %% [markdown]
 # ## 4. Public API surface — when to reach for which entry point
 #
 # The state-preparation package exposes five public names. The table

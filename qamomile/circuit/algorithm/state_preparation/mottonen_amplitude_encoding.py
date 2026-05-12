@@ -215,11 +215,20 @@ def _validate_and_normalize(
             is ``float``; otherwise it is ``complex``.
 
     Raises:
-        ValueError: If the length is not a power of two (or is less
-            than 2, i.e., would map to a zero-qubit register), or all
-            amplitudes are zero.
+        ValueError: If the input is not a 1-D vector (e.g. a nested
+            sequence or a 2-D ``np.ndarray``), the length is not a power
+            of two (or is less than 2, i.e., would map to a zero-qubit
+            register), or all amplitudes are zero.
     """
     arr = np.asarray(amplitudes)
+
+    # Reject nested sequences / 2-D arrays up front so the user sees a
+    # clear shape error here rather than a confusing TypeError deeper in
+    # the angle-computation pipeline (e.g. `math.atan2(np.ndarray, ...)`).
+    if arr.ndim != 1:
+        raise ValueError(
+            f"Amplitudes must be a 1-D vector, got an array of shape {arr.shape}"
+        )
 
     if np.iscomplexobj(arr):
         if np.allclose(np.imag(arr), 0.0):

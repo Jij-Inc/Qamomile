@@ -493,6 +493,28 @@ class TestInputValidation:
         with pytest.raises(ValueError, match=match):
             MottonenAmplitudeEncoding(amplitudes)
 
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [
+            pytest.param([[1.0, 0.0], [0.0, 1.0]], id="nested-list-2x2"),
+            pytest.param(np.eye(4), id="ndarray-4x4"),
+            pytest.param(np.zeros((2, 4), dtype=complex), id="ndarray-2x4-complex"),
+            pytest.param(np.array(1.0), id="ndarray-0d-scalar"),
+        ],
+    )
+    def test_non_1d_amplitudes_rejected(self, amplitudes) -> None:
+        """Nested sequences and 2-D / 0-D arrays are rejected with a clear shape error.
+
+        Without the early ``arr.ndim == 1`` check, e.g. a 2x2 nested list
+        passes ``len(arr) == 2`` (a power of 2 ≥ 2) and only fails much
+        later inside the angle computation with a confusing
+        ``TypeError`` from ``math.atan2(np.ndarray, ...)``.  This test
+        locks in the up-front shape validation in
+        ``_validate_and_normalize``.
+        """
+        with pytest.raises(ValueError, match="1-D vector"):
+            MottonenAmplitudeEncoding(amplitudes)
+
     def test_complex_nonzero_imag_accepted(self) -> None:
         """Complex inputs with non-zero imaginary part are accepted (full path).
 
