@@ -2005,9 +2005,23 @@ class CircuitAnalyzer:
     def _format_binop_operand(self, value: Value, param_values: dict) -> str | None:
         """Format a BinOp operand as a symbolic string.
 
-        Returns a human-readable string for the operand, or None if
-        unresolvable. Numeric values are formatted as numbers, symbolic
-        parameters use their name (with Greek letter mapping).
+        Resolution order: ``param_values[logical_id]`` → ``_loop_<name>``
+        fallback for ForOperation/ForItemsOperation loop variables →
+        constant → named parameter → array element access (``arr[i,j]``)
+        → display-name fallback (rejecting IR-internal placeholders).
+
+        Args:
+            value (Value): IR Value used as a BinOp operand (lhs or rhs).
+            param_values (dict): Mapping from ``logical_id`` (or ``_loop_<var>``
+                / parameter name) to a resolved entry — either a numeric value
+                or a previously-built symbolic string. Numeric values are
+                formatted as integers when float-equal to an integer
+                (``2.0`` → ``"2"``); otherwise as ``str(value)``.
+
+        Returns:
+            str | None: Human-readable string for the operand, or ``None``
+                when the operand cannot be resolved by any of the rules
+                above (caller treats ``None`` as "give up on this BinOp").
         """
         # Check param_values first (may contain number or symbolic string)
         if value.logical_id in param_values:
