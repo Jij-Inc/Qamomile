@@ -192,7 +192,7 @@ executable = converter.transpile(transpiler, p=p)
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.qaoa import qaoa_state
-from qamomile.circuit.visualization import MatplotlibDrawer
+from qamomile.circuit.visualization import MatplotlibDrawer, scrollable_svg
 
 
 @qmc.qkernel
@@ -224,7 +224,11 @@ block = transpiler.inline(block)
 # is rendered explicitly. `linear` is the empty dict `{}` for graph
 # partition (no linear Ising terms), so its ForItems loop has zero
 # iterations and is rendered as nothing rather than as a folded box.
-MatplotlibDrawer(block).draw(fold_loops=False)
+# The result is wide, so we wrap it in `scrollable_svg` to render it
+# inside a horizontally and vertically scrollable SVG container that
+# survives ReadTheDocs / Jupyter Book rendering without overflowing.
+fig = MatplotlibDrawer(block).draw(fold_loops=False)
+scrollable_svg(fig)
 
 # %% [markdown]
 # ### Inspecting the Building Blocks
@@ -251,12 +255,13 @@ from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
 superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
 
 # %%
-ising_cost.draw(
+fig = ising_cost.draw(
     q=converter.spin_model.num_bits,
     quad=converter.spin_model.quad,
     linear=converter.spin_model.linear,
     fold_loops=False,
 )
+scrollable_svg(fig)
 
 # %%
 x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)

@@ -175,7 +175,7 @@ executable = converter.transpile(transpiler, p=p)
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.qaoa import qaoa_state
-from qamomile.circuit.visualization import MatplotlibDrawer
+from qamomile.circuit.visualization import MatplotlibDrawer, scrollable_svg
 
 
 @qmc.qkernel
@@ -205,7 +205,9 @@ block = transpiler.inline(block)
 # `fold_loops=False` で全ループ(`for layer`/`for (i,j),Jij in quad`/`for i in range(n)`)を
 # アンロールして、各ゲートを展開した形で描画する。`linear` は空辞書 `{}` のため、
 # `for i, hi in linear` は 0 イテレーションとして消える(ボックスは現れない)。
-MatplotlibDrawer(block).draw(fold_loops=False)
+# 結果は横に長くなるので、`scrollable_svg` でスクロール可能なSVGコンテナに包む。
+fig = MatplotlibDrawer(block).draw(fold_loops=False)
+scrollable_svg(fig)
 
 # %% [markdown]
 # ### 内部の構成要素を見る
@@ -225,12 +227,13 @@ from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
 superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
 
 # %%
-ising_cost.draw(
+fig = ising_cost.draw(
     q=converter.spin_model.num_bits,
     quad=converter.spin_model.quad,
     linear=converter.spin_model.linear,
     fold_loops=False,
 )
+scrollable_svg(fig)
 
 # %%
 x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
