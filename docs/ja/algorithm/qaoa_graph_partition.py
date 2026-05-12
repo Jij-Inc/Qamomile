@@ -80,7 +80,7 @@ def _(problem: jm.DecoratedProblem):
     )
 
     # 制約条件：均等な分割サイズ
-    problem += problem.Constraint("equal_partition", x.sum() == V / 2)
+    problem += problem.Constraint("Equal Partition", x.sum() == V / 2)
 
 
 problem
@@ -210,6 +210,76 @@ from qamomile.qiskit import QiskitTranspiler
 transpiler = QiskitTranspiler()
 p = 5  # QAOA の層数
 executable = converter.transpile(transpiler, p=p)
+
+# %% [markdown]
+# ## QAOA 回路の可視化
+#
+# `QAOAConverter._transpile_quadratic()` は内部で次のサンプリング qkernel を組み立てて transpile します。チュートリアルでは可視化のため、その qkernel を**そのまま**ここに再掲します。`Transpiler.to_block` で IR ブロックに落とし、`Transpiler.inline` でサブ qkernel を展開してから `MatplotlibDrawer.draw` に渡すことで、コンバーターが内部で扱うのと同じ Block 構造を描画できます(レイヤー構造を読みやすくするため `p=2` に縮小)。
+
+# %%
+import qamomile.circuit as qmc
+from qamomile.circuit.algorithm.qaoa import qaoa_state
+from qamomile.circuit.visualization import MatplotlibDrawer
+
+
+@qmc.qkernel
+def qaoa_sampling(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
+    return qmc.measure(q)
+
+
+block = transpiler.to_block(
+    qaoa_sampling,
+    bindings={
+        "linear": converter.spin_model.linear,
+        "quad": converter.spin_model.quad,
+        "n": converter.spin_model.num_bits,
+        "p": 2,
+    },
+    parameters=["gammas", "betas"],
+)
+block = transpiler.inline(block)
+# `fold_loops=False` で全ループ(`for layer`/`for (i,j),Jij in quad`/`for i in range(n)`)を
+# アンロールして、各ゲートを展開した形で描画する。`linear` は空辞書 `{}` のため、
+# `for i, hi in linear` は 0 イテレーションとして消える(ボックスは現れない)。
+# 結果は横長になるが、ドキュメントビルド時にライトボックス用 JS が注入されるので、
+# クリックでモーダル拡大表示できる。
+MatplotlibDrawer(block).draw(fold_loops=False)
+
+# %% [markdown]
+# ### 内部の構成要素を見る
+#
+# `qaoa_sampling` の中では `qaoa_state` を呼んでいますが、`qaoa_state` 自体は次の3つの組み合わせで構成されています:
+#
+# - `superposition_vector(n)` — 全ビットに `H` を作用させて初期状態 $|+\rangle^{\otimes n}$ を準備する。
+# - `ising_cost(quad, linear, q, gamma)` — 二次項 `quad` の各エントリに対して `RZZ`、線形項 `linear` の各エントリに対して `RZ` を作用させるコスト層。今回の問題では線形項がない(`linear={}`)ので `RZZ` だけが現れる。
+# - `x_mixer(q, beta)` — 全ビットに `RX(2\beta)` を作用させるミキサー層。
+#
+# `qaoa_layers(p, ...)` はこの `ising_cost` と `x_mixer` を `p` 回交互に作用させているだけです。各部品を個別に描画して中身を確認します。
+
+# %%
+from qamomile.circuit.algorithm.basic import superposition_vector
+from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
+
+superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
+
+# %%
+ising_cost.draw(
+    q=converter.spin_model.num_bits,
+    quad=converter.spin_model.quad,
+    linear=converter.spin_model.linear,
+    fold_loops=False,
+)
+
+# %%
+x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
 
 # %% [markdown]
 # ## QAOA パラメータの最適化
