@@ -95,6 +95,24 @@ class TestScrollableSvg:
         # through `html.escape(quote=True)`.
         assert "1px&quot;; background: red" in body
 
+    def test_svg_carries_inline_max_width_none(self, small_fig):
+        """The embedded `<svg>` must carry inline style that opts out of the
+        responsive `svg { max-width: 100% }` rule MyST / Jupyter Book apply
+        to all cell-output media — otherwise wide circuits get shrunk to
+        the column width and the surrounding `overflow: auto` div has
+        nothing to overflow, so the horizontal scroll bar never appears
+        on the rendered page.
+        """
+        html = scrollable_svg(small_fig)
+        body = html.data
+        # The opening `<svg ...>` tag must include our style override.
+        opening = body[body.index("<svg") : body.index(">", body.index("<svg")) + 1]
+        assert "max-width:none" in opening, (
+            f"Expected `max-width:none` in <svg> style; got opening tag: "
+            f"{opening!r}"
+        )
+        assert "display:block" in opening
+
     def test_raises_when_savefig_omits_svg_tag(self, monkeypatch):
         """If the SVG backend produces output without `<svg`, raise loudly
         and still close the figure (so the caller is not silently leaked).

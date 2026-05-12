@@ -97,6 +97,21 @@ def scrollable_svg(
         # Drop XML / DOCTYPE preamble — inline HTML embedding only needs the
         # `<svg ...>` element.
         svg = svg[svg_start:]
+        # Inject inline style on the `<svg>` element to opt out of the
+        # responsive `svg, img { max-width: 100%; height: auto; }` rule
+        # that MyST / Jupyter Book's Tailwind layer applies to all
+        # cell-output media. Without this, a wide circuit gets shrunk to
+        # the cell-output column width — at which point the surrounding
+        # `overflow: auto` div has nothing to overflow and the scroll bar
+        # never appears. Forcing the SVG back to its natural width
+        # (carried by the `width="...pt"` attribute Matplotlib emits)
+        # makes the wrapper genuinely scroll horizontally on the rendered
+        # page.
+        svg = svg.replace(
+            "<svg ",
+            '<svg style="max-width:none;max-height:none;display:block" ',
+            1,
+        )
     finally:
         # The inline Matplotlib backend would also emit the figure as a
         # PNG cell output otherwise, producing a duplicate (and tiny)
