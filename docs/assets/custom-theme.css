@@ -93,6 +93,51 @@
 .dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: #C08A40 !important; }
 .dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: #C08A40 !important; }
 
+/* === Tag chips ===
+ * Pill-shaped clickable tag labels emitted by docs/scripts/build_doc_tags.py.
+ * They appear in:
+ *   - the Browse-by-tag block injected into each section index.md,
+ *   - the global tags landing page (tags/index.md),
+ *   - the Browse-by-tag header and article cards on per-tag pages,
+ *   - the auto-tags chip block at the top of every tagged article.
+ */
+a.tag-chip {
+  display: inline-block;
+  padding: 0.15em 0.75em;
+  margin: 0.18em 0.12em;
+  background-color: #F9EDD8;
+  color: #8B5E25;
+  border-radius: 999px;
+  font-size: 0.88em;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+a.tag-chip:hover {
+  background-color: #F0DCC0;
+  color: #6E4A1C;
+  text-decoration: none;
+}
+
+a.tag-chip::before {
+  content: "#";
+  margin-right: 0.25em;
+  opacity: 0.55;
+}
+
+/* Dark mode: deeper amber tint that reads against the dark background. */
+.dark a.tag-chip {
+  background-color: rgba(110, 74, 28, 0.45);
+  color: #F0DCC0;
+}
+
+.dark a.tag-chip:hover {
+  background-color: rgba(168, 116, 48, 0.6);
+  color: #FDF8F0;
+}
+
 /* Google Colab launch button (injected at build output) */
 .qamomile-colab-button {
   display: inline-flex;
@@ -121,4 +166,44 @@
   line-height: 14px;
   text-align: center;
   font-family: system-ui, sans-serif;
+}
+
+/* === Cell-output media: shrink to column width + click-to-zoom hint ===
+ *
+ * lightbox.js binds a click handler to every <img>/<svg> emitted into
+ * a notebook cell output and opens an overlay with the figure at its
+ * natural size. We give the thumbnail a `cursor: zoom-in` cue so the
+ * affordance is discoverable, and we also reinforce the `max-width:
+ * 100%` constraint here as a defence-in-depth fallback in case the
+ * inherited Tailwind / mystmd rule does not fire (e.g. on a stray svg
+ * emitted with explicit `width="...pt"` attributes that some renderers
+ * honour over CSS unless an explicit `max-width` is asserted at the
+ * cell-output scope).
+ *
+ * The selector list mirrors lightbox.js's SELECTOR so the cursor
+ * affordance and the click handler stay in sync. mystmd's matplotlib
+ * outputs land inside `[data-name="safe-output-image"]`; the rest are
+ * fallbacks for classic Jupyter (`.jp-OutputArea`), Jupyter Book /
+ * nbsphinx (`.cell_output`), Thebe live-execution (`.thebe-output`),
+ * and figure-based renderers.
+ */
+[data-name="safe-output-image"] img,
+[data-name="safe-output-image"] svg,
+.jp-OutputArea img,
+.jp-OutputArea svg:not([data-slot="icon"]),
+.jupyter-output img,
+.jupyter-output svg:not([data-slot="icon"]),
+.thebe-output img,
+.thebe-output svg:not([data-slot="icon"]),
+.cell_output img,
+.cell_output svg:not([data-slot="icon"]),
+.cell-output img,
+.cell-output svg:not([data-slot="icon"]),
+.notebook-output img,
+.notebook-output svg:not([data-slot="icon"]),
+article figure img,
+article figure svg:not([data-slot="icon"]) {
+  max-width: 100%;
+  height: auto;
+  cursor: zoom-in;
 }

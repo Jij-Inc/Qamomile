@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Reuse Patterns: QKernel Composition and Composite Gates
 #
 # As circuits grow, you want to avoid copy-pasting gate sequences. Qamomile offers two complementary reuse mechanisms:
@@ -36,6 +40,8 @@
 # # !pip install qamomile
 
 # %%
+import math
+
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler
@@ -86,6 +92,32 @@ print("GHZ result:", result.results)
 # %%
 qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
 print(qc.draw())
+
+# %% [markdown]
+# ### Passing scalar literals to helpers
+#
+# When a helper qkernel declares a scalar parameter (`UInt`, `Float`, or `Bit`), you can pass a raw Python literal at the call site — Qamomile auto-promotes `int` to `UInt`, `float` to `Float`, and `bool` to `Bit`. Writing `helper(q, 0, 0.5)` is equivalent to `helper(q, qmc.uint(0), qmc.float_(0.5))`. Use the explicit `qmc.uint` / `qmc.float_` / `qmc.bit` constructors only when you want to name the value or share it across multiple call sites.
+
+
+# %%
+@qmc.qkernel
+def rotate_first(
+    q: qmc.Vector[qmc.Qubit],
+    idx: qmc.UInt,
+    angle: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    q[idx] = qmc.ry(q[idx], angle)
+    return q
+
+
+@qmc.qkernel
+def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = rotate_first(q, 0, 0.5)  # int and float literals are accepted directly
+    return qmc.measure(q)
+
+
+helper_with_literals.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # ## Pattern 2: `@composite_gate`
@@ -244,6 +276,94 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # This lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
 
 # %% [markdown]
+# ## Pattern 4: Controlling a Built-in Gate
+#
+# When you only need a controlled version of a single primitive gate
+# (`qmc.rx`, `qmc.h`, `qmc.cp`, ...), `qmc.controlled` accepts the
+# built-in gate function directly — no `@qkernel` wrapper required.
+# The keyword for any classical parameter follows the underlying gate's
+# own parameter name (e.g. `angle=` for `qmc.rx` / `qmc.ry`, `theta=`
+# for `qmc.p` / `qmc.cp`).
+
+# %% [markdown]
+# **Before** — boilerplate wrapper:
+#
+# ```python
+# @qmc.qkernel
+# def _rx_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+#     return qmc.rx(q, theta)
+#
+# crx = qmc.controlled(_rx_gate)
+# ```
+#
+# **After** — wrap directly:
+#
+# ```python
+# crx = qmc.controlled(qmc.rx)
+# ```
+
+
+# %%
+@qmc.qkernel
+def controlled_rx_demo() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, name="q")
+    # Drive the control to |1> so the controlled rotation fires.
+    q[0] = qmc.x(q[0])
+    crx = qmc.controlled(qmc.rx)
+    q[0], q[1] = crx(q[0], q[1], angle=math.pi)
+    return qmc.measure(q)
+
+
+controlled_rx_demo.draw()
+
+# %% [markdown]
+# Multi-control and the `power` parameter work the same as for any
+# `controlled(...)` factory — `num_controls` and `power` are properties
+# of the `ControlledGate` rather than of the wrapped function, so
+# nothing extra is needed:
+
+
+# %%
+@qmc.qkernel
+def toffoli_via_builtin() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, name="q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    ccx = qmc.controlled(qmc.x, num_controls=2)
+    q[0], q[1], q[2] = ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+toffoli_via_builtin.draw()
+
+# %% [markdown]
+# Existing `@qmc.qkernel`-wrapped arguments still work — the built-in
+# form is purely additive. Reach for a hand-written `@qkernel` whenever
+# the gate body needs more than a single primitive call (e.g. an
+# H followed by an RX), since `controlled` of a multi-gate body is
+# exactly what `@qkernel` is for:
+
+
+# %%
+@qmc.qkernel
+def h_then_rx(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    q = qmc.h(q)
+    q = qmc.rx(q, theta)
+    return q
+
+
+@qmc.qkernel
+def controlled_pair_demo() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, name="q")
+    q[0] = qmc.x(q[0])
+    cg = qmc.controlled(h_then_rx)
+    q[0], q[1] = cg(q[0], q[1], theta=math.pi / 4)
+    return qmc.measure(q)
+
+
+controlled_pair_demo.draw()
+
+# %% [markdown]
 # ## Summary
 #
 # - **Helper `@qkernel`**: call one qkernel from another for code reuse.
@@ -253,3 +373,6 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # - **Stub composite gate**: `stub=True` with `ResourceMetadata` for top-down
 #   design and resource estimation without a full implementation.
 # - **`est.gates.oracle_calls`**: even when oracle internals are unknown, this reports per-oracle call counts as a dict (including symbolic call counts).
+# - **`qmc.controlled(builtin_gate)`**: skip the one-line `@qkernel`
+#   wrapper when controlling a single primitive — pass `qmc.rx`,
+#   `qmc.h`, `qmc.cp`, etc. directly to the factory.
