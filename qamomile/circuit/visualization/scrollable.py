@@ -13,6 +13,7 @@ Ctrl/Cmd + scroll without losing crispness.
 
 from __future__ import annotations
 
+import html as _html
 import io
 from typing import TYPE_CHECKING
 
@@ -36,7 +37,10 @@ def scrollable_svg(
     enables both axis scrollbars while capping the vertical extent. The
     inline Matplotlib backend would otherwise also auto-display the
     figure as a PNG below the SVG, so the helper closes the figure once
-    the SVG bytes are captured to suppress that duplicate output.
+    the SVG bytes are captured to suppress that duplicate output. The
+    figure is closed inside a ``finally`` so a Matplotlib failure during
+    ``savefig`` (e.g., a backend bug, an invalid artist) does not leak
+    the figure into the next cell.
 
     Args:
         fig (Figure): Matplotlib figure to embed. After the helper
@@ -45,7 +49,9 @@ def scrollable_svg(
         max_height_px (int): Vertical cap on the scroll container, in
             pixels. Tall circuits scroll vertically once they exceed
             this. Defaults to 600.
-        border (str): CSS border declaration for the container. Pass an
+        border (str): CSS border declaration for the container (e.g.
+            ``"1px solid #ddd"``). The value is HTML-attribute-escaped
+            before being interpolated into ``style="..."``. Pass an
             empty string to render without a border.
         padding_px (int): CSS padding inside the container, in pixels.
             Defaults to 8.
@@ -59,6 +65,10 @@ def scrollable_svg(
     Raises:
         ImportError: If ``IPython`` is not importable in the current
             environment.
+        RuntimeError: If Matplotlib's SVG backend produced output that
+            does not contain a ``<svg>`` element. This indicates a
+            backend or matplotlib version issue rather than user error;
+            the figure is still closed before the exception propagates.
 
     Example:
         >>> import qamomile.circuit as qmc
@@ -75,18 +85,35 @@ def scrollable_svg(
     from IPython.display import HTML
 
     buf = io.StringIO()
-    fig.savefig(buf, format="svg", bbox_inches="tight")
-    svg = buf.getvalue()
-    # Drop XML / DOCTYPE preamble — inline HTML embedding only needs the
-    # `<svg ...>` element.
-    svg = svg[svg.index("<svg") :]
+    try:
+        fig.savefig(buf, format="svg", bbox_inches="tight")
+        svg = buf.getvalue()
+        svg_start = svg.find("<svg")
+        if svg_start < 0:
+            raise RuntimeError(
+                "Matplotlib SVG backend produced output without an `<svg>` "
+                "element; cannot embed as inline HTML."
+            )
+        # Drop XML / DOCTYPE preamble — inline HTML embedding only needs the
+        # `<svg ...>` element.
+        svg = svg[svg_start:]
+    finally:
+        # The inline Matplotlib backend would also emit the figure as a
+        # PNG cell output otherwise, producing a duplicate (and tiny)
+        # raster below the scrollable SVG. Closing inside `finally` also
+        # guarantees the figure is released even if `savefig` failed.
+        plt.close(fig)
+        buf.close()
 
-    # The inline Matplotlib backend would also emit the figure as a PNG
-    # cell output otherwise, producing a duplicate (and tiny) raster
-    # below the scrollable SVG.
-    plt.close(fig)
-
-    style = f"overflow: auto; max-height: {max_height_px}px; padding: {padding_px}px;"
+    # `border` is caller-supplied, so escape the HTML-attribute special
+    # characters before splicing it into the `style="..."` attribute. No
+    # legitimate CSS value contains `"`/`<`/`>`/`&`, so escaping is a
+    # no-op for normal usage and a hard stop for accidental injection
+    # (e.g., a stray quote that would otherwise close the attribute).
+    style = (
+        f"overflow: auto; max-height: {int(max_height_px)}px; "
+        f"padding: {int(padding_px)}px;"
+    )
     if border:
-        style += f" border: {border};"
+        style += f" border: {_html.escape(border, quote=True)};"
     return HTML(f'<div style="{style}">{svg}</div>')

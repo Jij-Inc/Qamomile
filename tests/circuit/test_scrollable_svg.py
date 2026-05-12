@@ -7,6 +7,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pytest
 
+# IPython is part of the dev/jupyter extras, not a core qamomile dependency.
+# Skip cleanly in minimal envs that have matplotlib but not the notebook stack.
+pytest.importorskip("IPython")
+
 from qamomile.circuit.visualization import scrollable_svg
 
 
@@ -69,4 +73,40 @@ class TestScrollableSvg:
         scrollable_svg(fig)
         # `plt.close(fig)` removes `fig` from `Gcf` (the figure manager
         # registry), so `plt.fignum_exists` is the public way to confirm it.
+        assert not plt.fignum_exists(fig.number)
+
+    def test_border_is_html_attribute_escaped(self):
+        """A `border` value with attribute-special chars must not break out
+        of the `style="..."` attribute.
+
+        Without escaping, a border like `1px"; background: red` would close
+        the `style` attribute early and inject extra HTML/CSS into the
+        notebook output. The helper escapes the value, so the literal
+        `"` becomes the entity `&quot;` inside the attribute and stays
+        inert.
+        """
+        fig, _ = plt.subplots(figsize=(1, 1))
+        html = scrollable_svg(fig, border='1px"; background: red')
+        body = html.data
+        # The raw attribute-breaking quote must NOT appear inside the
+        # serialized `style="..."` attribute.
+        assert '1px"; background: red' not in body
+        # The escaped form must be present, proving the value flowed
+        # through `html.escape(quote=True)`.
+        assert "1px&quot;; background: red" in body
+
+    def test_raises_when_savefig_omits_svg_tag(self, monkeypatch):
+        """If the SVG backend produces output without `<svg`, raise loudly
+        and still close the figure (so the caller is not silently leaked).
+        """
+        fig, _ = plt.subplots(figsize=(1, 1))
+
+        def fake_savefig(buf, *args, **kwargs):
+            buf.write("<?xml version='1.0'?>\n<not-svg/>\n")
+
+        monkeypatch.setattr(fig, "savefig", fake_savefig)
+
+        with pytest.raises(RuntimeError, match="<svg"):
+            scrollable_svg(fig)
+        # The figure must be released even though the SVG extraction failed.
         assert not plt.fignum_exists(fig.number)
