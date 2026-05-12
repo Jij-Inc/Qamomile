@@ -187,8 +187,8 @@ Required sections, in this order:
 
 1. **One-line summary** (imperative mood, ending with a period).
 2. *(Optional)* A longer description paragraph after a blank line.
-3. **`Args:`** — one entry per parameter. Include the type in the docstring even though it is also in the signature; describe meaning, units, valid range, and default behavior.
-4. **`Returns:`** — describe the returned value's type and meaning. For tuple returns, name each element. Omit this section only for functions that truly return `None`.
+3. **`Args:`** — one entry per parameter. Use the form `name (type): description`. The type **MUST** appear in the docstring even though it is also in the signature (this is standard Google style; type annotations in the signature alone are NOT sufficient). Describe meaning, units, valid range, and default behavior.
+4. **`Returns:`** — use the form `type: description`. The return type **MUST** be stated explicitly even though it is also in the signature. For tuple returns, name each element and give each its own type. Omit this section only for functions that truly return `None`.
 5. **`Raises:`** — list every exception the function can raise with the condition that triggers it. Omit only if the function genuinely cannot raise.
 6. *(When helpful)* **`Example:`** — a minimal runnable snippet, especially for public API surfaces and `@qkernel` building blocks. Error classes MUST include both correct and incorrect examples.
 
@@ -207,22 +207,23 @@ def transpile(
     analyze → plan → emit) and returns an executable bound to this backend.
 
     Args:
-        kernel: The `@qkernel`-decorated function to compile. Must be an
-            entry-point kernel with concrete (non-symbolic) shapes once
-            `bindings` are applied.
-        bindings: Compile-time parameter bindings, keyed by parameter name.
-            Values are coerced to the parameter's declared handle type.
-            Also resolves array shapes. Defaults to None, meaning no
-            bindings — the kernel must then have no free parameters.
-        parameters: Names of kernel parameters to preserve as backend
-            runtime parameters rather than binding at compile time. Each
-            name must refer to a non-array parameter of the kernel.
-            Defaults to None, meaning all unbound parameters are treated
-            as compile-time fixed.
+        kernel (QKernel): The `@qkernel`-decorated function to compile.
+            Must be an entry-point kernel with concrete (non-symbolic)
+            shapes once `bindings` are applied.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings,
+            keyed by parameter name. Values are coerced to the parameter's
+            declared handle type. Also resolves array shapes. Defaults to
+            None, meaning no bindings — the kernel must then have no free
+            parameters.
+        parameters (list[str] | None): Names of kernel parameters to
+            preserve as backend runtime parameters rather than binding at
+            compile time. Each name must refer to a non-array parameter
+            of the kernel. Defaults to None, meaning all unbound
+            parameters are treated as compile-time fixed.
 
     Returns:
-        An `ExecutableProgram[T]` wrapping the backend circuit and the
-        parameter metadata needed to re-bind runtime parameters.
+        ExecutableProgram[T]: Executable wrapping the backend circuit and
+            the parameter metadata needed to re-bind runtime parameters.
 
     Raises:
         QamomileCompileError: If analyze/plan detects a dependency or shape
