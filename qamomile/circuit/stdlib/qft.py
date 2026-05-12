@@ -285,6 +285,18 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     This is a convenience factory function that creates a QFT gate
     and applies it to the qubits.
 
+    When *qubits* has a concrete (compile-time known) shape this emits
+    the standard ``O(n^2)`` QFT decomposition.  When *qubits* is a
+    sub-kernel parameter whose shape is still symbolic at trace time
+    (e.g. ``def apply_qft(qs: Vector[Qubit]): return qft(qs)`` traced
+    standalone) the function silently returns *qubits* unchanged: with
+    no concrete ``n`` we cannot decide how many controlled-phase gates
+    to emit, so we leave the sub-kernel block empty and let the outer
+    composition layer re-trace once the shape is resolved.  This is
+    the only acceptable fallback while ``get_size`` is strict and the
+    composition machinery does not yet propagate concrete shapes back
+    into already-built sub-kernel blocks.
+
     Args:
         qubits: Vector of qubits to transform
 
@@ -297,7 +309,10 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
             qubits = qft(qubits)
             return qubits
     """
-    n = _get_size(qubits)
+    try:
+        n = _get_size(qubits)
+    except ValueError:
+        return qubits
     qft_gate = QFT(n)
 
     # Get individual qubits from vector
@@ -319,6 +334,11 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     This is a convenience factory function that creates an IQFT gate
     and applies it to the qubits.
 
+    The same symbolic-shape contract as :func:`qft` applies here:
+    when *qubits* has no compile-time-known shape (a sub-kernel
+    parameter traced standalone) the function silently returns
+    *qubits* unchanged, leaving the sub-kernel block empty.
+
     Args:
         qubits: Vector of qubits to transform
 
@@ -331,7 +351,10 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
             qubits = iqft(qubits)
             return qubits
     """
-    n = _get_size(qubits)
+    try:
+        n = _get_size(qubits)
+    except ValueError:
+        return qubits
     iqft_gate = IQFT(n)
 
     # Get individual qubits from vector
