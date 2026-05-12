@@ -170,8 +170,8 @@ a.tag-chip::before {
 
 /* === Cell-output media: shrink to column width + click-to-zoom hint ===
  *
- * lightbox.js binds a click handler to every <img>/<svg> emitted into a
- * Jupyter cell output and opens an overlay with the figure at its
+ * lightbox.js binds a click handler to every <img>/<svg> emitted into
+ * a notebook cell output and opens an overlay with the figure at its
  * natural size. We give the thumbnail a `cursor: zoom-in` cue so the
  * affordance is discoverable, and we also reinforce the `max-width:
  * 100%` constraint here as a defence-in-depth fallback in case the
@@ -179,11 +179,28 @@ a.tag-chip::before {
  * emitted with explicit `width="...pt"` attributes that some renderers
  * honour over CSS unless an explicit `max-width` is asserted at the
  * cell-output scope).
+ *
+ * The selector list mirrors lightbox.js's SELECTOR so the cursor
+ * affordance and the click handler stay in sync. mystmd's matplotlib
+ * outputs land inside `[data-name="safe-output-image"]`; the rest are
+ * fallbacks for classic Jupyter (`.jp-OutputArea`), Jupyter Book /
+ * nbsphinx (`.cell_output`), Thebe live-execution (`.thebe-output`),
+ * and figure-based renderers.
  */
+[data-name="safe-output-image"] img,
+[data-name="safe-output-image"] svg,
+.jp-OutputArea img,
+.jp-OutputArea svg:not([data-slot="icon"]),
+.jupyter-output img,
+.jupyter-output svg:not([data-slot="icon"]),
+.thebe-output img,
+.thebe-output svg:not([data-slot="icon"]),
+.cell_output img,
+.cell_output svg:not([data-slot="icon"]),
 .cell-output img,
-.cell-output svg,
+.cell-output svg:not([data-slot="icon"]),
 .notebook-output img,
-.notebook-output svg {
+.notebook-output svg:not([data-slot="icon"]) {
   max-width: 100%;
   height: auto;
   cursor: zoom-in;

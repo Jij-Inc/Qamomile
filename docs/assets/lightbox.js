@@ -24,11 +24,37 @@
 
   // We intentionally exclude figures that already live inside a
   // lightbox overlay — those are the cloned previews and must not be
-  // re-bound recursively.
-  var SELECTOR =
-    ".cell-output img, .cell-output svg, " +
-    ".notebook-output img, .notebook-output svg, " +
-    "article figure img, article figure svg";
+  // re-bound recursively. Also exclude `data-slot="icon"` SVGs
+  // (mystmd's chrome — theme toggle, search icon, hamburger menu,
+  // copy-code button, etc.) so the lightbox only fires on actual
+  // notebook outputs.
+  //
+  // mystmd wraps every cell-output image in
+  // `<div data-name="safe-output-image">`, which is the precise
+  // anchor for matplotlib outputs. The fallback selectors target
+  // classic Jupyter (`.jp-OutputArea`), Jupyter Book / nbsphinx
+  // (`.cell_output`), Thebe live-execution (`.thebe-output`), and
+  // generic figures, so the script keeps working if mystmd renames
+  // the outer wrapper or if a page is ever served from a different
+  // notebook renderer.
+  var SELECTOR = [
+    '[data-name="safe-output-image"] img',
+    '[data-name="safe-output-image"] svg',
+    '.jp-OutputArea img',
+    '.jp-OutputArea svg:not([data-slot="icon"])',
+    '.jupyter-output img',
+    '.jupyter-output svg:not([data-slot="icon"])',
+    '.thebe-output img',
+    '.thebe-output svg:not([data-slot="icon"])',
+    '.cell_output img',
+    '.cell_output svg:not([data-slot="icon"])',
+    '.cell-output img',
+    '.cell-output svg:not([data-slot="icon"])',
+    '.notebook-output img',
+    '.notebook-output svg:not([data-slot="icon"])',
+    'article figure img',
+    'article figure svg:not([data-slot="icon"])',
+  ].join(", ");
 
   var OVERLAY_ID = "qamomile-lightbox-overlay";
   var DATA_FLAG = "qamomileLightbox";
@@ -191,16 +217,37 @@
   }
 
   function init() {
-    bindAll();
+    scheduleBind();
     if (typeof MutationObserver === "function") {
       var observer = new MutationObserver(scheduleBind);
-      observer.observe(document.body, {
+      // Observe documentElement (the <html> root), not document.body.
+      // mystmd's React hydration can replace document.body wholesale
+      // when the SSR HTML doesn't match what React expects (a known
+      // failure mode triggered by the very script tag we inject into
+      // <head>: SSR includes it, hydrated React tree does not, so
+      // React emits the "hydration recovered by client rendering"
+      // warning and re-renders the body). An observer attached to
+      // the old body becomes orphaned the moment that happens.
+      // documentElement is stable across that recovery.
+      observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
       });
     }
+    // SPA navigation hooks. mystmd is a React SPA; Back/Forward and
+    // popstate-driven route changes can swap cell-output content
+    // without firing DOMContentLoaded again. Re-running scheduleBind
+    // on each of these covers those navigations regardless of which
+    // event the SPA dispatches.
+    window.addEventListener("popstate", scheduleBind);
+    window.addEventListener("hashchange", scheduleBind);
+    window.addEventListener("pageshow", scheduleBind);
   }
 
+  // `pageshow` fires for both initial load and bfcache restore, so it
+  // also covers the "user hit back" case once we have already wired
+  // it inside init(). For the initial load we still need the
+  // DOMContentLoaded / immediate path to bring the observer up.
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
