@@ -444,19 +444,53 @@ def emit_controlled_u(
     target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
     param_operands = [v for v in remaining_operands if v.type.is_classical()]
 
-    control_indices = []
+    # Resolve every control and target operand to its physical qubit
+    # index.  Partial failure (some operands resolve, others do not)
+    # would emit a wrong-arity controlled gate and is therefore a
+    # loud ``EmitError``.  Total failure (none resolved) is kept on
+    # the legacy silent-return path because the
+    # ``SymbolicControlledU`` → ``ConcreteControlledU`` promotion in
+    # ``ConstantFoldingPass`` currently leaves the IR in an
+    # inconsistent operand layout (the control Vector is not
+    # expanded to individual qubits, so ``operands[:num_controls]``
+    # picks up a target Value rather than each control individually).
+    # Raising here would hard-break legitimate user code using
+    # ``controlled(fn, num_controls=n)`` with bindings.  The proper
+    # fix for the underlying promotion bug is tracked separately.
+    control_indices: list[int] = []
     for q in control_operands:
         idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
         if idx is not None:
             control_indices.append(idx)
 
-    target_indices = []
+    target_indices: list[int] = []
     for q in target_qubit_operands:
         idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
         if idx is not None:
             target_indices.append(idx)
 
+    if 0 < len(control_indices) < len(control_operands):
+        raise EmitError(
+            f"ControlledUOperation: only "
+            f"{len(control_indices)}/{len(control_operands)} control "
+            f"operand(s) could be resolved to physical qubits. Emitting "
+            f"a partial-arity controlled gate would silently miswire the "
+            f"circuit.  This typically indicates broken parent_array / "
+            f"slice metadata on a subset of the control operands.",
+            operation="ControlledUOperation",
+        )
+    if 0 < len(target_indices) < len(target_qubit_operands):
+        raise EmitError(
+            f"ControlledUOperation: only "
+            f"{len(target_indices)}/{len(target_qubit_operands)} target "
+            f"operand(s) could be resolved to physical qubits. Same "
+            f"partial-arity hazard as above.",
+            operation="ControlledUOperation",
+        )
+
     if not control_indices or not target_indices:
+        # Total resolution failure — see comment block above for why
+        # this is left as a silent return rather than a hard error.
         return
 
     local_bindings = emit_pass._resolver.bind_block_params(
