@@ -1,9 +1,3 @@
-"""Building blocks for state preparation.
-
-This module provides basic state preparation routines,
-which can be used to initialize qubit registers for various quantum algorithms.
-"""
-
 from __future__ import annotations
 
 import math

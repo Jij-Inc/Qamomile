@@ -48,10 +48,13 @@
 # まずは、小さなイジング模型について実際にボルツマン分布を可視化してみましょう。ここでは、1次元強磁性イジング鎖（$J_{ij} = 1$、$h_i = 0$）を考え、逆温度$\beta$を変えながら、エネルギー$E(\bm{x})$ごとの確率を集計したヒストグラムをプロットします。
 
 # %%
+import os
 from typing import Any, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 n_spins = 6
 J = 1.0
@@ -125,7 +128,8 @@ def metropolis_hastings(
     energy_func: Callable[[np.ndarray], float],
     beta: float,
 ) -> np.ndarray:
-    """逆温度``beta``のボルツマン分布に対するMetropolis-Hastingsルールで``new_state``を``state``に対して採択または棄却する。"""
+    """逆温度``beta``のボルツマン分布に対するMetropolis-Hastingsルールで
+    ``new_state``を``state``に対して採択または棄却する。"""
 
     delta_energy = energy_func(new_state) - energy_func(state)
 
@@ -141,7 +145,7 @@ def metropolis_hastings(
 # これでMCMCが実装できました。それでは、MCMCを使ってサンプリングしてみましょう。
 
 # %%
-T = 10000  # MCMCのステップ数
+T = 100 if docs_test_mode else 10000  # MCMCのステップ数
 beta = 1.0  # 逆温度
 
 sample = np.zeros((T, n_spins))
@@ -236,8 +240,10 @@ for i in range(n_spins - 1):
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.state_preparation import computational_basis_state
-from qamomile.circuit.algorithm.trotter import trotterized_time_evolution
+from qamomile.circuit.algorithm import (
+    computational_basis_state,
+    trotterized_time_evolution,
+)
 
 
 @qmc.qkernel
@@ -249,7 +255,9 @@ def qemcmc_circuit(
     time: qmc.Float,
     step: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
-    """QeMCMC用の提案回路: ``n``量子ビット上に``|input_bits>``を準備し、指定した``order``の鈴木-Trotter分解で全時間``time``、``step``ステップにわたり``sum_k Hs[k]``の時間発展を作用させ、最後に全量子ビットを測定する。"""
+    """QeMCMC用の提案回路: ``n``量子ビット上に``|input_bits>``を準備し、
+    指定した``order``の鈴木-Trotter分解で全時間``time``、``step``ステップに
+    わたり``sum_k Hs[k]``の時間発展を作用させ、最後に全量子ビットを測定する。"""
     q = qmc.qubit_array(n, name="q")
 
     # step 1: 初期状態を準備
@@ -358,12 +366,14 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 # ## 実行例
 
 # %% [markdown]
-# 実装したQeMCMCアルゴリズムを実行してみましょう。比較のために、先ほどの古典的な提案分布も同時に実行します。
+# 実装したQeMCMCアルゴリズムを実行してみましょう。
 
 # %%
 from qiskit_aer import AerSimulator
 
-T_quantum = 1000  # 量子回路シミュレーションのコストが高いため古典より小さめに設定
+T_quantum = (
+    20 if docs_test_mode else 1000
+)  # 量子回路シミュレーションのコストが高いため古典より小さめに設定
 
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 

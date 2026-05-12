@@ -19,7 +19,9 @@
 #
 # # Quantum-enhanced Markov chain Monte Carlo
 #
-# This tutorial demonstrates how to implement Quantum-enhanced Markov chain Monte Carlo (QeMCMC) [](https://doi.org/10.1038/s41586-023-06095-4) using Qamomile.
+# This tutorial demonstrates how to implement Quantum-enhanced Markov chain
+# Monte Carlo (QeMCMC) [](https://doi.org/10.1038/s41586-023-06095-4) using
+# Qamomile.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -67,17 +69,21 @@
 # values of the inverse temperature $\beta$.
 
 # %%
+import os
 from typing import Any, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 n_spins = 6
 J = 1.0
 
 
 def ising_energy(state: np.ndarray) -> float:
-    """Return the energy of a 1D ferromagnetic Ising chain (no external field) for the spin configuration ``state``."""
+    """Return the energy of a 1D ferromagnetic Ising chain (no external field)
+    for the spin configuration ``state``."""
     return -J * np.sum(state[:-1] * state[1:])
 
 
@@ -109,10 +115,10 @@ plt.show()
 #
 # Markov chain Monte Carlo (MCMC) is a general-purpose method for sampling
 # from probability distributions.
-# It achieves sampling from a target distribution $\pi(\bm{x})$ by exploiting a stochastic
-# process called a Markov chain.
-# Here we introduce the Metropolis-Hastings (MH) algorithm [](https://doi.org/10.1093/biomet/57.1.97) , a common
-# implementation of MCMC.
+# It achieves sampling from a target distribution $\pi(\bm{x})$ by exploiting
+# a stochastic process called a Markov chain.
+# Here we introduce the Metropolis-Hastings (MH) algorithm
+# [](https://doi.org/10.1093/biomet/57.1.97) , a common implementation of MCMC.
 #
 # The MH algorithm generates a new transition $\bm{x} \rightarrow \bm{x}'$
 # of the Markov chain according to a proposal probability $Q(\bm{y}|\bm{x})$,
@@ -139,7 +145,8 @@ rng = np.random.default_rng(seed=0)
 
 
 def local_update(state: np.ndarray) -> np.ndarray:
-    """Propose a new spin configuration by flipping a single randomly chosen spin in ``state``."""
+    """Propose a new spin configuration by flipping a single randomly chosen
+    spin in ``state``."""
     n = len(state)
     flip_index = rng.integers(0, n)
     new_state = state.copy()
@@ -166,7 +173,9 @@ def metropolis_hastings(
     energy_func: Callable[[np.ndarray], float],
     beta: float,
 ) -> np.ndarray:
-    """Accept or reject ``new_state`` against ``state`` under the Metropolis-Hastings rule for the Boltzmann distribution at inverse temperature ``beta``."""
+    """Accept or reject ``new_state`` against ``state`` under the
+    Metropolis-Hastings rule for the Boltzmann distribution at inverse
+    temperature ``beta``."""
 
     delta_energy = energy_func(new_state) - energy_func(state)
 
@@ -183,7 +192,7 @@ def metropolis_hastings(
 # Let us run it to draw samples.
 
 # %%
-T = 10000  # Number of MCMC steps
+T = 100 if docs_test_mode else 10000  # Number of MCMC steps
 beta = 1.0  # Inverse temperature
 
 sample = np.zeros((T, n_spins))
@@ -216,7 +225,8 @@ for t in range(T):
 
 # %%
 def average_magnetization(sample: np.ndarray) -> float:
-    """Return the average magnetization estimated from MCMC samples of shape ``(T, n_spins)``."""
+    """Return the average magnetization estimated from MCMC samples of shape
+    ``(T, n_spins)``."""
     magnetization = np.mean(sample, axis=1)
     return np.mean(magnetization)
 
@@ -225,7 +235,8 @@ sample_magnetization = np.array(
     [average_magnetization(sample[:i]) for i in range(1, T + 1)]
 )
 
-# Compute the theoretical average magnetization from the Boltzmann distribution at the current inverse temperature beta
+# Compute the theoretical average magnetization from the Boltzmann distribution
+# at the current inverse temperature beta
 weights = np.exp(-beta * energies)
 probs = weights / weights.sum()
 magnetization_per_state = all_states.mean(axis=1)
@@ -250,7 +261,8 @@ plt.show()
 
 # %% [markdown]
 # The Quantum-enhanced MCMC algorithm is an MCMC that uses sampling from a
-# quantum circuit as its proposal distribution [](https://doi.org/10.1038/s41586-023-06095-4).
+# quantum circuit as its proposal distribution
+# [](https://doi.org/10.1038/s41586-023-06095-4).
 # Starting from the current state $\bm{x}$, we apply a quantum circuit $U$
 # and measure in the computational basis to obtain a new state $\bm{y}$.
 # The resulting proposal distribution $Q(\bm{y}|\bm{x})$ is:
@@ -258,8 +270,10 @@ plt.show()
 # Q(\bm{y}|\bm{x}) = \| \langle \bm{y} | U | \bm{x} \rangle \|^2
 # $$
 # Computing this probability directly is difficult, but when the quantum
-# circuit satisfies $U = U^\top$, the proposal distribution satisfies $Q(\bm{x} \mid \bm{y}) = Q(\bm{y} \mid \bm{x})$,
-# so the $Q$ terms cancel out in the acceptance probability, eliminating the need to explicitly compute $Q$.
+# circuit satisfies $U = U^\top$, the proposal distribution satisfies
+# $Q(\bm{x} \mid \bm{y}) = Q(\bm{y} \mid \bm{x})$, so the $Q$ terms cancel
+# out in the acceptance probability, eliminating the need to explicitly
+# compute $Q$.
 # For example, to sample from the Boltzmann distribution of the Ising model,
 # we can use a trotterized time evolution under a time-independent Hamiltonian:
 # $$
@@ -272,7 +286,8 @@ plt.show()
 # of the two terms.
 # $\alpha$ is a normalization factor used to ensure that the eigenvalues
 # of the mixer and cost Hamiltonians are on the same scale.
-# $(\gamma, t)$ are tunable parameters that determine the efficiency of the MCMC process.
+# $(\gamma, t)$ are tunable parameters that determine the efficiency of the
+# MCMC process.
 
 # %% [markdown]
 # ---
@@ -299,14 +314,20 @@ for i in range(n_spins - 1):
 # ### 2. Building the Quantum Circuit
 #
 # Next, let us implement the quantum circuit.
-# First, we prepare the quantum state $\ket{\bm{x}}$ using `computational_basis_state` in order to encode the current state $\bm{x}$ as the input state.
-# The proposal transition uses time evolution simulation based on Trotter decomposition.
-# We use `trotterized_time_evolution` to build the circuit for the Hamiltonians we just prepared.
+# First, we prepare the quantum state $\ket{\bm{x}}$ using
+# `computational_basis_state` in order to encode the current state $\bm{x}$
+# as the input state.
+# The proposal transition uses time evolution simulation based on Trotter
+# decomposition.
+# We use `trotterized_time_evolution` to build the circuit for the
+# Hamiltonians we just prepared.
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.state_preparation import computational_basis_state
-from qamomile.circuit.algorithm.trotter import trotterized_time_evolution
+from qamomile.circuit.algorithm import (
+    computational_basis_state,
+    trotterized_time_evolution,
+)
 
 
 @qmc.qkernel
@@ -318,7 +339,10 @@ def qemcmc_circuit(
     time: qmc.Float,
     step: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
-    """QeMCMC proposal circuit: prepare ``|input_bits>`` on ``n`` qubits, evolve under ``sum_k Hs[k]`` using a Suzuki-Trotter splitting of given ``order`` and ``step`` steps over total time ``time``, then measure all qubits."""
+    """QeMCMC proposal circuit: prepare ``|input_bits>`` on ``n`` qubits,
+    evolve under ``sum_k Hs[k]`` using a Suzuki-Trotter splitting of given
+    ``order`` and ``step`` steps over total time ``time``, then measure all
+    qubits."""
     q = qmc.qubit_array(n, name="q")
 
     # step 1: prepare the initial state
@@ -336,8 +360,8 @@ def qemcmc_circuit(
 # We transpile the kernel.
 # Running the quantum circuit requires fixed values for the Hamiltonian
 # mixing coefficient $\gamma$ and the simulation time $t$.
-# Following [](https://doi.org/10.1103/PhysRevA.111.042615) , we set $\gamma=0.45$, $t=12$, and
-# $\Delta t = 0.8$.
+# Following [](https://doi.org/10.1103/PhysRevA.111.042615) , we set
+# $\gamma=0.45$, $t=12$, and $\Delta t = 0.8$.
 # At transpile time we bind `n`, `order`, `time`, and `step`, while keeping `input_bits`
 # as a runtime parameter.
 # %%
@@ -392,13 +416,15 @@ def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarra
     if input_kind == "spin":
         if not np.all(np.isin(values, [-1, 1])):
             raise ValueError(
-                f"input_kind='spin' requires elements in {{-1, 1}}, got: {values.tolist()}"
+                f"input_kind='spin' requires elements in {{-1, 1}}, "
+                f"got: {values.tolist()}"
             )
         return (1 - x) // 2
     if input_kind == "binary":
         if not np.all(np.isin(values, [0, 1])):
             raise ValueError(
-                f"input_kind='binary' requires elements in {{0, 1}}, got: {values.tolist()}"
+                f"input_kind='binary' requires elements in {{0, 1}}, "
+                f"got: {values.tolist()}"
             )
         return 1 - 2 * x
     if input_kind != "auto":
@@ -421,7 +447,8 @@ def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarra
 
 
 def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.ndarray:
-    """Obtain a proposed state from the quantum circuit using the current spin state as input."""
+    """Obtain a proposed state from the quantum circuit using the current
+    spin state as input."""
     binary_state = spin_binary_convert(state, input_kind="spin").tolist()
     result = executable.sample(
         executor,
@@ -438,12 +465,13 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 
 # %% [markdown]
 # Let us run the QeMCMC algorithm we just implemented.
-# For comparison, we also run the classical proposal from before.
 
 # %%
 from qiskit_aer import AerSimulator
 
-T_quantum = 1000  # Smaller than the classical run since quantum simulation is costlier
+T_quantum = (
+    20 if docs_test_mode else 1000
+)  # Smaller than the classical run since quantum simulation is costlier
 
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 
@@ -458,7 +486,8 @@ for t in range(T_quantum):
 
 # %% [markdown]
 # We compute the estimator of the average magnetization
-# and compare it with the result obtained from the MCMC method using the local update introduced earlier.
+# and compare it with the result obtained from the MCMC method using the
+# local update introduced earlier.
 
 # %%
 quantum_sample_magnetization = np.array(

@@ -27,11 +27,11 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
-from .state_preparation import computational_basis_state
 from .state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
+    computational_basis_state,
 )
 from .trotter import trotterized_time_evolution
 
@@ -51,8 +51,6 @@ __all__ = [
     "cz_entangling_layer",
     "cx_entangling_layer",
     "superposition_vector",
-    # State preparation
-    "computational_basis_state",
     # FQAOA
     "initial_occupations",
     "givens_rotation",
@@ -63,6 +61,7 @@ __all__ = [
     "fqaoa_layers",
     "fqaoa_state",
     # State preparation
+    "computational_basis_state",
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
