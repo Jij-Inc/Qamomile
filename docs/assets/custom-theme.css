@@ -200,7 +200,9 @@ a.tag-chip::before {
 .cell-output img,
 .cell-output svg:not([data-slot="icon"]),
 .notebook-output img,
-.notebook-output svg:not([data-slot="icon"]) {
+.notebook-output svg:not([data-slot="icon"]),
+article figure img,
+article figure svg:not([data-slot="icon"]) {
   max-width: 100%;
   height: auto;
   cursor: zoom-in;

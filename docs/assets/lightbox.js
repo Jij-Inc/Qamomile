@@ -13,12 +13,20 @@
 //
 // mystmd is a React-driven SPA, so we (a) bind on first paint via
 // DOMContentLoaded, and (b) re-bind on subsequent client-side
-// navigations via a MutationObserver on document.body. Each target
-// node is tagged with `data-qamomileLightbox="1"` once bound so
-// repeated MutationObserver fires do not stack handlers. The observer
-// callback itself is coalesced via requestAnimationFrame so a
-// hydration burst that mutates the DOM many times in one frame only
-// runs one bindAll() per frame.
+// navigations via a MutationObserver on `document.documentElement`.
+// We observe `documentElement` (the `<html>` element) rather than
+// `document.body` because mystmd's hydration recovery — triggered
+// when the SSR HTML doesn't match the hydrated tree, including by the
+// very `<script>` tag we inject into `<head>` — replaces
+// `document.body` wholesale, which would orphan an observer attached
+// to the old body. `documentElement` survives that recovery, so the
+// observer keeps firing for the freshly hydrated body subtree.
+//
+// Each target node is tagged with `data-qamomileLightbox="1"` once
+// bound so repeated MutationObserver fires do not stack handlers.
+// The observer callback itself is coalesced via requestAnimationFrame
+// so a hydration burst that mutates the DOM many times in one frame
+// only runs one bindAll() per frame.
 (function () {
   "use strict";
 
