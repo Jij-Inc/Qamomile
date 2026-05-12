@@ -53,10 +53,9 @@
 # | $R_z$ rotations | $0$ | $2^n - 1$ |
 # | `CNOT` | $2^n - 2$ | $2 (2^n - 2)$ |
 #
-# This tutorial walks through the public API surface, demonstrates the
-# three input modes (concrete sequence, compile-time-bound
-# `Vector[Float]`, runtime-parametric angles), and shows where each
-# mode shines.
+# This tutorial walks through the public API surface, demonstrates each
+# entry point with a runnable example, and ends with a comparison table
+# you can use to decide which API to reach for in your own code.
 
 # %%
 import numpy as np
@@ -76,6 +75,12 @@ from qamomile.qiskit import QiskitTranspiler
 transpiler = QiskitTranspiler()
 executor = transpiler.executor()
 
+# Tolerance used by every fidelity / probability check below.  Tight
+# enough to catch any silent regression in the docs build, loose
+# enough to absorb shot noise on sampler comparisons.
+ATOL_STATEVECTOR = 1e-8
+ATOL_SHOT = 0.05  # for 8192 shots, ~5σ on p(1-p)/N for any single bin
+
 
 def fidelity(prepared: np.ndarray, target: np.ndarray) -> float:
     """Phase-invariant fidelity ``|<prepared|target>|^2``."""
@@ -91,6 +96,14 @@ def normalize(amps: list[float] | list[complex]) -> np.ndarray:
     return arr / np.linalg.norm(arr)
 
 
+def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+    """Run *kernel* through Qiskit's statevector simulator and return the data."""
+    qc = transpiler.to_circuit(kernel, bindings=bindings or None)
+    return Statevector.from_instruction(
+        qc.remove_final_measurements(inplace=False)
+    ).data
+
+
 # %% [markdown]
 # ## 1. The simplest call — concrete real amplitudes
 #
@@ -99,8 +112,8 @@ def normalize(amps: list[float] | list[complex]) -> np.ndarray:
 # automatically, and prepares the corresponding state.
 #
 # As a first sanity check we encode the (un-normalised) vector
-# $a = (1, 2, 3, 4)$ on a 2-qubit register and read back the simulator's
-# statevector.
+# $a = (1, 2, 3, 4)$ on a 2-qubit register, read back the simulator's
+# statevector, and assert it matches the normalised target up to phase.
 
 # %%
 amps_real = [1.0, 2.0, 3.0, 4.0]
@@ -113,12 +126,14 @@ def prepare_real() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-qc = transpiler.to_circuit(prepare_real)
-sv = Statevector.from_instruction(qc.remove_final_measurements(inplace=False)).data
+sv = statevector_of(prepare_real)
 expected = normalize(amps_real)
 print(f"prepared      = {np.round(sv, 4)}")
 print(f"target (norm) = {np.round(expected, 4)}")
 print(f"fidelity      = {fidelity(sv, expected):.6f}")
+assert fidelity(sv, expected) == np.float64(1.0) or np.isclose(
+    fidelity(sv, expected), 1.0, atol=ATOL_STATEVECTOR
+), "real amplitude encoding lost fidelity"
 
 # %% [markdown]
 # Negative real amplitudes flow through the magnitude stage naturally —
@@ -137,10 +152,12 @@ def prepare_signed() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-qc = transpiler.to_circuit(prepare_signed)
-sv = Statevector.from_instruction(qc.remove_final_measurements(inplace=False)).data
+sv = statevector_of(prepare_signed)
 expected = normalize(amps_signed)
 print(f"fidelity (signed) = {fidelity(sv, expected):.6f}")
+assert np.isclose(fidelity(sv, expected), 1.0, atol=ATOL_STATEVECTOR), (
+    "signed real encoding lost fidelity"
+)
 
 # %% [markdown]
 # ## 2. Complex amplitudes
@@ -152,7 +169,7 @@ print(f"fidelity (signed) = {fidelity(sv, expected):.6f}")
 # real path.
 #
 # We encode $a = (1, 1+i, 1-i, 2i)$ — a generic complex 2-qubit state —
-# and verify the resulting amplitudes match (up to global phase).
+# and assert the resulting statevector matches (up to global phase).
 
 # %%
 amps_complex = [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j]
@@ -165,79 +182,93 @@ def prepare_complex() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-qc = transpiler.to_circuit(prepare_complex)
-sv = Statevector.from_instruction(qc.remove_final_measurements(inplace=False)).data
+sv = statevector_of(prepare_complex)
 expected = normalize(amps_complex)
 print(f"fidelity (complex) = {fidelity(sv, expected):.6f}")
+assert np.isclose(fidelity(sv, expected), 1.0, atol=ATOL_STATEVECTOR), (
+    "complex encoding lost fidelity"
+)
 
 # %% [markdown]
-# ## 3. Inspecting the gate budget
+# ## 3. Visualisation and resource estimation
 #
-# `MottonenAmplitudeEncoding` exposes a `_resources()` method that
-# returns the per-gate counts predicted by the Gray-walk decomposition.
-# The single-stage path (real input) and the two-stage path (complex
-# input) are reported separately.
+# Once a kernel uses `amplitude_encoding`, the entire IR carries the
+# encoding as a single `MottonenAmplitudeEncoding` composite gate.  Two
+# Qamomile-side inspection APIs work out-of-the-box on it:
+#
+# * `kernel.draw(fold_loops=False)` renders the IR.  We pass
+#   `fold_loops=False` so any `qmc.range` inside the gate's
+#   decomposition is unrolled in the diagram (the default `True`
+#   collapses each loop into a single block).
+# * `kernel.estimate_resources()` walks the IR and returns a
+#   `ResourceEstimate` with qubit count and gate breakdown — including
+#   the elementary RY / RZ / CNOT counts after the composite gate is
+#   resolved.  This is the supported way to check gate cost; it
+#   abstracts over the composite-gate machinery so user code never
+#   needs to look at `_resources().custom_metadata` directly.
 
 # %%
-gate_real = MottonenAmplitudeEncoding(amps_real)
-gate_complex = MottonenAmplitudeEncoding(amps_complex)
+prepare_real.draw(fold_loops=False)
 
-for label, gate in (("real", gate_real), ("complex", gate_complex)):
-    meta = gate._resources().custom_metadata
-    print(
-        f"{label:7s}: RY={meta['num_ry_gates']:>3d}  RZ={meta['num_rz_gates']:>3d}"
-        f"  CNOT={meta['num_cnot_gates']:>3d}  complex_input={meta['complex_input']}"
-    )
+# %%
+prepare_complex.draw(fold_loops=False)
+
+# %%
+est_real = prepare_real.estimate_resources()
+est_complex = prepare_complex.estimate_resources()
+
+print(
+    f"real    : qubits={est_real.qubits}  total={est_real.gates.total}  "
+    f"single={est_real.gates.single_qubit}  two={est_real.gates.two_qubit}  "
+    f"rotations={est_real.gates.rotation_gates}  clifford={est_real.gates.clifford_gates}"
+)
+print(
+    f"complex : qubits={est_complex.qubits}  total={est_complex.gates.total}  "
+    f"single={est_complex.gates.single_qubit}  two={est_complex.gates.two_qubit}  "
+    f"rotations={est_complex.gates.rotation_gates}  clifford={est_complex.gates.clifford_gates}"
+)
+
+# Closed-form reference (n = 2 qubits):
+#   real    Ry: 2^n - 1 = 3,  CNOT: 2^n - 2 = 2,  total = 5
+#   complex Ry: 3,  Rz: 3,  CNOT: 2 * (2^n - 2) = 4,  total = 10
+assert int(est_real.qubits) == 2
+assert int(est_real.gates.total) == 5
+assert int(est_real.gates.rotation_gates) == 3
+assert int(est_real.gates.two_qubit) == 2
+assert int(est_complex.qubits) == 2
+assert int(est_complex.gates.total) == 10
+assert int(est_complex.gates.rotation_gates) == 6
+assert int(est_complex.gates.two_qubit) == 4
 
 # %% [markdown]
 # Both counts grow as $O(2^n)$: amplitude encoding is intrinsically
-# expensive for many qubits. In practice this construction is most
+# expensive for many qubits.  In practice this construction is most
 # useful at the small register sizes one encounters as a building block
-# inside larger algorithms (HHL with 4–8 logical qubits in the
-# input register, QSCI with a sampled subspace, error-correction
-# warm-starts, etc.), not as a stand-alone preparation for hundreds of
-# qubits.
+# inside larger algorithms (HHL with 4–8 logical qubits in the input
+# register, QSCI with a sampled subspace, error-correction warm-starts,
+# etc.), not as a stand-alone preparation for hundreds of qubits.
 
 # %% [markdown]
-# ## 4. Three input modes
+# ## 4. Public API surface — when to reach for which entry point
 #
-# `amplitude_encoding` accepts the amplitudes in three different forms;
-# `amplitude_encoding_from_angles` adds a fourth mode that exposes
-# pre-computed angles so the same compiled circuit can be re-bound at
-# runtime. Picking the right one depends on **when** the values are
-# known and **how** you want to feed them into a kernel.
+# The state-preparation package exposes five public names. The table
+# below summarises which one to use for which job, and the trade-off
+# each makes.
 #
-# | Mode | Input lives in | When values are needed | Re-binding |
+# | API | Use it when | Pros | Cons |
 # |---|---|---|---|
-# | A. Closure | Python (outer scope) | Trace time | Recompile per amplitude |
-# | B. `bindings={"amps": ...}` on `Vector[Float]` | Kernel parameter | Trace time (extracted from binding metadata) | Recompile per amplitude |
-# | C. `amplitude_encoding_from_angles` + `bindings` | Kernel parameter | Trace time | Recompile per angle vector |
-# | D. `amplitude_encoding_from_angles` + `parameters` | Kernel parameter | **Runtime** | Re-bind without recompilation |
+# | `amplitude_encoding(q, amplitudes)` (concrete sequence) | The amplitudes are known where you build the kernel, e.g. as a Python list / numpy array in the surrounding scope. | Simplest call site. IR keeps a single `MottonenAmplitudeEncoding` composite gate, so resource estimation and future native dispatch (e.g. Qiskit `StatePreparation` via a `CompositeGateEmitter`) stay open. | Each new amplitude vector needs a fresh `transpile()` call. |
+# | `amplitude_encoding(q, amps)` + `bindings={"amps": [...]}` | You'd rather expose `amps: Vector[Float]` as a kernel parameter (for documentation, sweeping, or to keep the kernel free of magic numbers), but the values are still resolved at compile time. | Same IR shape and merits as the concrete-sequence form; no need to pre-compute Möttönen angles. The implementation reads the bound concrete data at trace time via `amps.value.get_const_array()`. | Real-only (a `Vector[Float]` cannot carry complex values). `parameters=["amps"]` is rejected by design — see the angles-based runtime path below. |
+# | `amplitude_encoding_from_angles(q, ry_angles, rz_angles=None)` + `bindings={...}` | You have already pre-computed Möttönen angles (e.g. shared across multiple kernels) and want to bind them at compile time. | Compile-time bound, same recompile-per-vector cost as the routes above; works for both real (rz_angles=None) and complex inputs. | Skips the `MottonenAmplitudeEncoding` composite-gate wrapping and emits the elementary `RY` / `RZ` / `CNOT` gates directly into the IR — resource estimation sees the elementary gates rather than the high-level op. |
+# | `amplitude_encoding_from_angles(q, ry_a, rz_a)` + `parameters=[...]` | You need the **same compiled circuit** to be re-bound to many amplitude vectors at run time (hybrid optimisation loops, parameter sweeps). | Compile once, sample many times via `executable.sample(bindings={...})` — the dominant cost is no longer recompilation. The only path that supports runtime-symbolic angles. | The user (your code) must call `compute_mottonen_amplitude_encoding_*_angles(...)` per iteration to translate amplitudes → angles. Same flat-IR caveat as the bindings form. |
+# | `MottonenAmplitudeEncoding(amplitudes)` (class) | You want the composite gate as a first-class object — typically for resource estimation outside a kernel, or to plug into a custom decomposition strategy. | Direct access to `gate.num_target_qubits` and the IR-side composite-gate object. | Most user code is better served by `amplitude_encoding`, which wraps the construction. |
+# | `compute_mottonen_amplitude_encoding_ry_angles(amps)` / `compute_mottonen_amplitude_encoding_rz_angles(amps)` | You need the Gray-walk Ry / Rz angles classically — to feed the runtime-parametric path above, to cache across kernels, or to reason about the angle values directly. | Fast pure-Python / NumPy preprocessing; keeps the angle computation outside the kernel build. Real inputs always return all-zeros from the Rz helper. | Requires understanding that the returned arrays already include the bit-reverse + $M^{(k)}$ Gray-walk transform — they are not the raw per-control-state angles. |
 #
-# Modes A–C are different ways of expressing "the amplitudes are known
-# at compile time"; D is the only mode that lets you reuse a compiled
-# circuit across different amplitudes inside an inner loop.
-#
-# We illustrate each mode below.
+# The next two cells exercise the two non-trivial bindings/parameters
+# entry points so you can see them in action.
 
 # %% [markdown]
-# ### Mode A — Closure (the calls we already saw)
-#
-# This is what every example above used: the amplitudes live as a
-# Python list in the outer scope and the kernel closes over them.
-# Best when the kernel and the amplitudes live near each other in code.
-
-# %% [markdown]
-# ### Mode B — `Vector[Float]` parameter, bound at compile time
-#
-# When you would rather expose the amplitudes as a kernel parameter
-# (for documentation, for sweeping over different vectors, or to keep
-# the kernel definition free of magic numbers), declare the parameter
-# as `Vector[Float]` and pass the values via `bindings={...}`. The
-# implementation reads the bound concrete data at trace time by
-# calling `amps.value.get_const_array()` on the underlying
-# `ArrayValue`, so the angle computation still runs classically and
-# the IR carries a single `MottonenAmplitudeEncoding` composite gate.
+# ### `amplitude_encoding` with a bound `Vector[Float]` parameter
 
 
 # %%
@@ -248,15 +279,22 @@ def prepare_via_binding(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-qc = transpiler.to_circuit(prepare_via_binding, bindings={"amps": [1.0, 2.0, 3.0, 4.0]})
-sv = Statevector.from_instruction(qc.remove_final_measurements(inplace=False)).data
-print(f"fidelity (mode B) = {fidelity(sv, normalize([1.0, 2.0, 3.0, 4.0])):.6f}")
+prepare_via_binding.draw(fold_loops=False, amps=[1.0, 2.0, 3.0, 4.0])
+
+# %%
+sv = statevector_of(prepare_via_binding, amps=[1.0, 2.0, 3.0, 4.0])
+print(
+    f"fidelity (bound Vector[Float]) = {fidelity(sv, normalize([1.0, 2.0, 3.0, 4.0])):.6f}"
+)
+assert np.isclose(
+    fidelity(sv, normalize([1.0, 2.0, 3.0, 4.0])), 1.0, atol=ATOL_STATEVECTOR
+)
 
 # %% [markdown]
-# Trying to leave the parameter symbolic with `parameters=["amps"]` is
-# rejected with a directing error — the angle computation
+# Trying to leave that parameter symbolic with `parameters=["amps"]`
+# is rejected with a directing error — the angle computation
 # (`atan2(|a_1|, |a_0|)` and friends) needs concrete numbers and
-# therefore fundamentally cannot be deferred to runtime. The error
+# therefore fundamentally cannot be deferred to runtime.  The error
 # points at `amplitude_encoding_from_angles` for the runtime case.
 
 # %%
@@ -264,28 +302,23 @@ try:
     transpiler.transpile(prepare_via_binding, parameters=["amps"])
 except ValueError as exc:
     print(f"ValueError: {exc}")
+    raised = True
+else:
+    raised = False
+assert raised, "expected ValueError when amps is a runtime parameter"
 
 # %% [markdown]
-# ### Mode C — Pre-computed angles, bound at compile time
+# ### Runtime-parametric angles — compile once, re-bind many times
 #
-# The classical part of Möttönen's construction is two helpers:
-# `compute_mottonen_amplitude_encoding_ry_angles(amps)` and
-# `compute_mottonen_amplitude_encoding_rz_angles(amps)`. They return
-# Gray-walk-ordered $R_y$ and $R_z$ angles of length $2^n - 1$ each
-# (the $R_z$ array is identically zero for real input).
-#
-# `amplitude_encoding_from_angles` is the companion function that
-# accepts those angles instead of amplitudes. Used with
-# `bindings={...}`, it behaves much like Mode B — but **without**
-# wrapping in the `MottonenAmplitudeEncoding` composite gate. The IR
-# carries the elementary `RY` / `RZ` / `CNOT` gates directly, which is
-# what unlocks the runtime mode below.
+# `amplitude_encoding_from_angles` is the only path that lets us reuse
+# a single compiled circuit across different amplitude vectors at run
+# time.  Pre-compute the angles classically with the
+# `compute_mottonen_amplitude_encoding_*_angles` helpers, transpile
+# once with `parameters=[...]`, then sample with new bindings each
+# iteration.
+
 
 # %%
-ry_angles = compute_mottonen_amplitude_encoding_ry_angles(amps_complex).tolist()
-rz_angles = compute_mottonen_amplitude_encoding_rz_angles(amps_complex).tolist()
-
-
 @qmc.qkernel
 def prepare_from_angles(
     ry_a: qmc.Vector[qmc.Float], rz_a: qmc.Vector[qmc.Float]
@@ -295,28 +328,19 @@ def prepare_from_angles(
     return qmc.measure(q)
 
 
-qc = transpiler.to_circuit(
-    prepare_from_angles, bindings={"ry_a": ry_angles, "rz_a": rz_angles}
+prepare_from_angles.draw(
+    fold_loops=False,
+    ry_a=compute_mottonen_amplitude_encoding_ry_angles(amps_complex).tolist(),
+    rz_a=compute_mottonen_amplitude_encoding_rz_angles(amps_complex).tolist(),
 )
-sv = Statevector.from_instruction(qc.remove_final_measurements(inplace=False)).data
-print(f"fidelity (mode C) = {fidelity(sv, normalize(amps_complex)):.6f}")
-
-# %% [markdown]
-# ### Mode D — Runtime-parametric angles
-#
-# The reason `amplitude_encoding_from_angles` exists at all is to
-# enable this mode. By transpiling with `parameters=[...]` we keep the
-# angle vectors symbolic in the emitted backend circuit, so the **same
-# compiled circuit** can be re-bound to many different amplitude
-# vectors via `executable.sample(bindings={...})`. This is the right
-# pattern for hybrid loops (e.g. classical optimisation over the
-# amplitudes), where recompilation per iteration would otherwise
-# dominate the wall-clock budget.
 
 # %%
 exe = transpiler.transpile(prepare_from_angles, parameters=["ry_a", "rz_a"])
 n_runtime_params = len(exe.compiled_quantum[0].circuit.parameters)
 print(f"runtime parameters in compiled circuit: {n_runtime_params}")
+assert n_runtime_params == 2 * (2**2 - 1), (
+    "expected 2 * (2^n - 1) parametric rotations for n=2 complex"
+)
 
 shots = 8192
 for trial_amps in (
@@ -336,23 +360,24 @@ for trial_amps in (
         idx = sum(int(b) << i for i, b in enumerate(bits))
         observed[idx] = c / shots
     expected_probs = np.abs(normalize(trial_amps)) ** 2
-    print(
-        f"amps={str(trial_amps):<48s}  "
-        f"max|p_obs - p_exp| = {np.max(np.abs(observed - expected_probs)):.4f}"
+    max_dev = float(np.max(np.abs(observed - expected_probs)))
+    print(f"amps={str(trial_amps):<48s}  max|p_obs - p_exp| = {max_dev:.4f}")
+    assert max_dev < ATOL_SHOT, (
+        f"runtime-parametric sampling diverged for amps={trial_amps}"
     )
 
 # %% [markdown]
 # All three iterations sample from the same compiled circuit; only the
 # runtime bindings change. The maximum per-bin deviation stays within
-# a few standard deviations of the multinomial shot noise.
+# shot-noise tolerance.
 
 # %% [markdown]
-# ## 5. Estimating an observable on the encoded state
+# ## 5. Plugging into a larger kernel — observable estimation
 #
 # `amplitude_encoding` is a building block — most users plug it into a
-# larger kernel. The simplest such use case is computing
+# larger kernel.  The simplest such use case is computing
 # $\langle \psi | H | \psi \rangle$ for some Hamiltonian $H$ on the
-# prepared state. The kernel becomes a single `expval`, and the
+# prepared state.  The kernel becomes a single `expval`, and the
 # observable can be passed in as a runtime binding.
 #
 # As a small analytic check, the encoded state for $a = (1, 2, 3, 4)$
@@ -380,25 +405,6 @@ H = qm_o.Z(0) + 0.0 * qm_o.Z(1)  # pad to 2-qubit width
 exe_expval = transpiler.transpile(expval_kernel, bindings={"H": H})
 result = exe_expval.run(executor).result()
 print(f"<Z_0> = {float(result):+.6f}   (analytic: {-1 / 3:+.6f})")
-
-# %% [markdown]
-# ## When to use which
-#
-# - **Concrete amplitudes known in Python** → call `amplitude_encoding`
-#   directly with the list/array. Mode A.
-# - **Amplitudes need to be a kernel parameter for clarity** → declare
-#   it as `Vector[Float]` and bind via `bindings={...}`. Mode B.
-# - **Hybrid optimisation loop, recompilation cost matters** → call
-#   `amplitude_encoding_from_angles` with `parameters=[...]` and
-#   pre-compute the angles inside the loop. Mode D.
-# - **Resource estimation** → use `MottonenAmplitudeEncoding._resources()`
-#   to get the closed-form gate counts before transpilation.
-#
-# The exponential gate growth ($O(2^n)$ rotations and CNOTs) is the
-# fundamental cost of Möttönen's construction. For larger registers,
-# specialised constructions (e.g. low-rank approximations of the input,
-# or backend-native primitives such as Qiskit's `StatePreparation`) are
-# usually preferred — Qamomile's CompositeGate machinery leaves room to
-# dispatch to such native paths in the future via a
-# `CompositeGateEmitter`, but the elementary decomposition above is
-# always available as the portable fallback.
+assert np.isclose(float(result), -1.0 / 3.0, atol=1e-8), (
+    "<Z_0> estimator deviated from analytic value"
+)
