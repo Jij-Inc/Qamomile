@@ -185,7 +185,7 @@ for label, gate in (("real", gate_real), ("complex", gate_complex)):
 # %% [markdown]
 # ### モードB — `Vector[Float]`パラメータ、コンパイル時にバインド
 #
-# 振幅をカーネルパラメータとして公開したい場合（ドキュメント目的、異なるベクトルを掃引する目的、あるいはカーネル定義をマジックナンバーから解放するため）は、パラメータを`Vector[Float]`として宣言し、`bindings={...}`で値を渡します。実装はtrace時にハンドルの`array_runtime_metadata`からバインド済みの具体データを読み出すため、角度計算は依然として古典的に走り、IRには単一の`MottonenAmplitudeEncoding`コンポジットゲートが残ります。
+# 振幅をカーネルパラメータとして公開したい場合（ドキュメント目的、異なるベクトルを掃引する目的、あるいはカーネル定義をマジックナンバーから解放するため）は、パラメータを`Vector[Float]`として宣言し、`bindings={...}`で値を渡します。実装はtrace時に基底の`ArrayValue`に対して`amps.value.get_const_array()`を呼び出してバインド済みの具体データを取り出すため、角度計算は依然として古典的に走り、IRには単一の`MottonenAmplitudeEncoding`コンポジットゲートが残ります。
 
 
 # %%

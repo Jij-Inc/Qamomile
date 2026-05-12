@@ -119,12 +119,13 @@ def _state_fidelity(got: np.ndarray, expected: np.ndarray) -> float:
 
 
 def _pad_observable(num_qubits: int, term: qm_o.Hamiltonian) -> qm_o.Hamiltonian:
-    """Pad a single-qubit Pauli to *num_qubits* width with a zero-coeff identity.
+    """Pad a single-qubit Pauli to *num_qubits* width with a zero-weighted Z term.
 
-    Several backend emit paths require the ``Hamiltonian.num_qubits`` to
-    match the register width; tacking on a zero-weighted term on the
-    highest-index qubit is the standard trick used elsewhere in the test
-    suite.
+    Several backend emit paths require the ``Hamiltonian.num_qubits``
+    to match the register width.  Adding ``0.0 * qm_o.Z(num_qubits - 1)``
+    extends the declared qubit count to ``num_qubits`` without affecting
+    any expectation value (the weight is exactly zero).  This is the
+    standard trick used elsewhere in the test suite.
 
     Args:
         num_qubits (int): Target register width.

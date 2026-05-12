@@ -234,10 +234,10 @@ for label, gate in (("real", gate_real), ("complex", gate_complex)):
 # (for documentation, for sweeping over different vectors, or to keep
 # the kernel definition free of magic numbers), declare the parameter
 # as `Vector[Float]` and pass the values via `bindings={...}`. The
-# implementation reads the bound concrete data out of the handle's
-# `array_runtime_metadata` at trace time, so the angle computation
-# still runs classically and the IR carries a single
-# `MottonenAmplitudeEncoding` composite gate.
+# implementation reads the bound concrete data at trace time by
+# calling `amps.value.get_const_array()` on the underlying
+# `ArrayValue`, so the angle computation still runs classically and
+# the IR carries a single `MottonenAmplitudeEncoding` composite gate.
 
 
 # %%
