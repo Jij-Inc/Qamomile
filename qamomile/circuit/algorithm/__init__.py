@@ -1,7 +1,6 @@
 """Algorithm building blocks for quantum circuits."""
 
 from .basic import (
-    computational_basis_state,
     cx_entangling_layer,
     cz_entangling_layer,
     rx_layer,
@@ -28,6 +27,7 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .state_preparation import computational_basis_state
 from .trotter import trotterized_time_evolution
 
 __all__ = [
@@ -46,6 +46,7 @@ __all__ = [
     "cz_entangling_layer",
     "cx_entangling_layer",
     "superposition_vector",
+    # State preparation
     "computational_basis_state",
     # FQAOA
     "initial_occupations",

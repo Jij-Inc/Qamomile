@@ -19,7 +19,7 @@
 #
 # # Quantum-enhanced Markov chain Monte Carlo
 #
-# This tutorial demonstrates how to implement Quantum-enhanced Markov chain Monte Carlo (QeMCMC) {https://doi.org/10.1038/s41586-023-06095-4} using Qamomile.
+# This tutorial demonstrates how to implement Quantum-enhanced Markov chain Monte Carlo (QeMCMC) [](https://doi.org/10.1038/s41586-023-06095-4) using Qamomile.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -38,7 +38,7 @@
 # A classic example is the **Boltzmann distribution** from statistical
 # mechanics:
 # $$
-# \pi(\bm{x}) = \frac{1}{Z} \exp\bigl(-\beta E(\bm{x})\bigr), \quad Z = \sum_{\bm{x}} \exp\bigl(-\beta E(\bm{x})\bigr).
+# \mu(\bm{x}) = \frac{1}{Z} \exp\bigl(-\beta E(\bm{x})\bigr), \quad Z = \sum_{\bm{x}} \exp\bigl(-\beta E(\bm{x})\bigr).
 # $$
 # Here, $E(\bm{x})$ is the energy of state $\bm{x}$, $\beta = 1/T$ is the
 # inverse temperature, and $Z$ is the normalization constant known as the
@@ -67,15 +67,19 @@
 # values of the inverse temperature $\beta$.
 
 # %%
-import numpy as np
+from typing import Any, Callable
+
 import matplotlib.pyplot as plt
+import numpy as np
 
 n_spins = 6
 J = 1.0
 
-# Energy of the 1D ferromagnetic Ising chain (no external field)
-def ising_energy(state):
+
+def ising_energy(state: np.ndarray) -> float:
+    """Return the energy of a 1D ferromagnetic Ising chain (no external field) for the spin configuration ``state``."""
     return -J * np.sum(state[:-1] * state[1:])
+
 
 # Enumerate all 2^n states
 all_states = np.array(
@@ -105,9 +109,9 @@ plt.show()
 #
 # Markov chain Monte Carlo (MCMC) is a general-purpose method for sampling
 # from probability distributions.
-# It achieves sampling from a target distribution by exploiting a stochastic
+# It achieves sampling from a target distribution $\pi(\bm{x})$ by exploiting a stochastic
 # process called a Markov chain.
-# Here we introduce the Metropolis-Hastings (MH) algorithm {https://doi.org/10.1093/biomet/57.1.97} , a common
+# Here we introduce the Metropolis-Hastings (MH) algorithm [](https://doi.org/10.1093/biomet/57.1.97) , a common
 # implementation of MCMC.
 #
 # The MH algorithm generates a new transition $\bm{x} \rightarrow \bm{x}'$
@@ -133,39 +137,57 @@ plt.show()
 # %%
 rng = np.random.default_rng(seed=0)
 
-def local_update(state):
+
+def local_update(state: np.ndarray) -> np.ndarray:
+    """Propose a new spin configuration by flipping a single randomly chosen spin in ``state``."""
     n = len(state)
     flip_index = rng.integers(0, n)
     new_state = state.copy()
     new_state[flip_index] = int(-1 * state[flip_index])
     return new_state
 
+
 # %% [markdown]
 # Next, we implement the step that stochastically processes the proposed
 # transition according to the acceptance probability.
-# With the proposal above, the acceptance ratio simplifies for the
-# Boltzmann target as follows.
+# Since this proposal satisfies $Q(\bm{x} \mid \bm{y}) = Q(\bm{y} \mid \bm{x})$,
+# the ratio of $Q$ cancels out in the acceptance probability.
+# Therefore, when the target distribution is the Boltzmann distribution,
+# the acceptance probability takes the following simple form
+# $$
+# A(\bm{y} | \bm{x}) = \min \left(1, \frac{\mu(\bm{y})}{\mu(\bm{x})}\right) = \min \left(1, \exp(-\beta (E(\bm{y}) - E(\bm{x})))\right).
+# $$
+
 
 # %%
-def metropolis_hastings(state, new_state, energy_func, beta):
+def metropolis_hastings(
+    state: np.ndarray,
+    new_state: np.ndarray,
+    energy_func: Callable[[np.ndarray], float],
+    beta: float,
+) -> np.ndarray:
+    """Accept or reject ``new_state`` against ``state`` under the Metropolis-Hastings rule for the Boltzmann distribution at inverse temperature ``beta``."""
 
     delta_energy = energy_func(new_state) - energy_func(state)
 
-    if delta_energy < 0 or rng.random() < np.exp(-beta * delta_energy):
+    if delta_energy < 0 or rng.random() < np.exp(
+        -beta * delta_energy
+    ):  # delta_energy < 0 means the new state has lower energy and is always accepted.
         return new_state
     else:
         return state
+
 
 # %% [markdown]
 # Now we have a working MCMC implementation.
 # Let us run it to draw samples.
 
 # %%
-T = 10000 # Number of MCMC steps
-beta = 1.0 # Inverse temperature
+T = 10000  # Number of MCMC steps
+beta = 1.0  # Inverse temperature
 
 sample = np.zeros((T, n_spins))
-state = np.ones(n_spins) # Initial state
+state = np.ones(n_spins)  # Initial state
 
 for t in range(T):
     new_state = local_update(state)
@@ -176,7 +198,7 @@ for t in range(T):
 # Let us confirm that the sampled sequence follows the Boltzmann
 # distribution.
 # Using the samples, we estimate a physical quantity associated with the
-# Boltzmann distribution.
+# Boltzmann distribution $\mu(\bm{x})$.
 # Here we estimate the spin's average magnetization:
 # $$
 # \langle \mu \rangle = \sum_{\bm{x}} \mu(\bm{x}) m(\bm{x})
@@ -191,12 +213,17 @@ for t in range(T):
 # Let us plot the estimator $\bar{\mu_t}$ obtained from the first $t$ MCMC
 # samples.
 
+
 # %%
-def average_magnetization(sample):
+def average_magnetization(sample: np.ndarray) -> float:
+    """Return the average magnetization estimated from MCMC samples of shape ``(T, n_spins)``."""
     magnetization = np.mean(sample, axis=1)
     return np.mean(magnetization)
 
-sample_magnetization = np.array([average_magnetization(sample[:i]) for i in range(1, T + 1)])
+
+sample_magnetization = np.array(
+    [average_magnetization(sample[:i]) for i in range(1, T + 1)]
+)
 
 # Compute the theoretical average magnetization from the Boltzmann distribution at the current inverse temperature beta
 weights = np.exp(-beta * energies)
@@ -223,7 +250,7 @@ plt.show()
 
 # %% [markdown]
 # The Quantum-enhanced MCMC algorithm is an MCMC that uses sampling from a
-# quantum circuit as its proposal distribution {https://doi.org/10.1038/s41586-023-06095-4}.
+# quantum circuit as its proposal distribution [](https://doi.org/10.1038/s41586-023-06095-4).
 # Starting from the current state $\bm{x}$, we apply a quantum circuit $U$
 # and measure in the computational basis to obtain a new state $\bm{y}$.
 # The resulting proposal distribution $Q(\bm{y}|\bm{x})$ is:
@@ -231,14 +258,21 @@ plt.show()
 # Q(\bm{y}|\bm{x}) = \| \langle \bm{y} | U | \bm{x} \rangle \|^2
 # $$
 # Computing this probability directly is difficult, but when the quantum
-# circuit satisfies $U = U^\top$, there is no need to compute $Q$.
-# For example, to sample from the Boltzmann distribution of the Ising
-# model, we can use a QAOA-style quantum circuit implementing Trotterized
-# time evolution under a mixer Hamiltonian $H_M$ and an Ising Hamiltonian
-# $H_C$:
+# circuit satisfies $U = U^\top$, the proposal distribution satisfies $Q(\bm{x} \mid \bm{y}) = Q(\bm{y} \mid \bm{x})$,
+# so the $Q$ terms cancel out in the acceptance probability, eliminating the need to explicitly compute $Q$.
+# For example, to sample from the Boltzmann distribution of the Ising model,
+# we can use a trotterized time evolution under a time-independent Hamiltonian:
 # $$
-# U(\gamma, t) = \exp(-i H t) \quad \quad H = (1-\gamma) H_M + \gamma H_C.
+# U(\gamma, t) = \exp(-i H t), \quad \quad
+# H = (1-\gamma) \alpha H_M + \gamma H_C.
 # $$
+# Here, $H_M$ is called the mixer Hamiltonian and generates quantum
+# transitions between states, while $H_C$ is the Ising Hamiltonian.
+# $\gamma \in [0,1]$ is a parameter that controls the relative weights
+# of the two terms.
+# $\alpha$ is a normalization factor used to ensure that the eigenvalues
+# of the mixer and cost Hamiltonians are on the same scale.
+# $(\gamma, t)$ are tunable parameters that determine the efficiency of the MCMC process.
 
 # %% [markdown]
 # ---
@@ -265,14 +299,15 @@ for i in range(n_spins - 1):
 # ### 2. Building the Quantum Circuit
 #
 # Next, let us implement the quantum circuit.
-# The circuit uses time evolution simulation based on Trotter decomposition.
-# We use `qamomile.circuit.algorithm.trotter` to build the circuit for the
-# Hamiltonians we just prepared.
+# First, we prepare the quantum state $\ket{\bm{x}}$ using `computational_basis_state` in order to encode the current state $\bm{x}$ as the input state.
+# The proposal transition uses time evolution simulation based on Trotter decomposition.
+# We use `trotterized_time_evolution` to build the circuit for the Hamiltonians we just prepared.
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.basic import computational_basis_state
+from qamomile.circuit.algorithm.state_preparation import computational_basis_state
 from qamomile.circuit.algorithm.trotter import trotterized_time_evolution
+
 
 @qmc.qkernel
 def qemcmc_circuit(
@@ -283,15 +318,17 @@ def qemcmc_circuit(
     time: qmc.Float,
     step: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
+    """QeMCMC proposal circuit: prepare ``|input_bits>`` on ``n`` qubits, evolve under ``sum_k Hs[k]`` using a Suzuki-Trotter splitting of given ``order`` and ``step`` steps over total time ``time``, then measure all qubits."""
     q = qmc.qubit_array(n, name="q")
 
     # step 1: prepare the initial state
-    q = computational_basis_state(n, q, input_bits)
+    q = computational_basis_state(q, input_bits)
 
     # step 2: apply the trotterized evolution under the mixer and cost Hamiltonians
     q = trotterized_time_evolution(q, Hs, order, time, step)
 
     return qmc.measure(q)
+
 
 # %% [markdown]
 # ### 3. Transpiling
@@ -299,7 +336,7 @@ def qemcmc_circuit(
 # We transpile the kernel.
 # Running the quantum circuit requires fixed values for the Hamiltonian
 # mixing coefficient $\gamma$ and the simulation time $t$.
-# Following {https://doi.org/10.1103/PhysRevA.111.042615} , we set $\gamma=0.45$, $t=12$, and
+# Following [](https://doi.org/10.1103/PhysRevA.111.042615) , we set $\gamma=0.45$, $t=12$, and
 # $\Delta t = 0.8$.
 # At transpile time we bind `n`, `order`, `time`, and `step`, while keeping `input_bits`
 # as a runtime parameter.
@@ -307,9 +344,9 @@ def qemcmc_circuit(
 from qamomile.qiskit import QiskitTranspiler
 
 gamma = 0.45  # Mixing coefficient
-time = 12.0   # Total evolution time
-step = 15    # Number of Trotter steps
-order = 2    # Suzuki-Trotter approximation order
+time = 12.0  # Total evolution time
+step = 15  # Number of Trotter steps
+order = 2  # Suzuki-Trotter approximation order
 
 Hs = [
     (1 - gamma) * mixer_hamiltonian,
@@ -339,6 +376,7 @@ executable = transpiler.transpile(
 # $\bm{x} \in \{0,1\}^n$, we also prepare a conversion between bit strings
 # and spin variables $\bm{s} \in \{1, -1\}^n$.
 
+
 # %%
 def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarray:
     """Convert between spin variables {-1, +1} and binary variables {0, 1}.
@@ -353,14 +391,20 @@ def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarra
 
     if input_kind == "spin":
         if not np.all(np.isin(values, [-1, 1])):
-            raise ValueError(f"input_kind='spin' requires elements in {{-1, 1}}, got: {values.tolist()}")
+            raise ValueError(
+                f"input_kind='spin' requires elements in {{-1, 1}}, got: {values.tolist()}"
+            )
         return (1 - x) // 2
     if input_kind == "binary":
         if not np.all(np.isin(values, [0, 1])):
-            raise ValueError(f"input_kind='binary' requires elements in {{0, 1}}, got: {values.tolist()}")
+            raise ValueError(
+                f"input_kind='binary' requires elements in {{0, 1}}, got: {values.tolist()}"
+            )
         return 1 - 2 * x
     if input_kind != "auto":
-        raise ValueError(f"input_kind must be 'spin', 'binary', or 'auto', got: {input_kind!r}")
+        raise ValueError(
+            f"input_kind must be 'spin', 'binary', or 'auto', got: {input_kind!r}"
+        )
 
     if np.any(values == -1) and np.all(np.isin(values, [-1, 1])):
         return (1 - x) // 2
@@ -376,7 +420,7 @@ def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarra
     )
 
 
-def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
+def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.ndarray:
     """Obtain a proposed state from the quantum circuit using the current spin state as input."""
     binary_state = spin_binary_convert(state, input_kind="spin").tolist()
     result = executable.sample(
@@ -384,8 +428,9 @@ def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
         shots=1,
         bindings={"input_bits": binary_state},
     ).result()
-    (proposed_bits, _count), = result.results
+    ((proposed_bits, _count),) = result.results
     return spin_binary_convert(np.array(proposed_bits, dtype=int), input_kind="binary")
+
 
 # %% [markdown]
 # ---
@@ -410,8 +455,15 @@ for t in range(T_quantum):
     state = metropolis_hastings(state, proposed_state, ising_energy, beta)
     quantum_sample[t] = state
 
+
+# %% [markdown]
+# We compute the estimator of the average magnetization
+# and compare it with the result obtained from the MCMC method using the local update introduced earlier.
+
 # %%
-quantum_sample_magnetization = np.array([average_magnetization(quantum_sample[:i]) for i in range(1, T_quantum + 1)])
+quantum_sample_magnetization = np.array(
+    [average_magnetization(quantum_sample[:i]) for i in range(1, T_quantum + 1)]
+)
 
 plt.plot(sample_magnetization[:T_quantum], label="MCMC estimate")
 plt.plot(quantum_sample_magnetization, label="QeMCMC estimate")
