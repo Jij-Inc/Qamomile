@@ -13,6 +13,10 @@
 # ---
 
 # %% [markdown]
+# ---
+# tags: [algorithm, sample-based]
+# ---
+#
 # # Quantum-enhanced Markov chain Monte Carlo
 #
 # このチュートリアルでは、Qamomileを使ってQuantum-enhanced Markov chain Monte Carlo (QeMCMC) {https://doi.org/10.1038/s41586-023-06095-4} を実装する例を示します。
