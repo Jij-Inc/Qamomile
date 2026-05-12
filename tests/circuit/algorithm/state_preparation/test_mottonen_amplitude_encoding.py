@@ -11,10 +11,12 @@ from qamomile.circuit.algorithm.state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
+)
+from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
+from qamomile.linalg import (
     compute_mottonen_amplitude_encoding_ry_angles,
     compute_mottonen_amplitude_encoding_rz_angles,
 )
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
 from tests.circuit.conftest import run_statevector
 
 # Catalogue of REAL amplitudes shared by every backend test.  Each entry is
@@ -372,6 +374,105 @@ class TestComputeAngles:
         for n in _QUBIT_COUNTS:
             ry_angles = compute_mottonen_amplitude_encoding_ry_angles(np.ones(2**n))
             assert ry_angles.shape == (2**n - 1,)
+
+
+# ---------------------------------------------------------------------------
+# Lazy construction (no eager angle computation)
+# ---------------------------------------------------------------------------
+
+
+class TestLazyConstruction:
+    """``MottonenAmplitudeEncoding`` defers angle computation.
+
+    The published Möttönen construction is intrinsically ``O(2^n)``
+    (normalisation) and ``O(n * 2^n)`` (angle computation).
+    ``__init__`` runs the cheap normalisation pass eagerly so input
+    errors surface at construction time, but the dominant
+    angle-precomputation cost is deferred:
+
+    * ``__init__`` populates ``_normalized``, ``_is_complex``,
+      ``_num_qubits`` (``O(2^n)``).  Angle caches stay empty.
+    * The first ``_resources()`` call reads ``_is_complex`` directly
+      and does NOT trigger angle precomputation.
+    * The first ``_decompose()`` call triggers the
+      ``O(n * 2^n)`` angle pass.  Subsequent calls hit the cache.
+    """
+
+    def test_init_does_not_compute_angles(self) -> None:
+        """``__init__`` normalises eagerly but leaves angle caches empty."""
+        gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
+        assert gate.num_target_qubits == 2
+        assert gate._is_complex is False
+        # Angles are not yet computed.
+        assert gate._ry_angles_per_level_cache is None
+        assert gate._rz_angles_per_level_cache is None
+
+    def test_resources_does_not_compute_angles(self) -> None:
+        """``_resources()`` reads ``_is_complex`` directly; no angle work."""
+        gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
+        _ = gate._resources()
+        assert gate._ry_angles_per_level_cache is None
+        assert gate._rz_angles_per_level_cache is None
+
+    def test_decompose_triggers_angle_computation(self) -> None:
+        """``_decompose()`` populates the angle caches."""
+        gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            # invoking the gate inside a kernel call goes through _decompose
+            q[0], q[1] = gate(q[0], q[1])
+            return qmc.measure(q)
+
+        kernel.build()
+        assert gate._ry_angles_per_level_cache is not None
+        # Real input → no Rz cache.
+        assert gate._rz_angles_per_level_cache is None
+
+    def test_kernel_build_triggers_eager_decomposition_known_limitation(
+        self,
+    ) -> None:
+        """``kernel.build()`` ends up triggering ``_decompose()`` (framework limitation).
+
+        Documented limitation: ``CompositeGate.__call__`` eagerly runs
+        ``_build_decomposition_block`` whenever the gate is invoked
+        inside a kernel body, in order to populate the
+        ``implementation_block`` field on the resulting
+        ``CompositeGateOperation``.  As a consequence, even though
+        ``MottonenAmplitudeEncoding._decompose()`` is lazy on the gate
+        object itself, going through ``amplitude_encoding(q, amps)``
+        inside a ``@qkernel`` will still compute the angles at
+        kernel-build time — the lazy contract is partially defeated by
+        the surrounding framework.
+
+        This test pins the current behaviour so that, if a future
+        refactor of the ``CompositeGate`` framework defers
+        ``_build_decomposition_block`` until emit time, this assertion
+        fails loudly and the lazy contract can be tightened.
+        """
+        from qamomile.circuit.ir.operation.composite_gate import (
+            CompositeGateOperation,
+        )
+
+        amps = [float(i + 1) for i in range(2**4)]
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q = amplitude_encoding(q, amps)
+            return qmc.measure(q)
+
+        block = kernel.build()
+        composite_ops = [
+            op for op in block.operations if isinstance(op, CompositeGateOperation)
+        ]
+        assert len(composite_ops) == 1
+        wrapped_gate = composite_ops[0].composite_gate_instance
+        assert isinstance(wrapped_gate, MottonenAmplitudeEncoding)
+        # Today: angles ARE populated by kernel.build() because
+        # CompositeGate.__call__ eagerly builds the decomposition block.
+        assert wrapped_gate._ry_angles_per_level_cache is not None
 
 
 # ---------------------------------------------------------------------------

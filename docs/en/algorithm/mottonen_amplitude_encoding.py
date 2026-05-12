@@ -66,6 +66,8 @@ import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
+)
+from qamomile.linalg import (
     compute_mottonen_amplitude_encoding_ry_angles,
     compute_mottonen_amplitude_encoding_rz_angles,
 )

@@ -13,53 +13,75 @@ quantum states using uniformly controlled rotations"
 stage and the RZ "phase restoration" stage are supported, so general
 complex amplitudes work end-to-end.
 
+This module hosts only the **gate-emission side** of the algorithm:
+the ``MottonenAmplitudeEncoding`` ``CompositeGate``, the function
+wrappers ``amplitude_encoding`` / ``amplitude_encoding_from_angles``,
+and the Gray-walk emitter ``_emit_mottonen_gates``.  The classical
+angle precomputation lives in :mod:`qamomile.linalg.mottonen` so that
+hybrid loops can call ``compute_mottonen_amplitude_encoding_*_angles``
+outside any kernel and feed the result back through
+``amplitude_encoding_from_angles`` with ``parameters=[...]``.
+
 Pipeline
 --------
 
-1. Validate and normalise the input (length must be a power of two).
+1. Validate and normalise the input — see
+   :func:`qamomile.linalg.mottonen.validate_and_normalize_amplitudes`
+   (length must be a power of two, all-zero rejected).
 2. Determine whether the input is genuinely complex (has a non-zero
-   imaginary part).  Real inputs (including complex with zero imag) keep
-   the original signed-RY path — negative real amplitudes flow through
-   the sign of ``arctan2(a_1, a_0)`` naturally, with no RZ overhead.
-   Complex inputs use the iterative disentangling construction described
-   below.
-3. For real inputs, recursively compute the per-level RY rotation angles
-   by splitting each chunk into upper / lower halves and using
-   ``arctan2`` of the two sub-block norms (or signed ``arctan2`` at the
-   leaf).
+   imaginary part).  Real inputs (including complex with zero imag)
+   keep the original signed-RY path — negative real amplitudes flow
+   through the sign of ``arctan2(a_1, a_0)`` naturally, with no RZ
+   overhead.  Complex inputs use the iterative disentangling
+   construction.
+3. For real inputs, compute the per-level RY rotation angles by
+   splitting each chunk into upper / lower halves and using
+   ``arctan2`` of the two sub-block norms (or signed ``arctan2`` at
+   the leaf).  See
+   :func:`qamomile.linalg.mottonen.compute_all_ry_angles_per_level`.
 4. For complex inputs, iteratively disentangle the target amplitude
-   vector qubit-by-qubit from LSB to MSB.  Each disentangling step
-   pairs adjacent complex amplitudes and reads off
-   ``ry_angle = 2 * arctan2(|a_1|, |a_0|)`` (magnitude split) and
-   ``rz_angle = arg(a_1 / a_0)`` (phase difference, taken in
-   ``(-π, π]``); the pair is then reduced to a single complex amplitude
-   ``sqrt(|a_0|^2 + |a_1|^2) * exp(i * avg_phase)`` that feeds the
-   next step, where ``avg_phase = arg(a_0) + rz_angle / 2`` when
-   ``a_0 != 0`` (using ``np.angle`` on the principal branch); the
-   one-side-zero cases use the non-zero side's argument and set
-   ``rz_angle = 0``.
+   vector qubit-by-qubit from LSB to MSB.  See
+   :func:`qamomile.linalg.mottonen.compute_disentangling_angles_per_level`.
 5. At each level ``k >= 1`` apply a uniformly controlled rotation over
    the previously prepared ``k`` qubits.  We use the standard Gray-code
    RY / CNOT decomposition for the magnitude stage and the same
-   structure with RZ for the phase stage; the per-level angle vector is
-   bit-reversed and then multiplied by the linear transform
-   :math:`M^{(k)}` to obtain the angles consumed by the Gray walk.
-   The emitted gate order is "all RY layers, then all RZ layers".
-   Pairwise ``[U_y^(k), U_z^(k')]`` does NOT commute in general
-   (including ``k != k'`` cases, because earlier RY targets can be
-   controls of later RZ multiplexers), but the FULL sweep product
-   equals the per-level interleaved product
+   structure with RZ for the phase stage.  The emitted gate order is
+   "all RY layers, then all RZ layers".  Pairwise
+   ``[U_y^(k), U_z^(k')]`` does NOT commute in general (including
+   ``k != k'`` cases, because earlier RY targets can be controls of
+   later RZ multiplexers), but the FULL sweep product equals the
+   per-level interleaved product
    ``(U_z^(0) U_y^(0)) ... (U_z^(n-1) U_y^(n-1))`` as unitaries — this
    is a structural identity verified by
    :class:`tests.circuit.algorithm.state_preparation.test_mottonen_amplitude_encoding.TestRyRzOrdering`
    with arbitrary (non-disentangling) per-level angles.  Within each
    level the order RY-before-RZ is preserved in both schemes.
+
+Lazy angle precomputation
+-------------------------
+
+``MottonenAmplitudeEncoding.__init__`` runs the cheap normalisation
+pass eagerly (``O(2^n)``) so input errors — wrong shape, length not a
+power of two, all-zero amplitudes — surface at construction time.  The
+expensive angle precomputation (``O(n * 2^n)``) is deferred: it runs
+lazily on the first ``_decompose()`` call and is cached afterwards.
+``_resources()`` reads ``is_complex`` directly from the cached
+``__init__`` state and never triggers angle precomputation, so
+standalone resource estimation on a ``MottonenAmplitudeEncoding``
+instance pays only the normalisation cost.
+
+In practice the surrounding ``CompositeGate.__call__`` framework
+eagerly invokes ``_decompose()`` when the gate is invoked inside a
+``@qkernel`` (to populate the operation's ``implementation_block``),
+so kernel-side ``estimate_resources()`` does still pay the angle
+cost today.  The lazy aspect is the right shape for a future
+framework refactor that defers ``_build_decomposition_block`` until
+emit time, and is verified standalone by
+``tests.circuit.algorithm.state_preparation.test_mottonen_amplitude_encoding.TestLazyConstruction``.
 """
 
 from __future__ import annotations
 
-import functools
-import math
 from collections.abc import Sequence
 
 import numpy as np
@@ -72,45 +94,22 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
 )
+from qamomile.linalg.mottonen import (
+    compute_all_ry_angles_per_level,
+    compute_disentangling_angles_per_level,
+    validate_and_normalize_amplitudes,
+)
 
 __all__ = [
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
-    "compute_mottonen_amplitude_encoding_ry_angles",
-    "compute_mottonen_amplitude_encoding_rz_angles",
 ]
 
 
 # ---------------------------------------------------------------------------
-# Small numeric helpers
+# Gate-emission helpers
 # ---------------------------------------------------------------------------
-
-
-def _gray_code(n: int) -> int:
-    """Return the binary-reflected Gray code of *n*.
-
-    Args:
-        n (int): Non-negative integer to encode.
-
-    Returns:
-        int: The Gray-code image ``n ^ (n >> 1)``.
-    """
-    return n ^ (n >> 1)
-
-
-def _bit_reverse(value: int, num_bits: int) -> int:
-    """Reverse the *num_bits* lowest bits of *value*.
-
-    Args:
-        value (int): Non-negative integer whose low bits are reversed.
-        num_bits (int): Width of the field to reverse over.
-
-    Returns:
-        int: The integer obtained by reversing the bottom *num_bits* of
-            *value*.
-    """
-    return int(format(value, f"0{num_bits}b")[::-1], 2)
 
 
 def _get_cnot_controls(k: int) -> list[int]:
@@ -142,299 +141,6 @@ def _get_cnot_controls(k: int) -> list[int]:
     return controls
 
 
-@functools.lru_cache(maxsize=None)
-def _compute_angle_transform_matrix(k: int) -> np.ndarray:
-    """Build the :math:`M^{(k)}` matrix that maps per-state angles to Gray-walk angles.
-
-    The matrix is
-
-    .. math::
-
-        M^{(k)}_{ij} = \\frac{1}{2^k}\\,(-1)^{\\,b(g_i)\\cdot b(j)},
-
-    where ``g_i`` is the Gray code of ``i`` and ``b(\\cdot)\\cdot b(\\cdot)``
-    denotes the bitwise inner product modulo 2.  This is the closed-form
-    transform from Möttönen-Vartiainen for decomposing a uniformly
-    controlled rotation into elementary RY / CNOT gates.
-
-    Cached at module scope (``functools.lru_cache``) because every
-    public entry point (``amplitude_encoding``,
-    ``amplitude_encoding_from_angles``, the two ``compute_*_angles``
-    helpers) calls :func:`_to_gray_walk_basis`, which in turn rebuilds
-    one matrix per level on every invocation.  The result depends only
-    on ``k``, so a per-process cache is safe.  The returned array is
-    marked read-only to prevent callers from accidentally mutating the
-    cached buffer.
-
-    Args:
-        k (int): Number of control qubits for the uniformly controlled
-            rotation.
-
-    Returns:
-        np.ndarray: A read-only ``(2**k, 2**k)`` array implementing the
-            linear transform.
-    """
-    size = 2**k
-    matrix = np.zeros((size, size))
-    for i in range(size):
-        g_i = _gray_code(i)
-        for j in range(size):
-            parity = (j & g_i).bit_count() & 1
-            matrix[i, j] = (2.0**-k) * (1.0 if parity == 0 else -1.0)
-    matrix.flags.writeable = False
-    return matrix
-
-
-# ---------------------------------------------------------------------------
-# Validation and angle computation
-# ---------------------------------------------------------------------------
-
-
-def _validate_and_normalize(
-    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
-) -> tuple[np.ndarray, int, bool]:
-    """Validate an amplitude vector and return its normalised form.
-
-    Inputs may be real or complex.  A complex input whose imaginary part
-    is identically zero (within ``np.allclose`` tolerance) is coerced to
-    a real array; this preserves the original signed-RY fast path for
-    vectors that happen to arrive boxed as ``complex``.
-
-    Args:
-        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
-            Amplitude vector.  Its length must be a power of two and at
-            least one entry must be non-zero.
-
-    Returns:
-        tuple[np.ndarray, int, bool]: ``(normalized, num_qubits, is_complex)``
-            where ``normalized`` is a unit-norm ``np.ndarray``,
-            ``num_qubits`` is ``log2(len(amplitudes))``, and
-            ``is_complex`` is True iff the input has a non-zero
-            imaginary component (and therefore needs the phase-restoration
-            stage).  When ``is_complex`` is False, ``normalized.dtype``
-            is ``float``; otherwise it is ``complex``.
-
-    Raises:
-        ValueError: If the input is not a 1-D vector (e.g. a nested
-            sequence or a 2-D ``np.ndarray``), the length is not a power
-            of two (or is less than 2, i.e., would map to a zero-qubit
-            register), or all amplitudes are zero.
-    """
-    arr = np.asarray(amplitudes)
-
-    # Reject nested sequences / 2-D arrays up front so the user sees a
-    # clear shape error here rather than a confusing TypeError deeper in
-    # the angle-computation pipeline (e.g. `math.atan2(np.ndarray, ...)`).
-    if arr.ndim != 1:
-        raise ValueError(
-            f"Amplitudes must be a 1-D vector, got an array of shape {arr.shape}"
-        )
-
-    if np.iscomplexobj(arr):
-        if np.allclose(np.imag(arr), 0.0):
-            arr = np.real(arr).astype(float)
-            is_complex = False
-        else:
-            arr = arr.astype(complex)
-            is_complex = True
-    else:
-        arr = arr.astype(float)
-        is_complex = False
-
-    n = len(arr)
-    if n < 2 or (n & (n - 1)) != 0:
-        raise ValueError(
-            f"Length of amplitudes must be a power of 2 and at least 2, got {n}"
-        )
-
-    norm = float(np.linalg.norm(arr))
-    if math.isclose(norm, 0.0, abs_tol=1e-15):
-        raise ValueError("Amplitudes must not be all zeros")
-
-    return arr / norm, int(round(math.log2(n))), is_complex
-
-
-def _compute_all_ry_angles(
-    amplitudes: np.ndarray,
-    num_qubits: int,
-) -> list[np.ndarray]:
-    """Pre-compute every level's Ry rotation angle vector (magnitude stage).
-
-    For each level ``k`` (``0 <= k < num_qubits``) the amplitude vector
-    is split into ``2**k`` equal chunks.  Each chunk yields one
-    per-control-state angle (called ``alpha`` in Möttönen-Vartiainen):
-
-    * **Intermediate levels** (``chunk_size > 2``): the angle rotates
-      the target qubit so its ``|1>`` weight matches the lower-half
-      block norm.  Using ``arctan2(norm_lower, norm_upper)`` keeps the
-      formula well defined when the upper half has zero norm.
-    * **Leaf level** (``chunk_size == 2``):
-      ``alpha = 2 * arctan2(a_1, a_0)`` directly, which is signed and
-      therefore preserves negative amplitudes.
-
-    For ``k >= 1`` the per-control-state angles are then transformed to
-    the Gray-walk basis via :func:`_to_gray_walk_basis`.
-
-    Args:
-        amplitudes (np.ndarray): Unit-norm real amplitude vector of
-            length ``2**num_qubits``.
-        num_qubits (int): Number of qubits in the target register.
-
-    Returns:
-        list[np.ndarray]: A list of ``num_qubits`` arrays; the ``k``-th
-            entry has length ``2**k`` and holds the Gray-walk Ry angles
-            for that level.
-    """
-    ry_angles_per_level: list[np.ndarray] = [np.empty(2**k) for k in range(num_qubits)]
-    for k in range(num_qubits):
-        chunk_size = 2 ** (num_qubits - k)
-        half_chunk = chunk_size // 2
-
-        per_chunk_angles = ry_angles_per_level[k]
-        for i in range(2**k):
-            chunk = amplitudes[i * chunk_size : (i + 1) * chunk_size]
-            if half_chunk == 1:
-                per_chunk_angles[i] = 2.0 * math.atan2(float(chunk[1]), float(chunk[0]))
-            else:
-                norm_upper = float(np.linalg.norm(chunk[:half_chunk]))
-                norm_lower = float(np.linalg.norm(chunk[half_chunk:]))
-                per_chunk_angles[i] = 2.0 * math.atan2(norm_lower, norm_upper)
-
-    return _to_gray_walk_basis(ry_angles_per_level, num_qubits)
-
-
-def _to_gray_walk_basis(
-    per_level_angles: list[np.ndarray],
-    num_qubits: int,
-) -> list[np.ndarray]:
-    """Convert per-control-state angles to the Gray-walk angle basis.
-
-    The Möttönen Gray-walk emission interleaves elementary rotations
-    with CNOTs in a Gray-code order; the elementary angles consumed by
-    that emission are obtained from the natural per-control-state
-    angles by a level-wise bit-reverse permutation followed by
-    multiplication by the level's transform matrix
-    (see :func:`_compute_angle_transform_matrix`).  Used by both the Ry
-    (magnitude) stage and the Rz (phase) stage; the structure is
-    identical.
-
-    The bit-reverse step converts between two indexing conventions: the
-    recursive chunk layout uses big-endian control labels (chunk index
-    0 = controls all zero in the most-significant order), while
-    :func:`_emit_mottonen_gates` walks Gray codes in the little-endian
-    convention.
-
-    Args:
-        per_level_angles (list[np.ndarray]): Per-level angle arrays in
-            the per-control-state ordering; the ``k``-th entry has
-            length ``2**k``.
-        num_qubits (int): Number of qubits (``len(per_level_angles)``).
-
-    Returns:
-        list[np.ndarray]: Same shape as *per_level_angles*, with each
-            level (for ``k >= 1``) replaced by the Gray-walk-basis
-            angles.  The ``k = 0`` entry is returned unchanged.
-    """
-    transformed: list[np.ndarray] = []
-    for k in range(num_qubits):
-        raw = per_level_angles[k]
-        if k == 0:
-            transformed.append(raw)
-            continue
-        bit_reversed = np.empty(2**k)
-        for j in range(2**k):
-            bit_reversed[j] = raw[_bit_reverse(j, k)]
-        transformed.append(_compute_angle_transform_matrix(k) @ bit_reversed)
-    return transformed
-
-
-def _compute_disentangling_angles(
-    amplitudes: np.ndarray,
-    num_qubits: int,
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Iteratively disentangle to obtain both Ry and Rz angles per level.
-
-    Implements the standard Möttönen disentangling sweep from LSB to
-    MSB.  At each step the amplitude vector is halved by pairing
-    adjacent entries; for the pair ``(a_0, a_1)`` we read off
-
-    * ``Ry angle = 2 * arctan2(|a_1|, |a_0|)`` (magnitude split),
-    * ``Rz angle = arg(a_1 / a_0)`` (phase difference),
-
-    and replace the pair with the single complex amplitude that
-    survives the implicit ``Rz^{-1} Ry^{-1}`` disentangling step:
-
-    .. math::
-
-        \\beta = \\sqrt{|a_0|^2 + |a_1|^2} \\,
-                 \\exp\\!\\left(i\\,\\frac{\\arg a_0 + \\arg a_1}{2}\\right).
-
-    Zero-magnitude halves are handled gracefully by leaving the
-    corresponding angle at ``0`` (the underlying state has no support
-    there so the angle is immaterial).  The returned per-level arrays
-    are already bit-reversed and gray-walk-transformed, ready for
-    :func:`_emit_mottonen_gates`.
-
-    Args:
-        amplitudes (np.ndarray): Unit-norm complex amplitude vector of
-            length ``2**num_qubits``.
-        num_qubits (int): Number of qubits in the target register.
-
-    Returns:
-        tuple[list[np.ndarray], list[np.ndarray]]:
-            ``(ry_angles_per_level, rz_angles_per_level)`` in Gray-walk
-            ordering.  Each list has ``num_qubits`` entries; the
-            ``k``-th entry holds ``2**k`` angles for level ``k`` of the
-            forward emission.
-    """
-    ry_angles_per_level: list[np.ndarray] = [np.empty(2**k) for k in range(num_qubits)]
-    rz_angles_per_level: list[np.ndarray] = [np.empty(2**k) for k in range(num_qubits)]
-
-    current = amplitudes.astype(complex).copy()
-    for j in range(num_qubits):
-        # Forward level k = num_qubits - 1 - j has 2**(num_qubits-1-j) = num_pairs angles.
-        forward_level = num_qubits - 1 - j
-        num_pairs = len(current) // 2
-        ry_at_level = ry_angles_per_level[forward_level]
-        rz_at_level = rz_angles_per_level[forward_level]
-        new_current = np.empty(num_pairs, dtype=complex)
-
-        for c in range(num_pairs):
-            a0 = current[2 * c]
-            a1 = current[2 * c + 1]
-            mag0 = float(abs(a0))
-            mag1 = float(abs(a1))
-            mag = math.sqrt(mag0 * mag0 + mag1 * mag1)
-            ry_at_level[c] = 2.0 * math.atan2(mag1, mag0)
-
-            if mag0 > 1e-15 and mag1 > 1e-15:
-                rz_at_level[c] = float(np.angle(a1 / a0))
-                avg_phase = float(np.angle(a0)) + rz_at_level[c] / 2.0
-            elif mag0 > 1e-15:
-                rz_at_level[c] = 0.0
-                avg_phase = float(np.angle(a0))
-            elif mag1 > 1e-15:
-                rz_at_level[c] = 0.0
-                avg_phase = float(np.angle(a1))
-            else:
-                rz_at_level[c] = 0.0
-                avg_phase = 0.0
-
-            new_current[c] = mag * np.exp(1j * avg_phase)
-
-        current = new_current
-
-    return (
-        _to_gray_walk_basis(ry_angles_per_level, num_qubits),
-        _to_gray_walk_basis(rz_angles_per_level, num_qubits),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Quantum gate emission
-# ---------------------------------------------------------------------------
-
-
 def _emit_mottonen_gates(
     qubits: list[Qubit],
     num_qubits: int,
@@ -445,8 +151,8 @@ def _emit_mottonen_gates(
 
     Level ``k`` targets qubit ``num_qubits - 1 - k`` so that the first
     rotation lands on the most-significant qubit (consistent with the
-    chunk-splitting convention used by :func:`_compute_all_ry_angles`
-    and :func:`_compute_disentangling_angles`).
+    chunk-splitting convention used by the
+    :mod:`qamomile.linalg.mottonen` per-level builders).
 
     *angles* may be either a concrete numerical sequence (Python list,
     NumPy array of dtype float) or a ``Vector[Float]`` handle — the
@@ -532,6 +238,12 @@ class MottonenAmplitudeEncoding(CompositeGate):
         * Complex inputs whose imaginary part is identically zero (e.g.
           ``[1+0j, -1+0j]``) are silently coerced to real and follow the
           single-stage path.
+        * Construction is **lazy**: ``__init__`` only checks shape /
+          length cheaply.  Normalisation runs on the first call to
+          :meth:`_resources`; full angle precomputation runs on the
+          first call to :meth:`_decompose`.  Validation errors that
+          require inspecting the values (all-zeros, complex coercion)
+          surface at those calls, not at construction.
 
     Example::
 
@@ -550,31 +262,72 @@ class MottonenAmplitudeEncoding(CompositeGate):
     def __init__(self, amplitudes: Sequence[float] | Sequence[complex] | np.ndarray):
         """Initialise the gate with a concrete amplitude vector.
 
+        Runs the full normalisation + complex-detection pass eagerly
+        (``O(2^n)``) so that input errors — wrong shape, length not a
+        power of two, all-zero amplitudes — surface at construction
+        time rather than at the first ``_resources()`` /
+        ``_decompose()`` call.  Angle precomputation
+        (``O(n * 2^n)``) stays deferred: it runs lazily on the first
+        ``_decompose()`` call and is cached afterwards.
+
+        This keeps the dominant cost of Möttönen out of
+        kernel-build time when the gate is later only used for
+        resource estimation.  In practice the
+        ``CompositeGate.__call__`` framework eagerly invokes
+        ``_decompose()`` to build the implementation block when the
+        gate is invoked inside a ``@qkernel``, so the lazy aspect
+        currently bites only for code that constructs
+        ``MottonenAmplitudeEncoding`` standalone — but the laziness
+        still matters there, and is the right shape for a future
+        framework refactor that defers ``_decompose()`` until emit
+        time.
+
         Args:
             amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
-                Amplitude vector of length ``2**n``.  Real or complex; it
-                is automatically normalised.  Complex inputs with zero
-                imaginary part are coerced to real (single-stage RY path).
+                Amplitude vector of length ``2**n``.  Real or complex;
+                it is automatically normalised.  Complex inputs with
+                zero imaginary part are coerced to real (single-stage
+                RY path).
 
         Raises:
-            ValueError: If the length is not a power of two (or is
-                less than 2, i.e., would map to a zero-qubit register),
-                or all amplitudes are zero.
+            ValueError: If the input is not a 1-D vector, the length
+                is not a power of two (or is less than 2, i.e., would
+                map to a zero-qubit register), or all amplitudes are
+                zero.
         """
-        self._amplitudes, self._num_qubits, self._is_complex = _validate_and_normalize(
+        normalized, num_qubits, is_complex = validate_and_normalize_amplitudes(
             amplitudes
         )
-        self._rz_angles_per_level: list[np.ndarray] | None
+        self._normalized: np.ndarray = normalized
+        self._num_qubits: int = num_qubits
+        self._is_complex: bool = is_complex
+
+        # Angle precomputation is deferred — populated lazily on the
+        # first call to :meth:`_ensure_angles` (driven from
+        # :meth:`_decompose`).  Resource estimation uses ``self._is_complex``
+        # alone, so it never triggers the angle pass.
+        self._ry_angles_per_level_cache: list[np.ndarray] | None = None
+        self._rz_angles_per_level_cache: list[np.ndarray] | None = None
+
+    def _ensure_angles(self) -> None:
+        """Run the angle-precomputation pass if not yet cached.
+
+        ``O(n * 2^n)`` — populates the per-level Ry (and, for complex
+        inputs, Rz) caches.  Idempotent.
+        """
+        if self._ry_angles_per_level_cache is not None:
+            return
         if self._is_complex:
-            (
-                self._ry_angles_per_level,
-                self._rz_angles_per_level,
-            ) = _compute_disentangling_angles(self._amplitudes, self._num_qubits)
-        else:
-            self._ry_angles_per_level = _compute_all_ry_angles(
-                self._amplitudes, self._num_qubits
+            ry, rz_levels = compute_disentangling_angles_per_level(
+                self._normalized, self._num_qubits
             )
-            self._rz_angles_per_level = None
+            self._ry_angles_per_level_cache = ry
+            self._rz_angles_per_level_cache = rz_levels
+        else:
+            self._ry_angles_per_level_cache = compute_all_ry_angles_per_level(
+                self._normalized, self._num_qubits
+            )
+            self._rz_angles_per_level_cache = None
 
     @property
     def num_target_qubits(self) -> int:
@@ -582,7 +335,7 @@ class MottonenAmplitudeEncoding(CompositeGate):
 
         Returns:
             int: The number of qubits (``log2`` of the amplitude vector
-                length).
+                length).  Cheap — known from ``__init__``.
         """
         return self._num_qubits
 
@@ -592,15 +345,10 @@ class MottonenAmplitudeEncoding(CompositeGate):
     ) -> tuple[Qubit, ...]:
         """Decompose into RY/CNOT (and RZ/CNOT for complex inputs) gates.
 
-        Emits the magnitude stage (RY layers, Gray-walk order) and then,
-        if the input is genuinely complex, the phase stage (RZ layers,
-        same structure).  Emitting "all RY layers then all RZ layers"
-        is mathematically equivalent (as a full unitary, not just on
-        ``|0>^n``) to the Möttönen-Vartiainen per-level interleaved
-        order — even though pairwise ``U_y`` / ``U_z`` multiplexers do
-        not commute in general (an earlier RY target can be a control
-        of a later RZ).  The structural identity is locked down by
-        :class:`tests.circuit.algorithm.state_preparation.test_mottonen_amplitude_encoding.TestRyRzOrdering`.
+        Triggers full angle precomputation on first call.  Emits the
+        magnitude stage (RY layers, Gray-walk order) and then, if the
+        input is genuinely complex, the phase stage (RZ layers, same
+        structure).
 
         Args:
             qubits (Vector[Qubit] | tuple[Qubit, ...]):
@@ -611,23 +359,30 @@ class MottonenAmplitudeEncoding(CompositeGate):
         Returns:
             tuple[Qubit, ...]: Output qubits in the encoded state.
         """
+        self._ensure_angles()
+        assert self._ry_angles_per_level_cache is not None
         qubit_list = [qubits[i] for i in range(self._num_qubits)]
-        ry_angles = [float(a) for a in np.concatenate(self._ry_angles_per_level)]
+        ry_angles = [float(a) for a in np.concatenate(self._ry_angles_per_level_cache)]
         _emit_mottonen_gates(qubit_list, self._num_qubits, ry_angles, gate="ry")
-        if self._rz_angles_per_level is not None:
-            rz_angles = [float(a) for a in np.concatenate(self._rz_angles_per_level)]
+        if self._rz_angles_per_level_cache is not None:
+            rz_angles = [
+                float(a) for a in np.concatenate(self._rz_angles_per_level_cache)
+            ]
             _emit_mottonen_gates(qubit_list, self._num_qubits, rz_angles, gate="rz")
         return tuple(qubit_list)
 
     def _resources(self) -> ResourceMetadata:
         """Return gate counts for the Gray-walk decomposition.
 
+        Reads only ``self._is_complex`` (set in ``__init__``), so this
+        method does NOT trigger angle precomputation.
+
         Returns:
             ResourceMetadata: Carries the ``RY`` count
                 (``2**n - 1``), the ``RZ`` count (``0`` for real inputs,
-                ``2**n - 1`` for complex), the ``CNOT`` count (``2**n - 2``
-                per emitted stage, so ``2 * (2**n - 2)`` for complex),
-                and aggregate totals.
+                ``2**n - 1`` for complex), the ``CNOT`` count
+                (``2**n - 2`` per emitted stage, so ``2 * (2**n - 2)``
+                for complex), and aggregate totals.
         """
         n = self._num_qubits
         num_ry = 2**n - 1
@@ -657,78 +412,8 @@ class MottonenAmplitudeEncoding(CompositeGate):
 
 
 # ---------------------------------------------------------------------------
-# Convenience functions
+# Convenience function wrappers
 # ---------------------------------------------------------------------------
-
-
-def compute_mottonen_amplitude_encoding_ry_angles(
-    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
-) -> np.ndarray:
-    """Pre-compute the flat Ry angle vector for a Möttönen encoding.
-
-    Returns the Gray-walk Ry angles for the magnitude stage of the
-    encoding.  For real inputs (or complex with zero imaginary part)
-    this corresponds to the single-stage signed-Ry encoding.  For
-    complex inputs with non-zero imaginary part, these are the
-    magnitude-stage angles only — pair with
-    :func:`compute_mottonen_amplitude_encoding_rz_angles` to obtain the
-    phase-stage angles needed to reproduce the full complex state.
-
-    Args:
-        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
-            Amplitude vector of length ``2**n``.  Real or complex; it is
-            normalised automatically.
-
-    Returns:
-        np.ndarray: 1-D array of length ``2**n - 1`` holding the
-            Gray-walk Ry angles laid out level by level.
-
-    Raises:
-        ValueError: If the length is not a power of two (or is less
-            than 2, i.e., would map to a zero-qubit register), or all
-            amplitudes are zero.
-    """
-    normalized, num_qubits, is_complex = _validate_and_normalize(amplitudes)
-    if is_complex:
-        ry_angles_per_level, _ = _compute_disentangling_angles(normalized, num_qubits)
-    else:
-        ry_angles_per_level = _compute_all_ry_angles(normalized, num_qubits)
-    return np.concatenate(ry_angles_per_level)
-
-
-def compute_mottonen_amplitude_encoding_rz_angles(
-    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
-) -> np.ndarray:
-    """Pre-compute the flat Rz angle vector for the phase-restoration stage.
-
-    Returns the Gray-walk Rz angles for the phase stage of the Möttönen
-    encoding.  For real inputs (or complex with zero imaginary part)
-    the phase stage is unnecessary and the returned array is all zeros.
-    For complex inputs with non-zero imaginary part, the returned
-    angles together with the Ry angles from
-    :func:`compute_mottonen_amplitude_encoding_ry_angles` reproduce the
-    full complex state.
-
-    Args:
-        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
-            Amplitude vector of length ``2**n``.  Real or complex; it is
-            normalised automatically.
-
-    Returns:
-        np.ndarray: 1-D array of length ``2**n - 1`` holding the
-            Gray-walk Rz angles laid out level by level (all zeros for
-            real inputs).
-
-    Raises:
-        ValueError: If the length is not a power of two (or is less
-            than 2, i.e., would map to a zero-qubit register), or all
-            amplitudes are zero.
-    """
-    normalized, num_qubits, is_complex = _validate_and_normalize(amplitudes)
-    if not is_complex:
-        return np.zeros(2**num_qubits - 1)
-    _, rz_angles_per_level = _compute_disentangling_angles(normalized, num_qubits)
-    return np.concatenate(rz_angles_per_level)
 
 
 def amplitude_encoding(
@@ -854,11 +539,12 @@ def amplitude_encoding_from_angles(
     Companion to :func:`amplitude_encoding` for the **parametric** use
     case: the user pre-computes the Gray-walk Ry (and optionally Rz)
     angles classically with
-    :func:`compute_mottonen_amplitude_encoding_ry_angles` and
-    :func:`compute_mottonen_amplitude_encoding_rz_angles`, then passes
-    them in as either concrete sequences or as ``Vector[Float]``
-    handles obtained from kernel parameters.  In the latter case the
-    angles can be left as runtime parameters
+    :func:`qamomile.linalg.compute_mottonen_amplitude_encoding_ry_angles`
+    and
+    :func:`qamomile.linalg.compute_mottonen_amplitude_encoding_rz_angles`,
+    then passes them in as either concrete sequences or as
+    ``Vector[Float]`` handles obtained from kernel parameters.  In the
+    latter case the angles can be left as runtime parameters
     (``transpiler.transpile(kernel, parameters=["ry_angles", ...])``)
     so the same compiled circuit can be re-bound to different
     amplitude vectors without recompilation — useful inside hybrid
@@ -897,6 +583,11 @@ def amplitude_encoding_from_angles(
             instead.
 
     Example::
+
+        from qamomile.linalg import (
+            compute_mottonen_amplitude_encoding_ry_angles,
+            compute_mottonen_amplitude_encoding_rz_angles,
+        )
 
         # Pre-compute classically (outside the kernel)
         ry = compute_mottonen_amplitude_encoding_ry_angles(amps)
