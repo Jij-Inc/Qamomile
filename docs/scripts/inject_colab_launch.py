@@ -127,11 +127,13 @@ META_CHARSET_RE = re.compile(
 #     ``preload-class`` pattern: add ``html.qamomile-preloading`` at
 #     the very start of head, the inline <style> below contains a
 #     blanket ``transition: none !important`` rule scoped to that
-#     class, and a ``window.load`` handler removes the class two
-#     ``requestAnimationFrame`` ticks later (= guaranteed past the
-#     first paint AND past hydration's mount-time reflows). After
-#     that, all transitions work normally for actual user
-#     interactions (theme toggle, hover, etc.).
+#     class, and after ``window.load`` we observe DOM mutations and
+#     remove the class once 250ms passes without any mutation, i.e.
+#     once React hydration has quiesced. Bounded by a 5-second
+#     hard-cap after ``load`` and a 10-second wall-clock safety net
+#     so a runaway page can never stay hidden forever. See the
+#     comment on the reveal logic inside ``THEME_INIT_SCRIPT`` below
+#     for the trade-offs that led to this idle-detection scheme.
 THEME_INIT_SCRIPT_ID = "qamomile-theme-init"
 THEME_INIT_SCRIPT = (
     "(function(){"
@@ -159,30 +161,80 @@ THEME_INIT_SCRIPT = (
     '!window.matchMedia("(prefers-color-scheme: light)").matches);'
     'if(dark)d.classList.add("dark");'
     "}catch(e){}"
-    # Reveal: lift the preloading class once everything's settled.
-    # Three triggers race; first one wins:
-    #   1. window.load + 2 RAF — hydration is normally complete by
-    #      then on a typical machine.
-    #   2. 2-second safety timeout — guarantees the page never stays
-    #      hidden longer than that even if `load` is unusually
-    #      delayed (slow CDN, large image, etc.).
-    #   3. First user-driven event — if the user is already
-    #      interacting (mousemove, click, keydown, touch), they've
-    #      seen enough that further hiding is hostile UX.
+    # Reveal: lift the preloading class once hydration has settled.
+    #
+    # Older strategy raced three triggers: ``window.load + 2 RAF``, a
+    # 2-second safety timeout, and the first user-driven event
+    # (mousemove / click / keydown / touch). All three turned out to be
+    # unreliable on pages whose React hydration kept mutating the DOM
+    # past the ``load`` event:
+    #   - ``load + 2 RAF`` only buys ~32ms after ``load``; on heavy
+    #     pages (mottonen, the section landings) React is still doing
+    #     hydration-mismatch recovery (client-rendering whole subtrees)
+    #     well past that point, so the guard lifts mid-storm and the
+    #     user sees cell outputs flicker into place.
+    #   - The 2-second safety timeout measures from script start, not
+    #     from ``load``; on the same heavy pages ``load`` itself fires
+    #     several seconds after the script runs, so the timeout always
+    #     fires first and never actually saves the user from anything.
+    #   - The user-driven-event trigger is hostile by design: any mouse
+    #     movement during the multi-second hidden phase races the guard
+    #     down and exposes the in-progress hydration. This is exactly
+    #     the ちらつき regression contributors keep reporting.
+    #
+    # New strategy: after ``load``, install a MutationObserver on
+    # documentElement (subtree, attributes, characterData) and reveal
+    # once 250ms passes without any mutation — that is, hydration has
+    # quiesced. Two safety nets bound the worst case so a misbehaving
+    # page can never stay blank forever:
+    #   1. ``hardCap``: 5 seconds after ``load``. By that point any
+    #      reasonable hydration-mismatch recovery has finished; a page
+    #      that's still mutating after 5s past ``load`` is in a runaway
+    #      state and the user is better served by seeing it than by an
+    #      indefinitely hidden body.
+    #   2. ``wallClock``: 10 seconds from script start. Covers the
+    #      degenerate case where ``load`` never fires at all (broken
+    #      network, blocked resource, etc.). Independent of the first
+    #      net because if ``load`` never fires, the inner listener
+    #      never runs and ``hardCap`` is never installed.
     "var revealed=false;"
     "function reveal(){"
     "if(revealed)return;"
     "revealed=true;"
     'd.classList.remove("qamomile-preloading");'
     "}"
+    "setTimeout(reveal,10000);"
     'window.addEventListener("load",function(){'
+    "var lastMut=performance.now();"
+    "var hardCap=setTimeout(reveal,5000);"
+    "var obs=new MutationObserver(function(){"
+    "lastMut=performance.now();"
+    "});"
+    "obs.observe(d,{"
+    "childList:true,"
+    "subtree:true,"
+    "attributes:true,"
+    "characterData:true"
+    "});"
+    "function checkIdle(){"
+    "if(revealed){obs.disconnect();return;}"
+    "if(performance.now()-lastMut>=250){"
+    "obs.disconnect();"
+    "clearTimeout(hardCap);"
+    "reveal();"
+    "}else{"
+    "requestAnimationFrame(checkIdle);"
+    "}"
+    "}"
+    # Skip one rAF before starting the idle probe so React has a
+    # chance to start its hydration work — otherwise the very first
+    # ``checkIdle`` call sees ``performance.now() - lastMut`` already
+    # well above 250ms (because we haven't observed any mutation yet)
+    # and we'd reveal before hydration even begins.
     "requestAnimationFrame(function(){"
-    "requestAnimationFrame(reveal);"
+    "lastMut=performance.now();"
+    "requestAnimationFrame(checkIdle);"
     "});"
-    "});"
-    "setTimeout(reveal,2000);"
-    '["mousemove","keydown","click","touchstart"].forEach(function(e){'
-    "window.addEventListener(e,reveal,{once:true,passive:true});"
     "});"
     "})();"
 )
