@@ -2817,15 +2817,32 @@ class CircuitAnalyzer:
         materializes those entries into a plain list of (key, value) tuples
         where keys and values are raw Python objects (not IR Values).
 
-        Returns None if the dict is truly unbound (no data available).
+        Args:
+            dict_value (Value): The DictValue (or compatible Value) whose
+                entries should be materialized. May carry IR-level
+                ``entries`` and/or runtime ``dict_runtime`` metadata.
+
+        Returns:
+            list[tuple] | None: A list of ``(key, value)`` tuples when the
+                dict's contents are knowable at visualization time. Returns
+                ``[]`` for a dict that is bound to an empty mapping (so
+                callers can render zero iterations as a ``VSkip`` rather than
+                a folded box). Returns ``None`` only when the dict is truly
+                unbound — no IR-level entries and no runtime metadata.
         """
         # Try IR-level entries first
         if hasattr(dict_value, "entries") and dict_value.entries:
             return dict_value.entries
 
-        bound_items = dict_value.get_bound_data_items()
-        if bound_items:
-            return list(bound_items)
+        # Distinguish "bound but empty" from "never bound". Truthy-checking
+        # get_bound_data_items() conflates the two because both return the
+        # empty tuple, which makes ForItems over an empty bound Dict render
+        # as a folded box even when fold_loops=False.
+        if (
+            hasattr(dict_value, "metadata")
+            and dict_value.metadata.dict_runtime is not None
+        ):
+            return list(dict_value.get_bound_data_items())
 
         return None
 
