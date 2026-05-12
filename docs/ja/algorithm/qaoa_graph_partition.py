@@ -170,40 +170,39 @@ executable = converter.transpile(transpiler, p=p)
 # %% [markdown]
 # ## QAOA 回路の可視化
 #
-# Qamomile の `MatplotlibDrawer`(`kernel.draw()` 経由)で QAOA 回路の構造を確認できます。`QAOAConverter.transpile()` が内部で構築するサンプリング qkernel は外部 API として公開されていないため、ここでは可視化用に同等の qkernel を定義し、コンバーターの spin model から `quad`/`linear` をそのまま流用します。レイヤー構造を読みやすくするため、可視化は `p=2` に減らしています。
+# `QAOAConverter._transpile_quadratic()` は内部で次のサンプリング qkernel を組み立てて transpile します。チュートリアルでは可視化のため、その qkernel を**そのまま**ここに再掲します。`Transpiler.to_block` で IR ブロックに落とし、`Transpiler.inline` でサブ qkernel を展開してから `MatplotlibDrawer.draw` に渡すことで、コンバーターが内部で扱うのと同じ Block 構造を描画できます(レイヤー構造を読みやすくするため `p=2` に縮小)。
 
 # %%
 import qamomile.circuit as qmc
+from qamomile.circuit.algorithm.qaoa import qaoa_state
+from qamomile.circuit.visualization import MatplotlibDrawer
 
 
 @qmc.qkernel
-def qaoa_demo(
-    n: qmc.UInt,
+def qaoa_sampling(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, name="q")
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-    for layer in qmc.range(p):
-        for (i, j), Jij in quad.items():
-            q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * gammas[layer])
-        for i, hi in linear.items():
-            q[i] = qmc.rz(q[i], angle=hi * gammas[layer])
-        for i in qmc.range(n):
-            q[i] = qmc.rx(q[i], angle=2.0 * betas[layer])
+    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
     return qmc.measure(q)
 
 
-qaoa_demo.draw(
-    n=converter.spin_model.num_bits,
-    p=2,
-    quad=converter.spin_model.quad,
-    linear=converter.spin_model.linear,
+block = transpiler.to_block(
+    qaoa_sampling,
+    bindings={
+        "linear": converter.spin_model.linear,
+        "quad": converter.spin_model.quad,
+        "n": converter.spin_model.num_bits,
+        "p": 2,
+    },
+    parameters=["gammas", "betas"],
 )
+block = transpiler.inline(block)
+MatplotlibDrawer(block).draw()
 
 # %% [markdown]
 # ## QAOA パラメータの最適化
