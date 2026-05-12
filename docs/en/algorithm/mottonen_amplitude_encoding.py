@@ -32,7 +32,7 @@
 # simulation protocols. Qamomile ships a backend-portable implementation
 # under `qamomile.circuit.algorithm.state_preparation`, based on the
 # uniformly controlled rotation construction of Möttönen, Vartiainen,
-# Bergholm and Salomaa (arXiv:quant-ph/0407010).
+# Bergholm and Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010`.
 #
 # The construction has two stages:
 #
