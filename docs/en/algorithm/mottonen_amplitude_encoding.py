@@ -32,7 +32,11 @@
 # simulation protocols. Qamomile ships a backend-portable implementation
 # under `qamomile.circuit.algorithm.state_preparation`, based on the
 # uniformly controlled rotation construction of Möttönen, Vartiainen,
-# Bergholm and Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010`.
+# Bergholm and Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` (the
+# paper covers the more general arbitrary-state $|a\rangle \to |b\rangle$
+# transformation; the implementation only emits the state-preparation
+# half with the input fixed to $|0\rangle^{\otimes n}$ — see §3 on
+# resource estimation for the cost-side consequences).
 #
 # The construction has two stages:
 #
@@ -53,17 +57,19 @@
 # | $R_z$ rotations | $0$ | $2^n - 1$ |
 # | `CNOT` | $2^n - 2$ | $2 (2^n - 2)$ |
 #
-# This tutorial walks through the public API surface, demonstrates each
-# entry point with a runnable example, and ends with a comparison table
-# you can use to decide which API to reach for in your own code.
+# This tutorial walks through the simplest call (§1, §2), then IR
+# visualisation and resource estimation (§3), the runtime-rebindable
+# angles API (§4), and finally embedding into a larger kernel (§5).
 #
 # > ⚠️ **Pre-condition: the input qubits must be in the all-zero state**
-# > $|0\rangle^{\otimes n}$.  Möttönen encodes the unitary that maps
-# > $|0\rangle^{\otimes n}$ to the target $|\psi\rangle$; applied to
-# > any other input it produces a different output, *not* the target
+# > $|0\rangle^{\otimes n}$.  Qamomile's `amplitude_encoding(...)` /
+# > `amplitude_encoding_from_angles(...)` only emits the unitary that
+# > maps $|0\rangle^{\otimes n}$ to the target $|\psi\rangle$ (the
+# > general Möttönen construction extends to arbitrary inputs, but the
+# > implementation specialises to the state-preparation half).  Applied
+# > to any other input it produces a different output, *not* the target
 # > amplitude vector.  Qamomile does not track qubit states at runtime,
-# > so it is the caller's responsibility to invoke
-# > `amplitude_encoding(...)` / `amplitude_encoding_from_angles(...)`
+# > so it is the caller's responsibility to invoke these functions
 # > immediately after `qmc.qubit_array(n, ...)`, before any other gates
 # > touch the register.
 
@@ -86,9 +92,6 @@ from qamomile.qiskit import QiskitTranspiler
 transpiler = QiskitTranspiler()
 executor = transpiler.executor()
 
-# Tolerance used by every fidelity / probability check below.  Tight
-# enough to catch any silent regression in the docs build, loose
-# enough to absorb shot noise on sampler comparisons.
 ATOL_STATEVECTOR = 1e-8
 ATOL_SHOT = 0.05  # for 8192 shots, ~5σ on p(1-p)/N for any single bin
 
@@ -203,64 +206,35 @@ assert np.isclose(fidelity(sv, expected), 1.0, atol=ATOL_STATEVECTOR), (
 # %% [markdown]
 # ## 3. Visualisation and resource estimation
 #
-# Once a kernel uses `amplitude_encoding`, the entire IR carries the
-# encoding as a single `MottonenAmplitudeEncoding` composite gate.  Two
-# Qamomile-side inspection APIs work out-of-the-box on it:
+# ### Drawing the circuit — `kernel.draw()`
 #
-# * `kernel.draw(fold_loops=False)` renders the IR.  We pass
-#   `fold_loops=False` so any `qmc.range` inside the gate's
-#   decomposition is unrolled in the diagram (the default `True`
-#   collapses each loop into a single block).
-# * `kernel.estimate_resources()` walks the IR and returns a
-#   `ResourceEstimate` with qubit count and gate breakdown — including
-#   the elementary RY / RZ / CNOT counts after the composite gate is
-#   resolved.  This is the supported way to check gate cost; it
-#   abstracts over the composite-gate machinery so user code never
-#   needs to look at `_resources().custom_metadata` directly.
+# `kernel.draw(fold_loops=False)` renders the kernel's IR.  For kernels
+# that use `amplitude_encoding`, the entire encoding stays as a single
+# `MottonenAmplitudeEncoding` composite gate in the IR, so by default it
+# shows up as one large opaque box.
 
 # %%
 prepare_real.draw(fold_loops=False)
 
-# %%
-prepare_complex.draw(fold_loops=False)
+# %% [markdown]
+# To peek inside, pass `expand_composite=True`.  The composite gate is
+# expanded and the underlying elementary `RY` / `RZ` / `CNOT` gates
+# become visible.
+#
+# The real path uses only `RY` and `CNOT`:
 
 # %%
-est_real = prepare_real.estimate_resources()
-est_complex = prepare_complex.estimate_resources()
-
-print(
-    f"real    : qubits={est_real.qubits}  total={est_real.gates.total}  "
-    f"single={est_real.gates.single_qubit}  two={est_real.gates.two_qubit}  "
-    f"rotations={est_real.gates.rotation_gates}  clifford={est_real.gates.clifford_gates}"
-)
-print(
-    f"complex : qubits={est_complex.qubits}  total={est_complex.gates.total}  "
-    f"single={est_complex.gates.single_qubit}  two={est_complex.gates.two_qubit}  "
-    f"rotations={est_complex.gates.rotation_gates}  clifford={est_complex.gates.clifford_gates}"
-)
-
-# Closed-form reference (n = 2 qubits):
-#   real    Ry: 2^n - 1 = 3,  CNOT: 2^n - 2 = 2,  total = 5
-#   complex Ry: 3,  Rz: 3,  CNOT: 2 * (2^n - 2) = 4,  total = 10
-assert int(est_real.qubits) == 2
-assert int(est_real.gates.total) == 5
-assert int(est_real.gates.rotation_gates) == 3
-assert int(est_real.gates.two_qubit) == 2
-assert int(est_complex.qubits) == 2
-assert int(est_complex.gates.total) == 10
-assert int(est_complex.gates.rotation_gates) == 6
-assert int(est_complex.gates.two_qubit) == 4
+prepare_real.draw(fold_loops=False, expand_composite=True)
 
 # %% [markdown]
-# Both counts grow as $O(2^n)$: amplitude encoding is intrinsically
-# expensive for many qubits.  In practice this construction is most
-# useful at the small register sizes one encounters as a building block
-# inside larger algorithms (HHL with 4–8 logical qubits in the input
-# register, QSCI with a sampled subspace, error-correction warm-starts,
-# etc.), not as a stand-alone preparation for hundreds of qubits.
+# The complex path adds `RZ` gates at the same positions — you can see
+# them appear in the diagram below:
+
+# %%
+prepare_complex.draw(fold_loops=False, expand_composite=True)
 
 # %% [markdown]
-# ### Verifying the gate counts against the published formula
+# ### Resource estimation — verifying against the published formula
 #
 # Möttönen, Vartiainen, Bergholm and Salomaa
 # {cite:p}`10.48550/arXiv.quant-ph/0407010` give an explicit closed
@@ -270,12 +244,22 @@ assert int(est_complex.gates.two_qubit) == 4
 # costs $2^k$ elementary rotations and $2^k$ CNOTs.  Summing over
 # the $n$ stages of the amplitude-encoding cascade — stage $k$ for
 # $k = 0, 1, \ldots, n-1$, with stage $0$ uncontrolled (and therefore
-# CNOT-free) — yields:
+# CNOT-free) — yields per cascade:
 #
 # | input    | rotations            | CNOTs                  |
 # |----------|---------------------:|-----------------------:|
 # | real     | $2^n - 1$            | $2^n - 2$              |
 # | complex  | $2 \cdot (2^n - 1)$  | $2 \cdot (2^n - 2)$    |
+#
+# > **About the discrepancy with the paper's abstract.** The abstract
+# > advertises $2^{n+2} - 5$ rotations + $2^{n+2} - 4n - 4$ CNOTs, but
+# > that is the cost of the **full arbitrary-input → arbitrary-output**
+# > state transformation $|a\rangle \to |b\rangle$ (decomposed as
+# > $|a\rangle \to |e_1\rangle \to |b\rangle$).  Qamomile's
+# > `amplitude_encoding` only emits the $|0\rangle^{\otimes n} \to
+# > |\psi\rangle$ half, so the table above is roughly half that cost.
+# > Note that the implementation also does not apply inter-cascade
+# > CNOT cancellation — it sticks with the plain per-stage decomposition.
 #
 # We verify that `kernel.estimate_resources()` reports exactly these
 # numbers across a range of register sizes.  This walks the full
@@ -329,41 +313,40 @@ for n in (2, 3, 4, 5):
     assert cnot_cplx == 2 * (2**n - 2), f"complex CNOTs off at n={n}"
 
 # %% [markdown]
-# Note that this is the *basic* Möttönen-Vartiainen Gray-code count;
-# the same paper (later sections) and follow-up work describe
-# inter-stage CNOT cancellations that bring the optimal asymptotic
-# count down to $2^{n+1} - 2n$ for the full complex case.  Qamomile's
-# implementation does not apply those cancellations — it sticks with
-# the plain per-stage decomposition for clarity and portability — so
-# the assertion above is the right reference.
+# Both rotation and CNOT counts grow as $O(2^n)$ in $n$ — amplitude
+# encoding is intrinsically expensive for many qubits.
 
 # %% [markdown]
-# ## 4. Public API surface — when to reach for which entry point
+# ## 4. Runtime-rebindable angles API
 #
-# The state-preparation package exposes four user-facing entry points
-# (the ones you import from `qamomile.circuit.algorithm`).  The table
-# below summarises which one to use for which job, and the trade-off
-# each makes.
+# The state-preparation package exposes two main user-facing entry
+# points:
 #
-# | API | Use it when | Pros | Cons |
-# |---|---|---|---|
-# | `amplitude_encoding(q, amplitudes)` (concrete sequence) | The amplitudes are known where you build the kernel, e.g. as a Python list / numpy array in the surrounding scope. | Simplest call site. IR keeps a single `MottonenAmplitudeEncoding` composite gate, so resource estimation and future native dispatch (e.g. Qiskit `StatePreparation` via a `CompositeGateEmitter`) stay open. | Each new amplitude vector needs a fresh `transpile()` call. |
-# | `amplitude_encoding(q, amps)` + `bindings={"amps": [...]}` | You'd rather expose `amps: Vector[Float]` as a kernel parameter (for documentation, sweeping, or to keep the kernel free of magic numbers), but the values are still resolved at compile time. | Same IR shape and merits as the concrete-sequence form; no need to pre-compute Möttönen angles. The implementation reads the bound concrete data at trace time via `amps.value.get_const_array()`. | Real-only (a `Vector[Float]` cannot carry complex values). `parameters=["amps"]` is rejected by design — see the angles-based runtime path below. |
-# | `amplitude_encoding_from_angles(q, ry_angles, rz_angles=None)` + `bindings={...}` | You have already pre-computed Möttönen angles (e.g. shared across multiple kernels) and want to bind them at compile time. | Compile-time bound, same recompile-per-vector cost as the routes above; works for both real (rz_angles=None) and complex inputs. | Skips the `MottonenAmplitudeEncoding` composite-gate wrapping and emits the elementary `RY` / `RZ` / `CNOT` gates directly into the IR — resource estimation sees the elementary gates rather than the high-level op. |
-# | `amplitude_encoding_from_angles(q, ry_a, rz_a)` + `parameters=[...]` | You need the **same compiled circuit** to be re-bound to many amplitude vectors at run time (hybrid optimisation loops, parameter sweeps). | Compile once, sample many times via `executable.sample(bindings={...})` — the dominant cost is no longer recompilation. The only path that supports runtime-symbolic angles. | The user (your code) must call `compute_mottonen_amplitude_encoding_*_angles(...)` per iteration to translate amplitudes → angles. Same flat-IR caveat as the bindings form. |
-# | `compute_mottonen_amplitude_encoding_ry_angles(amps)` / `compute_mottonen_amplitude_encoding_rz_angles(amps)` | You need the Gray-walk Ry / Rz angles classically — to feed the runtime-parametric path above, to cache across kernels, or to reason about the angle values directly. | Fast pure-Python / NumPy preprocessing; keeps the angle computation outside the kernel build. Real inputs always return all-zeros from the Rz helper. | Requires understanding that the returned arrays already include the bit-reverse + $M^{(k)}$ Gray-walk transform — they are not the raw per-control-state angles. |
+# - `amplitude_encoding(q, amplitudes)` — the **amplitude-based** entry
+#   used in §1–§3.  Computes Möttönen angles from the amplitudes at
+#   compile time and leaves a single `MottonenAmplitudeEncoding`
+#   composite gate in the IR.
+# - `amplitude_encoding_from_angles(q, ry_angles, rz_angles=None)` —
+#   the **angle-based** entry, which takes Möttönen angles
+#   **pre-computed** by the caller.  This is the only path that lets a
+#   single compiled circuit be re-bound at run time to many different
+#   amplitude vectors (hybrid optimisation loops, parameter sweeps).
 #
-# The package also exposes `MottonenAmplitudeEncoding` (the underlying
-# `CompositeGate` subclass) for library authors who want to embed
-# amplitude encoding into their own composite-gate decomposition; in
-# typical user code prefer `amplitude_encoding`, which is just a thin
-# `Vector[Qubit]` adapter around it.
-#
-# The next two cells exercise the two non-trivial bindings/parameters
-# entry points so you can see them in action.
+# `amplitude_encoding` further supports passing the amplitudes either as
+# (a) a concrete sequence directly, or (b) a `Vector[Float]` kernel
+# parameter resolved at compile time via `bindings={...}`.  The next two
+# subsections exercise (b) and `amplitude_encoding_from_angles` —
+# everything that was not already shown in §1–§3.
 
 # %% [markdown]
-# ### `amplitude_encoding` with a bound `Vector[Float]` parameter
+# ### 4.1 `amplitude_encoding` with a bound `Vector[Float]` parameter
+#
+# When you'd rather not bake the amplitudes in as a magic number
+# (sweeping, exposing them as documentation, ...), declare
+# `amps: Vector[Float]` as a kernel parameter and pass values via
+# `bindings={"amps": [...]}`.  The bound concrete data is read at trace
+# time, so the IR shape is identical to the concrete-sequence form from
+# §1.  Real-only (a `Vector[Float]` cannot carry complex values).
 
 
 # %%
@@ -403,14 +386,19 @@ else:
 assert raised, "expected ValueError when amps is a runtime parameter"
 
 # %% [markdown]
-# ### Runtime-parametric angles — compile once, re-bind many times
+# ### 4.2 `amplitude_encoding_from_angles` — compile once, re-bind many times
 #
-# `amplitude_encoding_from_angles` is the only path that lets us reuse
-# a single compiled circuit across different amplitude vectors at run
-# time.  Pre-compute the angles classically with the
-# `compute_mottonen_amplitude_encoding_*_angles` helpers, transpile
-# once with `parameters=[...]`, then sample with new bindings each
-# iteration.
+# `amplitude_encoding_from_angles` is the **only** path that lets us
+# reuse a single compiled circuit across different amplitude vectors at
+# run time.  Pre-compute the angles classically with the
+# `compute_mottonen_amplitude_encoding_*_angles` helpers, transpile once
+# with `parameters=[...]`, then sample with new bindings each iteration.
+# Complex inputs are supported (just pass `rz_angles`).
+#
+# Note: this path skips the `MottonenAmplitudeEncoding` composite-gate
+# wrapping and emits the elementary `RY` / `RZ` / `CNOT` gates directly
+# into the IR — resource estimation sees the elementary gates rather
+# than the high-level op.
 
 
 # %%
@@ -503,3 +491,17 @@ print(f"<Z_0> = {float(result):+.6f}   (analytic: {-1 / 3:+.6f})")
 assert np.isclose(float(result), -1.0 / 3.0, atol=1e-8), (
     "<Z_0> estimator deviated from analytic value"
 )
+
+# %% [markdown]
+# ## Summary — which API for which use case
+#
+# | Goal | Use |
+# |---|---|
+# | You have the amplitudes as a Python list / NumPy array (most common) | `amplitude_encoding(q, [...])` (§1, §2) |
+# | Expose the amplitudes as a kernel parameter, bind at compile time (real only) | `amplitude_encoding(q, amps)` + `bindings={"amps": [...]}` (§4.1) |
+# | Reuse one compiled circuit across many amplitude vectors at run time (sweeps, hybrid optimisation) | `amplitude_encoding_from_angles(q, ry, rz)` + `parameters=[...]` (§4.2) |
+# | Pre-compute the angles classically (caching, sharing across kernels, inspection) | `compute_mottonen_amplitude_encoding_{ry,rz}_angles(amps)` (`qamomile.linalg`) |
+#
+# When in doubt, start with `amplitude_encoding(q, [...])` and switch to
+# `amplitude_encoding_from_angles` only when you actually need run-time
+# rebinding — that is the typical evolution path.

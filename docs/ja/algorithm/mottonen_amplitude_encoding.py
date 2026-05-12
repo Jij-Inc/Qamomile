@@ -25,7 +25,7 @@
 # |\psi\rangle \;=\; \sum_{i=0}^{2^n - 1} a_i \, |i\rangle
 # $$
 #
-# を準備する操作です。古典データを量子状態として読み込むあらゆるアルゴリズム — HHL系の線形方程式ソルバー、カーネル法、多くの量子シミュレーションプロトコルなど — の入口にあたります。Qamomileは`qamomile.circuit.algorithm.state_preparation`の下に、Möttönen, Vartiainen, Bergholm, Salomaaの一様制御回転構成 {cite:p}`10.48550/arXiv.quant-ph/0407010` に基づいたSDK移植可能な実装を提供しています。
+# を準備する操作です。古典データを量子状態として読み込むあらゆるアルゴリズム — HHL系の線形方程式ソルバー、カーネル法、多くの量子シミュレーションプロトコルなど — の入口にあたります。Qamomileは`qamomile.circuit.algorithm.state_preparation`の下に、Möttönen, Vartiainen, Bergholm, Salomaaの一様制御回転構成 {cite:p}`10.48550/arXiv.quant-ph/0407010` に基づいたSDK移植可能な実装を提供しています (元論文は任意状態 $|a\rangle \to |b\rangle$ の変換を扱っていますが、実装では入力を $|0\rangle^{\otimes n}$ に固定した state-preparation 半分だけを emit します — 詳細は §3 のリソース推定を参照)。
 #
 # この構成は2段階からなります:
 #
@@ -40,9 +40,9 @@
 # | $R_z$回転 | $0$ | $2^n - 1$ |
 # | `CNOT` | $2^n - 2$ | $2 (2^n - 2)$ |
 #
-# このチュートリアルでは公開API表面を一通り見て、各エントリポイントを動作確認しながら、最後に「どの場面でどれを選ぶか」を一覧できる比較表を示します。
+# このチュートリアルではまず最も単純な使い方 (§1, §2) を見て、その後 IR の可視化とリソース推定 (§3)、ランタイム再バインドが効く角度 API (§4)、そしてより大きいカーネルへの組み込み (§5) と進みます。
 #
-# > ⚠️ **前提条件: 入力量子ビットは全ゼロ状態** $|0\rangle^{\otimes n}$ **でなければなりません**。Möttönenは$|0\rangle^{\otimes n}$から目標状態$|\psi\rangle$へ写すユニタリを符号化するアルゴリズムなので、それ以外の入力に適用すると別の出力 (目標振幅ベクトルとは無関係) が出てきます。Qamomileはruntimeで量子ビットの状態を追跡しないため、`amplitude_encoding(...)` / `amplitude_encoding_from_angles(...)`は`qmc.qubit_array(n, ...)`の直後、他のゲートがレジスタに触れる前に呼び出す責任は呼び出し側にあります。
+# > ⚠️ **前提条件: 入力量子ビットは全ゼロ状態** $|0\rangle^{\otimes n}$ **でなければなりません**。Qamomileの`amplitude_encoding(...)` / `amplitude_encoding_from_angles(...)`は$|0\rangle^{\otimes n}$から目標状態$|\psi\rangle$へ写すユニタリだけを emit します (Möttönen の一般構成は任意入力にも拡張できますが、実装は state-preparation の片側に特化しています)。それ以外の入力に適用すると別の出力 (目標振幅ベクトルとは無関係) が出てきます。Qamomileはruntimeで量子ビットの状態を追跡しないため、`qmc.qubit_array(n, ...)`の直後、他のゲートがレジスタに触れる前に呼び出す責任は呼び出し側にあります。
 
 # %%
 import numpy as np
@@ -63,9 +63,6 @@ from qamomile.qiskit import QiskitTranspiler
 transpiler = QiskitTranspiler()
 executor = transpiler.executor()
 
-# 以下のすべての fidelity / 確率チェックで使う許容値。
-# docs build 時にサイレントなリグレッションを検出できるくらいタイトに、
-# sampler 比較ではショットノイズを吸収できるくらいゆるく取っています。
 ATOL_STATEVECTOR = 1e-8
 ATOL_SHOT = 0.05  # 8192 shots, p(1-p)/N に対しおよそ5σ
 
@@ -168,58 +165,40 @@ assert np.isclose(fidelity(sv, expected), 1.0, atol=ATOL_STATEVECTOR), (
 # %% [markdown]
 # ## 3. 可視化とリソース推定
 #
-# カーネルが`amplitude_encoding`を使うと、IR全体ではエンコード処理が単一の`MottonenAmplitudeEncoding`コンポジットゲートとして残ります。Qamomile側の検査APIが2つそのまま機能します:
+# ### 回路の可視化 — `kernel.draw()`
 #
-# * `kernel.draw(fold_loops=False)`でIRを描画。`fold_loops=False`を渡すことで、ゲート内部の`qmc.range`がアンロールされた図が得られます（デフォルトの`True`では各ループが1ブロックに折り畳まれます）。
-# * `kernel.estimate_resources()`はIRを歩き、量子ビット数とゲート数の内訳を持つ`ResourceEstimate`を返します。コンポジットゲート展開後の基本RY / RZ / CNOTのカウントを含みます。これがゲートコスト確認のサポートされた方法であり、コンポジットゲート機構を抽象化してくれるので、ユーザコードが`_resources().custom_metadata`を直接見る必要はありません。
+# `kernel.draw(fold_loops=False)` でカーネルのIRを描画できます。`amplitude_encoding`を使ったカーネルでは、エンコード処理がまるごと単一の `MottonenAmplitudeEncoding` コンポジットゲートとしてIRに残るため、デフォルトでは中身が見えない大きい1ブロックとして表示されます。
 
 # %%
 prepare_real.draw(fold_loops=False)
 
-# %%
-prepare_complex.draw(fold_loops=False)
-
-# %%
-est_real = prepare_real.estimate_resources()
-est_complex = prepare_complex.estimate_resources()
-
-print(
-    f"real    : qubits={est_real.qubits}  total={est_real.gates.total}  "
-    f"single={est_real.gates.single_qubit}  two={est_real.gates.two_qubit}  "
-    f"rotations={est_real.gates.rotation_gates}  clifford={est_real.gates.clifford_gates}"
-)
-print(
-    f"complex : qubits={est_complex.qubits}  total={est_complex.gates.total}  "
-    f"single={est_complex.gates.single_qubit}  two={est_complex.gates.two_qubit}  "
-    f"rotations={est_complex.gates.rotation_gates}  clifford={est_complex.gates.clifford_gates}"
-)
-
-# 閉形式の参照値 (n = 2 qubits):
-#   real    Ry: 2^n - 1 = 3,  CNOT: 2^n - 2 = 2,  total = 5
-#   complex Ry: 3,  Rz: 3,  CNOT: 2 * (2^n - 2) = 4,  total = 10
-assert int(est_real.qubits) == 2
-assert int(est_real.gates.total) == 5
-assert int(est_real.gates.rotation_gates) == 3
-assert int(est_real.gates.two_qubit) == 2
-assert int(est_complex.qubits) == 2
-assert int(est_complex.gates.total) == 10
-assert int(est_complex.gates.rotation_gates) == 6
-assert int(est_complex.gates.two_qubit) == 4
-
 # %% [markdown]
-# どちらの数も$O(2^n)$で増加します。振幅エンコーディングは多量子ビットで本質的に高価です。実用上、この構成は大きいアルゴリズム内のビルディングブロックとして遭遇する小さなレジスタサイズ（HHLで4〜8論理量子ビットの入力レジスタ、サンプリングされた部分空間を持つQSCI、誤り訂正のwarm-startsなど）で最も有用であり、数百量子ビットのスタンドアロンの状態準備としてではありません。
-
-# %% [markdown]
-# ### 論文の公式値とのゲート数照合
+# 中身を覗くには `expand_composite=True` を渡します。コンポジットゲートが展開され、内部の基本 `RY` / `RZ` / `CNOT` ゲートが見えるようになります。
 #
-# Möttönen, Vartiainen, Bergholm, Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` はGray符号分解の閉形式を明示しています (Section II, Fig. 2 と Eq. (2) 直後の段落 — 論文側ではLemma / Theorem 番号は付いていません): $k$個のcontrolを持つuniformly controlled rotation は $2^k$個の基本回転と $2^k$個のCNOTに分解される。振幅エンコーディングのカスケードを構成する $n$ ステージ — $k = 0, 1, \ldots, n-1$ で stage $0$ は uncontrolled (したがって CNOT なし) — について和を取ると:
+# 実数経路では `RY` と `CNOT` のみが現れます:
+
+# %%
+prepare_real.draw(fold_loops=False, expand_composite=True)
+
+# %% [markdown]
+# 複素経路では同じ位置に `RZ` ゲートが追加で現れることが確認できます:
+
+# %%
+prepare_complex.draw(fold_loops=False, expand_composite=True)
+
+# %% [markdown]
+# ### リソース推定 — 論文の公式値との照合
+#
+# Möttönen, Vartiainen, Bergholm, Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` の Section II は、$k$個のcontrolを持つuniformly controlled rotationを $2^k$個の基本回転と $2^k$個のCNOTに分解するGray符号レシピを与えています (Section II, Fig. 2 と Eq. (2) 直後の段落 — 論文側ではLemma / Theorem番号は付いていません)。振幅エンコーディングは $k = 0, 1, \ldots, n-1$ の $n$ 個のUC回転をカスケード接続するため、stage $0$ は uncontrolled (CNOT なし) として、1 cascade あたり次の値を実現します:
 #
 # | 入力     | 回転数               | CNOT数                  |
 # |----------|---------------------:|-----------------------:|
 # | 実数     | $2^n - 1$            | $2^n - 2$              |
 # | 複素数   | $2 \cdot (2^n - 1)$  | $2 \cdot (2^n - 2)$    |
 #
-# `kernel.estimate_resources()`がこの値を正確に報告することを、複数のレジスタサイズに対して確認します。これは `MottonenAmplitudeEncoding._resources()` のメタデータを直接見るのではなく、IRを歩いてコンポジットゲートを解決するフルの推定経路を通るため、テスト的にもより強い保証になります。
+# > **論文のアブストラクトとの差異について**: 論文アブストラクトは $2^{n+2} - 5$ rotations + $2^{n+2} - 4n - 4$ CNOTs という値を提示していますが、これは**任意入力 $|a\rangle$ から任意出力 $|b\rangle$ への state-to-state 変換** ($|a\rangle \to |e_1\rangle \to |b\rangle$ の両側) のコストです。Qamomile の `amplitude_encoding` は $|0\rangle^{\otimes n} \to |\psi\rangle$ の片側だけを emit するので、上の表のとおり約半分のコストになります。なお Qamomile の実装は cascade 間の CNOT cancellation はかけていません — 各 stage ごとの素直な分解で留めています。
+#
+# `kernel.estimate_resources()` がこの値を正確に報告することを、複数のレジスタサイズに対して確認します。これは `MottonenAmplitudeEncoding._resources()` のメタデータを直接見るのではなく、IRを歩いてコンポジットゲートを解決するフルの推定経路を通るため、テスト的にもより強い保証になります。
 
 
 # %%
@@ -267,27 +246,22 @@ for n in (2, 3, 4, 5):
     assert cnot_cplx == 2 * (2**n - 2), f"複素のCNOT数が公式値と不一致 (n={n})"
 
 # %% [markdown]
-# 上記は **基本** のMöttönen-Vartiainen Gray符号カウントです。同じ論文の後半および後続研究では、ステージ間のCNOTキャンセルにより複素の場合の最適漸近コストを $2^{n+1} - 2n$ まで下げる方法が記述されています。Qamomileの実装は明確さと移植性のため、これらのキャンセル最適化を適用していません — 各ステージごとの素直な分解で留めています。したがって上のassertが正しい参照値です。
+# 回転数も CNOT 数も $n$ について $O(2^n)$ で増加します — 振幅エンコーディングは多量子ビットで本質的に高価なオペレーションです。
 
 # %% [markdown]
-# ## 4. 公開API表面 — どの場面でどれを使うか
+# ## 4. ランタイム再バインドが効く角度API
 #
-# state_preparationパッケージはユーザ向けに4つのエントリポイントを提供します (`qamomile.circuit.algorithm`からimportするもの)。下表は「どの仕事にどれを使うか」と「それぞれのトレードオフ」をまとめたものです。
+# state_preparationパッケージはユーザ向けに大きく分けて2つのエントリポイントを提供します:
 #
-# | API | こういう時に使う | メリット | デメリット |
-# |---|---|---|---|
-# | `amplitude_encoding(q, amplitudes)` (具体シーケンス) | 振幅がカーネル定義近傍のPythonリスト・numpy配列として手元にある場合。 | 呼び出しがもっとも単純。IRには単一の`MottonenAmplitudeEncoding`コンポジットゲートが残るので、リソース推定や将来のbackend native dispatch (例: `CompositeGateEmitter`経由のQiskit `StatePreparation`) の余地が保たれる。 | 振幅を変えるたびに`transpile()`が必要。 |
-# | `amplitude_encoding(q, amps)` + `bindings={"amps": [...]}` | 振幅をカーネルパラメータ`amps: Vector[Float]`として宣言したい（ドキュメント目的、掃引、マジックナンバー回避）。値はコンパイル時に解決する。 | IRの形と利点は具体シーケンス版と同じ。Möttönen角度を事前計算する必要なし。実装は`amps.value.get_const_array()`でtrace時にバインド済み具体データを読み出す。 | 実数のみ（`Vector[Float]`は複素数を運べない）。`parameters=["amps"]`は意図的に拒否される — 以下の角度ベースのrun-time pathを参照。 |
-# | `amplitude_encoding_from_angles(q, ry_angles, rz_angles=None)` + `bindings={...}` | Möttönen角度を既に事前計算済みで（複数カーネルで共有など）、コンパイル時にバインドしたい場合。 | コンパイル時バインド、再コンパイルコストは上の経路と同じ。実数 (`rz_angles=None`) でも複素入力でも動く。 | `MottonenAmplitudeEncoding`コンポジットゲートのラッピングをスキップし、基本`RY` / `RZ` / `CNOT`ゲートを直接IRに発行する — リソース推定は高レベルopではなく基本ゲート列を見ることになる。 |
-# | `amplitude_encoding_from_angles(q, ry_a, rz_a)` + `parameters=[...]` | **同じコンパイル済み回路** をrun-timeで多くの異なる振幅ベクトルに再バインドしたい場合（ハイブリッド最適化ループ、パラメータ掃引）。 | 1度コンパイル、`executable.sample(bindings={...})`で何度でもサンプル — 支配的なコストが再コンパイルでなくなる。runtime symbolic 角度をサポートする唯一の経路。 | 呼び出し側 (ユーザコード) が反復ごとに`compute_mottonen_amplitude_encoding_*_angles(...)`を呼んで振幅 → 角度の変換をする必要がある。同じflat-IRの caveat も該当。 |
-# | `compute_mottonen_amplitude_encoding_ry_angles(amps)` / `compute_mottonen_amplitude_encoding_rz_angles(amps)` | Gray-walk Ry / Rz角度を古典的に得たい場合 — 上のrun-time parametric pathに食わせる、複数カーネル間でキャッシュする、角度値そのものを推論したいなど。 | 純粋なPython / NumPyの前処理として高速。角度計算をカーネルbuildの外側に保てる。実数入力ではRzヘルパは常にゼロ配列を返す。 | 返ってくる配列が既にbit-reverse + $M^{(k)}$ Gray-walk変換済みであることを理解しておく必要あり — 生のper-control-state角度ではない。 |
+# - `amplitude_encoding(q, amplitudes)` — §1〜§3 で見てきた**振幅ベース**の入口。コンパイル時に振幅から角度を計算し、IR に単一の `MottonenAmplitudeEncoding` コンポジットゲートを残します。
+# - `amplitude_encoding_from_angles(q, ry_angles, rz_angles=None)` — Möttönen角度を**事前に計算済み**で渡す**角度ベース**の入口。同じコンパイル済み回路を runtime で異なる振幅ベクトルに何度も再バインドできるのはこちらだけです (ハイブリッド最適化ループ、パラメータ掃引向け)。
 #
-# パッケージは`MottonenAmplitudeEncoding` (内部の`CompositeGate`サブクラス) も公開していますが、これは自分のコンポジットゲート分解の中に振幅エンコーディングを埋め込みたいライブラリ作者向けの低レベルエントリです。通常のユーザコードでは、その薄い`Vector[Qubit]`アダプタである`amplitude_encoding`を使ってください。
-#
-# 次の2セルでは、上記表のうち非自明な`bindings` / `parameters`の入口を実際に動かして見せます。
+# `amplitude_encoding` はさらに、振幅の渡し方として (a) 具体シーケンスを直接渡す形と、(b) `Vector[Float]` カーネルパラメータに `bindings={...}` で値を流し込む形をサポートします。以下のサブセクションで、まだ §1〜§3 で見ていない (b) と `amplitude_encoding_from_angles` を順に動かして見せます。
 
 # %% [markdown]
-# ### `amplitude_encoding`にbound `Vector[Float]`パラメータを渡す
+# ### 4.1 `amplitude_encoding` に bound `Vector[Float]` パラメータを渡す
+#
+# 振幅をマジックナンバーとしてカーネル内に書き込みたくない (掃引したい、ドキュメント目的でパラメータとして見せたい等) 場合、`amps: Vector[Float]` をカーネルパラメータとして宣言し、`bindings={"amps": [...]}` で値を流し込めます。コンパイル時にバインド済み具体データが読まれるため、IRの形は §1 の具体シーケンス版と同一です。実数のみ対応 (`Vector[Float]`は複素数を運べないため)。
 
 
 # %%
@@ -310,7 +284,7 @@ assert np.isclose(
 )
 
 # %% [markdown]
-# `parameters=["amps"]`でパラメータをsymbolicに残そうとすると、方向付きエラーで拒否されます — 角度計算（`atan2(|a_1|, |a_0|)`など）には具体的な数値が必要なので、ランタイムへ遅延させることは本質的にできません。エラーメッセージはランタイムケース用に`amplitude_encoding_from_angles`を指し示します。
+# `parameters=["amps"]`で `amps` を symbolic に残そうとすると、方向付きエラーで拒否されます — 角度計算（`atan2(|a_1|, |a_0|)`など）には具体的な数値が必要なので、ランタイムへ遅延させることは本質的にできません。エラーメッセージはランタイムケース用に `amplitude_encoding_from_angles` を指し示します。
 
 # %%
 try:
@@ -323,9 +297,11 @@ else:
 assert raised, "ampsをruntime parameterにすると ValueError が出るはず"
 
 # %% [markdown]
-# ### Runtime parametric な角度 — 1度コンパイルして何度も再バインド
+# ### 4.2 `amplitude_encoding_from_angles` — 1度コンパイルして何度も再バインド
 #
-# `amplitude_encoding_from_angles`は、1つのコンパイル済み回路を異なる振幅ベクトルにrun-timeで再バインドできる唯一のパスです。`compute_mottonen_amplitude_encoding_*_angles`ヘルパーで角度を古典的に事前計算し、`parameters=[...]`で1度transpileしておき、反復ごとに新しいバインディングでサンプリングします。
+# `amplitude_encoding_from_angles` は、1つのコンパイル済み回路を異なる振幅ベクトルに run-time で再バインドできる**唯一**のパスです。`compute_mottonen_amplitude_encoding_*_angles` ヘルパーで角度を古典的に事前計算し、`parameters=[...]`で1度transpileしておき、反復ごとに新しいバインディングでサンプリングします。複素入力にも対応します (`rz_angles` を渡す)。
+#
+# 注意: この経路は `MottonenAmplitudeEncoding` コンポジットゲートのラッピングをスキップし、基本 `RY` / `RZ` / `CNOT` ゲートを直接 IR に発行します。リソース推定は高レベルopではなく基本ゲート列を見ることになります。
 
 
 # %%
@@ -411,3 +387,15 @@ print(f"<Z_0> = {float(result):+.6f}   (analytic: {-1 / 3:+.6f})")
 assert np.isclose(float(result), -1.0 / 3.0, atol=1e-8), (
     "<Z_0> estimator が解析値から乖離"
 )
+
+# %% [markdown]
+# ## まとめ — どのAPIをいつ使うか
+#
+# | やりたいこと | 使うAPI |
+# |---|---|
+# | 振幅をPythonリスト/numpy配列として直接持っている (もっとも一般的) | `amplitude_encoding(q, [...])` (§1, §2) |
+# | 振幅をカーネルパラメータとして見せたい・compile-time に bind したい (実数のみ) | `amplitude_encoding(q, amps)` + `bindings={"amps": [...]}` (§4.1) |
+# | 同じコンパイル済み回路を runtime で異なる振幅に何度も再バインドしたい (掃引・ハイブリッド最適化) | `amplitude_encoding_from_angles(q, ry, rz)` + `parameters=[...]` (§4.2) |
+# | 角度だけ古典的に取り出したい (キャッシュ・他カーネルと共有・解析) | `compute_mottonen_amplitude_encoding_{ry,rz}_angles(amps)` (`qamomile.linalg`) |
+#
+# 迷ったら `amplitude_encoding(q, [...])` から始めてください。runtime 再バインドの必要が出てきたら `amplitude_encoding_from_angles` に切り替える、というのが典型的な進化パスです。

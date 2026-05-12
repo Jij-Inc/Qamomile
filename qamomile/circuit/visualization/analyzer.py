@@ -887,7 +887,7 @@ class CircuitAnalyzer:
 
         if isinstance(op, CompositeGateOperation):
             label = op.name.upper()
-            box_width = self._estimate_label_box_width(label)
+            box_width = self._estimate_block_label_box_width(label)
             qubit_indices = []
             for qval in list(op.control_qubits) + list(op.target_qubits):
                 indices = self._resolve_operand_to_qubit_indices(
