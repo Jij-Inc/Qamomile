@@ -298,10 +298,11 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     into already-built sub-kernel blocks.
 
     Args:
-        qubits: Vector of qubits to transform
+        qubits (Vector[Qubit]): Vector of qubits to transform.
 
     Returns:
-        Transformed qubits (same vector, modified in place)
+        Vector[Qubit]: Transformed qubits (same vector, modified in
+            place).
 
     Example:
         @qmc.qkernel
@@ -340,10 +341,11 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     *qubits* unchanged, leaving the sub-kernel block empty.
 
     Args:
-        qubits: Vector of qubits to transform
+        qubits (Vector[Qubit]): Vector of qubits to transform.
 
     Returns:
-        Transformed qubits (same vector, modified in place)
+        Vector[Qubit]: Transformed qubits (same vector, modified in
+            place).
 
     Example:
         @qmc.qkernel

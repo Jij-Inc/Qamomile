@@ -671,6 +671,31 @@ class TestInputValidation:
             kernel.build()
 
 
+@qmc.qkernel
+def _amp_encode_with_symbolic_qubits(
+    qs: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Sub-kernel taking a Vector[Qubit] of symbolic length.
+
+    Used by ``test_symbolic_shape_qubits_raise_clear_error`` to drive
+    the ``get_size`` failure path inside ``amplitude_encoding`` and
+    confirm the API-specific error message is raised.
+    """
+    qs = amplitude_encoding(qs, [1.0, 0.0, 0.0, 0.0])
+    return qs
+
+
+class TestSymbolicShapeQubitsRejected:
+    """``amplitude_encoding`` raises an API-specific error on symbolic qubits."""
+
+    def test_symbolic_shape_qubits_raise_clear_error(self) -> None:
+        """A Vector[Qubit] without a compile-time-known size is rejected
+        with an ``amplitude_encoding``-prefixed ValueError that names the
+        binding workaround, rather than the bare ``get_size`` message."""
+        with pytest.raises(ValueError, match="amplitude_encoding requires"):
+            _amp_encode_with_symbolic_qubits.build()
+
+
 # ---------------------------------------------------------------------------
 # Kernel builders shared by every backend
 # ---------------------------------------------------------------------------

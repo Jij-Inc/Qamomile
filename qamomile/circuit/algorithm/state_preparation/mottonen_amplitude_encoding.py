@@ -264,12 +264,15 @@ class MottonenAmplitudeEncoding(CompositeGate):
         * Complex inputs whose imaginary part is identically zero (e.g.
           ``[1+0j, -1+0j]``) are silently coerced to real and follow the
           single-stage path.
-        * Construction is **lazy**: ``__init__`` only checks shape /
-          length cheaply.  Normalisation runs on the first call to
-          :meth:`_resources`; full angle precomputation runs on the
-          first call to :meth:`_decompose`.  Validation errors that
-          require inspecting the values (all-zeros, complex coercion)
-          surface at those calls, not at construction.
+        * ``__init__`` runs the cheap pass eagerly (``O(2^n)``):
+          shape / length validation, normalisation, and complex
+          detection, so input errors (wrong shape, length not a
+          power of two, all-zero amplitudes) surface at construction
+          time.  The expensive pass — full per-level angle
+          precomputation, ``O(n * 2^n)`` — is deferred until the
+          first :meth:`_decompose` call and cached afterwards.
+          :meth:`_resources` reads only the cached complex flag and
+          never triggers the angle pass.
 
     Example::
 
@@ -505,9 +508,12 @@ def amplitude_encoding(
             updated to the post-encoding qubit handle.
 
     Raises:
-        ValueError: If the amplitude length is not a power of two (or
-            is less than 2, i.e., would map to a zero-qubit register),
-            all amplitudes are zero, the qubit count does not match
+        ValueError: If *qubits* has a symbolic shape (no compile-time
+            known size — e.g., it is a sub-kernel parameter traced
+            standalone before its shape is resolved), the amplitude
+            length is not a power of two (or is less than 2, i.e.,
+            would map to a zero-qubit register), all amplitudes are
+            zero, the qubit count does not match
             ``log2(len(amplitudes))``, or *amplitudes* is a
             ``Vector[Float]`` handle whose concrete values are not
             available at trace time (use
@@ -532,7 +538,15 @@ def amplitude_encoding(
 
         transpiler.transpile(prepare, bindings={"amps": [1.0, 0.0, 0.0, 1.0]})
     """
-    n = get_size(qubits)
+    try:
+        n = get_size(qubits)
+    except ValueError as e:
+        raise ValueError(
+            "amplitude_encoding requires a Vector[Qubit] with a compile-time "
+            "known size; received a symbolic-shape vector. Bind the qubit "
+            "count via transpiler.transpile(kernel, bindings={...}) so the "
+            "Möttönen angle pre-computation can run at trace time."
+        ) from e
 
     if isinstance(amplitudes, Vector):
         const_array = amplitudes.value.get_const_array()
