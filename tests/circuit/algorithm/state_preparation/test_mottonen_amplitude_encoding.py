@@ -485,12 +485,15 @@ class TestResourceEstimationAgainstPaper:
 
     Reference: M. Möttönen, J. J. Vartiainen, V. Bergholm, M. M. Salomaa,
     "Transformation of quantum states using uniformly controlled
-    rotations", arXiv:quant-ph/0407010 (2004).  Lemma 5 (Section 3) of
-    that paper states that a ``k``-controlled uniformly controlled
-    rotation decomposes into ``2**k`` elementary rotations and ``2**k``
-    CNOTs.  Summing over the ``n`` stages of the amplitude-encoding
-    cascade — stage ``k`` for ``k = 0, 1, ..., n - 1``, where stage 0
-    is uncontrolled and contributes no CNOTs — yields the closed forms:
+    rotations", arXiv:quant-ph/0407010 (2004).  **Section II** of
+    that paper (Fig. 2 + paragraph after Eq. (2)) describes the
+    Gray-code decomposition of a ``k``-controlled uniformly
+    controlled rotation into ``2**k`` elementary rotations and
+    ``2**k`` CNOTs (the paper does not number this as a Lemma /
+    Theorem).  Summing over the ``n`` stages of the
+    amplitude-encoding cascade — stage ``k`` for
+    ``k = 0, 1, ..., n - 1``, where stage 0 is uncontrolled and
+    contributes no CNOTs — yields the closed forms:
 
     | input    | rotations         | CNOTs                |
     |----------|-------------------|----------------------|

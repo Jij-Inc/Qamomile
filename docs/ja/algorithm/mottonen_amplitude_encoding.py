@@ -41,6 +41,8 @@
 # | `CNOT` | $2^n - 2$ | $2 (2^n - 2)$ |
 #
 # このチュートリアルでは公開API表面を一通り見て、各エントリポイントを動作確認しながら、最後に「どの場面でどれを選ぶか」を一覧できる比較表を示します。
+#
+# > ⚠️ **前提条件: 入力量子ビットは全ゼロ状態** $|0\rangle^{\otimes n}$ **でなければなりません**。Möttönenは$|0\rangle^{\otimes n}$から目標状態$|\psi\rangle$へ写すユニタリを符号化するアルゴリズムなので、それ以外の入力に適用すると別の出力 (目標振幅ベクトルとは無関係) が出てきます。Qamomileはruntimeで量子ビットの状態を追跡しないため、`amplitude_encoding(...)` / `amplitude_encoding_from_angles(...)`は`qmc.qubit_array(n, ...)`の直後、他のゲートがレジスタに触れる前に呼び出す責任は呼び出し側にあります。
 
 # %%
 import numpy as np
@@ -210,7 +212,7 @@ assert int(est_complex.gates.two_qubit) == 4
 # %% [markdown]
 # ### 論文の公式値とのゲート数照合
 #
-# Möttönen, Vartiainen, Bergholm, Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` はGray符号分解の閉形式を明示しています (Lemma 5, Section 3): $k$個のcontrolを持つuniformly controlled rotation は $2^k$個の基本回転と $2^k$個のCNOTに分解される。振幅エンコーディングのカスケードを構成する $n$ ステージ — $k = 0, 1, \ldots, n-1$ で stage $0$ は uncontrolled (したがって CNOT なし) — について和を取ると:
+# Möttönen, Vartiainen, Bergholm, Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` はGray符号分解の閉形式を明示しています (Section II, Fig. 2 と Eq. (2) 直後の段落 — 論文側ではLemma / Theorem 番号は付いていません): $k$個のcontrolを持つuniformly controlled rotation は $2^k$個の基本回転と $2^k$個のCNOTに分解される。振幅エンコーディングのカスケードを構成する $n$ ステージ — $k = 0, 1, \ldots, n-1$ で stage $0$ は uncontrolled (したがって CNOT なし) — について和を取ると:
 #
 # | 入力     | 回転数               | CNOT数                  |
 # |----------|---------------------:|-----------------------:|

@@ -13,6 +13,21 @@ quantum states using uniformly controlled rotations"
 stage and the RZ "phase restoration" stage are supported, so general
 complex amplitudes work end-to-end.
 
+.. important::
+
+    **Pre-condition: the input register must be in the all-zero state**
+    :math:`|0\\rangle^{\\otimes n}`.  The Möttönen construction
+    decomposes the unitary that takes :math:`|0\\rangle^{\\otimes n}`
+    to the target :math:`|\\psi\\rangle`; applying it to any other
+    initial state yields a *different* output (the same unitary
+    applied to a different input), not the target amplitude vector.
+    There is no runtime guard for this — Qamomile does not track
+    qubit states — so it is the caller's responsibility to ensure the
+    register has not yet been mutated when ``amplitude_encoding`` /
+    ``amplitude_encoding_from_angles`` is invoked.  In practice, call
+    these helpers immediately after ``qmc.qubit_array(n, ...)``
+    inside a kernel.
+
 This module hosts only the **gate-emission side** of the algorithm:
 the ``MottonenAmplitudeEncoding`` ``CompositeGate``, the function
 wrappers ``amplitude_encoding`` / ``amplitude_encoding_from_angles``,
@@ -228,6 +243,17 @@ class MottonenAmplitudeEncoding(CompositeGate):
     for genuinely complex inputs, Z) rotations decomposed into ``RY`` /
     ``RZ`` and ``CNOT`` gates with Gray-code ordering.
 
+    .. important::
+
+        **Pre-condition: the input qubits must be in the all-zero state**
+        :math:`|0\\rangle^{\\otimes n}`.  The gate emits the unitary
+        that maps :math:`|0\\rangle^{\\otimes n}` to the target
+        :math:`|\\psi\\rangle`.  Applied to any other input it
+        produces ``U |\\phi\\rangle`` for that ``|\\phi\\rangle`` —
+        which is *not* the target amplitude vector.  Qamomile does
+        not track qubit states at runtime, so this is the caller's
+        responsibility.
+
     Notes:
         * Input amplitudes are normalised automatically.
         * Real inputs (negative entries allowed) use a single RY stage:
@@ -428,6 +454,16 @@ def amplitude_encoding(
     see the class docstring for the gate-count tradeoff between the two
     paths.
 
+    .. important::
+
+        **Pre-condition: ``qubits`` must currently be in the all-zero
+        state** :math:`|0\\rangle^{\\otimes n}`.  Möttönen encodes the
+        unitary that takes :math:`|0\\rangle^{\\otimes n}` to the
+        normalised target; applied to any other state it produces a
+        different (in general meaningless) output.  In practice call
+        this immediately after ``qmc.qubit_array(n, ...)`` inside a
+        kernel.
+
     *amplitudes* may be supplied as one of three forms:
 
     * A concrete Python ``Sequence[float]`` / ``Sequence[complex]`` /
@@ -535,6 +571,16 @@ def amplitude_encoding_from_angles(
     rz_angles: Sequence[float] | np.ndarray | Vector[Float] | None = None,
 ) -> Vector[Qubit]:
     """Apply Möttönen amplitude encoding from pre-computed Ry / Rz angles.
+
+    .. important::
+
+        **Pre-condition: ``qubits`` must currently be in the all-zero
+        state** :math:`|0\\rangle^{\\otimes n}`.  The Möttönen Gray-walk
+        emission produced by these angle vectors only encodes the
+        intended state when starting from :math:`|0\\rangle^{\\otimes n}`;
+        applied to any other input it produces ``U |\\phi\\rangle`` for
+        the same ``U`` and a different ``|\\phi\\rangle``, which is in
+        general not the target amplitude vector.
 
     Companion to :func:`amplitude_encoding` for the **parametric** use
     case: the user pre-computes the Gray-walk Ry (and optionally Rz)

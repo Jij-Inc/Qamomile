@@ -56,6 +56,16 @@
 # This tutorial walks through the public API surface, demonstrates each
 # entry point with a runnable example, and ends with a comparison table
 # you can use to decide which API to reach for in your own code.
+#
+# > ⚠️ **Pre-condition: the input qubits must be in the all-zero state**
+# > $|0\rangle^{\otimes n}$.  Möttönen encodes the unitary that maps
+# > $|0\rangle^{\otimes n}$ to the target $|\psi\rangle$; applied to
+# > any other input it produces a different output, *not* the target
+# > amplitude vector.  Qamomile does not track qubit states at runtime,
+# > so it is the caller's responsibility to invoke
+# > `amplitude_encoding(...)` / `amplitude_encoding_from_angles(...)`
+# > immediately after `qmc.qubit_array(n, ...)`, before any other gates
+# > touch the register.
 
 # %%
 import numpy as np
@@ -254,11 +264,13 @@ assert int(est_complex.gates.two_qubit) == 4
 #
 # Möttönen, Vartiainen, Bergholm and Salomaa
 # {cite:p}`10.48550/arXiv.quant-ph/0407010` give an explicit closed
-# form for the Gray-code decomposition (Lemma 5, Section 3): a
-# $k$-controlled uniformly controlled rotation costs $2^k$ elementary
-# rotations and $2^k$ CNOTs.  Summing over the $n$ stages of the
-# amplitude-encoding cascade — stage $k$ for $k = 0, 1, \ldots, n-1$,
-# with stage $0$ uncontrolled (and therefore CNOT-free) — yields:
+# form for the Gray-code decomposition (Section II, Fig. 2 +
+# paragraph after Eq. (2) — the paper does not number this as a
+# Lemma / Theorem): a $k$-controlled uniformly controlled rotation
+# costs $2^k$ elementary rotations and $2^k$ CNOTs.  Summing over
+# the $n$ stages of the amplitude-encoding cascade — stage $k$ for
+# $k = 0, 1, \ldots, n-1$, with stage $0$ uncontrolled (and therefore
+# CNOT-free) — yields:
 #
 # | input    | rotations            | CNOTs                  |
 # |----------|---------------------:|-----------------------:|

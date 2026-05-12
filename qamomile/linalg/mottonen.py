@@ -3,22 +3,37 @@
 Pure classical preprocessing for the Möttönen amplitude-encoding
 construction.  Takes an amplitude vector and returns the Gray-walk
 ``Ry`` (and, for complex inputs, ``Rz``) angle vectors that the
-Möttönen Gray-code emission consumes.
+Möttönen Gray-code emission consumes — assuming that the target
+register starts in :math:`|0\\rangle^{\\otimes n}`.  See
+:mod:`qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding`
+for the gate-emission side and the all-zero-state pre-condition.
 
-The actual quantum gate emission lives in
-:mod:`qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding`;
-this module contains only the numerical maths so that the math can
-also be used standalone — for example, by hybrid-optimisation loops
-that pre-compute angle vectors outside any kernel and then feed them
-into ``amplitude_encoding_from_angles`` via ``parameters=[...]``.
+The math here is intentionally separated from gate emission so it
+can also be used standalone — e.g., by hybrid-optimisation loops
+that pre-compute angle vectors outside any kernel and then feed
+them into ``amplitude_encoding_from_angles`` via
+``parameters=[...]``.
 
-Reference:
-    M. Möttönen, J. J. Vartiainen, V. Bergholm, M. M. Salomaa,
-    "Transformation of quantum states using uniformly controlled
-    rotations", arXiv:quant-ph/0407010 (2004).  Lemma 5 of Section 3
-    gives the ``2^k`` rotation / ``2^k`` CNOT count per uniformly
-    controlled rotation that the Gray-walk angle vectors below
-    ultimately drive.
+Reference
+---------
+
+M. Möttönen, J. J. Vartiainen, V. Bergholm, M. M. Salomaa,
+"Transformation of quantum states using uniformly controlled
+rotations", arXiv:quant-ph/0407010 (2004).  Equation / section
+numbers cited in individual function docstrings below refer to this
+paper.  In particular:
+
+* The Gray-code decomposition of a ``k``-control uniformly
+  controlled rotation into ``2^k`` single-qubit rotations + ``2^k``
+  CNOTs is described in **Section II**, around **Fig. 2** and the
+  paragraph immediately after **Eq. (2)** (the paper does not number
+  this as a Lemma / Theorem).
+* The angle-basis transform ``θ = M^(k) α`` linking per-state
+  rotation angles ``α`` to elementary Gray-walk angles ``θ`` is
+  **Eq. (3)** of Section II.
+* Application to state preparation, including the iterative
+  disentangling for general (complex) amplitudes, is in
+  **Section III**, **Eqs. (4)-(8)**.
 """
 
 from __future__ import annotations
@@ -46,6 +61,11 @@ __all__ = [
 def _gray_code(n: int) -> int:
     """Return the binary-reflected Gray code of *n*.
 
+    Used to index the elementary Gray-walk angles consumed by the
+    Möttönen-Vartiainen decomposition (arXiv:quant-ph/0407010,
+    Section II — the binary reflected Gray code ``g_i`` appears in
+    the exponent of **Eq. (3)**).
+
     Args:
         n (int): Non-negative integer to encode.
 
@@ -57,6 +77,17 @@ def _gray_code(n: int) -> int:
 
 def _bit_reverse(value: int, num_bits: int) -> int:
     """Reverse the *num_bits* lowest bits of *value*.
+
+    This is **not a step the paper itself names** — it is an
+    implementation-side bridge between two indexing conventions.  The
+    recursive amplitude-chunk layout used by
+    :func:`compute_all_ry_angles_per_level` /
+    :func:`compute_disentangling_angles_per_level` numbers chunks
+    big-endian (chunk index 0 = controls all zero in the
+    most-significant order), while the matrix in
+    :func:`_compute_angle_transform_matrix` (paper **Eq. (3)**) is
+    indexed in the little-endian convention.  Bit-reversing the
+    chunk index converts between the two before applying ``M^(k)``.
 
     Args:
         value (int): Non-negative integer whose low bits are reversed.
@@ -73,16 +104,19 @@ def _bit_reverse(value: int, num_bits: int) -> int:
 def _compute_angle_transform_matrix(k: int) -> np.ndarray:
     """Build the :math:`M^{(k)}` matrix that maps per-state angles to Gray-walk angles.
 
-    The matrix is
+    Implements **Eq. (3)** of Möttönen et al.,
+    arXiv:quant-ph/0407010 (Section II):
 
     .. math::
 
         M^{(k)}_{ij} = \\frac{1}{2^k}\\,(-1)^{\\,b(g_i)\\cdot b(j)},
 
     where ``g_i`` is the Gray code of ``i`` and ``b(\\cdot)\\cdot b(\\cdot)``
-    denotes the bitwise inner product modulo 2.  This is the closed-form
-    transform from Möttönen-Vartiainen for decomposing a uniformly
-    controlled rotation into elementary RY / CNOT gates.
+    denotes the bitwise inner product modulo 2.  This is the
+    closed-form transform that turns the per-control-state rotation
+    angles ``α`` into the elementary Gray-walk angles ``θ`` consumed
+    by the ``2^k`` rotation / ``2^k`` CNOT decomposition (paper
+    Section II, Fig. 2 + paragraph after Eq. (2)).
 
     Cached at module scope (``functools.lru_cache``) because every
     public entry point reaches :func:`_to_gray_walk_basis`, which in
@@ -119,6 +153,11 @@ def validate_and_normalize_amplitudes(
     amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
 ) -> tuple[np.ndarray, int, bool]:
     """Validate an amplitude vector and return its normalised form.
+
+    The Möttönen construction (arXiv:quant-ph/0407010, Section III)
+    works on a unit-norm amplitude vector indexed by computational
+    basis states; this helper enforces that pre-condition so the
+    downstream angle computation can assume a well-formed input.
 
     Inputs may be real or complex.  A complex input whose imaginary
     part is identically zero (within ``np.allclose`` tolerance) is
@@ -193,20 +232,22 @@ def _to_gray_walk_basis(
 ) -> list[np.ndarray]:
     """Convert per-control-state angles to the Gray-walk angle basis.
 
-    The Möttönen Gray-walk emission interleaves elementary rotations
-    with CNOTs in a Gray-code order; the elementary angles consumed by
-    that emission are obtained from the natural per-control-state
-    angles by a level-wise bit-reverse permutation followed by
-    multiplication by the level's transform matrix
-    (see :func:`_compute_angle_transform_matrix`).  Used by both the
-    Ry (magnitude) stage and the Rz (phase) stage; the structure is
-    identical.
+    Per-level application of paper **Eq. (3)** (Möttönen et al.,
+    arXiv:quant-ph/0407010, Section II):
+    ``θ = M^(k) α``.  The Gray-walk emission interleaves ``2^k``
+    elementary rotations with ``2^k`` CNOTs in a Gray-code order
+    (Section II, Fig. 2); ``M^(k)`` (built by
+    :func:`_compute_angle_transform_matrix`) is the closed-form
+    transform from the natural per-control-state angles ``α`` to the
+    elementary Gray-walk angles ``θ``.  Used identically by the Ry
+    (magnitude) and Rz (phase) stages.
 
-    The bit-reverse step converts between two indexing conventions:
-    the recursive chunk layout uses big-endian control labels (chunk
-    index ``0`` = controls all zero in the most-significant order),
-    while the gate emission walks Gray codes in the little-endian
-    convention.
+    The bit-reverse step is **not in the paper as a numbered step**
+    (see :func:`_bit_reverse`); it is an implementation bridge
+    between the recursive big-endian chunk indexing used by
+    :func:`compute_all_ry_angles_per_level` /
+    :func:`compute_disentangling_angles_per_level` and the
+    little-endian indexing assumed by ``M^(k)``.
 
     Args:
         per_level_angles (list[np.ndarray]): Per-level angle arrays in
@@ -238,21 +279,30 @@ def compute_all_ry_angles_per_level(
 ) -> list[np.ndarray]:
     """Pre-compute every level's Ry rotation angle vector (magnitude stage).
 
+    Implements the recursive magnitude-stage angle formula given in
+    Möttönen et al., arXiv:quant-ph/0407010, **Section III, Eq. (8)**
+    (with the leaf case matching the unnumbered angle
+    ``2 \\arcsin(|a_{2j}| / \\sqrt{|a_{2j-1}|^2 + |a_{2j}|^2})``
+    just before **Eq. (6)**, equivalent to ``2 atan2(|a_1|, |a_0|)``
+    on the leaf pair).  The pre-condition is the all-zero state
+    :math:`|0\\rangle^{\\otimes n}`; the formulas below describe the
+    angles needed to reach a real ``amplitudes`` from there.
+
     For each level ``k`` (``0 <= k < num_qubits``) the amplitude
     vector is split into ``2**k`` equal chunks.  Each chunk yields one
-    per-control-state angle (called ``alpha`` in
-    Möttönen-Vartiainen):
+    per-control-state angle ``α`` (Eq. (8)):
 
     * **Intermediate levels** (``chunk_size > 2``): the angle rotates
       the target qubit so its ``|1>`` weight matches the lower-half
       block norm.  Using ``arctan2(norm_lower, norm_upper)`` keeps the
       formula well defined when the upper half has zero norm.
     * **Leaf level** (``chunk_size == 2``):
-      ``alpha = 2 * arctan2(a_1, a_0)`` directly, which is signed and
-      therefore preserves negative amplitudes.
+      ``α = 2 * arctan2(a_1, a_0)`` directly (signed, so negative
+      amplitudes are preserved without a phase stage).
 
     For ``k >= 1`` the per-control-state angles are then transformed
-    to the Gray-walk basis via :func:`_to_gray_walk_basis`.
+    to the Gray-walk basis via :func:`_to_gray_walk_basis` (paper
+    **Eq. (3)**).
 
     Args:
         amplitudes (np.ndarray): Unit-norm real amplitude vector of
@@ -288,26 +338,45 @@ def compute_disentangling_angles_per_level(
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Iteratively disentangle to obtain both Ry and Rz angles per level.
 
-    Implements the standard Möttönen disentangling sweep from LSB to
-    MSB.  At each step the amplitude vector is halved by pairing
-    adjacent entries; for the pair ``(a_0, a_1)`` we read off
+    Implements the Möttönen disentangling sweep for general (complex)
+    amplitudes from Möttönen et al., arXiv:quant-ph/0407010,
+    **Section III, Eqs. (4)-(8)**: the phase-equalisation rotation
+    ``Ξ_z`` (Eq. (4)) followed by the magnitude rotation, applied
+    pair-by-pair from LSB to MSB.  Pre-condition is the all-zero
+    state :math:`|0\\rangle^{\\otimes n}`; the angles below are
+    those needed to *reach* the input ``amplitudes`` from there
+    (computed via the inverse sweep that disentangles the input).
 
-    * ``Ry angle = 2 * arctan2(|a_1|, |a_0|)`` (magnitude split),
-    * ``Rz angle = arg(a_1 / a_0)`` (phase difference),
+    At each step the amplitude vector is halved by pairing adjacent
+    entries; for the pair ``(a_0, a_1)`` we read off
+
+    * ``Ry angle = 2 * arctan2(|a_1|, |a_0|)`` (magnitude split,
+      paper **Eq. (8)** restricted to the leaf level — equivalently
+      the unnumbered ``2 arcsin(...)`` form just before **Eq. (6)**),
+    * ``Rz angle = arg(a_1 / a_0)`` (phase difference, paper
+      **Eq. (5)**),
 
     and replace the pair with the single complex amplitude that
-    survives the implicit ``Rz^{-1} Ry^{-1}`` disentangling step:
+    survives the implicit ``Rz^{-1} Ry^{-1}`` disentangling step
+    (paper **Eq. (6)** zeros out one of the pair entries; the
+    surviving amplitude is
 
     .. math::
 
         \\beta = \\sqrt{|a_0|^2 + |a_1|^2} \\,
-                 \\exp\\!\\left(i\\,\\frac{\\arg a_0 + \\arg a_1}{2}\\right).
+                 \\exp\\!\\left(i\\,\\frac{\\arg a_0 + \\arg a_1}{2}\\right),
+
+    which carries the averaged phase needed by the next outer step
+    of the sweep — the paper does not write ``β`` in this exact
+    closed form but the relation falls out of combining
+    Eqs. (5)-(7)).  The full sweep is paper **Eq. (7)**.
 
     Zero-magnitude halves are handled gracefully by leaving the
     corresponding angle at ``0`` (the underlying state has no support
     there so the angle is immaterial).  The returned per-level arrays
-    are already bit-reversed and gray-walk-transformed, ready for the
-    Möttönen Gray-walk emission.
+    are already bit-reversed and gray-walk-transformed (paper
+    **Eq. (3)** applied per level via :func:`_to_gray_walk_basis`),
+    ready for the Möttönen Gray-walk emission.
 
     Args:
         amplitudes (np.ndarray): Unit-norm complex amplitude vector of
