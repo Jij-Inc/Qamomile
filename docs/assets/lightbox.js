@@ -15,7 +15,10 @@
 // DOMContentLoaded, and (b) re-bind on subsequent client-side
 // navigations via a MutationObserver on document.body. Each target
 // node is tagged with `data-qamomileLightbox="1"` once bound so
-// repeated MutationObserver fires do not stack handlers.
+// repeated MutationObserver fires do not stack handlers. The observer
+// callback itself is coalesced via requestAnimationFrame so a
+// hydration burst that mutates the DOM many times in one frame only
+// runs one bindAll() per frame.
 (function () {
   "use strict";
 
@@ -29,27 +32,66 @@
 
   var OVERLAY_ID = "qamomile-lightbox-overlay";
   var DATA_FLAG = "qamomileLightbox";
+  // Saved across openOverlay() / closeOverlay() so we can return focus
+  // to the element the user activated the lightbox from once they
+  // dismiss it (a11y requirement for `role="dialog"`).
+  var previouslyFocused = null;
 
   function closeOverlay() {
     var overlay = document.getElementById(OVERLAY_ID);
     if (overlay) {
       overlay.remove();
     }
-    document.removeEventListener("keydown", onEscape, true);
+    document.removeEventListener("keydown", onOverlayKeydown, true);
+    if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+      try {
+        previouslyFocused.focus();
+      } catch (_) {
+        // Element may have been detached during SPA navigation; the
+        // failed restoration is harmless — focus simply falls back to
+        // <body>.
+      }
+    }
+    previouslyFocused = null;
   }
 
-  function onEscape(event) {
+  function onOverlayKeydown(event) {
     if (event.key === "Escape") {
+      event.preventDefault();
       closeOverlay();
+      return;
+    }
+    if (event.key === "Tab") {
+      // The overlay is the only focusable element in its subtree
+      // (the cloned <img>/<svg> is not interactive), so trapping
+      // focus is just keeping the overlay focused on every Tab.
+      event.preventDefault();
+      var overlay = document.getElementById(OVERLAY_ID);
+      if (overlay) {
+        overlay.focus();
+      }
     }
   }
 
   function openOverlay(node) {
     closeOverlay(); // ensure only one overlay at a time
+    previouslyFocused =
+      document.activeElement && document.activeElement !== document.body
+        ? document.activeElement
+        : node;
+
     var overlay = document.createElement("div");
     overlay.id = OVERLAY_ID;
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute(
+      "aria-label",
+      "Enlarged figure preview. Press Escape or click outside to close."
+    );
+    // tabindex="-1" so focus() works without injecting the overlay
+    // into the natural Tab order; the explicit Tab handler above
+    // keeps focus on the overlay while it is open.
+    overlay.setAttribute("tabindex", "-1");
     overlay.style.cssText = [
       "position: fixed",
       "inset: 0",
@@ -61,6 +103,7 @@
       "cursor: zoom-out",
       "overflow: auto",
       "padding: 2vmin",
+      "outline: none",
     ].join(";");
 
     // The cloned content sits in a white card so SVG strokes / dark
@@ -102,7 +145,11 @@
     overlay.addEventListener("click", closeOverlay);
 
     document.body.appendChild(overlay);
-    document.addEventListener("keydown", onEscape, true);
+    document.addEventListener("keydown", onOverlayKeydown, true);
+    // Move focus to the overlay so subsequent keyboard input
+    // (Escape / Tab) is captured by the dialog instead of leaking to
+    // the underlying page.
+    overlay.focus();
   }
 
   function bindOne(node) {
@@ -129,13 +176,24 @@
     }
   }
 
+  // Coalesce MutationObserver fires via requestAnimationFrame so a
+  // hydration burst that triggers many subtree mutations in one frame
+  // runs `bindAll()` (and its full querySelectorAll) only once per
+  // frame. Mirrors the pattern in colab-launch.js.
+  var bindScheduled = false;
+  function scheduleBind() {
+    if (bindScheduled) return;
+    bindScheduled = true;
+    window.requestAnimationFrame(function () {
+      bindScheduled = false;
+      bindAll();
+    });
+  }
+
   function init() {
     bindAll();
     if (typeof MutationObserver === "function") {
-      var observer = new MutationObserver(function () {
-        // Coalesce — bindAll is idempotent thanks to the data flag.
-        bindAll();
-      });
+      var observer = new MutationObserver(scheduleBind);
       observer.observe(document.body, {
         childList: true,
         subtree: true,

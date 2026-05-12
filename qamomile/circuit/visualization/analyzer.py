@@ -2857,10 +2857,19 @@ class CircuitAnalyzer:
           when the dict was bound at ``transpile`` / ``draw`` time via
           ``bindings={"d": {0: 1.0, ...}}``.
 
-        Both encodings can iterate zero times (empty IR ``entries`` or
-        empty bound mapping). The two empty cases collapse to the same
-        observable behaviour at visualization time, so callers do not
-        need to distinguish them.
+        The runtime-metadata branch distinguishes "bound but empty" by
+        checking ``metadata.dict_runtime is not None`` directly (so a
+        dict bound to ``{}`` returns ``[]`` and renders as ``VSkip``).
+        The IR-entries branch only fires when ``DictValue.entries`` is
+        truthy: an empty IR ``entries`` tuple is treated as the
+        "unbound parameter placeholder" case (every kernel-parameter
+        ``Dict`` is constructed with ``entries=()``) and falls through
+        to ``None``, which the caller renders as a folded box. There
+        is currently no way for a kernel to declare a literal empty
+        ``DictValue`` whose contents are knowable to be empty without
+        also setting ``dict_runtime`` — if that ever becomes possible
+        the IR-entries branch needs the same "is the entries field
+        explicitly empty?" check the runtime branch already does.
 
         Callers (`_build_vfor_items`, `build_qubit_map`'s ForItems
         branch) handle the union shape by sniffing each pair —
