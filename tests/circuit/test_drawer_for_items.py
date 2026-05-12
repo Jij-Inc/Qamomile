@@ -85,9 +85,7 @@ class TestEmptyBoundDictForItems:
 
     def test_empty_dict_under_fold_loops_false_skips(self):
         """Empty bound Dict yields VSkip, not VFoldedBlock(FOR_ITEMS)."""
-        vc = _build_visual_circuit(
-            kernel_with_dict, fold_loops=False, n=3, coeffs={}
-        )
+        vc = _build_visual_circuit(kernel_with_dict, fold_loops=False, n=3, coeffs={})
         nodes = list(_walk_visual_nodes(vc.children))
 
         folded_for_items = [
@@ -101,15 +99,13 @@ class TestEmptyBoundDictForItems:
         )
 
         # The empty loop should appear as VSkip (zero-iteration unfold).
-        assert any(
-            isinstance(n, VSkip) for n in nodes
-        ), "Empty bound Dict ForItems should collapse to a VSkip node."
+        assert any(isinstance(n, VSkip) for n in nodes), (
+            "Empty bound Dict ForItems should collapse to a VSkip node."
+        )
 
     def test_empty_dict_under_fold_loops_true_still_folds(self):
         """fold_loops=True keeps the canonical folded view, even when empty."""
-        vc = _build_visual_circuit(
-            kernel_with_dict, fold_loops=True, n=3, coeffs={}
-        )
+        vc = _build_visual_circuit(kernel_with_dict, fold_loops=True, n=3, coeffs={})
         nodes = list(_walk_visual_nodes(vc.children))
         folded_for_items = [
             n
@@ -130,8 +126,7 @@ class TestEmptyBoundDictForItems:
         unfolded_for_items = [
             n
             for n in _walk_visual_nodes(vc.children)
-            if isinstance(n, VUnfoldedSequence)
-            and n.kind == VUnfoldedKind.FOR_ITEMS
+            if isinstance(n, VUnfoldedSequence) and n.kind == VUnfoldedKind.FOR_ITEMS
         ]
         assert len(unfolded_for_items) == 1, (
             f"Expected exactly one unfolded ForItems sequence; got "
@@ -161,9 +156,7 @@ class TestForItemsValueVarSubstitutesIntoBinOpLabels:
     def test_ising_cost_rzz_labels_show_concrete_coefficients(self):
         """One RZZ per quad entry, each label has the entry's coefficient."""
         coeffs = {(0, 1): 0.5, (1, 2): -0.3, (0, 2): 0.7}
-        block = ising_cost._build_graph_for_visualization(
-            q=3, quad=coeffs, linear={}
-        )
+        block = ising_cost._build_graph_for_visualization(q=3, quad=coeffs, linear={})
         analyzer = CircuitAnalyzer(
             block,
             DEFAULT_STYLE,
