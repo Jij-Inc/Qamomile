@@ -495,6 +495,117 @@ def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
     return True
 
 
+# Match ``id="cite-…"`` on the rendered bibliography ``<li>``. mystmd
+# derives ``…`` from the citation's label, which for DOI-resolved
+# citations is the full URL (e.g.
+# ``cite-https://doi.org/10.48550/arxiv.quant-ph/0407010``). The ``/``,
+# ``:`` and ``.`` chars in that string cause React's client-side
+# hydration to fail to reconcile the SSR ``<li>`` against its computed
+# tree, and the failure cascades: a single citation `<li>` produces on
+# the order of 150 React #418 errors during hydration, each of which
+# is a hydration-mismatch recovery that re-renders the surrounding
+# subtree client-side and is visible to the user as a flicker on the
+# affected cell outputs. Replacing the unsafe chars with ``-`` so the
+# id matches what React would compute on the client eliminates the
+# mismatch.
+#
+# We anchor on the ``id=`` prefix so the regex does not accidentally
+# rewrite the citation's visible label text (which legitimately
+# contains ``https://`` etc.) or the ``href`` of the citation link
+# (which legitimately points at the doi.org URL).
+_CITE_ID_RE = re.compile(r'(?P<prefix>\sid=")cite-(?P<value>[^"]+)"', re.IGNORECASE)
+# Cross-references back into the bibliography ``<li>`` use a fragment
+# of the form ``href="#cite-…"``. mystmd doesn't emit these in our
+# tagged-pill citation style today, but the upstream renderer can add
+# them, and our sanitization needs to keep the two in sync so anchors
+# still resolve.
+_CITE_HREF_RE = re.compile(r'(?P<prefix>href=")#cite-(?P<value>[^"]+)"', re.IGNORECASE)
+# Chars React's hydration tolerates in attribute values; everything
+# else gets collapsed to a single ``-``. Underscore is included
+# because it is HTML5-id-safe and appears in some upstream citation
+# labels.
+_UNSAFE_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _sanitize_cite_id(raw: str) -> str:
+    """Collapse non-safe chars in a cite ID to ``-``, stripping edges.
+
+    Args:
+        raw (str): The original suffix after ``cite-`` (e.g. the URL
+            ``https://doi.org/10.48550/arxiv.quant-ph/0407010``).
+
+    Returns:
+        str: An id-safe suffix using only ``[A-Za-z0-9_-]`` with no
+            leading or trailing ``-``. Always non-empty for non-empty
+            input.
+    """
+    safe = _UNSAFE_ID_CHARS.sub("-", raw).strip("-")
+    return safe or "id"
+
+
+def sanitize_cite_ids(html_path: Path) -> bool:
+    """Rewrite mystmd's ``<li id="cite-…">`` ids to React-safe chars.
+
+    Background: mystmd renders bibliography entries with HTML ids of
+    the form ``id="cite-<label>"``. For citations resolved by DOI, the
+    ``<label>`` is the full URL — containing ``/``, ``:``, and ``.``,
+    all of which sit outside what React's hydration is willing to
+    treat as equivalent across SSR vs client computation. The result
+    on every page that ships a DOI-style citation (mottonen,
+    qsci, …) is a cascade of ~150 React #418 hydration-mismatch
+    errors, each of which recovers by re-rendering its enclosing
+    subtree client-side, which manifests to the user as a multi-second
+    flicker of the cell outputs sitting near the bibliography. The
+    surrounding preload guard (see ``THEME_INIT_SCRIPT``) is bounded
+    to a ~5 s hard cap, so on slow networks the flicker re-emerges
+    past the cap and is back in the user's face. Removing it at the
+    source is the structural fix.
+
+    Strategy: rewrite ``id="cite-<unsafe>"`` to
+    ``id="cite-<unsafe-collapsed-to-A-Za-z0-9_->"`` in place, and
+    keep any matching ``href="#cite-…"`` cross-references in sync so
+    fragment anchors still resolve. Idempotent: a second run on the
+    same HTML is a no-op because the sanitized form contains no
+    unsafe chars to collapse.
+
+    Args:
+        html_path (Path): The HTML file to patch in place.
+
+    Returns:
+        bool: True if at least one ``id`` or ``href`` was rewritten,
+            False otherwise (page carries no citation ids, or the ids
+            were already sanitized).
+    """
+    content = html_path.read_text(encoding="utf-8")
+    changed = False
+
+    def _id_repl(match: re.Match[str]) -> str:
+        nonlocal changed
+        original = match.group("value")
+        sanitized = _sanitize_cite_id(original)
+        if sanitized == original:
+            return match.group(0)
+        changed = True
+        return f'{match.group("prefix")}cite-{sanitized}"'
+
+    def _href_repl(match: re.Match[str]) -> str:
+        nonlocal changed
+        original = match.group("value")
+        sanitized = _sanitize_cite_id(original)
+        if sanitized == original:
+            return match.group(0)
+        changed = True
+        return f'{match.group("prefix")}#cite-{sanitized}"'
+
+    new_content = _CITE_ID_RE.sub(_id_repl, content)
+    new_content = _CITE_HREF_RE.sub(_href_repl, new_content)
+
+    if not changed:
+        return False
+    html_path.write_text(new_content, encoding="utf-8")
+    return True
+
+
 def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
     """Rewrite ``docs/_build_src/<lang>/`` → ``docs/<lang>/`` in ``target_path``.
 
@@ -527,7 +638,7 @@ def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
 
 def patch_language_build(
     docs_root: Path, language: str
-) -> tuple[int, int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int, int, int]:
     """Run all post-build patches for one language's build output.
 
     Patches applied:
@@ -548,10 +659,16 @@ def patch_language_build(
        on every ``*.html`` (see :func:`inject_lightbox_script_tag`)
        so wide cell-output images become click-to-zoom modals on the
        rendered page.
+    6. Sanitize bibliography ``<li id="cite-…">`` ids to
+       ``[A-Za-z0-9_-]`` (see :func:`sanitize_cite_ids`). DOI-resolved
+       citations otherwise carry ids whose ``/`` / ``:`` chars cause
+       React hydration to fail-and-recover in a cascade visible as a
+       multi-second flicker around the bibliography.
 
     Returns:
         ``(injected_count, rewritten_count, css_inlined_count,
-        theme_init_count, lightbox_count, total_html, total_json)``.
+        theme_init_count, lightbox_count, cite_sanitized_count,
+        total_html, total_json)``.
     """
     html_root = docs_root / language / "_build" / "html"
     if not html_root.exists():
@@ -580,6 +697,7 @@ def patch_language_build(
     css_inlined_count = 0
     theme_init_count = 0
     lightbox_count = 0
+    cite_sanitized_count = 0
 
     # Rewrite build-dir paths across HTML + JSON. JSON is the SPA's data
     # layer; without rewriting it, post-navigation re-hydration puts the
@@ -612,6 +730,8 @@ def patch_language_build(
         relative_lightbox = Path(relative_lightbox).as_posix()
         if inject_lightbox_script_tag(html_file, relative_lightbox):
             lightbox_count += 1
+        if sanitize_cite_ids(html_file):
+            cite_sanitized_count += 1
 
     return (
         injected_count,
@@ -619,6 +739,7 @@ def patch_language_build(
         css_inlined_count,
         theme_init_count,
         lightbox_count,
+        cite_sanitized_count,
         len(html_files),
         len(json_files),
     )
@@ -636,6 +757,7 @@ def main() -> int:
             css_inlined_count,
             theme_init_count,
             lightbox_count,
+            cite_sanitized_count,
             total_html,
             total_json,
         ) = patch_language_build(docs_root, language)
@@ -644,6 +766,7 @@ def main() -> int:
             f"injected lightbox script into {lightbox_count}/{total_html} HTML, "
             f"inlined theme CSS into {css_inlined_count}/{total_html} HTML, "
             f"injected theme-init script into {theme_init_count}/{total_html} HTML, "
+            f"sanitized cite ids in {cite_sanitized_count}/{total_html} HTML, "
             f"rewrote build-dir paths in {rewritten_count}/{total_html + total_json} "
             f"({total_html} HTML + {total_json} JSON)"
         )
