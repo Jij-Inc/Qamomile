@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block
@@ -2840,35 +2841,63 @@ class CircuitAnalyzer:
     @staticmethod
     def _materialize_dict_entries(
         dict_value: Value,
-    ) -> list[tuple] | None:
-        """Extract entries from DictValue, including bound_data in metadata.
+    ) -> Sequence[tuple] | None:
+        """Extract entries from a DictValue from either IR or runtime metadata.
 
-        DictValue.entries is typically empty when data is bound at build
-        time; the actual data lives in typed runtime metadata. This helper
-        materializes those entries into a plain list of (key, value) tuples
-        where keys and values are raw Python objects (not IR Values).
+        A ``DictValue`` carries entries in one of two complementary
+        encodings depending on how it was constructed:
+
+        * **IR-level**: ``DictValue.entries`` is a tuple of
+          ``(TupleValue | Value, Value)`` pairs — IR Values, not
+          plain Python objects. Used when the dict was built inside a
+          kernel (e.g. literal ``{i: x[i]}`` against symbolic
+          parameters).
+        * **Runtime metadata**: ``DictValue.metadata.dict_runtime.bound_data``
+          holds a tuple of ``(raw_key, raw_value)`` Python pairs. Used
+          when the dict was bound at ``transpile`` / ``draw`` time via
+          ``bindings={"d": {0: 1.0, ...}}``.
+
+        Both encodings can iterate zero times (empty IR ``entries`` or
+        empty bound mapping). The two empty cases collapse to the same
+        observable behaviour at visualization time, so callers do not
+        need to distinguish them.
+
+        Callers (`_build_vfor_items`, `build_qubit_map`'s ForItems
+        branch) handle the union shape by sniffing each pair —
+        ``hasattr(entry_key, "elements")`` for ``TupleValue``,
+        ``hasattr(entry_key, "get_const")`` for scalar IR Values,
+        otherwise treating the pair as raw Python.
 
         Args:
-            dict_value (Value): The DictValue (or compatible Value) whose
-                entries should be materialized. May carry IR-level
-                ``entries`` and/or runtime ``dict_runtime`` metadata.
+            dict_value (Value): The DictValue (or compatible Value)
+                whose entries should be materialized. Should carry
+                IR-level ``entries`` or runtime ``dict_runtime``
+                metadata; otherwise treated as truly unbound.
 
         Returns:
-            list[tuple] | None: A list of ``(key, value)`` tuples when the
-                dict's contents are knowable at visualization time. Returns
-                ``[]`` for a dict that is bound to an empty mapping (so
-                callers can render zero iterations as a ``VSkip`` rather than
-                a folded box). Returns ``None`` only when the dict is truly
-                unbound — no IR-level entries and no runtime metadata.
+            Sequence[tuple] | None: A sequence of ``(key, value)``
+                pairs whose element types depend on the encoding above
+                (IR Values for the IR-level branch, raw Python objects
+                for the runtime branch). Returns ``[]`` for a dict
+                that is bound to an empty mapping so callers can
+                render zero iterations as a ``VSkip`` rather than a
+                folded box. Returns ``None`` only when the dict is
+                truly unbound — no IR-level entries AND no runtime
+                metadata.
         """
-        # Try IR-level entries first
+        # IR-level entries: a tuple of (TupleValue | Value, Value)
+        # pairs. Returned as-is so the caller can resolve each operand
+        # against `param_values` and pull symbolic / constant info as
+        # appropriate.
         if hasattr(dict_value, "entries") and dict_value.entries:
             return dict_value.entries
 
-        # Distinguish "bound but empty" from "never bound". Truthy-checking
-        # get_bound_data_items() conflates the two because both return the
-        # empty tuple, which makes ForItems over an empty bound Dict render
-        # as a folded box even when fold_loops=False.
+        # Runtime metadata: a tuple of (raw_key, raw_value) Python
+        # pairs. Distinguish "bound but empty" from "never bound" — a
+        # truthy check on get_bound_data_items() would conflate the
+        # two (both return the empty tuple), which made ForItems over
+        # an empty bound Dict render as a folded box even when
+        # fold_loops=False.
         if (
             hasattr(dict_value, "metadata")
             and dict_value.metadata.dict_runtime is not None
