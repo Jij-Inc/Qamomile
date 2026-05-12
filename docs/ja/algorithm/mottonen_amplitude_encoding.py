@@ -45,8 +45,59 @@
 # > ⚠️ **前提条件: 入力量子ビットは全ゼロ状態** $|0\rangle^{\otimes n}$ **でなければなりません**。Qamomileの`amplitude_encoding(...)` / `amplitude_encoding_from_angles(...)`は$|0\rangle^{\otimes n}$から目標状態$|\psi\rangle$へ写すユニタリだけを emit します (Möttönen の一般構成は任意入力にも拡張できますが、実装は state-preparation の片側に特化しています)。それ以外の入力に適用すると別の出力 (目標振幅ベクトルとは無関係) が出てきます。Qamomileはruntimeで量子ビットの状態を追跡しないため、`qmc.qubit_array(n, ...)`の直後、他のゲートがレジスタに触れる前に呼び出す責任は呼び出し側にあります。
 
 # %%
+# Install the latest Qamomile through pip!
+# (Google Colab) 下の Transpiler タブで選んだ SDK に対応する行の先頭の
+# "# " を外して実行してください。
+# # !pip install qamomile                  # Qiskit (デフォルト)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA 12.x ツールチェインの場合の CUDA-Q (CUDA 13.x なら cudaq-cu13)。Linux / macOS-arm64 / WSL2 のみ。
+
+# %% [markdown]
+# この記事ではデフォルトで Qiskit を使います。Qamomile は同じ`@qkernel`を複数のSDKにトランスパイルできるので、別のSDKで読みたい場合はすぐ下にあるTranspilerと`statevector_of()`検証ヘルパの2つのセルを差し替えれば、本文の他のコードはそのままで動きます。Colabではまず上のセルにある対応する`pip install`行のコメントを外してください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# インストールしている CUDA Toolkit が CUDA 12.x なら`qamomile[cudaq-cu12]`を、CUDA 13.x なら`qamomile[cudaq-cu13]`を使ってください。CUDA-Q は Linux / macOS arm64 / Windows-via-WSL2 のみサポートされています。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — デフォルトでは Qiskit を使います。上のタブで別の SDK (QURI Parts / CUDA-Q) を選んだ場合は、そのタブの2行をこのセルの下の2行と置き換え、上のセルで対応する pip install 行のコメントが外れていることを確認してください。
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+executor = transpiler.executor()
+
+# %%
 import numpy as np
-from qiskit.quantum_info import Statevector
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
@@ -58,10 +109,6 @@ from qamomile.linalg import (
     compute_mottonen_amplitude_encoding_ry_angles,
     compute_mottonen_amplitude_encoding_rz_angles,
 )
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-executor = transpiler.executor()
 
 ATOL_STATEVECTOR = 1e-8
 ATOL_SHOT = 0.05  # 8192 shots, p(1-p)/N に対しおよそ5σ
@@ -79,6 +126,62 @@ def normalize(amps: list[float] | list[complex]) -> np.ndarray:
     else:
         arr = np.asarray(amps, dtype=float)
     return arr / np.linalg.norm(arr)
+
+
+# %% [markdown]
+# トランスパイル済み回路から statevector を読み出す部分はSDK依存です — それぞれの SDK が statevector シミュレータを別々の入口で公開しています。下の`statevector_of()`ヘルパでそのSDK固有部分をくるんでいます。上で選んだ Transpiler に合うタブを選んでください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit.quantum_info import Statevector
+#
+#
+# def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+#     """*kernel*をQiskitのstatevectorシミュレータで実行してデータを返す。"""
+#     qc = transpiler.to_circuit(kernel, bindings=bindings or None)
+#     return Statevector.from_instruction(
+#         qc.remove_final_measurements(inplace=False)
+#     ).data
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from quri_parts.core.state import GeneralCircuitQuantumState
+# from quri_parts.qulacs.simulator import evaluate_state_to_vector
+#
+#
+# def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+#     """*kernel*をQURI Partsのstatevectorシミュレータで実行してデータを返す。"""
+#     circuit = transpiler.to_circuit(kernel, bindings=bindings or None)
+#     state = GeneralCircuitQuantumState(circuit.qubit_count, circuit)
+#     return np.asarray(evaluate_state_to_vector(state).vector)
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+#
+# def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+#     """*kernel*をCUDA-Qのstatevectorシミュレータで実行してデータを返す。"""
+#     artifact = transpiler.to_circuit(kernel, bindings=bindings or None)
+#     return np.asarray(cudaq.get_state(artifact.kernel_func))
+# ```
+# :::
+# ::::
+
+# %%
+# Statevector ヘルパ — デフォルトでは Qiskit を使います。上のタブで別の SDK を選んだ場合は、そのタブのスニペットをこのセルの下と入れ替えてください。
+from qiskit.quantum_info import Statevector
 
 
 def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
@@ -322,11 +425,14 @@ prepare_from_angles.draw(
 
 # %%
 exe = transpiler.transpile(prepare_from_angles, parameters=["ry_a", "rz_a"])
-n_runtime_params = len(exe.compiled_quantum[0].circuit.parameters)
-print(f"runtime parameters in compiled circuit: {n_runtime_params}")
-assert n_runtime_params == 2 * (2**2 - 1), (
-    "n=2 複素ケースでは 2 * (2^n - 1) 個のパラメトリック回転を期待"
-)
+# `parameters=["ry_a", "rz_a"]` で両方の Möttönen 角度ベクトルを
+# ランタイム再バインド可能と宣言しています。n 量子ビットのレジスタに
+# 対しては合計サイズは 2 * (2^n - 1) (Ry に長さ (2^n - 1) のベクトル
+# 1本、Rz に1本)、n=2 では基本回転パラメータが 6 個になります。
+# コンパイル後の成果物から実際の個数を introspect する方法は SDK
+# 依存です (Qiskit は `circuit.parameters`、QURI Parts は
+# `param_mapping` など)。下のサンプリングで間接的に動作を確認します。
+print(f"compiled artifact type: {type(exe).__name__}")
 
 shots = 8192
 for trial_amps in (

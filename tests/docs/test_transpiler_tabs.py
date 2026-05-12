@@ -220,6 +220,39 @@ assert fidelity > 0.85"""
 
 
 # ---------------------------------------------------------------------------
+# Pattern D — reusable statevector-helper definition (mottonen).
+# ---------------------------------------------------------------------------
+
+MOTTONEN_QISKIT_BODY = """from qiskit.quantum_info import Statevector
+
+
+def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+    \"\"\"Run *kernel* through Qiskit's statevector simulator and return the data.\"\"\"
+    qc = transpiler.to_circuit(kernel, bindings=bindings or None)
+    return Statevector.from_instruction(
+        qc.remove_final_measurements(inplace=False)
+    ).data"""
+
+MOTTONEN_QURI_BODY = """from quri_parts.core.state import GeneralCircuitQuantumState
+from quri_parts.qulacs.simulator import evaluate_state_to_vector
+
+
+def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+    \"\"\"Run *kernel* through QURI Parts' statevector simulator and return the data.\"\"\"
+    circuit = transpiler.to_circuit(kernel, bindings=bindings or None)
+    state = GeneralCircuitQuantumState(circuit.qubit_count, circuit)
+    return np.asarray(evaluate_state_to_vector(state).vector)"""
+
+MOTTONEN_CUDAQ_BODY = """import cudaq
+
+
+def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+    \"\"\"Run *kernel* through CUDA-Q's statevector simulator and return the data.\"\"\"
+    artifact = transpiler.to_circuit(kernel, bindings=bindings or None)
+    return np.asarray(cudaq.get_state(artifact.kernel_func))"""
+
+
+# ---------------------------------------------------------------------------
 # Per-(article, sdk) substitution tables.
 # ---------------------------------------------------------------------------
 
@@ -259,6 +292,11 @@ ARTICLE_BODIES: dict[str, tuple[str, str | None, str | None]] = {
         H07_QISKIT_BODY,
         H07_QURI_BODY,
         H07_CUDAQ_BODY,
+    ),
+    "docs/en/algorithm/mottonen_amplitude_encoding.py": (
+        MOTTONEN_QISKIT_BODY,
+        MOTTONEN_QURI_BODY,
+        MOTTONEN_CUDAQ_BODY,
     ),
 }
 

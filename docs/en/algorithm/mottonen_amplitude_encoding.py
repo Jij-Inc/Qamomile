@@ -74,8 +74,70 @@
 # > touch the register.
 
 # %%
+# Install the latest Qamomile through pip!
+# (Google Colab) Pick the line that matches your chosen Transpiler tab
+# below and remove the leading "# " from it to run.
+# # !pip install qamomile                  # Qiskit (default)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use cudaq-cu13 on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+
+# %% [markdown]
+# This article uses Qiskit by default. Qamomile transpiles the same
+# `@qkernel` to multiple quantum SDKs, so you can follow it with another
+# SDK by swapping the two cells immediately below — the Transpiler and
+# the `statevector_of()` verification helper. Everything else in the
+# article is identical regardless of the SDK you pick. On Colab,
+# uncomment the matching `pip install` line in the cell above first.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+# `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+# matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+# macOS arm64, and Windows-via-WSL2 only.
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — by default this article uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+executor = transpiler.executor()
+
+# %%
 import numpy as np
-from qiskit.quantum_info import Statevector
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
@@ -87,10 +149,6 @@ from qamomile.linalg import (
     compute_mottonen_amplitude_encoding_ry_angles,
     compute_mottonen_amplitude_encoding_rz_angles,
 )
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-executor = transpiler.executor()
 
 ATOL_STATEVECTOR = 1e-8
 ATOL_SHOT = 0.05  # for 8192 shots, ~5σ on p(1-p)/N for any single bin
@@ -108,6 +166,67 @@ def normalize(amps: list[float] | list[complex]) -> np.ndarray:
     else:
         arr = np.asarray(amps, dtype=float)
     return arr / np.linalg.norm(arr)
+
+
+# %% [markdown]
+# Reading the statevector out of the transpiled circuit is SDK-specific
+# — each SDK exposes its statevector simulator differently. The
+# `statevector_of()` helper below wraps that per-SDK detail; pick the
+# tab that matches the Transpiler you chose above.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit.quantum_info import Statevector
+#
+#
+# def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+#     """Run *kernel* through Qiskit's statevector simulator and return the data."""
+#     qc = transpiler.to_circuit(kernel, bindings=bindings or None)
+#     return Statevector.from_instruction(
+#         qc.remove_final_measurements(inplace=False)
+#     ).data
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from quri_parts.core.state import GeneralCircuitQuantumState
+# from quri_parts.qulacs.simulator import evaluate_state_to_vector
+#
+#
+# def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+#     """Run *kernel* through QURI Parts' statevector simulator and return the data."""
+#     circuit = transpiler.to_circuit(kernel, bindings=bindings or None)
+#     state = GeneralCircuitQuantumState(circuit.qubit_count, circuit)
+#     return np.asarray(evaluate_state_to_vector(state).vector)
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+#
+# def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
+#     """Run *kernel* through CUDA-Q's statevector simulator and return the data."""
+#     artifact = transpiler.to_circuit(kernel, bindings=bindings or None)
+#     return np.asarray(cudaq.get_state(artifact.kernel_func))
+# ```
+# :::
+# ::::
+
+# %%
+# Statevector helper — by default this article uses Qiskit. If you
+# picked a different tab above, copy the snippet from that tab into
+# this cell in place of the lines below.
+from qiskit.quantum_info import Statevector
 
 
 def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
@@ -419,11 +538,14 @@ prepare_from_angles.draw(
 
 # %%
 exe = transpiler.transpile(prepare_from_angles, parameters=["ry_a", "rz_a"])
-n_runtime_params = len(exe.compiled_quantum[0].circuit.parameters)
-print(f"runtime parameters in compiled circuit: {n_runtime_params}")
-assert n_runtime_params == 2 * (2**2 - 1), (
-    "expected 2 * (2^n - 1) parametric rotations for n=2 complex"
-)
+# `parameters=["ry_a", "rz_a"]` declares both Möttönen-angle vectors as
+# run-time-rebindable. For an n-qubit register the combined size is
+# 2 * (2^n - 1) (one length-(2^n - 1) vector for Ry, one for Rz); at
+# n=2 that is 6 elementary rotation parameters. The exact way to
+# introspect the count from the compiled artifact is SDK-specific
+# (`circuit.parameters` on Qiskit, `param_mapping` on QURI Parts,
+# etc.), so we verify the contract indirectly below by sampling.
+print(f"compiled artifact type: {type(exe).__name__}")
 
 shots = 8192
 for trial_amps in (
