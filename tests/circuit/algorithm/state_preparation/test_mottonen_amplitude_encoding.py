@@ -375,6 +375,101 @@ class TestComputeAngles:
 
 
 # ---------------------------------------------------------------------------
+# Resource estimation against the published Möttönen-Vartiainen formula
+# ---------------------------------------------------------------------------
+
+
+class TestResourceEstimationAgainstPaper:
+    """``kernel.estimate_resources()`` matches the published Möttönen formula.
+
+    Reference: M. Möttönen, J. J. Vartiainen, V. Bergholm, M. M. Salomaa,
+    "Transformation of quantum states using uniformly controlled
+    rotations", arXiv:quant-ph/0407010 (2004).  Lemma 5 (Section 3) of
+    that paper states that a ``k``-controlled uniformly controlled
+    rotation decomposes into ``2**k`` elementary rotations and ``2**k``
+    CNOTs.  Summing over the ``n`` stages of the amplitude-encoding
+    cascade — stage ``k`` for ``k = 0, 1, ..., n - 1``, where stage 0
+    is uncontrolled and contributes no CNOTs — yields the closed forms:
+
+    | input    | rotations         | CNOTs                |
+    |----------|-------------------|----------------------|
+    | real     | ``2**n - 1``      | ``2**n - 2``         |
+    | complex  | ``2 (2**n - 1)``  | ``2 (2**n - 2)``     |
+
+    These are the basic Möttönen-Vartiainen counts before any of the
+    inter-stage cancellation optimisations described later in the same
+    paper (which the Qamomile implementation does NOT apply).  They
+    therefore line up exactly with what
+    ``MottonenAmplitudeEncoding._resources()`` reports — but here we
+    deliberately go through the public ``kernel.estimate_resources()``
+    entry point, which walks the IR and resolves the composite gate
+    automatically, so this test exercises the full
+    composite-gate-aware estimator path on top of the formula.
+    """
+
+    @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4, 5])
+    def test_real_amplitude_encoding_matches_published_formula(
+        self, n_qubits: int
+    ) -> None:
+        """Real input: rotations = ``2^n - 1``, CNOTs = ``max(0, 2^n - 2)``."""
+        amps = np.ones(2**n_qubits).tolist()
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n_qubits, "q")
+            q = amplitude_encoding(q, amps)
+            return qmc.measure(q)
+
+        est = kernel.estimate_resources()
+        expected_rot = 2**n_qubits - 1
+        # 2^n - 2 underflows to a negative for n=1; clamp to 0 to match
+        # the implementation's no-CNOT special case at the leaf level.
+        expected_cnot = max(0, 2**n_qubits - 2)
+        assert int(est.qubits) == n_qubits
+        assert int(est.gates.rotation_gates) == expected_rot
+        assert int(est.gates.two_qubit) == expected_cnot
+        assert int(est.gates.total) == expected_rot + expected_cnot
+        # No T gates and no multi-qubit (3+) gates in the basic Möttönen
+        # decomposition: rotations are single-qubit, CNOTs are two-qubit
+        # Cliffords.
+        assert int(est.gates.t_gates) == 0
+        assert int(est.gates.multi_qubit) == 0
+        assert int(est.gates.clifford_gates) == expected_cnot
+        assert int(est.gates.single_qubit) == expected_rot
+
+    @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
+    def test_complex_amplitude_encoding_matches_published_formula(
+        self, n_qubits: int
+    ) -> None:
+        """Complex input: rotations and CNOTs both double (Ry + Rz stages)."""
+        rng = np.random.default_rng(101 + n_qubits)
+        # Force the two-stage path with a non-zero imaginary component;
+        # complex inputs whose imag part is identically zero are silently
+        # coerced to the cheaper real path.
+        re = rng.standard_normal(2**n_qubits)
+        im = rng.standard_normal(2**n_qubits)
+        amps = (re + 1j * im).tolist()
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n_qubits, "q")
+            q = amplitude_encoding(q, amps)
+            return qmc.measure(q)
+
+        est = kernel.estimate_resources()
+        expected_rot = 2 * (2**n_qubits - 1)
+        expected_cnot = 2 * max(0, 2**n_qubits - 2)
+        assert int(est.qubits) == n_qubits
+        assert int(est.gates.rotation_gates) == expected_rot
+        assert int(est.gates.two_qubit) == expected_cnot
+        assert int(est.gates.total) == expected_rot + expected_cnot
+        assert int(est.gates.t_gates) == 0
+        assert int(est.gates.multi_qubit) == 0
+        assert int(est.gates.clifford_gates) == expected_cnot
+        assert int(est.gates.single_qubit) == expected_rot
+
+
+# ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------
 

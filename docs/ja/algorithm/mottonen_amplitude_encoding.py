@@ -207,6 +207,66 @@ assert int(est_complex.gates.two_qubit) == 4
 # どちらの数も$O(2^n)$で増加します。振幅エンコーディングは多量子ビットで本質的に高価です。実用上、この構成は大きいアルゴリズム内のビルディングブロックとして遭遇する小さなレジスタサイズ（HHLで4〜8論理量子ビットの入力レジスタ、サンプリングされた部分空間を持つQSCI、誤り訂正のwarm-startsなど）で最も有用であり、数百量子ビットのスタンドアロンの状態準備としてではありません。
 
 # %% [markdown]
+# ### 論文の公式値とのゲート数照合
+#
+# Möttönen, Vartiainen, Bergholm, Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` はGray符号分解の閉形式を明示しています (Lemma 5, Section 3): $k$個のcontrolを持つuniformly controlled rotation は $2^k$個の基本回転と $2^k$個のCNOTに分解される。振幅エンコーディングのカスケードを構成する $n$ ステージ — $k = 0, 1, \ldots, n-1$ で stage $0$ は uncontrolled (したがって CNOT なし) — について和を取ると:
+#
+# | 入力     | 回転数               | CNOT数                  |
+# |----------|---------------------:|-----------------------:|
+# | 実数     | $2^n - 1$            | $2^n - 2$              |
+# | 複素数   | $2 \cdot (2^n - 1)$  | $2 \cdot (2^n - 2)$    |
+#
+# `kernel.estimate_resources()`がこの値を正確に報告することを、複数のレジスタサイズに対して確認します。これは `MottonenAmplitudeEncoding._resources()` のメタデータを直接見るのではなく、IRを歩いてコンポジットゲートを解決するフルの推定経路を通るため、テスト的にもより強い保証になります。
+
+
+# %%
+def make_real_kernel(n: int) -> qmc.QKernel:
+    """``n``量子ビットで実振幅Möttönen経路を走らせるカーネル。"""
+    real_amps = np.ones(2**n).tolist()
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n, "q")
+        q = amplitude_encoding(q, real_amps)
+        return qmc.measure(q)
+
+    return kernel
+
+
+def make_complex_kernel(n: int) -> qmc.QKernel:
+    """複素 (Ry+Rz) Möttönen経路を走らせるカーネル。"""
+    cplx_amps = (np.ones(2**n) + 1j * np.arange(2**n)).tolist()
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n, "q")
+        q = amplitude_encoding(q, cplx_amps)
+        return qmc.measure(q)
+
+    return kernel
+
+
+print(f"{'n':>3s} | {'real(rot/CNOT)':>16s} | {'complex(rot/CNOT)':>20s}")
+print(f"{'---':>3s} | {'---':>16s} | {'---':>20s}")
+for n in (2, 3, 4, 5):
+    er = make_real_kernel(n).estimate_resources()
+    ec = make_complex_kernel(n).estimate_resources()
+    rot_real, cnot_real = int(er.gates.rotation_gates), int(er.gates.two_qubit)
+    rot_cplx, cnot_cplx = int(ec.gates.rotation_gates), int(ec.gates.two_qubit)
+    print(
+        f"{n:>3d} | {f'{rot_real} / {cnot_real}':>16s} | {f'{rot_cplx} / {cnot_cplx}':>20s}"
+    )
+
+    # Möttönen-Vartiainen の閉形式を直接 assert:
+    assert rot_real == 2**n - 1, f"実数の回転数が公式値と不一致 (n={n})"
+    assert cnot_real == 2**n - 2, f"実数のCNOT数が公式値と不一致 (n={n})"
+    assert rot_cplx == 2 * (2**n - 1), f"複素の回転数が公式値と不一致 (n={n})"
+    assert cnot_cplx == 2 * (2**n - 2), f"複素のCNOT数が公式値と不一致 (n={n})"
+
+# %% [markdown]
+# 上記は **基本** のMöttönen-Vartiainen Gray符号カウントです。同じ論文の後半および後続研究では、ステージ間のCNOTキャンセルにより複素の場合の最適漸近コストを $2^{n+1} - 2n$ まで下げる方法が記述されています。Qamomileの実装は明確さと移植性のため、これらのキャンセル最適化を適用していません — 各ステージごとの素直な分解で留めています。したがって上のassertが正しい参照値です。
+
+# %% [markdown]
 # ## 4. 公開API表面 — どの場面でどれを使うか
 #
 # state_preparationパッケージは5つの公開名を提供します。下表は「どの仕事にどれを使うか」と「それぞれのトレードオフ」をまとめたものです。

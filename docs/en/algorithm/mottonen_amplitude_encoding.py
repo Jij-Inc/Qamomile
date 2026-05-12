@@ -249,6 +249,82 @@ assert int(est_complex.gates.two_qubit) == 4
 # etc.), not as a stand-alone preparation for hundreds of qubits.
 
 # %% [markdown]
+# ### Verifying the gate counts against the published formula
+#
+# Möttönen, Vartiainen, Bergholm and Salomaa
+# {cite:p}`10.48550/arXiv.quant-ph/0407010` give an explicit closed
+# form for the Gray-code decomposition (Lemma 5, Section 3): a
+# $k$-controlled uniformly controlled rotation costs $2^k$ elementary
+# rotations and $2^k$ CNOTs.  Summing over the $n$ stages of the
+# amplitude-encoding cascade — stage $k$ for $k = 0, 1, \ldots, n-1$,
+# with stage $0$ uncontrolled (and therefore CNOT-free) — yields:
+#
+# | input    | rotations            | CNOTs                  |
+# |----------|---------------------:|-----------------------:|
+# | real     | $2^n - 1$            | $2^n - 2$              |
+# | complex  | $2 \cdot (2^n - 1)$  | $2 \cdot (2^n - 2)$    |
+#
+# We verify that `kernel.estimate_resources()` reports exactly these
+# numbers across a range of register sizes.  This walks the full
+# composite-gate-aware estimator path (not just the
+# `MottonenAmplitudeEncoding._resources()` metadata directly) so the
+# check also exercises the IR resolution.
+
+
+# %%
+def make_real_kernel(n: int) -> qmc.QKernel:
+    """Build a kernel that runs the real-input Möttönen path on ``n`` qubits."""
+    real_amps = np.ones(2**n).tolist()
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n, "q")
+        q = amplitude_encoding(q, real_amps)
+        return qmc.measure(q)
+
+    return kernel
+
+
+def make_complex_kernel(n: int) -> qmc.QKernel:
+    """Build a kernel that runs the complex (Ry+Rz) Möttönen path."""
+    cplx_amps = (np.ones(2**n) + 1j * np.arange(2**n)).tolist()
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n, "q")
+        q = amplitude_encoding(q, cplx_amps)
+        return qmc.measure(q)
+
+    return kernel
+
+
+print(f"{'n':>3s} | {'real(rot/CNOT)':>16s} | {'complex(rot/CNOT)':>20s}")
+print(f"{'---':>3s} | {'---':>16s} | {'---':>20s}")
+for n in (2, 3, 4, 5):
+    er = make_real_kernel(n).estimate_resources()
+    ec = make_complex_kernel(n).estimate_resources()
+    rot_real, cnot_real = int(er.gates.rotation_gates), int(er.gates.two_qubit)
+    rot_cplx, cnot_cplx = int(ec.gates.rotation_gates), int(ec.gates.two_qubit)
+    print(
+        f"{n:>3d} | {f'{rot_real} / {cnot_real}':>16s} | {f'{rot_cplx} / {cnot_cplx}':>20s}"
+    )
+
+    # Möttönen-Vartiainen closed form, asserted directly:
+    assert rot_real == 2**n - 1, f"real rotations off at n={n}"
+    assert cnot_real == 2**n - 2, f"real CNOTs off at n={n}"
+    assert rot_cplx == 2 * (2**n - 1), f"complex rotations off at n={n}"
+    assert cnot_cplx == 2 * (2**n - 2), f"complex CNOTs off at n={n}"
+
+# %% [markdown]
+# Note that this is the *basic* Möttönen-Vartiainen Gray-code count;
+# the same paper (later sections) and follow-up work describe
+# inter-stage CNOT cancellations that bring the optimal asymptotic
+# count down to $2^{n+1} - 2n$ for the full complex case.  Qamomile's
+# implementation does not apply those cancellations — it sticks with
+# the plain per-stage decomposition for clarity and portability — so
+# the assertion above is the right reference.
+
+# %% [markdown]
 # ## 4. Public API surface — when to reach for which entry point
 #
 # The state-preparation package exposes five public names. The table
