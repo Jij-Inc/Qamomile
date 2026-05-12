@@ -2008,8 +2008,20 @@ class CircuitAnalyzer:
 
         Resolution order: ``param_values[logical_id]`` → ``_loop_<name>``
         fallback for ForOperation/ForItemsOperation loop variables →
-        constant → named parameter → array element access (``arr[i,j]``)
-        → display-name fallback (rejecting IR-internal placeholders).
+        constant → array element access (``arr[i,j]``, recursing on each
+        index so loop-bound indices substitute) → named parameter →
+        display-name fallback (rejecting IR-internal placeholders).
+
+        The array-element branch is checked *before* ``is_parameter()``
+        because an element access on a parameter array reports
+        ``is_parameter()`` True and ``parameter_name() == "gammas[layer]"``
+        — i.e. the parameter name is the pre-formatted string with the
+        unsubstituted loop variable baked in. Returning that verbatim
+        would leak ``layer`` into the rendered expression even though
+        ForOperation unrolling has already provided the concrete index
+        via ``_loop_layer``. Trying the recursive array-element formatter
+        first lets the index resolution see those concrete values
+        (``gammas[0]``, ``gammas[1]``).
 
         Args:
             value (Value): IR Value used as a BinOp operand (lhs or rhs).
@@ -2056,20 +2068,28 @@ class CircuitAnalyzer:
             if isinstance(const, float) and const == int(const):
                 return str(int(const))
             return str(const)
+        # Array element (e.g., weights[e]). Checked before is_parameter()
+        # so unrolled loop indices substitute (`gammas[layer]` →
+        # `gammas[0]`) instead of leaking via the pre-formatted
+        # parameter_name string `value.parameter_name()` returns for
+        # element accesses on parameter arrays.
+        if (
+            hasattr(value, "parent_array")
+            and value.parent_array is not None
+            and hasattr(value, "element_indices")
+            and value.element_indices
+        ):
+            array_name = value.parent_array.name or "arr"
+            idx_parts = []
+            for idx_val in value.element_indices:
+                idx = self._format_binop_operand(idx_val, param_values) or "?"
+                idx_parts.append(idx)
+            return f"{array_name}[{','.join(idx_parts)}]"
         # Named parameter
         if value.is_parameter():
             name = value.parameter_name() or value.name
             if name and not self._is_internal_temp_name(name):
                 return name
-        # Array element (e.g., weights[e])
-        if hasattr(value, "parent_array") and value.parent_array is not None:
-            array_name = value.parent_array.name or "arr"
-            if hasattr(value, "element_indices") and value.element_indices:
-                idx_parts = []
-                for idx_val in value.element_indices:
-                    idx = self._format_binop_operand(idx_val, param_values) or "?"
-                    idx_parts.append(idx)
-                return f"{array_name}[{','.join(idx_parts)}]"
 
         # Fallback: name (refuse IR-internal placeholders so that
         # "uint_tmp"/"float_tmp"/"bit_tmp" never leak into rendered

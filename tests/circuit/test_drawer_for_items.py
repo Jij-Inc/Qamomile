@@ -188,3 +188,96 @@ class TestForItemsValueVarSubstitutesIntoBinOpLabels:
             f"expected substrings {sorted(expected_substrings)}, "
             f"saw {sorted(seen)} in {labels}"
         )
+
+
+class TestForLoopVariableSubstitutesIntoArrayIndices:
+    """ForOperation loop indices into parameter arrays must substitute.
+
+    When a ``for layer in qmc.range(p):`` loop is unrolled at
+    visualization time, gate-angle expressions like
+    ``gammas[layer]`` must render as ``gammas[0]`` and ``gammas[1]``
+    in the unrolled iterations — not as the literal symbolic
+    ``gammas[layer]`` repeated for every iteration. This used to
+    regress because the array-element access on a parameter array
+    reports ``is_parameter()`` True with ``parameter_name() ==
+    "gammas[layer]"`` (the pre-formatted string with the loop
+    variable baked in), so ``_format_binop_operand`` returned that
+    verbatim from its named-parameter branch before the
+    array-element branch ever got a chance to recurse on the
+    indices.
+    """
+
+    def test_unrolled_for_substitutes_loop_index_into_parameter_array(self):
+        """Each unrolled `gammas[layer]` access shows the iteration index.
+
+        Routes the kernel through the public `Transpiler.to_block +
+        inline` pipeline so the analyzer sees the same fully-flattened
+        Block the docs notebooks render. The kernel below is a
+        miniature stand-in for the QAOA layer loop: it iterates
+        `for layer in qmc.range(p):` and pulls `gammas[layer]` /
+        `betas[layer]` out of two parameter arrays per iteration.
+        """
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def two_param_loops(
+            p: qmc.UInt,
+            n: qmc.UInt,
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, name="q")
+            for layer in qmc.range(p):
+                for i in qmc.range(n):
+                    q[i] = qmc.rz(q[i], angle=gammas[layer])
+                for i in qmc.range(n):
+                    q[i] = qmc.rx(q[i], angle=betas[layer])
+            return qmc.measure(q)
+
+        t = QiskitTranspiler()
+        block = t.to_block(
+            two_param_loops,
+            bindings={"p": 2, "n": 3},
+            parameters=["gammas", "betas"],
+        )
+        block = t.inline(block)
+
+        analyzer = CircuitAnalyzer(
+            block,
+            DEFAULT_STYLE,
+            inline=False,
+            fold_loops=False,
+            expand_composite=False,
+            inline_depth=None,
+        )
+        qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(block)
+        vc = analyzer.build_visual_ir(block, qubit_map, qubit_names, num_qubits)
+        labels = [
+            n.label for n in _walk_visual_nodes(vc.children) if isinstance(n, VGate)
+        ]
+
+        # No label should contain the bare loop variable name.
+        for label in labels:
+            assert "[layer]" not in label, (
+                f"Loop variable 'layer' leaked into label {label!r}; expected "
+                f"the unrolled iteration to substitute it as a concrete index"
+            )
+
+        # Both iteration indices should appear for both parameter arrays.
+        # ``_format_symbolic_param`` TeX-converts ``gammas`` →
+        # ``${\gamma}s$`` (and ``betas`` → ``${\beta}s$``) because the
+        # base ``gamma`` / ``beta`` is in the Greek symbol map; the
+        # ``[0]`` / ``[1]`` index sits inside the same ``$...$`` math
+        # span, so we assert against the TeX form rather than the bare
+        # ``gammas[0]`` string.
+        joined = " ".join(labels)
+        for needle in (
+            r"{\gamma}s[0]",
+            r"{\gamma}s[1]",
+            r"{\beta}s[0]",
+            r"{\beta}s[1]",
+        ):
+            assert needle in joined, (
+                f"Expected unrolled iterations to include `{needle}` "
+                f"somewhere in {labels}"
+            )
