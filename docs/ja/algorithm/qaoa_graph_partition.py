@@ -202,7 +202,10 @@ block = transpiler.to_block(
     parameters=["gammas", "betas"],
 )
 block = transpiler.inline(block)
-MatplotlibDrawer(block).draw()
+# `fold_loops=False` で全ループ(`for layer`/`for (i,j),Jij in quad`/`for i in range(n)`)を
+# アンロールして、各ゲートを展開した形で描画する。`linear` は空辞書 `{}` のため、
+# `for i, hi in linear` は 0 イテレーションとして消える(ボックスは現れない)。
+MatplotlibDrawer(block).draw(fold_loops=False)
 
 # %% [markdown]
 # ## QAOA パラメータの最適化

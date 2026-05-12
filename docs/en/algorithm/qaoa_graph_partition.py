@@ -219,7 +219,12 @@ block = transpiler.to_block(
     parameters=["gammas", "betas"],
 )
 block = transpiler.inline(block)
-MatplotlibDrawer(block).draw()
+# `fold_loops=False` unrolls every loop (`for layer`,
+# `for (i,j),Jij in quad`, and the per-qubit range loops) so each gate
+# is rendered explicitly. `linear` is the empty dict `{}` for graph
+# partition (no linear Ising terms), so its ForItems loop has zero
+# iterations and is rendered as nothing rather than as a folded box.
+MatplotlibDrawer(block).draw(fold_loops=False)
 
 # %% [markdown]
 # ## Optimize the QAOA Parameters
