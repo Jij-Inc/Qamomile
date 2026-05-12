@@ -2,7 +2,7 @@
 
 Detailed guidance for each of the six required sections. Read this in full before writing your first tutorial in a session.
 
-The two canonical tutorials — [qaoa_maxcut.py](../../../../docs/en/vqa/qaoa_maxcut.py) (hand-wired VQA) and [qaoa_graph_partition.py](../../../../docs/en/optimization/qaoa_graph_partition.py) (converter-based) — show the voice, cell rhythm, and code patterns. Keep both open while drafting. Their section *titles* differ from this guide (they were written before this structure was formalized); match their *content and cell pacing*, but use the H2 titles this guide prescribes.
+The two canonical tutorials — [qaoa_maxcut.py](../../../../docs/en/algorithm/qaoa_maxcut.py) (hand-wired VQA) and [qaoa_graph_partition.py](../../../../docs/en/algorithm/qaoa_graph_partition.py) (converter-based) — show the voice, cell rhythm, and code patterns. Keep both open while drafting. Their section *titles* differ from this guide (they were written before this structure was formalized); match their *content and cell pacing*, but use the H2 titles this guide prescribes.
 
 ---
 
@@ -12,7 +12,7 @@ The rendered tutorial has a **strict** heading hierarchy:
 
 - **H1** (`# <title>`) — the tutorial title. Appears exactly once, inside the Abstract cell.
 - **H2** (`## <section>`) — one of the five fixed pedagogical labels, in order, and nothing else:
-  1. **`## Backgrounds`**
+  1. **`## Background`**
   2. **`## Algorithm`**
   3. **`## Implementation`**
   4. **`## Run example`**
@@ -83,9 +83,9 @@ Name the **target Qamomile API** — `qaoa_state`, `QAOAConverter`, `PCEConverte
 
 ---
 
-## 2. Backgrounds
+## 2. Background
 
-**H2 heading (strict):** `## Backgrounds`
+**H2 heading (strict):** `## Background`
 
 **Goal:** Equip the reader with the background of *the problem the algorithm solves*, not the algorithm itself. For a QAOA-for-MaxCut tutorial, this section is about the MaxCut problem — its definition and a concrete instance — not about QAOA.
 
@@ -102,7 +102,7 @@ Name the **target Qamomile API** — `qaoa_state`, `QAOAConverter`, `PCEConverte
 - The ansatz, the encoding, the cost Hamiltonian. Those are the algorithm, not the problem — they live in §3.
 - Qamomile API calls other than those strictly needed to build the instance (`BinaryModel.from_qubo`, `problem.eval`, …).
 
-**Format:** H2 `## Backgrounds`, then H3 subsections. Typical breakdown:
+**Format:** H2 `## Background`, then H3 subsections. Typical breakdown:
 
 - `### What is <Problem>?` — problem definition, math.
 - `### Create the <instance>` — concrete data builder, optional `matplotlib` visualization.
@@ -208,12 +208,12 @@ Skip any step that genuinely does not apply (e.g. algorithms with fixed circuits
 
 ### Import rules (Qamomile-specific)
 
-Tutorials under `tutorial/`, `vqa/`, and `optimization/` may import:
+Tutorials under `tutorial/`, `algorithm/`, and `usage/` may import:
 
 - **Runtime deps** (from `pyproject.toml` `[project].dependencies`): `qamomile`, `jijmodeling`, `ommx`, `qiskit`, `qiskit_aer`, `sympy`, `numpy` (transitive via qiskit).
 - **Doc-build dev deps** (from `[dependency-groups].dev`): `matplotlib`, `networkx`, `scipy`. These are in the environment `jupyter-book build .` runs in, so every existing tutorial uses them freely.
 
-Tutorials under `collaboration/` may additionally import the optional backend their extra installs (`qamomile[cudaq-cu13]`, `qamomile[quri_parts]`, `qamomile[qbraid]`), and must say so in the Abstract cell. Do not import optional backends outside `collaboration/`.
+Tutorials under `integration/` may additionally import the optional backend their extra installs (`qamomile[cudaq-cu13]`, `qamomile[quri_parts]`, `qamomile[qbraid]`), and must say so in the Abstract cell. Do not import optional backends outside `integration/`.
 
 ### Other rules
 
@@ -272,7 +272,7 @@ Contents of the subsection:
 2. A new `@qmc.qkernel` that calls the helper.
 3. Transpile, sample with the **same optimized parameters**, and print the mean energy side-by-side with the hand-wired result.
 
-Reference: [qaoa_maxcut.py](../../../../docs/en/vqa/qaoa_maxcut.py) lines 419–481.
+Reference: [qaoa_maxcut.py](../../../../docs/en/algorithm/qaoa_maxcut.py) lines 419–481.
 
 ### Don't
 
@@ -290,7 +290,7 @@ Reference: [qaoa_maxcut.py](../../../../docs/en/vqa/qaoa_maxcut.py) lines 419–
 
 1. **Recap.** A numbered list matching the Abstract's step list — one line per step, past tense ("Defined a MaxCut problem", "Ran a classical optimization loop"). This anchors what the reader just spent 20 minutes on.
 2. **Limitations.** Name 1–2 known failure modes or assumptions of the algorithm *or* the Qamomile implementation. QAOA: shallow-depth results are provably weak; QRAO: requires a graph colouring that may not fit; converter-based paths: penalty weights need tuning.
-3. **Where to next.** 1–2 follow-up references as relative links to other Qamomile tutorials or API pages. Format: `[QAOA for Graph Partitioning](../optimization/qaoa_graph_partition)`. If the user gave you multiple source papers, this is where the one you didn't use as the primary source can appear.
+3. **Where to next.** 1–2 follow-up references as relative links to other Qamomile tutorials or API pages. Format: `[QAOA for Graph Partitioning](qaoa_graph_partition)` (a sibling tutorial in the same category) or `[Tutorials](../tutorial/index.md)` (cross-category). If the user gave you multiple source papers, this is where the one you didn't use as the primary source can appear.
 
 **Format:** One markdown cell with H2 `## Conclusion`, a numbered recap, then a **Next steps** bullet list. 8–20 lines total. No code.
 
@@ -313,7 +313,7 @@ Reference: [qaoa_maxcut.py](../../../../docs/en/vqa/qaoa_maxcut.py) lines 419–
 # **Next steps:**
 #
 # - For **constrained optimization** problems (where penalty terms are
-#   needed), see [QAOA for Graph Partitioning](../optimization/qaoa_graph_partition)
+#   needed), see [QAOA for Graph Partitioning](qaoa_graph_partition)
 #   which uses the higher-level `QAOAConverter` together with JijModeling.
 ```
 

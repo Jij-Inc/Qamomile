@@ -19,13 +19,13 @@
 #
 # # PCEでMaxCutを解く: 20変数を3量子ビットで
 #
-# このチュートリアルではQamomileの`PCEConverter`を使ったPauli Correlation Encoding (PCE) によるMaxCut問題の解法を扱います。PCEは$N$個の二値変数を、$n = \mathcal{O}(N^{1/k})$量子ビットというはるかに小さなレジスタ上の$k$体Pauli相関子の期待値へ圧縮します。これにより、QAOAのような変数1つあたり1量子ビットの符号化方式ではNISQ機器に載らない規模の問題でも変分最適化が可能になります。
+# このチュートリアルではQamomileの`PCEConverter`を使ったPauli Correlation Encoding (PCE) によるMaxCut問題の解法を扱います。PCEは$N$個のスピン変数を、$n = \mathcal{O}(N^{1/k})$量子ビットというはるかに小さなレジスタ上の$k$体Pauli相関子の期待値で表します。これにより、標準的な変数1つあたり1量子ビットのQAOA定式化では近未来量子デバイスに載らない規模の問題でも、変分最適化を試せるようになります。
 #
 # 本チュートリアルでは20頂点のMaxCutを$k = 2$で**わずか3量子ビット**で解き、結果を全探索による厳密解と比較して検証します。手順は以下の通りです。
 #
 # 1. 20頂点のMaxCut問題を定義し、厳密解を全探索で求めます。
-# 2. `PCEConverter(instance, k=2)`でPCE符号化を構築し、`get_encoded_pauli_list()`で変数ごとのPauliオブザーバブルを取り出します。
-# 3. ハードウェア効率の良い`@qkernel`アンザッツを記述し、各相関子の期待値を`qm.expval(q, P)`で読み出します。
+# 2. `PCEConverter(ising_model, k=2)`でPCE符号化を構築し、`get_encoded_pauli_list()`で変数ごとのPauliオブザーバブルを取り出します。
+# 3. ハードウェア効率の良い`@qkernel`アンザッツを記述し、各相関子の期待値を`qmc.expval(q, P)`で評価します。
 # 4. MaxCut目的関数のtanh緩和した代理損失に対し、`scipy.optimize.minimize`でアンザッツを学習します。
 # 5. 最適化済みの期待値を`converter.decode(expectations)`でスピン列にデコードし、分割を可視化します。
 
@@ -34,7 +34,7 @@
 # # !pip install qamomile
 
 # %% [markdown]
-# ## Backgrounds
+# ## 背景
 
 # %% [markdown]
 # ### MaxCut問題とは？
@@ -58,9 +58,9 @@
 # %% [markdown]
 # ### グラフの作成
 #
-# 20頂点の**3-正則**ランダムグラフを使用します（各頂点はちょうど3つの隣接頂点を持つので、$|E| = 3 \cdot 20 / 2 = 30$辺となります）。3-正則MaxCutはPCE論文における代表的なベンチマークです。次数が一様であることでEdwards-Erdős正規化項のスケールがクリーンに定まり、かつ全探索で厳密解を求められる程度の規模に収まります。
+# 20頂点の**3-正則**ランダムグラフを使用します（各頂点はちょうど3つの隣接頂点を持つので、$|E| = 3 \cdot 20 / 2 = 30$辺となります）。3-正則MaxCutはPCE論文における代表的なベンチマークです。次数が一様であることでEdwards-Erdős正則化項のスケールがきれいに定まり、かつ全探索で厳密解を求められる程度の規模に収まります。
 #
-# `nx.random_regular_graph`は非連結なグラフを生成することがあります（孤立した連結成分は自由なスピンを残し、最適化のランドスケープを退化させます）。そこで連結なグラフが得られるまでseedをずらします。
+# `nx.random_regular_graph`は非連結なグラフを生成することがあります（非連結成分ごとに独立な全体スピン反転対称性が生じ、縮退が増えます）。そこで連結なグラフが得られるまでseedをずらします。
 
 # %%
 import matplotlib.pyplot as plt
@@ -113,12 +113,12 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # %% [markdown]
 # ## Algorithm
 #
-# PCEはSciorilli, Borges, Patti, García-Martín, Camilo, Anandkumar, Aolitaによって提案された手法で (https://doi.org/10.48550/arXiv.2401.09421)、QAOAのような変数1つあたり1量子ビットの符号化方式では収まりきらない量子ビット数の領域へ組合せ最適化を押し進めるためのアプローチです。$N$変数の問題に対しPCEは$n = \mathcal{O}(N^{1/k})$量子ビットしか使いません。
+# PCEは[Sciorilliら](https://doi.org/10.48550/arXiv.2401.09421)によって提案された手法で、標準的な変数1つあたり1量子ビットのQAOA定式化では収まりきらない組合せ最適化インスタンスを、より厳しい量子ビット数の制約下で扱うためのアプローチです。$N$変数の問題に対しPCEは$n = \mathcal{O}(N^{1/k})$量子ビットしか使いません。
 
 # %% [markdown]
 # ### PCE符号化
 #
-# PCEは**圧縮率**$k > 1$を選び、二値変数$i \in \{1, \dots, N\}$をそれぞれ別個の$k$体Pauli相関子$P_i$に割り当てます。$P_i$は$\{X, Y, Z\}$から選んだ恒等演算子でない$k$個のPauli演算子のテンソル積で、$n$量子ビットのうち$k$個に作用します。$n$量子ビット上にこのような相関子は$\binom{n}{k} \cdot 3^k$個存在するので、$n$は次を満たす最小の整数として選びます。
+# PCEは**相関子次数**$k > 1$を選び、スピン変数$i \in \{1, \dots, N\}$をそれぞれ別個の$k$体Pauli相関子$P_i$に割り当てます。$P_i$は$\{X, Y, Z\}$から選んだ恒等演算子でない$k$個のPauli演算子のテンソル積で、$n$量子ビットのうち$k$個に作用します。$n$量子ビット上にこのような相関子は$\binom{n}{k} \cdot 3^k$個存在するので、$n$は次を満たす最小の整数として選びます。
 #
 # $$
 # \binom{n}{k} \cdot 3^k \;\ge\; N.
@@ -135,7 +135,7 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # C(\mathbf{s}) \;=\; \sum_i h_i \, s_i \,+\, \sum_{i<j} J_{ij} \, s_i s_j
 # $$
 #
-# を、各スピン$s_i$を**tanh緩和**した相関子期待値$\sigma_i(\boldsymbol{\theta}) = \tanh\bigl(\alpha\, \langle P_i \rangle\bigr)$に置き換え、さらにすべての相関子を開区間$(-1, +1)$内に保つための4次の**正規化項**を加えることで、滑らかな代理損失へ変換します（この開領域では任意のビット列が表現可能です）。
+# を、各スピン$s_i$を**tanh緩和**した相関子期待値$\sigma_i(\boldsymbol{\theta}) = \tanh\bigl(\alpha\, \langle P_i \rangle\bigr)$に置き換え、さらに緩和変数の早すぎる飽和を抑える4次の**正則化項**を加えることで、滑らかな代理損失へ変換します。tanh写像により$\sigma_i$は開区間$(-1, +1)$に入り、この領域では符号を選ぶことで任意の候補ビット列を表せます。
 #
 # $$
 # \mathcal{L}(\boldsymbol{\theta})
@@ -145,12 +145,12 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # \;=\; \beta \cdot \nu \cdot \!\left[ \frac{1}{N} \sum_i \sigma_i^2 \right]^{\!2}.
 # $$
 #
-# 直観的には、データ項は接続された各ペアで$\sigma_i$と$\sigma_j$を逆符号へ引き寄せ（$J_{ij} \sigma_i \sigma_j$が負になる方向）、正規化項は早すぎる飽和を抑える counterweight として働き、相関子領域の滑らかな内部にオプティマイザを留めることで、誤った候補ビット列に早期に収束しないようにします。
+# 直観的には、データ項は接続された各ペアで$\sigma_i$と$\sigma_j$を逆符号へ引き寄せ（$J_{ij} \sigma_i \sigma_j$が負になる方向）、正則化項は早すぎる飽和に罰を与えることでこれと釣り合いを取り、緩和変数領域の滑らかな内部にオプティマイザを留めることで、誤った候補ビット列に早期に収束しないようにします。
 #
-# ハイパーパラメータは https://doi.org/10.48550/arXiv.2401.09421 に従います。
+# ハイパーパラメータは同論文に従います。
 #
-# - **$\alpha$**（tanhの鋭さ）: $\alpha \sim N^{k/2}$でスケールします。ここで$N$はグラフのノード数（つまりスピン変数の数）、$k$はPCEの圧縮率です。本チュートリアルの20ノード・$k = 2$では$\alpha = 20^{1} = 20$となります。
-# - **$\beta = 1/2$**（正規化項の強さ）: 論文がランダムグラフ上で一度だけ調整し、全実験で固定の値です。
+# - **$\alpha$**（tanhの鋭さ）: $\alpha \sim N^{k/2}$でスケールします。ここで$N$はグラフのノード数（つまりスピン変数の数）、$k$はPCEの相関子次数です。本チュートリアルの20ノード・$k = 2$では$\alpha = 20^{1} = 20$となります。
+# - **$\beta = 1/2$**（正則化項の強さ）: 論文がランダムグラフ上で一度だけ調整し、全実験で固定の値です。
 # - **$\nu$**（全体スケール）: 自由なハイパーパラメータではなく、グラフから直接計算されるEdwards-ErdősのMaxCut下界$\nu = |E|/2 + (N - 1)/4$です。
 #
 # MaxCutに限れば、スピンモデルは$h_i = 0$、各辺で$J_{ij} = +\tfrac{1}{2}$なので、データ項は隣接する$\sigma_i, \sigma_j$が逆符号となるとき正確に最小化されます。
@@ -158,19 +158,19 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # %% [markdown]
 # ### デコード
 #
-# 収束後、PCEは最適化された各相関子期待値を符号関数で離散スピンへ丸めます。
+# 収束後、PCEは最適化された各相関子期待値を符号丸めで離散スピンへ丸めます。
 #
 # $$
 # s_i \;=\; \operatorname{sgn}\!\bigl\langle P_i \bigr\rangle_{\boldsymbol{\theta}^*}
 # \;\in\; \{+1, -1\},
 # $$
 #
-# そして二値割り当ては$x_i = (1 - s_i) / 2$として復元されます。
+# Qamomileの`SignRounder`は$\langle P_i \rangle \ge 0$なら$s_i = +1$、それ以外なら$s_i = -1$に丸めます。二値割り当ては$x_i = (1 - s_i) / 2$として復元されます。
 
 # %% [markdown]
 # ### アンザッツの選択
 #
-# PCEは特定の回路を規定しません。原論文では**ハードウェア効率の良いブリックワーク型アンザッツ**——単一量子ビット回転と2量子ビットエンタングラを交互に積み重ねた、変数の数に比例してパラメータが増えるアンザッツ——を採用しています。本チュートリアルでは`qamomile.circuit.algorithm.basic`が提供する事前定義のレイヤ（`ry_layer`、`rz_layer`、`cz_entangling_layer`）を`depth`回スタックして使い、合計で$2 \cdot n \cdot \text{depth}$個の変分角度を持たせます。
+# PCEは特定の回路を規定しません。原論文では**ハードウェア効率の良いブリックワーク型アンザッツ**——単一量子ビット回転と2量子ビットエンタングラを交互に積み重ねたアンザッツ——を採用しています。本チュートリアルでは`qamomile.circuit.algorithm.basic`が提供する事前定義のレイヤ（`ry_layer`、`rz_layer`、`cz_entangling_layer`）を`depth`回スタックして使い、合計で$2 \cdot n \cdot \text{depth}$個の変分角度を持たせます。
 
 # %% [markdown]
 # ### ゲート規約に関する注意
@@ -183,7 +183,7 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # %% [markdown]
 # ### Step 1: BinaryModelとPCEConverterの構築
 #
-# §1で導出したIsing形式——$h_i = 0$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$——を`BinaryModel.from_ising`で直接構築し、得られたSPINモデルと圧縮率$k = 2$を`PCEConverter`に渡します。コンバータは内部で`PCEEncoder`を構築し、必要な量子ビット数を計算します。このスケーリングではスピンモデルのエネルギーが**カット値の符号反転**に等しくなるので、カットが大きいほどエネルギーが低くなります。
+# §1で導出したIsing形式——$h_i = 0$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$——を`BinaryModel.from_ising`で直接構築し、得られたSPINモデルと相関子次数$k = 2$を`PCEConverter`に渡します。コンバータは内部で`PCEEncoder`を構築し、必要な量子ビット数を計算します。このスケーリングではスピンモデルのエネルギーが**カット値の符号反転**に等しくなるので、カットが大きいほどエネルギーが低くなります。
 
 # %%
 from qamomile.optimization.binary_model import BinaryModel
@@ -200,13 +200,13 @@ converter = PCEConverter(ising_model, k=2)
 spin_model = converter.spin_model
 print(f"Number of variables  : {spin_model.num_bits}")
 print(f"PCE qubit count      : {converter.num_qubits}")
-print(f"Compression rate     : k = {converter.k}")
+print(f"Correlator order     : k = {converter.k}")
 print(f"Compression factor   : {spin_model.num_bits / converter.num_qubits:.1f}x")
 
 # %% [markdown]
 # ### Step 2: 変数ごとのPauliオブザーバブルを確認する
 #
-# `get_encoded_pauli_list()`は変数ごとに1つのHamiltonianを返します。各Hamiltonianは係数1の$k$体Pauli文字列をちょうど1つ含みます。これらが§3で言及した$P_i$オブザーバブルで、最適化ループはアンザッツカーネル内で`qm.expval`を通してこれらを読み出します。同じ列挙はベースとなる`PCEEncoder` (`converter.encoder`) にも残っており、コンバータを介さずに確認することも可能です。
+# `get_encoded_pauli_list()`は変数ごとに1つのHamiltonianを返します。各Hamiltonianは係数1の$k$体Pauli文字列をちょうど1つ含みます。これらが§3で言及した$P_i$オブザーバブルで、最適化ループはアンザッツカーネル内で`qmc.expval`を通してこれらを評価します。同じ列挙はベースとなる`PCEEncoder` (`converter.encoder`) にも残っており、コンバータを介さずに確認することも可能です。
 
 # %%
 observables = converter.get_encoded_pauli_list()
@@ -218,7 +218,7 @@ for i, P_i in enumerate(observables):
 # %% [markdown]
 # ### Step 3: ハードウェア効率の良いアンザッツの定義
 #
-# アンザッツは一様重ね合わせから出発し、`ry_layer` + `rz_layer` + `cz_entangling_layer`のブリックワーク層を`depth`回適用します。カーネルは$\langle P \rangle$を返しますが、`P`はbindingsで渡される特定のオブザーバブルで、同じカーネルが$P_i$ごとに1回ずつトランスパイルされます。
+# アンザッツは一様重ね合わせを準備し、`ry_layer` + `rz_layer` + `cz_entangling_layer`のブリックワーク層を`depth`回適用します。カーネルは$\langle P \rangle$を返しますが、`P`はbindingsで渡される特定のオブザーバブルで、同じカーネルが$P_i$ごとに1回ずつトランスパイルされます。
 
 # %%
 import qamomile.circuit as qmc
@@ -276,7 +276,7 @@ print(f"Variational params : {num_thetas} (= 2 * n * depth)")
 # %% [markdown]
 # ### Step 5: 変分パラメータの最適化
 #
-# 古典側のループは現在の`thetas`に対して各オブザーバブルの$\langle P_i \rangle$を評価し、§3のtanh緩和損失（データ項+正規化項）に値を代入してから、`scipy.optimize.minimize`に更新を依頼します。読者がオプティマイザの収束を確認できるよう損失履歴を記録します。
+# 古典側のループは現在の`thetas`に対して各オブザーバブルの$\langle P_i \rangle$を評価し、§3のtanh緩和損失（データ項+正則化項）に値を代入してから、`scipy.optimize.minimize`に更新を依頼します。読者がオプティマイザの収束を確認できるよう損失履歴を記録します。
 
 # %%
 import os
@@ -288,7 +288,7 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 maxiter = 10 if docs_test_mode else 100
 
 # https://doi.org/10.48550/arXiv.2401.09421 に従ったハイパーパラメータ:
-#   alpha = N^(k/2)（N = ノード数、k = PCEの圧縮率）
+#   alpha = N^(k/2)（N = ノード数、k = PCEの相関子次数）
 #   beta  = 1/2（固定。論文ではランダムグラフ上で一度だけチューニング）
 #   nu    = |E| / 2 + (N - 1) / 4（無向MaxCutに対するEdwards-Erdős下界）
 N = spin_model.num_bits
@@ -319,7 +319,7 @@ def loss(params: np.ndarray) -> float:
     for i, h_i in spin_model.linear.items():
         L_data += h_i * relaxed[i]
 
-    # 正規化項: beta * nu * [(1/N) sum tanh^2(alpha <P_i>)]^2
+    # 正則化項: beta * nu * [(1/N) sum tanh^2(alpha <P_i>)]^2
     mean_sq = sum(r**2 for r in relaxed) / N
     L_reg = beta * nu * mean_sq**2
 
@@ -406,7 +406,7 @@ plt.show()
 #
 # 1. MaxCutを最初からスピンIsing問題（$s_i \in \{+1, -1\}$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$）として書き、スピンエネルギーが$-\text{cut}$と一致するように整えたうえで、ベクトル化したNumPyで$2^{20}$通りすべてのスピン配置を全探索して厳密解を求めました。
 # 2. 20個のスピン変数を2体Pauli相関子に符号化し、`PCEConverter(ising_model, k=2)`で**わずか3量子ビット**——およそ7倍の圧縮——に押し込み、`get_encoded_pauli_list()`から変数ごとのオブザーバブルを取り出しました。
-# 3. ハードウェア効率の良い`@qkernel`アンザッツを構築して`qm.expval`で$\langle P \rangle$を返すようにし、オブザーバブルごとに1回トランスパイルしてtanh緩和したMaxCut損失と論文の4次正規化項（$\alpha = N^{k/2}$、$\beta = 1/2$、$\nu = |E|/2 + (N-1)/4$）で学習しました。
+# 3. ハードウェア効率の良い`@qkernel`アンザッツを構築して`qmc.expval`で$\langle P \rangle$を返すようにし、オブザーバブルごとに1回トランスパイルしてtanh緩和したMaxCut損失と論文の4次正則化項（$\alpha = N^{k/2}$、$\beta = 1/2$、$\nu = |E|/2 + (N-1)/4$）で学習しました。
 # 4. 最適化された期待値を`PCEConverter.decode(...)`に与えて離散的なスピン割り当てを復元し、全探索による厳密解と近似比を比較しました。
 #
 # **限界事項:**

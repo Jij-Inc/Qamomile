@@ -20,24 +20,24 @@
 # # PCE for MaxCut: Solving 20 Variables on 3 Qubits
 #
 # This tutorial walks through Pauli Correlation Encoding (PCE) for the
-# MaxCut problem using Qamomile's `PCEConverter`. PCE compresses $N$
-# binary variables into the expectation values of $k$-body Pauli
-# correlators on a much smaller register of $n = \mathcal{O}(N^{1/k})$
-# qubits, enabling variational optimization at problem sizes that would
-# not fit on near-term hardware under one-qubit-per-variable schemes
-# like QAOA.
+# MaxCut problem using Qamomile's `PCEConverter`. PCE represents $N$
+# spin variables by expectation values of $k$-body Pauli correlators on
+# a much smaller register of $n = \mathcal{O}(N^{1/k})$ qubits, enabling
+# variational optimization at problem sizes that would not fit on
+# near-term hardware with standard one-qubit-per-variable QAOA
+# formulations.
 #
 # We will solve a 20-vertex MaxCut instance on **just 3 qubits** with
 # $k = 2$, and verify the result against a brute-force optimum. Steps:
 #
 # 1. Define a 20-node MaxCut problem and brute-force its optimum.
-# 2. Build the PCE encoding via `PCEConverter(instance, k=2)` and read
-#    out the per-variable Pauli observables with `get_encoded_pauli_list()`.
-# 3. Write a hardware-efficient `@qkernel` ansatz and read each
-#    correlator's expectation with `qm.expval(q, P)`.
+# 2. Build the PCE encoding via `PCEConverter(ising_model, k=2)` and list
+#    the per-variable Pauli observables with `get_encoded_pauli_list()`.
+# 3. Write a hardware-efficient `@qkernel` ansatz and evaluate each
+#    correlator's expectation with `qmc.expval(q, P)`.
 # 4. Train the ansatz against a tanh-relaxed surrogate of the MaxCut
 #    objective using `scipy.optimize.minimize`.
-# 5. Decode the optimized expectations into a bitstring with
+# 5. Decode the optimized expectations into a spin assignment with
 #    `converter.decode(expectations)` and visualize the partition.
 
 # %%
@@ -45,7 +45,7 @@
 # # !pip install qamomile
 
 # %% [markdown]
-# ## Backgrounds
+# ## Background
 
 # %% [markdown]
 # ### What is MaxCut?
@@ -86,9 +86,10 @@
 # scale, and the size is small enough that brute force still gives us a
 # ground truth.
 #
-# `nx.random_regular_graph` can produce disconnected graphs (an isolated
-# component contributes a free spin and degenerates the optimization
-# landscape), so we bump the seed until we land on a connected graph.
+# `nx.random_regular_graph` can produce disconnected graphs (each
+# disconnected component introduces an independent global spin-flip
+# symmetry and extra degeneracy), so we bump the seed until we land on a
+# connected graph.
 
 # %%
 import matplotlib.pyplot as plt
@@ -147,17 +148,18 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # %% [markdown]
 # ## Algorithm
 #
-# PCE was introduced by Sciorilli, Borges, Patti, García-Martín, Camilo,
-# Anandkumar, and Aolita (https://doi.org/10.48550/arXiv.2401.09421) as
-# a way of pushing combinatorial optimization deep into the qubit-count
-# regime where QAOA-style one-qubit-per-variable encodings cannot fit.
+# PCE was introduced by
+# [Sciorilli et al.](https://doi.org/10.48550/arXiv.2401.09421) as
+# a way to run larger combinatorial-optimization instances under tight
+# qubit budgets, where standard one-qubit-per-variable QAOA
+# formulations cannot fit.
 # For an $N$-variable problem PCE uses only $n = \mathcal{O}(N^{1/k})$
 # qubits.
 
 # %% [markdown]
 # ### PCE Encoding
 #
-# PCE picks a **compression rate** $k > 1$ and assigns each binary
+# PCE picks a **correlator order** $k > 1$ and assigns each spin
 # variable $i \in \{1, \dots, N\}$ to a distinct $k$-body Pauli
 # correlator $P_i$ — a tensor product of $k$ non-identity Paulis from
 # $\{X, Y, Z\}$ acting on $k$ of the $n$ qubits. The number of distinct
@@ -189,9 +191,10 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # into a smooth surrogate by replacing each spin $s_i$ with the
 # **tanh-relaxed** correlator expectation
 # $\sigma_i(\boldsymbol{\theta}) = \tanh\bigl(\alpha\, \langle P_i \rangle\bigr)$,
-# and adds a quartic **regularizer** that keeps every correlator inside
-# the open interval $(-1, +1)$ — the open domain where every bitstring
-# is still expressible:
+# and adds a quartic **regularizer** that discourages premature
+# saturation of the relaxed variables. The tanh map itself keeps
+# $\sigma_i$ inside the open interval $(-1, +1)$, where sign rounding
+# can still realize every candidate bitstring by choosing the signs:
 #
 # $$
 # \mathcal{L}(\boldsymbol{\theta})
@@ -205,14 +208,14 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # opposite signs for every connected pair (so $J_{ij} \sigma_i \sigma_j$
 # is negative); the regularizer counterbalances by penalizing premature
 # saturation, keeping the optimizer in the smooth interior of the
-# correlator domain instead of locking onto a poor candidate bitstring
+# relaxed-variable domain instead of locking onto a poor candidate bitstring
 # early.
 #
-# Hyperparameters, following (https://doi.org/10.48550/arXiv.2401.09421):
+# Hyperparameters, following the same paper:
 #
 # - **$\alpha$** (tanh sharpness): scaled as
 #   $\alpha \sim N^{k/2}$, where $N$ is the number of graph nodes (i.e.
-#   the number of spin variables) and $k$ is the PCE compression rate.
+#   the number of spin variables) and $k$ is the PCE correlator order.
 #   For our 20-node, $k = 2$ run this is $\alpha = 20^{1} = 20$.
 # - **$\beta = 1/2$** (regularizer strength): a fixed value the paper
 #   tunes once on random graphs and reuses across experiments.
@@ -228,22 +231,23 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # ### Decoding
 #
 # After convergence, PCE rounds each correlator's optimized expectation
-# back to a discrete spin via the sign function:
+# back to a discrete spin via sign rounding:
 #
 # $$
 # s_i \;=\; \operatorname{sgn}\!\bigl\langle P_i \bigr\rangle_{\boldsymbol{\theta}^*}
 # \;\in\; \{+1, -1\},
 # $$
 #
-# and the binary assignment is recovered as $x_i = (1 - s_i) / 2$.
+# Qamomile's `SignRounder` uses $s_i = +1$ when
+# $\langle P_i \rangle \ge 0$ and $s_i = -1$ otherwise. The binary
+# assignment is then recovered as $x_i = (1 - s_i) / 2$.
 
 # %% [markdown]
 # ### Ansatz Choice
 #
 # PCE does not prescribe a fixed circuit — the original paper uses a
 # **hardware-efficient brickwork ansatz**: alternating layers of
-# single-qubit rotations and two-qubit entanglers, with the parameter
-# count scaling linearly in the number of variables. We use Qamomile's
+# single-qubit rotations and two-qubit entanglers. We use Qamomile's
 # pre-built layers (`ry_layer`, `rz_layer`, `cz_entangling_layer`) from
 # `qamomile.circuit.algorithm.basic` and stack them `depth` times,
 # giving $2 \cdot n \cdot \text{depth}$ variational angles in total.
@@ -267,10 +271,10 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 #
 # We instantiate the Ising form derived in §1 — $h_i = 0$,
 # $J_{ij} = 1/2$ on every edge, constant $-|E|/2$ — directly via
-# `BinaryModel.from_ising`, hand the SPIN-typed model and compression
-# rate $k = 2$ to `PCEConverter`, and let it build the `PCEEncoder` and
-# qubit count. With this scaling, the spin-model energy equals
-# **minus the cut value**, so a higher cut means a lower energy.
+# `BinaryModel.from_ising`, hand the SPIN-typed model and correlator
+# order $k = 2$ to `PCEConverter`, and let it build the `PCEEncoder` and
+# qubit count. With this scaling, the spin-model energy equals **minus
+# the cut value**, so a higher cut means a lower energy.
 
 # %%
 from qamomile.optimization.binary_model import BinaryModel
@@ -287,7 +291,7 @@ converter = PCEConverter(ising_model, k=2)
 spin_model = converter.spin_model
 print(f"Number of variables  : {spin_model.num_bits}")
 print(f"PCE qubit count      : {converter.num_qubits}")
-print(f"Compression rate     : k = {converter.k}")
+print(f"Correlator order     : k = {converter.k}")
 print(f"Compression factor   : {spin_model.num_bits / converter.num_qubits:.1f}x")
 
 # %% [markdown]
@@ -295,9 +299,9 @@ print(f"Compression factor   : {spin_model.num_bits / converter.num_qubits:.1f}x
 #
 # `get_encoded_pauli_list()` returns one Hamiltonian per variable, each
 # containing exactly one $k$-body Pauli string with coefficient $1$.
-# These are the $P_i$ observables of §3 — the optimizer will read them
-# with `qm.expval` inside the ansatz kernel. The same enumeration also
-# lives on the underlying `PCEEncoder` (`converter.encoder`) for
+# These are the $P_i$ observables of §3 — the optimizer will evaluate
+# them with `qmc.expval` inside the ansatz kernel. The same enumeration
+# also lives on the underlying `PCEEncoder` (`converter.encoder`) for
 # inspection without going through the converter.
 
 # %%
@@ -310,7 +314,7 @@ for i, P_i in enumerate(observables):
 # %% [markdown]
 # ### Step 3: Define the Hardware-Efficient Ansatz
 #
-# The ansatz starts in the uniform superposition and applies `depth`
+# The ansatz prepares the uniform superposition and applies `depth`
 # brickwork layers of `ry_layer` + `rz_layer` + `cz_entangling_layer`.
 # The kernel returns the expectation value $\langle P \rangle$ where
 # `P` is one specific observable supplied via bindings — the same
@@ -393,7 +397,7 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 maxiter = 10 if docs_test_mode else 100
 
 # Hyperparameters from https://doi.org/10.48550/arXiv.2401.09421:
-#   alpha = N^(k/2) (N = number of nodes, k = PCE compression rate)
+#   alpha = N^(k/2) (N = number of nodes, k = PCE correlator order)
 #   beta  = 1/2 (fixed, paper tunes once on random graphs)
 #   nu    = |E| / 2 + (N - 1) / 4 (Edwards-Erdős unweighted MaxCut bound)
 N = spin_model.num_bits
@@ -526,10 +530,10 @@ plt.show()
 #    with vectorised NumPy.
 # 2. Encoded the 20 spin variables into 2-body Pauli correlators on
 #    just **3 qubits** — a roughly 7× compression — with
-#    `PCEConverter(ising_model, k=2)` and read the per-variable
+#    `PCEConverter(ising_model, k=2)` and obtained the per-variable
 #    observables from `get_encoded_pauli_list()`.
 # 3. Built a hardware-efficient `@qkernel` ansatz that returns
-#    $\langle P \rangle$ via `qm.expval`, transpiled it once per
+#    $\langle P \rangle$ via `qmc.expval`, transpiled it once per
 #    observable, and trained it against the tanh-relaxed MaxCut loss
 #    plus the paper's quartic regularizer
 #    ($\alpha = N^{k/2}$, $\beta = 1/2$, $\nu = |E|/2 + (N-1)/4$).
