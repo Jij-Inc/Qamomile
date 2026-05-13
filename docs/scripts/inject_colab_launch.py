@@ -562,7 +562,10 @@ _SECTION_RE = re.compile(
     r"<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>",
     re.IGNORECASE | re.DOTALL,
 )
-_CLASS_ATTR_RE = re.compile(r'\bclass\s*=\s*"(?P<value>[^"]*)"', re.IGNORECASE)
+_CLASS_ATTR_RE = re.compile(
+    r'\bclass\s*=\s*(?P<q>["\'])(?P<value>[^"\']*)(?P=q)',
+    re.IGNORECASE,
+)
 # Match ``id="cite-…"`` on the rendered bibliography ``<li>`` (scoped
 # by the section / class-token check above). mystmd derives ``…``
 # from the citation's label, which for DOI-resolved citations is the
@@ -581,15 +584,25 @@ _CLASS_ATTR_RE = re.compile(r'\bclass\s*=\s*"(?P<value>[^"]*)"', re.IGNORECASE)
 # We anchor on the ``id=`` prefix so the regex does not accidentally
 # rewrite the citation's visible label text (which legitimately
 # contains ``https://`` etc.) or the ``href`` of the citation link
-# (which legitimately points at the doi.org URL).
-_CITE_ID_IN_BIB_RE = re.compile(r'(\sid=")cite-([^"]+)"')
+# (which legitimately points at the doi.org URL). Both regexes
+# tolerate the HTML5-legal whitespace variations: ``\s+`` for the
+# leading attribute separator (mystmd emits one space today but
+# pretty-printers can emit a newline + indent), ``\s*`` around the
+# ``=``, and a captured quote char so single- or double-quoted
+# values both work. The closing quote in the value capture uses a
+# backreference so we never cross a quote boundary by accident.
+_CITE_ID_IN_BIB_RE = re.compile(r'(\s+id\s*=\s*(["\']))cite-([^"\']+)\2')
 # Cross-references back into the bibliography use a fragment of the
 # form ``href="#cite-…"``. mystmd doesn't emit these in our
 # tagged-pill citation style today, but the upstream renderer can
 # (e.g. footnote-style citation pills), and rewritten ids must stay
 # in sync with their cross-references so the fragment anchor still
-# resolves to its ``<li>`` after sanitization.
-_CITE_HREF_RE = re.compile(r'(href=")#cite-([^"]+)"', re.IGNORECASE)
+# resolves to its ``<li>`` after sanitization. Same whitespace /
+# quote-style tolerance as ``_CITE_ID_IN_BIB_RE``.
+_CITE_HREF_RE = re.compile(
+    r'(href\s*=\s*(["\']))#cite-([^"\']+)\2',
+    re.IGNORECASE,
+)
 # Chars HTML5 + CSS-selector + React all accept in id values without
 # special encoding; everything else gets collapsed to a single ``-``.
 # Underscore is included because it is HTML5-id-safe and appears in
@@ -778,7 +791,7 @@ def sanitize_cite_ids(html_path: Path) -> bool:
             continue
         bibliography_spans.append((section_match.start(), section_match.end()))
         for id_match in _CITE_ID_IN_BIB_RE.finditer(section_match.group(0)):
-            raw = id_match.group(2)
+            raw = id_match.group(3)
             decoded = _decode_id_raw(raw)
             sanitized = _sanitize_cite_id(decoded)
             sanitized_occurrences.setdefault(sanitized, []).append(raw)
@@ -830,10 +843,14 @@ def sanitize_cite_ids(html_path: Path) -> bool:
         return False
 
     # Pass 2: rewrite ids only inside bibliography section spans.
+    # ``match.group(1)`` is the captured prefix up to and including
+    # the opening quote; ``match.group(2)`` is the quote char alone,
+    # which we reuse as the closing quote so single-quoted attributes
+    # keep their single quotes.
     def _id_repl(match: re.Match[str]) -> str:
-        decoded = _decode_id_raw(match.group(2))
-        sanitized = decoded_to_sanitized.get(decoded, match.group(2))
-        return f'{match.group(1)}cite-{sanitized}"'
+        decoded = _decode_id_raw(match.group(3))
+        sanitized = decoded_to_sanitized.get(decoded, match.group(3))
+        return f"{match.group(1)}cite-{sanitized}{match.group(2)}"
 
     pieces: list[str] = []
     cursor = 0
@@ -846,13 +863,15 @@ def sanitize_cite_ids(html_path: Path) -> bool:
 
     # Pass 3: rewrite fragment cross-references anywhere using the
     # same map. Unknown fragments (decoded label not in the map) are
-    # passed through — they point at non-bibliography anchors.
+    # passed through — they point at non-bibliography anchors. Same
+    # group layout as ``_id_repl``: 1 = prefix-with-opening-quote,
+    # 2 = quote char, 3 = raw value after ``#cite-``.
     def _href_repl(match: re.Match[str]) -> str:
-        decoded = _decode_href_raw(match.group(2))
+        decoded = _decode_href_raw(match.group(3))
         sanitized = decoded_to_sanitized.get(decoded)
-        if sanitized is None or sanitized == match.group(2):
+        if sanitized is None or sanitized == match.group(3):
             return match.group(0)
-        return f'{match.group(1)}#cite-{sanitized}"'
+        return f"{match.group(1)}#cite-{sanitized}{match.group(2)}"
 
     new_content = _CITE_HREF_RE.sub(_href_repl, new_content)
 

@@ -117,7 +117,7 @@ _DOI_BIB_HTML = """
 """
 
 
-def test_sanitize_rewrites_dollar_doi_id_and_matching_fragment(tmp_path, mod):
+def test_sanitize_rewrites_doi_id_and_matching_fragment(tmp_path, mod):
     """DOI-form id is collapsed; matching #cite fragment follows the same map."""
     p = _write_html(tmp_path, "page.html", _DOI_BIB_HTML)
     assert mod.sanitize_cite_ids(p) is True
@@ -371,6 +371,56 @@ def test_sanitize_decodes_html_entity_in_id(tmp_path, mod):
     assert mod.sanitize_cite_ids(p) is True
     out = p.read_text(encoding="utf-8")
     assert 'id="cite-a-b"' in out
+
+
+def test_sanitize_tolerates_multi_space_and_newline_id_attribute(tmp_path, mod):
+    """``<li ... \\n  id="cite-…">`` and similar wrap-formatted attrs match.
+
+    Pretty-printers and hand-edited HTML can put a newline + indent
+    between attributes, or multiple spaces around ``=``. A tight
+    ``\\sid="`` regex would silently skip such ids and leave them
+    unsanitized. The regex tolerates ``\\s+`` before ``id``, ``\\s*``
+    around ``=``, and either quote style.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li class="myst-bibliography-item"
+      id  =  "cite-https://doi.org/a">
+    a
+  </li>
+</section>
+<a href = "#cite-https://doi.org/a">ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'id  =  "cite-https-doi-org-a"' in out
+    assert 'href = "#cite-https-doi-org-a"' in out
+
+
+def test_sanitize_tolerates_single_quoted_id_attribute(tmp_path, mod):
+    """``<li id='cite-…'>`` (single-quoted) is also handled.
+
+    HTML5 lets attribute values be wrapped in either ``"`` or ``'``.
+    The regex captures the quote char and reuses it as the closing
+    quote so single-quoted citations round-trip with single quotes
+    instead of getting silently rewritten with double quotes.
+    """
+    html = (
+        "<html><body>"
+        "<section class='myst-bibliography'>"
+        "<li id='cite-https://doi.org/a'>x</li>"
+        "</section>"
+        "<a href='#cite-https://doi.org/a'>ref</a>"
+        "</body></html>"
+    )
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert "id='cite-https-doi-org-a'" in out
+    assert "href='#cite-https-doi-org-a'" in out
 
 
 def test_sanitize_resolves_both_percent_and_entity_href_forms(tmp_path, mod):
