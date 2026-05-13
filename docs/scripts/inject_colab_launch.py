@@ -719,11 +719,23 @@ def sanitize_cite_ids(html_path: Path) -> bool:
        ``#cite-https%3A%2F%2F…`` or ``#cite-a&amp;b`` still match the
        original ``<li>`` label.
 
-    Collisions: if two distinct decoded labels collapse to the same
-    sanitized form, we'd ship duplicate ``id`` attributes and break
-    both HTML validity and fragment navigation. The function raises
-    ``RuntimeError`` so the build fails loud rather than silently
-    producing broken HTML.
+    Collisions: any path that would produce two ``<li>`` elements
+    sharing the same sanitized ``id`` value fails loudly because the
+    resulting HTML would be invalid and fragment navigation would
+    pick one of the duplicates arbitrarily. Two such paths are
+    detected and both raise ``RuntimeError``:
+
+    1. **Distinct decoded labels** that happen to collapse to the
+       same sanitized form (e.g. ``cite-a/b`` and ``cite-a:b`` both
+       become ``cite-a-b``).
+    2. **Repeated decoded occurrences** — the same decoded label
+       appearing as multiple SSR ``id`` attributes. E.g.
+       ``cite-a&amp;b`` and ``cite-a&b`` are two ``<li>`` items
+       whose ``id`` values decode to the same string (``a&b``), so
+       both would rewrite to ``cite-a-b``. The SSR is already
+       broken in that case (duplicate ids at the DOM level) but
+       otherwise our pass would silently fan the encoded forms into
+       the canonical one and hide the upstream issue.
 
     Idempotent: re-running on a sanitized HTML is a no-op — the
     sanitized labels match the unchanged sanitized form, and no
@@ -740,8 +752,10 @@ def sanitize_cite_ids(html_path: Path) -> bool:
 
     Raises:
         RuntimeError: If two distinct decoded citation labels collapse
-            to the same sanitized form (would create duplicate ``id``
-            attributes on the page).
+            to the same sanitized form, or if the same decoded label
+            appears as multiple SSR ``id`` occurrences. Either case
+            would create duplicate ``id`` attributes on the rendered
+            page.
     """
     content = html_path.read_text(encoding="utf-8")
 
