@@ -180,7 +180,7 @@ class AOAConverter(QAOAConverter):
         flattened_pairs = [pair for partition in partitions for pair in partition]
         return np.asarray(flattened_pairs, dtype=np.uint64)
 
-    def _resolve_pair_indices(
+    def resolve_pair_indices(
         self,
         *,
         mixer: str | MixerName,
@@ -237,7 +237,7 @@ class AOAConverter(QAOAConverter):
             case _:
                 assert False, f"unreachable: unhandled MixerName {mixer!r}"
 
-    def _compute_dicke_composition_schedule(
+    def compute_dicke_composition_schedule(
         self,
         hamming_weight: int,
         block_size: int,
@@ -259,7 +259,7 @@ class AOAConverter(QAOAConverter):
         n_qubits = self.spin_model.num_bits
         return dicke_state_composition_schedule(n_qubits, block_size, hamming_weight)
 
-    def _compute_basis_state_initial_ones(
+    def compute_basis_state_initial_ones(
         self,
         hamming_weight: int,
         block_size: int,
@@ -354,7 +354,7 @@ class AOAConverter(QAOAConverter):
             self.spin_model.num_bits if block_size is None else block_size
         )
 
-        resolved_pair_indices_mixer = self._resolve_pair_indices(
+        resolved_pair_indices_mixer = self.resolve_pair_indices(
             mixer=mixer,
             pair_indices=pair_indices_mixer,
             block_size=effective_block_size,
@@ -369,12 +369,12 @@ class AOAConverter(QAOAConverter):
                 triplets_indices_dicke,
                 pair_angles_dicke,
                 triplets_angles_dicke,
-            ) = self._compute_dicke_composition_schedule(
+            ) = self.compute_dicke_composition_schedule(
                 hamming_weight=hamming_weight,
                 block_size=effective_block_size,
             )
         elif initial_state == InitialState.SINGLE_BASIS_STATE:
-            initial_ones = self._compute_basis_state_initial_ones(
+            initial_ones = self.compute_basis_state_initial_ones(
                 hamming_weight=hamming_weight,
                 block_size=effective_block_size,
             )
