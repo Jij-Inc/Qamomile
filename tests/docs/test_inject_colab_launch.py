@@ -400,6 +400,29 @@ def test_sanitize_tolerates_multi_space_and_newline_id_attribute(tmp_path, mod):
     assert 'href = "#cite-https-doi-org-a"' in out
 
 
+def test_sanitize_tolerates_uppercase_id_attribute(tmp_path, mod):
+    """``<li ID="cite-…">`` (uppercased attribute name) is also handled.
+
+    HTML attribute names are case-insensitive per the HTML5 spec.
+    mystmd lowercases its output today but an alternate serializer
+    or hand-edit could emit ``ID=`` or ``Id=``. ``_CITE_ID_IN_BIB_RE``
+    uses ``re.IGNORECASE`` so any spelling still matches.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li ID="cite-https://doi.org/a">x</li>
+</section>
+<a HREF="#cite-https://doi.org/a">ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'ID="cite-https-doi-org-a"' in out
+    assert 'HREF="#cite-https-doi-org-a"' in out
+
+
 def test_sanitize_tolerates_single_quoted_id_attribute(tmp_path, mod):
     """``<li id='cite-…'>`` (single-quoted) is also handled.
 

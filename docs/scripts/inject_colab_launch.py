@@ -591,7 +591,13 @@ _CLASS_ATTR_RE = re.compile(
 # ``=``, and a captured quote char so single- or double-quoted
 # values both work. The closing quote in the value capture uses a
 # backreference so we never cross a quote boundary by accident.
-_CITE_ID_IN_BIB_RE = re.compile(r'(\s+id\s*=\s*(["\']))cite-([^"\']+)\2')
+# ``re.IGNORECASE`` because HTML attribute names are case-insensitive
+# in the spec, so ``ID=`` and ``Id=`` from an alternate serializer
+# still match.
+_CITE_ID_IN_BIB_RE = re.compile(
+    r'(\s+id\s*=\s*(["\']))cite-([^"\']+)\2',
+    re.IGNORECASE,
+)
 # Cross-references back into the bibliography use a fragment of the
 # form ``href="#cite-…"``. mystmd doesn't emit these in our
 # tagged-pill citation style today, but the upstream renderer can
