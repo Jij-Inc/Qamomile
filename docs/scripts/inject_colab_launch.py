@@ -559,7 +559,7 @@ def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
 # silently fall out of scope and could leave duplicate ids in the
 # rendered page.
 _SECTION_RE = re.compile(
-    r'<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>',
+    r"<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>",
     re.IGNORECASE | re.DOTALL,
 )
 _CLASS_ATTR_RE = re.compile(r'\bclass\s*=\s*"(?P<value>[^"]*)"', re.IGNORECASE)
@@ -803,24 +803,19 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     #      canonical form and hides the upstream issue. Fail loud
     #      either way so the build never ships a page with duplicate
     #      bibliography ids.
-    distinct_collisions = {
-        s: rs for s, rs in sanitized_origins.items() if len(rs) > 1
-    }
+    distinct_collisions = {s: rs for s, rs in sanitized_origins.items() if len(rs) > 1}
     occurrence_collisions = {
         s: rs for s, rs in sanitized_occurrences.items() if len(rs) > 1
     }
     if distinct_collisions or occurrence_collisions:
         parts: list[str] = []
         for sanitized, decoded_raws in sorted(distinct_collisions.items()):
-            parts.append(
-                f"{sanitized!r} <- distinct labels {sorted(decoded_raws)!r}"
-            )
+            parts.append(f"{sanitized!r} <- distinct labels {sorted(decoded_raws)!r}")
         for sanitized, raw_occurrences in sorted(occurrence_collisions.items()):
             if sanitized in distinct_collisions:
                 continue  # already reported with richer detail
             parts.append(
-                f"{sanitized!r} <- repeated occurrences "
-                f"{sorted(raw_occurrences)!r}"
+                f"{sanitized!r} <- repeated occurrences {sorted(raw_occurrences)!r}"
             )
         details = "; ".join(parts)
         raise RuntimeError(

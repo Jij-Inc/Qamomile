@@ -38,9 +38,7 @@ def _load_module():
     Returns:
         ModuleType: A freshly imported copy of the script module.
     """
-    spec = importlib.util.spec_from_file_location(
-        "inject_colab_launch", SCRIPT_PATH
-    )
+    spec = importlib.util.spec_from_file_location("inject_colab_launch", SCRIPT_PATH)
     assert spec is not None and spec.loader is not None, SCRIPT_PATH
     module = importlib.util.module_from_spec(spec)
     sys.modules["inject_colab_launch"] = module
@@ -124,12 +122,8 @@ def test_sanitize_rewrites_dollar_doi_id_and_matching_fragment(tmp_path, mod):
     p = _write_html(tmp_path, "page.html", _DOI_BIB_HTML)
     assert mod.sanitize_cite_ids(p) is True
     out = p.read_text(encoding="utf-8")
-    assert (
-        'id="cite-https-doi-org-10-48550-arxiv-quant-ph-0407010"' in out
-    )
-    assert (
-        'href="#cite-https-doi-org-10-48550-arxiv-quant-ph-0407010"' in out
-    )
+    assert 'id="cite-https-doi-org-10-48550-arxiv-quant-ph-0407010"' in out
+    assert 'href="#cite-https-doi-org-10-48550-arxiv-quant-ph-0407010"' in out
     # The outbound DOI URL is NOT a #cite fragment and must not be touched.
     assert 'href="https://doi.org/10.48550/arxiv.quant-ph/0407010"' in out
 
