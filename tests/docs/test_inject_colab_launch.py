@@ -255,7 +255,31 @@ def test_sanitize_raises_on_collisions(tmp_path, mod):
 </body></html>
 """
     p = _write_html(tmp_path, "page.html", html)
-    with pytest.raises(RuntimeError, match="collapse to the same sanitized id"):
+    with pytest.raises(RuntimeError, match="duplicate id attributes"):
+        mod.sanitize_cite_ids(p)
+
+
+def test_sanitize_raises_on_repeated_decoded_occurrences(tmp_path, mod):
+    """Same decoded label appearing in multiple SSR ``id`` attributes fails.
+
+    ``cite-a&amp;b`` and ``cite-a&b`` are two ``<li>`` items in the
+    source whose ``id`` values DECODE to the same string (``a&b``),
+    so both would rewrite to the same sanitized form ``cite-a-b``.
+    The SSR is already broken in this case — duplicate ids at the
+    DOM level — but our sanitizer would silently fan the two encoded
+    forms into the canonical one and hide the upstream problem. Fail
+    loud instead so the build surfaces the issue.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-a&amp;b">first</li>
+  <li id="cite-a&b">second</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    with pytest.raises(RuntimeError, match="duplicate id attributes"):
         mod.sanitize_cite_ids(p)
 
 

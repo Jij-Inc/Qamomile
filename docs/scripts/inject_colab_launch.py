@@ -547,6 +547,17 @@ def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
 # ``not-myst-bibliography`` (a regex ``\bmyst-bibliography\b`` would,
 # since ``\b`` only checks the word/non-word boundary and ``-`` is a
 # non-word character).
+#
+# Known limitation: lazy ``.*?`` matching means a nested ``<section>``
+# inside the bibliography would close the regex at the inner
+# ``</section>`` instead of the outer one. mystmd's current output
+# never nests sections inside ``<section class="myst-bibliography">``
+# (the body is a flat ``<header>`` + ``<ol><li>…</li></ol>``), so
+# this is theoretical, but if upstream ever changes we'll need to
+# switch to a proper HTML parser. The collision check would surface
+# the regression: any cite-id beyond the inner ``</section>`` would
+# silently fall out of scope and could leave duplicate ids in the
+# rendered page.
 _SECTION_RE = re.compile(
     r'<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>',
     re.IGNORECASE | re.DOTALL,
@@ -736,9 +747,13 @@ def sanitize_cite_ids(html_path: Path) -> bool:
 
     # Pass 1: walk every ``<section>``, keep only those whose class
     # attribute actually contains ``myst-bibliography`` as a CSS
-    # token, and collect raw → decoded → sanitized mappings.
+    # token, and collect both the unique decoded labels (for the
+    # ``decoded → sanitized`` rewrite map) and every per-id-attribute
+    # occurrence (so we can detect duplicate-id outputs in pass 2 of
+    # the collision check).
     decoded_to_sanitized: dict[str, str] = {}
     sanitized_origins: dict[str, list[str]] = {}
+    sanitized_occurrences: dict[str, list[str]] = {}  # sanitized -> raw[]
     bibliography_spans: list[tuple[int, int]] = []
     for section_match in _SECTION_RE.finditer(content):
         attrs = section_match.group("attrs")
@@ -749,28 +764,55 @@ def sanitize_cite_ids(html_path: Path) -> bool:
             continue
         bibliography_spans.append((section_match.start(), section_match.end()))
         for id_match in _CITE_ID_IN_BIB_RE.finditer(section_match.group(0)):
-            decoded = _decode_id_raw(id_match.group(2))
+            raw = id_match.group(2)
+            decoded = _decode_id_raw(raw)
+            sanitized = _sanitize_cite_id(decoded)
+            sanitized_occurrences.setdefault(sanitized, []).append(raw)
             if decoded in decoded_to_sanitized:
                 continue
-            sanitized = _sanitize_cite_id(decoded)
             decoded_to_sanitized[decoded] = sanitized
             sanitized_origins.setdefault(sanitized, []).append(decoded)
 
     if not decoded_to_sanitized:
         return False  # no bibliography or no cite ids inside one
 
-    # Collision check before we mutate anything: if two distinct
-    # decoded labels collapse to the same sanitized form, fail loud.
-    collisions = {s: rs for s, rs in sanitized_origins.items() if len(rs) > 1}
-    if collisions:
-        details = "; ".join(
-            f"{sanitized!r} <- {sorted(raws)!r}"
-            for sanitized, raws in sorted(collisions.items())
-        )
+    # Collision check before we mutate anything. Two failure modes:
+    #   1. Two *distinct* decoded labels collapse to the same
+    #      sanitized form (e.g. ``cite-a/b`` and ``cite-a:b`` both
+    #      become ``cite-a-b``).
+    #   2. The *same* decoded label appears as multiple SSR ``id``
+    #      occurrences (e.g. ``cite-a&amp;b`` and ``cite-a&b`` are two
+    #      `<li>` items in the source that both decode to ``a&b`` and
+    #      would both rewrite to ``cite-a-b``). The SSR is already
+    #      broken in that case — duplicate ids at the DOM level — but
+    #      our sanitizer otherwise silently fans them into the
+    #      canonical form and hides the upstream issue. Fail loud
+    #      either way so the build never ships a page with duplicate
+    #      bibliography ids.
+    distinct_collisions = {
+        s: rs for s, rs in sanitized_origins.items() if len(rs) > 1
+    }
+    occurrence_collisions = {
+        s: rs for s, rs in sanitized_occurrences.items() if len(rs) > 1
+    }
+    if distinct_collisions or occurrence_collisions:
+        parts: list[str] = []
+        for sanitized, decoded_raws in sorted(distinct_collisions.items()):
+            parts.append(
+                f"{sanitized!r} <- distinct labels {sorted(decoded_raws)!r}"
+            )
+        for sanitized, raw_occurrences in sorted(occurrence_collisions.items()):
+            if sanitized in distinct_collisions:
+                continue  # already reported with richer detail
+            parts.append(
+                f"{sanitized!r} <- repeated occurrences "
+                f"{sorted(raw_occurrences)!r}"
+            )
+        details = "; ".join(parts)
         raise RuntimeError(
-            f"{html_path}: distinct citation labels collapse to the same "
-            f"sanitized id, which would produce duplicate id attributes "
-            f"on the page: {details}"
+            f"{html_path}: bibliography citation ids would collapse to "
+            f"duplicate sanitized values, which would produce duplicate "
+            f"id attributes on the page: {details}"
         )
 
     # If every decoded label is already its own sanitized form, no
