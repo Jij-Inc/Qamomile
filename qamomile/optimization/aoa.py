@@ -209,7 +209,7 @@ class AOAConverter(QAOAConverter):
                 mixer_name = MixerName(mixer)
                 if mixer_name != MixerName.RING:
                     warnings.warn(
-                        f"pair_indices was provided; the mixer={mixer!r} argument is ignored.",
+                        f"pair_indices_mixer was provided; the mixer={mixer!r} argument is ignored.",
                         stacklevel=3,
                     )
             except ValueError:
