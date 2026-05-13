@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Classical Control Flow Patterns
 #
 # Quantum circuits often have structure that depends on classical control flow: iterating over qubits, applying gates based on a graph's edges, or choosing between gate sequences. Qamomile supports these patterns through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.

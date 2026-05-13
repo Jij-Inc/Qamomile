@@ -37,6 +37,26 @@ Dependencies flow only downstream. The practical rules:
 - **Transpiler passes** are IR-centric: each pass primarily reads / writes IR and must not depend on Frontend **implementation details** (AST machinery, tracer internals, frontend-only helpers). Passes at the compile-entry / config boundary may legitimately accept or type-reference Frontend surface types such as `QKernel` and `DecompositionConfig` as configuration inputs — e.g., `SubstitutionPass` takes `QKernel` as a substitution target and imports it under `TYPE_CHECKING` + runtime-late import (see `qamomile/circuit/transpiler/passes/substitution.py:34,276`). That pattern is NOT a layer violation. Flag only passes that reach into Frontend behavior or non-boundary internals.
 - **Backend** depends on IR and Transpiler public APIs. Backend MUST NOT import from Frontend.
 
+### B-bis. IR Abstraction Level
+
+Qamomile prefers to **keep the IR as abstract as possible and delegate concretization to the transpile target** (backend emit / runtime). The IR encodes *what the program means*; how a backend realizes it (per-qubit instruction encoding, native composite-gate equivalents, runtime loop / branch lowering) is the backend's job. Concretizing too early at the IR layer locks Qamomile into a single backend's view and bypasses the emit-time extension surfaces — `GateEmitter` (per-gate emission), `CompositeGateEmitter` (native lowering of composite gates), and the emit pass itself when something needs structural customization.
+
+Existing examples of the principle in code:
+
+- **Vector measurement** is a single `MeasureVectorOperation` (`qamomile/circuit/ir/operation/gate.py#L410`) — not expanded into N per-qubit `MeasureOperation`s at IR level. How it turns into actual measurement instructions is left to emit time: backends with a native vector primitive can emit one operation, others can iterate per-qubit. The IR does not commit to per-qubit semantics.
+- **`MeasureQFixedOperation`** is HYBRID (quantum measurement + classical decode). It is split into `MeasureVectorOperation + DecodeQFixedOperation` only at `plan`'s pre-segmentation lowering — late enough that the IR keeps the highest abstraction that still admits a clean classical/quantum segmentation boundary, and each resulting half remains as abstract as possible (no per-qubit expansion).
+- **Composite gates** (QFT / QPE / IQFT) stay as `CompositeGateOperation`; native lowering is opt-in via `CompositeGateEmitter`.
+- **Symbolic loop bounds** stay as `ForOperation`; `LoopAnalyzer` decides unroll-vs-runtime-loop at emit time.
+
+Reviewer rules:
+
+- A new IR op or transpiler pass that pre-expands an abstract concept into per-element / per-qubit / per-step concretization at IR level — **without** a stated reason such as enabling segmentation or breaking a HYBRID kind into pure halves — is a **P1** design regression.
+- A new pass that performs concretization (per-qubit expansion, native-gate substitution, loop unrolling) at a stage **earlier than necessary** — when the same lowering could happen later (typically `plan` or `emit`) — is **P1**.
+- A new pass or op that hard-codes backend-specific lowering inside the IR layer — instead of leaving it to emit time where `GateEmitter`, `CompositeGateEmitter`, or the emit pass itself can express the lowering — is **P1** (also a Section B violation).
+- Splitting a HYBRID op into pure-quantum + pure-classical halves at IR level **is** acceptable when needed for segmentation (`MeasureQFixed → MeasureVector + DecodeQFixed` is the canonical example). The check is whether each resulting half stays as abstract as possible.
+
+When ambiguous, prefer (a) a single abstract op over multiple low-level ones, and (b) lowering at the **latest stage** where the IR still cleanly expresses the abstraction.
+
 ### C. @qkernel & Converter Pattern
 
 - Quantum building blocks exposed for composition by algorithm or optimization converters (QAOA / QRAO / FQAOA ansatz pieces, stdlib algorithms like QFT / QPE / IQFT, mixer / cost-Hamiltonian prep, etc.) MUST use `@qm.qkernel` (or `@qmc.qkernel`). `CompositeGate._decompose()` methods and emitter-side decomposition strategies are separate patterns (class method / strategy protocol) and are out of scope for this rule.
@@ -69,7 +89,8 @@ Applies to backend files under `qamomile/{qiskit,quri_parts,cudaq,qbraid,...}/`.
 
 - **Python 3.11+** (per `pyproject.toml`'s `requires-python`), `X | None` (not `Optional[X]`), extensive type annotations. `enum.StrEnum` is available from 3.11 and is the preferred pattern for closed-set parameters (see later in this section).
 - **No stale imports** left behind from a rename / refactor (dead code at function / class level is covered in Step 5.5's root-cause consolidation).
-- **Google-style docstrings on ALL functions, methods, and classes** (public and private), with `Args` / `Returns` / `Raises` as applicable and `Example` where helpful. Private helpers may use compact sections but must keep the structure. Tests are exempt from `Args` / `Returns` — a 1–2 line description of what is verified suffices. See CLAUDE.md's "Docstring Convention (MANDATORY)". Missing docstrings are P2+.
+- **Google-style docstrings on ALL functions, methods, and classes** (public and private), with `Args` / `Returns` / `Raises` as applicable and `Example` where helpful. Private helpers may use compact sections but must keep the structure. Tests (`def test_...`) are exempt from `Args` / `Returns` — a 1–2 line description of what is verified suffices; **test helpers and fixtures** follow the full rule. See CLAUDE.md's "Docstring Convention (MANDATORY)". Missing docstrings are **P2+**.
+- **Types in docstrings are MANDATORY** for `Args:` and `Returns:`. `Args:` entries MUST use the form `name (type): description`; `Returns:` MUST use the form `type: description`. Type annotations in the signature alone are NOT sufficient — Google-style requires the type to be repeated in the docstring as well so doc-generation tools (and human readers skimming the docstring without the signature) get a complete contract. Missing types in `Args` / `Returns` of a present docstring is **P2** (separate from the "missing docstring entirely" P2+).
 - **Closed-set parameters as Enum**: a public parameter with a finite set of valid strings (mode, method, algorithm variant, backend key) MUST be defined as `enum.StrEnum` and dispatched via the Enum internally. Signatures accept `str | MyEnum` and normalize at the entry (`method = MyEnum(method)`; on failure `raise ValueError` listing the valid values). Internal dispatch via `match` (small sets, see Section L) or a `ClassVar[dict[MyEnum, ...]]` (8+ variants). **Never** construct a `dict[str, callable]` inside a hot-path method every call. Raw string `==` dispatch on closed sets is P2; per-call dict construction is P3.
 
 ### H. Testing Philosophy
@@ -115,8 +136,9 @@ qBraid is out of scope (executor-only wrapper around Qiskit, requires API key). 
 ### I. Documentation
 
 - **Jupytext percent-format `.py` is the source of truth.** Every tutorial `.py` must have a committed `.ipynb` that (a) exists, (b) stays in sync when its `.py` changes, (c) contains execution outputs. Any of these failing is **P1**. An `.ipynb`-only change (no corresponding `.py` update) is **P2** — it bypasses the source-of-truth.
-- **Docs test coverage**: new tutorial paths (outside `collaboration/`) must be in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. Missing is **P1**.
+- **Docs test coverage**: new tutorial paths (outside `integration/`) must be in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. Missing is **P1**.
 - **en/ja parity**: `docs/en/` and `docs/ja/` must share file structure and content — only the natural language differs. Missing or outdated counterpart is **P1**.
+- **Tag whitelist (`ALLOWED_TAGS` in `docs/scripts/build_doc_tags.py`)**: every `tags:` entry in an article's MyST frontmatter MUST already be in `ALLOWED_TAGS`. Adding a new tag to the whitelist as a side-effect of introducing an article is **P1** — the taxonomy is deliberately small and curated, and an unannounced expansion of it is precisely what the whitelist exists to prevent. If a new tag is genuinely needed, the PR should call it out explicitly and the `ALLOWED_TAGS` change should be a separate, documented decision (not a quiet line in a docs PR).
 - Jupyter Book 2 with MyST.
 
 ### J. Numerical Correctness
