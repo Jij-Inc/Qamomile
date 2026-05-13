@@ -23,7 +23,7 @@ def _scs_schedule(
         ValueError: If ``k_dicke`` is outside ``[0, n_dicke]``.
     """
     if not (0 <= k_dicke <= n_dicke):
-        raise ValueError("Require 0 <= k <= n")
+        raise ValueError("Require 0 <= k_dicke <= n_dicke.")
 
     n = n_dicke - 1
 
