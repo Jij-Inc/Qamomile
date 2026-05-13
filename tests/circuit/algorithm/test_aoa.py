@@ -381,7 +381,7 @@ def test_aoa_state_superposition_expval_z_sum_is_zero(name, TranspilerCls):
     job = exe.run(transpiler.executor())
     result = job.result()
 
-    assert abs(result) < 1e-6
+    np.testing.assert_allclose(result, 0.0, atol=1e-6)
 
 
 @pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
@@ -428,11 +428,13 @@ def test_aoa_state_dicke_expval_z_sum_is_zero(name, TranspilerCls):
     job = exe.run(transpiler.executor())
     result = job.result()
 
-    assert abs(result) < 1e-6
+    np.testing.assert_allclose(result, 0.0, atol=1e-6)
 
 
 @pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
-@pytest.mark.parametrize("beta", [0.0, np.pi / 8, np.pi / 4, np.pi / 2])
+@pytest.mark.parametrize(
+    "beta", [-np.pi / 2, 0.0, np.pi / 8, np.pi / 4, np.pi / 2, np.pi, 2 * np.pi]
+)
 def test_xy_pair_rotation_expval_matches_exact_xy_unitary(name, TranspilerCls, beta):
     """Tests that xy_pair_rotation applies exp(-i*beta/2*(X@X + Y@Y)) exactly.
 
@@ -454,4 +456,4 @@ def test_xy_pair_rotation_expval_matches_exact_xy_unitary(name, TranspilerCls, b
     job = exe.run(transpiler.executor())
     result = job.result()
 
-    assert abs(result - 2.0 * np.cos(2.0 * beta)) < 1e-5
+    np.testing.assert_allclose(result, 2.0 * np.cos(2.0 * beta), atol=1e-5)

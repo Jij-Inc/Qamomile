@@ -11,6 +11,7 @@ from .aoa import (
     hubo_aoa_state_dicke,
     hubo_aoa_state_superposition,
     xy_mixer,
+    xy_pair_rotation,
 )
 from .basic import (
     cx_entangling_layer,
@@ -66,6 +67,7 @@ __all__ = [
     "hubo_aoa_state_dicke",
     "hubo_aoa_state_basis_state",
     "xy_mixer",
+    "xy_pair_rotation",
     # Basic layers
     "rx_layer",
     "ry_layer",

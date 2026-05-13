@@ -2,6 +2,7 @@
 
 import re
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -315,7 +316,7 @@ def test_prepare_dicke_expval_z_sum_is_zero(name, TranspilerCls):
     job = exe.run(transpiler.executor())
     result = job.result()
 
-    assert abs(result) < 1e-6
+    np.testing.assert_allclose(result, 0.0, atol=1e-6)
 
 
 @pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
@@ -363,4 +364,4 @@ def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
     job = exe.run(transpiler.executor())
     result = job.result()
 
-    assert abs(result - float(n - 2 * k)) < 1e-5
+    np.testing.assert_allclose(result, float(n - 2 * k), atol=1e-5)

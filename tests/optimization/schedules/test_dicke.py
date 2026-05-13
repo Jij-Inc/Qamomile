@@ -60,6 +60,22 @@ def test_dicke_state_composition_schedule_repeats_local_schedule_per_block():
 
 
 @pytest.mark.parametrize(
+    ("n_dicke", "k_dicke"),
+    [(1, 0), (4, 0), (4, 4), (6, 6)],
+)
+def test_bartschi_eidenbenz_schedule_early_return_for_trivial_weights(n_dicke, k_dicke):
+    """Tests that k=0 and k=n_dicke return empty arrays (Dicke state is already a basis state)."""
+    pair_indices, triplets_indices, pair_angles, triplets_angles = bartschi_eidenbenz_schedule(
+        n_dicke, k_dicke
+    )
+
+    assert pair_indices.size == 0
+    assert triplets_indices.size == 0
+    assert pair_angles.size == 0
+    assert triplets_angles.size == 0
+
+
+@pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"n_qubits": 0, "block_size": 2, "hamming_weight": 1}, "n_qubits must be > 0"),

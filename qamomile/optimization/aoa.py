@@ -87,7 +87,7 @@ class AOAConverter(QAOAConverter):
         """Validate and normalize a user-provided pair schedule.
 
         Args:
-            pair_indices: Array-like schedule of qubit pairs.
+            pair_indices (np.ndarray): Array-like schedule of qubit pairs.
 
         Returns:
             numpy.ndarray: Pair schedule converted to ``uint64`` with shape
@@ -106,8 +106,8 @@ class AOAConverter(QAOAConverter):
         """Build the parity-style ring XY mixer schedule.
 
         Args:
-            num_blocks: Number of one-hot blocks.
-            block_size: Number of qubits per block.
+            num_blocks (int): Number of one-hot blocks.
+            block_size (int): Number of qubits per block.
 
         Returns:
             numpy.ndarray: Flattened list of qubit pairs implementing the ring
@@ -128,7 +128,7 @@ class AOAConverter(QAOAConverter):
         """Greedily partition pairs into non-overlapping batches.
 
         Args:
-            pair_indices: Array of qubit pairs with shape ``(num_pairs, 2)``.
+            pair_indices (np.ndarray): Array of qubit pairs with shape ``(num_pairs, 2)``.
 
         Returns:
             list[list[tuple[int, int]]]: List of partitions where pairs inside
@@ -162,8 +162,8 @@ class AOAConverter(QAOAConverter):
         finally flattens those batches into a single execution order.
 
         Args:
-            num_blocks: Number of one-hot blocks.
-            block_size: Number of qubits per block.
+            num_blocks (int): Number of one-hot blocks.
+            block_size (int): Number of qubits per block.
 
         Returns:
             numpy.ndarray: Flattened list of qubit pairs implementing the
@@ -190,12 +190,12 @@ class AOAConverter(QAOAConverter):
         """Resolve the XY mixer schedule into a validated pair matrix.
 
         Args:
-            mixer: Name of the built-in mixer schedule to use when explicit
-                pair indices are not supplied.
-            pair_indices: Optional explicit array of qubit pairs with shape
-                ``(num_pairs, 2)``.
-            block_size: Size of each one-hot block used by the built-in mixer
-                schedule builders.
+            mixer (str | MixerName): Name of the built-in mixer schedule to
+                use when explicit pair indices are not supplied.
+            pair_indices (np.ndarray | None): Optional explicit array of qubit
+                pairs with shape ``(num_pairs, 2)``.
+            block_size (int | None): Size of each one-hot block used by the
+                built-in mixer schedule builders.
 
         Returns:
             numpy.ndarray: A validated ``uint64`` array of qubit pairs.
@@ -204,15 +204,19 @@ class AOAConverter(QAOAConverter):
             ValueError: If neither explicit pairs nor a valid built-in mixer
                 configuration is provided.
         """
-        mixer = MixerName(mixer)
-
         if pair_indices is not None:
-            if mixer != MixerName.RING:
-                warnings.warn(
-                    f"pair_indices was provided; the mixer={mixer!r} argument is ignored.",
-                    stacklevel=3,
-                )
+            try:
+                mixer_name = MixerName(mixer)
+                if mixer_name != MixerName.RING:
+                    warnings.warn(
+                        f"pair_indices was provided; the mixer={mixer!r} argument is ignored.",
+                        stacklevel=3,
+                    )
+            except ValueError:
+                pass  # invalid mixer is ignored when pair_indices overrides it
             return self._normalize_pair_indices(pair_indices)
+
+        mixer_name = MixerName(mixer)
 
         if block_size is None:
             raise ValueError(
@@ -229,13 +233,13 @@ class AOAConverter(QAOAConverter):
             )
 
         num_blocks = self.spin_model.num_bits // block_size
-        match mixer:
+        match mixer_name:
             case MixerName.RING:
                 return self._build_ring_pair_indices(num_blocks, block_size)
             case MixerName.FULLY_CONNECTED:
                 return self._build_fully_connected_pair_indices(num_blocks, block_size)
             case _:
-                assert False, f"unreachable: unhandled MixerName {mixer!r}"
+                assert False, f"unreachable: unhandled MixerName {mixer_name!r}"
 
     def compute_dicke_composition_schedule(
         self,
@@ -248,11 +252,12 @@ class AOAConverter(QAOAConverter):
         number of qubits from the spin model.
 
         Args:
-            hamming_weight: Dicke Hamming weight ``k`` applied to every block.
-            block_size: Number of qubits per block.
+            hamming_weight (int): Dicke Hamming weight ``k`` applied to every block.
+            block_size (int): Number of qubits per block.
 
         Returns:
-            Tuple ``(initial_ones, pair_indices_dicke, triplets_indices_dicke,
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            ``(initial_ones, pair_indices_dicke, triplets_indices_dicke,
             pair_angles_dicke, triplets_angles_dicke)`` — global qubit indices
             and SCS rotation parameters for the full register.
         """
@@ -267,19 +272,27 @@ class AOAConverter(QAOAConverter):
         """Build basis-state ``|1>`` indices per block for a target Hamming weight.
 
         Args:
-            hamming_weight: Number of ``|1>`` qubits per block.
-            block_size: Number of qubits per block.
+            hamming_weight (int): Number of ``|1>`` qubits per block.
+            block_size (int): Number of qubits per block.
 
         Returns:
             numpy.ndarray: Global qubit indices initialized in ``|1>``.
 
         Raises:
-            ValueError: If ``hamming_weight`` is outside ``[0, block_size]``.
+            ValueError: If ``block_size <= 0``; if ``n_qubits`` is not
+                divisible by ``block_size``; or if ``hamming_weight`` is
+                outside ``[0, block_size]``.
         """
+        if block_size <= 0:
+            raise ValueError("block_size must be > 0.")
+
+        n_qubits = self.spin_model.num_bits
+        if n_qubits % block_size != 0:
+            raise ValueError("n_qubits must be divisible by block_size.")
+
         if not (0 <= hamming_weight <= block_size):
             raise ValueError("Require 0 <= hamming_weight <= block_size.")
 
-        n_qubits = self.spin_model.num_bits
         num_blocks = n_qubits // block_size
 
         initial_ones: list[int] = []
@@ -348,7 +361,6 @@ class AOAConverter(QAOAConverter):
                 if ``hamming_weight`` is outside ``[0, block_size]``.
         """
         initial_state = InitialState(initial_state)
-        mixer = MixerName(mixer)
 
         effective_block_size = (
             self.spin_model.num_bits if block_size is None else block_size

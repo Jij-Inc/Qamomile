@@ -1,4 +1,4 @@
-"""This helpers contains the helpers that precompute the indexes of the SCS blocks for the Dicke state preparation algorithm."""
+"""Helpers to precompute the indices of the SCS blocks for the Dicke state preparation algorithm."""
 
 import numpy as np
 
@@ -53,6 +53,11 @@ def bartschi_eidenbenz_schedule(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build the Bartschi-Eidenbenz schedule for an n_dicke-qubit register with weight k_dicke.
 
+    For the degenerate weights ``k_dicke == 0`` and ``k_dicke == n_dicke``,
+    the Dicke state is already a computational basis state (all-zero or
+    all-one) and no SCS rotation is needed; empty arrays are returned so
+    that no gates are emitted.
+
     Args:
         n_dicke (int): Number of qubits in the Dicke state.
         k_dicke (int): Hamming weight of the Dicke state.
@@ -62,7 +67,20 @@ def bartschi_eidenbenz_schedule(
         ``(pair_indices, triplets_indices, pair_angles, triplets_angles)``
         — stacked SCS column outputs in descending column order, suitable
         for direct use with :func:`~qamomile.circuit.algorithm.state_preparation.dicke.prepare_dicke`.
+
+    Raises:
+        ValueError: If ``k_dicke`` is outside ``[0, n_dicke]``.
     """
+    if not (0 <= k_dicke <= n_dicke):
+        raise ValueError("Require 0 <= k_dicke <= n_dicke.")
+
+    if k_dicke == 0 or k_dicke == n_dicke:
+        return (
+            np.empty((0, 2), dtype=np.uint32),
+            np.empty((0, 3), dtype=np.uint32),
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=float),
+        )
 
     pair_indices = []
     triplets_indices = []
@@ -97,9 +115,10 @@ def dicke_state_composition_schedule(
     The same Dicke weight ``hamming_weight`` is used for every block.
 
     Args:
-        n_qubits: Total number of qubits in the full register.
-        block_size: Number of qubits per block.
-        hamming_weight: Dicke Hamming weight ``k`` for each block ``|D^block_size_k>``.
+        n_qubits (int): Total number of qubits in the full register.
+        block_size (int): Number of qubits per block.
+        hamming_weight (int): Dicke Hamming weight ``k`` for each block
+            ``|D^block_size_k>``. Defaults to ``1``.
 
     Returns:
         tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

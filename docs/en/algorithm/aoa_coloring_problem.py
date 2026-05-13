@@ -16,6 +16,10 @@
 # ---
 
 # %% [markdown]
+# ---
+# tags: [algorithm, optimization, variational]
+# ---
+#
 # # Alternating Operator Ansatz for Graph Coloring
 #
 # This tutorial demonstrates how to solve the **K - graph coloring problem**
@@ -23,7 +27,7 @@
 #
 # >Hadfield, S.; Wang, Z.; O’Gorman, B.; Rieffel, E.G.; Venturelli, D.; Biswas, R. From the Quantum Approximate Optimization Algorithm to a Quantum Alternating Operator Ansatz. Algorithms 2019, 12, 34. https://doi.org/10.3390/a12020034
 #
-# The AOA algorithm extend QAOA by using more general mixers and initial states. 
+# The AOA algorithm extends QAOA by using more general mixers and initial states.
 #
 # ### Why does this matter for graph coloring? 
 # The one-hot encoding uses $N \times K$ binary variables but only $K^N$
@@ -36,7 +40,7 @@
 # AOA fixes both ends: it starts inside the feasible subspace and uses an XY mixer that 
 # preserves Hamming weight, so every sample is feasible by construction.
 #
-# We will proceed as follow:
+# We will proceed as follows:
 #
 # 1. Formulate the problem with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html).
 # 2. Create an instance with concrete data.
@@ -198,10 +202,10 @@ print(hamiltonian)
 # It is used to define the size of each block on which a Dicke state is built and the mixers apply.
 # In our case for the graph coloring problem:
 # - we have $K$ qubits for one node which can take $K$ colors
-# - the constraint state that each node can only take a single color. So within each subset of $K$ qubits, the hamming_weight (number of ones) should remained equals to $1$.
-# - we set `block_size = num_color` to state : "prepare a dicke state in each subset of $K$ qubits and mix only within each subset".
+# - the constraint states that each node can only take a single color. So within each subset of $K$ qubits, the hamming_weight (number of ones) should remain equal to $1$.
+# - we set `block_size = num_colors` to state: "prepare a Dicke state in each subset of $K$ qubits and mix only within each subset".
 #
-# The behavior is illustrated throroughly in the next section using draw function.
+# The behavior is illustrated thoroughly in the next section using the draw function.
 
 # %%
 from qamomile.qiskit import QiskitTranspiler

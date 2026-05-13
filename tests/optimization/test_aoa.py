@@ -51,7 +51,7 @@ def test_ring_pair_indices_block_size_two_has_no_duplicates():
     """Tests that ring mixer with block_size=2 produces correct non-duplicate adjacent pair indices."""
     converter = AOAConverter(_make_4bit_quadratic_model())
 
-    pair_indices = converter._resolve_pair_indices(
+    pair_indices = converter.resolve_pair_indices(
         mixer="ring",
         pair_indices=None,
         block_size=2,
@@ -67,7 +67,7 @@ def test_explicit_pair_indices_warn_when_mixer_is_ignored():
     explicit = np.asarray([(0, 1), (2, 3)], dtype=np.uint64)
 
     with pytest.warns(UserWarning, match="mixer=.*ignored"):
-        resolved = converter._resolve_pair_indices(
+        resolved = converter.resolve_pair_indices(
             mixer="fully-connected",
             pair_indices=explicit,
             block_size=2,
@@ -82,7 +82,7 @@ def test_invalid_mixer_error_contains_value():
     converter = AOAConverter(_make_4bit_quadratic_model())
 
     with pytest.raises(ValueError, match="invalid.*MixerName|MixerName.*invalid"):
-        converter._resolve_pair_indices(
+        converter.resolve_pair_indices(
             mixer="invalid",  # type: ignore[arg-type]
             pair_indices=None,
             block_size=2,
