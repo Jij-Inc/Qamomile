@@ -431,7 +431,7 @@ sample_set = converter.decode(sample_result)
 #
 # ### Feasibility Check
 #
-# We can now check the advantage of AOA compare to QAOA.
+# We can now check the advantage of AOA compared to QAOA.
 #  
 # The problem-tailored XY mixer that we implemented should
 # allow one to remain within the feasible space. Thus, 

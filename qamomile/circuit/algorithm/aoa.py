@@ -1,7 +1,7 @@
 """AOA (Alternating Operator Ansatz) circuit building blocks.
 
 This module provides the quantum circuit components for the Alternating Operator Ansatz (AOA),
-including Dicke state preparation and the XY mixer.
+including Dicke state preparation (using Bartschi-Eidenbenz SCS construction) and the XY mixer.
 
 All functions are decorated with ``@qmc.qkernel`` and use Handle-typed
 parameters so they can be composed inside other ``@qkernel`` functions.
