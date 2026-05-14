@@ -2,22 +2,26 @@ import numpy as np
 import pytest
 
 from qamomile.optimization.schedules.dicke import (
-    _scs_schedule,
     bartschi_eidenbenz_schedule,
     dicke_state_composition_schedule,
 )
 
 
-def test_scs_schedule_for_weight_two_builds_one_pair_and_one_triplet():
-    """Tests that _scs_schedule for n=4, k=2 returns exactly one pair and one triplet with correct indices and angles."""
-    pair_indices, triplets_indices, pair_angles, triplets_angles = _scs_schedule(4, 2)
+def test_bartschi_eidenbenz_schedule_first_column_matches_scs_formula():
+    """Tests that the first column of bartschi_eidenbenz_schedule(4,2) matches the SCS angle formula.
 
-    np.testing.assert_array_equal(pair_indices, np.asarray([[2, 3]], dtype=np.uint32))
-    np.testing.assert_array_equal(
-        triplets_indices, np.asarray([[1, 2, 3]], dtype=np.uint32)
+    The topmost column (n=4, k_sub=2) yields pair index [2,3], triplet index [1,2,3],
+    pair angle 2*arccos(1/sqrt(4)), and triplet angle 2*arccos(sqrt(2/4)). These
+    values are derived from the Bartschi-Eidenbenz SCS formula.
+    """
+    pair_indices, triplets_indices, pair_angles, triplets_angles = (
+        bartschi_eidenbenz_schedule(4, 2)
     )
-    np.testing.assert_allclose(pair_angles, [2 * np.arccos(0.5)])
-    np.testing.assert_allclose(triplets_angles, [2 * np.arccos(np.sqrt(0.5))])
+
+    np.testing.assert_array_equal(pair_indices[0], [2, 3])
+    np.testing.assert_array_equal(triplets_indices[0], [1, 2, 3])
+    np.testing.assert_allclose(pair_angles[0], 2 * np.arccos(1 / np.sqrt(4)))
+    np.testing.assert_allclose(triplets_angles[0], 2 * np.arccos(np.sqrt(2 / 4)))
 
 
 def test_bartschi_eidenbenz_schedule_stacks_columns_in_descending_size_order():

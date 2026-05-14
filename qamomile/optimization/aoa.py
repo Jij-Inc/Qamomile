@@ -213,7 +213,11 @@ class AOAConverter(QAOAConverter):
                         stacklevel=3,
                     )
             except ValueError:
-                pass  # invalid mixer is ignored when pair_indices overrides it
+                warnings.warn(
+                    f"pair_indices was provided; the unrecognised mixer={mixer!r} is ignored.",
+                    UserWarning,
+                    stacklevel=3,
+                )
             return self._normalize_pair_indices(pair_indices)
 
         mixer_name = MixerName(mixer)
@@ -361,6 +365,20 @@ class AOAConverter(QAOAConverter):
                 if ``hamming_weight`` is outside ``[0, block_size]``.
         """
         initial_state = InitialState(initial_state)
+
+        if (
+            pair_indices_mixer is not None
+            and block_size is None
+            and initial_state in {InitialState.DICKE, InitialState.SINGLE_BASIS_STATE}
+        ):
+            warnings.warn(
+                "pair_indices_mixer was provided without block_size; Dicke and "
+                "basis-state initialisation will treat the full register as a single "
+                f"block (block_size = {self.spin_model.num_bits}). Pass block_size "
+                "explicitly to initialise per-block Dicke states.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         effective_block_size = (
             self.spin_model.num_bits if block_size is None else block_size

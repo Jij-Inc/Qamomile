@@ -34,6 +34,17 @@ if not BACKENDS:
     pytest.skip("No quantum backend available", allow_module_level=True)
 
 
+def _make_3bit_hubo_model() -> BinaryModel:
+    """Create a 3-variable HUBO model with a cubic 3-body term."""
+    return BinaryModel.from_hubo(
+        {
+            (0, 1, 2): 1.0,
+            (0, 1): -0.5,
+            (0,): 0.2,
+        }
+    )
+
+
 def _make_4bit_quadratic_model() -> BinaryModel:
     return BinaryModel.from_hubo(
         {
@@ -341,6 +352,91 @@ def test_preserve_hamming_weight_single_basis_state(
     )
     result = job.result()
 
+    assert len(result.results) > 0
+    for sample, _count in result.results:
+        assert sum(sample) == expected_weight
+
+
+# ---------------------------------------------------------------------------
+# HUBO converter path tests (P1: covers _transpile_hubo*)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+@pytest.mark.parametrize(
+    "initial_state",
+    ["uniform", "dicke", "single_basis_state"],
+)
+def test_hubo_transpile_all_initial_states_smoke(name, TranspilerCls, initial_state):
+    """Tests that all supported initial states for HUBO models transpile and sample successfully.
+
+    Exercises the three HUBO converter branches: _transpile_hubo (uniform),
+    _transpile_hubo_dicke (dicke), and _transpile_hubo_basis_state (single_basis_state).
+    The model has a 3-body term so spin_model.higher is non-empty, triggering the HUBO path.
+    """
+    model = _make_3bit_hubo_model()
+    converter = AOAConverter(model)
+    transpiler = TranspilerCls()
+
+    executable = converter.transpile(
+        transpiler,
+        p=1,
+        initial_state=initial_state,
+        hamming_weight=1,
+        mixer="ring",
+    )
+
+    job = executable.sample(
+        transpiler.executor(),
+        shots=8,
+        bindings={"gammas": [0.2], "betas": [0.3]},
+    )
+    result = job.result()
+
+    assert len(result.results) > 0
+    for sample, count in result.results:
+        assert len(sample) == model.num_bits
+        assert count > 0
+
+
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+@pytest.mark.parametrize("seed", [0, 42])
+def test_hubo_preserve_hamming_weight_dicke(name, TranspilerCls, seed):
+    """Tests that HUBO AOA with Dicke initial state preserves Hamming weight in all samples.
+
+    The model has a 3-body higher-order term triggering the HUBO path. With the Dicke
+    initial state and the ring XY mixer, every sample must have Hamming weight 1 per
+    block by symmetry of the XY mixer within the feasible subspace.
+    """
+    rng = np.random.default_rng(seed)
+    block_size = 3
+    n_qubits = 2 * block_size
+    gammas = rng.uniform(-np.pi, np.pi, size=1).tolist()
+    betas = rng.uniform(-np.pi, np.pi, size=1).tolist()
+
+    model = BinaryModel.from_hubo(
+        {(0, 1, 2): 1.0, **{(i, (i + 1) % n_qubits): 0.5 for i in range(n_qubits)}}
+    )
+    converter = AOAConverter(model)
+    transpiler = TranspilerCls()
+
+    executable = converter.transpile(
+        transpiler,
+        p=1,
+        initial_state="dicke",
+        hamming_weight=1,
+        mixer="ring",
+        block_size=block_size,
+    )
+
+    job = executable.sample(
+        transpiler.executor(),
+        shots=32,
+        bindings={"gammas": gammas, "betas": betas},
+    )
+    result = job.result()
+
+    expected_weight = n_qubits // block_size
     assert len(result.results) > 0
     for sample, _count in result.results:
         assert sum(sample) == expected_weight

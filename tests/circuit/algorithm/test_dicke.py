@@ -365,3 +365,43 @@ def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
     result = job.result()
 
     np.testing.assert_allclose(result, float(n - 2 * k), atol=1e-5)
+
+
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        (2, 1),
+        (3, 1),
+        (4, 2),
+    ],
+)
+def test_prepare_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n, k):
+    """Tests that prepare_dicke samples have Hamming weight k via the sampler path.
+
+    For |D^n_k>, every bitstring in the equal superposition has exactly k set bits,
+    so all measurement outcomes must have Hamming weight k.
+    """
+    initial_ones, pair_indices, triplets_indices, pair_angles, triplets_angles = (
+        dicke_state_composition_schedule(n_qubits=n, block_size=n, hamming_weight=k)
+    )
+
+    transpiler = TranspilerCls()
+    exe = transpiler.transpile(
+        _wrap_prepare_dicke,
+        bindings={
+            "n": n,
+            "initial_ones": initial_ones,
+            "pair_indices": pair_indices,
+            "triplets_indices": triplets_indices,
+            "pair_angles": pair_angles,
+            "triplets_angles": triplets_angles,
+        },
+    )
+
+    job = exe.sample(transpiler.executor(), shots=32)
+    result = job.result()
+
+    assert len(result.results) > 0
+    for sample, _count in result.results:
+        assert sum(sample) == k

@@ -119,10 +119,10 @@ def prepare_dicke(
         qmc.Vector[qmc.Qubit]: Qubit register prepared in the Dicke state.
 
     Example:
-        >>> import numpy as np
-        >>> from qamomile.optimization.schedules.dicke import bartschi_eidenbenz_schedule
-        >>> initial_ones = np.array([3], dtype=np.uint32)  # |D^4_1>: last qubit = |1>
-        >>> pi, ti, pa, ta = bartschi_eidenbenz_schedule(n_dicke=4, k_dicke=1)
+        >>> from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
+        >>> initial_ones, pi, ti, pa, ta = dicke_state_composition_schedule(
+        ...     n_qubits=4, block_size=4, hamming_weight=1
+        ... )
         >>> q = prepare_dicke(4, initial_ones, pi, ti, pa, ta)
     """
     q = qmc.qubit_array(n, name="q")
