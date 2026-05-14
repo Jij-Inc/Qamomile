@@ -97,8 +97,8 @@ def bartschi_eidenbenz_schedule(
         triplets_angles += ta.tolist()
 
     return (
-        np.array(pair_indices, dtype=np.uint32),
-        np.array(triplets_indices, dtype=np.uint32),
+        np.array(pair_indices, dtype=np.uint32).reshape(-1, 2),
+        np.array(triplets_indices, dtype=np.uint32).reshape(-1, 3),
         np.array(pair_angles, dtype=float),
         np.array(triplets_angles, dtype=float),
     )
