@@ -875,7 +875,20 @@ class Vector(ArrayBase[T]):
             #     bounds and parent length were constants at slice
             #     construction time; mismatched concrete-vs-symbolic
             #     sides are accepted here and re-checked in IR.
+            #
+            #     ``VectorView.consume`` clears ``_slice_covered_indices``
+            #     after non-destructively releasing the parent, so a view
+            #     that has already passed through a broadcast gate
+            #     (``qmc.h(qs[a:b])`` consumes the view internally as of
+            #     the broadcast-affine-type fix) arrives with
+            #     ``_slice_covered_indices is None`` even when its IR
+            #     ``ArrayValue`` carries concrete slice metadata.  Fall
+            #     back to recomputing the coverage from the underlying
+            #     ``ArrayValue`` so coverage mismatch is still caught
+            #     after the broadcast.
             rhs_covered = value._slice_covered_indices
+            if rhs_covered is None:
+                rhs_covered = _coverage_from_array_value(value.value)
             if rhs_covered is not None and tuple(lhs_covered) != tuple(rhs_covered):
                 raise AffineTypeError(
                     f"Slice assignment coverage mismatch on "
@@ -900,10 +913,27 @@ class Vector(ArrayBase[T]):
             #     path, so we require ownership to be intact.  Only
             #     reachable when LHS coverage is concrete; the
             #     symbolic-bound case is validated by the IR pass.
+            # ``VectorView.consume`` clears ``_slice_covered_indices`` to
+            # ``None`` after non-destructively releasing the parent's
+            # bulk-borrow records.  Broadcast gates
+            # (``_broadcast_single_qubit_gate`` and friends) call this
+            # consume internally on entry, so the handle returned by
+            # ``qmc.h(qs[a:b])`` already has both ``_slice_covered_indices
+            # is None`` *and* the parent's entries for the covered slots
+            # cleared.  Treat that combination as the broadcast-consumed
+            # path: the borrow is provably released, the only thing left
+            # is the IR-level release marker we emit below.  This is the
+            # distinguishing feature against a *stale* view (drained by
+            # an overlapping later slice): the stale view's
+            # ``_slice_covered_indices`` is still populated, so it falls
+            # through to the "no longer owns" branch and gets rejected.
+            rhs_pre_released = value._slice_covered_indices is None
             for idx in lhs_covered:
                 key = (f"const:{idx}",)
                 owner = self_root._borrowed_indices.get(key)
                 if owner is value:
+                    continue
+                if rhs_pre_released and owner is None:
                     continue
                 if isinstance(owner, _ConsumedSlotMarker):
                     raise QubitConsumedError(
@@ -1361,6 +1391,48 @@ def _as_int_const(value: int | UInt) -> int | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _coverage_from_array_value(av: ArrayValue) -> tuple[int, ...] | None:
+    """Recompute concrete coverage from a sliced ``ArrayValue``'s metadata.
+
+    Used by slice-assignment validation when the wrapping
+    :class:`VectorView` has already passed through a broadcast gate
+    (or any other non-destructive consume) that cleared its
+    ``_slice_covered_indices`` to ``None``.  The underlying
+    ``ArrayValue`` still carries the full affine map (``slice_of`` /
+    ``slice_start`` / ``slice_step`` / ``shape[0]``); when every
+    component is a compile-time constant the covered root-space slot
+    set can be reconstructed identically to what ``_make_slice_view``
+    would have stored.
+
+    Args:
+        av (ArrayValue): The sliced ``ArrayValue`` whose root-space
+            coverage is wanted.
+
+    Returns:
+        tuple[int, ...] | None: The covered root-space slot indices in
+            iteration order, or ``None`` when ``av`` is not a slice
+            (``slice_of is None``) or when any of its start / step /
+            length components is still symbolic.
+    """
+    if av.slice_of is None:
+        return None
+    start_const = av.slice_start.get_const() if av.slice_start is not None else None
+    step_const = av.slice_step.get_const() if av.slice_step is not None else None
+    if start_const is None or step_const is None or not av.shape:
+        return None
+    length_value = av.shape[0]
+    length_const = length_value.get_const() if length_value is not None else None
+    if length_const is None:
+        return None
+    try:
+        start_int = int(start_const)
+        step_int = int(step_const)
+        length_int = int(length_const)
+    except (TypeError, ValueError):
+        return None
+    return tuple(start_int + step_int * i for i in range(length_int))
 
 
 def _uint_min(a: int | UInt, b: int | UInt) -> int | UInt:
