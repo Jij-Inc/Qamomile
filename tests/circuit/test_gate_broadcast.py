@@ -654,8 +654,11 @@ class TestBroadcastConsumesVectorHandle:
         """The canonical ``qs = qmc.gate(qs)`` pattern remains valid for every gate.
 
         Sanity check that the new consume contract does not regress the
-        common reassign idiom — every gate type chains through a single
-        kernel and the resulting block is non-empty.
+        common reassign idiom: every gate type chains through a single
+        kernel, lowers to one ``ForOperation`` per call in source order,
+        and each loop body contains exactly one ``GateOperation`` of the
+        matching gate kind (no spurious or reordered ops introduced by
+        the consume-at-start refactor).
         """
 
         @qmc.qkernel
@@ -677,6 +680,33 @@ class TestBroadcastConsumesVectorHandle:
 
         assert _good.block is not None
         fors = [op for op in _good.block.operations if isinstance(op, ForOperation)]
-        # 12 broadcast gate calls → 12 ForOperations (one per gate); measure
-        # lowers to a single MeasureVectorOperation, not a ForOperation.
-        assert len(fors) == 12
+        # 12 broadcast gate calls → 12 ForOperations in source order
+        # (one per gate); ``measure`` lowers to a single
+        # ``MeasureVectorOperation``, not a ``ForOperation``.
+        expected_gate_types = [
+            GateOperationType.H,
+            GateOperationType.X,
+            GateOperationType.Y,
+            GateOperationType.Z,
+            GateOperationType.S,
+            GateOperationType.SDG,
+            GateOperationType.T,
+            GateOperationType.TDG,
+            GateOperationType.RX,
+            GateOperationType.RY,
+            GateOperationType.RZ,
+            GateOperationType.P,
+        ]
+        assert len(fors) == len(expected_gate_types)
+        for for_op, expected in zip(fors, expected_gate_types):
+            gate_ops = [
+                op for op in for_op.operations if isinstance(op, GateOperation)
+            ]
+            assert len(gate_ops) == 1, (
+                f"Expected one gate inside the {expected.name} broadcast loop, "
+                f"got {len(gate_ops)}"
+            )
+            assert gate_ops[0].gate_type is expected, (
+                f"Expected {expected.name} inside its broadcast loop, "
+                f"got {gate_ops[0].gate_type.name}"
+            )
