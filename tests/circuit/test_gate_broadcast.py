@@ -699,9 +699,7 @@ class TestBroadcastConsumesVectorHandle:
         ]
         assert len(fors) == len(expected_gate_types)
         for for_op, expected in zip(fors, expected_gate_types):
-            gate_ops = [
-                op for op in for_op.operations if isinstance(op, GateOperation)
-            ]
+            gate_ops = [op for op in for_op.operations if isinstance(op, GateOperation)]
             assert len(gate_ops) == 1, (
                 f"Expected one gate inside the {expected.name} broadcast loop, "
                 f"got {len(gate_ops)}"
