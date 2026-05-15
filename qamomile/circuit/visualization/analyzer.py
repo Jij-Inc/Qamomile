@@ -29,6 +29,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
     MeasureOperation,
+    MeasureQFixedOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -776,7 +777,7 @@ class CircuitAnalyzer:
                 continue
 
             # Generic: GateOperation, CallBlock/ControlledU/CompositeGate (box mode),
-            # MeasureOperation, MeasureVectorOperation
+            # MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation
             if isinstance(
                 op,
                 (
@@ -784,6 +785,7 @@ class CircuitAnalyzer:
                     CallBlockOperation,
                     MeasureOperation,
                     MeasureVectorOperation,
+                    MeasureQFixedOperation,
                     CompositeGateOperation,
                     ControlledUOperation,
                 ),
@@ -855,6 +857,36 @@ class CircuitAnalyzer:
                 label="M",
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
+                kind=VGateKind.MEASURE_VECTOR,
+            )
+
+        if isinstance(op, MeasureQFixedOperation):
+            # ``MeasureQFixedOperation`` is the HYBRID measurement that
+            # ``plan`` later splits into ``MeasureVectorOperation +
+            # DecodeQFixedOperation``.  The visualizer works on the
+            # pre-plan IR so it sees the unsplit form and must resolve
+            # the carrier qubits itself.  The operand is the QFixed
+            # ``Value`` produced by the upstream ``CastOperation``,
+            # which attaches a ``CastMetadata`` whose
+            # ``qubit_logical_ids`` field enumerates the source qubits
+            # in carrier order.  Each entry is of the form
+            # ``f"{root_logical_id}_{idx}"`` (without brackets);
+            # ``QInitOperation`` registers root qubits in
+            # ``qubit_map`` under ``f"{root_logical_id}_[{idx}]"``
+            # (with brackets).  We bridge the two encodings here so
+            # the carrier wires resolve precisely — including the
+            # non-contiguous indices a slice-source cast produces
+            # (e.g. ``cast(q[1::2], QFixed)`` covers root ``{1, 3}``).
+            qubit_indices = []
+            if op.operands:
+                qubit_indices = self._resolve_qfixed_carrier_indices(
+                    op.operands[0], qubit_map, logical_id_remap
+                )
+            return VGate(
+                node_key=node_key,
+                label="M",
+                qubit_indices=qubit_indices,
+                estimated_width=self.style.gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
             )
 
@@ -2327,6 +2359,61 @@ class CircuitAnalyzer:
         if count > 0:
             return count
         return None
+
+    def _resolve_qfixed_carrier_indices(
+        self,
+        operand: Value,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+    ) -> list[int]:
+        """Resolve a QFixed measurement operand to its carrier wire indices.
+
+        The operand is the QFixed ``Value`` produced by ``CastOperation``;
+        its ``metadata.cast.qubit_logical_ids`` carries one entry per
+        carrier qubit in measurement order, formatted as
+        ``f"{root_logical_id}_{idx}"``.  ``QInitOperation`` registers
+        each root element in ``qubit_map`` as ``f"{root_logical_id}_[{idx}]"``.
+        This helper bridges the two encodings: it parses each cast
+        carrier string, applies ``logical_id_remap`` to the root prefix
+        (in case the cast lives in an inlined block), reformats with
+        brackets, and looks up the result in ``qubit_map``.
+
+        Args:
+            operand (Value): The QFixed-typed operand of a
+                ``MeasureQFixedOperation`` (i.e. the result of a prior
+                ``CastOperation``).
+            qubit_map (dict[str, int]): Mapping from logical_id-derived
+                keys to qubit wire indices.
+            logical_id_remap (dict[str, str]): Mapping from formal-
+                parameter logical_ids to actual-argument logical_ids,
+                used when the cast occurs inside an inlined block.
+
+        Returns:
+            list[int]: The wire indices the QFixed measurement targets,
+                in carrier (most-significant-bit-first) order.  Empty
+                when the operand carries no cast metadata or when no
+                carrier entry resolves to a known wire.
+        """
+        cast_meta = getattr(operand.metadata, "cast", None)
+        if cast_meta is None or not cast_meta.qubit_logical_ids:
+            return []
+        indices: list[int] = []
+        for carrier_key in cast_meta.qubit_logical_ids:
+            # Carrier key format: ``f"{root_logical_id}_{idx}"`` (no
+            # brackets).  Split on the *last* ``_`` to recover the root
+            # prefix and idx; the root logical_id itself may contain
+            # underscores (UUIDs use them), so split from the right.
+            try:
+                root_lid, idx_str = carrier_key.rsplit("_", 1)
+                idx_int = int(idx_str)
+            except (ValueError, AttributeError):
+                continue
+            remapped_lid = logical_id_remap.get(root_lid, root_lid)
+            bracket_key = f"{remapped_lid}_[{idx_int}]"
+            wire = qubit_map.get(bracket_key)
+            if wire is not None:
+                indices.append(wire)
+        return indices
 
     def _resolve_view_chain_to_root(
         self,

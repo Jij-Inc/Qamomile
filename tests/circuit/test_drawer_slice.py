@@ -183,6 +183,74 @@ class TestSliceDrawUnfolded:
         assert sorted(h_qubits) == [0, 2], h_qubits
 
 
+class TestSliceCastQFixedDraw:
+    """``cast(view, QFixed) -> measure`` must render the measurement on
+    the carrier qubits the cast spans.
+
+    Two analyzer bugs combined to drop the measurement entirely from
+    the rendered figure: ``MeasureQFixedOperation`` was not in the
+    visual-IR dispatch list (so the op silently produced no node), and
+    even if it had been, the cast's ``CastMetadata.qubit_logical_ids``
+    is formatted as ``f"{root_lid}_{idx}"`` while ``QInitOperation``
+    registers root elements in ``qubit_map`` as
+    ``f"{root_lid}_[{idx}]"``.  ``_resolve_qfixed_carrier_indices``
+    bridges the two encodings; the regressions below pin down both
+    fixes together — a measure must appear, and it must land on the
+    physical wires the slice actually covers.
+    """
+
+    def test_cast_view_qfixed_measure_targets_slice_wires(self):
+        """``cast(q[1::2], QFixed); measure`` renders M on q[1] and q[3]."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            qf = qmc.cast(q[1::2], qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        vc = _build_visual_circuit(kern)
+        m_indices: list[int] = []
+        for c in vc.children:
+            if isinstance(c, VGate) and c.kind == VGateKind.MEASURE_VECTOR:
+                m_indices.extend(c.qubit_indices)
+        assert sorted(m_indices) == [1, 3], m_indices
+
+    def test_cast_view_qfixed_measure_renders_a_gate(self):
+        """The QFixed measure must produce a VGate node — silent drop
+        was the original symptom (only VSkip nodes survived)."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            qf = qmc.cast(q[1::2], qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        vc = _build_visual_circuit(kern)
+        measure_count = sum(
+            1
+            for c in vc.children
+            if isinstance(c, VGate) and c.kind == VGateKind.MEASURE_VECTOR
+        )
+        assert measure_count == 1, [type(c).__name__ for c in vc.children]
+
+    def test_cast_root_qfixed_measure_targets_all_wires(self):
+        """``cast(q, QFixed); measure`` still targets every wire when
+        the cast source is the whole register (not a slice)."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        vc = _build_visual_circuit(kern)
+        m_indices: list[int] = []
+        for c in vc.children:
+            if isinstance(c, VGate) and c.kind == VGateKind.MEASURE_VECTOR:
+                m_indices.extend(c.qubit_indices)
+        assert sorted(m_indices) == [0, 1, 2, 3], m_indices
+
+
 class TestSliceDrawSmoke:
     """End-to-end smoke: ``MatplotlibDrawer.draw_kernel`` runs without
     raising for every slice topology.
