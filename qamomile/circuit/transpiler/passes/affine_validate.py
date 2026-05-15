@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import AffineTypeError, ValidationError
@@ -61,12 +65,15 @@ class AffineValidationPass(Pass[Block, Block]):
 
             # SliceArrayOperation takes the parent array as an operand
             # but does NOT consume it — it only produces metadata
-            # describing a strided view.  The parent remains live and
-            # downstream gate/measure ops on it must not be flagged as
-            # double-consume.  (ConstantFoldingPass normally strips
-            # SliceArrayOperation before this pass, but we guard
-            # defensively in case ordering changes.)
-            if isinstance(op, SliceArrayOperation):
+            # describing a strided view.  ReleaseSliceViewOperation
+            # likewise carries a sliced ArrayValue operand without
+            # consuming it: the op is a declarative borrow-return
+            # marker for SliceLinearityCheckPass and does not
+            # contribute to the affine-type consume count.  Both ops
+            # are normally stripped by ConstantFoldingPass /
+            # StripSliceArrayOpsPass before this pass, but we guard
+            # defensively in case ordering changes.
+            if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
                 continue
 
             # Check each operand

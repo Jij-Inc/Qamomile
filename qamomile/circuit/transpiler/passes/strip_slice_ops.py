@@ -16,7 +16,11 @@ from __future__ import annotations
 import dataclasses
 
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 
 from . import Pass
 from .control_flow_visitor import OperationTransformer
@@ -54,7 +58,7 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
 
         class Stripper(OperationTransformer):
             def transform_operation(self, op: Operation) -> Operation | None:
-                if isinstance(op, SliceArrayOperation):
+                if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
                     return None
                 return op
 

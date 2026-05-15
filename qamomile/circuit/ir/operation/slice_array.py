@@ -77,3 +77,76 @@ class SliceArrayOperation(Operation):
             :attr:`OperationKind.CLASSICAL`.
         """
         return OperationKind.CLASSICAL
+
+
+@dataclass
+class ReleaseSliceViewOperation(Operation):
+    """Mark a slice view's borrow as explicitly returned to its parent.
+
+    Emitted by :meth:`Vector.__setitem__` when used with a slice index
+    (``qs[a:b] = qmc.h(qs[a:b])``).  This op tells the post-fold
+    linearity checker
+    (:class:`~qamomile.circuit.transpiler.passes.slice_linearity_check.SliceLinearityCheckPass`)
+    that the view referenced in ``operands[0]`` no longer owns its
+    covered parent slots, mirroring the frontend's
+    ``VectorView.consume(operation_name="slice assignment")`` borrow
+    release.
+
+    Like :class:`SliceArrayOperation`, this op is a declarative
+    classical-side marker that does not survive into the emit stream:
+    :class:`~qamomile.circuit.transpiler.passes.strip_slice_ops.StripSliceArrayOpsPass`
+    removes both :class:`SliceArrayOperation` and
+    :class:`ReleaseSliceViewOperation` after
+    :class:`SliceLinearityCheckPass` has observed them.  Reaching emit
+    is a compiler-internal invariant violation and is rejected with a
+    ``RuntimeError`` from :mod:`standard_emit`.
+
+    Within a control-flow body (``ForOperation`` / ``WhileOperation``
+    / ``IfOperation``), this op only releases view borrows that were
+    *created within the same body*.  Releasing a borrow that the
+    enclosing block has registered (an "outer-snapshot" borrow) is
+    rejected by ``SliceLinearityCheckPass`` with
+    ``SliceLinearityViolationError`` — the loop-merge semantics of the
+    pass cannot propagate entry deletions out of the body, so the only
+    way to keep the static check consistent is to forbid that pattern.
+
+    Attributes:
+        operands: ``[view_av]`` — the sliced :class:`ArrayValue` whose
+            borrow is being released.  Must have ``slice_of`` non-None.
+        results: ``[]`` — the op produces no new IR values.
+
+    Example:
+        ``qs[1:3] = qmc.h(qs[1:3])`` emits, after the broadcast loop::
+
+            ReleaseSliceViewOperation(
+                operands=[qmc_h_result_view],  # slice_of=qs_value
+                results=[],
+            )
+    """
+
+    @property
+    def signature(self) -> Signature:
+        """Return the type signature of this release operation.
+
+        Returns:
+            A :class:`Signature` with a single operand (the view to
+            release) and no results.  The operand type is inferred
+            from the attached :class:`Value`.
+        """
+        operand_type: "ValueType | None"
+        operand_type = self.operands[0].type if self.operands else None
+        return Signature(
+            operands=[
+                ParamHint(name="view", type=operand_type) if operand_type else None,
+            ],
+            results=[],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Release is classical — it updates borrow tracking metadata only.
+
+        Returns:
+            :attr:`OperationKind.CLASSICAL`.
+        """
+        return OperationKind.CLASSICAL

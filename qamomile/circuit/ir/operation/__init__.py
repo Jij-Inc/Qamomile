@@ -20,7 +20,7 @@ from .gate import (
 )
 from .operation import Operation
 from .return_operation import ReturnOperation
-from .slice_array import SliceArrayOperation
+from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
 
 __all__ = [
     "Operation",
@@ -46,4 +46,5 @@ __all__ = [
     "ExpvalOp",
     # Slice operation
     "SliceArrayOperation",
+    "ReleaseSliceViewOperation",
 ]

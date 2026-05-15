@@ -8,7 +8,10 @@ from typing import Generic, Iterator, TypeVar, overload
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
-from qamomile.circuit.ir.operation.slice_array import SliceArrayOperation
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -696,25 +699,338 @@ class Vector(ArrayBase[T]):
             index = self._make_uint_index(index)
         return self._get_element((index,))
 
-    def __setitem__(self, index: int | UInt, value: T) -> None:
-        """Set element at the given index.
+    def __setitem__(
+        self, index: "int | UInt | slice", value: "T | VectorView[T]"
+    ) -> None:
+        """Set element at the given index, or return a view via slice assignment.
+
+        For an integer / ``UInt`` index this is the existing element
+        borrow-return path: the right-hand side handle is validated
+        against the borrow recorded for that index and consumed.
+
+        For a ``slice`` index, the assignment is treated as the
+        **explicit borrow-return of a slice view**.  The right-hand
+        side must be a ``VectorView`` covering exactly the same
+        root-space slot set as ``self[index]`` would build (typically
+        produced by a broadcast such as
+        ``qmc.h(self[index])``).  The view's parent ownership is
+        released on both sides of the IR boundary: ``value.consume(...)``
+        clears the frontend ``_borrowed_indices`` entries, and a
+        :class:`ReleaseSliceViewOperation` is emitted so the post-fold
+        :class:`SliceLinearityCheckPass` can mirror the release in IR
+        state.  See :meth:`_return_slice_view` for the full validation
+        sequence.
+
+        Args:
+            index: Either a concrete index (``int`` / ``UInt``) selecting
+                a single element, or a Python ``slice`` selecting a
+                contiguous or strided subset.
+            value: The handle being written back.  For integer indices
+                this must be the element handle previously borrowed
+                from ``self[index]``; for slice indices this must be a
+                ``VectorView`` covering the same slot set.
 
         Raises:
-            TypeError: If ``index`` is a ``slice`` — slice assignment is
-                not supported; iterate over the view and assign elements
-                one at a time instead.
+            TypeError: If ``value`` is not a ``VectorView`` when
+                ``index`` is a ``slice``.
+            AffineTypeError: If ``value`` is a view of a different root
+                parent, or its coverage does not match the LHS slice.
+            QubitConsumedError: If ``value`` is an already-consumed
+                view handle.
+            ValueError: If either side has symbolic-bound slice
+                metadata (not supported in this revision).
         """
         if isinstance(index, slice):
-            raise TypeError(
-                "Slice assignment is not supported on Vector. "
-                "Iterate over the view and assign elements individually:\n"
-                "  view = q[0::2]\n"
-                "  for i in qmc.range(view.shape[0]):\n"
-                "      view[i] = qmc.h(view[i])"
-            )
+            return self._return_slice_view(index, value)
         if isinstance(index, int):
             index = self._make_uint_index(index)
         self._return_element((index,), value)
+
+    def _return_slice_view(self, s: slice, value: "T | VectorView[T]") -> None:
+        """Accept a ``VectorView`` as the explicit return of ``self[s]``.
+
+        Validates that ``value`` covers the same root-space slot set
+        as ``self[s]`` would build, then consumes the view handle and
+        emits a :class:`ReleaseSliceViewOperation` so the post-fold
+        IR linearity check can drop the corresponding view ownership
+        entries.
+
+        The validation order matters: cheap type / consumed checks
+        come before the slot-set comparison helper, so a malformed
+        right-hand side cannot allocate or trace anything.  In order:
+        (1) RHS is a ``VectorView``; (2) RHS is not already consumed;
+        (3) LHS root (and, for a view LHS, the view itself) is still
+        live — mirrors the consumed-array guard in
+        :meth:`_return_element`; (4) RHS root matches LHS root;
+        (5) compute LHS coverage; (6) RHS coverage matches LHS
+        coverage; (7) every covered parent slot is currently owned by
+        the RHS view (catches a silently-drained stale view); (8)
+        consume the RHS view; (9) emit
+        :class:`ReleaseSliceViewOperation`.
+
+        Args:
+            s: The Python ``slice`` object that appeared on the left
+                of the assignment.
+            value: The right-hand side handle.  Must be a
+                ``VectorView``.
+
+        Raises:
+            TypeError: ``value`` is not a ``VectorView``.
+            QubitConsumedError: ``value`` is already consumed, the LHS
+                root (or LHS view) was already consumed, or a covered
+                slot has been destroyed by a prior destructive consume.
+            AffineTypeError: ``value``'s root parent does not match
+                ``self`` (or its root parent for a ``VectorView``
+                left-hand side), its covered slot set does not match
+                what ``self[s]`` would build, or it no longer owns
+                every covered slot in the parent's borrow record.
+            ValueError: Either side has symbolic-bound slice metadata
+                (literal-bounded slices only in this revision).
+            NotImplementedError: For non-positive ``step`` or negative
+                ``start`` / ``stop`` values.
+        """
+        # (1) Type check first — cheap and avoids allocating helpers
+        #     on an invalid right-hand side.
+        if not isinstance(value, VectorView):
+            raise TypeError(
+                "Slice assignment expects a VectorView (e.g. the "
+                "result of ``qmc.h(qs[a:b])``).  Got "
+                f"{type(value).__name__}.  Use ``qs[i] = ...`` for "
+                "element-level assignment."
+            )
+
+        # (2) Reject already-consumed value before any state mutation.
+        if value._consumed:
+            display_name = value.value.name or "view"
+            raise QubitConsumedError(
+                f"Slice assignment got an already-consumed VectorView "
+                f"'{display_name}'.",
+                handle_name=display_name,
+                operation_name="slice assignment",
+            )
+
+        # (3) LHS-root liveness check.  ``_return_element`` performs the
+        #     same guard before touching ``_borrowed_indices`` (see
+        #     ``ArrayBase._return_element``); slice assignment must
+        #     mirror it so a pattern like
+        #     ``v = qs[0:2]; measure(qs); qs[0:2] = v`` cannot quietly
+        #     succeed after the parent has been consumed.  For a
+        #     ``VectorView`` LHS the parent identity is captured via
+        #     ``_slice_parent``; the view's own ``_consumed`` is also
+        #     checked because a view may itself have been retired
+        #     (e.g. by ``cast``).
+        self_root = self._slice_parent if isinstance(self, VectorView) else self
+        if self_root._consumed and self_root.value.type.is_quantum():
+            display_name = self_root.value.name or "array"
+            raise QubitConsumedError(
+                f"Slice assignment target '{display_name}' was already "
+                f"consumed by '{self_root._consumed_by}' and cannot be "
+                f"used as the LHS of a slice assignment.",
+                handle_name=display_name,
+                operation_name="slice assignment",
+                first_use_location=self_root._consumed_by,
+            )
+        if (
+            isinstance(self, VectorView)
+            and self._consumed
+            and self.value.type.is_quantum()
+        ):
+            display_name = self.value.name or "view"
+            raise QubitConsumedError(
+                f"Slice assignment LHS view '{display_name}' was "
+                f"already consumed by '{self._consumed_by}'.",
+                handle_name=display_name,
+                operation_name="slice assignment",
+                first_use_location=self._consumed_by,
+            )
+
+        # (4) Root identity check.  ``VectorView._slice_parent`` is
+        #     always the root parent (``_nested_slice`` composes the
+        #     affine map back to root), so this works whether ``self``
+        #     is the root ``Vector`` or itself a ``VectorView``.
+        if value._slice_parent is not self_root:
+            raise AffineTypeError(
+                f"Slice assignment on '{self.value.name}' expects a "
+                f"VectorView whose root parent is "
+                f"'{self_root.value.name}'; got a view of "
+                f"'{value._slice_parent.value.name}'.",
+                handle_name=self.value.name,
+                operation_name="slice assignment",
+            )
+
+        # (5) Compute the would-be LHS coverage side-effect-free.  If
+        #     anything along the chain (parent length, slice bound) is
+        #     still a symbolic ``UInt`` at trace time, defer the deep
+        #     checks (6) and (7) to the post-fold
+        #     ``SliceLinearityCheckPass`` — the bindings haven't been
+        #     applied yet, so concrete coverage is unknowable here.
+        try:
+            lhs_covered: tuple[int, ...] | None = self._normalize_slice_to_covered(s)
+        except ValueError:
+            lhs_covered = None
+
+        if lhs_covered is not None:
+            # (6) Compare with the RHS view's recorded coverage.  The
+            #     RHS records concrete coverage only when its own
+            #     bounds and parent length were constants at slice
+            #     construction time; mismatched concrete-vs-symbolic
+            #     sides are accepted here and re-checked in IR.
+            rhs_covered = value._slice_covered_indices
+            if rhs_covered is not None and tuple(lhs_covered) != tuple(rhs_covered):
+                raise AffineTypeError(
+                    f"Slice assignment coverage mismatch on "
+                    f"'{self.value.name}': LHS covers {list(lhs_covered)}, "
+                    f"RHS covers {list(rhs_covered)}.",
+                    handle_name=self.value.name,
+                    operation_name="slice assignment",
+                )
+
+            # (7) RHS-ownership check: ``value`` must currently own
+            #     every parent slot it claims to cover.  Without
+            #     this, a stale view that was silently drained by a
+            #     later overlapping slice
+            #     (``a = qs[0:2]; b = qs[0:2]; qs[0:2] = a``) would
+            #     pass slice assignment as a no-op release — the
+            #     parent's borrow record now points at ``b``, so
+            #     ``a.consume`` and the emitted
+            #     ``ReleaseSliceViewOperation`` both run without
+            #     raising or removing anything, leaving the user
+            #     with the false impression that ``a`` was returned.
+            #     Slice assignment is the *explicit* borrow-return
+            #     path, so we require ownership to be intact.  Only
+            #     reachable when LHS coverage is concrete; the
+            #     symbolic-bound case is validated by the IR pass.
+            for idx in lhs_covered:
+                key = (f"const:{idx}",)
+                owner = self_root._borrowed_indices.get(key)
+                if owner is value:
+                    continue
+                if isinstance(owner, _ConsumedSlotMarker):
+                    raise QubitConsumedError(
+                        f"Slice assignment RHS view "
+                        f"'{value.value.name}' covers "
+                        f"'{self_root.value.name}[{idx}]', but that "
+                        f"slot was destroyed by a prior destructive "
+                        f"consume (measure / cast).",
+                        handle_name=value.value.name or "view",
+                        operation_name="slice assignment",
+                    )
+                raise AffineTypeError(
+                    f"Slice assignment RHS view '{value.value.name}' "
+                    f"no longer owns '{self_root.value.name}[{idx}]'; "
+                    f"the parent's borrow record points at "
+                    f"{'an unrelated view / element' if owner is not None else 'no live owner'}.  "
+                    f"This view was likely drained by a later "
+                    f"overlapping slice; reconstruct the view before "
+                    f"assigning it back.",
+                    handle_name=value.value.name or "view",
+                    operation_name="slice assignment",
+                )
+
+        # (8) Frontend release: consume the view handle.  The op name
+        #     is intentionally not in ``_DESTRUCTIVE_CONSUME_OPS``, so
+        #     no ``_ConsumedSlotMarker`` is installed — slice
+        #     assignment is borrow-return, not physical destruction.
+        value.consume(operation_name="slice assignment")
+
+        # (9) IR release: emit a marker the post-fold linearity check
+        #     can observe.  Without this op, ``SliceLinearityCheckPass``
+        #     would still treat the view as a live owner of the
+        #     covered slots and reject any subsequent direct access
+        #     to those slots.  Stripped after the linearity check by
+        #     ``StripSliceArrayOpsPass``.
+        release_op = ReleaseSliceViewOperation(
+            operands=[value.value],
+            results=[],
+        )
+        get_current_tracer().add_operation(release_op)
+
+    def _normalize_slice_to_covered(self, s: slice) -> tuple[int, ...]:
+        """Compute the root-space covered indices for ``self[s]`` without side effects.
+
+        Mirrors the validation, clamping, and length computation done
+        by :meth:`_make_slice_view` but performs everything in pure
+        Python ``int`` space — no IR op is emitted, no entry is added
+        to ``_borrowed_indices``, no ``BinOp`` is produced.
+
+        The clamp behaviour intentionally tracks ``_make_slice_view``'s
+        guard at [array.py:1099](array.py:1099): clamp ``stop`` against
+        parent length **only** when the parent length is itself a
+        compile-time constant.  When the parent length is symbolic, the
+        user-provided bounds are trusted (matching what
+        ``_make_slice_view`` writes into ``_slice_covered_indices`` for
+        the RHS view); a later out-of-range binding manifests at
+        emit-time against the resolved length.  This is what lets
+        ``q = qubit_array(n, "q"); q[0:2] = h(q[0:2])`` validate
+        coverage at trace time even before ``n`` is bound.
+
+        Args:
+            s: The Python ``slice`` object whose root-space coverage
+                is requested.
+
+        Returns:
+            A tuple of integer parent-space indices covered by the
+            slice, in iteration order.
+
+        Raises:
+            ValueError: If any of ``s.start`` / ``s.stop`` / ``s.step``
+                is symbolic (not a compile-time integer constant), or
+                if ``s.stop is None`` and the parent length is also
+                symbolic (no concrete upper bound to fall back on).
+            NotImplementedError: For non-positive ``step`` or negative
+                ``start`` / ``stop`` values (same restrictions as
+                ``_make_slice_view``).
+        """
+        parent_length = self._shape[0]
+        parent_len_int = _as_int_const(parent_length)
+
+        raw_start = 0 if s.start is None else s.start
+        if s.stop is None:
+            if parent_len_int is None:
+                raise ValueError(
+                    "slice assignment with an implicit stop (``q[a:]``) "
+                    "requires the parent vector length to be a "
+                    "compile-time integer constant; got a symbolic "
+                    "length."
+                )
+            raw_stop = parent_len_int
+        else:
+            raw_stop = s.stop
+        raw_step = 1 if s.step is None else s.step
+
+        start_int = _as_int_const(raw_start)
+        stop_int = _as_int_const(raw_stop)
+        step_int = _as_int_const(raw_step)
+        if start_int is None or stop_int is None or step_int is None:
+            raise ValueError(
+                "slice assignment with symbolic bounds is not supported "
+                "in this revision.  Use literal-bounded slicing."
+            )
+
+        for bound_name, bound_value in (
+            ("start", start_int),
+            ("stop", stop_int),
+            ("step", step_int),
+        ):
+            if bound_value < 0:
+                raise NotImplementedError(
+                    f"Negative {bound_name} ({bound_value}) is not "
+                    f"supported for slice assignment."
+                )
+        if step_int <= 0:
+            raise NotImplementedError(
+                f"slice assignment requires a positive step (got {step_int})."
+            )
+
+        # Same Python-style clamp as ``_make_slice_view``, but in pure
+        # int space (no ``_uint_min`` / ``BinOp`` emit).  Skip when the
+        # parent length is symbolic — see the docstring for rationale.
+        if parent_len_int is not None:
+            stop_int = min(stop_int, parent_len_int)
+            start_int = min(start_int, stop_int)
+
+        length = max(0, (stop_int - start_int + step_int - 1) // step_int)
+        return tuple(start_int + step_int * i for i in range(length))
 
     def _make_slice_view(self, s: slice) -> "VectorView[T]":
         """Build a VectorView describing the slice ``s`` of this vector.
@@ -1290,22 +1606,110 @@ class VectorView(Vector[T]):
             return self._nested_slice(index)
         return super().__getitem__(index)
 
-    def __setitem__(self, index: int | UInt, value: T) -> None:
-        """Return a borrowed element to its view slot.
+    def __setitem__(
+        self, index: "int | UInt | slice", value: "T | VectorView[T]"
+    ) -> None:
+        """Return a borrowed element / sub-view to its parent slot(s).
+
+        Element assignment (``view[i] = q``) delegates to the inherited
+        ``Vector.__setitem__`` path.  Slice assignment
+        (``view[a:b] = qmc.h(view[a:b])``) is the same explicit
+        borrow-return form as on root vectors: the right-hand side
+        must be a ``VectorView`` covering the same root-space slot set
+        as ``view[a:b]`` would build (composed back to the shared root
+        parent), and the view is consumed and recorded for release in
+        IR via :class:`ReleaseSliceViewOperation`.
 
         Args:
-            index: View-local index of the slot being returned.
-            value: Handle previously borrowed from the view.
+            index: View-local index, or a ``slice`` describing the
+                sub-view to release.
+            value: Handle being returned — element handle for integer
+                indices, ``VectorView`` for slice indices.
 
         Raises:
-            TypeError: If ``index`` is a ``slice``.
+            TypeError: For a slice index when ``value`` is not a
+                ``VectorView``.
+            AffineTypeError: For a slice index when ``value``'s root
+                parent does not match this view's root parent, or when
+                coverage does not match.
+            ValueError: For a slice index with symbolic-bound
+                metadata on either side.
+            NotImplementedError: For a slice index with non-positive
+                step or negative bounds.
         """
         if isinstance(index, slice):
-            raise TypeError(
-                "Slice assignment is not supported on VectorView. "
-                "Iterate and assign elements individually instead."
-            )
+            return self._return_slice_view(index, value)
         super().__setitem__(index, value)
+
+    def _normalize_slice_to_covered(self, s: slice) -> tuple[int, ...]:
+        """Root-space coverage of ``self[s]`` for a nested slice, no side effects.
+
+        Composes the outer (this view) and inner (``s``) affine maps
+        in pure ``int`` space, mirroring :meth:`_nested_slice`
+        including its out-of-range stop / start clamp against
+        ``view_length``.
+
+        Args:
+            s: The Python ``slice`` applied to this view.
+
+        Returns:
+            A tuple of root-space slot indices covered by ``self[s]``,
+            in iteration order.
+
+        Raises:
+            ValueError: If this view's start / step / length, or any
+                of ``s.start`` / ``s.stop`` / ``s.step``, is not a
+                compile-time integer constant.
+            NotImplementedError: For non-positive ``step`` or negative
+                ``start`` / ``stop`` values.
+        """
+        outer_start = _as_int_const(self._slice_start)
+        outer_step = _as_int_const(self._slice_step)
+        view_length = _as_int_const(self._shape[0])
+        if outer_start is None or outer_step is None or view_length is None:
+            raise ValueError(
+                "slice assignment on a VectorView requires the outer "
+                "view's start, step and length to all be compile-time "
+                "integer constants; got a symbolic component."
+            )
+
+        raw_start = 0 if s.start is None else s.start
+        raw_stop = view_length if s.stop is None else s.stop
+        raw_step = 1 if s.step is None else s.step
+
+        inner_start = _as_int_const(raw_start)
+        inner_stop = _as_int_const(raw_stop)
+        inner_step = _as_int_const(raw_step)
+        if inner_start is None or inner_stop is None or inner_step is None:
+            raise ValueError(
+                "slice assignment with symbolic bounds is not supported "
+                "in this revision."
+            )
+
+        for bound_name, bound_value in (
+            ("start", inner_start),
+            ("stop", inner_stop),
+            ("step", inner_step),
+        ):
+            if bound_value < 0:
+                raise NotImplementedError(
+                    f"Negative {bound_name} ({bound_value}) is not "
+                    f"supported for slice assignment on a VectorView."
+                )
+        if inner_step <= 0:
+            raise NotImplementedError(
+                f"slice assignment on a VectorView requires a positive "
+                f"step (got {inner_step})."
+            )
+
+        # Same view-length clamp as ``_nested_slice``, pure int.
+        inner_stop = min(inner_stop, view_length)
+        inner_start = min(inner_start, inner_stop)
+
+        inner_length = max(0, (inner_stop - inner_start + inner_step - 1) // inner_step)
+        composed_start = outer_start + outer_step * inner_start
+        composed_step = outer_step * inner_step
+        return tuple(composed_start + composed_step * j for j in range(inner_length))
 
     def consume(self, operation_name: str = "unknown") -> typing.Self:
         """Consume the view and release its parent slice-borrows.

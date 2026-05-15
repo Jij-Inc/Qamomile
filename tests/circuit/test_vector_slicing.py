@@ -74,13 +74,22 @@ class TestVectorViewFrontend:
                     pass
                 return q
 
-    def test_slice_assignment_rejected(self):
-        """Slice assignment on a Vector is rejected with a clear message."""
+    def test_slice_assignment_non_view_rejected(self):
+        """Slice assignment with a non-VectorView right-hand side raises TypeError.
+
+        Slice assignment is the explicit borrow-return path for slice views.
+        Passing a non-VectorView (e.g. a Vector itself, a scalar, or an
+        element handle) is a category error: ``vec[a:b] = vec`` would mix
+        whole-array assignment with the slice path, and ``vec[a:b] = q[i]``
+        confuses slice-level with element-level returns.  The frontend
+        rejects this at trace time before any borrow state mutation.
+        """
 
         @qmc.qkernel
-        def kern(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            q[0::2] = q[0::2]  # type: ignore[assignment]
-            return q
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q[0::2] = q  # type: ignore[assignment]  # whole-array on RHS
+            return qmc.measure(q)
 
         with pytest.raises(TypeError, match="Slice assignment"):
             _ = kern.block
@@ -2036,3 +2045,346 @@ class TestRound5Reviewer:
         # the same slot indices {1, 3}.
         exe = transpiler.transpile(kern, bindings={"obs": H})
         assert exe is not None
+
+
+# =============================================================================
+# Slice Assignment Tests
+# =============================================================================
+
+
+class TestSliceAssignment:
+    """Tests for the slice-assignment broadcast-return path
+    (``qs[a:b] = qmc.h(qs[a:b])``).
+
+    Slice assignment is the explicit borrow-return form: the right-hand
+    side must be a ``VectorView`` covering the same root-space slot set
+    as ``qs[a:b]`` would build.  These tests cover both the happy path
+    (literal bounds, bindings-resolved bounds, fully-symbolic via re-trace,
+    nested slice on a view, body-internal loop pattern) and every
+    negative path the frontend validator rejects at trace time
+    (mismatched coverage, cross-array RHS, stale view from drain, LHS
+    root consumed, RHS consumed, body-internal release).
+    """
+
+    # ----- positive: literal-bound assignment compiles and emits ----------
+
+    def test_literal_slice_assignment_emits_correct_gates(self):
+        """``q[0:2] = h(q[0:2])`` emits H on qubits {0, 1}."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q[0:2] = qmc.h(q[0:2])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern)
+        qc = exe.compiled_quantum[0].circuit
+        applied = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "h"
+        )
+        assert applied == [0, 1], applied
+
+    def test_bindings_resolved_slice_assignment_emits_correct_gates(self):
+        """``q[0:2] = h(q[0:2])`` with parent length from bindings emits H on {0, 1}."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            q[0:2] = qmc.h(q[0:2])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"num": 4})
+        qc = exe.compiled_quantum[0].circuit
+        applied = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "h"
+        )
+        assert applied == [0, 1], applied
+
+    def test_fully_symbolic_slice_assignment_via_bindings(self):
+        """``q[lo:hi] = h(q[lo:hi])`` resolves through bindings and emits
+        H on the resolved range.  Trace-time check is deferred (both
+        sides are symbolic), but the bindings-applied re-trace runs the
+        full coverage / ownership validation."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt, lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            q[lo:hi] = qmc.h(q[lo:hi])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"num": 6, "lo": 1, "hi": 4})
+        qc = exe.compiled_quantum[0].circuit
+        applied = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "h"
+        )
+        assert applied == [1, 2, 3], applied
+
+    def test_computed_bound_slice_assignment(self):
+        """``q[1:n - 2] = h(q[1:n - 2])`` with computed stop expression
+        resolves the BinOp via partial_eval and emits correctly."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            q[1 : num - 2] = qmc.h(q[1 : num - 2])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"num": 6})
+        qc = exe.compiled_quantum[0].circuit
+        applied = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "h"
+        )
+        assert applied == [1, 2, 3], applied
+
+    def test_slice_assignment_on_vector_view(self):
+        """Nested slice assignment via ``VectorView.__setitem__``.
+
+        ``view[a:b] = h(view[a:b])`` releases the inner view back to its
+        parent ``VectorView``.  The outer view's affine map is composed
+        with the inner slice in pure-int space (``VectorView._normalize_
+        slice_to_covered``) and the resulting root-space coverage is
+        validated against the RHS view's coverage.
+        """
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(8, "q")
+            view = q[0::2]  # length-4 view over q[0], q[2], q[4], q[6]
+            view[0:2] = qmc.h(view[0:2])  # H on q[0], q[2]
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern)
+        qc = exe.compiled_quantum[0].circuit
+        applied = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "h"
+        )
+        assert applied == [0, 2], applied
+
+    def test_body_internal_slice_assignment_in_for_loop(self):
+        """``for i in range(...): qs[i:i+1] = h(qs[i:i+1])`` keeps each
+        view's lifetime inside the body iteration.  Because the slice is
+        constructed inside the body, the IR pass's ``outer_snapshot_stack``
+        guard doesn't fire (no outer-registered entry is being deleted),
+        and the release at the end of the iteration cleans up the
+        registration before the next iteration.
+        """
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            for i in qmc.range(4):
+                q[i : i + 1] = qmc.h(q[i : i + 1])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern)
+        # All four qubits should have H applied via the loop.
+        qc = exe.compiled_quantum[0].circuit
+        n_h = sum(1 for inst in qc.data if inst.operation.name == "h")
+        assert n_h == 4
+
+    def test_top_level_slice_assignment_after_body_use(self):
+        """``even = qs[0::2]; for i in ...: even[i] = h(even[i]); qs[0::2] = even``
+        is the canonical broadcast-loop pattern: top-level view, body-internal
+        element use, top-level slice-assignment release.  The IR pass's
+        outer_snapshot_stack pops when the body exits, so the top-level
+        release sees an empty stack and proceeds normally.
+        """
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]
+            for i in qmc.range(even.shape[0]):
+                even[i] = qmc.h(even[i])
+            q[0::2] = even
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern)
+        qc = exe.compiled_quantum[0].circuit
+        applied = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "h"
+        )
+        assert applied == [0, 2], applied
+
+    # ----- negative: trace-time rejects ---------------------------------
+
+    def test_coverage_mismatch_literal_rejected(self):
+        """``q[0:2] = h(q[0:3])`` (concrete bounds, concrete parent length)
+        is rejected at trace time with a coverage-mismatch AffineTypeError.
+        """
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q[0:2] = qmc.h(q[0:3])
+            return qmc.measure(q)
+
+        with pytest.raises(AffineTypeError, match="coverage mismatch"):
+            _ = kern.block
+
+    def test_coverage_mismatch_symbolic_parent_rejected(self):
+        """``q[0:2] = h(q[0:3])`` with symbolic parent length is still
+        caught at trace time.
+
+        The frontend's ``_normalize_slice_to_covered`` skips the parent-length
+        clamp when the parent is symbolic but still computes lhs coverage
+        from concrete user bounds; ``_make_slice_view`` records concrete
+        ``_slice_covered_indices`` under the same condition.  Both
+        agree on the comparison, so the mismatch is rejected.
+        """
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            q[0:2] = qmc.h(q[0:3])
+            return qmc.measure(q)
+
+        with pytest.raises(AffineTypeError, match="coverage mismatch"):
+            _ = kern.block
+
+    def test_cross_array_rhs_rejected(self):
+        """``q[0:2] = h(r[0:2])`` (RHS view's root parent differs from LHS)
+        is rejected at trace time with a root-identity AffineTypeError.
+        """
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            r = qmc.qubit_array(4, "r")
+            q[0:2] = qmc.h(r[0:2])
+            _ = qmc.measure(r)
+            return qmc.measure(q)
+
+        with pytest.raises(AffineTypeError, match="root parent"):
+            _ = kern.block
+
+    def test_stale_view_drained_by_overlap_rejected(self):
+        """``a = q[0:2]; b = q[0:2]; q[0:2] = a`` is rejected because ``a``
+        was silently drained by ``b``'s opportunistic-drain registration.
+
+        Without the step-7 ownership check, the slice-assignment release
+        would be a no-op (``a`` no longer owns any parent slot), giving
+        the user a false sense of completion.  The new check requires
+        the RHS view to still own every covered slot in the parent's
+        borrow record before consuming / releasing.
+        """
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            a = q[0:2]
+            b = q[0:2]  # opportunistic drain transfers parent slots to b
+            q[0:2] = a  # a no longer owns parent slots → rejected
+            _ = b
+            return qmc.measure(q)
+
+        with pytest.raises(AffineTypeError, match="no longer owns"):
+            _ = kern.block
+
+    def test_lhs_root_consumed_rejected(self):
+        """``v = q[0:2]; measure(q); q[0:2] = h(v)`` is rejected at the
+        new LHS-root liveness check (step 3).
+
+        The parent ``q`` was destroyed by the prior ``measure``, so the
+        slice-assignment target is no longer valid.  Without this check
+        the assignment would silently proceed and the IR release marker
+        would be emitted against a consumed parent, leading to confusing
+        downstream errors.  Mirrors ``_return_element``'s consumed-array
+        guard at the start of element borrow-return.
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            v = q[0:2]
+            bits = qmc.measure(q)
+            q[0:2] = qmc.h(v)
+            return bits
+
+        with pytest.raises(QubitConsumedError, match="cannot be used as the LHS"):
+            _ = kern.block
+
+    def test_rhs_view_already_consumed_rejected(self):
+        """``v = q[0:2]; measure(v); q[0:2] = v`` is rejected at step 2
+        (RHS consumed-check).  The measure consumed ``v`` already so the
+        view handle cannot be returned via slice assignment.
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            v = q[0:2]
+            bits = qmc.measure(v)
+            q[0:2] = v
+            return bits
+
+        with pytest.raises(QubitConsumedError):
+            _ = kern.block
+
+    def test_body_internal_release_of_outer_view_rejected(self):
+        """``even = q[0::2]; for i in ...: q[0::2] = even`` is rejected
+        at the IR pass's ``outer_snapshot_stack`` guard.
+
+        Releasing an outer-registered view from inside a control-flow body
+        would require the loop / branch merge to propagate the entry
+        deletion outward, which the current consumption-priority union
+        cannot do safely.  The pass raises ``SliceLinearityViolationError``
+        with a hint pointing at the control-flow region.
+        """
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.transpiler.errors import (
+            SliceLinearityViolationError,
+        )
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]
+            for _ in qmc.range(1):
+                # Body-internal release of outer-registered view.
+                q[0::2] = even
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(SliceLinearityViolationError, match="control-flow body"):
+            transpiler.transpile(kern)

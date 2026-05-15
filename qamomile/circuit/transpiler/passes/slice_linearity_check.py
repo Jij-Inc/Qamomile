@@ -49,6 +49,7 @@ from __future__ import annotations
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     Operation,
+    ReleaseSliceViewOperation,
     ReturnOperation,
     SliceArrayOperation,
 )
@@ -201,6 +202,18 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
     def __init__(self) -> None:
         """Initialize per-run mutable state to safe defaults."""
         self._used_view_uuids: set[str] = set()
+        # ``_outer_snapshot_stack`` is a stack of outer ``state``
+        # snapshots taken when entering a control-flow body in
+        # ``_walk_nested``.  While walking inside the body, every
+        # state-mutating helper (slice registration's opportunistic
+        # drain, ReleaseSliceViewOperation handling) consults the
+        # snapshot to forbid removing entries that the enclosing
+        # block had already registered — those changes cannot be
+        # propagated out of the body by the current merge logic, so
+        # they're rejected up-front.  Empty stack means we're at the
+        # top level; only the innermost frame matters for the per-op
+        # check because nested bodies push their own snapshot.
+        self._outer_snapshot_stack: list[State] = []
 
     @property
     def name(self) -> str:
@@ -307,6 +320,18 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 )
                 continue
 
+            if isinstance(op, ReleaseSliceViewOperation):
+                # ``Vector.__setitem__`` slice assignment emits this op
+                # immediately after consuming a view handle on the
+                # frontend.  Mirror that release in the IR borrow
+                # tracker: drop every entry whose owner is the view
+                # ArrayValue we are releasing.  See ``_handle_release``
+                # for the outer-snapshot guard used when this op
+                # appears inside a control-flow body.
+                if op.operands:
+                    self._handle_release(op.operands[0], state)
+                continue
+
             if isinstance(op, HasNestedOps):
                 self._walk_nested(op, state)
                 continue
@@ -340,10 +365,20 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             state: Caller's mutable borrow tracker.
         """
         if isinstance(op, IfOperation):
-            true_state = dict(state)
-            self._walk(op.true_operations, true_state)
-            false_state = dict(state)
-            self._walk(op.false_operations, false_state)
+            # Push outer snapshot for the duration of branch walks.
+            # Any release / drain inside either branch that targets
+            # an entry from the snapshot is rejected by the helpers
+            # — the current merge policy cannot propagate entry
+            # deletions out of the body, so cross-body release is
+            # unsupported in this revision.
+            self._outer_snapshot_stack.append(dict(state))
+            try:
+                true_state = dict(state)
+                self._walk(op.true_operations, true_state)
+                false_state = dict(state)
+                self._walk(op.false_operations, false_state)
+            finally:
+                self._outer_snapshot_stack.pop()
             # Conservative union with a consumption-priority rule.  If
             # either branch destroyed a slot the post-If state must
             # treat it as destroyed; otherwise a downstream operand
@@ -387,14 +422,18 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         #    consume, and the body simulation is one iteration, so any
         #    transient ownership swap is dropped to avoid corrupting
         #    the outer state's view of the live slice graph.
-        for body in op.nested_op_lists():
-            body_state = dict(state)
-            self._walk(body, body_state)
-            for k, v in body_state.items():
-                if isinstance(v, _ConsumedSlotMarker):
-                    state[k] = _CONSUMED_SLOT
-                elif k not in state and isinstance(v, ArrayValue):
-                    state[k] = v
+        self._outer_snapshot_stack.append(dict(state))
+        try:
+            for body in op.nested_op_lists():
+                body_state = dict(state)
+                self._walk(body, body_state)
+                for k, v in body_state.items():
+                    if isinstance(v, _ConsumedSlotMarker):
+                        state[k] = _CONSUMED_SLOT
+                    elif k not in state and isinstance(v, ArrayValue):
+                        state[k] = v
+        finally:
+            self._outer_snapshot_stack.pop()
 
     # ------------------------------------------------------------------
     # Borrow / release processing
@@ -616,6 +655,126 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         for k in to_remove:
             del state[k]
 
+    def _handle_release(self, view_value: ValueBase, state: State) -> None:
+        """Apply a slice-assignment release to ``state``.
+
+        Mirrors the frontend's ``VectorView.consume(operation_name=
+        'slice assignment')``: every state entry whose owner is the
+        view ``ArrayValue`` is removed.  Reuses
+        :meth:`_release_by_owner_uuid` since "release this view's
+        slots" is the same operation as the symbolic-bound view
+        release used elsewhere.
+
+        When called from inside a control-flow body, refuses to drop
+        any entry that the enclosing block already owned (the
+        innermost outer snapshot recorded by ``_walk_nested``).  The
+        current loop / branch merge cannot propagate entry deletions
+        out of the body, so such cross-body releases would leave the
+        outer state inconsistent — they are rejected with
+        ``SliceLinearityViolationError`` for predictability.
+
+        Args:
+            view_value: The sliced ``ArrayValue`` whose borrow is
+                being released.  Must be an ``ArrayValue`` (the
+                ``ReleaseSliceViewOperation`` op invariant guarantees
+                this).
+            state: Mutable borrow tracker for the current scope.
+
+        Raises:
+            SliceLinearityViolationError: When invoked inside a
+                control-flow body and any entry being removed was
+                recorded in the outer snapshot (cross-body release).
+        """
+        if not isinstance(view_value, ArrayValue):
+            return
+
+        target_uuid = view_value.uuid
+        outer_snapshot = (
+            self._outer_snapshot_stack[-1] if self._outer_snapshot_stack else None
+        )
+
+        if outer_snapshot is not None:
+            offenders = [
+                k
+                for k, owner in outer_snapshot.items()
+                if isinstance(owner, ArrayValue) and owner.uuid == target_uuid
+            ]
+            if offenders:
+                raise SliceLinearityViolationError(
+                    f"Slice assignment inside a control-flow body "
+                    f"attempted to release view '{view_value.name}', "
+                    f"which was registered by the enclosing block.  "
+                    f"Cross-body release is not supported in this "
+                    f"revision because the loop / branch merge cannot "
+                    f"propagate the deletion to the outer state.  "
+                    f"Move the view construction *inside* the body, "
+                    f"or perform the slice assignment outside the "
+                    f"control-flow region."
+                )
+
+        self._release_by_owner_uuid(target_uuid, state)
+
+    def _guard_drain_against_outer_snapshot(
+        self,
+        drained_view: ArrayValue,
+        new_view: ArrayValue,
+        root: ArrayValue,
+        reason: str,
+    ) -> None:
+        """Reject implicit drain of an outer-registered view from inside a body.
+
+        ``_register_slice_bulk_borrow_if_new`` has three drain paths that
+        delete an existing view's state entries before registering a new
+        view that overlaps it: same-coverage replacement, nested-slice
+        drain of the outer view, and the opportunistic drain of an
+        unused view.  Each is an entry-deletion, so the same
+        propagation problem that motivates ``_handle_release``'s
+        outer-snapshot guard applies — if we drop an entry that the
+        enclosing block had registered, the post-body merge cannot
+        carry that deletion outward and the outer state ends up holding
+        a stale owner.  Forbid the pattern up-front instead.
+
+        Args:
+            drained_view: The view whose state entries the caller is
+                about to delete.
+            new_view: The view being registered, used in the error
+                message to point users at the construction site.
+            root: The shared root parent ArrayValue (used for the
+                ``<root>[idx]`` reference in the error body).
+            reason: Short descriptor of which drain path triggered the
+                guard (``"same-coverage replacement"`` /
+                ``"nested-slice drain of outer view"`` /
+                ``"opportunistic drain of unused view"``), surfaced in
+                the error message so the user can see *why* the IR
+                tried to drop the outer view.
+
+        Raises:
+            SliceLinearityViolationError: If any entry in the innermost
+                outer snapshot is owned by ``drained_view``.
+        """
+        if not self._outer_snapshot_stack:
+            return
+        outer_snapshot = self._outer_snapshot_stack[-1]
+        target_uuid = drained_view.uuid
+        offenders = [
+            k
+            for k, owner in outer_snapshot.items()
+            if isinstance(owner, ArrayValue) and owner.uuid == target_uuid
+        ]
+        if not offenders:
+            return
+        raise SliceLinearityViolationError(
+            f"Slice construction inside a control-flow body would "
+            f"implicitly drain view '{drained_view.name}' (registered "
+            f"on '{root.name}' by the enclosing block) to make room "
+            f"for '{new_view.name}' ({reason}).  Cross-body drain is "
+            f"not supported in this revision because the loop / branch "
+            f"merge cannot propagate the deletion to the outer state.  "
+            f"Move the outer view's construction *inside* the body, "
+            f"or rework the slicing so the body does not overlap the "
+            f"outer view."
+        )
+
     # ------------------------------------------------------------------
     # Slice registration
     # ------------------------------------------------------------------
@@ -725,6 +884,9 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             if other_full == new_covered:
                 # Same logical view — release all of the old view's
                 # registrations before installing the new one below.
+                self._guard_drain_against_outer_snapshot(
+                    other_view, av, root, "same-coverage replacement"
+                )
                 for slot in other_full:
                     old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:
@@ -739,6 +901,9 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # view (including those outside the new view's coverage,
                 # since the outer handle is no longer usable) before
                 # registering the inner.
+                self._guard_drain_against_outer_snapshot(
+                    other_view, av, root, "nested-slice drain of outer view"
+                )
                 for slot in other_full:
                     old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:
@@ -753,6 +918,9 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # that HAS been used gets the strict overlap error
                 # below — the permissive drain only applies to
                 # sliced-but-never-touched placeholders.
+                self._guard_drain_against_outer_snapshot(
+                    other_view, av, root, "opportunistic drain of unused view"
+                )
                 for slot in other_full:
                     old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:

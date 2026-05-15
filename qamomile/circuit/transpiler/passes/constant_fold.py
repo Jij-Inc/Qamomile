@@ -6,7 +6,11 @@ import dataclasses
 from typing import Any
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -122,6 +126,19 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     # ``slice_start`` / ``slice_step`` are separate
                     # references that need the same folding applied.
                     return outer_self._substitute_slice_op_result(op, folded_values)
+
+                # ReleaseSliceViewOperation is the symmetric counterpart
+                # of SliceArrayOperation: a declarative marker that tells
+                # SliceLinearityCheckPass to drop the view's borrow.  The
+                # same strip / keep policy applies — when
+                # ``strip_slice_ops`` is True the marker is removed (it
+                # carries no information needed downstream), otherwise
+                # it survives to be observed by the linearity check and
+                # finally removed by StripSliceArrayOpsPass.
+                if isinstance(op, ReleaseSliceViewOperation):
+                    if outer_self._strip_slice_ops:
+                        return None
+                    return op
 
                 # Substitute folded values in operands and results.
                 # Results must also be folded so that, e.g.,
