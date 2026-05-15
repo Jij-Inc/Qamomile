@@ -2328,6 +2328,61 @@ class CircuitAnalyzer:
             return count
         return None
 
+    def _resolve_view_chain_to_root(
+        self,
+        array_value: "ArrayValue",
+    ) -> tuple["ArrayValue", int, int] | None:
+        """Walk the ``slice_of`` chain to the root array, composing the affine map.
+
+        For a sliced ``ArrayValue`` (i.e. one with ``slice_of is not None``),
+        the element-index in operand metadata is *view-local*: ``view[i]``
+        on ``q[0::2]`` records ``element_indices[0] = i`` against
+        ``parent_array = view_av``, not against ``q``.  Translating to a
+        physical wire index requires walking the ``slice_of`` chain to
+        the root and composing the start / step pairs of every hop.
+
+        At each hop ``cur = slice_of(child)`` the parent-space index of
+        ``child[i]`` is ``cur.slice_start + cur.slice_step * i``.
+        Composing through a chain accumulates as
+        ``(start, step) -> (cur.slice_start + cur.slice_step * start,
+        cur.slice_step * step)`` until ``cur.slice_of is None`` (root).
+
+        Args:
+            array_value (ArrayValue): A possibly-sliced ArrayValue.  When
+                ``slice_of is None`` the function returns the identity
+                transform ``(array_value, 0, 1)``.
+
+        Returns:
+            tuple[ArrayValue, int, int] | None: ``(root_av, start, step)``
+                so that the root-space index of a view-local ``idx`` is
+                ``start + step * idx``.  ``None`` when any
+                ``slice_start`` / ``slice_step`` along the chain is
+                symbolic (cannot compose the affine map at draw time).
+        """
+        cur = array_value
+        start = 0
+        step = 1
+        while getattr(cur, "slice_of", None) is not None:
+            slice_start = cur.slice_start
+            slice_step = cur.slice_step
+            if slice_start is None or not slice_start.is_constant():
+                return None
+            if slice_step is None or not slice_step.is_constant():
+                return None
+            s = slice_start.get_const()
+            st = slice_step.get_const()
+            if s is None or st is None:
+                return None
+            try:
+                s_int = int(s)
+                st_int = int(st)
+            except (TypeError, ValueError):
+                return None
+            start = s_int + st_int * start
+            step = st_int * step
+            cur = cur.slice_of
+        return cur, start, step
+
     def _resolve_parent_array_element(
         self,
         operand: Value,
@@ -2336,6 +2391,12 @@ class CircuitAnalyzer:
         param_values: dict,
     ) -> int | None:
         """Resolve a `q[i]` operand to its wire index when `i` is concrete.
+
+        Handles both direct ``q[i]`` and ``view[i]`` where ``view`` is a
+        slice of ``q``: when ``parent_array.slice_of`` is non-None, the
+        chain is walked via :meth:`_resolve_view_chain_to_root` so that
+        view-local ``i`` is composed with the chain's affine map to a
+        root-space index.
 
         Args:
             operand: IR Value expected to have `parent_array` and
@@ -2348,19 +2409,16 @@ class CircuitAnalyzer:
                 `element_indices[0]`.
 
         Returns:
-            The wire index `qubit_map[parent_lid] + int(i)` when the
-            operand is a parent-array element access with a resolvable
-            index. None if the operand is not a parent-array element
-            access, the parent is not in `qubit_map`, `element_indices`
-            is absent, or the index is symbolic and cannot be evaluated.
+            The wire index for the resolved element.  When the parent
+            is a slice view, the view-local index is composed with the
+            ``slice_of`` chain back to the root register.  ``None`` when
+            the parent / root is not in ``qubit_map``,
+            ``element_indices`` is absent, or any index / slice
+            metadata in the chain is symbolic and cannot be evaluated.
         """
         if not (hasattr(operand, "parent_array") and operand.parent_array is not None):
             return None
-        parent_lid = logical_id_remap.get(
-            operand.parent_array.logical_id, operand.parent_array.logical_id
-        )
-        if parent_lid not in qubit_map:
-            return None
+        parent_array = operand.parent_array
         if not (hasattr(operand, "element_indices") and operand.element_indices):
             return None
         idx_value = operand.element_indices[0]
@@ -2370,7 +2428,24 @@ class CircuitAnalyzer:
             idx = self._evaluate_value(idx_value, param_values)
         if idx is None:
             return None
-        return qubit_map[parent_lid] + int(idx)
+        idx_int = int(idx)
+        # Slice view → walk to root, compose affine map.
+        if getattr(parent_array, "slice_of", None) is not None:
+            resolved = self._resolve_view_chain_to_root(parent_array)
+            if resolved is None:
+                return None
+            root_av, start, step = resolved
+            root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+            if root_lid not in qubit_map:
+                return None
+            return qubit_map[root_lid] + start + step * idx_int
+        # Direct array element.
+        parent_lid = logical_id_remap.get(
+            parent_array.logical_id, parent_array.logical_id
+        )
+        if parent_lid not in qubit_map:
+            return None
+        return qubit_map[parent_lid] + idx_int
 
     def _resolve_non_element_operand(
         self,
