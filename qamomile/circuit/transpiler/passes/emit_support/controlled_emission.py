@@ -445,18 +445,20 @@ def emit_controlled_u(
     param_operands = [v for v in remaining_operands if v.type.is_classical()]
 
     # Resolve every control and target operand to its physical qubit
-    # index.  Partial failure (some operands resolve, others do not)
-    # would emit a wrong-arity controlled gate and is therefore a
-    # loud ``EmitError``.  Total failure (none resolved) is kept on
-    # the legacy silent-return path because the
-    # ``SymbolicControlledU`` → ``ConcreteControlledU`` promotion in
-    # ``ConstantFoldingPass`` currently leaves the IR in an
-    # inconsistent operand layout (the control Vector is not
-    # expanded to individual qubits, so ``operands[:num_controls]``
-    # picks up a target Value rather than each control individually).
-    # Raising here would hard-break legitimate user code using
-    # ``controlled(fn, num_controls=n)`` with bindings.  The proper
-    # fix for the underlying promotion bug is tracked separately.
+    # index.  Any resolution failure — partial or total — is now a
+    # loud ``EmitError``.  Partial-failure would emit a wrong-arity
+    # controlled gate; total-failure would silently drop the gate
+    # entirely.  Both are silent miscompile vectors and are rejected.
+    #
+    # Historical note: total-failure previously took a silent-return
+    # path because the ``SymbolicControlledU`` → ``ConcreteControlledU``
+    # promotion in ``ConstantFoldingPass`` can produce an inconsistent
+    # operand layout (the control Vector is not expanded to individual
+    # qubits, so ``operands[:num_controls]`` picks up a target Value
+    # rather than each control individually).  That promotion bug is
+    # tracked separately; if it triggers post-this-change, the
+    # ``EmitError`` here surfaces it instead of silently dropping the
+    # gate.
     control_indices: list[int] = []
     for q in control_operands:
         idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
@@ -469,29 +471,27 @@ def emit_controlled_u(
         if idx is not None:
             target_indices.append(idx)
 
-    if 0 < len(control_indices) < len(control_operands):
+    if len(control_indices) < len(control_operands):
         raise EmitError(
             f"ControlledUOperation: only "
             f"{len(control_indices)}/{len(control_operands)} control "
-            f"operand(s) could be resolved to physical qubits. Emitting "
-            f"a partial-arity controlled gate would silently miswire the "
-            f"circuit.  This typically indicates broken parent_array / "
-            f"slice metadata on a subset of the control operands.",
+            f"operand(s) could be resolved to physical qubits. "
+            f"Emitting a partial- or zero-arity controlled gate would "
+            f"silently miswire the circuit (or drop it entirely).  "
+            f"This typically indicates broken parent_array / slice "
+            f"metadata on the control operands, or a stale "
+            f"``SymbolicControlledU`` → ``ConcreteControlledU`` "
+            f"promotion in ``ConstantFoldingPass``.",
             operation="ControlledUOperation",
         )
-    if 0 < len(target_indices) < len(target_qubit_operands):
+    if len(target_indices) < len(target_qubit_operands):
         raise EmitError(
             f"ControlledUOperation: only "
-            f"{len(target_indices)}/{len(target_qubit_operands)} target "
-            f"operand(s) could be resolved to physical qubits. Same "
-            f"partial-arity hazard as above.",
+            f"{len(target_indices)}/{len(target_qubit_operands)} "
+            f"target operand(s) could be resolved to physical qubits.  "
+            f"Same partial- or zero-arity hazard as above.",
             operation="ControlledUOperation",
         )
-
-    if not control_indices or not target_indices:
-        # Total resolution failure — see comment block above for why
-        # this is left as a silent return rather than a hard error.
-        return
 
     local_bindings = emit_pass._resolver.bind_block_params(
         block_value, param_operands, bindings

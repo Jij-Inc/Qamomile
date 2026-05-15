@@ -37,6 +37,19 @@ class _ConsumedSlotMarker:
     ``QubitConsumedError`` — mirroring how ``ArrayBase._consumed``
     handles whole-array consumption.
 
+    Historical note: this marker was originally designed to also
+    guard the "two same-range views, destructively consume one"
+    pattern (``a = q[1::2]; b = q[1::2]; measure(a); ... b ...``).
+    That pattern is now rejected up-front by
+    ``VectorView._wrap``'s overlap check — a second overlapping view
+    cannot be constructed while the first is live.  The marker
+    therefore only serves to record "this physical qubit was
+    destroyed by an earlier view operation" after the destroying
+    view has gone out of scope or been consumed; any subsequent
+    direct parent access through the same slot index needs to fail
+    loudly, and the marker is the persistent breadcrumb that drives
+    that failure.
+
     Only one instance ever exists; equality is by identity.
     """
 
@@ -1594,31 +1607,24 @@ class VectorView(Vector[T]):
         instance._slice_covered_indices = covered_indices
 
         if covered_indices is not None and parent.value.type.is_quantum():
-            # Opportunistically drain views that already own the
-            # target slots but have no outstanding element borrows.
-            # This lets sequential same-range slicing (``a = q[0::2];
-            # loop(a); b = q[0::2]``) succeed — the first view is
-            # effectively done by the time the second is created,
-            # even though no explicit ``consume`` happened.
-            views_to_drain: list[ArrayBase] = []
-            for idx in covered_indices:
-                key = (f"const:{idx}",)
-                existing = parent._borrowed_indices.get(key)
-                if (
-                    isinstance(existing, ArrayBase)
-                    and not existing._borrowed_indices
-                    and existing not in views_to_drain
-                ):
-                    views_to_drain.append(existing)
-            for drained in views_to_drain:
-                drained_covered = getattr(drained, "_slice_covered_indices", None)
-                if drained_covered is None:
-                    continue
-                for drained_idx in drained_covered:
-                    drained_key = (f"const:{drained_idx}",)
-                    if parent._borrowed_indices.get(drained_key) is drained:
-                        del parent._borrowed_indices[drained_key]
-
+            # Multi-view of overlapping ranges is forbidden: while a
+            # view is live, the parent slots it covers are locked.
+            # The user must consume / release / let the existing view
+            # go out of scope (and its destructive consume cleanup
+            # finish) before constructing a new view that touches the
+            # same slot.  Previously this code path did an
+            # "opportunistic drain" that silently re-bound the slot's
+            # owner from an unused old view to the new view; that
+            # made ``a = q[0::2]; b = q[0::2]`` succeed with
+            # surprising semantics (``a`` was effectively dead after
+            # ``b``'s construction even though it appeared live to the
+            # user).  Rejecting overlap up-front is clearer and
+            # eliminates the need for the ``_ConsumedSlotMarker``
+            # sentinel — a destructively-consumed view's slots stay
+            # in the parent's borrow table under the view itself with
+            # ``view._consumed = True``, so downstream access checks
+            # can distinguish "view active" from "view destroyed" via
+            # the view's own state.
             for idx in covered_indices:
                 key = (f"const:{idx}",)
                 existing = parent._borrowed_indices.get(key)
@@ -1626,8 +1632,10 @@ class VectorView(Vector[T]):
                     if isinstance(existing, ArrayBase):
                         raise QubitConsumedError(
                             f"Parent slot '{parent.value.name}[{idx}]' is already "
-                            f"owned by another slice view; overlapping views are "
-                            f"not supported.",
+                            f"owned by another slice view '{existing.value.name}' "
+                            f"and cannot be re-sliced while that view is live.  "
+                            f"Consume / release the existing view before "
+                            f"slicing the same range again.",
                             handle_name=f"{parent.value.name}[{idx}]",
                             operation_name="array slicing",
                         )
@@ -1819,12 +1827,14 @@ class VectorView(Vector[T]):
         self.validate_all_returned()
         is_destructive = operation_name in _DESTRUCTIVE_CONSUME_OPS
 
-        # Reject the consume up-front when an overlapping view has
-        # already destroyed any of our covered slots.  Without this the
-        # second destructive consume would either silently no-op (if
-        # ``owner is self`` is False due to drain transfer) or quietly
-        # reinstall the marker — neither path tells the user about the
-        # double-consume.
+        # Reject the consume up-front when a prior destructive view
+        # consume has already destroyed any of our covered slots.
+        # Under the strict no-multi-view policy a second overlapping
+        # view cannot be constructed while the first is live, so the
+        # only way to land here is via slot re-use after the first
+        # view (and any handover through nested slicing) has been
+        # destructively consumed and its breadcrumb ``_CONSUMED_SLOT``
+        # left behind.
         if self._slice_covered_indices is not None:
             already_destroyed = sorted(
                 idx
@@ -1849,11 +1859,15 @@ class VectorView(Vector[T]):
                 key = (f"const:{idx}",)
                 owner = self._slice_parent._borrowed_indices.get(key)
                 if is_destructive:
-                    # Always install the consumed sentinel — overriding
-                    # any other view that the parent currently records
-                    # as owner — so a subsequent operation on either
-                    # view sees the destroyed slot via the parent's
-                    # table.
+                    # Replace the view-owner record with the
+                    # ``_CONSUMED_SLOT`` breadcrumb so subsequent
+                    # direct parent access through this slot raises
+                    # ``QubitConsumedError`` even after this view has
+                    # gone out of scope.  Under the strict
+                    # no-multi-view policy the existing owner is
+                    # always ``self``; the unconditional overwrite is
+                    # kept for forward-compat with potential
+                    # nested-slice handover edge cases.
                     self._slice_parent._borrowed_indices[key] = _CONSUMED_SLOT
                 elif owner is self:
                     del self._slice_parent._borrowed_indices[key]
@@ -1972,6 +1986,23 @@ class VectorView(Vector[T]):
             results=[new_sliced_av],
         )
         get_current_tracer().add_operation(slice_op)
+
+        # Nested slicing transfers ownership: this outer view (``self``)
+        # gives up its borrow on the parent's slots so the new inner
+        # view can claim them.  Without this explicit release the
+        # overlap check in ``VectorView._wrap`` would reject the inner
+        # construction because the outer still owns the parent slots.
+        # Strict no-overlap is intentional for top-level same-range
+        # re-slicing (``a = q[0::2]; b = q[0::2]`` is forbidden); nested
+        # slicing is the legitimate way to derive a sub-view, and
+        # making it pass through this hand-off keeps the policy
+        # consistent: at any moment, each parent slot has at most one
+        # live owner.
+        if self._slice_covered_indices is not None:
+            for idx in self._slice_covered_indices:
+                key = (f"const:{idx}",)
+                if self._slice_parent._borrowed_indices.get(key) is self:
+                    del self._slice_parent._borrowed_indices[key]
 
         return VectorView._wrap(
             parent=self._slice_parent,

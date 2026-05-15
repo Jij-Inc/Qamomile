@@ -1317,27 +1317,35 @@ class TestRound2Reviewer:
 
     # ----- P2-A -------------------------------------------------------------
 
-    def test_post_fold_allows_drain_of_unused_overlapping_view(self):
-        """Frontend & post-fold agree: an unused view is drained on overlap.
+    def test_overlapping_top_level_views_are_rejected(self):
+        """Top-level same-range / overlapping views are rejected at trace time.
 
-        Regression (P2-A): post-fold was stricter than frontend and
-        rejected ``a = q[0:3]; b = q[1:4]`` when ``a`` was never used,
-        even though the frontend's drain-on-drained logic accepts it.
+        Under the strict no-multi-view policy
+        (``VectorView._wrap``'s overlap check), constructing a second
+        top-level view that overlaps an existing live view is rejected
+        immediately with ``QubitConsumedError``.  This replaces the
+        prior "opportunistic drain" semantics where an unused outer
+        view was silently drained by a later overlapping slice —
+        which made ``a = q[0:3]; b = q[1:4]`` succeed at the cost of
+        very surprising ownership transfer.  Nested slicing
+        (``view[0:2]``) is still allowed because ``_nested_slice``
+        explicitly releases the outer view's borrow before the inner
+        view's ``_wrap`` runs.
         """
-        pytest.importorskip("qiskit")
-        from qamomile.qiskit import QiskitTranspiler
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(4, "q")
-            _a = q[0:3]  # unused — drained on overlap
-            b = q[1:4]
+            _a = q[0:3]  # outer view covers {0, 1, 2}
+            b = q[1:4]  # ← overlaps on {1, 2} → rejected
             b[0] = qmc.h(b[0])
             return qmc.measure(q)
 
-        transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(kern, bindings={})
-        assert exe is not None
+        with pytest.raises(
+            QubitConsumedError, match="already owned by another slice view"
+        ):
+            _ = kern.block
 
     # ----- P2-B -------------------------------------------------------------
 
@@ -2294,28 +2302,32 @@ class TestSliceAssignment:
         with pytest.raises(AffineTypeError, match="root parent"):
             _ = kern.block
 
-    def test_stale_view_drained_by_overlap_rejected(self):
-        """``a = q[0:2]; b = q[0:2]; q[0:2] = a`` is rejected because ``a``
-        was silently drained by ``b``'s opportunistic-drain registration.
+    def test_overlapping_top_level_slice_rejected_at_creation(self):
+        """``a = q[0:2]; b = q[0:2]`` is rejected at ``b``'s construction.
 
-        Without the step-7 ownership check, the slice-assignment release
-        would be a no-op (``a`` no longer owns any parent slot), giving
-        the user a false sense of completion.  The new check requires
-        the RHS view to still own every covered slot in the parent's
-        borrow record before consuming / releasing.
+        Under the strict no-multi-view policy
+        (``VectorView._wrap``'s overlap check), the second
+        same-range view ``b`` is rejected immediately with
+        ``QubitConsumedError`` — no need for the downstream slice
+        assignment to detect a stale ``a``.  This is stricter than
+        the previous "opportunistic drain + ownership check at
+        ``q[0:2] = a``" two-step rejection; the failure mode is now
+        loud at the obvious site (the construction of ``b``).
         """
-        from qamomile.circuit.transpiler.errors import AffineTypeError
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(4, "q")
             a = q[0:2]
-            b = q[0:2]  # opportunistic drain transfers parent slots to b
-            q[0:2] = a  # a no longer owns parent slots → rejected
+            b = q[0:2]  # ← rejected: overlap with a
+            q[0:2] = a
             _ = b
             return qmc.measure(q)
 
-        with pytest.raises(AffineTypeError, match="no longer owns"):
+        with pytest.raises(
+            QubitConsumedError, match="already owned by another slice view"
+        ):
             _ = kern.block
 
     def test_lhs_root_consumed_rejected(self):
