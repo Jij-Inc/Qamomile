@@ -202,6 +202,7 @@ class SubstitutionPass(Pass[Block, Block]):
             operations=transformed_ops,
             kind=input.kind,
             parameters=input.parameters,
+            param_slots=input.param_slots,
         )
 
     def _transform_operations(

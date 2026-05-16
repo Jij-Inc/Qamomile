@@ -179,6 +179,8 @@ See [docs/en/tutorial/09_compilation_and_transpilation.py](docs/en/tutorial/09_c
 
 [overlap-check]: qamomile/circuit/transpiler/transpiler.py#L475-L487
 
+The kernel's full classical parameter contract is also recorded on the IR itself via `Block.param_slots`: a tuple of `ParamSlot` entries, one per classical kernel argument, carrying `(name, type, kind, ndim, default, bound_value, differentiable)`. `kind` is `RUNTIME_PARAMETER` (the slot survives as a runtime parameter) or `COMPILE_TIME_BOUND` (the slot was folded by `bindings` or a Python signature default). The manifest survives the pipeline so downstream readers can recover the contract without an external Python-side side-car. Pure-quantum arguments (`Qubit`, `Vector[Qubit]`) and structural-container arguments (`Tuple`, `Dict`) do not appear in `param_slots`; they remain in `Block.input_values`.
+
 ## Docstring Convention (MANDATORY)
 
 All functions, methods, and classes in `qamomile/` — **public and private alike** — MUST carry a **Google-style docstring** with the appropriate sections filled in, not just a one-line summary. This is enforced by `/local-review` (missing docstrings are P2+).
