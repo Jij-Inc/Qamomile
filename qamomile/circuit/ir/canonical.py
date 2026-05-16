@@ -54,6 +54,7 @@ from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
@@ -103,22 +104,26 @@ def canonicalize(block: Block) -> Block:
     return canonicalize_and_remap(block)[0]
 
 
-def canonicalize_and_remap(block: Block) -> tuple[Block, dict[str, str]]:
-    """Return canonical-form Block plus the UUID remap table.
+def canonicalize_and_remap(
+    block: Block,
+) -> tuple[Block, dict[str, str], dict[str, str]]:
+    """Return canonical-form Block plus the UUID and logical_id remap tables.
 
     Useful when the caller holds external references keyed on the
-    original Value UUIDs (e.g., a host-side port map) and needs to
-    update those references to match the canonical form.
+    original Value UUIDs or logical_ids (e.g., a host-side port map)
+    and needs to update those references to match the canonical form.
 
     Args:
         block (Block): The block to canonicalize. Must be at
             ``BlockKind.AFFINE`` or ``BlockKind.ANALYZED``.
 
     Returns:
-        tuple[Block, dict[str, str]]: A pair ``(canonical_block,
-            uuid_remap)`` where ``uuid_remap`` maps every original
-            Value UUID encountered during the walk to its canonical
-            counterpart.
+        tuple[Block, dict[str, str], dict[str, str]]: A triple
+            ``(canonical_block, uuid_remap, logical_id_remap)`` where
+            each remap maps every original identifier encountered
+            during the walk to its canonical counterpart. ``uuid`` and
+            ``logical_id`` share the same monotonic counter but are
+            tracked in separate maps.
 
     Raises:
         ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
@@ -132,7 +137,11 @@ def canonicalize_and_remap(block: Block) -> tuple[Block, dict[str, str]]:
         )
     canon = _Canonicalizer()
     new_block = canon.canonical_block(block)
-    return new_block, dict(canon.uuid_remap)
+    return (
+        new_block,
+        dict(canon.uuid_remap),
+        dict(canon.logical_id_remap),
+    )
 
 
 def to_canonical_bytes(block: Block) -> bytes:
@@ -229,6 +238,17 @@ class _Canonicalizer:
                 wrap it themselves.
         """
         return self._uuid_remap
+
+    @property
+    def logical_id_remap(self) -> dict[str, str]:
+        """Return the accumulated old-logical_id to canonical-logical_id map.
+
+        Returns:
+            dict[str, str]: Snapshot reference (not a copy) of the live
+                remap table; callers that need a stable copy should
+                wrap it themselves.
+        """
+        return self._logical_id_remap
 
     def _next_id(self) -> str:
         """Mint the next deterministic UUID string from the counter.
@@ -382,6 +402,14 @@ class _Canonicalizer:
         ):
             sub = self.canonical_block(new_op.implementation_block)
             new_op = dataclasses.replace(new_op, implementation_block=sub)
+
+        # ControlledUOperation carries the unitary as a nested ``block``
+        # field. Canonicalize it through the same canonicalizer so UUIDs
+        # inside the unitary body are rewritten in lockstep with the
+        # parent Block.
+        if isinstance(new_op, ControlledUOperation) and new_op.block is not None:
+            sub_block = self.canonical_block(new_op.block)
+            new_op = dataclasses.replace(new_op, block=sub_block)
 
         return new_op
 
@@ -598,6 +626,15 @@ def _token(obj: Any) -> str:
     if isinstance(obj, dict):
         items = sorted(obj.items(), key=lambda kv: _token(kv[0]))
         return "{" + ",".join(f"{_token(k)}:{_token(v)}" for k, v in items) + "}"
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        # Dataclass instances (e.g. ``ResourceMetadata`` on
+        # ``CompositeGateOperation``) get serialized field-by-field in
+        # name-sorted order so canonical bytes are independent of the
+        # declared-field order and of any nested ``dict``'s insertion
+        # order (handled transitively via the dict branch above).
+        fields = sorted(dataclasses.fields(obj), key=lambda f: f.name)
+        body = ",".join(f"{f.name}={_token(getattr(obj, f.name))}" for f in fields)
+        return f"{type(obj).__name__}({body})"
     return repr(obj)
 
 
@@ -663,8 +700,12 @@ def _metadata_token(metadata: ValueMetadata) -> str:
             f"elem_lids={_token(list(metadata.array_runtime.element_logical_ids))})"
         )
     if metadata.dict_runtime is not None:
+        # ``bound_data`` is stored as tuple-of-pairs in the Mapping's
+        # original iteration order. Two semantically-equal dicts with
+        # different insertion order must hash identically, so emit via
+        # ``_token(dict(...))`` so the dict-handling branch sorts keys.
         parts.append(
-            f"dict_runtime(items={_token(list(metadata.dict_runtime.bound_data))})"
+            "dict_runtime(items=" + _token(dict(metadata.dict_runtime.bound_data)) + ")"
         )
     return "[" + ",".join(parts) + "]"
 
@@ -740,15 +781,33 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
     if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
         # Nested block's values participate in the same canonical
         # universe; recurse to ensure they are declared too.
-        sub = op.implementation_block
-        for v in sub.input_values:
-            visit(v)
-        for key in sorted(sub.parameters):
-            visit(sub.parameters[key])
-        for nested_op in sub.operations:
-            _collect_from_operation(nested_op, visit)
-        for v in sub.output_values:
-            visit(v)
+        _collect_from_subblock(op.implementation_block, visit)
+    if isinstance(op, ControlledUOperation) and op.block is not None:
+        _collect_from_subblock(op.block, visit)
+
+
+def _collect_from_subblock(sub: Block, visit: Any) -> None:
+    """Walk the Values declared inside a nested Block.
+
+    Used for ``CompositeGateOperation.implementation_block`` and
+    ``ControlledUOperation.block``. Mirrors the top-level
+    ``_collect_values`` walk order so declarations remain
+    deterministic.
+
+    Args:
+        sub (Block): A nested Block embedded in an operation.
+        visit (Callable[[ValueBase], None]): The same ``visit`` closure
+            passed by ``_collect_values`` so the nested Block's Values
+            land in the parent declaration list.
+    """
+    for v in sub.input_values:
+        visit(v)
+    for key in sorted(sub.parameters):
+        visit(sub.parameters[key])
+    for nested_op in sub.operations:
+        _collect_from_operation(nested_op, visit)
+    for v in sub.output_values:
+        visit(v)
 
 
 _INLINE_INDENT = "  "
@@ -762,9 +821,12 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         # CompositeGateOperation extras: opaque Python references that
         # do not reflect IR-level structure.
         "composite_gate_instance",
-        # Implementation block is emitted separately in the operation
-        # serializer so it doesn't get rendered as an opaque repr.
+        # Nested-Block fields. Both ``implementation_block``
+        # (CompositeGateOperation) and ``block`` (ControlledUOperation)
+        # are emitted separately by ``_emit_operation`` so they are not
+        # rendered through ``repr`` here.
         "implementation_block",
+        "block",
     }
 )
 
@@ -885,6 +947,10 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
         out.append(f"{pad}{_INLINE_INDENT}implementation:")
         _emit_block(op.implementation_block, out, indent + 2)
+
+    if isinstance(op, ControlledUOperation) and op.block is not None:
+        out.append(f"{pad}{_INLINE_INDENT}unitary_block:")
+        _emit_block(op.block, out, indent + 2)
 
 
 def _extra_field_tokens(op: Operation) -> list[str]:

@@ -121,6 +121,45 @@ def _measure_after_h_twin(q: qmc.Qubit) -> qmc.Bit:
     return qmc.measure(q)
 
 
+# Two structurally-identical controlled-U scenarios. Each top-level
+# kernel applies controlled(_phase_a/_phase_b) so each top-level Block
+# contains a ``ControlledUOperation`` carrying a nested unitary
+# ``block`` field. The canonical form must rewrite UUIDs inside that
+# nested block in lockstep with the parent so the two builds agree.
+
+
+@qmc.qkernel
+def _phase_a(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Single-qubit phase rotation used as a controlled-U body."""
+    return qmc.p(q, theta)
+
+
+@qmc.qkernel
+def _phase_b(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Structurally identical twin of ``_phase_a``."""
+    return qmc.p(q, theta)
+
+
+@qmc.qkernel
+def _controlled_phase_a(
+    ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Top-level kernel that embeds ``ControlledUOperation`` via controlled(_phase_a)."""
+    op = qmc.controlled(_phase_a)
+    ctrl, target = op(ctrl, target, theta=theta)
+    return ctrl, target
+
+
+@qmc.qkernel
+def _controlled_phase_b(
+    ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Twin of ``_controlled_phase_a`` for cross-build ControlledU determinism."""
+    op = qmc.controlled(_phase_b)
+    ctrl, target = op(ctrl, target, theta=theta)
+    return ctrl, target
+
+
 # ---------------------------------------------------------------------------
 # Basic invariants
 # ---------------------------------------------------------------------------
@@ -182,6 +221,20 @@ class TestCanonicalizeDeterminism:
         b = _to_affine(_measure_after_h_twin)
         assert content_hash(a) == content_hash(b)
 
+    def test_controlled_u_twins_same_canonical_bytes(self):
+        """Cross-build determinism through ``ControlledUOperation.block``.
+
+        Each top-level kernel embeds a ``ControlledUOperation`` whose
+        ``block`` field is itself an independently-traced sub-Block.
+        Without nested canonicalization, UUIDs inside that sub-Block
+        would differ between builds and the canonical bytes would
+        disagree.
+        """
+        a = _to_affine(_controlled_phase_a)
+        b = _to_affine(_controlled_phase_b)
+        assert to_canonical_bytes(a) == to_canonical_bytes(b)
+        assert content_hash(a) == content_hash(b)
+
 
 class TestCanonicalizeIdempotence:
     """Canonicalizing twice must equal canonicalizing once."""
@@ -220,9 +273,16 @@ class TestCounterBasedUUIDs:
     def test_remap_dict_covers_every_original_uuid(self):
         """``canonicalize_and_remap`` returns a key for every original Value UUID."""
         block = _to_affine(_h_then_rx)
-        _, remap = canonicalize_and_remap(block)
+        _, uuid_remap, _ = canonicalize_and_remap(block)
         for v in block.input_values:
-            assert v.uuid in remap
+            assert v.uuid in uuid_remap
+
+    def test_remap_exposes_logical_id_table(self):
+        """``canonicalize_and_remap`` also exposes the logical_id remap table."""
+        block = _to_affine(_h_then_rx)
+        _, _, logical_id_remap = canonicalize_and_remap(block)
+        for v in block.input_values:
+            assert v.logical_id in logical_id_remap
 
 
 # ---------------------------------------------------------------------------
