@@ -141,9 +141,16 @@ def build_param_slots(
         if is_tuple_type(param_type) or is_dict_type(param_type):
             continue
 
-        # Decide the slot's kind. Observable slots are always runtime
-        # parameters (their value is supplied via bindings at execute
-        # time but they cannot be folded by partial_eval).
+        # Decide the slot's kind. ``Observable`` semantics mirror the
+        # tracer in ``QKernel._create_traced_block`` (see
+        # ``qamomile/circuit/frontend/qkernel.py``): a scalar
+        # ``Observable`` and an *unbound* ``Vector[Observable]`` are
+        # always RUNTIME_PARAMETER (the value is supplied at execute
+        # time and ``partial_eval`` cannot fold it). A *bound*
+        # ``Vector[Observable]`` — i.e., one that appears in
+        # ``kwargs_map`` — falls through to the ``name in kwargs_map``
+        # branch below and is recorded as COMPILE_TIME_BOUND with the
+        # concrete observable list.
         is_scalar_observable = param_type is Observable
         is_unbound_observable_array = (
             is_array_type(param_type)

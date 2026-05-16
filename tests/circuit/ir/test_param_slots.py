@@ -11,6 +11,7 @@ parameter_shape_resolution).
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -21,6 +22,14 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
 )
 from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
+    ParameterShapeResolutionPass,
+)
+from qamomile.circuit.transpiler.passes.substitution import (
+    SubstitutionConfig,
+    SubstitutionPass,
+    SubstitutionRule,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -212,6 +221,35 @@ class TestPipelinePreservation:
         assert affine.kind in (BlockKind.AFFINE, BlockKind.HIERARCHICAL)
         assert len(affine.param_slots) == 1
         assert affine.param_slots[0].name == "theta"
+
+    def test_substitution_preserves_param_slots(self):
+        """``SubstitutionPass`` carries ``param_slots`` through Block reconstruction.
+
+        Constructs a config with a single rule whose ``source_name`` does
+        not match any operation in the block. The pass still reconstructs
+        the Block (it short-circuits only when ``rules`` is empty) but
+        applies no operational transformation, isolating the
+        param_slots-forwarding behavior.
+        """
+        config = SubstitutionConfig(
+            rules=[SubstitutionRule(source_name="__nonexistent__", strategy="default")]
+        )
+        out = SubstitutionPass(config).run(_scalar_param.block)
+        assert out.param_slots == _scalar_param.block.param_slots
+
+    def test_parameter_shape_resolution_preserves_param_slots(self):
+        """``ParameterShapeResolutionPass`` keeps ``param_slots`` when reconstructing.
+
+        Feeds the cached HIERARCHICAL ``_vector_param.block`` (whose
+        ``thetas`` ArrayValue has a symbolic shape dim) together with a
+        concrete ``thetas`` binding. That combination produces a
+        non-empty substitution map and forces the pass to rebuild the
+        Block, exercising the param_slots-forwarding path.
+        """
+        out = ParameterShapeResolutionPass(
+            bindings={"thetas": np.array([0.1, 0.2, 0.3])}
+        ).run(_vector_param.block)
+        assert out.param_slots == _vector_param.block.param_slots
 
 
 # ---------------------------------------------------------------------------
