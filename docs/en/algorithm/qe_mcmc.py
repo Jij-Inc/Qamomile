@@ -36,7 +36,7 @@
 
 # %% [markdown]
 # In many physics and engineering problems, drawing samples $\bm{x}$ from a
-# probability distribution $\pi(\bm{x})$ is a central computational task.
+# probability distribution $\mu(\bm{x})$ is a central computational task.
 # A classic example is the **Boltzmann distribution** from statistical
 # mechanics:
 # $$
@@ -45,11 +45,12 @@
 # Here, $E(\bm{x})$ is the energy of state $\bm{x}$, $\beta = 1/T$ is the
 # inverse temperature, and $Z$ is the normalization constant known as the
 # partition function.
-# Beyond describing spin configurations at thermal equilibrium, the Boltzmann
-# distribution is also widely used as a sampling approach for combinatorial
-# optimization problems.
+# Beyond giving the probability distribution of state $\bm{x}$ at thermal
+# equilibrium, sampling that targets the Boltzmann distribution is also
+# widely used as an approach for combinatorial optimization problems.
 #
-# As a concrete example, consider the **Ising model**.
+# As a concrete example of an energy function for the Boltzmann distribution,
+# consider the **Ising model**.
 # The Ising model is a system with a spin variable $x_i \in \{-1, +1\}$ at
 # each site $i$, whose energy is given by:
 # $$
@@ -60,11 +61,11 @@
 # Since the total number of states grows exponentially as $2^n$, computing
 # the partition function $Z$ exactly becomes intractable for large $n$.
 # MCMC, introduced below, is therefore used to draw samples directly from
-# $\pi(\bm{x})$.
+# $\mu(\bm{x})$.
 #
 # First, let us actually visualize the Boltzmann distribution for a small
 # Ising model.
-# We take a 1D ferromagnetic Ising chain ($J_{ij} = 1$, $h_i = 0$) and plot
+# We take a 1D ferromagnetic Ising chain ($J_{i,i+1} = 1$, $h_i = 0$) and plot
 # histograms of the probability aggregated by energy $E(\bm{x})$ for several
 # values of the inverse temperature $\beta$.
 
@@ -105,7 +106,7 @@ for ax, beta in zip(axes, betas):
     ax.bar(unique_energies, e_probs, width=0.8)
     ax.set_xlabel(r"Energy $E(\mathbf{x})$")
     ax.set_title(rf"$\beta = {beta}$")
-axes[0].set_ylabel(r"Probability $\pi(E)$")
+axes[0].set_ylabel(r"Probability $\mu(E)$")
 fig.suptitle(f"Boltzmann distribution of {n_spins}-spin Ising chain")
 plt.tight_layout()
 plt.show()
@@ -115,22 +116,22 @@ plt.show()
 #
 # Markov chain Monte Carlo (MCMC) is a general-purpose method for sampling
 # from probability distributions.
-# It achieves sampling from a target distribution $\pi(\bm{x})$ by exploiting
+# It achieves sampling from a target distribution $\mu(\bm{x})$ by exploiting
 # a stochastic process called a Markov chain.
 # Here we introduce the Metropolis-Hastings (MH) algorithm
 # [](https://doi.org/10.1093/biomet/57.1.97) , a common implementation of MCMC.
 #
-# The MH algorithm generates a new transition $\bm{x} \rightarrow \bm{x}'$
+# The MH algorithm generates a new transition $\bm{x} \rightarrow \bm{y}$
 # of the Markov chain according to a proposal probability $Q(\bm{y}|\bm{x})$,
 # and then accepts or rejects this transition according to the acceptance
 # probability
 # $$
-# A(\bm{y} | \bm{x}) = \min \left(1, \frac{\pi(\bm{y})}{\pi(\bm{x})} \cdot \frac{Q(\bm{x} | \bm{y})}{Q(\bm{y} | \bm{x})} \right).
+# A(\bm{y} | \bm{x}) = \min \left(1, \frac{\mu(\bm{y})}{\mu(\bm{x})} \cdot \frac{Q(\bm{x} | \bm{y})}{Q(\bm{y} | \bm{x})} \right).
 # $$
 # These two steps generate the state at time $t+1$ from the state at time
 # $t$.
 # After sufficient time, the states of this Markov chain follow the target
-# distribution $\pi(\bm{x})$.
+# distribution $\mu(\bm{x})$.
 # Thus, by running enough transitions, the resulting chain states
 # $\{\bm{x}^{(t)}\}$ can be taken as the desired samples.
 #
@@ -192,8 +193,8 @@ def metropolis_hastings(
 # Let us run it to draw samples.
 
 # %%
-T = 100 if docs_test_mode else 10000  # Number of MCMC steps
-beta = 1.0  # Inverse temperature
+T = 100 if docs_test_mode else 1000  # Number of MCMC steps
+beta = 0.5  # Inverse temperature
 
 sample = np.zeros((T, n_spins))
 state = np.ones(n_spins)  # Initial state
@@ -210,16 +211,17 @@ for t in range(T):
 # Boltzmann distribution $\mu(\bm{x})$.
 # Here we estimate the spin's average magnetization:
 # $$
-# \langle \mu \rangle = \sum_{\bm{x}} \mu(\bm{x}) m(\bm{x})
+# \langle m \rangle = \sum_{\bm{x}} \mu(\bm{x}) m(\bm{x})
 # $$
 # where the magnetization is
 # $$
 # m(\bm{x}) = \frac{1}{n} \sum_{i=1}^n x_i.
 # $$
 # Since the average magnetization is the expectation of the magnetization
-# with respect to the Boltzmann distribution, the closer the samples are to
-# the Boltzmann distribution, the better the estimator should become.
-# Let us plot the estimator $\bar{\mu_t}$ obtained from the first $t$ MCMC
+# with respect to the Boltzmann distribution, the estimator should become
+# more accurate as the number of samples grows and as the sample
+# distribution gets closer to the Boltzmann distribution.
+# Let us plot the estimator $\bar{m}_t$ obtained from the first $t$ MCMC
 # samples.
 
 
@@ -369,7 +371,8 @@ from qamomile.qiskit import QiskitTranspiler
 
 gamma = 0.45  # Mixing coefficient
 time = 12.0  # Total evolution time
-step = 15  # Number of Trotter steps
+delta_t = 0.8  # Trotter step size
+step = int(time / delta_t)  # Number of Trotter steps
 order = 2  # Suzuki-Trotter approximation order
 
 Hs = [
@@ -465,19 +468,37 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 
 # %% [markdown]
 # Let us run the QeMCMC algorithm we just implemented.
+# We switch to a lower temperature $\beta = 1.0$ where classical local
+# updates mix slowly, so that we can observe the behavior of the quantum
+# proposal distribution under conditions that are harder for the classical
+# baseline. For a fair comparison, we also run a classical MCMC at the same
+# $\beta = 1.0$ alongside the quantum run.
 
 # %%
 from qiskit_aer import AerSimulator
 
+beta = 1.0  # Switch to a lower temperature where local updates mix slowly
 T_quantum = (
     20 if docs_test_mode else 1000
-)  # Smaller than the classical run since quantum simulation is costlier
+)  # Kept small because quantum-circuit simulation is costly
 
+# Recompute the theoretical average magnetization for the new beta=1.0
+weights = np.exp(-beta * energies)
+probs = weights / weights.sum()
+theoretical_magnetization = np.sum(probs * magnetization_per_state)
+
+# Run a classical MCMC at the same beta and step count for a fair comparison
+classical_compare_sample = np.zeros((T_quantum, n_spins))
+state = np.ones(n_spins)  # Initial state
+for t in range(T_quantum):
+    new_state = local_update(state)
+    state = metropolis_hastings(state, new_state, ising_energy, beta)
+    classical_compare_sample[t] = state
+
+# QeMCMC
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
-
 quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
 state = np.ones(n_spins, dtype=int)  # Initial state
-
 for t in range(T_quantum):
     proposed_state = quantum_proposal(state, executable, executor)
     state = metropolis_hastings(state, proposed_state, ising_energy, beta)
@@ -485,16 +506,18 @@ for t in range(T_quantum):
 
 
 # %% [markdown]
-# We compute the estimator of the average magnetization
-# and compare it with the result obtained from the MCMC method using the
-# local update introduced earlier.
+# We compute the estimator of the average magnetization and compare it with
+# the classical MCMC result obtained at the same $\beta = 1.0$.
 
 # %%
 quantum_sample_magnetization = np.array(
     [average_magnetization(quantum_sample[:i]) for i in range(1, T_quantum + 1)]
 )
+classical_compare_magnetization = np.array(
+    [average_magnetization(classical_compare_sample[:i]) for i in range(1, T_quantum + 1)]
+)
 
-plt.plot(sample_magnetization[:T_quantum], label="MCMC estimate")
+plt.plot(classical_compare_magnetization, label="MCMC estimate")
 plt.plot(quantum_sample_magnetization, label="QeMCMC estimate")
 plt.axhline(
     theoretical_magnetization,

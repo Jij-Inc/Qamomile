@@ -33,19 +33,20 @@
 # ### ボルツマン分布のサンプリング
 
 # %% [markdown]
-# 多くの物理・工学的な問題では、ある確率分布$\pi(\bm{x})$からサンプル$\bm{x}$を得ることが重要な計算タスクになります。代表的な例が、統計力学における**ボルツマン分布**です:
+# 多くの物理・工学的な問題では、ある確率分布$\mu(\bm{x})$からサンプル$\bm{x}$を得ることが重要な計算タスクになります。代表的な例が、統計力学における**ボルツマン分布**です:
 # $$
 # \mu(\bm{x}) = \frac{1}{Z} \exp\bigl(-\beta E(\bm{x})\bigr), \quad Z = \sum_{\bm{x}} \exp\bigl(-\beta E(\bm{x})\bigr).
 # $$
-# ここで、$E(\bm{x})$は状態$\bm{x}$のエネルギー、$\beta = 1/T$は逆温度、$Z$は分配関数と呼ばれる規格化定数です。ボルツマン分布は熱平衡状態のスピン配置を記述するだけでなく、組合せ最適化問題に対するサンプリング手法としても広く利用されています。
+# ここで、$E(\bm{x})$は状態$\bm{x}$のエネルギー、$\beta = 1/T$は逆温度、$Z$は分配関数と呼ばれる規格化定数です。
+# ボルツマン分布は熱平衡状態における状態$\bm{x}$の確率分布を与えるだけでなく、これを目標分布とするサンプリングは組合せ最適化問題の解法としても広く利用されています。
 #
-# ボルツマン分布の具体例として、**イジング模型**を考えてみましょう。イジング模型は、各サイト$i$にスピン変数$x_i \in \{-1, +1\}$が置かれた系で、そのエネルギーは次式で与えられます:
+# ボルツマン分布のエネルギー関数の具体例として、**イジング模型**を考えてみましょう。イジング模型は、各サイト$i$にスピン変数$x_i \in \{-1, +1\}$が置かれた系で、そのエネルギーは次式で与えられます:
 # $$
 # E(\bm{x}) = -\sum_{\langle i, j \rangle} J_{ij} \, x_i x_j - \sum_i h_i \, x_i.
 # $$
-# ここで、$J_{ij}$はスピン間の相互作用、$h_i$はサイト$i$にかかる外部磁場です。状態の総数は$2^n$と指数的に増えるため、$n$が大きい場合には分配関数$Z$を厳密に計算することは困難です。そこで、$\pi(\bm{x})$から直接サンプルを得る手法として、後述するMCMCが利用されます。
+# ここで、$J_{ij}$はスピン間の相互作用、$h_i$はサイト$i$にかかる外部磁場です。状態の総数は$2^n$と指数的に増えるため、$n$が大きい場合には分配関数$Z$を厳密に計算することは困難です。そこで、$\mu(\bm{x})$から直接サンプルを得る手法として、後述するMCMCが利用されます。
 #
-# まずは、小さなイジング模型について実際にボルツマン分布を可視化してみましょう。ここでは、1次元強磁性イジング鎖（$J_{ij} = 1$、$h_i = 0$）を考え、逆温度$\beta$を変えながら、エネルギー$E(\bm{x})$ごとの確率を集計したヒストグラムをプロットします。
+# まずは、小さなイジング模型について実際にボルツマン分布を可視化してみましょう。ここでは、1次元強磁性イジング鎖（$J_{i,i+1} = 1$、$h_i = 0$）を考え、逆温度$\beta$を変えながら、エネルギー$E(\bm{x})$ごとの確率を集計したヒストグラムをプロットします。
 
 # %%
 import os
@@ -83,7 +84,7 @@ for ax, beta in zip(axes, betas):
     ax.bar(unique_energies, e_probs, width=0.8)
     ax.set_xlabel(r"Energy $E(\mathbf{x})$")
     ax.set_title(rf"$\beta = {beta}$")
-axes[0].set_ylabel(r"Probability $\pi(E)$")
+axes[0].set_ylabel(r"Probability $\mu(E)$")
 fig.suptitle(f"Boltzmann distribution of {n_spins}-spin Ising chain")
 plt.tight_layout()
 plt.show()
@@ -91,13 +92,13 @@ plt.show()
 # %% [markdown]
 # ### マルコフ連鎖モンテカルロ法 (MCMC)
 #
-# マルコフ連鎖モンテカルロ法 (MCMC) は、確率分布からのサンプリングに使用される一般的な手法です。MCMCはマルコフ連鎖と呼ばれる確率過程を利用することで、目的の分布$\pi(\bm{x})$からのサンプリングを実現します。ここでは、MCMCの代表的な実装であるMetropolis-Hastings (MH) アルゴリズム [](https://doi.org/10.1093/biomet/57.1.97) を紹介します。
+# マルコフ連鎖モンテカルロ法 (MCMC) は、確率分布からのサンプリングに使用される一般的な手法です。MCMCはマルコフ連鎖と呼ばれる確率過程を利用することで、目的の分布$\mu(\bm{x})$からのサンプリングを実現します。ここでは、MCMCの代表的な実装であるMetropolis-Hastings (MH) アルゴリズム [](https://doi.org/10.1093/biomet/57.1.97) を紹介します。
 #
-# MHアルゴリズムは、ある提案確率$Q(\bm{y}|\bm{x})$に従ってマルコフ連鎖の新たな遷移$\bm{x} \rightarrow \bm{x}'$を生成し、次の採択確率
+# MHアルゴリズムは、ある提案確率$Q(\bm{y}|\bm{x})$に従ってマルコフ連鎖の新たな遷移$\bm{x} \rightarrow \bm{y}$を生成し、次の採択確率
 # $$
-# A(\bm{y} | \bm{x}) = \min \left(1, \frac{\pi(\bm{y})}{\pi(\bm{x})} \cdot \frac{Q(\bm{x} | \bm{y})}{Q(\bm{y} | \bm{x})} \right).
+# A(\bm{y} | \bm{x}) = \min \left(1, \frac{\mu(\bm{y})}{\mu(\bm{x})} \cdot \frac{Q(\bm{x} | \bm{y})}{Q(\bm{y} | \bm{x})} \right).
 # $$
-# に従って採用または棄却するという2つのステップからなります。この一連の手順により、時刻$t$の状態から時刻$t+1$の状態を生成します。十分な時間が経過したのちには、このマルコフ連鎖の状態はサンプリングしたい分布$\pi(\bm{x})$に従います。よって、十分に遷移を重ねることで、得られるマルコフ連鎖の状態列$\{\bm{x}^{(t)}\}$を目的のサンプルとして利用できます。
+# に従って採用または棄却するという2つのステップからなります。この一連の手順により、時刻$t$の状態から時刻$t+1$の状態を生成します。十分な時間が経過したのちには、このマルコフ連鎖の状態はサンプリングしたい分布$\mu(\bm{x})$に従います。よって、十分に遷移を重ねることで、得られるマルコフ連鎖の状態列$\{\bm{x}^{(t)}\}$を目的のサンプルとして利用できます。
 #
 # 実際に確認してみましょう。先ほど用意したボルツマン分布をMH法でサンプリングしてみます。提案分布にはさまざまなものが使えますが、ここでは最もシンプルな、ランダムなスピンを1つだけ選んで反転させるものを利用します。
 
@@ -145,8 +146,8 @@ def metropolis_hastings(
 # これでMCMCが実装できました。それでは、MCMCを使ってサンプリングしてみましょう。
 
 # %%
-T = 100 if docs_test_mode else 10000  # MCMCのステップ数
-beta = 1.0  # 逆温度
+T = 100 if docs_test_mode else 1000  # MCMCのステップ数
+beta = 0.5  # 逆温度
 
 sample = np.zeros((T, n_spins))
 state = np.ones(n_spins)  # 初期状態
@@ -159,13 +160,13 @@ for t in range(T):
 # %% [markdown]
 # 得られたサンプル列がボルツマン分布に従っているかを確認しましょう。得られたサンプルを用いて、ボルツマン分布$\mu(\bm{x})$に関する物理量を推定してみます。ここでは、スピンの平均磁化:
 # $$
-# \langle \mu \rangle = \sum_{\bm{x}} \mu(\bm{x}) m(\bm{x})
+# \langle m \rangle = \sum_{\bm{x}} \mu(\bm{x}) m(\bm{x})
 # $$
 # を推定します。磁化は、
 # $$
 # m(\bm{x}) = \frac{1}{n} \sum_{i=1}^n x_i
 # $$
-# です。平均磁化は磁化のボルツマン分布に関する期待値なので、得られたサンプルがボルツマン分布に近いほど推定精度はよくなるはずです。MCMCの$t$番目までのサンプルによる推定量$\bar{\mu_t}$をプロットしてみましょう。
+# です。平均磁化は磁化のボルツマン分布に関する期待値なので、サンプル数を増やすとともに、得られたサンプル列がボルツマン分布に近いほど推定精度はよくなるはずです。MCMCの$t$番目までのサンプルによる推定量$\bar{m}_t$をプロットしてみましょう。
 
 
 # %%
@@ -278,7 +279,8 @@ from qamomile.qiskit import QiskitTranspiler
 
 gamma = 0.45  # 混合係数
 time = 12.0  # 総発展時間
-step = 15  # Trotterステップ数
+delta_t = 0.8  # Trotterステップの時間幅
+step = int(time/delta_t)
 order = 2  # Suzuki-Trotter近似次数
 
 Hs = [
@@ -366,20 +368,33 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 # ## 実行例
 
 # %% [markdown]
-# 実装したQeMCMCアルゴリズムを実行してみましょう。
+# 実装したQeMCMCアルゴリズムを実行してみましょう。先ほどよりも低温の $\beta = 1.0$ に設定し、古典MCMCの局所更新では混合が遅くなる条件で量子提案分布の挙動を観察します。公平な比較のため、同じ $\beta = 1.0$ で古典MCMCも併走させます。
 
 # %%
 from qiskit_aer import AerSimulator
 
+beta = 1.0  # 局所更新では混合が遅くなる低温に切り替える
 T_quantum = (
     20 if docs_test_mode else 1000
-)  # 量子回路シミュレーションのコストが高いため古典より小さめに設定
+)  # 量子回路シミュレーションのコストが高いため小さめに設定
 
+# beta=1.0 におけるボルツマン分布から平均磁化の理論値を再計算
+weights = np.exp(-beta * energies)
+probs = weights / weights.sum()
+theoretical_magnetization = np.sum(probs * magnetization_per_state)
+
+# 比較用に同じ beta、同じステップ数で古典MCMCも実行
+classical_compare_sample = np.zeros((T_quantum, n_spins))
+state = np.ones(n_spins)  # 初期状態
+for t in range(T_quantum):
+    new_state = local_update(state)
+    state = metropolis_hastings(state, new_state, ising_energy, beta)
+    classical_compare_sample[t] = state
+
+# QeMCMC
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
-
 quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
 state = np.ones(n_spins, dtype=int)  # 初期状態
-
 for t in range(T_quantum):
     proposed_state = quantum_proposal(state, executable, executor)
     state = metropolis_hastings(state, proposed_state, ising_energy, beta)
@@ -387,14 +402,17 @@ for t in range(T_quantum):
 
 
 # %% [markdown]
-# 平均磁化の推定量を計算し、先に紹介したローカルアップデートによるMCMCの結果と比較します。
+# 平均磁化の推定量を計算し、同じ $\beta = 1.0$ で実行した古典MCMCの結果と比較します。
 
 # %%
 quantum_sample_magnetization = np.array(
     [average_magnetization(quantum_sample[:i]) for i in range(1, T_quantum + 1)]
 )
+classical_compare_magnetization = np.array(
+    [average_magnetization(classical_compare_sample[:i]) for i in range(1, T_quantum + 1)]
+)
 
-plt.plot(sample_magnetization[:T_quantum], label="MCMC estimate")
+plt.plot(classical_compare_magnetization, label="MCMC estimate")
 plt.plot(quantum_sample_magnetization, label="QeMCMC estimate")
 plt.axhline(
     theoretical_magnetization,
