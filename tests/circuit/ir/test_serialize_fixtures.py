@@ -41,6 +41,7 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.basic import superposition_vector
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.parameter import ParamKind
 from qamomile.circuit.ir.serialize import (
     SCHEMA_VERSION,
     dump_json,
@@ -48,7 +49,10 @@ from qamomile.circuit.ir.serialize import (
     load_json,
     load_msgpack,
 )
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.stdlib.qft import qft
+from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures" / f"serialize_v{SCHEMA_VERSION}"
@@ -99,6 +103,21 @@ def _fix_qft() -> qmc.Vector[qmc.Qubit]:
     """QFT on 3 qubits — covers CompositeGateOperation + nested implementation_block."""
     qs = qmc.qubit_array(3, "qs")
     return qft(qs)
+
+
+@qmc.qkernel
+def _fix_expval(theta: qmc.Float, H: qmc.Observable) -> qmc.Float:
+    """A toy VQE-style kernel — covers ``ExpvalOp`` + ``ObservableType`` parameter.
+
+    Returns the expectation value of an Observable parameter against a
+    single-qubit state prepared with H + Rx. Pins the wire form of
+    ``ExpvalOp``, the Observable runtime-parameter encoding, and the
+    classical Float return shape.
+    """
+    q = qmc.qubit(name="q")
+    q = qmc.h(q)
+    q = qmc.rx(q, theta)
+    return qmc.expval(q, H)  # type: ignore[arg-type]
 
 
 # Mapping from fixture name → (builder, expected structural shape).
@@ -154,6 +173,66 @@ FIXTURE_KERNELS: list[tuple[str, Callable[[], Block], dict[str, Any]]] = [
             "kind": BlockKind.AFFINE,
             "op_types": ["QInitOperation", "CompositeGateOperation"],
             "param_slot_count": 0,
+        },
+    ),
+    (
+        "measure_analyzed",
+        # Same source kernel as ``measure``, but advanced through
+        # ``analyze`` so the fixture covers BlockKind.ANALYZED — the
+        # other supported top-level kind. Detects regressions that
+        # break only the ANALYZED path (e.g., a future pass changes
+        # the dependency-analysis shape that some encoder field
+        # depends on). ``analyze`` requires classical I/O on
+        # entrypoint kernels, so we use ``measure`` (returns ``Bit``)
+        # rather than ``bell`` (returns ``Vector[Qubit]``).
+        lambda: AnalyzePass().run(InlinePass().run(_fix_measure.block)),
+        {
+            "kind": BlockKind.ANALYZED,
+            "op_types": ["QInitOperation", "GateOperation", "MeasureOperation"],
+            "param_slot_count": 0,
+        },
+    ),
+    (
+        "vqe_expval",
+        lambda: InlinePass().run(_fix_expval.block),
+        {
+            "kind": BlockKind.AFFINE,
+            # H, Rx, then ExpvalOp returning a Float.
+            "op_types": [
+                "QInitOperation",
+                "GateOperation",
+                "GateOperation",
+                "ExpvalOp",
+            ],
+            "param_slot_count": 2,
+            "param_slot_names": ["theta", "H"],
+            # Both slots are RUNTIME_PARAMETER (theta is auto-detected,
+            # H is always RUNTIME for Observable per the qkernel
+            # tracer).
+            "param_slot_kinds": [
+                ParamKind.RUNTIME_PARAMETER,
+                ParamKind.RUNTIME_PARAMETER,
+            ],
+            "param_slot_types": [FloatType, ObservableType],
+        },
+    ),
+    (
+        "ansatz_rx_bound",
+        # Identical IR shape to ``ansatz_rx`` above, but reasserted
+        # here with explicit bound_value checks so the test fails if
+        # the numpy round-trip path in ParamSlot.bound_value breaks.
+        lambda: InlinePass().run(
+            _fix_ansatz_rx.build(thetas=np.array([0.1, 0.2, 0.3]))
+        ),
+        {
+            "kind": BlockKind.AFFINE,
+            "op_types": ["QInitOperation", "ForOperation", "ForOperation"],
+            "param_slot_count": 1,
+            "param_slot_names": ["thetas"],
+            "param_slot_kinds": [ParamKind.COMPILE_TIME_BOUND],
+            "bound_value_numpy_array": {
+                "thetas": np.array([0.1, 0.2, 0.3], dtype=np.float64),
+            },
         },
     ),
 ]
@@ -213,9 +292,37 @@ def _assert_shape(block: Block, expected: dict) -> None:
     if "param_slot_names" in expected:
         names = [s.name for s in block.param_slots]
         assert names == expected["param_slot_names"], (
-            f"param_slot names {names!r} != expected "
-            f"{expected['param_slot_names']!r}"
+            f"param_slot names {names!r} != expected {expected['param_slot_names']!r}"
         )
+    if "param_slot_kinds" in expected:
+        kinds = [s.kind for s in block.param_slots]
+        assert kinds == expected["param_slot_kinds"], (
+            f"param_slot kinds {kinds!r} != expected {expected['param_slot_kinds']!r}"
+        )
+    if "param_slot_types" in expected:
+        type_classes = [type(s.type) for s in block.param_slots]
+        assert type_classes == expected["param_slot_types"], (
+            f"param_slot types {[t.__name__ for t in type_classes]!r} "
+            f"!= expected {[t.__name__ for t in expected['param_slot_types']]!r}"
+        )
+    if "bound_value_numpy_array" in expected:
+        slots_by_name = {s.name: s for s in block.param_slots}
+        for slot_name, expected_array in expected["bound_value_numpy_array"].items():
+            assert slot_name in slots_by_name, (
+                f"expected param_slot {slot_name!r} for numpy bound_value check"
+            )
+            actual = slots_by_name[slot_name].bound_value
+            assert isinstance(actual, np.ndarray), (
+                f"bound_value for {slot_name!r} is not a numpy array; "
+                f"got {type(actual).__name__}"
+            )
+            assert actual.dtype == expected_array.dtype, (
+                f"bound_value dtype {actual.dtype!r} != "
+                f"expected {expected_array.dtype!r}"
+            )
+            assert np.array_equal(actual, expected_array), (
+                f"bound_value values for {slot_name!r} differ"
+            )
 
 
 @pytest.mark.parametrize(
