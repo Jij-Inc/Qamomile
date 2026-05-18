@@ -16,6 +16,14 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+
+# Real algorithm kernels used by TestRealAlgorithmRoundTrip below.
+from qamomile.circuit.algorithm.basic import (  # noqa: E402
+    cz_entangling_layer,
+    phase_gadget,
+    rx_layer,
+    superposition_vector,
+)
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
@@ -40,6 +48,7 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueMetadata,
 )
+from qamomile.circuit.stdlib.qft import iqft, qft  # noqa: E402
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 
 # ---------------------------------------------------------------------------
@@ -424,3 +433,206 @@ class TestManualConstruction:
             output_values=[new_q],
         )
         assert baseline != dump_json(modified)
+
+
+# ---------------------------------------------------------------------------
+# Real-algorithm round-trip
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _bell_state() -> qmc.Vector[qmc.Qubit]:
+    """Bell state: H on q0, then CX(q0, q1). Two-qubit, two-op kernel."""
+    qs = qmc.qubit_array(2, "qs")
+    qs[0] = qmc.h(qs[0])
+    qs[0], qs[1] = qmc.cx(qs[0], qs[1])
+    return qs
+
+
+@qmc.qkernel
+def _ansatz_h_rx_cz(thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+    """A small variational ansatz: superposition + Rx layer + CZ ladder.
+
+    Stresses ``ForOperation`` over a symbolic ``Vector[Float]`` plus
+    multi-qubit ``cz`` tuple assignment, both common shapes in real
+    QAOA / VQE ansatze.
+    """
+    n = thetas.shape[0]
+    q = qmc.qubit_array(n, "q")
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+    for i in qmc.range(n):
+        q[i] = qmc.rx(q[i], thetas[i])
+    for i in qmc.range(n - 1):
+        q[i], q[i + 1] = qmc.cz(q[i], q[i + 1])
+    return q
+
+
+@qmc.qkernel
+def _algo_superposition_5() -> qmc.Vector[qmc.Qubit]:
+    """Exercise the ``superposition_vector`` stdlib kernel via composition."""
+    return superposition_vector(5)  # type: ignore[arg-type]
+
+
+@qmc.qkernel
+def _algo_rx_then_cz(
+    thetas: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Compose two ``qamomile.circuit.algorithm.basic`` kernels.
+
+    Forces ``InlinePass`` to flatten two distinct ``CallBlockOperation``s
+    and confirms the serialized form still survives.
+    """
+    n = thetas.shape[0]
+    q = qmc.qubit_array(n, "q")
+    q = rx_layer(q, thetas, 0)  # type: ignore[arg-type]
+    q = cz_entangling_layer(q)
+    return q
+
+
+@qmc.qkernel
+def _algo_phase_gadget(
+    indices: qmc.Vector[qmc.UInt], angle: qmc.Float
+) -> qmc.Vector[qmc.Qubit]:
+    """Exercise the ``phase_gadget`` stdlib kernel (CX ladder + RZ).
+
+    ``indices`` and ``angle`` are bound at build time so the gadget's
+    ``k`` (number of qubits in the term) is concrete.
+    """
+    q = qmc.qubit_array(3, "q")
+    return phase_gadget(q, indices, angle)
+
+
+@qmc.qkernel
+def _qft_3() -> qmc.Vector[qmc.Qubit]:
+    """QFT on 3 qubits — exercises ``CompositeGateOperation`` + nested block."""
+    qs = qmc.qubit_array(3, "qs")
+    return qft(qs)
+
+
+@qmc.qkernel
+def _qft_then_iqft_4() -> qmc.Vector[qmc.Qubit]:
+    """QFT followed by IQFT — two composite gates in sequence."""
+    qs = qmc.qubit_array(4, "qs")
+    qs = qft(qs)
+    qs = iqft(qs)
+    return qs
+
+
+_REAL_KERNELS = [
+    pytest.param(_bell_state, {}, id="bell"),
+    pytest.param(
+        _ansatz_h_rx_cz,
+        {"thetas": np.array([0.1, 0.2, 0.3, 0.4])},
+        id="ansatz_h_rx_cz",
+    ),
+    pytest.param(_algo_superposition_5, {}, id="superposition_5"),
+    pytest.param(
+        _algo_rx_then_cz,
+        {"thetas": np.array([0.5, 0.6, 0.7])},
+        id="rx_then_cz",
+    ),
+    pytest.param(
+        _algo_phase_gadget,
+        {"indices": np.array([0, 1, 2], dtype=np.int64), "angle": 0.7},
+        id="phase_gadget",
+    ),
+    pytest.param(_qft_3, {}, id="qft_3"),
+    pytest.param(_qft_then_iqft_4, {}, id="qft_then_iqft_4"),
+]
+
+
+def _build_real(kernel, build_kwargs):
+    """Build an AFFINE block for a real-algorithm kernel.
+
+    Uses ``kernel.build(**kwargs)`` when bindings are provided
+    (typical for kernels with ``Vector[Float]`` parameters) and falls
+    back to the cached ``kernel.block`` otherwise; either way the
+    block is then run through ``InlinePass`` so the result is AFFINE.
+
+    Args:
+        kernel: A ``@qkernel``-decorated function.
+        build_kwargs: Bindings for ``kernel.build``. Empty dict means
+            use ``kernel.block`` directly.
+
+    Returns:
+        Block: The AFFINE block ready for serialization.
+    """
+    raw = kernel.build(**build_kwargs) if build_kwargs else kernel.block
+    return InlinePass().run(raw)
+
+
+class TestRealAlgorithmRoundTrip:
+    """End-to-end round-trip on representative real-world kernels.
+
+    Each kernel is built into an AFFINE block, serialized through one
+    of the wire formats, decoded back, and re-encoded into the
+    intermediate dict. ``to_dict`` equality on the two dicts is the
+    strongest equivalence we can express without depending on the
+    canonical-form pass (PR #389, separate branch): UUIDs round-trip
+    verbatim, every operation field is preserved, and the value table
+    is rebuilt in the same order.
+    """
+
+    @pytest.mark.parametrize("kernel,build_kwargs", _REAL_KERNELS)
+    def test_json_round_trip_to_dict_equal(self, kernel, build_kwargs):
+        """``to_dict(load_json(dump_json(b))) == to_dict(b)`` for real kernels."""
+        block = _build_real(kernel, build_kwargs)
+        original = to_dict(block)
+        restored = to_dict(load_json(dump_json(block)))
+        assert restored == original
+
+    @pytest.mark.parametrize("kernel,build_kwargs", _REAL_KERNELS)
+    def test_msgpack_round_trip_to_dict_equal(self, kernel, build_kwargs):
+        """``to_dict(load_msgpack(dump_msgpack(b))) == to_dict(b)`` for real kernels."""
+        block = _build_real(kernel, build_kwargs)
+        original = to_dict(block)
+        restored = to_dict(load_msgpack(dump_msgpack(block)))
+        assert restored == original
+
+    @pytest.mark.parametrize("kernel,build_kwargs", _REAL_KERNELS)
+    def test_round_trip_preserves_op_sequence(self, kernel, build_kwargs):
+        """Operation type and order are byte-stable across the round-trip."""
+        block = _build_real(kernel, build_kwargs)
+        restored = load_json(dump_json(block))
+        assert [type(op).__name__ for op in restored.operations] == [
+            type(op).__name__ for op in block.operations
+        ]
+
+    @pytest.mark.parametrize("kernel,build_kwargs", _REAL_KERNELS)
+    def test_round_trip_preserves_value_uuids(self, kernel, build_kwargs):
+        """Every Value UUID present in the original survives the round-trip."""
+        block = _build_real(kernel, build_kwargs)
+        restored = load_json(dump_json(block))
+        original_uuids = {v.uuid for v in block.input_values} | {
+            v.uuid for v in block.output_values
+        }
+        restored_uuids = {v.uuid for v in restored.input_values} | {
+            v.uuid for v in restored.output_values
+        }
+        assert restored_uuids == original_uuids
+
+    def test_qft_round_trip_preserves_nested_block(self):
+        """QFT's nested ``implementation_block`` survives byte-for-byte.
+
+        This is a focused regression test: the encoder must emit the
+        nested unitary block separately rather than via ``repr`` (the
+        same fix that addressed Copilot's review on PR #389 for
+        ControlledU's nested block).
+        """
+        block = _build_real(_qft_3, {})
+        restored = load_msgpack(dump_msgpack(block))
+        original_d = to_dict(block)
+        restored_d = to_dict(restored)
+        # Find the CompositeGateOperation in operations
+        composite = next(
+            op
+            for op in original_d["block"]["operations"]
+            if op["$type"] == "CompositeGateOperation"
+        )
+        composite_r = next(
+            op
+            for op in restored_d["block"]["operations"]
+            if op["$type"] == "CompositeGateOperation"
+        )
+        assert composite["implementation_block"] == composite_r["implementation_block"]
