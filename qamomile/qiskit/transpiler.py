@@ -416,7 +416,16 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> Any:
-        """Build a Qiskit ``expr.Expr`` for a runtime classical predicate.
+        """Build a Qiskit ``expr.Expr`` for an unlowered runtime predicate.
+
+        Fallback path used by ``StandardEmitPass`` only when a
+        ``CompOp``/``CondOp``/``NotOp`` reaches emit without having been
+        rewritten to ``RuntimeClassicalExpr`` by ``ClassicalLoweringPass``
+        — i.e., predicates that depend on emit-time-bound values not
+        visible to the pre-emit lowering pass (e.g. computed from a loop
+        variable that wraps a measurement). The primary path is
+        ``_emit_runtime_classical_expr``; prefer extending the lowering
+        pass over adding new cases here.
 
         Recursively resolves operands to either Qiskit ``Clbit`` references
         (via ``clbit_map``), constants, or already-built sub-expressions
