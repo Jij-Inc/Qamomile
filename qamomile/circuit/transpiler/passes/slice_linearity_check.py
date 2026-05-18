@@ -723,16 +723,16 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
     ) -> None:
         """Reject implicit drain of an outer-registered view from inside a body.
 
-        ``_register_slice_bulk_borrow_if_new`` has three drain paths that
+        ``_register_slice_bulk_borrow_if_new`` has two drain paths that
         delete an existing view's state entries before registering a new
-        view that overlaps it: same-coverage replacement, nested-slice
-        drain of the outer view, and the opportunistic drain of an
-        unused view.  Each is an entry-deletion, so the same
-        propagation problem that motivates ``_handle_release``'s
-        outer-snapshot guard applies — if we drop an entry that the
-        enclosing block had registered, the post-body merge cannot
-        carry that deletion outward and the outer state ends up holding
-        a stale owner.  Forbid the pattern up-front instead.
+        view that overlaps it: same-coverage replacement and
+        nested-slice drain of the outer view.  Each is an entry-deletion,
+        so the same propagation problem that motivates
+        ``_handle_release``'s outer-snapshot guard applies — if we drop
+        an entry that the enclosing block had registered, the post-body
+        merge cannot carry that deletion outward and the outer state
+        ends up holding a stale owner.  Forbid the pattern up-front
+        instead.
 
         Args:
             drained_view: The view whose state entries the caller is
@@ -743,8 +743,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 ``<root>[idx]`` reference in the error body).
             reason: Short descriptor of which drain path triggered the
                 guard (``"same-coverage replacement"`` /
-                ``"nested-slice drain of outer view"`` /
-                ``"opportunistic drain of unused view"``), surfaced in
+                ``"nested-slice drain of outer view"``), surfaced in
                 the error message so the user can see *why* the IR
                 tried to drop the outer view.
 
@@ -908,24 +907,14 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:
                         del state[old_key]
-            elif other_uuid not in self._used_view_uuids:
-                # Partial overlap with an outer view that was never
-                # used (no element or whole-view operand reference
-                # since its registration).  The frontend's
-                # ``VectorView._wrap`` drains such a view regardless
-                # of coverage shape; match that here so the two
-                # checkers agree on what programs are legal.  A view
-                # that HAS been used gets the strict overlap error
-                # below — the permissive drain only applies to
-                # sliced-but-never-touched placeholders.
-                self._guard_drain_against_outer_snapshot(
-                    other_view, av, root, "opportunistic drain of unused view"
-                )
-                for slot in other_full:
-                    old_key = _const_key(root, slot)
-                    if state.get(old_key) is other_view:
-                        del state[old_key]
             else:
+                # Strict-return policy: any partial overlap with an
+                # existing live view is a linearity violation, including
+                # the previously-permissive "outer view was never used"
+                # case.  Callers must explicitly return / consume the
+                # outer view before constructing an overlapping inner
+                # view.  This matches the frontend's strict
+                # ``VectorView._wrap`` overlap check.
                 raise SliceLinearityViolationError(
                     self._format_view_registration_conflict(
                         other_view,

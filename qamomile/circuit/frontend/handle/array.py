@@ -587,48 +587,25 @@ class ArrayBase(Handle, Generic[T]):
     def validate_all_returned(self) -> None:
         """Validate all borrowed elements have been returned.
 
-        First opportunistically releases any slice-owner entries whose
-        view is itself drained (no outstanding element borrows on the
-        view): this corresponds to "the view is finished using its
-        elements" and lets patterns like ``q[0::2] → loop → measure(q)``
-        complete without the user explicitly releasing the view.  Only
-        after that does the method raise if any borrows remain, formatting
-        direct-borrow and view-owned entries with distinct labels.
+        Strict-return policy: an active slice view that is still
+        registered as the owner of any parent slot is treated as an
+        unreturned borrow even if the view itself has no outstanding
+        element borrows.  The caller must perform an explicit slice
+        assignment (``parent[a:b:c] = view``) to release the view's
+        bulk-borrow before consuming the parent.  Destructively
+        consumed views (parked in the dict with ``view._consumed`` set
+        and ``view._consumed_by`` in ``_DESTRUCTIVE_CONSUME_OPS``)
+        record physically-destroyed slots and are not outstanding
+        borrows; they survive end-of-block so a later whole-array
+        consume can detect and reject the destroyed slots.
 
         Raises:
             UnreturnedBorrowError: If any elements are still borrowed,
-                either directly or by a view whose own borrows have not
-                all been returned.
+                either directly or by a slice view that has not been
+                explicitly returned via slice assignment.
         """
         if not self.value.type.is_quantum():
             return
-
-        # Opportunistically release slice-borrows whose owning view has
-        # no outstanding element borrows (view is drained).  ``Vector``
-        # is a dataclass with ``__hash__ = None``, so deduplicate views
-        # by ``id`` rather than by set membership.  Destructively
-        # consumed views are *not* drainable — they are destroyed-slot
-        # breadcrumbs that need to survive until end-of-block so a
-        # later whole-array consume (``measure(q)``) can detect the
-        # destroyed slots and reject.
-        slice_entries = {
-            k: v
-            for k, v in self._borrowed_indices.items()
-            if isinstance(v, ArrayBase) and not _is_destroyed_slot_owner(v)
-        }
-        if slice_entries:
-            unique_views: dict[int, ArrayBase[T]] = {}
-            for v in slice_entries.values():
-                unique_views.setdefault(id(v), v)
-            drained_view_ids = {
-                vid for vid, v in unique_views.items() if not v._borrowed_indices
-            }
-            if drained_view_ids:
-                to_remove = [
-                    k for k, v in slice_entries.items() if id(v) in drained_view_ids
-                ]
-                for k in to_remove:
-                    del self._borrowed_indices[k]
 
         # Destroyed-slot owners (destructively consumed views parked
         # in the dict) are not outstanding borrows — they record
@@ -644,6 +621,7 @@ class ArrayBase(Handle, Generic[T]):
             return
 
         borrowed_strs: list[str] = []
+        view_held: set[str] = set()
         for key, owner in outstanding_entries.items():
             if isinstance(owner, ArrayBase):
                 # Slice-held slot: key is a single-element tuple like
@@ -652,9 +630,24 @@ class ArrayBase(Handle, Generic[T]):
                 borrowed_strs.append(
                     f"{self.value.name}[{idx_str}] (held by slice view)"
                 )
+                view_held.add(owner.value.name or "view")
             else:
                 index_str = self._format_index(owner)
                 borrowed_strs.append(f"{self.value.name}[{index_str}]")
+
+        if view_held:
+            view_names = ", ".join(sorted(view_held))
+            raise UnreturnedBorrowError(
+                f"Array '{self.value.name}' has unreturned slice-view "
+                f"borrows from {view_names}.\n"
+                f"Borrowed slots: {', '.join(borrowed_strs)}\n\n"
+                f"Fix: Return every active view via slice assignment "
+                f"before consuming the parent:\n"
+                f"  view = {self.value.name}[a:b:c]\n"
+                f"  # ... use view ...\n"
+                f"  {self.value.name}[a:b:c] = view  # explicit return",
+                handle_name=self.value.name,
+            )
 
         raise UnreturnedBorrowError(
             f"Array '{self.value.name}' has unreturned borrowed elements.\n"

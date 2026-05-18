@@ -51,6 +51,7 @@ class TestVectorViewFrontend:
             v = q[0:6:2]
             captured["length"] = v.shape[0]
             v[0] = qmc.h(v[0])
+            q[0:6:2] = v
             return q
 
         assert kern.block is not None
@@ -202,6 +203,7 @@ def test_slice_even_hadamard_sampling(backend, seed, n):
         evens = q[0::2]
         for i in qmc.range(evens.shape[0]):
             evens[i] = qmc.h(evens[i])
+        q[0::2] = evens
         return qmc.measure(q)
 
     exe = transpiler.transpile(circuit, bindings={"num": n})
@@ -249,6 +251,8 @@ def test_slice_xy_brick_sampling(backend, seed, n_pairs):
             evens[i] = qmc.h(evens[i])
         for i in qmc.range(evens.shape[0]):
             evens[i], odds[i] = qmc.cx(evens[i], odds[i])
+        q[0::2] = evens
+        q[1::2] = odds
         return qmc.measure(q)
 
     exe = transpiler.transpile(circuit, bindings={"num": n})
@@ -302,6 +306,7 @@ def test_slice_even_rx_expval(backend, seed, n):
             evens = q[0::2]
             for i in qmc.range(evens.shape[0]):
                 evens[i] = qmc.rx(evens[i], angle)
+            q[0::2] = evens
             return qmc.expval(q, obs)
 
         exe = transpiler.transpile(
@@ -320,27 +325,84 @@ def test_slice_even_rx_expval(backend, seed, n):
 # ---------------------------------------------------------------------------
 
 
+def _make_h_via_slice_kernel(slice_kind: str):
+    """Build a kernel that applies ``H`` to qubits selected by ``slice_kind``.
+
+    Args:
+        slice_kind (str): One of ``"0::2"`` / ``"1::2"`` / ``"1:5"`` /
+            ``"2::3"``; identifies which slice form the kernel body uses.
+
+    Returns:
+        QKernel: A kernel that takes ``num: UInt`` and broadcasts ``H``
+            over ``q[<slice_kind>]`` via an explicit loop, returning the
+            view to ``q`` before measuring.
+    """
+    if slice_kind == "0::2":
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            view = q[0::2]
+            for i in qmc.range(view.shape[0]):
+                view[i] = qmc.h(view[i])
+            q[0::2] = view
+            return qmc.measure(q)
+
+        return kern
+    if slice_kind == "1::2":
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            view = q[1::2]
+            for i in qmc.range(view.shape[0]):
+                view[i] = qmc.h(view[i])
+            q[1::2] = view
+            return qmc.measure(q)
+
+        return kern
+    if slice_kind == "1:5":
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            view = q[1:5]
+            for i in qmc.range(view.shape[0]):
+                view[i] = qmc.h(view[i])
+            q[1:5] = view
+            return qmc.measure(q)
+
+        return kern
+    if slice_kind == "2::3":
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            view = q[2::3]
+            for i in qmc.range(view.shape[0]):
+                view[i] = qmc.h(view[i])
+            q[2::3] = view
+            return qmc.measure(q)
+
+        return kern
+    raise AssertionError(f"unknown slice_kind {slice_kind!r}")
+
+
 @pytest.mark.parametrize(
-    "slicer, n, expected_qubits",
+    "slice_kind, n, expected_qubits",
     [
-        (lambda q: q[0::2], 6, [0, 2, 4]),
-        (lambda q: q[1::2], 6, [1, 3, 5]),
-        (lambda q: q[1:5], 6, [1, 2, 3, 4]),
-        (lambda q: q[2::3], 10, [2, 5, 8]),
+        ("0::2", 6, [0, 2, 4]),
+        ("1::2", 6, [1, 3, 5]),
+        ("1:5", 6, [1, 2, 3, 4]),
+        ("2::3", 10, [2, 5, 8]),
     ],
 )
-def test_slice_emits_expected_qubit_indices(slicer, n, expected_qubits):
+def test_slice_emits_expected_qubit_indices(slice_kind, n, expected_qubits):
     """Emitted H gates land on exactly the qubits the slice describes."""
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
 
-    @qmc.qkernel
-    def circuit(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-        q = qmc.qubit_array(num, "q")
-        view = slicer(q)
-        for i in qmc.range(view.shape[0]):
-            view[i] = qmc.h(view[i])
-        return qmc.measure(q)
+    circuit = _make_h_via_slice_kernel(slice_kind)
 
     transpiler = QiskitTranspiler()
     exe = transpiler.transpile(circuit, bindings={"num": n})
@@ -364,6 +426,7 @@ def test_dynamic_slice_bounds_qiskit():
         region = q[lo:hi]
         for i in qmc.range(region.shape[0]):
             region[i] = qmc.h(region[i])
+        q[lo:hi] = region
         return qmc.measure(q)
 
     transpiler = QiskitTranspiler()
@@ -387,9 +450,13 @@ def test_nested_slice_composes_through_parent():
         q = qmc.qubit_array(num, "q")
         # q[0::2] → parent indices 0, 2, 4, 6; [1:3] → view-local 1, 2
         # → parent 2, 4.
-        inner = q[0::2][1:3]
+        outer = q[0::2]
+        inner = outer[1:3]
         for i in qmc.range(inner.shape[0]):
             inner[i] = qmc.h(inner[i])
+        # ``inner`` owns parent slots {2, 4} after the nested-slice hand-off;
+        # write it back via the same root-space slice ``q[2:5:2]``.
+        q[2:5:2] = inner
         return qmc.measure(q)
 
     transpiler = QiskitTranspiler()
@@ -440,12 +507,21 @@ class TestSliceBulkBorrow:
             q[1] = qmc.h(q[1])
             for i in qmc.range(evens.shape[0]):
                 evens[i] = qmc.h(evens[i])
+            q[0:4:2] = evens
             return q
 
         assert kern.block is not None
 
-    def test_drained_view_releases_parent_on_consume(self):
-        """After writing all view slots back, the parent can be consumed."""
+    def test_explicit_slice_return_before_parent_consume(self):
+        """After writing the view back via slice assignment, the parent can be consumed.
+
+        Renamed from ``test_drained_view_releases_parent_on_consume``:
+        the old name implied an implicit-drain semantic where merely
+        emptying the view's element borrows freed the parent.  The
+        strict-return policy removed that path — the view must be
+        returned explicitly via ``parent[a:b:c] = view`` before the
+        parent is consumed.  This test pins the explicit pattern.
+        """
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -453,12 +529,32 @@ class TestSliceBulkBorrow:
             evens = q[0:4:2]
             for i in qmc.range(evens.shape[0]):
                 evens[i] = qmc.h(evens[i])
-            # ``measure`` consumes ``q``; its ``validate_all_returned``
-            # must observe that the view is drained and release the
-            # slice-borrows on slots 0 and 2.
+            q[0:4:2] = evens
             return qmc.measure(q)
 
         assert kern.block is not None
+
+    def test_drained_view_without_explicit_return_rejected(self):
+        """Implicit-drain pattern (view drained of element borrows but
+        not slice-assigned back) now raises ``UnreturnedBorrowError``.
+
+        Prior to the strict-return change this pattern silently passed
+        via an opportunistic drain.  Pinning the new loud failure keeps
+        regressions visible.
+        """
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            for i in qmc.range(evens.shape[0]):
+                evens[i] = qmc.h(evens[i])
+            # Missing ``q[0:4:2] = evens`` — should fail at measure(q).
+            return qmc.measure(q)
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = kern.block
 
     def test_overlapping_live_slices_are_rejected(self):
         """Two slices with partial overlap, where the first is still live,
@@ -755,6 +851,7 @@ class TestPostFoldLinearity:
             region = q[lo:hi]
             for i in qmc.range(region.shape[0]):
                 region[i] = qmc.h(region[i])
+            q[lo:hi] = region
             # Slot 0 is out of [lo, hi) when lo=2, hi=4.
             return qmc.measure(q)
 
@@ -854,31 +951,88 @@ class TestConstantIndexOnSliceView:
     (``view[0] = qmc.h(view[0])``) went through Phase-1 and asserted.
     """
 
+    @staticmethod
+    def _make_const_index_kernel(slice_kind: str):
+        """Build a kernel that applies ``h`` / ``x`` to ``view[0]`` / ``view[1]``.
+
+        Mirrors the lambda-parametrized variants in
+        :meth:`test_const_index_on_view_maps_to_root_slot`; the strict-
+        return policy requires each kernel to write the view back via
+        the same slice expression, so we materialise four explicit
+        kernel bodies rather than synthesise them through a lambda.
+        """
+        if slice_kind == "1:3":
+
+            @qmc.qkernel
+            def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(num, "q")
+                view = q[1:3]
+                view[0] = qmc.h(view[0])
+                view[1] = qmc.x(view[1])
+                q[1:3] = view
+                return qmc.measure(q)
+
+            return kern
+        if slice_kind == "0::2":
+
+            @qmc.qkernel
+            def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(num, "q")
+                view = q[0::2]
+                view[0] = qmc.h(view[0])
+                view[1] = qmc.x(view[1])
+                q[0::2] = view
+                return qmc.measure(q)
+
+            return kern
+        if slice_kind == "1::2":
+
+            @qmc.qkernel
+            def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(num, "q")
+                view = q[1::2]
+                view[0] = qmc.h(view[0])
+                view[1] = qmc.x(view[1])
+                q[1::2] = view
+                return qmc.measure(q)
+
+            return kern
+        if slice_kind == "0::2[1:3]":
+
+            @qmc.qkernel
+            def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(num, "q")
+                outer = q[0::2]
+                view = outer[1:3]
+                view[0] = qmc.h(view[0])
+                view[1] = qmc.x(view[1])
+                # ``view`` covers root slots {2, 4}; write back through
+                # the equivalent root-space slice.
+                q[2:5:2] = view
+                return qmc.measure(q)
+
+            return kern
+        raise AssertionError(f"unknown slice_kind {slice_kind!r}")
+
     @pytest.mark.parametrize(
-        "slicer, expected_h, expected_x",
+        "slice_kind, expected_h, expected_x",
         [
-            (lambda q: q[1:3], [1], [2]),
-            (lambda q: q[0::2], [0], [2]),
-            (lambda q: q[1::2], [1], [3]),
+            ("1:3", [1], [2]),
+            ("0::2", [0], [2]),
+            ("1::2", [1], [3]),
             # Nested slice: q[0::2] covers {0,2,4,6}; then [1:3] covers
             # view slots 1, 2 → parent slots 2, 4.
-            (lambda q: q[0::2][1:3], [2], [4]),
+            ("0::2[1:3]", [2], [4]),
         ],
     )
     def test_const_index_on_view_maps_to_root_slot(
-        self, slicer, expected_h, expected_x
+        self, slice_kind, expected_h, expected_x
     ):
         """Gates at ``view[0]`` / ``view[1]`` land on root slots via slice chain."""
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
-        @qmc.qkernel
-        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(num, "q")
-            view = slicer(q)
-            view[0] = qmc.h(view[0])
-            view[1] = qmc.x(view[1])
-            return qmc.measure(q)
+        kern = self._make_const_index_kernel(slice_kind)
 
         transpiler = QiskitTranspiler()
         exe = transpiler.transpile(kern, bindings={"num": 8})
@@ -949,6 +1103,7 @@ class TestWholeViewEmit:
             q = qmc.qubit_array(4, "q")
             view = q[1::2]
             view = qmc.qft(view)
+            q[1::2] = view
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
@@ -1042,6 +1197,7 @@ class TestWholeViewEmit:
             q = qmc.qubit_array(4, "q")
             view = q[1::2]
             view = qmc.qft(view)
+            q[1::2] = view
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
@@ -2331,17 +2487,18 @@ class TestSliceAssignment:
             _ = kern.block
 
     def test_lhs_root_consumed_rejected(self):
-        """``v = q[0:2]; measure(q); q[0:2] = h(v)`` is rejected at the
-        new LHS-root liveness check (step 3).
+        """``v = q[0:2]; measure(q); q[0:2] = h(v)`` is rejected up-front
+        because ``v`` was still bulk-borrowing from ``q`` at the time of
+        ``measure(q)``.
 
-        The parent ``q`` was destroyed by the prior ``measure``, so the
-        slice-assignment target is no longer valid.  Without this check
-        the assignment would silently proceed and the IR release marker
-        would be emitted against a consumed parent, leading to confusing
-        downstream errors.  Mirrors ``_return_element``'s consumed-array
-        guard at the start of element borrow-return.
+        Under the strict-return policy the parent cannot be consumed
+        while any slice view is outstanding, so the failure surfaces
+        as ``UnreturnedBorrowError`` at ``measure(q)`` rather than the
+        downstream LHS-root liveness check on ``q[0:2] = ...``.  Both
+        outcomes loudly reject the silent miscompile path; we just pin
+        the *earlier* failure point introduced by the strict policy.
         """
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -2351,7 +2508,7 @@ class TestSliceAssignment:
             q[0:2] = qmc.h(v)
             return bits
 
-        with pytest.raises(QubitConsumedError, match="cannot be used as the LHS"):
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
             _ = kern.block
 
     def test_rhs_view_already_consumed_rejected(self):
