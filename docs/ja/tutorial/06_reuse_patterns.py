@@ -33,6 +33,8 @@
 # # !pip install qamomile
 
 # %%
+import math
+
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler
@@ -265,7 +267,83 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # この例のように、オラクル内部が不明でも回路解析を進められます。既知部分は通常通りカウントされ、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。
 
 # %% [markdown]
-# こののように完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
+# このように完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
+
+# %% [markdown]
+# ## パターン4:組み込みゲートをそのままcontrol化
+#
+# 単一のプリミティブゲート(`qmc.rx`、`qmc.h`、`qmc.cp`など)をcontrol化したいだけの場合、`qmc.controlled`は組み込みゲート関数を直接受け取れます。`@qkernel`ラッパーは不要です。古典パラメータのキーワード名は元のゲートのパラメータ名に従います(例:`qmc.rx`/`qmc.ry`なら`angle=`、`qmc.p`/`qmc.cp`なら`theta=`)。
+
+# %% [markdown]
+# **これまで** — ボイラープレートのラッパー:
+#
+# ```python
+# @qmc.qkernel
+# def _rx_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+#     return qmc.rx(q, theta)
+#
+# crx = qmc.controlled(_rx_gate)
+# ```
+#
+# **これから** — そのまま渡せる:
+#
+# ```python
+# crx = qmc.controlled(qmc.rx)
+# ```
+
+
+# %%
+@qmc.qkernel
+def controlled_rx_demo() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, name="q")
+    # control側を|1>にしてcontrol回転を発火させる
+    q[0] = qmc.x(q[0])
+    crx = qmc.controlled(qmc.rx)
+    q[0], q[1] = crx(q[0], q[1], angle=math.pi)
+    return qmc.measure(q)
+
+
+controlled_rx_demo.draw()
+
+# %% [markdown]
+# 多重コントロールや`power`パラメータも他の`controlled(...)`と同じく動きます。`num_controls`と`power`は`ControlledGate`側の機能でラップ対象の関数とは独立しているため、追加の作業は不要です:
+
+
+# %%
+@qmc.qkernel
+def toffoli_via_builtin() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, name="q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    ccx = qmc.controlled(qmc.x, num_controls=2)
+    q[0], q[1], q[2] = ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+toffoli_via_builtin.draw()
+
+# %% [markdown]
+# 既存の`@qmc.qkernel`引数も従来どおり動きます。今回の組み込みゲート受け入れは純粋に追加の機能です。ゲート本体が単一プリミティブ呼び出し以上のもの(例えばHのあとにRX)を含む場合は、これまでどおり手書きの`@qkernel`を使ってください。複数ゲートからなる本体をcontrol化したいときこそ`@qkernel`の出番です:
+
+
+# %%
+@qmc.qkernel
+def h_then_rx(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    q = qmc.h(q)
+    q = qmc.rx(q, theta)
+    return q
+
+
+@qmc.qkernel
+def controlled_pair_demo() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, name="q")
+    q[0] = qmc.x(q[0])
+    cg = qmc.controlled(h_then_rx)
+    q[0], q[1] = cg(q[0], q[1], theta=math.pi / 4)
+    return qmc.measure(q)
+
+
+controlled_pair_demo.draw()
 
 # %% [markdown]
 # ## まとめ
@@ -274,3 +352,4 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # - `@composite_gate`：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。`@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
 # - **スタブゲート**：`stub=True`と`ResourceMetadata`で、実装なしにトップダウン設計とリソース推定が可能です。
 # - `est.gates.oracle_calls`：オラクル内部が不明な状態でも、呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
+# - **`qmc.controlled(builtin_gate)`**:単一のプリミティブをcontrol化するときの1行`@qkernel`ラッパーは不要です。`qmc.rx`、`qmc.h`、`qmc.cp`等をそのままファクトリに渡せます。
