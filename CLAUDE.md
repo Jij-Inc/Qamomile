@@ -179,6 +179,19 @@ See [docs/en/tutorial/09_compilation_and_transpilation.py](docs/en/tutorial/09_c
 
 [overlap-check]: qamomile/circuit/transpiler/transpiler.py#L475-L487
 
+### Canonical Form
+
+`qamomile.circuit.ir.canonical` provides a normalization step that re-numbers every `Value.uuid` / `Value.logical_id` in a `Block` from a deterministic counter and rewrites every UUID reference embedded in operations and value metadata (`CastMetadata`, `QFixedMetadata`, `ArrayRuntimeMetadata`, `CastOperation.qubit_mapping`). This gives the IR a build-independent identity that is required for content-addressable hashing, IR diffing, and (later) wire serialization.
+
+Key contract:
+
+- **Scope**: `canonicalize` / `canonicalize_and_remap` / `to_canonical_bytes` / `content_hash` accept only `BlockKind.AFFINE` and `BlockKind.ANALYZED`. `HIERARCHICAL` blocks still contain `CallBlockOperation`s that point at sibling `Block`s by Python identity; inline them first. The function raises `ValueError` (kind mismatch) or `NotImplementedError` (residual `CallBlockOperation`) when these preconditions are violated.
+- **Stage neutrality**: canonicalize is a normalization, not a pipeline-stage advance. `Block.kind` is preserved. `classical_lowering` and `plan` MUST NOT be run before canonicalize if the canonical form is meant to be portable — those passes commit to qamomile-internal representations.
+- **Content-only equivalence**: display-only fields (`Block.name`, `Block.output_names`, `Value.name`) are **excluded** from `to_canonical_bytes`. Two structurally-identical kernels with different function names hash equally. `Block.label_args` is functional (it names input ports by position) and is included.
+- **Counter-based UUIDs**: the first `Value` visited gets `00000000-0000-0000-0000-000000000000`, then `…0001`, and so on. `uuid` and `logical_id` share the same monotonically increasing counter; their separate remap tables are exposed via `canonicalize_and_remap`.
+- **Byte format is internal**: `to_canonical_bytes` is intended only to back `content_hash`. It is not a wire format and may change between qamomile releases; do not rely on parsing it. A versioned serialization format is tracked separately.
+- **Hash stability prerequisite**: arbitrary Python objects stored in `ValueMetadata.array_runtime.const_array` / `dict_runtime.bound_data` are stringified via `repr`, so their `repr` must be stable for `content_hash` to be meaningful.
+
 ## Docstring Convention (MANDATORY)
 
 All functions, methods, and classes in `qamomile/` — **public and private alike** — MUST carry a **Google-style docstring** with the appropriate sections filled in, not just a one-line summary. This is enforced by `/local-review` (missing docstrings are P2+).
