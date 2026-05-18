@@ -85,6 +85,7 @@ print(f"Exact ground state energy: {E_exact:.6f}")
 # - `ansatz_energy`はVQE用に$\langle\psi|H|\psi\rangle$を返します
 # - `ansatz_measure`はQSCIサンプリング用に状態を計算基底で測定します
 
+
 # %%
 @qmc.qkernel
 def ansatz_state(
@@ -148,11 +149,10 @@ sample_exec = transpiler.transpile(
 #
 # QSCIは入力状態の最適化が甘くても頑健で、ランダムパラメータでも意味のある部分空間が得られますが、短いVQEを走らせるとサンプリング分布が真の基底状態を支配するビット列に集中するため、同じ$K$でも部分空間の情報量が大きくなります。ここでは数回のCOBYLA反復だけ走らせます。
 
+
 # %%
 def cost_fn(params: np.ndarray) -> float:
-    return energy_exec.run(
-        executor, bindings={"thetas": list(params)}
-    ).result()
+    return energy_exec.run(executor, bindings={"thetas": list(params)}).result()
 
 
 rng = np.random.default_rng(0)
@@ -176,9 +176,7 @@ print(f"VQE energy = {result.fun:+.6f}   (gap to E_exact: {result.fun - E_exact:
 # %%
 shots = 500 if docs_test_mode else 4000
 sample_results = (
-    sample_exec.sample(
-        executor, bindings={"thetas": list(opt_params)}, shots=shots
-    )
+    sample_exec.sample(executor, bindings={"thetas": list(opt_params)}, shots=shots)
     .result()
     .results
 )
@@ -198,9 +196,7 @@ unique_bitstrings = [bits for bits, _ in sample_results]
 K_max = len(unique_bitstrings)
 ks = sorted({k for k in (1, 2, 4, 8, 16, K_max) if k <= K_max})
 
-energies = [
-    float(solve_subspace(unique_bitstrings[:K], H)[0][0]) for K in ks
-]
+energies = [float(solve_subspace(unique_bitstrings[:K], H)[0][0]) for K in ks]
 
 for K, E in zip(ks, energies):
     print(f"K = {K:3d}   E_QSCI = {E:+.6f}   gap = {E - E_exact:+.3e}")
