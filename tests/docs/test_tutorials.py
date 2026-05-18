@@ -38,10 +38,8 @@ TUTORIAL_PATTERNS = [
     # a local simulator (e.g. the QURI Parts tutorial below) are opted in
     # explicitly and gated on their optional dependency via
     # OPTIONAL_SKIP_MODULES.
-    "docs/en/integration/quri_parts_executor.py",
-    "docs/ja/integration/quri_parts_executor.py",
-    "docs/en/integration/quri_parts_executor.ipynb",
-    "docs/ja/integration/quri_parts_executor.ipynb",
+    "docs/en/integration/quri_parts_support.py",
+    "docs/ja/integration/quri_parts_support.py",
     # We will not execute the following directories:
     # - integration: most articles may require API keys and may have side
     #   effects; opt-in additions live above.
@@ -53,7 +51,7 @@ TUTORIAL_PATTERNS = [
 OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
     "qsci": "quri_parts",
-    "quri_parts_executor": "quri_parts",
+    "quri_parts_support": "quri_parts",
 }
 
 

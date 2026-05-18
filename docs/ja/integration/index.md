@@ -9,4 +9,4 @@ Qamomileを外部ライブラリや量子プラットフォームと組み合わ
 ## すべての記事
 
 - [qBraid Executor](qbraid_executor) — qBraid対応デバイスでのQiskit回路実行
-- [QURI Parts Executor](quri_parts_executor) — QURI PartsへのトランスパイルとQulacs状態ベクトルシミュレータでの実行
+- [QURI Parts Support](quri_parts_support) — QURI PartsへのトランスパイルとQulacs状態ベクトルシミュレータでの実行
