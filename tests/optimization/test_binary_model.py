@@ -234,6 +234,227 @@ def test_from_hubo_with_simplify():
     assert bm.num_bits == 2
 
 
+# ---- from_higher_ising ----
+
+
+def test_from_higher_ising_manually():
+    """from_higher_ising should return a SPIN model with higher Ising coefficients stored correctly."""
+    higher_ising = {(0,): 1.0, (0, 1): 2.0, (0, 1, 3): 4.0}
+    constant = 8.0
+
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
+
+    assert bm.vartype == VarType.SPIN
+    assert np.isclose(bm.constant, constant)
+    assert bm.num_bits == 3  # indices 0, 1, 3 → sequential 0, 1, 2
+
+    # Coefficients stored under remapped sequential indices
+    assert np.isclose(bm.coefficients[(0,)], 1.0)
+    assert np.isclose(bm.coefficients[(0, 1)], 2.0)
+    assert np.isclose(
+        bm.coefficients[(0, 1, 2)], 4.0
+    )  # original index 3 → sequential 2
+
+    # Energy equivalence via round-trip: SPIN → BINARY → SPIN
+    bin_bm = bm.change_vartype(VarType.BINARY)
+    roundtrip_bm = bin_bm.change_vartype(VarType.SPIN)
+
+    for bits in range(2**bm.num_bits):
+        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
+        assert np.isclose(
+            bm.calc_energy(state), roundtrip_bm.calc_energy(state), atol=1e-10
+        )
+
+
+def test_from_higher_ising_equivalence_with_from_ising():
+    """from_higher_ising and from_ising should agree on inputs of order ≤ 2."""
+    linear = {0: 1.0, 2: -3.0}
+    quad = {(0, 1): 2.0, (1, 2): -0.5}
+    constant = 0.25
+
+    higher_ising: dict[tuple[int, ...], float] = {(i,): v for i, v in linear.items()}
+    higher_ising.update({k: v for k, v in quad.items()})
+
+    bm_higher = BinaryModel.from_higher_ising(
+        higher_ising=higher_ising, constant=constant
+    )
+    bm_ising = BinaryModel.from_ising(linear=linear, quad=quad, constant=constant)
+
+    assert bm_higher.vartype == bm_ising.vartype == VarType.SPIN
+    assert bm_higher.num_bits == bm_ising.num_bits
+    assert np.isclose(bm_higher.constant, bm_ising.constant)
+    assert bm_higher.linear == bm_ising.linear
+    assert bm_higher.quad == bm_ising.quad
+    assert bm_higher.higher == bm_ising.higher
+
+
+def test_from_higher_ising_duplicate_accumulation():
+    """from_higher_ising should accumulate duplicate (post-sort) index tuples."""
+    higher_ising = {(0, 1, 2): 2.0, (2, 0, 1): 3.0}
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=0.0)
+    assert bm.vartype == VarType.SPIN
+    assert bm.num_bits == 3
+    assert np.isclose(bm.higher[(0, 1, 2)], 5.0)
+
+
+def test_from_higher_ising_empty_term_is_promoted_to_constant():
+    """from_higher_ising should treat empty-index term () as a constant contribution."""
+    bm = BinaryModel.from_higher_ising(
+        higher_ising={(): 1.25, (0, 2): 2.0}, constant=0.75
+    )
+    assert np.isclose(bm.constant, 2.0)  # 0.75 + 1.25
+    assert bm.num_bits == 2
+    assert np.isclose(bm.quad[(0, 1)], 2.0)
+
+
+def test_from_higher_ising_duplicate_indices_pair_cancel():
+    """from_higher_ising should reduce one pair via s_i**2 = 1: (0,0,2) → (2,)."""
+    with pytest.warns(
+        UserWarning,
+        match="Duplicate variable indices in higher Ising term",
+    ):
+        bm = BinaryModel.from_higher_ising(higher_ising={(0, 0, 2): 3.0}, constant=0.0)
+
+    # (0,0,2): index 0 appears twice → cancels; index 2 remains.
+    # After remapping the single surviving original index 2 → new index 0.
+    assert bm.num_bits == 1
+    assert np.isclose(bm.linear[0], 3.0)
+    assert bm.coefficients == {(0,): 3.0}
+
+
+def test_from_higher_ising_duplicate_indices_multi_pair_cancel():
+    """from_higher_ising should reduce multiple paired indices: (0,0,1,1,2) → (2,)."""
+    with pytest.warns(
+        UserWarning,
+        match="Duplicate variable indices in higher Ising term",
+    ):
+        bm = BinaryModel.from_higher_ising(
+            higher_ising={(0, 0, 1, 1, 2): 3.0}, constant=0.0
+        )
+
+    # Both 0 and 1 cancel; only 2 remains → linear term.
+    assert bm.num_bits == 1
+    assert np.isclose(bm.linear[0], 3.0)
+
+
+def test_from_higher_ising_duplicate_indices_all_cancel_to_constant():
+    """from_higher_ising should promote a fully-paired term to constant: (0,0) → constant."""
+    with pytest.warns(
+        UserWarning,
+        match="Duplicate variable indices in higher Ising term",
+    ):
+        bm = BinaryModel.from_higher_ising(
+            higher_ising={(0, 0): 2.5, (1,): 1.0}, constant=0.75
+        )
+
+    # (0,0) collapses to 1 → adds to constant: 0.75 + 2.5 = 3.25
+    assert np.isclose(bm.constant, 3.25)
+    assert bm.num_bits == 1
+    assert np.isclose(bm.linear[0], 1.0)
+
+
+def test_from_higher_ising_duplicate_indices_partial_cancel():
+    """from_higher_ising should keep odd-count indices: (0,1,1,2,2) → (0,)."""
+    with pytest.warns(
+        UserWarning,
+        match="Duplicate variable indices in higher Ising term",
+    ):
+        bm = BinaryModel.from_higher_ising(
+            higher_ising={(0, 1, 1, 2, 2): 2.0}, constant=0.0
+        )
+
+    # Only 0 has odd count → reduced to (0,).
+    assert bm.num_bits == 1
+    assert np.isclose(bm.linear[0], 2.0)
+
+
+def test_from_higher_ising_4th_order():
+    """4th-order from_higher_ising: SPIN→BINARY→SPIN round-trip should preserve energy."""
+    higher_ising = {(0, 1, 2, 3): 2.0, (0, 1): 1.0, (2,): -1.0}
+    constant = 3.0
+
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
+    assert bm.vartype == VarType.SPIN
+    assert bm.order == 4
+
+    bin_bm = bm.change_vartype(VarType.BINARY)
+    roundtrip_bm = bin_bm.change_vartype(VarType.SPIN)
+
+    for bits in range(2**bm.num_bits):
+        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
+        assert np.isclose(
+            bm.calc_energy(state), roundtrip_bm.calc_energy(state), atol=1e-10
+        ), f"Energy mismatch for state {state}"
+
+
+def test_from_higher_ising_5th_order():
+    """5th-order from_higher_ising: SPIN→BINARY→SPIN round-trip should preserve energy."""
+    higher_ising = {(0, 1, 2, 3, 4): 1.0, (0, 2): 0.5, (3,): -1.0}
+    constant = 0.0
+
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
+    assert bm.vartype == VarType.SPIN
+    assert bm.order == 5
+
+    bin_bm = bm.change_vartype(VarType.BINARY)
+    roundtrip_bm = bin_bm.change_vartype(VarType.SPIN)
+
+    for bits in range(2**bm.num_bits):
+        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
+        assert np.isclose(
+            bm.calc_energy(state), roundtrip_bm.calc_energy(state), atol=1e-10
+        ), f"Energy mismatch for state {state}"
+
+
+def test_from_higher_ising_with_simplify():
+    """from_higher_ising with simplify=True should remove near-zero coefficients."""
+    higher_ising = {(0,): 1.0, (0, 1): 1e-16, (2, 3, 4): 2.0}
+    bm = BinaryModel.from_higher_ising(
+        higher_ising=higher_ising, constant=0.0, simplify=True
+    )
+    assert bm.vartype == VarType.SPIN
+    # Near-zero (0,1) is removed before BinaryModel construction. Surviving
+    # original indices are {0, 2, 3, 4}, remapped to {0, 1, 2, 3}.
+    assert bm.num_bits == 4
+    assert np.isclose(bm.linear[0], 1.0)
+    assert np.isclose(bm.higher[(1, 2, 3)], 2.0)
+    assert (0, 1) not in bm.coefficients
+
+
+@pytest.mark.parametrize("seed", [3001 + i for i in range(50)])
+def test_from_higher_ising_equivalence_random(seed):
+    """from_higher_ising round-trip SPIN→BINARY→SPIN should preserve energy."""
+    rng = np.random.default_rng(seed)
+
+    higher_ising: dict[tuple[int, ...], float] = {}
+    num_terms = int(rng.integers(3, 10))
+    max_index = 6
+    for _ in range(num_terms):
+        order = int(rng.integers(1, 5))
+        indices = tuple(
+            sorted(int(i) for i in rng.choice(max_index, size=order, replace=False))
+        )
+        higher_ising[indices] = float(rng.standard_normal())
+    constant = float(rng.standard_normal())
+
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
+    assert bm.vartype == VarType.SPIN
+
+    bin_bm = bm.change_vartype(VarType.BINARY)
+    roundtrip_bm = bin_bm.change_vartype(VarType.SPIN)
+
+    assert bm.num_bits == roundtrip_bm.num_bits
+
+    if bm.num_bits > 0:
+        for _ in range(5):
+            state = [int(rng.choice([-1, 1])) for _ in range(bm.num_bits)]
+            bm_energy = bm.calc_energy(state)
+            rt_energy = roundtrip_bm.calc_energy(state)
+            assert np.isclose(bm_energy, rt_energy, atol=1e-10), (
+                f"Energy mismatch: BM={bm_energy}, RT={rt_energy} for state={state}"
+            )
+
+
 # ---- num_bits ----
 
 
@@ -280,6 +501,49 @@ def test_order():
     expr = BinaryExpr(vartype=VarType.SPIN, constant=5.0, coefficients={})
     model = BinaryModel(expr)
     assert model.order == 0
+
+
+# ---- BinaryExpr.reduce_indices ----
+
+
+@pytest.mark.parametrize(
+    "inds, expected",
+    [
+        ((), ()),
+        ((5,), (5,)),
+        ((2, 1, 0), (0, 1, 2)),
+        ((0, 0, 2), (2,)),
+        ((0, 0, 1, 1, 2), (2,)),
+        ((0, 0), ()),
+        ((0, 1, 1, 2, 2), (0,)),
+        ((0, 0, 0), (0,)),
+    ],
+)
+def test_reduce_indices_spin(inds, expected):
+    """SPIN: pairs cancel via s_i**2 = 1; surviving indices returned sorted."""
+    assert BinaryExpr.reduce_indices(VarType.SPIN, inds) == expected
+
+
+@pytest.mark.parametrize(
+    "inds, expected",
+    [
+        ((), ()),
+        ((5,), (5,)),
+        ((2, 1, 0), (0, 1, 2)),
+        ((0, 0, 2), (0, 2)),
+        ((0, 0, 1, 1, 2), (0, 1, 2)),
+        ((0, 0), (0,)),
+    ],
+)
+def test_reduce_indices_binary(inds, expected):
+    """BINARY: duplicates collapse via x_i**2 = x_i; returned sorted."""
+    assert BinaryExpr.reduce_indices(VarType.BINARY, inds) == expected
+
+
+def test_reduce_indices_rejects_unknown_vartype():
+    """reduce_indices raises ValueError when given a non-VarType value."""
+    with pytest.raises(ValueError, match="Unknown vartype"):
+        BinaryExpr.reduce_indices("not a vartype", (0, 1))  # type: ignore[arg-type]
 
 
 # ---- BinaryExpr.__imul__ idempotency ----
