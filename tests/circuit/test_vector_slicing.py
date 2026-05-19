@@ -495,9 +495,7 @@ class TestSliceBulkBorrow:
             q[0] = qmc.h(q[0])
             return q
 
-        with pytest.raises(
-            QubitConsumedError, match="held by a VectorView slice"
-        ):
+        with pytest.raises(QubitConsumedError, match="held by a VectorView slice"):
             _ = kern.block
 
     def test_parent_access_on_non_covered_slot_is_fine(self):
