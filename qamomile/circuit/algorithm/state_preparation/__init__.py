@@ -31,6 +31,7 @@ to feed pre-computed angles into ``amplitude_encoding_from_angles``::
     )
 """
 
+from .dicke import prepare_dicke, scs_gate_2q, scs_gate_3q
 from .computational_basis_state import computational_basis_state
 from .mottonen_amplitude_encoding import (
     MottonenAmplitudeEncoding,
@@ -43,4 +44,7 @@ __all__ = [
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
+    "prepare_dicke",
+    "scs_gate_2q",
+    "scs_gate_3q",
 ]
