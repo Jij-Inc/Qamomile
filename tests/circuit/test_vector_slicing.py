@@ -485,6 +485,7 @@ class TestSliceBulkBorrow:
 
     def test_parent_access_on_covered_slot_is_rejected(self):
         """``q[0]`` after ``q[0:4:2]`` raises because slot 0 is slice-owned."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Qubit]:
@@ -494,7 +495,9 @@ class TestSliceBulkBorrow:
             q[0] = qmc.h(q[0])
             return q
 
-        with pytest.raises(Exception, match="held by a VectorView slice"):
+        with pytest.raises(
+            QubitConsumedError, match="held by a VectorView slice"
+        ):
             _ = kern.block
 
     def test_parent_access_on_non_covered_slot_is_fine(self):
@@ -557,15 +560,16 @@ class TestSliceBulkBorrow:
             _ = kern.block
 
     def test_overlapping_live_slices_are_rejected(self):
-        """Two slices with partial overlap, where the first is still live,
-        can't be created simultaneously.
+        """Two slices with partial overlap on the same root are rejected.
 
-        A never-accessed slice is treated as drained (``a`` below would
-        have an empty ``_borrowed_indices``), so slicing ``b`` after
-        ``a`` with overlap is allowed via the opportunistic drain.
-        To force a real live overlap, ``a`` must hold an outstanding
-        element borrow at the moment ``b`` is created.
+        Strict no-multi-view rejects every live overlap at
+        ``VectorView._wrap`` regardless of whether ``a`` has been
+        accessed yet — the second view's construction fails as soon as
+        the parent's borrow table records ``a`` against any of ``b``'s
+        covered slots.
         """
+
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Qubit]:
@@ -576,7 +580,9 @@ class TestSliceBulkBorrow:
             a[0] = qa
             return q
 
-        with pytest.raises(Exception, match="already owned by another slice view"):
+        with pytest.raises(
+            QubitConsumedError, match="already owned by another slice view"
+        ):
             _ = kern.block
 
     def test_symbolic_slice_skips_bulk_borrow(self):
@@ -1992,7 +1998,7 @@ class TestRound4Reviewer:
             q = qmc.qubit_array(4, "q")
             return qmc.measure(qmc.cast(q[lo:hi], qmc.QFixed, int_bits=0))
 
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="symbolic"):
             kern.block
 
     # ----- R4-D: eager BinOp folding when both operands are constants --------
