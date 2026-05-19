@@ -2136,6 +2136,120 @@ class TestRound4Reviewer:
         assert measured_q == [2, 3, 4]
 
 
+class TestExpvalIsDestructive:
+    """``expval`` consumes its qubits — alignment with measure / cast.
+
+    Prior to making ``expval`` a destructive consume the IR pass had to
+    treat ``ExpvalOp`` as a release-mode op (clearing view ownership)
+    just to compensate for the fact that the frontend never called
+    ``consume()`` on the qubits.  That left a back door: a kernel could
+    use the same view (or even the same root register) for further ops
+    after ``expval`` returned, with no compile-time error.  These tests
+    pin the strict-return alignment — every consume path that gives up
+    quantum state goes through the same destructive-consume machinery.
+    """
+
+    def test_use_after_expval_on_view_is_rejected_at_trace(self):
+        """``expval(q[0::2], H); q[0] = h(q[0])`` raises at trace time."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            _ = qmc.expval(q[0::2], obs)  # slots {0, 2} destroyed
+            q[0] = qmc.h(q[0])  # ← use after expval-destroyed slot
+            return qmc.measure(q)
+
+        with pytest.raises(QubitConsumedError):
+            _ = kern.block
+
+    def test_use_after_expval_whole_array_is_rejected_at_trace(self):
+        """``e = expval(q, H); q = h(q)`` raises at trace time.
+
+        ``expval`` destructively consumes the whole array; the original
+        handle's affine-type check fires when the kernel tries to reuse it.
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            _ = qmc.expval(q, obs)
+            q = qmc.h(q)  # ← affine type rejects this
+            return qmc.measure(q)
+
+        with pytest.raises(QubitConsumedError):
+            _ = kern.block
+
+    def test_expval_with_outstanding_borrow_is_rejected(self):
+        """``v = q[0:2]; expval(q, H)`` raises — unreturned view borrow."""
+        from qamomile.circuit.transpiler.errors import (
+            QubitConsumedError,
+            UnreturnedBorrowError,
+        )
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            _v = q[0:2]  # bulk-borrows {0, 1}
+            return qmc.expval(q, obs)  # ← whole-array consume with view live
+
+        with pytest.raises((QubitConsumedError, UnreturnedBorrowError)):
+            _ = kern.block
+
+    def test_two_disjoint_views_destructively_consumed_via_expval(self):
+        """``expval(q[0::2], H); q[1::2] = h(q[1::2])`` still works.
+
+        Two disjoint views: the first is destructively consumed via
+        ``expval``, the second is independent and can be slice-assigned
+        back in the usual way.  Both halves of the parent must work in
+        the same kernel.
+
+        Only structural ``kern.block`` is asserted here because mixing
+        ``expval`` and ``measure`` in one kernel produces a
+        multi-segment program that the NISQ executor rejects at plan
+        time.  The strict-return + destructive-consume bookkeeping is
+        what we need to pin.
+        """
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            _ = qmc.expval(q[0::2], obs)  # destroy {0, 2}
+            q[1::2] = qmc.h(q[1::2])  # use the surviving half
+            # ``measure(q)`` would re-touch destroyed slots, so we
+            # measure only the surviving half.
+            return qmc.measure(q[1::2])
+
+        block = kern.block
+        assert block is not None
+
+    def test_expval_after_pauli_evolve_on_view_consumes_view(self):
+        """``view = pauli_evolve(view, ...); expval(view, H)`` is valid + destructive.
+
+        ``pauli_evolve`` transfers view ownership to the next-version
+        handle; ``expval`` then destructively consumes it.  The kernel
+        cannot touch the same slots afterwards.
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern(
+            H: qmc.Observable,
+            gamma: qmc.Float,
+            obs: qmc.Observable,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[0::2]
+            view = qmc.pauli_evolve(view, H, gamma)
+            _ = qmc.expval(view, obs)  # destructive on slots {0, 2}
+            q[0] = qmc.h(q[0])  # ← rejected
+            return qmc.measure(q)
+
+        with pytest.raises(QubitConsumedError):
+            _ = kern.block
+
+
 class TestRound5Reviewer:
     """Regression tests for Copilot Round 5 review findings.
 

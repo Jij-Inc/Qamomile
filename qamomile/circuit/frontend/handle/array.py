@@ -63,7 +63,7 @@ class ConsumeMode(enum.Enum):
 # implementation detail of :func:`_classify_consume`; new code should
 # query ``_classify_consume(...)`` rather than inspect the sets
 # directly.
-_DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset({"measure", "cast"})
+_DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset({"measure", "cast", "expval"})
 _BORROW_RELEASING_CONSUME_OPS: frozenset[str] = frozenset({"slice assignment"})
 
 
@@ -1665,8 +1665,8 @@ class VectorView(Vector[T]):
           (``parent[a:b:c] = view``) — this is the *only* path that
           fully releases the borrow without destroying the qubits;
         - destructively consuming it (``measure(view)`` /
-          ``cast(view, ...)``) — the physical slots become consumed
-          markers, no return needed.
+          ``cast(view, ...)`` / ``expval(view, H)``) — the physical
+          slots become consumed markers, no return needed.
 
         Every other consume (broadcast gates ``h(view)``,
         ``pauli_evolve(view, H, gamma)``, sub-kernel calls

@@ -137,12 +137,11 @@ class _ConsumedSlotMarker:
 
     Installed by :meth:`SliceBorrowCheckPass._process_result_releases`
     when a destructive operation (``MeasureOperation``,
-    ``MeasureVectorOperation``, ``CastOperation``) consumes a view's
-    covered slots.  Subsequent operand access to the same slot is
-    treated as a violation, matching the frontend's ``_CONSUMED_SLOT``
-    sentinel semantics.  ``ExpvalOp`` does not install this marker —
-    its physical qubits survive the expval (it only retires the SSA
-    handle).  Only one instance ever exists; identity is the test.
+    ``MeasureVectorOperation``, ``CastOperation``, ``ExpvalOp``)
+    consumes a view's covered slots.  Subsequent operand access to
+    the same slot is treated as a violation, matching the frontend's
+    ``_CONSUMED_SLOT`` sentinel semantics.  Only one instance ever
+    exists; identity is the test.
     """
 
     __slots__ = ()
@@ -158,6 +157,7 @@ _IR_DESTRUCTIVE_OPS: tuple[type, ...] = (
     MeasureOperation,
     MeasureVectorOperation,
     CastOperation,
+    ExpvalOp,
 )
 
 
@@ -530,9 +530,9 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
           same root untouched so a sibling view or direct access on a
           non-overlapping slot remains valid.  For destructive ops
           (``MeasureOperation``, ``MeasureVectorOperation``,
-          ``CastOperation``), install ``_CONSUMED_SLOT`` markers on
-          the covered slots so any later access — direct or via
-          another view — is rejected as use-after-destroy.
+          ``CastOperation``, ``ExpvalOp``), install ``_CONSUMED_SLOT``
+          markers on the covered slots so any later access — direct
+          or via another view — is rejected as use-after-destroy.
 
         * **Root operand** (no chain): release every entry whose
           owner root matches, matching the prior whole-array consume
@@ -541,26 +541,18 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
           subsequent operations can't accidentally re-touch the
           collapsed state.
 
-        ``ExpvalOp`` retires the SSA handle but does not physically
-        destroy the qubits, so it does not install consumed markers
-        (matching the frontend's ``_DESTRUCTIVE_CONSUME_OPS``).
+        ``ExpvalOp`` is treated as destructive in lock-step with the
+        frontend's ``_DESTRUCTIVE_CONSUME_OPS`` set — both layers
+        agree that estimating an observable consumes its qubits.
 
         Args:
             op: The operation potentially consuming operand arrays.
             state: Mutable borrow tracker.
         """
-        if not isinstance(
-            op,
-            (
-                MeasureOperation,
-                MeasureVectorOperation,
-                ExpvalOp,
-                CastOperation,
-            ),
-        ):
+        if not isinstance(op, _IR_DESTRUCTIVE_OPS):
             return
 
-        is_destructive = isinstance(op, _IR_DESTRUCTIVE_OPS)
+        is_destructive = True
 
         for v in op.operands:
             if not isinstance(v, ArrayValue):
