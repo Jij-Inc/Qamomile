@@ -14,6 +14,11 @@ docs/_build_src/
 docs/en/tags/
 docs/ja/tags/
 
+# Side-effect output directory created by minto.Experiment (used by
+# ommx-quantum-benchmarks when loading datasets from the GitHub
+# Container Registry).
+.minto_experiments/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
