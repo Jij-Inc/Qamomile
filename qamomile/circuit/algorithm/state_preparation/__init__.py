@@ -2,6 +2,11 @@
 
 Available routines:
 
+* :func:`computational_basis_state`: prepare ``|bits>`` from
+  :math:`|0\\rangle^{\\otimes n}` via per-qubit ``Rx(pi * bits[i])``.
+  Equivalent to a conditional ``X`` (up to a global phase) but emitted
+  as a parameterised rotation so ``bits`` can be left as a runtime
+  parameter at transpile time.
 * :class:`MottonenAmplitudeEncoding` / :func:`amplitude_encoding`: prepare
   an arbitrary real- or complex-amplitude state from
   :math:`|0\\rangle^{\\otimes n}` using Möttönen's Ry (and, for complex
@@ -27,6 +32,7 @@ to feed pre-computed angles into ``amplitude_encoding_from_angles``::
 """
 
 from .dicke import prepare_dicke, scs_gate_2q, scs_gate_3q
+from .computational_basis_state import computational_basis_state
 from .mottonen_amplitude_encoding import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
@@ -34,6 +40,7 @@ from .mottonen_amplitude_encoding import (
 )
 
 __all__ = [
+    "computational_basis_state",
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",

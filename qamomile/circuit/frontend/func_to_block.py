@@ -15,6 +15,7 @@ from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -56,6 +57,140 @@ def _get_ndim(param_type: typing.Any) -> int:
     elif "Tensor" in type_name:
         return 3
     return 1
+
+
+def _array_element_type(param_type: typing.Any) -> typing.Any:
+    """Return the element handle type of an array annotation, or ``None``.
+
+    Args:
+        param_type (Any): A frontend type annotation such as
+            ``Vector[Float]`` or ``Float``.
+
+    Returns:
+        Any | None: The element handle type for an array annotation
+            (``Float`` for ``Vector[Float]``), or ``None`` if
+            ``param_type`` is not an array annotation.
+    """
+    if hasattr(param_type, "__args__") and param_type.__args__:
+        return param_type.__args__[0]
+    return getattr(param_type, "element_type", None)
+
+
+def build_param_slots(
+    signature: inspect.Signature,
+    input_types: dict[str, typing.Any],
+    *,
+    parameters: list[str] | None = None,
+    kwargs: dict[str, typing.Any] | None = None,
+    qubit_sizes: dict[str, int] | None = None,
+    bind_defaults: bool,
+) -> tuple[ParamSlot, ...]:
+    """Build a ``ParamSlot`` tuple for the classical arguments of a kernel.
+
+    Mirrors the argument-classification logic in
+    ``QKernel._create_traced_block`` so the resulting slot list reflects
+    the same decisions that drive symbolic-vs-bound input creation. Only
+    classical (non-quantum, non-Tuple, non-Dict) arguments are included;
+    pure-quantum arguments live in ``Block.input_values`` instead.
+
+    Args:
+        signature (inspect.Signature): The kernel function's signature.
+        input_types (dict[str, Any]): Resolved frontend type annotations
+            keyed by argument name (typically
+            ``QKernel.input_types`` or the equivalent computed in
+            ``func_to_block``).
+        parameters (list[str] | None): Names explicitly requested as
+            runtime parameters via ``parameters=[...]``. ``None`` is
+            treated as an empty list.
+        kwargs (dict[str, Any] | None): Concrete values supplied via
+            ``bindings`` / direct kwargs. ``None`` is treated as an
+            empty dict.
+        qubit_sizes (dict[str, int] | None): Optional mapping from
+            ``Vector[Qubit]`` parameter names to their integer sizes;
+            these are quantum inputs and are not included in the slot
+            list.
+        bind_defaults (bool): When ``True``, Python signature defaults
+            are treated as ``COMPILE_TIME_BOUND`` with
+            ``bound_value=default``. When ``False`` (e.g., the
+            ``func_to_block`` path that does not bake in defaults),
+            defaulted arguments stay ``RUNTIME_PARAMETER`` and the
+            default appears only in ``ParamSlot.default``.
+
+    Returns:
+        tuple[ParamSlot, ...]: One slot per classical argument, in the
+            order they appear in ``signature.parameters``.
+    """
+    parameters_set = set(parameters or ())
+    kwargs_map = kwargs or {}
+    qubit_sizes_set = set((qubit_sizes or {}).keys())
+
+    slots: list[ParamSlot] = []
+    for name, param in signature.parameters.items():
+        param_type = input_types.get(name, param.annotation)
+
+        # Skip pure-quantum and structural-container arguments. These
+        # do not participate in the classical parameter contract.
+        if param_type is Qubit:
+            continue
+        if name in qubit_sizes_set:
+            continue
+        if is_array_type(param_type):
+            elem_handle_type = _array_element_type(param_type)
+            if elem_handle_type is Qubit:
+                continue
+        if is_tuple_type(param_type) or is_dict_type(param_type):
+            continue
+
+        # Decide the slot's kind. ``Observable`` semantics mirror the
+        # tracer in ``QKernel._create_traced_block`` (see
+        # ``qamomile/circuit/frontend/qkernel.py``): a scalar
+        # ``Observable`` and an *unbound* ``Vector[Observable]`` are
+        # always RUNTIME_PARAMETER (the value is supplied at execute
+        # time and ``partial_eval`` cannot fold it). A *bound*
+        # ``Vector[Observable]`` — i.e., one that appears in
+        # ``kwargs_map`` — falls through to the ``name in kwargs_map``
+        # branch below and is recorded as COMPILE_TIME_BOUND with the
+        # concrete observable list.
+        is_scalar_observable = param_type is Observable
+        is_unbound_observable_array = (
+            is_array_type(param_type)
+            and _array_element_type(param_type) is Observable
+            and name not in kwargs_map
+        )
+
+        if is_scalar_observable or is_unbound_observable_array:
+            kind = ParamKind.RUNTIME_PARAMETER
+            bound_value: typing.Any = None
+        elif name in parameters_set:
+            kind = ParamKind.RUNTIME_PARAMETER
+            bound_value = None
+        elif name in kwargs_map:
+            kind = ParamKind.COMPILE_TIME_BOUND
+            bound_value = kwargs_map[name]
+        elif bind_defaults and param.default is not inspect.Parameter.empty:
+            kind = ParamKind.COMPILE_TIME_BOUND
+            bound_value = param.default
+        else:
+            kind = ParamKind.RUNTIME_PARAMETER
+            bound_value = None
+
+        ndim = _get_ndim(param_type) if is_array_type(param_type) else 0
+        default = (
+            param.default if param.default is not inspect.Parameter.empty else None
+        )
+
+        slots.append(
+            ParamSlot(
+                name=name,
+                type=handle_type_map(param_type),
+                kind=kind,
+                ndim=ndim,
+                default=default,
+                bound_value=bound_value,
+            )
+        )
+
+    return tuple(slots)
 
 
 def is_tuple_type(t: typing.Any) -> bool:
@@ -379,6 +514,16 @@ def func_to_block(func: typing.Callable) -> Block:
     # Re-fetch operations after adding ReturnOperation
     operations = tracer.operations
 
+    # ``input_types`` above already maps each name to a converted
+    # ``ValueType``; ``build_param_slots`` needs the raw handle-side type
+    # annotations (e.g., ``Vector[Float]``) so it can introspect array
+    # element types and dimensionality. Pass ``type_hints`` directly.
+    param_slots = build_param_slots(
+        signature=signature,
+        input_types=type_hints,
+        bind_defaults=False,
+    )
+
     return Block(
         name=func.__name__,
         label_args=label_args,
@@ -386,4 +531,5 @@ def func_to_block(func: typing.Callable) -> Block:
         output_values=return_values,
         operations=operations,
         kind=BlockKind.HIERARCHICAL,
+        param_slots=param_slots,
     )

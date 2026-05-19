@@ -102,6 +102,7 @@ class ParameterShapeResolutionPass(Pass[Block, Block]):
             operations=new_operations,
             kind=input.kind,
             parameters=input.parameters,
+            param_slots=input.param_slots,
         )
 
     def _build_substitutions(
