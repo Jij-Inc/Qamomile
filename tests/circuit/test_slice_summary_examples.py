@@ -470,172 +470,211 @@ class TestSection_1_7_ViewAsKernelArgument:
 
 
 # ---------------------------------------------------------------------------
-# Section 2: error patterns — module-level kernels for source-readable tracing
+# Section 2: error patterns, grouped by concept
+#
+# Each conceptual group below mirrors a subsection of the summary's
+# Section 2-3.  The kernels are module-level so ``@qmc.qkernel`` can
+# read their source for AST tracing.
 # ---------------------------------------------------------------------------
 
 
-@qmc.qkernel
-def _ng_a_body_release() -> qmc.Vector[qmc.Bit]:
-    """NG A: body-internal release of an outer-registered view."""
-    q = qmc.qubit_array(4, "q")
-    even = q[0::2]
-    for _ in qmc.range(1):
-        q[0::2] = even  # ← rejected post-fold by ``outer_snapshot_stack``
-    return qmc.measure(q)
+# -- Strict-return violations: forgetting the slice-assign return -----------
 
 
 @qmc.qkernel
-def _ng_b_body_overlap() -> qmc.Vector[qmc.Bit]:
-    """NG B: body-internal slice that overlaps an outer view (concrete bounds)."""
-    q = qmc.qubit_array(4, "q")
-    even = q[0::2]  # noqa: F841 — kept live to force the overlap conflict
-    for _ in qmc.range(1):
-        v = q[0:3]  # ← rejected at trace time by ``VectorView._wrap``
-        v = qmc.h(v)
-        q[0:3] = v
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _ng_c_coverage_mismatch() -> qmc.Vector[qmc.Bit]:
-    """NG C: slice-assignment LHS / RHS coverage mismatch."""
-    q = qmc.qubit_array(4, "q")
-    q[0:2] = qmc.h(q[0:3])  # ← AffineTypeError at trace time
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _ng_d_top_level_overlap() -> qmc.Vector[qmc.Bit]:
-    """NG D: two overlapping live views on the same root."""
-    q = qmc.qubit_array(4, "q")
-    a = q[0:3]
-    b = q[0:2]  # ← QubitConsumedError at trace time
-    _ = a
-    _ = b
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _ng_e_strict_return_violation() -> qmc.Vector[qmc.Bit]:
-    """NG E: drained view not returned via slice assignment before parent consume."""
+def _strict_return_loop() -> qmc.Vector[qmc.Bit]:
+    """View borrow via element loop; ``q[0:4:2] = evens`` is forgotten."""
     q = qmc.qubit_array(4, "q")
     evens = q[0:4:2]
     for i in qmc.range(evens.shape[0]):
         evens[i] = qmc.h(evens[i])
-    # Missing ``q[0:4:2] = evens`` — strict-return policy rejects.
     return qmc.measure(q)
 
 
 @qmc.qkernel
-def _ng_f_broadcast_no_return() -> qmc.Vector[qmc.Bit]:
-    """NG F: broadcast gate transferred bulk-borrow but caller never returned the view."""
+def _strict_return_broadcast() -> qmc.Vector[qmc.Bit]:
+    """Broadcast transferred ownership onto ``view``; slice-assign forgotten."""
     q = qmc.qubit_array(4, "q")
     view = q[0::2]
-    view = qmc.h(view)  # ownership transferred to ``view``
-    # Missing ``q[0::2] = view`` — strict-return policy rejects.
+    view = qmc.h(view)
     return qmc.measure(q)
 
 
 @qmc.qkernel
-def _h_pair(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Sub-kernel: H broadcast over a length-2 register."""
+def _strict_return_qkernel_call_callee(
+    q: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Sub-kernel for the qkernel-call strict-return violation case."""
     for i in qmc.range(2):
         q[i] = qmc.h(q[i])
     return q
 
 
 @qmc.qkernel
-def _ng_g_qkernel_call_no_return() -> qmc.Vector[qmc.Bit]:
-    """NG G: sub-kernel call transferred bulk-borrow but caller never returned the view."""
+def _strict_return_qkernel_call() -> qmc.Vector[qmc.Bit]:
+    """Sub-kernel call transferred ownership; slice-assign forgotten."""
     q = qmc.qubit_array(4, "q")
     view = q[0:2]
-    view = _h_pair(view)  # ownership transferred to ``view``
-    # Missing ``q[0:2] = view`` — strict-return policy rejects.
+    view = _strict_return_qkernel_call_callee(view)
     return qmc.measure(q)
 
 
 @qmc.qkernel
-def _ng_h_pauli_evolve_no_return(
+def _strict_return_pauli_evolve(
     H: qmc.Observable, gamma: qmc.Float
 ) -> qmc.Vector[qmc.Bit]:
-    """NG H: pauli_evolve transferred bulk-borrow but caller never returned the view."""
+    """``pauli_evolve`` transferred ownership; slice-assign forgotten."""
     q = qmc.qubit_array(4, "q")
     view = q[0::2]
-    view = qmc.pauli_evolve(view, H, gamma)  # ownership transferred to ``view``
-    # Missing ``q[0::2] = view`` — strict-return policy rejects.
+    view = qmc.pauli_evolve(view, H, gamma)
     return qmc.measure(q)
 
 
-class TestSection_2_NegativePatterns:
-    """Section 2 NG patterns must raise the documented error type."""
+# -- Multi-view overlap: two live views on the same root --------------------
 
-    def test_ng_a_body_release_raises(self):
-        """``q[0::2] = even`` inside a for body trips the post-fold guard."""
+
+@qmc.qkernel
+def _multi_view_overlap_top_level() -> qmc.Vector[qmc.Bit]:
+    """``a = q[0:3]; b = q[0:2]`` — two live views with overlapping coverage."""
+    q = qmc.qubit_array(4, "q")
+    a = q[0:3]
+    b = q[0:2]
+    _ = a
+    _ = b
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _multi_view_overlap_in_body() -> qmc.Vector[qmc.Bit]:
+    """Outer view live across the body, body creates an overlapping inner view."""
+    q = qmc.qubit_array(4, "q")
+    even = q[0::2]  # noqa: F841 — kept live to force the overlap conflict
+    for _ in qmc.range(1):
+        v = q[0:3]
+        v = qmc.h(v)
+        q[0:3] = v
+    return qmc.measure(q)
+
+
+# -- Slice-assignment structural mismatches ----------------------------------
+
+
+@qmc.qkernel
+def _slice_assign_coverage_mismatch() -> qmc.Vector[qmc.Bit]:
+    """``q[0:2] = qmc.h(q[0:3])`` — LHS and RHS coverages differ."""
+    q = qmc.qubit_array(4, "q")
+    q[0:2] = qmc.h(q[0:3])
+    return qmc.measure(q)
+
+
+# -- Control-flow body violations: outer-view release inside a body ----------
+
+
+@qmc.qkernel
+def _body_release_of_outer_view() -> qmc.Vector[qmc.Bit]:
+    """Slice-assign that releases an outer view from inside a for body."""
+    q = qmc.qubit_array(4, "q")
+    even = q[0::2]
+    for _ in qmc.range(1):
+        q[0::2] = even
+    return qmc.measure(q)
+
+
+class TestStrictReturnViolations:
+    """Every view-consuming op that's not destructive demands a slice-assign return.
+
+    Skipping that return leaves the parent's bulk-borrow live and the
+    next parent consume (``measure(q)`` etc.) raises
+    ``UnreturnedBorrowError``.  Four entry points exercise the four
+    transfer-style ops the summary calls out: element loop, broadcast
+    gate, sub-kernel call, and ``pauli_evolve``.
+    """
+
+    def test_loop_pattern_without_slice_assign_raises(self):
+        """Element loop + no slice-assign on the loop's view."""
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = _strict_return_loop.block
+
+    def test_broadcast_without_slice_assign_raises(self):
+        """``view = qmc.h(view)`` + no slice-assign on the returned view."""
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = _strict_return_broadcast.block
+
+    def test_qkernel_call_without_slice_assign_raises(self):
+        """``view = sub_kernel(view)`` + no slice-assign on the returned view."""
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = _strict_return_qkernel_call.block
+
+    def test_pauli_evolve_without_slice_assign_raises(self):
+        """``view = qmc.pauli_evolve(view, ...)`` + no slice-assign on the returned view."""
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = _strict_return_pauli_evolve.block
+
+
+class TestMultiViewOverlap:
+    """Two live views on the same root with overlapping coverage are rejected.
+
+    Strict no-multi-view: at most one live ``VectorView`` may own any
+    given parent slot.  Concrete-bounds overlap is caught at trace
+    time by ``VectorView._wrap``; the same pattern inside a
+    control-flow body is rejected for the same reason (the body's view
+    construction sees the outer view's claim on the parent slot).
+    """
+
+    def test_top_level_overlap_raises_at_trace(self):
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        with pytest.raises(
+            QubitConsumedError, match="already owned by another slice view"
+        ):
+            _ = _multi_view_overlap_top_level.block
+
+    def test_body_internal_overlap_raises_at_trace(self):
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        with pytest.raises(
+            QubitConsumedError, match="already owned by another slice view"
+        ):
+            _ = _multi_view_overlap_in_body.block
+
+
+class TestSliceAssignmentConsistency:
+    """Slice assignment requires LHS and RHS to describe the same slot set.
+
+    Coverage mismatch is the canonical case: the right-hand side
+    covers a different number of parent slots than the left-hand
+    slice.  Caught at trace time inside ``_return_slice_view`` even
+    when the right-hand side has been broadcast-consumed (the helper
+    reconstructs coverage from the IR ``ArrayValue``).
+    """
+
+    def test_coverage_mismatch_raises_at_trace(self):
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        with pytest.raises(AffineTypeError, match="coverage mismatch"):
+            _ = _slice_assign_coverage_mismatch.block
+
+
+class TestControlFlowBodyViolations:
+    """Releasing an outer-registered view from inside a control-flow body is rejected.
+
+    The IR pass's ``outer_snapshot_stack`` guard catches this: the
+    body cannot delete a borrow-table entry that the enclosing block
+    is still relying on, because the loop / branch merge cannot
+    propagate the deletion outward.  Caught post-fold.
+    """
+
+    def test_release_of_outer_view_in_body_raises(self):
         from qamomile.circuit.transpiler.errors import SliceLinearityViolationError
 
         transpiler = QiskitTranspiler()
         with pytest.raises(SliceLinearityViolationError):
-            transpiler.transpile(_ng_a_body_release)
-
-    def test_ng_b_body_overlap_raises_at_trace(self):
-        """Concrete-bounds overlap is rejected during ``VectorView._wrap``."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
-
-        with pytest.raises(
-            QubitConsumedError, match="already owned by another slice view"
-        ):
-            _ = _ng_b_body_overlap.block
-
-    def test_ng_c_coverage_mismatch_raises(self):
-        """LHS / RHS slice coverage mismatch is rejected at trace time."""
-        from qamomile.circuit.transpiler.errors import AffineTypeError
-
-        with pytest.raises(AffineTypeError, match="coverage mismatch"):
-            _ = _ng_c_coverage_mismatch.block
-
-    def test_ng_d_top_level_overlap_raises_at_trace(self):
-        """``a = q[0:3]; b = q[0:2]`` overlap is rejected at ``b``'s ``_wrap``."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
-
-        with pytest.raises(
-            QubitConsumedError, match="already owned by another slice view"
-        ):
-            _ = _ng_d_top_level_overlap.block
-
-    def test_ng_e_strict_return_violation_raises(self):
-        """Drained view + ``measure(q)`` without slice-assign-back is rejected."""
-        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
-
-        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _ng_e_strict_return_violation.block
-
-    def test_ng_f_broadcast_no_return_raises(self):
-        """``view = qmc.h(view); measure(q)`` is rejected — the broadcast
-        transferred the bulk-borrow onto ``view`` but the caller never
-        slice-assigned it back.
-        """
-        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
-
-        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _ng_f_broadcast_no_return.block
-
-    def test_ng_g_qkernel_call_no_return_raises(self):
-        """``view = sub_kernel(view); measure(q)`` is rejected — the
-        sub-kernel call transferred the bulk-borrow onto ``view`` but
-        the caller never slice-assigned it back.
-        """
-        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
-
-        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _ng_g_qkernel_call_no_return.block
-
-    def test_ng_h_pauli_evolve_no_return_raises(self):
-        """``view = qmc.pauli_evolve(view, ...); measure(q)`` is
-        rejected for the same reason: pauli_evolve transferred the
-        bulk-borrow onto ``view`` and the caller never slice-assigned
-        it back.
-        """
-        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
-
-        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _ng_h_pauli_evolve_no_return.block
+            transpiler.transpile(_body_release_of_outer_view)
