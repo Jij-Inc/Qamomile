@@ -2,11 +2,11 @@
 """Post-build HTML patches for the Qamomile docs.
 
 Originally just a colab-launch script-tag injector; the script has
-since absorbed four more passes that all run against the same set of
+since absorbed five more passes that all run against the same set of
 ``docs/<lang>/_build/html/*.html`` (and ``*.json``) files, so they live
 together for a single rglob walk.
 
-The five passes:
+The six passes:
 
 1. Rewrite build-dir paths in GitHub URLs (HTML + JSON). ``./build.sh
    build`` runs mystmd from ``docs/_build_src/<lang>/`` so the
@@ -56,6 +56,14 @@ The five passes:
    native Ctrl/Cmd + scroll to zoom further. SPA-aware via a
    MutationObserver so client-side navigations also pick up freshly
    hydrated outputs.
+
+6. Sanitize bibliography ``<li id="cite-…">`` ids so the SSR ``id``
+   matches what React computes on the client. mystmd renders
+   DOI-resolved citations with HTML ids containing ``/`` / ``:`` /
+   ``.``, which makes SSR disagree with the client computation and
+   cascades into ~150 React #418 hydration-mismatch errors and a
+   visible flicker around the bibliography. Replacing the unsafe
+   chars with ``-`` aligns the two sides.
 """
 
 from __future__ import annotations
@@ -127,11 +135,20 @@ META_CHARSET_RE = re.compile(
 #     ``preload-class`` pattern: add ``html.qamomile-preloading`` at
 #     the very start of head, the inline <style> below contains a
 #     blanket ``transition: none !important`` rule scoped to that
-#     class, and a ``window.load`` handler removes the class two
-#     ``requestAnimationFrame`` ticks later (= guaranteed past the
-#     first paint AND past hydration's mount-time reflows). After
-#     that, all transitions work normally for actual user
-#     interactions (theme toggle, hover, etc.).
+#     class, and once the page has settled the class is removed.
+#     "Settled" is detected by observing DOM mutations from script
+#     init onward and revealing once BOTH (a) ``DOMContentLoaded``
+#     has fired (so deferred / module scripts have executed and
+#     hydration has had a chance to start) AND (b) 250 ms has
+#     elapsed since the last observed mutation (so React's hydration
+#     and any mismatch recovery have quiesced). Bounded by an
+#     8-second hard-cap from observer start and a 10-second wall-
+#     clock safety net so a runaway page can never stay hidden
+#     forever. We deliberately do NOT wait for ``window.load`` (slow
+#     image / CDN resources can push it well past hydration end and
+#     turn the guard into a multi-second blank screen). See the
+#     comment on the reveal logic inside ``THEME_INIT_SCRIPT`` below
+#     for the trade-offs that led to this idle-detection scheme.
 THEME_INIT_SCRIPT_ID = "qamomile-theme-init"
 THEME_INIT_SCRIPT = (
     "(function(){"
@@ -159,31 +176,109 @@ THEME_INIT_SCRIPT = (
     '!window.matchMedia("(prefers-color-scheme: light)").matches);'
     'if(dark)d.classList.add("dark");'
     "}catch(e){}"
-    # Reveal: lift the preloading class once everything's settled.
-    # Three triggers race; first one wins:
-    #   1. window.load + 2 RAF — hydration is normally complete by
-    #      then on a typical machine.
-    #   2. 2-second safety timeout — guarantees the page never stays
-    #      hidden longer than that even if `load` is unusually
-    #      delayed (slow CDN, large image, etc.).
-    #   3. First user-driven event — if the user is already
-    #      interacting (mousemove, click, keydown, touch), they've
-    #      seen enough that further hiding is hostile UX.
+    # Reveal: lift the preloading class once hydration has settled.
+    #
+    # The reveal is gated on TWO conditions:
+    #
+    #  (a) ``DOMContentLoaded`` has fired. Per the HTML spec, this
+    #      means parsing finished AND every deferred / module
+    #      ``<script>`` in the document has executed. Since mystmd
+    #      ships its React entry as ``type="module"`` (deferred by
+    #      default), hydration has had a chance to start before
+    #      ``DOMContentLoaded`` fires. Gating on ``DOMContentLoaded``
+    #      avoids the "JS bundle still downloading" race where the
+    #      ``MutationObserver`` would otherwise see no mutations for
+    #      the download window and reveal pre-hydration.
+    #
+    #  (b) The DOM has been quiet for 250 ms — that is, the
+    #      ``MutationObserver`` registered at script init hasn't
+    #      observed a mutation in 250 ms. This is the "hydration
+    #      finished and React isn't recovering anymore" detector. The
+    #      observer is installed BEFORE ``DOMContentLoaded`` so we
+    #      catch the head→body parse mutations and the entire
+    #      hydration burst, not just the tail.
+    #
+    # Earlier iterations gated the reveal on ``window.load`` (raced
+    # against a few additional triggers). That turned out to be wrong
+    # on every axis:
+    #   - ``load`` on heavy mystmd pages can fire well past hydration
+    #     end (the mottonen page measures ``loadEventEnd`` near 8s in
+    #     production thanks to lazy-loaded images and external CDN
+    #     assets). Waiting for ``load`` turns the guard into a multi-
+    #     second blank screen even after React has already settled.
+    #   - The user-driven-event fallback (``mousemove`` / ``click`` /
+    #     etc.) was hostile by design: any mouse movement during the
+    #     hidden phase raced the guard down and exposed the in-
+    #     progress hydration. That's the ちらつき regression we keep
+    #     getting reported.
+    #   - A 2-second safety timeout measured from script start always
+    #     fired before ``load`` did, defeating its own purpose.
+    #
+    # Two safety nets bound the worst case so a runaway page never
+    # stays blank forever:
+    #   1. ``hardCap``: 8 seconds from observer start. A page still
+    #      mutating past 8 s is in a runaway state and the user is
+    #      better served by seeing it than by an indefinitely hidden
+    #      body.
+    #   2. ``wallClock``: 10 seconds from script start. Covers the
+    #      degenerate case where the observer never installs at all
+    #      (older browsers without ``MutationObserver`` /
+    #      ``requestAnimationFrame`` / ``performance.now``).
+    #
+    # Feature detection: if any of the three APIs is missing, fall
+    # back to a 1-second blanket reveal. Better than waiting for the
+    # 10 s wall clock and far better than crashing in flight.
     "var revealed=false;"
     "function reveal(){"
     "if(revealed)return;"
     "revealed=true;"
     'd.classList.remove("qamomile-preloading");'
     "}"
-    'window.addEventListener("load",function(){'
-    "requestAnimationFrame(function(){"
-    "requestAnimationFrame(reveal);"
+    "setTimeout(reveal,10000);"
+    "if(typeof MutationObserver!=='function'"
+    "||typeof requestAnimationFrame!=='function'"
+    "||typeof performance==='undefined'"
+    "||typeof performance.now!=='function'){"
+    "setTimeout(reveal,1000);"
+    "return;"
+    "}"
+    # Track whether DOMContentLoaded has fired. The flag is set
+    # synchronously by an event listener registered before observer
+    # start, so the very first ``checkIdle`` tick after DCL sees
+    # ``dclFired === true`` without races.
+    "var dclFired=document.readyState!=='loading';"
+    "if(!dclFired){"
+    "document.addEventListener('DOMContentLoaded',function(){"
+    "dclFired=true;"
+    "},{once:true});"
+    "}"
+    "var lastMut=performance.now();"
+    "var hardCap=setTimeout(reveal,8000);"
+    "var obs=new MutationObserver(function(){"
+    "lastMut=performance.now();"
     "});"
+    "obs.observe(d,{"
+    "childList:true,"
+    "subtree:true,"
+    "attributes:true,"
+    "characterData:true"
     "});"
-    "setTimeout(reveal,2000);"
-    '["mousemove","keydown","click","touchstart"].forEach(function(e){'
-    "window.addEventListener(e,reveal,{once:true,passive:true});"
-    "});"
+    "function checkIdle(){"
+    "if(revealed){obs.disconnect();return;}"
+    # Both gates must be satisfied: DOMContentLoaded fired AND 250 ms
+    # since the last mutation. The DCL gate prevents an early reveal
+    # while deferred / module scripts are still loading their bundles
+    # (and the MutationObserver therefore sees a quiet DOM that does
+    # NOT mean hydration is done).
+    "if(dclFired&&performance.now()-lastMut>=250){"
+    "obs.disconnect();"
+    "clearTimeout(hardCap);"
+    "reveal();"
+    "}else{"
+    "requestAnimationFrame(checkIdle);"
+    "}"
+    "}"
+    "requestAnimationFrame(checkIdle);"
     "})();"
 )
 
@@ -192,10 +287,12 @@ THEME_INIT_SCRIPT = (
 # style-pass that interprets the rest of the theme overrides. The
 # ``html.qamomile-preloading`` class is set by THEME_INIT_SCRIPT a
 # moment earlier (inline <script> at the start of <head>), so the
-# first paint already has these rules in effect. Once
-# ``qamomile-preloading`` is removed (post-load + 2 RAF, or a 2-second
-# safety timeout, whichever comes first), the rules stop matching and
-# normal styling / transitions resume.
+# first paint already has these rules in effect. The class is later
+# removed by THEME_INIT_SCRIPT itself — once both
+# ``DOMContentLoaded`` has fired AND the DOM has been quiet for
+# 250 ms, or, as safety nets, after 8 s from observer start or
+# 10 s wall-clock from script start. Once removed, these rules stop
+# matching and normal styling / transitions resume.
 #
 # Two layers of suppression:
 #
@@ -443,6 +540,353 @@ def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
     return True
 
 
+# mystmd's SSR bibliography lives in ``<section ... class="…myst-
+# bibliography…">``. The pair below is the most general "find every
+# section" / "extract its class attribute" regex; the actual CSS-
+# class-token check happens in Python so we don't false-match
+# ``not-myst-bibliography`` (a regex ``\bmyst-bibliography\b`` would,
+# since ``\b`` only checks the word/non-word boundary and ``-`` is a
+# non-word character).
+#
+# Known limitation: lazy ``.*?`` matching means a nested ``<section>``
+# inside the bibliography would close the regex at the inner
+# ``</section>`` instead of the outer one. mystmd's current output
+# never nests sections inside ``<section class="myst-bibliography">``
+# (the body is a flat ``<header>`` + ``<ol><li>…</li></ol>``), so
+# this is theoretical, but if upstream ever changes we'll need to
+# switch to a proper HTML parser. The collision check would surface
+# the regression: any cite-id beyond the inner ``</section>`` would
+# silently fall out of scope and could leave duplicate ids in the
+# rendered page.
+_SECTION_RE = re.compile(
+    r"<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>",
+    re.IGNORECASE | re.DOTALL,
+)
+_CLASS_ATTR_RE = re.compile(
+    r'\bclass\s*=\s*(?P<q>["\'])(?P<value>[^"\']*)(?P=q)',
+    re.IGNORECASE,
+)
+# Match ``id="cite-…"`` on the rendered bibliography ``<li>`` (scoped
+# by the section / class-token check above). mystmd derives ``…``
+# from the citation's label, which for DOI-resolved citations is the
+# full URL (e.g.
+# ``cite-https://doi.org/10.48550/arxiv.quant-ph/0407010``). The
+# ``/``, ``:``, and ``.`` chars in that string cause the SSR ``id``
+# attribute to disagree with what React computes on the client
+# during hydration, and the failure cascades: a single citation
+# ``<li>`` produces on the order of 150 React #418 errors during
+# hydration, each of which recovers by re-rendering its enclosing
+# subtree client-side and is visible to the user as a flicker on
+# the affected cell outputs. Collapsing the unsafe chars to ``-``
+# aligns the SSR id with the client computation and eliminates the
+# mismatch.
+#
+# We anchor on the ``id=`` prefix so the regex does not accidentally
+# rewrite the citation's visible label text (which legitimately
+# contains ``https://`` etc.) or the ``href`` of the citation link
+# (which legitimately points at the doi.org URL). Both regexes
+# tolerate the HTML5-legal whitespace variations: ``\s+`` for the
+# leading attribute separator (mystmd emits one space today but
+# pretty-printers can emit a newline + indent), ``\s*`` around the
+# ``=``, and a captured quote char so single- or double-quoted
+# values both work. The closing quote in the value capture uses a
+# backreference so we never cross a quote boundary by accident.
+# ``re.IGNORECASE`` because HTML attribute names are case-insensitive
+# in the spec, so ``ID=`` and ``Id=`` from an alternate serializer
+# still match.
+_CITE_ID_IN_BIB_RE = re.compile(
+    r'(\s+id\s*=\s*(["\']))cite-([^"\']+)\2',
+    re.IGNORECASE,
+)
+# Cross-references back into the bibliography use a fragment of the
+# form ``href="#cite-…"``. mystmd doesn't emit these in our
+# tagged-pill citation style today, but the upstream renderer can
+# (e.g. footnote-style citation pills), and rewritten ids must stay
+# in sync with their cross-references so the fragment anchor still
+# resolves to its ``<li>`` after sanitization. Same whitespace /
+# quote-style tolerance as ``_CITE_ID_IN_BIB_RE``.
+_CITE_HREF_RE = re.compile(
+    r'(href\s*=\s*(["\']))#cite-([^"\']+)\2',
+    re.IGNORECASE,
+)
+# Chars HTML5 + CSS-selector + React all accept in id values without
+# special encoding; everything else gets collapsed to a single ``-``.
+# Underscore is included because it is HTML5-id-safe and appears in
+# some upstream citation labels.
+_UNSAFE_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _has_class_token(class_value: str, token: str) -> bool:
+    """Return True iff ``token`` appears as a CSS class in ``class_value``.
+
+    Splits on whitespace so ``"foo myst-bibliography bar"`` matches
+    ``myst-bibliography`` but ``"not-myst-bibliography"`` does not.
+
+    Args:
+        class_value (str): The raw value of an HTML ``class``
+            attribute (the content between the surrounding quotes).
+        token (str): The exact class token to look for. Compared
+            case-sensitively because mystmd's emitted classes are
+            stable case-wise.
+
+    Returns:
+        bool: True if ``token`` is one of the whitespace-separated
+            tokens in ``class_value``.
+    """
+    return token in class_value.split()
+
+
+def _sanitize_cite_id(raw: str) -> str:
+    """Collapse non-safe chars in a cite ID to ``-``, stripping edges.
+
+    The caller is responsible for HTML-entity-decoding ``raw`` first
+    so that ``cite-a&amp;b`` and the equivalent literal ``cite-a&b``
+    produce the same sanitized form. Without that step the SSR side
+    would sanitize to ``a-amp-b`` while React's client side — which
+    builds the id from the decoded label string — would sanitize to
+    ``a-b``, reintroducing the very mismatch this pass is meant to
+    eliminate.
+
+    Args:
+        raw (str): The original suffix after ``cite-``, already
+            HTML-entity-decoded (e.g. the URL
+            ``https://doi.org/10.48550/arxiv.quant-ph/0407010``).
+
+    Returns:
+        str: An id-safe suffix using only ``[A-Za-z0-9_-]`` with no
+            leading or trailing ``-``. Always non-empty for non-empty
+            input.
+    """
+    safe = _UNSAFE_ID_CHARS.sub("-", raw).strip("-")
+    return safe or "id"
+
+
+def _decode_id_raw(raw: str) -> str:
+    """HTML-entity-decode a raw id suffix.
+
+    React computes the bibliography ``<li>`` id from the citation's
+    decoded label, not from the SSR-encoded form, so we have to
+    normalize entities before sanitizing. ``cite-a&amp;b`` and
+    ``cite-a&b`` must therefore collapse to the same sanitized id.
+
+    Args:
+        raw (str): Raw id suffix as captured by the regex (may
+            contain HTML entities such as ``&amp;``).
+
+    Returns:
+        str: The same suffix with HTML entities decoded.
+    """
+    import html
+
+    return html.unescape(raw)
+
+
+def _decode_href_raw(raw: str) -> str:
+    """Percent-decode then HTML-entity-decode a fragment label.
+
+    A ``href="#cite-…"`` value can carry both ``%xx`` percent-encoding
+    (browser-level URL escaping) and HTML entities (HTML-level
+    escaping), in either order. Decode both so the resulting key
+    matches the ``_decode_id_raw`` output of the corresponding ``<li>``
+    id and the cross-reference can be rewritten consistently.
+
+    Args:
+        raw (str): Raw fragment suffix as captured by the regex.
+
+    Returns:
+        str: ``raw`` after URL percent-decoding followed by HTML-
+            entity decoding.
+    """
+    import html
+    from urllib.parse import unquote
+
+    return html.unescape(unquote(raw))
+
+
+def sanitize_cite_ids(html_path: Path) -> bool:
+    """Rewrite mystmd's ``<li id="cite-…">`` ids to match React's client compute.
+
+    Background: mystmd renders bibliography entries with HTML ids of
+    the form ``id="cite-<label>"``. For citations resolved by DOI, the
+    ``<label>`` is the full URL — containing ``/``, ``:``, and ``.``,
+    none of which the SSR'd HTML and React's client computation agree
+    on during hydration. The result on every page that ships a
+    DOI-style citation (mottonen, qsci, …) is a cascade of ~150 React
+    #418 hydration-mismatch errors, each of which recovers by re-
+    rendering its enclosing subtree client-side, which manifests to
+    the user as a multi-second flicker of the cell outputs sitting
+    near the bibliography. Removing it at the source is the
+    structural fix.
+
+    Strategy: only touch the SSR ``<section class="…myst-bibliography
+    …">`` block, scoped by a proper CSS-class-token check (so
+    ``class="not-myst-bibliography"`` does NOT match). Within that
+    scope, collect every ``id="cite-<raw>"``, HTML-entity-decode the
+    raw label, compute its sanitized form, and build a one-pass
+    ``{decoded → sanitized}`` map. Then:
+
+    1. Rewrite the ``id`` attributes inside the bibliography section
+       using the map (matched by decoded label, not the SSR raw, so
+       both ``cite-a&amp;b`` and the equivalent ``cite-a&b`` collapse
+       to one entry).
+    2. Rewrite any matching ``href="#cite-…"`` fragment cross-
+       references anywhere in the document using the same map. A
+       fragment whose decoded label is not in the map is left alone
+       — it points at something that isn't a bibliography ``<li>``
+       and isn't ours to rewrite. Percent-encoded and HTML-entity-
+       encoded forms are both decoded before lookup, so
+       ``#cite-https%3A%2F%2F…`` or ``#cite-a&amp;b`` still match the
+       original ``<li>`` label.
+
+    Collisions: any path that would produce two ``<li>`` elements
+    sharing the same sanitized ``id`` value fails loudly because the
+    resulting HTML would be invalid and fragment navigation would
+    pick one of the duplicates arbitrarily. Two such paths are
+    detected and both raise ``RuntimeError``:
+
+    1. **Distinct decoded labels** that happen to collapse to the
+       same sanitized form (e.g. ``cite-a/b`` and ``cite-a:b`` both
+       become ``cite-a-b``).
+    2. **Repeated decoded occurrences** — the same decoded label
+       appearing as multiple SSR ``id`` attributes. E.g.
+       ``cite-a&amp;b`` and ``cite-a&b`` are two ``<li>`` items
+       whose ``id`` values decode to the same string (``a&b``), so
+       both would rewrite to ``cite-a-b``. The SSR is already
+       broken in that case (duplicate ids at the DOM level) but
+       otherwise our pass would silently fan the encoded forms into
+       the canonical one and hide the upstream issue.
+
+    Idempotent: re-running on a sanitized HTML is a no-op — the
+    sanitized labels match the unchanged sanitized form, and no
+    ``id`` / ``href`` ends up actually rewritten.
+
+    Args:
+        html_path (Path): The HTML file to patch in place.
+
+    Returns:
+        bool: True if at least one ``id`` or ``href`` was rewritten,
+            False otherwise (page carries no bibliography section,
+            no citation ids inside it, or the ids were already
+            sanitized).
+
+    Raises:
+        RuntimeError: If two distinct decoded citation labels collapse
+            to the same sanitized form, or if the same decoded label
+            appears as multiple SSR ``id`` occurrences. Either case
+            would create duplicate ``id`` attributes on the rendered
+            page.
+    """
+    content = html_path.read_text(encoding="utf-8")
+
+    # Pass 1: walk every ``<section>``, keep only those whose class
+    # attribute actually contains ``myst-bibliography`` as a CSS
+    # token, and collect both the unique decoded labels (for the
+    # ``decoded → sanitized`` rewrite map) and every per-id-attribute
+    # occurrence (so we can detect duplicate-id outputs in pass 2 of
+    # the collision check).
+    decoded_to_sanitized: dict[str, str] = {}
+    sanitized_origins: dict[str, list[str]] = {}
+    sanitized_occurrences: dict[str, list[str]] = {}  # sanitized -> raw[]
+    bibliography_spans: list[tuple[int, int]] = []
+    for section_match in _SECTION_RE.finditer(content):
+        attrs = section_match.group("attrs")
+        class_match = _CLASS_ATTR_RE.search(attrs)
+        if class_match is None:
+            continue
+        if not _has_class_token(class_match.group("value"), "myst-bibliography"):
+            continue
+        bibliography_spans.append((section_match.start(), section_match.end()))
+        for id_match in _CITE_ID_IN_BIB_RE.finditer(section_match.group(0)):
+            raw = id_match.group(3)
+            decoded = _decode_id_raw(raw)
+            sanitized = _sanitize_cite_id(decoded)
+            sanitized_occurrences.setdefault(sanitized, []).append(raw)
+            if decoded in decoded_to_sanitized:
+                continue
+            decoded_to_sanitized[decoded] = sanitized
+            sanitized_origins.setdefault(sanitized, []).append(decoded)
+
+    if not decoded_to_sanitized:
+        return False  # no bibliography or no cite ids inside one
+
+    # Collision check before we mutate anything. Two failure modes:
+    #   1. Two *distinct* decoded labels collapse to the same
+    #      sanitized form (e.g. ``cite-a/b`` and ``cite-a:b`` both
+    #      become ``cite-a-b``).
+    #   2. The *same* decoded label appears as multiple SSR ``id``
+    #      occurrences (e.g. ``cite-a&amp;b`` and ``cite-a&b`` are two
+    #      `<li>` items in the source that both decode to ``a&b`` and
+    #      would both rewrite to ``cite-a-b``). The SSR is already
+    #      broken in that case — duplicate ids at the DOM level — but
+    #      our sanitizer otherwise silently fans them into the
+    #      canonical form and hides the upstream issue. Fail loud
+    #      either way so the build never ships a page with duplicate
+    #      bibliography ids.
+    distinct_collisions = {s: rs for s, rs in sanitized_origins.items() if len(rs) > 1}
+    occurrence_collisions = {
+        s: rs for s, rs in sanitized_occurrences.items() if len(rs) > 1
+    }
+    if distinct_collisions or occurrence_collisions:
+        parts: list[str] = []
+        for sanitized, decoded_raws in sorted(distinct_collisions.items()):
+            parts.append(f"{sanitized!r} <- distinct labels {sorted(decoded_raws)!r}")
+        for sanitized, raw_occurrences in sorted(occurrence_collisions.items()):
+            if sanitized in distinct_collisions:
+                continue  # already reported with richer detail
+            parts.append(
+                f"{sanitized!r} <- repeated occurrences {sorted(raw_occurrences)!r}"
+            )
+        details = "; ".join(parts)
+        raise RuntimeError(
+            f"{html_path}: bibliography citation ids would collapse to "
+            f"duplicate sanitized values, which would produce duplicate "
+            f"id attributes on the page: {details}"
+        )
+
+    # If every decoded label is already its own sanitized form, no
+    # rewriting is needed — early-exit to keep idempotency cheap.
+    if all(decoded == sanitized for decoded, sanitized in decoded_to_sanitized.items()):
+        return False
+
+    # Pass 2: rewrite ids only inside bibliography section spans.
+    # ``match.group(1)`` is the captured prefix up to and including
+    # the opening quote; ``match.group(2)`` is the quote char alone,
+    # which we reuse as the closing quote so single-quoted attributes
+    # keep their single quotes.
+    def _id_repl(match: re.Match[str]) -> str:
+        decoded = _decode_id_raw(match.group(3))
+        sanitized = decoded_to_sanitized.get(decoded, match.group(3))
+        return f"{match.group(1)}cite-{sanitized}{match.group(2)}"
+
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in bibliography_spans:
+        pieces.append(content[cursor:start])
+        pieces.append(_CITE_ID_IN_BIB_RE.sub(_id_repl, content[start:end]))
+        cursor = end
+    pieces.append(content[cursor:])
+    new_content = "".join(pieces)
+
+    # Pass 3: rewrite fragment cross-references anywhere using the
+    # same map. Unknown fragments (decoded label not in the map) are
+    # passed through — they point at non-bibliography anchors. Same
+    # group layout as ``_id_repl``: 1 = prefix-with-opening-quote,
+    # 2 = quote char, 3 = raw value after ``#cite-``.
+    def _href_repl(match: re.Match[str]) -> str:
+        decoded = _decode_href_raw(match.group(3))
+        sanitized = decoded_to_sanitized.get(decoded)
+        if sanitized is None or sanitized == match.group(3):
+            return match.group(0)
+        return f"{match.group(1)}#cite-{sanitized}{match.group(2)}"
+
+    new_content = _CITE_HREF_RE.sub(_href_repl, new_content)
+
+    if new_content == content:
+        return False
+    html_path.write_text(new_content, encoding="utf-8")
+    return True
+
+
 def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
     """Rewrite ``docs/_build_src/<lang>/`` → ``docs/<lang>/`` in ``target_path``.
 
@@ -475,7 +919,7 @@ def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
 
 def patch_language_build(
     docs_root: Path, language: str
-) -> tuple[int, int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int, int, int]:
     """Run all post-build patches for one language's build output.
 
     Patches applied:
@@ -496,10 +940,35 @@ def patch_language_build(
        on every ``*.html`` (see :func:`inject_lightbox_script_tag`)
        so wide cell-output images become click-to-zoom modals on the
        rendered page.
+    6. Sanitize bibliography ``<li id="cite-…">`` ids to
+       ``[A-Za-z0-9_-]`` (see :func:`sanitize_cite_ids`). DOI-resolved
+       citations otherwise carry ids whose ``/`` / ``:`` chars cause
+       React hydration to fail-and-recover in a cascade visible as a
+       multi-second flicker around the bibliography.
+
+    Args:
+        docs_root (Path): Repository ``docs/`` directory. The function
+            reads its source assets from ``docs/assets/`` and writes
+            into ``docs/<language>/_build/html/``.
+        language (str): Language slug — ``"en"`` or ``"ja"``. Drives
+            both the build-output directory and the source-path
+            rewrite needle.
 
     Returns:
-        ``(injected_count, rewritten_count, css_inlined_count,
-        theme_init_count, lightbox_count, total_html, total_json)``.
+        tuple[int, int, int, int, int, int, int, int]: An 8-tuple of
+            counters in the form ``(injected_count, rewritten_count,
+            css_inlined_count, theme_init_count, lightbox_count,
+            cite_sanitized_count, total_html, total_json)``. The
+            first six are how many files each pass actually rewrote;
+            the last two are the universe sizes the passes iterated
+            over (every ``*.html`` / ``*.json`` under the build
+            output) and are reported alongside so the audit print in
+            ``main`` can render ``X/Y`` ratios.
+
+    Raises:
+        RuntimeError: If the language's build directory or one of the
+            source asset scripts (``colab-launch.js`` /
+            ``lightbox.js``) is missing.
     """
     html_root = docs_root / language / "_build" / "html"
     if not html_root.exists():
@@ -528,6 +997,7 @@ def patch_language_build(
     css_inlined_count = 0
     theme_init_count = 0
     lightbox_count = 0
+    cite_sanitized_count = 0
 
     # Rewrite build-dir paths across HTML + JSON. JSON is the SPA's data
     # layer; without rewriting it, post-navigation re-hydration puts the
@@ -560,6 +1030,8 @@ def patch_language_build(
         relative_lightbox = Path(relative_lightbox).as_posix()
         if inject_lightbox_script_tag(html_file, relative_lightbox):
             lightbox_count += 1
+        if sanitize_cite_ids(html_file):
+            cite_sanitized_count += 1
 
     return (
         injected_count,
@@ -567,6 +1039,7 @@ def patch_language_build(
         css_inlined_count,
         theme_init_count,
         lightbox_count,
+        cite_sanitized_count,
         len(html_files),
         len(json_files),
     )
@@ -584,6 +1057,7 @@ def main() -> int:
             css_inlined_count,
             theme_init_count,
             lightbox_count,
+            cite_sanitized_count,
             total_html,
             total_json,
         ) = patch_language_build(docs_root, language)
@@ -592,6 +1066,7 @@ def main() -> int:
             f"injected lightbox script into {lightbox_count}/{total_html} HTML, "
             f"inlined theme CSS into {css_inlined_count}/{total_html} HTML, "
             f"injected theme-init script into {theme_init_count}/{total_html} HTML, "
+            f"sanitized cite ids in {cite_sanitized_count}/{total_html} HTML, "
             f"rewrote build-dir paths in {rewritten_count}/{total_html + total_json} "
             f"({total_html} HTML + {total_json} JSON)"
         )
