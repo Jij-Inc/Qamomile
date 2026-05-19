@@ -321,10 +321,10 @@ def evaluate_with_ommx(
     sample_result, spin_model: BinaryModel, ommx_instance: ommx.v1.Instance
 ) -> ommx.v1.SampleSet:
     """Decode SPIN samples, flip to BINARY, and evaluate against the OMMX instance."""
-    binary_ss = spin_model.decode_from_sampleresult(sample_result)
+    spin_ss = spin_model.decode_from_sampleresult(sample_result)
     ommx_samples = ommx.v1.Samples({})
     next_id = 0
-    for sample, occ in zip(binary_ss.samples, binary_ss.num_occurrences):
+    for sample, occ in zip(spin_ss.samples, spin_ss.num_occurrences):
         if occ <= 0:
             continue
         # SPIN (+/-1) -> BINARY (0/1): x = (1 - s) / 2
