@@ -29,10 +29,18 @@ T = TypeVar("T", bound=Handle)
 
 # Operation names whose ``consume`` call physically destroys the
 # quantum state of the target qubits (qubit handles cannot be reused,
-# and the underlying physical register is gone).  Other consumes
-# (gates, sub-kernel calls, ControlledU) only retire the SSA-style
-# handle but the physical qubits carry forward in the result handle.
+# and the underlying physical register is gone).
 _DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset({"measure", "cast"})
+
+# Operation names whose ``consume`` call drops the slice-view's bulk
+# borrow on the parent without producing a new view handle to carry
+# the ownership forward.  ``slice assignment`` is the explicit
+# borrow-return path that emits a ``ReleaseSliceViewOperation`` to
+# tell downstream IR passes about the release.  Every other
+# non-destructive op carries the ownership forward via ownership
+# transfer (the consume's caller installs the new view handle into
+# the parent's borrow table in place of the consumed one).
+_BORROW_RELEASING_CONSUME_OPS: frozenset[str] = frozenset({"slice assignment"})
 
 
 def _is_destroyed_slot_owner(owner: object) -> bool:
@@ -1651,6 +1659,59 @@ class VectorView(Vector[T]):
 
         return instance
 
+    @classmethod
+    def _wrap_unregistered(
+        cls,
+        parent: "Vector[T]",
+        sliced_av: ArrayValue,
+        length: int | UInt,
+        start_uint: UInt,
+        step_uint: UInt,
+    ) -> "VectorView[T]":
+        """Construct a ``VectorView`` without touching ``parent``'s borrow table.
+
+        :meth:`_wrap` runs the strict no-multi-view check and installs
+        the new view as the owner of its covered slots.  This factory
+        skips both — it produces a bare ``VectorView`` instance with
+        only the structural fields filled in.  The caller is
+        responsible for arranging ownership separately, typically via
+        :meth:`_transfer_borrow_to` on the predecessor view (used by
+        ``pauli_evolve`` and ``QKernel.__call__`` to carry the slice
+        ownership forward onto a freshly-minted
+        ``next_version`` / call-result ``ArrayValue``).
+
+        Args:
+            parent: The root ``Vector`` the view slices.
+            sliced_av: The result ``ArrayValue`` produced by the op
+                that's constructing the view (has ``slice_of`` /
+                ``slice_start`` / ``slice_step`` already populated).
+            length: Length of the view (``int`` or ``UInt``).
+            start_uint: Parent-space start as a ``UInt`` handle.
+            step_uint: Parent-space stride as a ``UInt`` handle.
+
+        Returns:
+            A ``VectorView`` with ``_slice_parent`` / ``_slice_start`` /
+                ``_slice_step`` set.  ``_slice_covered_indices`` is
+                ``None`` until :meth:`_transfer_borrow_to` populates it
+                from the predecessor view.
+        """
+        instance = object.__new__(cls)
+        instance.value = sliced_av
+        instance._shape = (length,)
+        instance._borrowed_indices = {}
+        instance.element_type = parent.element_type
+        instance.parent = None
+        instance.indices = ()
+        instance.name = None
+        instance.id = str(uuid.uuid4())
+        instance._consumed = False
+        instance._consumed_by = None
+        instance._slice_parent = parent
+        instance._slice_start = start_uint
+        instance._slice_step = step_uint
+        instance._slice_covered_indices = None
+        return instance
+
     def __post_init__(self) -> None:
         """Skip ``ArrayBase.__post_init__``.
 
@@ -1795,26 +1856,50 @@ class VectorView(Vector[T]):
     def consume(self, operation_name: str = "unknown") -> typing.Self:
         """Consume the view and release its parent slice-borrows.
 
-        Validates that every view-local borrow has been returned, then
-        releases the parent's record of the bulk-borrow so the parent
-        can be consumed/returned normally once the view is done (e.g.
-        passed to another ``@qkernel`` which consumes its argument).
+        Validates that every view-local borrow has been returned,
+        then dispatches on ``operation_name`` to keep the parent's
+        slice-borrow record consistent with the new strict-return
+        semantics:
 
-        For a destructive consume (``measure``, ``cast``) the view is
-        instead left parked in the parent's borrow table as a
-        destroyed-slot breadcrumb — ``super().consume()`` flips
-        ``self._consumed = True`` and ``self._consumed_by =
-        operation_name``, which is what
-        :func:`_is_destroyed_slot_owner` reads to reject subsequent
-        access at the same slot.
+        * **Destructive** (``measure`` / ``cast``): leave ``self``
+          parked in the parent's borrow table as a destroyed-slot
+          breadcrumb.  ``super().consume()`` flips
+          ``self._consumed = True`` and ``self._consumed_by =
+          operation_name``, which is what
+          :func:`_is_destroyed_slot_owner` reads to reject subsequent
+          access at the same slot.
+        * **Releasing** (``slice assignment``): drop every parent
+          entry that ``self`` currently owns.  The caller (the slice-
+          assignment frontend path) also emits a
+          ``ReleaseSliceViewOperation`` so the IR-level checker sees
+          the release.  This branch is reserved for explicit borrow-
+          return paths.
+        * **Transfer** (every other op — broadcast gates, rotation,
+          phase, ControlledU, sub-kernel call argument consumption,
+          etc.): rebind the parent's borrow entry from ``self`` to
+          the new view handle returned here.  The new view inherits
+          ``self._slice_covered_indices`` so it can be slice-assigned
+          back to the parent later — strict-return requires that
+          eventual ``parent[a:b:c] = new_view``.
+
+        Operations that produce a fresh sliced ``ArrayValue`` (e.g.
+        :func:`qamomile.circuit.frontend.operation.pauli_evolve.pauli_evolve`,
+        :class:`QKernel.__call__` for callees that return a sliced
+        array) cannot simply use the auto-returned ``new_view``
+        because the new view they build wraps a different ``Value``
+        than this consume's return.  Those op implementations call
+        :meth:`_transfer_borrow_to` after building their result so
+        the parent's borrow table tracks the right handle.
 
         Args:
             operation_name: Name of the operation consuming this view
-                (used in error messages).
+                (used in error messages and for dispatch).
 
         Returns:
-            A fresh view handle with the same backing state; the
-            returned view no longer holds the parent's slice-borrow.
+            A fresh view handle with the same backing state; under
+            transfer the parent's borrow table now points at this
+            handle, under release / destruction the parent's record
+            for the covered slots is finalised.
 
         Raises:
             QubitConsumedError: If any covered slot was already
@@ -1823,6 +1908,7 @@ class VectorView(Vector[T]):
         """
         self.validate_all_returned()
         is_destructive = operation_name in _DESTRUCTIVE_CONSUME_OPS
+        is_releasing = operation_name in _BORROW_RELEASING_CONSUME_OPS
 
         # A prior destructive view consume can leave a destroyed-slot
         # breadcrumb in the parent's borrow table; reject the consume
@@ -1849,23 +1935,105 @@ class VectorView(Vector[T]):
                     operation_name=operation_name,
                 )
 
+        new_view = super().consume(operation_name)
+        new_view._slice_parent = self._slice_parent
+        new_view._slice_start = self._slice_start
+        new_view._slice_step = self._slice_step
+
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
                 key = (f"const:{idx}",)
                 owner = self._slice_parent._borrowed_indices.get(key)
                 if is_destructive:
-                    # Destructive consume: keep the view parked under
+                    # Destructive consume: keep ``self`` parked under
                     # this slot so ``_is_destroyed_slot_owner`` can
                     # surface the destruction to later accesses.
                     continue
                 if owner is self:
-                    del self._slice_parent._borrowed_indices[key]
-        new_view = super().consume(operation_name)
-        new_view._slice_parent = self._slice_parent
-        new_view._slice_start = self._slice_start
-        new_view._slice_step = self._slice_step
-        new_view._slice_covered_indices = None  # parent already released
+                    if is_releasing:
+                        del self._slice_parent._borrowed_indices[key]
+                    else:
+                        # Transfer ownership to the new view handle.
+                        self._slice_parent._borrowed_indices[key] = new_view
+
+        # ``_slice_covered_indices`` on the returned handle:
+        #   destructive / releasing — None (parent state finalised; the
+        #     handle has nothing left to claim)
+        #   transfer — same as ``self``'s coverage; the new view is the
+        #     live owner of those slots.
+        if is_destructive or is_releasing:
+            new_view._slice_covered_indices = None
+        else:
+            new_view._slice_covered_indices = self._slice_covered_indices
         return new_view
+
+    def _transfer_borrow_to(
+        self,
+        new_owner: "VectorView[T]",
+        operation_name: str,
+    ) -> None:
+        """Hand ownership of this view's parent slots to ``new_owner``.
+
+        Used by op implementations that build a fresh ``VectorView``
+        wrapper for the result of a transferring op (e.g.
+        ``pauli_evolve``'s next-versioned ``ArrayValue`` or
+        ``QKernel.__call__``'s slice-shaped return value).
+        :meth:`consume` cannot do this transfer on its own because the
+        auto-returned new view handle wraps ``self.value`` rather than
+        the op's freshly minted result value.
+
+        The method:
+
+        1. Validates and runs the destroyed-slot precondition check
+           (mirroring :meth:`consume`).
+        2. Marks ``self`` as consumed via :meth:`Handle.consume`
+           bookkeeping (sets ``_consumed`` / ``_consumed_by``).
+        3. Rebinds every parent borrow entry currently owned by
+           ``self`` to ``new_owner``.
+        4. Hands the covered-indices set to ``new_owner`` so it can
+           be slice-assigned back to the parent later.
+
+        The caller must have already populated ``new_owner``'s
+        ``_slice_parent``, ``_slice_start``, ``_slice_step`` and
+        ``value`` fields before invoking this method.
+
+        Args:
+            new_owner: The freshly-built ``VectorView`` that should
+                take over ``self``'s bulk-borrow on the parent.
+            operation_name: Name of the transferring operation
+                (recorded on ``self._consumed_by`` for error messages).
+
+        Raises:
+            QubitConsumedError: If any covered slot was already
+                destroyed by a prior destructive view consume on an
+                overlapping view that has since gone out of scope.
+        """
+        self.validate_all_returned()
+        if self._slice_covered_indices is not None:
+            already_destroyed = sorted(
+                idx
+                for idx in self._slice_covered_indices
+                if _is_destroyed_slot_owner(
+                    self._slice_parent._borrowed_indices.get((f"const:{idx}",))
+                )
+            )
+            if already_destroyed:
+                raise QubitConsumedError(
+                    f"Cannot consume view of '{self._slice_parent.value.name}' "
+                    f"via '{operation_name}': slot(s) {already_destroyed} were "
+                    f"already destroyed by a prior destructive view operation "
+                    f"on overlapping slots.",
+                    handle_name=self._slice_parent.value.name or "array",
+                    operation_name=operation_name,
+                )
+        self._consumed = True
+        self._consumed_by = operation_name
+        if self._slice_covered_indices is not None:
+            for idx in self._slice_covered_indices:
+                key = (f"const:{idx}",)
+                if self._slice_parent._borrowed_indices.get(key) is self:
+                    self._slice_parent._borrowed_indices[key] = new_owner
+        new_owner._slice_covered_indices = self._slice_covered_indices
 
     def _nested_slice(self, s: slice) -> "VectorView[T]":
         """Compose a nested slice into a single view over the same parent.

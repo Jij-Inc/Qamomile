@@ -622,6 +622,7 @@ class TestVectorViewAsKernelArgument:
             q = qmc.qubit_array(num, "q")
             evens = q[0::2]
             evens = h_all(evens)
+            q[0::2] = evens
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
@@ -662,6 +663,8 @@ class TestVectorViewAsKernelArgument:
             evens = q[0::2]
             odds = q[1::2]
             evens, odds = cx_alt_layer(evens, odds)
+            q[0::2] = evens
+            q[1::2] = odds
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
@@ -675,13 +678,15 @@ class TestVectorViewAsKernelArgument:
         expected = [(2 * i, 2 * i + 1) for i in range(n // 2)]
         assert pairs == expected
 
-    def test_view_consumption_releases_parent_bulk_borrow(self):
-        """Passing a view to a kernel releases the parent slice-borrow.
+    def test_view_consumption_transfers_parent_bulk_borrow(self):
+        """Passing a view to a sub-kernel transfers the bulk-borrow to the result handle.
 
-        After the call, the parent's covered slots can be accessed
-        directly again — otherwise a subsequent ``q[0]`` would be
-        rejected as "held by a slice view".
+        Under strict-return the parent slot stays locked after the
+        call — ownership is transferred from the original view to the
+        sub-kernel's return value, not released.  Slice-assigning the
+        returned view back releases the parent's slot.
         """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -690,16 +695,31 @@ class TestVectorViewAsKernelArgument:
                 q[i] = qmc.h(q[i])
             return q
 
+        # Without the slice-assign return, ``q[0]`` is still held by
+        # the returned view.
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Qubit]:
+        def kern_no_return() -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(4, "q")
             evens = q[0:4:2]
             evens = h_all(evens)
             del evens
-            q[0] = qmc.x(q[0])  # must be accessible again
+            q[0] = qmc.x(q[0])
             return q
 
-        assert circuit.block is not None
+        with pytest.raises(QubitConsumedError, match="held by a VectorView slice"):
+            _ = kern_no_return.block
+
+        # The strict-return form releases the borrow before touching q[0].
+        @qmc.qkernel
+        def kern_with_return() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            evens = h_all(evens)
+            q[0:4:2] = evens
+            q[0] = qmc.x(q[0])
+            return q
+
+        assert kern_with_return.block is not None
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +812,7 @@ class TestViewAsKernelOperandViaCallBlock:
             q = qmc.qubit_array(num, "q")
             evens = q[0::2]
             evens = apply_h(evens)
+            q[0::2] = evens
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
@@ -1128,6 +1149,7 @@ class TestWholeViewEmit:
             q = qmc.qubit_array(4, "q")
             view = q[1::2]
             view = qmc.pauli_evolve(view, H, gamma)
+            q[1::2] = view
             return qmc.measure(q)
 
         H_op = qm_o.Z(0) * qm_o.Z(1)
@@ -1232,6 +1254,7 @@ class TestWholeViewEmit:
             cz = qmc.controlled(_zgate, num_controls=1)
             view = q[1::2]
             view = cz(view, target_indices=[1])
+            q[1::2] = view
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()

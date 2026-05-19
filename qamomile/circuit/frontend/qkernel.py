@@ -424,10 +424,41 @@ class QKernel(Generic[P, R]):
                 key = parent._make_indices_key(indices)
                 parent._borrowed_indices.pop(key, None)
 
+        # Slice-view inputs need their bulk-borrow transferred onto the
+        # call's result handles under strict-return.  Stash the
+        # pre-consume metadata so the result-wrapping loop can pair
+        # each sliced result ``ArrayValue`` with its originating input
+        # view by (root_logical_id, slice_start_uuid, slice_step_uuid)
+        # — a single root may have multiple disjoint views (e.g.
+        # ``q[0::2]`` and ``q[1::2]``) so logical_id alone is not
+        # specific enough.
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        input_view_metas: dict[tuple[str, str | None, str | None], VectorView[Any]] = {}
+        for name, handle in bound_args.arguments.items():
+            if isinstance(handle, VectorView) and handle._should_enforce_linear():
+                root_av = handle.value
+                while root_av.slice_of is not None:
+                    root_av = root_av.slice_of
+                start_uuid = (
+                    handle._slice_start.value.uuid if handle._slice_start else None
+                )
+                step_uuid = (
+                    handle._slice_step.value.uuid if handle._slice_step else None
+                )
+                input_view_metas[(root_av.logical_id, start_uuid, step_uuid)] = handle
+
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
                 continue
-            # Consume quantum handles to enforce affine type
+            # ``VectorView`` argument consumption is deferred to
+            # ``_transfer_borrow_to`` after the call so the parent's
+            # borrow record can be rebound straight onto the result
+            # handle.  Everything else takes the regular ``consume``
+            # path to enforce affine type.
+            if isinstance(handle, VectorView) and handle._should_enforce_linear():
+                inputs_map[name] = handle.value
+                continue
             if handle._should_enforce_linear():
                 handle = handle.consume(operation_name=f"QKernel[{self.name}]")
             inputs_map[name] = handle.value
@@ -470,6 +501,39 @@ class QKernel(Generic[P, R]):
                 else:
                     # Fallback: empty shape (will need runtime resolution)
                     shape = ()
+
+                # If the result has slice metadata and we have a
+                # matching input view, wrap as ``VectorView`` and
+                # transfer the parent's bulk-borrow over.  Strict-
+                # return then demands the caller eventually slice-
+                # assign the wrapped result back to the parent.
+                if val.slice_of is not None:
+                    result_root_av = val
+                    while result_root_av.slice_of is not None:
+                        result_root_av = result_root_av.slice_of
+                    result_start_uuid = (
+                        val.slice_start.uuid if val.slice_start else None
+                    )
+                    result_step_uuid = val.slice_step.uuid if val.slice_step else None
+                    meta_key = (
+                        result_root_av.logical_id,
+                        result_start_uuid,
+                        result_step_uuid,
+                    )
+                    in_view = input_view_metas.get(meta_key)
+                    if in_view is not None and in_view._slice_parent is not None:
+                        length = shape[0] if shape else val.shape[0]
+                        new_view = VectorView._wrap_unregistered(
+                            parent=in_view._slice_parent,
+                            sliced_av=val,
+                            length=length,
+                            start_uint=in_view._slice_start,
+                            step_uint=in_view._slice_step,
+                        )
+                        in_view._transfer_borrow_to(new_view, f"QKernel[{self.name}]")
+                        wrapped_results.append(new_view)
+                        continue
+
                 wrapped_results.append(
                     actual_class._create_from_value(value=val, shape=shape)
                 )

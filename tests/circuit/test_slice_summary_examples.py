@@ -123,6 +123,7 @@ def _section_1_7(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(num, "q")
     evens = q[0::2]
     evens = _h_all(evens)
+    q[0::2] = evens
     return qmc.measure(q)
 
 
@@ -525,6 +526,46 @@ def _ng_e_strict_return_violation() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
+@qmc.qkernel
+def _ng_f_broadcast_no_return() -> qmc.Vector[qmc.Bit]:
+    """NG F: broadcast gate transferred bulk-borrow but caller never returned the view."""
+    q = qmc.qubit_array(4, "q")
+    view = q[0::2]
+    view = qmc.h(view)  # ownership transferred to ``view``
+    # Missing ``q[0::2] = view`` — strict-return policy rejects.
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _h_pair(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Sub-kernel: H broadcast over a length-2 register."""
+    for i in qmc.range(2):
+        q[i] = qmc.h(q[i])
+    return q
+
+
+@qmc.qkernel
+def _ng_g_qkernel_call_no_return() -> qmc.Vector[qmc.Bit]:
+    """NG G: sub-kernel call transferred bulk-borrow but caller never returned the view."""
+    q = qmc.qubit_array(4, "q")
+    view = q[0:2]
+    view = _h_pair(view)  # ownership transferred to ``view``
+    # Missing ``q[0:2] = view`` — strict-return policy rejects.
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ng_h_pauli_evolve_no_return(
+    H: qmc.Observable, gamma: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """NG H: pauli_evolve transferred bulk-borrow but caller never returned the view."""
+    q = qmc.qubit_array(4, "q")
+    view = q[0::2]
+    view = qmc.pauli_evolve(view, H, gamma)  # ownership transferred to ``view``
+    # Missing ``q[0::2] = view`` — strict-return policy rejects.
+    return qmc.measure(q)
+
+
 class TestSection_2_NegativePatterns:
     """Section 2 NG patterns must raise the documented error type."""
 
@@ -567,3 +608,34 @@ class TestSection_2_NegativePatterns:
 
         with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
             _ = _ng_e_strict_return_violation.block
+
+    def test_ng_f_broadcast_no_return_raises(self):
+        """``view = qmc.h(view); measure(q)`` is rejected — the broadcast
+        transferred the bulk-borrow onto ``view`` but the caller never
+        slice-assigned it back.
+        """
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = _ng_f_broadcast_no_return.block
+
+    def test_ng_g_qkernel_call_no_return_raises(self):
+        """``view = sub_kernel(view); measure(q)`` is rejected — the
+        sub-kernel call transferred the bulk-borrow onto ``view`` but
+        the caller never slice-assigned it back.
+        """
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = _ng_g_qkernel_call_no_return.block
+
+    def test_ng_h_pauli_evolve_no_return_raises(self):
+        """``view = qmc.pauli_evolve(view, ...); measure(q)`` is
+        rejected for the same reason: pauli_evolve transferred the
+        bulk-borrow onto ``view`` and the caller never slice-assigned
+        it back.
+        """
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
+            _ = _ng_h_pauli_evolve_no_return.block

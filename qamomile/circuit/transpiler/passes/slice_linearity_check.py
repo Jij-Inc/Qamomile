@@ -578,9 +578,10 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 covered = self._collect_view_coverage(v)
                 if covered is None:
                     # Symbolic bounds — release anything owned by this
-                    # specific view uuid (no partial consumption
-                    # semantic possible without concrete coverage).
-                    self._release_by_owner_uuid(v.uuid, state)
+                    # specific view's logical_id (no partial
+                    # consumption semantic possible without concrete
+                    # coverage).
+                    self._release_by_owner_logical_id(v.logical_id, state)
                     continue
                 view_root = _root_of(v)
                 for slot in covered:
@@ -618,21 +619,27 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 for k in to_consume:
                     state[k] = _CONSUMED_SLOT
 
-    def _release_by_owner_uuid(self, uuid: str, state: State) -> None:
-        """Drop every state entry whose direct owner has the given uuid.
+    def _release_by_owner_logical_id(self, logical_id: str, state: State) -> None:
+        """Drop every state entry whose direct owner has the given logical_id.
 
-        Used for symbolic-bound view release when we can't enumerate
-        coverage.  Only entries whose owner ArrayValue uuid matches
-        are removed; unrelated root-space consumed markers stay put.
+        Used for slice-view release.  Matching is by ``logical_id``
+        (stable across ``next_version`` bumps) rather than ``uuid`` so
+        that frontend ops which produce a fresh SSA-versioned
+        ``ArrayValue`` for the same logical view (e.g. ``pauli_evolve``
+        on a slice, or a sub-kernel call whose result preserves the
+        slice chain) still release the original registration.  Only
+        entries whose owner is an ``ArrayValue`` are considered;
+        unrelated root-space consumed markers stay put.
 
         Args:
-            uuid: The ArrayValue uuid whose ownership should be cleared.
+            logical_id: The ArrayValue logical_id whose ownership
+                should be cleared.
             state: Mutable borrow tracker.
         """
         to_remove = [
             k
             for k, owner in state.items()
-            if isinstance(owner, ArrayValue) and owner.uuid == uuid
+            if isinstance(owner, ArrayValue) and owner.logical_id == logical_id
         ]
         for k in to_remove:
             del state[k]
@@ -641,11 +648,12 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         """Apply a slice-assignment release to ``state``.
 
         Mirrors the frontend's ``VectorView.consume(operation_name=
-        'slice assignment')``: every state entry whose owner is the
-        view ``ArrayValue`` is removed.  Reuses
-        :meth:`_release_by_owner_uuid` since "release this view's
-        slots" is the same operation as the symbolic-bound view
-        release used elsewhere.
+        'slice assignment')``: every state entry whose owner has the
+        same logical_id as ``view_value`` is removed.  Matching is by
+        ``logical_id`` (not ``uuid``) so a release on a fresh
+        SSA-versioned view (the result of ``pauli_evolve`` on a slice,
+        a sub-kernel call returning the slice, etc.) still releases the
+        original registration.
 
         When called from inside a control-flow body, refuses to drop
         any entry that the enclosing block already owned (the
@@ -670,7 +678,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         if not isinstance(view_value, ArrayValue):
             return
 
-        target_uuid = view_value.uuid
+        target_logical_id = view_value.logical_id
         outer_snapshot = (
             self._outer_snapshot_stack[-1] if self._outer_snapshot_stack else None
         )
@@ -679,7 +687,8 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             offenders = [
                 k
                 for k, owner in outer_snapshot.items()
-                if isinstance(owner, ArrayValue) and owner.uuid == target_uuid
+                if isinstance(owner, ArrayValue)
+                and owner.logical_id == target_logical_id
             ]
             if offenders:
                 raise SliceLinearityViolationError(
@@ -694,7 +703,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     f"control-flow region."
                 )
 
-        self._release_by_owner_uuid(target_uuid, state)
+        self._release_by_owner_logical_id(target_logical_id, state)
 
     def _guard_drain_against_outer_snapshot(
         self,
