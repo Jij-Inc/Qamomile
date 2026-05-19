@@ -317,9 +317,11 @@ class UnreturnedBorrowAtBlockEndError(AffineTypeError):
     Raised by :class:`SliceLinearityCheckPass` when the root block's
     operation sequence finishes with a slice view still recorded as
     the owner of one or more parent slots — i.e. a view that was
-    sliced but never used (so opportunistic drain didn't fire) and
-    never destructively consumed (so the consumed-slot marker wasn't
-    installed either).
+    sliced but never returned via slice assignment
+    (``parent[a:b:c] = view``), never destructively consumed
+    (``measure`` / ``cast``), and never consumed by passing it to a
+    sub-kernel.  Strict-return requires every view to be released
+    explicitly before the parent is consumed.
 
     Direct element borrows (``q[i]``) emit no IR operation, so this
     IR-level pass does **not** detect them; that path is covered by
@@ -334,19 +336,23 @@ class UnreturnedBorrowAtBlockEndError(AffineTypeError):
         @qmc.qkernel
         def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(4, "q")
-            view = q[lo:hi]    # slice constructed but never used
-            return q           # → UnreturnedBorrowAtBlockEndError after
-                               #   bindings make {lo, hi} concrete
+            view = q[lo:hi]
+            for i in qmc.range(view.shape[0]):
+                view[i] = qmc.h(view[i])
+            return q   # → UnreturnedBorrowAtBlockEndError once bindings
+                       #   make {lo, hi} concrete and the pass sees
+                       #   ``view`` still owning slots on ``q``.
 
-    Correct code either uses the view (so opportunistic drain
-    releases the parent slots) or skips slicing it::
+    Correct code returns the view via slice assignment before
+    ``q`` is consumed::
 
         @qmc.qkernel
         def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(4, "q")
             view = q[lo:hi]
             for i in qmc.range(view.shape[0]):
-                view[i] = qmc.h(view[i])  # use the view; parent released
+                view[i] = qmc.h(view[i])
+            q[lo:hi] = view    # explicit return
             return q
     """
 

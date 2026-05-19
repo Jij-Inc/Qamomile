@@ -42,19 +42,12 @@ def _is_destroyed_slot_owner(owner: object) -> bool:
     owner is a ``VectorView`` that has been destructively consumed
     (``view._consumed`` is ``True`` and the recorded
     ``_consumed_by`` operation name is in
-    ``_DESTRUCTIVE_CONSUME_OPS``).  Under the strict no-multi-view
-    policy, a destroyed view stays in the parent's borrow table as
-    the slot's owner until it goes out of scope; that persistence
-    is what lets subsequent direct parent access at the same slot
-    index fail loudly with ``QubitConsumedError`` rather than
-    silently overwriting the destroyed qubit.
-
-    This helper replaces the prior ``isinstance(owner,
-    _ConsumedSlotMarker)`` check that lived against a dedicated
-    sentinel class.  Folding the destroyed-slot signal into the
-    view's own state (rather than a side-channel sentinel) means
-    there is one less type to thread through ``_borrowed_indices``
-    annotations and one less place to forget to handle.
+    ``_DESTRUCTIVE_CONSUME_OPS``).  The destructively consumed view
+    is parked in the parent's borrow table as the slot's owner
+    until it goes out of scope; that persistence is what lets
+    subsequent direct parent access at the same slot index fail
+    loudly with ``QubitConsumedError`` rather than silently
+    overwriting the destroyed qubit.
 
     Args:
         owner: A value from ``ArrayBase._borrowed_indices`` (any of
@@ -90,10 +83,9 @@ class ArrayBase(Handle, Generic[T]):
     # obligation, so the parent can't touch it directly".  The owner
     # has two runtime variants distinguished by ``isinstance``:
     #   * ``tuple[UInt, ...]`` — direct element borrow (the index handles
-    #     borrowed).  Kept for error formatting and back-compat.
+    #     borrowed).
     #   * ``ArrayBase[T]`` — slice view ownership (the ``VectorView``
-    #     itself; used by ``validate_all_returned`` to detect drained
-    #     views).  For slice borrows only constant indices are
+    #     itself).  For slice borrows only constant indices are
     #     registered; symbolic slices skip registration (best-effort
     #     linearity).
     #
@@ -103,10 +95,7 @@ class ArrayBase(Handle, Generic[T]):
     # slot's owner — ``view._consumed`` is ``True`` and
     # ``view._consumed_by`` records the destroying operation name.
     # The :func:`_is_destroyed_slot_owner` helper centralises the
-    # check; downstream access paths use it instead of ``isinstance``
-    # against a dedicated sentinel class (which we no longer need now
-    # that the strict no-multi-view policy means there is only one
-    # ``VectorView`` per slot at any time).
+    # check.
     _borrowed_indices: dict[
         tuple[str, ...],
         "tuple[UInt, ...] | ArrayBase[T]",
@@ -1539,10 +1528,13 @@ class VectorView(Vector[T]):
         ``start``, ``step`` and ``length`` are compile-time ``int``
         constants.  While the view is live, accessing the corresponding
         parent slot directly (``q[0]`` after ``evens = q[0::2]``) raises
-        ``QubitConsumedError``.  The parent's ``validate_all_returned``
-        opportunistically releases the bulk-borrow once the view has no
-        outstanding element borrows, so normal usage — slice, loop,
-        ``return q`` / ``measure(q)`` — does not require manual release.
+        ``QubitConsumedError``.  The caller must explicitly release the
+        view before the parent is consumed — either by writing it back
+        via slice assignment (``parent[a:b:c] = view``), by passing it
+        to a sub-kernel / broadcast gate that consumes it, or by
+        destructively consuming it (``measure(view)`` / ``cast(view,
+        ...)``).  A view left bulk-borrowing at the parent's consume
+        point raises ``UnreturnedBorrowError``.
 
         Symbolic slices (``q[lo:hi]`` with ``lo``/``hi`` ``UInt``) cannot
         enumerate their covered slots at trace time and therefore skip
@@ -1563,6 +1555,7 @@ class VectorView(Vector[T]):
             evens = q[0::2]
             for i in qmc.range(evens.shape[0]):
                 evens[i] = qmc.h(evens[i])
+            q[0::2] = evens  # explicit return before the parent is used
             return q
         ```
     """
@@ -1625,24 +1618,14 @@ class VectorView(Vector[T]):
         instance._slice_covered_indices = covered_indices
 
         if covered_indices is not None and parent.value.type.is_quantum():
-            # Multi-view of overlapping ranges is forbidden: while a
-            # view is live, the parent slots it covers are locked.
-            # The user must consume / release / let the existing view
-            # go out of scope (and its destructive consume cleanup
-            # finish) before constructing a new view that touches the
-            # same slot.  Previously this code path did an
-            # "opportunistic drain" that silently re-bound the slot's
-            # owner from an unused old view to the new view; that
-            # made ``a = q[0::2]; b = q[0::2]`` succeed with
-            # surprising semantics (``a`` was effectively dead after
-            # ``b``'s construction even though it appeared live to the
-            # user).  Rejecting overlap up-front is clearer and lets
-            # us drop a dedicated "consumed slot" sentinel class — a
-            # destructively-consumed view's slots stay in the parent's
-            # borrow table under the view itself with
-            # ``view._consumed = True``, so downstream access checks
-            # can distinguish "view active" from "view destroyed" via
-            # :func:`_is_destroyed_slot_owner`.
+            # Strict no-multi-view: while a view is live, the parent
+            # slots it covers are locked.  The user must consume /
+            # release the existing view (or let its destructive consume
+            # leave a destroyed-slot breadcrumb) before constructing a
+            # new view that touches the same slot.  Without this guard,
+            # ``a = q[0::2]; b = q[0::2]`` would silently make ``a``
+            # dead after ``b``'s construction — a silent
+            # ownership-transfer that is hard to debug.
             for idx in covered_indices:
                 key = (f"const:{idx}",)
                 existing = parent._borrowed_indices.get(key)
@@ -1817,17 +1800,13 @@ class VectorView(Vector[T]):
         can be consumed/returned normally once the view is done (e.g.
         passed to another ``@qkernel`` which consumes its argument).
 
-        For a destructive consume (``measure``, ``cast``) the slot
-        marker is installed on the parent's borrow table
-        *unconditionally* — even if the parent currently records
-        ownership against a *different* view of the same slots.  That
-        situation arises from the opportunistic drain when a second
-        same-range view is sliced before the first has been used; the
-        first view's slots are silently transferred to the second view
-        in the parent's table.  Without the unconditional mark a later
-        ``measure`` on the original view would walk the slot loop, see
-        ``owner is self`` is False, and silently emit nothing — leaving
-        the second view to reach the backend over destroyed qubits.
+        For a destructive consume (``measure``, ``cast``) the view is
+        instead left parked in the parent's borrow table as a
+        destroyed-slot breadcrumb — ``super().consume()`` flips
+        ``self._consumed = True`` and ``self._consumed_by =
+        operation_name``, which is what
+        :func:`_is_destroyed_slot_owner` reads to reject subsequent
+        access at the same slot.
 
         Args:
             operation_name: Name of the operation consuming this view
@@ -1840,19 +1819,18 @@ class VectorView(Vector[T]):
         Raises:
             QubitConsumedError: If any covered slot was already
                 destroyed by a prior destructive view consume on an
-                overlapping view.
+                overlapping view that has since gone out of scope.
         """
         self.validate_all_returned()
         is_destructive = operation_name in _DESTRUCTIVE_CONSUME_OPS
 
-        # Reject the consume up-front when a prior destructive view
-        # consume has already destroyed any of our covered slots.
-        # Under the strict no-multi-view policy a second overlapping
-        # view cannot be constructed while the first is live, so the
-        # only way to land here is via slot re-use after the first
-        # destructively consumed view has gone out of scope but is
-        # still parked in the parent's borrow table as a "destroyed"
-        # breadcrumb (see :func:`_is_destroyed_slot_owner`).
+        # A prior destructive view consume can leave a destroyed-slot
+        # breadcrumb in the parent's borrow table; reject the consume
+        # up-front when any of our covered slots are in that state.
+        # Reachable only when the destructively consumed predecessor
+        # view has gone out of scope by the time the new view
+        # constructs over the same slots — strict no-multi-view
+        # rejects the easy live-overlap variant earlier in ``_wrap``.
         if self._slice_covered_indices is not None:
             already_destroyed = sorted(
                 idx
@@ -1876,17 +1854,9 @@ class VectorView(Vector[T]):
                 key = (f"const:{idx}",)
                 owner = self._slice_parent._borrowed_indices.get(key)
                 if is_destructive:
-                    # Destructive consume: leave the view (``self``)
-                    # parked in the parent's borrow table.
-                    # ``super().consume()`` below mutates
-                    # ``self._consumed = True`` and
-                    # ``self._consumed_by = operation_name``, which is
-                    # what :func:`_is_destroyed_slot_owner` will read
-                    # to recognise the slot as destroyed on subsequent
-                    # access attempts.  No replacement / overwrite of
-                    # the dict entry is needed: the destroyed-slot
-                    # signal lives on the view's own state, not on a
-                    # side-channel sentinel.
+                    # Destructive consume: keep the view parked under
+                    # this slot so ``_is_destroyed_slot_owner`` can
+                    # surface the destruction to later accesses.
                     continue
                 if owner is self:
                     del self._slice_parent._borrowed_indices[key]

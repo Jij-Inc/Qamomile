@@ -13,9 +13,10 @@ enumerable until bindings were applied:
 2. A view whose newly-concrete coverage hits a slot that was
    consumed by a destructive view operation earlier in the block.
 3. A view reaching the end of the block while still recorded as the
-   owner of its parent's slots — i.e. never released through the
-   normal opportunistic-drain or destructive-consume paths.  When
-   the state dict is non-empty at completion the pass raises
+   owner of its parent's slots — i.e. never released through a
+   slice-assign release, a registration-time drain (same-coverage
+   replacement / nested-slice handover), or a destructive consume.
+   When the state dict is non-empty at completion the pass raises
    :class:`UnreturnedBorrowAtBlockEndError`.
 
 Direct element borrows (``q[i]``) are intentionally **not** observed
@@ -201,17 +202,16 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
 
     def __init__(self) -> None:
         """Initialize per-run mutable state to safe defaults."""
-        self._used_view_uuids: set[str] = set()
         # ``_outer_snapshot_stack`` is a stack of outer ``state``
         # snapshots taken when entering a control-flow body in
         # ``_walk_nested``.  While walking inside the body, every
-        # state-mutating helper (slice registration's opportunistic
-        # drain, ReleaseSliceViewOperation handling) consults the
-        # snapshot to forbid removing entries that the enclosing
-        # block had already registered — those changes cannot be
-        # propagated out of the body by the current merge logic, so
-        # they're rejected up-front.  Empty stack means we're at the
-        # top level; only the innermost frame matters for the per-op
+        # state-mutating helper (slice registration's drain paths,
+        # ReleaseSliceViewOperation handling) consults the snapshot
+        # to forbid removing entries that the enclosing block had
+        # already registered — those changes cannot be propagated
+        # out of the body by the current merge logic, so they're
+        # rejected up-front.  Empty stack means we're at the top
+        # level; only the innermost frame matters for the per-op
         # check because nested bodies push their own snapshot.
         self._outer_snapshot_stack: list[State] = []
 
@@ -248,18 +248,6 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             )
 
         state: State = {}
-        # ``used_view_uuids`` tracks slice-view ArrayValue uuids whose
-        # elements have been referenced in any operand since the view
-        # was registered.  It is consulted by
-        # ``_register_slice_bulk_borrow_if_new`` to decide whether an
-        # overlapping new view may opportunistically drain an older
-        # one — mirroring the frontend's ``VectorView._wrap`` logic
-        # that lets ``a = q[0:3] (unused); b = q[1:4]`` succeed when
-        # ``a`` has no outstanding element borrows.  A view moves
-        # into this set the first time its elements, or the view
-        # itself as a whole ArrayValue operand, appears in an
-        # operation.
-        self._used_view_uuids = set()
         self._walk(input.operations, state)
 
         # ``_ConsumedSlotMarker`` entries are not outstanding borrows
@@ -474,23 +462,24 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             if not isinstance(v, ArrayValue):
                 continue
             if v.slice_of is not None:
-                self._used_view_uuids.add(v.uuid)
-            else:
-                # Root array whole operand: check each concrete slot.
-                shape = v.shape
-                if shape:
-                    length = self._const_int(shape[0])
-                    if length is not None:
-                        for idx in range(length):
-                            key = _const_key(v, idx)
-                            if isinstance(state.get(key), _ConsumedSlotMarker):
-                                raise SliceLinearityViolationError(
-                                    f"Whole-array operand '{v.name}' (slot {idx}) "
-                                    f"is accessed after it was consumed by a "
-                                    f"destructive view operation "
-                                    f"(e.g. measure / cast on a view); the "
-                                    f"physical qubit is no longer available."
-                                )
+                # Slice-view operand: bulk-borrow / aliasing is handled
+                # by the element-operand loop below via parent_array.
+                continue
+            # Root array whole operand: check each concrete slot.
+            shape = v.shape
+            if shape:
+                length = self._const_int(shape[0])
+                if length is not None:
+                    for idx in range(length):
+                        key = _const_key(v, idx)
+                        if isinstance(state.get(key), _ConsumedSlotMarker):
+                            raise SliceLinearityViolationError(
+                                f"Whole-array operand '{v.name}' (slot {idx}) "
+                                f"is accessed after it was consumed by a "
+                                f"destructive view operation "
+                                f"(e.g. measure / cast on a view); the "
+                                f"physical qubit is no longer available."
+                            )
 
         for v in op.operands:
             if not isinstance(v, Value):
@@ -500,14 +489,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             if not v.type.is_quantum():
                 continue
 
-            # Register any sliced ArrayValue seen via parent_array, and
-            # mark the immediate sliced parent as "used" so subsequent
-            # overlapping slices can't opportunistically drain it.
-            if (
-                isinstance(v.parent_array, ArrayValue)
-                and v.parent_array.slice_of is not None
-            ):
-                self._used_view_uuids.add(v.parent_array.uuid)
+            # Register any sliced ArrayValue seen via parent_array.
             self._register_slice_bulk_borrow_if_new(v.parent_array, state)
 
             key = self._resolve_qubit_key(v)
@@ -908,13 +890,11 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     if state.get(old_key) is other_view:
                         del state[old_key]
             else:
-                # Strict-return policy: any partial overlap with an
-                # existing live view is a linearity violation, including
-                # the previously-permissive "outer view was never used"
-                # case.  Callers must explicitly return / consume the
-                # outer view before constructing an overlapping inner
-                # view.  This matches the frontend's strict
-                # ``VectorView._wrap`` overlap check.
+                # Strict-return: partial overlap with an existing live
+                # view is a linearity violation.  Callers must
+                # explicitly return / consume the outer view before
+                # constructing an overlapping inner view.  Matches the
+                # frontend's strict ``VectorView._wrap`` overlap check.
                 raise SliceLinearityViolationError(
                     self._format_view_registration_conflict(
                         other_view,

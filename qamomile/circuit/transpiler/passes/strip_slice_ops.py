@@ -1,14 +1,15 @@
-"""Strip SliceArrayOperation nodes after slice_linearity_check has consumed them.
+"""Strip SliceArrayOperation / ReleaseSliceViewOperation after the linearity check.
 
-``SliceArrayOperation`` is purely declarative — the resulting sliced
-``ArrayValue`` carries all the emit-time metadata on its own
-(``slice_of`` / ``slice_start`` / ``slice_step``).  ``ConstantFoldingPass``
-keeps these ops around when ``strip_slice_ops=False`` so the downstream
-``SliceLinearityCheckPass`` can observe them in program order and treat
-them as view-declaration markers.  Once the linearity check has run,
-those ops are unneeded; segmentation and emission expect a pure
-quantum-op stream without classical slice declarations in the middle.
-This pass removes them and leaves the block otherwise unchanged.
+Both ops are purely declarative — the resulting sliced ``ArrayValue``
+carries all the emit-time metadata on its own (``slice_of`` /
+``slice_start`` / ``slice_step``), and the release marker only exists
+so ``SliceLinearityCheckPass`` can observe explicit slice-assignment
+borrow-returns in program order.  ``ConstantFoldingPass`` keeps these
+ops around when ``strip_slice_ops=False`` so the downstream linearity
+check can see them.  Once the linearity check has run, both ops are
+unneeded; segmentation and emission expect a pure quantum-op stream
+without classical slice declarations in the middle.  This pass removes
+them and leaves the block otherwise unchanged.
 """
 
 from __future__ import annotations
@@ -27,12 +28,12 @@ from .control_flow_visitor import OperationTransformer
 
 
 class StripSliceArrayOpsPass(Pass[Block, Block]):
-    """Remove ``SliceArrayOperation`` nodes from the block.
+    """Remove ``SliceArrayOperation`` / ``ReleaseSliceViewOperation`` nodes.
 
-    The op is only meaningful to ``SliceLinearityCheckPass`` as a
-    view-declaration marker; downstream passes (analyze, plan, emit)
-    neither need nor expect it.  Dropping the op here keeps the
-    segmentation quantum-op-only.
+    Both ops are only meaningful to ``SliceLinearityCheckPass`` as
+    view-declaration / release markers; downstream passes (analyze,
+    plan, emit) neither need nor expect them.  Dropping them here
+    keeps the segmentation quantum-op-only.
     """
 
     @property
@@ -40,20 +41,20 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
         return "strip_slice_ops"
 
     def run(self, input: Block) -> Block:
-        """Drop ``SliceArrayOperation`` nodes from ``input``.
+        """Drop slice marker ops from ``input``.
 
         Walks the operation tree (including nested control flow) and
         returns a structurally identical block with every
-        ``SliceArrayOperation`` node removed.  The sliced
-        ``ArrayValue`` results remain reachable through later
-        operands' ``parent_array`` chains, so emit-time resolution is
-        unaffected.
+        ``SliceArrayOperation`` and ``ReleaseSliceViewOperation`` node
+        removed.  The sliced ``ArrayValue`` results remain reachable
+        through later operands' ``parent_array`` chains, so emit-time
+        resolution is unaffected.
 
         Args:
             input: Block that has completed ``SliceLinearityCheckPass``.
 
         Returns:
-            A new block with all ``SliceArrayOperation`` nodes removed.
+            A new block with all slice marker ops removed.
         """
 
         class Stripper(OperationTransformer):
