@@ -6,12 +6,28 @@ time evolution operator of a Pauli Hamiltonian to a quantum state.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import cast, overload
 
 from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
 from qamomile.circuit.frontend.handle.array import VectorView
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+
+
+@overload
+def pauli_evolve(
+    q: VectorView[Qubit],
+    hamiltonian: Observable,
+    gamma: Float,
+) -> VectorView[Qubit]: ...
+
+
+@overload
+def pauli_evolve(
+    q: Vector[Qubit],
+    hamiltonian: Observable,
+    gamma: Float,
+) -> Vector[Qubit]: ...
 
 
 def pauli_evolve(

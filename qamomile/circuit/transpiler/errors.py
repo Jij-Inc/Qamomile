@@ -318,10 +318,13 @@ class UnreturnedBorrowAtBlockEndError(AffineTypeError):
     operation sequence finishes with a slice view still recorded as
     the owner of one or more parent slots — i.e. a view that was
     sliced but never returned via slice assignment
-    (``parent[a:b:c] = view``), never destructively consumed
-    (``measure`` / ``cast``), and never consumed by passing it to a
-    sub-kernel.  Strict-return requires every view to be released
-    explicitly before the parent is consumed.
+    (``parent[a:b:c] = view``) and never destructively consumed
+    (``measure`` / ``cast``).  Other consume forms (broadcast gates,
+    sub-kernel calls, ``pauli_evolve``, controlled-U ``index_spec``)
+    only *transfer* the borrow to a freshly-wrapped view; that new
+    view still has to come back through slice assignment.
+    Strict-return requires every view to be released explicitly
+    before the parent is consumed.
 
     Direct element borrows (``q[i]``) emit no IR operation, so this
     IR-level pass does **not** detect them; that path is covered by

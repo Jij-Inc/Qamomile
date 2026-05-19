@@ -27,17 +27,19 @@ nothing to track; the frontend trace-time validator
 direct-element-borrow violations.
 
 State shape: a single dict keyed by a 2-tuple
-``(root_uuid, slot_descriptor)`` where ``root_uuid`` is the uuid of
-the **root** parent ArrayValue (after walking the ``slice_of``
-chain) and ``slot_descriptor`` is ``f"const:<idx>"`` for slots
-covered by compile-time-constant slices, or ``f"sym:<view_uuid>"``
-for symbolic-bound slices that cannot be enumerated slot-wise.
+``(root_logical_id, slot_descriptor)`` where
+``root_logical_id`` is the ``logical_id`` of the **root** parent
+ArrayValue (after walking the ``slice_of`` chain) and
+``slot_descriptor`` is ``f"const:<idx>"`` for slots covered by
+compile-time-constant slices.  Symbolic-bound slices (those whose
+bounds remain non-constant post-fold) are not enumerated and are
+left to the frontend trace-time validator.
 
-Namespacing by root uuid is required so that borrow / consumed
-state on one register (``a``) does not block access to the
-identically-named slot on another register (``b``); without it,
-``measure(a[1::2])`` would incorrectly mark ``b[1]`` and ``b[3]``
-as destroyed.
+Namespacing by root logical_id is required so that borrow /
+consumed state on one register (``a``) does not block access to
+the identically-named slot on another register (``b``); without
+it, ``measure(a[1::2])`` would incorrectly mark ``b[1]`` and
+``b[3]`` as destroyed.
 
 Values are either an :class:`ArrayValue` (the slice view that owns
 the slot) or a ``_ConsumedSlotMarker`` (a slot already destroyed by
@@ -121,26 +123,6 @@ def _const_key(root_av: ArrayValue, idx: int) -> BorrowKey:
     return (root_av.logical_id, f"const:{idx}")
 
 
-def _sym_key(root_av: ArrayValue, view_uuid: str) -> BorrowKey:
-    """Build a symbolic borrow key for a view whose coverage is unresolved.
-
-    Used when a sliced view's bounds remain symbolic at the linearity
-    check site; coverage cannot be enumerated, so a single placeholder
-    keyed under the view's own uuid is registered instead.  Uses
-    ``logical_id`` for the root namespace for the same reason as
-    :func:`_const_key`.
-
-    Args:
-        root_av: The root parent ArrayValue.
-        view_uuid: The sliced ArrayValue's uuid (the view itself, not
-            the root).
-
-    Returns:
-        Two-element tuple suitable as a key into the ``State`` dict.
-    """
-    return (root_av.logical_id, f"sym:{view_uuid}")
-
-
 def _slot_descriptor(key: BorrowKey) -> str:
     """Return the human-readable slot descriptor portion of a borrow key.
 
@@ -179,7 +161,16 @@ _IR_DESTRUCTIVE_OPS: tuple[type, ...] = (
 )
 
 
-Owner = Value | ArrayValue | _ConsumedSlotMarker
+Owner = ArrayValue | _ConsumedSlotMarker
+"""Borrow-state owner discriminant.
+
+State values are always either a slice-view ``ArrayValue`` (the live
+owner of one or more parent slots) or ``_ConsumedSlotMarker`` (a
+destroyed slot).  Direct element borrows (``q[i]``) are intentionally
+not tracked by this IR-level pass — those are SSA-versioned and have
+no IR semantics worth modelling here; the frontend trace-time
+validator covers them.
+"""
 State = dict[BorrowKey, Owner]
 
 
@@ -191,8 +182,10 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
     the operations of the root block in order, maintaining a borrow
     state map modelled on the frontend's
     :attr:`ArrayBase._borrowed_indices` — a single ``dict`` whose
-    values discriminate between direct element borrows (``Value``)
-    and slice-view owners (``ArrayValue``) by ``isinstance``.
+    values are slice-view ``ArrayValue`` owners or the
+    ``_ConsumedSlotMarker`` sentinel.  Direct element borrows
+    (``q[i]``) emit no IR operation and are left to the trace-time
+    validator.
 
     At the end of the walk, any non-empty entry becomes an
     :class:`UnreturnedBorrowAtBlockEndError` — closing the pre-existing
@@ -874,6 +867,23 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             if other_full == new_covered:
                 # Same logical view — release all of the old view's
                 # registrations before installing the new one below.
+                #
+                # NB: this drain fires whenever two views resolve to the
+                # same covered set post-fold, including the (rare,
+                # symbolic-bound) sibling case where ``a = q[lo:hi]``
+                # and ``b = q[lo2:hi2]`` happen to coincide.  We cannot
+                # distinguish the legitimate version-bump / nested
+                # ``inner-equals-outer`` cases from a sibling-with-
+                # identical-coverage purely from ``logical_id`` or
+                # coverage — both nested ``outer[0:full]`` and sibling
+                # views have distinct ``logical_id``s but identical
+                # coverage.  Preserving nested provenance in IR would
+                # require keeping multi-hop ``slice_of`` chains across
+                # ``VectorView._nested_slice`` (which currently
+                # flattens to root) and is tracked as a follow-up.
+                # The frontend catches sibling overlap for concrete
+                # bounds, so this hole is limited to symbolic-bound
+                # views that resolve to coinciding ranges.
                 self._guard_drain_against_outer_snapshot(
                     other_view, av, root, "same-coverage replacement"
                 )
@@ -890,6 +900,11 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # parent (the frontend's ``_nested_slice`` does the
                 # same partial hand-off).  Slots outside ``new_covered``
                 # remain registered against the outer.
+                #
+                # NB: same provenance caveat as the ``==`` branch above
+                # — symbolic-bound sibling overlap can take this path
+                # too because IR has no provenance to distinguish it
+                # from genuine nested handoff.
                 self._guard_drain_against_outer_snapshot(
                     other_view, av, root, "nested-slice handoff"
                 )
@@ -1049,20 +1064,17 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         op's operand.
 
         Args:
-            owner: Either a direct-borrow Value or a slice-view ArrayValue.
+            owner (Owner): A slice-view ``ArrayValue`` or the consumed
+                slot sentinel.
 
         Returns:
-            Root parent ``logical_id`` for both ArrayValue and Value
-            owners (after walking ``slice_of`` to the root), or ``None``
-            when the owner has no usable parent.
+            str | None: Root parent ``logical_id`` after walking
+                ``slice_of`` to the root for ``ArrayValue`` owners.
+                Returns ``None`` for ``_ConsumedSlotMarker`` (no owning
+                view).
         """
         if isinstance(owner, ArrayValue):
             root = owner
-            while root.slice_of is not None:
-                root = root.slice_of
-            return root.logical_id
-        if isinstance(owner, Value) and owner.parent_array is not None:
-            root = owner.parent_array
             while root.slice_of is not None:
                 root = root.slice_of
             return root.logical_id
@@ -1102,25 +1114,24 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         """Render outstanding borrows for the block-end error message.
 
         Args:
-            state: Final borrow tracker.
+            state (State): Final borrow tracker.  ``_ConsumedSlotMarker``
+                entries have already been filtered out by the caller.
 
         Returns:
-            A newline-separated list of "array[idx] — held by <owner>".
+            str: A newline-separated list of
+                "<root_name>[idx] — held by slice view <view_name>".
         """
         lines: list[str] = []
         for key, owner in state.items():
             idx_str = _slot_descriptor(key).split(":", 1)[1]
-            if isinstance(owner, ArrayValue):
-                root = owner
-                while root.slice_of is not None:
-                    root = root.slice_of
-                lines.append(
-                    f"  {root.name}[{idx_str}] — held by slice view {owner.name}"
-                )
-            else:
-                holder = owner if isinstance(owner, Value) else None
-                name = holder.name if holder is not None else "<direct>"
-                lines.append(f"  — element borrow {name} (slot {idx_str})")
+            assert isinstance(owner, ArrayValue), (
+                "Outstanding borrow owner must be a slice-view ArrayValue; "
+                f"got {type(owner).__name__}"
+            )
+            root = owner
+            while root.slice_of is not None:
+                root = root.slice_of
+            lines.append(f"  {root.name}[{idx_str}] — held by slice view {owner.name}")
         return "\n".join(lines)
 
     @staticmethod
@@ -1154,32 +1165,6 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         )
 
     @staticmethod
-    def _format_direct_conflict(
-        existing: Value,
-        new_v: Value,
-        op: Operation,
-        key: BorrowKey,
-    ) -> str:
-        """Format a direct-borrow double-access message.
-
-        Args:
-            existing: The Value currently holding the slot.
-            new_v: The Value attempting a fresh borrow.
-            op: Operation where the conflict manifested.
-            key: The colliding ``(root_uuid, f"const:<idx>")`` key.
-
-        Returns:
-            Human-readable error body.
-        """
-        idx_str = _slot_descriptor(key).split(":", 1)[1]
-        return (
-            f"Element '{new_v.name}' and '{existing.name}' alias on slot "
-            f"{idx_str} at '{type(op).__name__}'.\n"
-            f"Return the previously borrowed element (via "
-            f"``array[idx] = ...``) before borrowing it again."
-        )
-
-    @staticmethod
     def _format_view_registration_conflict(
         existing: Owner,
         new_view: ArrayValue,
@@ -1189,21 +1174,22 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         """Format a view-registration overlap message.
 
         Args:
-            existing: Current owner of the slot (view or direct).
-            new_view: The new sliced ArrayValue being registered.
-            idx: Colliding root-parent index.
-            root: The root parent ArrayValue.
+            existing (Owner): Current owner of the slot — always a
+                slice-view ``ArrayValue`` at the call sites that
+                invoke this formatter (consumed-slot markers and
+                direct borrows take different paths above).
+            new_view (ArrayValue): The new sliced ArrayValue being
+                registered.
+            idx (int): Colliding root-parent index.
+            root (ArrayValue): The root parent ArrayValue.
 
         Returns:
-            Human-readable error body.
+            str: Human-readable error body.
         """
-        owner_desc = (
-            f"slice view '{existing.name}'"
-            if isinstance(existing, ArrayValue)
-            else f"element borrow '{existing.name}'"
-            if isinstance(existing, Value)
-            else "<unknown>"
-        )
+        if isinstance(existing, ArrayValue):
+            owner_desc = f"slice view '{existing.name}'"
+        else:
+            owner_desc = "<unknown>"
         return (
             f"Slice view '{new_view.name}' covers '{root.name}[{idx}]' "
             f"which is already held by {owner_desc}.\n"

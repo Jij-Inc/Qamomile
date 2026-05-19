@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
 import typing
 import uuid
 from typing import Generic, Iterator, TypeVar, overload
@@ -27,20 +28,64 @@ from .primitives import Bit, Float, Qubit, UInt
 T = TypeVar("T", bound=Handle)
 
 
-# Operation names whose ``consume`` call physically destroys the
-# quantum state of the target qubits (qubit handles cannot be reused,
-# and the underlying physical register is gone).
-_DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset({"measure", "cast"})
+class ConsumeMode(enum.Enum):
+    """Classify how a ``VectorView.consume`` call resolves slice borrows.
 
-# Operation names whose ``consume`` call drops the slice-view's bulk
-# borrow on the parent without producing a new view handle to carry
-# the ownership forward.  ``slice assignment`` is the explicit
-# borrow-return path that emits a ``ReleaseSliceViewOperation`` to
-# tell downstream IR passes about the release.  Every other
-# non-destructive op carries the ownership forward via ownership
-# transfer (the consume's caller installs the new view handle into
-# the parent's borrow table in place of the consumed one).
+    ``ArrayBase.consume`` and ``VectorView.consume`` accept a free-form
+    ``operation_name`` string used both for error messages and for
+    dispatching how the parent's bulk-borrow table is updated.  The
+    string itself is purely cosmetic; the dispatch logic only cares
+    about which of three resolution modes applies, captured by this
+    enum:
+
+    - ``DESTRUCTIVE``: the consume physically destroys the qubits
+      (``measure`` / ``cast``).  The consumed view stays parked in the
+      parent's borrow table so any later access to the same slot is
+      surfaced as a use-after-destroy.
+    - ``RELEASING``: the consume returns the borrow to the parent
+      cleanly (``slice assignment``) — the entries are dropped and the
+      parent regains free access to the covered slots.
+    - ``TRANSFER``: the consume hands ownership forward to a freshly
+      built ``VectorView`` (broadcast gates, ``pauli_evolve``,
+      ``QKernel.__call__``, controlled-U ``index_spec``).  The covered
+      slots stay borrowed under the new handle.
+    """
+
+    DESTRUCTIVE = enum.auto()
+    RELEASING = enum.auto()
+    TRANSFER = enum.auto()
+
+
+# String-keyed dispatch tables.  ``operation_name`` is also used as
+# free-form text in error messages, so the canonical mode for an
+# operation is its presence in one of these two sets.  Anything not
+# listed defaults to :attr:`ConsumeMode.TRANSFER`.  Treat these as
+# implementation detail of :func:`_classify_consume`; new code should
+# query ``_classify_consume(...)`` rather than inspect the sets
+# directly.
+_DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset({"measure", "cast"})
 _BORROW_RELEASING_CONSUME_OPS: frozenset[str] = frozenset({"slice assignment"})
+
+
+def _classify_consume(operation_name: str | None) -> ConsumeMode:
+    """Map a free-form ``operation_name`` to its :class:`ConsumeMode`.
+
+    Args:
+        operation_name (str | None): The string handed to
+            ``ArrayBase.consume`` / ``VectorView.consume`` (also
+            recorded on ``ArrayBase._consumed_by``).  ``None`` is
+            treated as a transfer because pre-consume helpers may not
+            yet have a recorded operation name.
+
+    Returns:
+        ConsumeMode: ``DESTRUCTIVE`` for measure / cast,
+            ``RELEASING`` for slice assignment, ``TRANSFER`` otherwise.
+    """
+    if operation_name in _DESTRUCTIVE_CONSUME_OPS:
+        return ConsumeMode.DESTRUCTIVE
+    if operation_name in _BORROW_RELEASING_CONSUME_OPS:
+        return ConsumeMode.RELEASING
+    return ConsumeMode.TRANSFER
 
 
 def _is_destroyed_slot_owner(owner: object) -> bool:
@@ -49,17 +94,17 @@ def _is_destroyed_slot_owner(owner: object) -> bool:
     A destroyed slot is a parent ``_borrowed_indices`` entry whose
     owner is a ``VectorView`` that has been destructively consumed
     (``view._consumed`` is ``True`` and the recorded
-    ``_consumed_by`` operation name is in
-    ``_DESTRUCTIVE_CONSUME_OPS``).  The destructively consumed view
-    is parked in the parent's borrow table as the slot's owner
+    ``_consumed_by`` operation name classifies as
+    :attr:`ConsumeMode.DESTRUCTIVE`).  The destructively consumed
+    view is parked in the parent's borrow table as the slot's owner
     until it goes out of scope; that persistence is what lets
     subsequent direct parent access at the same slot index fail
     loudly with ``QubitConsumedError`` rather than silently
     overwriting the destroyed qubit.
 
     Args:
-        owner: A value from ``ArrayBase._borrowed_indices`` (any of
-            ``tuple[UInt, ...]`` for direct element borrows,
+        owner (object): A value from ``ArrayBase._borrowed_indices``
+            (any of ``tuple[UInt, ...]`` for direct element borrows,
             ``ArrayBase[T]`` for slice-view ownership, or ``None``
             when the slot is absent).
 
@@ -71,7 +116,7 @@ def _is_destroyed_slot_owner(owner: object) -> bool:
     return (
         isinstance(owner, ArrayBase)
         and owner._consumed
-        and owner._consumed_by in _DESTRUCTIVE_CONSUME_OPS
+        and _classify_consume(owner._consumed_by) is ConsumeMode.DESTRUCTIVE
     )
 
 
@@ -629,10 +674,11 @@ class ArrayBase(Handle, Generic[T]):
         assignment (``parent[a:b:c] = view``) to release the view's
         bulk-borrow before consuming the parent.  Destructively
         consumed views (parked in the dict with ``view._consumed`` set
-        and ``view._consumed_by`` in ``_DESTRUCTIVE_CONSUME_OPS``)
-        record physically-destroyed slots and are not outstanding
-        borrows; they survive end-of-block so a later whole-array
-        consume can detect and reject the destroyed slots.
+        and ``view._consumed_by`` classified as
+        :attr:`ConsumeMode.DESTRUCTIVE`) record physically-destroyed
+        slots and are not outstanding borrows; they survive
+        end-of-block so a later whole-array consume can detect and
+        reject the destroyed slots.
 
         Raises:
             UnreturnedBorrowError: If any elements are still borrowed,
@@ -1043,12 +1089,11 @@ class Vector(ArrayBase[T]):
                     operation_name="slice assignment",
                 )
 
-        # (8) Frontend release: consume the view handle.  The op name
-        #     is intentionally not in ``_DESTRUCTIVE_CONSUME_OPS``, so
-        #     no destroyed-slot signal is recorded — slice assignment
-        #     is borrow-return, not physical destruction (the
-        #     non-destructive branch of ``VectorView.consume`` deletes
-        #     the parent entry instead).
+        # (8) Frontend release: consume the view handle.  ``"slice
+        #     assignment"`` classifies as :attr:`ConsumeMode.RELEASING`
+        #     — no destroyed-slot signal is recorded; instead the
+        #     parent's borrow entry for the covered slots is deleted
+        #     by the releasing branch of ``VectorView.consume``.
         value.consume(operation_name="slice assignment")
 
         # (8.5) Re-register the LHS as owner of the just-released slots
@@ -1613,13 +1658,23 @@ class VectorView(Vector[T]):
         ``start``, ``step`` and ``length`` are compile-time ``int``
         constants.  While the view is live, accessing the corresponding
         parent slot directly (``q[0]`` after ``evens = q[0::2]``) raises
-        ``QubitConsumedError``.  The caller must explicitly release the
-        view before the parent is consumed — either by writing it back
-        via slice assignment (``parent[a:b:c] = view``), by passing it
-        to a sub-kernel / broadcast gate that consumes it, or by
-        destructively consuming it (``measure(view)`` / ``cast(view,
-        ...)``).  A view left bulk-borrowing at the parent's consume
-        point raises ``UnreturnedBorrowError``.
+        ``QubitConsumedError``.  Under the strict-return policy the
+        view's ownership is cleared only by two operations:
+
+        - slice-assigning it back into the parent
+          (``parent[a:b:c] = view``) — this is the *only* path that
+          fully releases the borrow without destroying the qubits;
+        - destructively consuming it (``measure(view)`` /
+          ``cast(view, ...)``) — the physical slots become consumed
+          markers, no return needed.
+
+        Every other consume (broadcast gates ``h(view)``,
+        ``pauli_evolve(view, H, gamma)``, sub-kernel calls
+        ``f(view)``, controlled-U ``index_spec``) only *transfers*
+        ownership to a freshly-wrapped ``VectorView`` and that new
+        view still must be returned via slice assignment.  A view
+        left bulk-borrowing at the parent's consume point raises
+        ``UnreturnedBorrowError``.
 
         Symbolic slices (``q[lo:hi]`` with ``lo``/``hi`` ``UInt``) cannot
         enumerate their covered slots at trace time and therefore skip
@@ -1991,8 +2046,7 @@ class VectorView(Vector[T]):
                 overlapping view that has since gone out of scope.
         """
         self.validate_all_returned()
-        is_destructive = operation_name in _DESTRUCTIVE_CONSUME_OPS
-        is_releasing = operation_name in _BORROW_RELEASING_CONSUME_OPS
+        mode = _classify_consume(operation_name)
 
         # A prior destructive view consume can leave a destroyed-slot
         # breadcrumb in the parent's borrow table; reject the consume
@@ -2033,27 +2087,27 @@ class VectorView(Vector[T]):
             for idx in self._slice_covered_indices:
                 key = (f"const:{idx}",)
                 owner = self._slice_parent._borrowed_indices.get(key)
-                if is_destructive:
+                if mode is ConsumeMode.DESTRUCTIVE:
                     # Destructive consume: keep ``self`` parked under
                     # this slot so ``_is_destroyed_slot_owner`` can
                     # surface the destruction to later accesses.
                     continue
                 if owner is self:
-                    if is_releasing:
+                    if mode is ConsumeMode.RELEASING:
                         del self._slice_parent._borrowed_indices[key]
-                    else:
+                    else:  # ConsumeMode.TRANSFER
                         # Transfer ownership to the new view handle.
                         self._slice_parent._borrowed_indices[key] = new_view
 
         # ``_slice_covered_indices`` on the returned handle:
-        #   destructive / releasing — None (parent state finalised; the
+        #   DESTRUCTIVE / RELEASING — None (parent state finalised; the
         #     handle has nothing left to claim)
-        #   transfer — same as ``self``'s coverage; the new view is the
+        #   TRANSFER — same as ``self``'s coverage; the new view is the
         #     live owner of those slots.
-        if is_destructive or is_releasing:
-            new_view._slice_covered_indices = None
-        else:
+        if mode is ConsumeMode.TRANSFER:
             new_view._slice_covered_indices = self._slice_covered_indices
+        else:
+            new_view._slice_covered_indices = None
         return new_view
 
     def _transfer_borrow_to(
