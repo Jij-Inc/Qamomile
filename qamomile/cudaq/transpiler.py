@@ -17,6 +17,10 @@ import dataclasses
 from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -278,11 +282,37 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         """Handle if-operations for both static and runtime paths.
 
         Compile-time constant conditions are always handled by the
-        base class.  Runtime measurement-dependent conditions are
-        delegated to ``StandardEmitPass._emit_if`` when the emitter
-        is in RUNNABLE mode (``supports_if_else() == True``), or raise
-        ``EmitError`` when in STATIC mode.
+        base class.  Runtime measurement-dependent conditions go
+        through ``CudaqKernelEmitter.emit_if_start`` directly so that
+        compound predicates lowered by
+        :meth:`_emit_runtime_classical_expr` (stored as Python text
+        expressions in ``bindings``) are emitted verbatim into the
+        generated kernel source — the standard ``StandardEmitPass``
+        path only handles single-bit conditions because it looks the
+        condition up in ``clbit_map``.
+
+        Args:
+            circuit: The CUDA-Q kernel artifact under construction.
+            op: The IR ``IfOperation`` to emit.
+            qubit_map: Map from logical qubit ``QubitAddress`` to
+                physical qubit index in the emitted kernel.
+            clbit_map: Map from logical classical-bit ``QubitAddress``
+                to physical clbit index in the emitted kernel.
+            bindings: Compile-time bindings (also carries the runtime
+                expression text registry consumed by
+                :meth:`_resolve_runtime_condition_text`).
+
+        Raises:
+            EmitError: When the runtime condition is not in RUNNABLE
+                mode (should be unreachable post
+                ``_has_runtime_control_flow`` selection) or cannot be
+                resolved to a clbit / stored runtime expression.
         """
+        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+            register_classical_phi_aliases,
+            register_phi_outputs,
+        )
+
         condition = op.condition
 
         # Compile-time constant conditions are handled by the base class.
@@ -290,20 +320,216 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
 
-        # Runtime condition: delegate to StandardEmitPass if emitter supports it
-        if self._emitter.supports_if_else():
-            StandardEmitPass._emit_if(self, circuit, op, qubit_map, clbit_map, bindings)
-            return
+        if not self._emitter.supports_if_else():
+            # Should not be reachable if _has_runtime_control_flow ran.
+            raise EmitError(
+                "CUDA-Q 0.14.x does not support measurement-dependent "
+                "conditional branching via the builder API. Use a circuit "
+                "with runtime control flow support (automatically handled "
+                "when runtime if/while is detected)."
+            )
 
-        # The following error should not be reachable
-        # because the mode must have be determined by _has_runtime_control_flow,
-        # which checks for unresolvable IfOperation conditions.
-        # But guard against misconfiguration to find the bug easily.
-        raise EmitError(
-            "CUDA-Q 0.14.x does not support measurement-dependent conditional "
-            "branching via the builder API. Use a circuit with runtime control "
-            "flow support (automatically handled when runtime if/while is detected)."
+        cond_arg = self._resolve_runtime_condition_text(condition, clbit_map, bindings)
+        context = self._emitter.emit_if_start(circuit, cond_arg)
+        self._emit_operations(
+            circuit, op.true_operations, qubit_map, clbit_map, bindings
         )
+        if op.false_operations:
+            self._emitter.emit_else_start(circuit, context)
+            self._emit_operations(
+                circuit, op.false_operations, qubit_map, clbit_map, bindings
+            )
+        self._emitter.emit_if_end(circuit, context)
+        register_phi_outputs(self, op, qubit_map, clbit_map, bindings)
+        register_classical_phi_aliases(self, op.phi_ops, bindings, None)
+
+    def _emit_while(
+        self,
+        circuit: Any,
+        op: WhileOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit while-loop, supporting compound runtime classical conditions.
+
+        The standard ``StandardEmitPass._emit_while`` handles
+        single-bit measurement conditions (looked up in ``clbit_map``);
+        compound predicates from :meth:`_emit_runtime_classical_expr`
+        are stored in ``bindings`` as Python text and need to flow
+        through ``CudaqKernelEmitter.emit_while_start`` directly.
+
+        Args:
+            circuit: The CUDA-Q kernel artifact under construction.
+            op: The IR ``WhileOperation`` to emit. Its ``operands[0]``
+                holds the condition Value (single-bit measurement or
+                a previously lowered ``RuntimeClassicalExpr``).
+            qubit_map: Map from logical qubit ``QubitAddress`` to
+                physical qubit index in the emitted kernel.
+            clbit_map: Map from logical classical-bit ``QubitAddress``
+                to physical clbit index in the emitted kernel.
+            bindings: Compile-time bindings (also carries the runtime
+                expression text registry consumed by
+                :meth:`_resolve_runtime_condition_text`).
+
+        Raises:
+            ValueError: When the operation has no condition operand.
+            EmitError: When the emitter is not in RUNNABLE mode (the
+                CUDA-Q runtime path is selected by
+                ``_has_runtime_control_flow``) or the condition
+                cannot be resolved.
+        """
+        if not op.operands:
+            raise ValueError("WhileOperation requires a condition operand")
+
+        condition = op.operands[0]
+        condition_value = condition.value if hasattr(condition, "value") else condition
+
+        if not self._emitter.supports_while_loop():
+            raise EmitError(
+                "CUDA-Q 0.14.x does not support measurement-dependent while "
+                "loops via the builder API."
+            )
+
+        cond_arg = self._resolve_runtime_condition_text(
+            condition_value, clbit_map, bindings
+        )
+        context = self._emitter.emit_while_start(circuit, cond_arg)
+        self._emit_operations(circuit, op.operations, qubit_map, clbit_map, bindings)
+        self._emitter.emit_while_end(circuit, context)
+
+    def _resolve_runtime_condition_text(
+        self,
+        condition: Any,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> int | str:
+        """Resolve a runtime if/while condition to an ``emit_if_start`` argument.
+
+        Returns either a clbit index (``int``) when the condition is a
+        single measurement bit, or a Python source-text expression
+        (``str``) when the condition is a compound predicate
+        previously lowered by :meth:`_emit_runtime_classical_expr` and
+        stashed in ``bindings`` keyed by the condition's UUID.
+
+        Raises:
+            EmitError: When the condition is neither a known clbit
+                nor a stored runtime expression.
+        """
+        get_runtime_expr = getattr(bindings, "get_runtime_expr", None)
+        if callable(get_runtime_expr) and hasattr(condition, "uuid"):
+            stored = get_runtime_expr(condition.uuid)
+            if isinstance(stored, str):
+                return stored
+        elif hasattr(condition, "uuid"):
+            stored = bindings.get(condition.uuid) if hasattr(bindings, "get") else None
+            if isinstance(stored, str):
+                return stored
+
+        if hasattr(condition, "uuid"):
+            addr = QubitAddress(condition.uuid)
+            if addr in clbit_map:
+                return clbit_map[addr]
+
+        raise EmitError(
+            "Runtime if/while conditions must come from measurement results "
+            "or a previously lowered RuntimeClassicalExpr. The condition "
+            "value resolved to neither."
+        )
+
+    def _emit_runtime_classical_expr(
+        self,
+        circuit: Any,
+        op: RuntimeClassicalExpr,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Lower ``RuntimeClassicalExpr`` to a Python source-text expression.
+
+        CUDA-Q kernels are realised as a textual Python source body
+        that gets compiled with the ``@cudaq.kernel`` decorator.  We
+        therefore translate each AND / OR / NOT / EQ / ... node into a
+        parenthesised Python expression that references previously
+        emitted clbits (``__b{idx}``) or sub-expressions.  The
+        resulting string is stored in ``bindings`` keyed by
+        ``op.results[0].uuid`` so downstream ``_emit_if`` /
+        ``_emit_while`` / nested ``RuntimeClassicalExpr`` ops can
+        consume it.
+
+        Raises:
+            EmitError: When an operand cannot be resolved to a clbit /
+                stored sub-expression / constant.
+        """
+        get_runtime_expr = getattr(bindings, "get_runtime_expr", None)
+
+        def resolve_operand(v: Any) -> str | None:
+            if not hasattr(v, "uuid"):
+                return None
+
+            # Stored expression text from a prior RuntimeClassicalExpr.
+            if callable(get_runtime_expr):
+                stored = get_runtime_expr(v.uuid)
+                if isinstance(stored, str):
+                    return stored
+            else:
+                stored = bindings.get(v.uuid) if hasattr(bindings, "get") else None
+                if isinstance(stored, str):
+                    return stored
+
+            # Constant value — emit Python literal.
+            if hasattr(v, "is_constant") and v.is_constant():
+                const = v.get_const()
+                if isinstance(const, bool):
+                    return "True" if const else "False"
+                if isinstance(const, (int, float)):
+                    return repr(const)
+                return None
+
+            # Direct clbit reference (single measurement bit).
+            addr = QubitAddress(v.uuid)
+            if addr in clbit_map:
+                return self._emitter._clbit_ref(clbit_map[addr])
+
+            return None
+
+        kind = op.kind
+        if kind is RuntimeOpKind.NOT:
+            inner = resolve_operand(op.operands[0])
+            if inner is None:
+                raise EmitError(
+                    f"Cannot resolve operand for RuntimeClassicalExpr(NOT): "
+                    f"{op.operands[0]!r}"
+                )
+            result_text = f"(not {inner})"
+        else:
+            lhs = resolve_operand(op.operands[0])
+            rhs = resolve_operand(op.operands[1])
+            if lhs is None or rhs is None:
+                raise EmitError(
+                    f"Cannot resolve operands for RuntimeClassicalExpr({kind!r})"
+                )
+            op_text = {
+                RuntimeOpKind.AND: "and",
+                RuntimeOpKind.OR: "or",
+                RuntimeOpKind.EQ: "==",
+                RuntimeOpKind.NEQ: "!=",
+                RuntimeOpKind.LT: "<",
+                RuntimeOpKind.LE: "<=",
+                RuntimeOpKind.GT: ">",
+                RuntimeOpKind.GE: ">=",
+            }.get(kind)
+            if op_text is None:
+                raise EmitError(
+                    f"Unsupported RuntimeClassicalExpr kind for CUDA-Q backend: {kind}"
+                )
+            result_text = f"({lhs} {op_text} {rhs})"
+
+        # Stash for downstream IfOp / WhileOp / nested RuntimeClassicalExpr.
+        set_runtime_expr = getattr(bindings, "set_runtime_expr", None)
+        if callable(set_runtime_expr):
+            set_runtime_expr(op.results[0].uuid, result_text)
+        else:
+            bindings[op.results[0].uuid] = result_text
 
     def _blockvalue_to_gate(
         self,

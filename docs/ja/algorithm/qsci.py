@@ -35,6 +35,12 @@
 # このチュートリアルでは4量子ビットの横磁場Isingモデルでフローを通しで歩きます。量子状態の準備とサンプリングは**QURI Parts**バックエンド（Qulacsシミュレータ）で実行し、部分空間の構築と対角化は`qamomile.linalg.solve_subspace`を使います。内部ではベクトル化されたZ基底ルーチン`subspace_hamiltonian`（XOR・パリティ計算のみで行列積不要）を呼びます。
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# このノートブックではQURI Partsのトランスパイラ/エグゼキュータを使うため、
+# `quri_parts` extra付きでインストールします。
+# # !pip install "qamomile[quri_parts]"
+
+# %%
 import os
 
 import matplotlib.pyplot as plt

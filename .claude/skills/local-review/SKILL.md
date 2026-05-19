@@ -133,13 +133,111 @@ qBraid is out of scope (executor-only wrapper around Qiskit, requires API key). 
 
 **Severity**: missing cross-backend execution is **P1**; fixed-inputs-only is **P2**; sampler-only or estimator-only when simulatable is **P2**; missing reverse-direction retro-extension in a new-backend PR is **P1**.
 
+The **documentation** counterpart of this rule lives in Section I-bis below — every new algorithm / stdlib / backend that this section requires tests for *also* requires a corresponding doc article. Apply both checks together when reviewing such a PR.
+
 ### I. Documentation
 
 - **Jupytext percent-format `.py` is the source of truth.** Every tutorial `.py` must have a committed `.ipynb` that (a) exists, (b) stays in sync when its `.py` changes, (c) contains execution outputs. Any of these failing is **P1**. An `.ipynb`-only change (no corresponding `.py` update) is **P2** — it bypasses the source-of-truth.
 - **Docs test coverage**: new tutorial paths (outside `integration/`) must be in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. Missing is **P1**.
 - **en/ja parity**: `docs/en/` and `docs/ja/` must share file structure and content — only the natural language differs. Missing or outdated counterpart is **P1**.
 - **Tag whitelist (`ALLOWED_TAGS` in `docs/scripts/build_doc_tags.py`)**: every `tags:` entry in an article's MyST frontmatter MUST already be in `ALLOWED_TAGS`. Adding a new tag to the whitelist as a side-effect of introducing an article is **P1** — the taxonomy is deliberately small and curated, and an unannounced expansion of it is precisely what the whitelist exists to prevent. If a new tag is genuinely needed, the PR should call it out explicitly and the `ALLOWED_TAGS` change should be a separate, documented decision (not a quiet line in a docs PR).
+- **Google Colab pip install cell**: every article under `docs/{en,ja}/{tutorial,algorithm,usage,integration}/` MUST have a commented-out pip install cell as its **first code cell** (right after the intro markdown, before any `import qamomile…`). Readers open these notebooks via the "Open in Colab" button, where Qamomile is not pre-installed; the leading `# ` keeps the cell a no-op for the local docs build, and Colab users uncomment it. The shape of this cell — and what comes immediately after — depends on whether the article is generic across SDKs or pins to a specific one (see the "Transpiler tab block" rule below for the SDK-generic case).
+
+  General rules for the install line(s):
+  - At least one line in the cell MUST install `qamomile` so the cell works on a fresh Colab VM.
+  - If the article needs additional non-Qamomile packages (e.g. `openfermion`, `pyscf`, `openfermionpyscf`), put them on the same `pip install` line(s) so the cell is self-contained.
+  - JA mirror localises the comment but keeps the shell command identical.
+
+  Today's optional-extra mapping for the SDK extras themselves (used in both the install line(s) and the Transpiler tab block below):
+  - `qamomile[quri_parts]` — `qamomile.quri_parts.QuriPartsTranspiler` / `QuriPartsExecutor`
+  - `qamomile[qbraid]` — `qamomile.qbraid.QBraidExecutor`
+  - `qamomile[cudaq-cu12]` (or `qamomile[cudaq-cu13]` on a CUDA 13.x toolchain) — `qamomile.cudaq.CudaqTranspiler`
+
+  Missing pip install cell, or an install line whose extras / additional packages do not cover what the notebook actually imports, is **P2**. (See `docs/README.md` "Creating a new page" step 2 for the full convention.)
+
+- **Transpiler tab block (SDK-generic articles)**: an article where the body code is backend-agnostic — the `transpiler` is constructed once and the rest of the article uses Qamomile-level abstractions — MUST follow the canonical three-cell template:
+
+  1. **Multi-pattern pip install code cell** with one line per supported SDK, all commented for Colab:
+
+     ```python
+     # %%
+     # Install the latest Qamomile through pip!
+     # (Google Colab) Pick the line that matches your chosen Transpiler tab
+     # below and remove the leading "# " from it to run.
+     # # !pip install qamomile                  # Qiskit (default)
+     # # !pip install "qamomile[quri_parts]"    # QURI Parts
+     # # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use cudaq-cu13 on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+     ```
+
+     Articles with extra non-Qamomile packages append them to all three lines (e.g. ``qamomile openfermion pyscf openfermionpyscf``).
+
+  2. **Tab-set markdown cell** introducing the SDK choice with one `:::{tab-item}` per supported SDK. Each tab body shows the `from qamomile.<sdk> import <Sdk>Transpiler` + `transpiler = <Sdk>Transpiler()` two-liner that the reader copy-pastes into the executable cell below if they pick that tab. The tabs use the synced-tab pattern (`:sync: qiskit` / `quri_parts` / `cudaq`) so a reader who picks "QURI Parts" once on the page sees the same pick on every other tab-set on the page. The CUDA-Q tab notes the toolchain split (`cudaq-cu12` vs `cudaq-cu13`) and the platform restriction (Linux / macOS-arm64 / WSL2). On Colab, MyST tab directives degrade to raw text — that's expected and acceptable; the inner code blocks still render and the reader can copy from them.
+
+  3. **Transpiler executable cell directly under the tab block**, carrying a copy-paste hint comment and the default Qiskit two-liner:
+
+     ```python
+     # %%
+     # Transpiler — by default this article uses Qiskit. If you picked a
+     # different tab above (QURI Parts / CUDA-Q), copy the two lines from
+     # that tab into this cell in place of the two below, and make sure the
+     # matching pip install line further up has been uncommented.
+     from qamomile.qiskit import QiskitTranspiler
+
+     transpiler = QiskitTranspiler()
+     ```
+
+     This is the cell readers actually edit when switching SDKs. Putting it directly under the tab block keeps "the tab above" literal — no other cells in between. Other generic imports (`numpy`, `qamomile.circuit`, `qamomile.observable`, …) belong in a separate cell that follows.
+
+  **Severity** for SDK-generic articles:
+  - Pip install cell with only one SDK installed (e.g. only `qamomile`, no extras shown) when the article doesn't pin to a specific SDK: **P2** (Colab readers who picked a non-default tab end up unable to install the matching extra).
+  - Tab-set missing entirely or covering fewer than three SDKs without justification: **P2**.
+  - Transpiler executable cell separated from the tab block by an unrelated cell (typically the generic imports cell): **P3** — readers' eye has to skip over an unrelated cell to find the place "the tab above" points at.
+  - Transpiler executable cell missing the copy-paste hint comment: **P3**.
+
+  Tutorial 01 ([docs/en/tutorial/01_your_first_quantum_kernel.py](docs/en/tutorial/01_your_first_quantum_kernel.py)) is the canonical reference implementation — diff against it when reviewing or authoring an SDK-generic article.
+
+- **SDK-pinned articles** (single-SDK is the article's topic, e.g. `algorithm/qsci.py`'s QSCI walk-through is by design QURI Parts–first; `tutorial/08_compilation_and_transpilation.py` explicitly compares two SDKs side by side; `integration/qbraid_executor.py` is the qBraid integration article) keep the simple single-line pip install cell with the matching extra and DO NOT use the Transpiler tab block. Forcing the tab block on these articles is a Section I violation, not compliance with it.
+
+- **Articles that don't use a Transpiler at all** (e.g. `tutorial/03_resource_estimation.py`, `usage/binary_model.py`) keep the simple `# # !pip install qamomile` cell and don't need the tab block.
+
 - Jupyter Book 2 with MyST.
+
+### I-bis. New-Feature Documentation Coverage (MANDATORY)
+
+Mirrors Section H-bis on the documentation side. Tests prove a feature *works*; docs prove a feature *exists* for users. Any addition or non-trivial modification that introduces a new public-facing surface MUST ship with corresponding documentation, **in both `docs/en/` and `docs/ja/`**.
+
+**What needs a doc article**:
+
+| Change in `qamomile/` | Required doc surface |
+|---|---|
+| New file under `qamomile/circuit/algorithm/` (new ansatz, VQE component, QAOA / QRAO / FQAOA variant, optimization helper) | New article under `docs/{en,ja}/algorithm/<name>.py` with a runnable example |
+| New file under `qamomile/circuit/stdlib/` (composite gate, primitive routine like QFT / QPE / IQFT) | A dedicated article under `docs/{en,ja}/tutorial/` (or `algorithm/` if its primary use is algorithmic), **or** a clearly added section in an existing article that covers the family |
+| New SDK backend (new directory under `qamomile/` with its own `Transpiler` / `Executor`) | Article under `docs/{en,ja}/integration/<backend>.py`, mirroring `integration/qbraid_executor.py` |
+| New top-level public module (e.g. a peer of `qamomile.linalg`, `qamomile.observable`) | Dedicated article under `docs/{en,ja}/usage/` |
+| Large new public-API surface inside an existing module (new public class, new public top-level function exported via `__all__`) | At minimum, an existing tutorial / usage / algorithm article touched to introduce the surface |
+| New optional extra in `pyproject.toml`'s `[project.optional-dependencies]` | Consuming article(s) install with the right `qamomile[<extra>]`; `docs/README.md`'s extras list and Section I above are extended |
+
+**What counts as "non-trivial modification"** (mirrors H-bis): IR shape change, parameter / signature change, gate-sequence change, semantic change observable from the public API. Pure refactors that preserve public behavior are exempt — but if the existing article was already wrong / outdated, this is the moment to fix it.
+
+**Required content per new article**:
+
+- Standard jupytext percent-format header.
+- MyST `tags:` frontmatter with the section tag (`tutorial` / `algorithm` / `usage` / `integration`) plus topical tags, all within `ALLOWED_TAGS`.
+- Google Colab pip install cell as the first code cell, with the right extra(s) per Section I.
+- A complete runnable example exercising the new feature, with executed `.ipynb` outputs committed.
+- en/ja parity: the JA mirror has the same structure / cells / outputs, with prose translated.
+- (For new tutorial / algorithm / usage paths) the path added to `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`.
+
+**Severity**:
+
+- New algorithm/stdlib file with **no** corresponding docs article (en or ja or both): **P1**.
+- New SDK backend without `integration/<backend>.py` article: **P1**.
+- Article exists in `en` but not `ja` (or vice versa): **P1** (also a Section I "en/ja parity" violation — report once with both sections cited).
+- Existing article using outdated parameter signatures / removed APIs / removed extras after the diff: **P1**.
+- New top-level public module without a `usage/` article: **P1**.
+- New large public-API surface inside an existing module documented only in docstrings, with no tutorial / algorithm / usage article touching it: **P2**.
+
+When the PR description explicitly defers documentation to a follow-up tracked elsewhere (a linked issue, a written plan), downgrade by one level (P1 → P2, P2 → P3) but still report — the deferral is part of the public record, not a silent omission.
 
 ### J. Numerical Correctness
 

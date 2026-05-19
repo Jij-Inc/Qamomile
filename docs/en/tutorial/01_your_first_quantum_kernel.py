@@ -52,15 +52,69 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# (Google Colab) Pick the line that matches your chosen Transpiler tab
+# below and remove the leading "# " from it to run.
+# # !pip install qamomile                  # Qiskit (default)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use cudaq-cu13 on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+
+# %% [markdown]
+# This tutorial uses Qiskit by default. Qamomile transpiles the same
+# `@qkernel` to multiple quantum SDKs, so you can follow it with another
+# SDK by swapping the import shown below — the rest of the tutorial code
+# is identical regardless of the SDK you pick. On Colab, uncomment the
+# matching `pip install` line in the cell above first.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+# `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+# matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+# macOS arm64, and Windows-via-WSL2 only.
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — by default this tutorial uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
 
 # %%
 import math
 
 import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
 
 # %% [markdown]
 # ## First QKernel: The Biased Coin
@@ -195,14 +249,14 @@ print("probabilities:", result.probabilities())
 # %% [markdown]
 # ## Inspecting the Transpiled Circuit
 #
-# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`). This is useful for debugging — you can see exactly how the circuit looks in the target SDK.
+# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns the **SDK-native circuit object** (e.g., a Qiskit `QuantumCircuit`, a QURI Parts `LinearMappedParametricQuantumCircuit`). Useful when you need to feed the circuit into SDK-specific tooling, or when debugging. The exact type depends on the Transpiler you picked at the top of this tutorial. For an SDK-agnostic visual, use `biased_coin.draw(...)` (shown earlier in this tutorial); to draw the SDK-native circuit, use that SDK's own drawing API (e.g. `circuit.draw()` for Qiskit, `cudaq.draw(...)` for CUDA-Q).
 
 # %%
-qiskit_circuit = transpiler.to_circuit(
+circuit = transpiler.to_circuit(
     biased_coin,
     bindings={"theta": math.pi / 4},
 )
-print(qiskit_circuit)
+print(type(circuit).__name__)
 
 # %% [markdown]
 # ## Multi-Qubit Example
@@ -283,6 +337,13 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+else:
+    # The ``else`` branch runs only if neither the decorator nor
+    # ``.draw()`` raised. Surfacing that as an AssertionError turns
+    # "silent success" into a docs-test failure so we notice if the
+    # affine-type check ever stops firing — the example would then be
+    # silently teaching a broken claim.
+    raise AssertionError("Expected bad_rebind to raise; it did not.")
 
 # %% [markdown]
 # The fix is simple: always write `q = qmc.h(q)`, not just `qmc.h(q)`.

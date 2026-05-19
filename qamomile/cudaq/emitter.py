@@ -633,12 +633,36 @@ class CudaqKernelEmitter:
         raise NotImplementedError
 
     def emit_if_start(
-        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
+        self,
+        circuit: CudaqKernelArtifact,
+        clbit_or_expr: int | str,
+        value: int = 1,
     ) -> dict[str, Any]:
-        """Emit ``if __b{clbit}:`` and increase indentation."""
-        self._emit(f"if {self._clbit_ref(clbit)}:")
+        """Emit ``if <cond>:`` and increase indentation.
+
+        Args:
+            circuit: The CUDA-Q kernel artifact under construction.
+            clbit_or_expr: Either an ``int`` clbit index (for the simple
+                single-measurement-bit conditional case ``if __b{i}:``)
+                or a pre-built Python source text expression (for
+                compound predicates produced by
+                :meth:`CudaqEmitPass._emit_runtime_classical_expr`).
+            value: Comparison value — currently only ``1`` is honored
+                (the condition is treated as truthy). Kept for protocol
+                compatibility with other backends.
+
+        Returns:
+            A small context dict carrying the rendered condition text
+            so subsequent ``emit_else_start`` / ``emit_if_end`` calls
+            can reason about it if needed.
+        """
+        if isinstance(clbit_or_expr, int):
+            cond_text = self._clbit_ref(clbit_or_expr)
+        else:
+            cond_text = clbit_or_expr
+        self._emit(f"if {cond_text}:")
         self._indent += 1
-        return {"clbit": clbit}
+        return {"cond": cond_text}
 
     def emit_else_start(
         self, circuit: CudaqKernelArtifact, context: dict[str, Any]
@@ -655,12 +679,24 @@ class CudaqKernelEmitter:
         self._indent -= 1
 
     def emit_while_start(
-        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
+        self,
+        circuit: CudaqKernelArtifact,
+        clbit_or_expr: int | str,
+        value: int = 1,
     ) -> dict[str, Any]:
-        """Emit ``while __b{clbit}:`` and increase indentation."""
-        self._emit(f"while {self._clbit_ref(clbit)}:")
+        """Emit ``while <cond>:`` and increase indentation.
+
+        Same dual-input shape as :meth:`emit_if_start`: ``int`` clbit
+        index for a simple single-bit loop, or a pre-built Python text
+        expression for a compound predicate.
+        """
+        if isinstance(clbit_or_expr, int):
+            cond_text = self._clbit_ref(clbit_or_expr)
+        else:
+            cond_text = clbit_or_expr
+        self._emit(f"while {cond_text}:")
         self._indent += 1
-        return {"clbit": clbit}
+        return {"cond": cond_text}
 
     def emit_while_end(
         self, circuit: CudaqKernelArtifact, context: dict[str, Any]

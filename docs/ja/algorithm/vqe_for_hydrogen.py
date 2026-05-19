@@ -30,8 +30,57 @@
 # 量子コンピューティングを用いた量子化学問題の解法を紹介し、特にH₂分子の最小エネルギー構造の探索に焦点を当てます。
 
 # %%
-# 必要なパッケージは以下のコマンドでインストールできます
-# # !pip install openfermion pyscf openfermionpyscf
+# 最新のQamomileをpipからインストールします！
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile openfermion pyscf openfermionpyscf                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]" openfermion pyscf openfermionpyscf    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]" openfermion pyscf openfermionpyscf    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xならcudaq-cu13)。Linux / macOS-arm64 / WSL2のみ。
+
+# %% [markdown]
+# この記事はデフォルトでQiskitを使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。記事本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — この記事はデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
 
 # %%
 import os
@@ -42,14 +91,11 @@ import numpy as np
 import openfermion.chem as of_chem
 import openfermion.transforms as of_trans
 import openfermionpyscf as of_pyscf
-from qiskit_aer.primitives import EstimatorV2
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.qiskit.transpiler import QiskitExecutor
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
@@ -130,12 +176,11 @@ def vqe_ansatz(
 
 
 # %% [markdown]
-# ## Qiskitを用いたVQEの実行
+# ## VQEの実行
 #
-# このセクションでは、`QiskitTranspiler` を使って VQE カーネルを実行可能オブジェクトにトランスパイルします。デフォルトの executor がこのオブジェクトを実行し、qkernel で定義した `expval` による期待値を返します。そのため、ユーザーは最適化ループのみ実装すれば問題ありません。
+# このセクションでは、記事冒頭で作った `transpiler` を使って VQE カーネルを実行可能オブジェクトにトランスパイルします。デフォルトの executor が実行可能オブジェクトを走らせ、qkernel が `expval` で定義した期待値を返してくれるので、ユーザーが書くのは最適化ループだけです。実際に emit + 実行を担う SDK は、記事冒頭の Transpiler/Executor タブで切り替えられます。
 
 # %%
-transpiler = QiskitTranspiler()
 reps = 4
 
 executable = transpiler.transpile(
@@ -144,12 +189,65 @@ executable = transpiler.transpile(
     parameters=["thetas"],
 )
 
-# Transpiled quantum circuit
-executable.quantum_circuit.draw("mpl")
+# トランスパイル後の量子回路（SDK固有のオブジェクト。`.draw("mpl")` は
+# Qiskit固有なので、SDK間で動くように型名だけprintします。実際の図が見たい時は
+# 各SDKの描画APIを使ってください）。
+print(type(executable.quantum_circuit).__name__)
+
+# %% [markdown]
+# 期待値を計算できるexecutorが必要です（`vqe_ansatz`内の`expval`はパラメトリックな`Float`を返し、最適化ループはそれを最小化します）。配線のしかたは選んだSDKによって違うので、上のタブで別のSDKを選んだ場合は下のタブブロックから対応するスニペットをコピペしてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit_aer.primitives import EstimatorV2
+# from qamomile.qiskit.transpiler import QiskitExecutor
+#
+# executor = QiskitExecutor(estimator=EstimatorV2())
+# ```
+#
+# `EstimatorV2`はQiskitの現行世代のprimitiveで、サンプリングを介さず直接期待値を計算します。
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsExecutor
+#
+# # QuriPartsExecutor は estimator が指定されない場合、qulacs バックエンドの
+# # パラメトリック estimator を遅延構築します。VQE ループにはそのデフォルトで十分です。
+# executor = QuriPartsExecutor()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# from qamomile.cudaq import CudaqExecutor
+#
+# # CudaqExecutor は cudaq.observe を内部で呼んで期待値を計算するため、
+# # 明示的な estimator の配線は不要です。
+# executor = CudaqExecutor()
+# ```
+# :::
+# ::::
+
+# %%
+# Executor — この記事はデフォルトで Qiskit の EstimatorV2 を使って期待値を計算します。
+# 上のタブで別のSDKを選んだ場合は、対応するタブのスニペットで以下を上書きしてください
+# （あわせて記事冒頭のpipセルで対応する行のコメントも外しておくこと）。
+from qiskit_aer.primitives import EstimatorV2
+
+from qamomile.qiskit.transpiler import QiskitExecutor
+
+executor = QiskitExecutor(estimator=EstimatorV2())
 
 # %%
 cost_history = []
-executor = QiskitExecutor(estimator=EstimatorV2())
 
 
 def cost_fn(param_values):
