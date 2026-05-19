@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
@@ -1818,6 +1818,22 @@ wheels = [
 ]
 
 [[package]]
+name = "minto"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jijmodeling" },
+    { name = "numpy" },
+    { name = "ommx" },
+    { name = "pandas" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/38/35/84c54b3a93c0c35a2ac6ded25cac6c3ae7799a012c3c02370f37ecd627fb/minto-2.0.0.tar.gz", hash = "sha256:f6c425f1486e30768c26d28fc36c9cce06fe033b208efe41c7db4e930408b2f6", size = 830810, upload-time = "2026-04-13T04:51:46.206Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/5b/294ebc63a1a5fa28662b62282e9845496ad3a5c53c639dc65ab45038b5b1/minto-2.0.0-py3-none-any.whl", hash = "sha256:0b58bd2f52d616761bc8d897c8efa4498d009cacdb4747b13272562ce186767c", size = 36885, upload-time = "2026-04-13T04:51:44.837Z" },
+]
+
+[[package]]
 name = "mistune"
 version = "3.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2207,6 +2223,22 @@ dependencies = [
     { name = "pyscipopt" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ca/00/5f0aab79e0d9e9dc83ec41294b43ff99f4ae7d6870bcfe7d5fda5daa38f0/ommx_pyscipopt_adapter-2.5.1.tar.gz", hash = "sha256:767d386c6d3c47a03a35b8e237c6d0d623ed3c63f5995d15c13cd6541b253f2d", size = 11064, upload-time = "2026-03-19T13:05:41.627Z" }
+
+[[package]]
+name = "ommx-quantum-benchmarks"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jijmodeling" },
+    { name = "minto" },
+    { name = "numpy" },
+    { name = "ommx" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3e/07/601927fa870037ad19250bfb817859f8729ade340da41ef7ecd250c822aa/ommx_quantum_benchmarks-0.0.2.tar.gz", hash = "sha256:fc29142ae32b7c7d3a29dff3aae409c8195c1092c3af71a6c16fdfbe60d93d26", size = 265006, upload-time = "2026-05-18T07:29:42.339Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6c/2a/3c67741cba180438b376ad9593da925962ee1ec121dd029bad11b68adb9a/ommx_quantum_benchmarks-0.0.2-py3-none-any.whl", hash = "sha256:f71283f0839da54dd2f36916e63524844335f9fa931d6bcc60c8be58ba7b32bd", size = 140953, upload-time = "2026-05-18T07:29:40.865Z" },
+]
 
 [[package]]
 name = "openfermion"
@@ -3168,6 +3200,7 @@ dev = [
     { name = "matplotlib" },
     { name = "networkx" },
     { name = "ommx-pyscipopt-adapter" },
+    { name = "ommx-quantum-benchmarks" },
     { name = "openfermion" },
     { name = "openfermionpyscf" },
     { name = "pylatexenc" },
@@ -3205,6 +3238,7 @@ dev = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "ommx-pyscipopt-adapter", specifier = ">=2.3.0" },
+    { name = "ommx-quantum-benchmarks", specifier = ">=0.0.1" },
     { name = "openfermion", specifier = ">=1.6.0" },
     { name = "openfermionpyscf", specifier = ">=0.5" },
     { name = "pylatexenc", specifier = ">=2.10" },
