@@ -202,7 +202,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             elif isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
                 # SliceArrayOperation / ReleaseSliceViewOperation are
                 # intentionally preserved through partial_eval /
-                # constant_fold so SliceLinearityCheckPass can validate
+                # constant_fold so SliceBorrowCheckPass can validate
                 # view borrow / release post-fold; StripSliceArrayOpsPass
                 # (invoked from ``Transpiler.strip_slice_ops`` after the
                 # linearity check) is responsible for removing both
@@ -213,7 +213,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 raise RuntimeError(
                     f"{type(op).__name__} reached emit — "
                     f"StripSliceArrayOpsPass should have stripped it "
-                    f"after SliceLinearityCheckPass.  This is a "
+                    f"after SliceBorrowCheckPass.  This is a "
                     f"compiler bug; please report it."
                 )
             elif isinstance(op, GateOperation):

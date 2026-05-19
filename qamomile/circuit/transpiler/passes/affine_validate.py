@@ -68,7 +68,7 @@ class AffineValidationPass(Pass[Block, Block]):
             # describing a strided view.  ReleaseSliceViewOperation
             # likewise carries a sliced ArrayValue operand without
             # consuming it: the op is a declarative borrow-return
-            # marker for SliceLinearityCheckPass and does not
+            # marker for SliceBorrowCheckPass and does not
             # contribute to the affine-type consume count.  Both ops
             # are normally stripped by ConstantFoldingPass /
             # StripSliceArrayOpsPass before this pass, but we guard

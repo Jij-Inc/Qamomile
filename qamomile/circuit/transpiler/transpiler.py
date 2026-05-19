@@ -33,8 +33,8 @@ from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
 )
 from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
-from qamomile.circuit.transpiler.passes.slice_linearity_check import (
-    SliceLinearityCheckPass,
+from qamomile.circuit.transpiler.passes.slice_borrow_check import (
+    SliceBorrowCheckPass,
 )
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
@@ -371,7 +371,7 @@ class Transpiler(ABC, Generic[T]):
         """Pass 1.95: Remove ``SliceArrayOperation`` nodes from the block.
 
         ``PartialEvaluationPass`` keeps these declarative ops through
-        constant folding so :meth:`slice_linearity_check` can use them
+        constant folding so :meth:`slice_borrow_check` can use them
         as view-declaration markers. Once the linearity check has run,
         segmentation and downstream passes expect a classical-op-free
         quantum stream — this pass performs that cleanup.
@@ -382,7 +382,7 @@ class Transpiler(ABC, Generic[T]):
 
         return StripSliceArrayOpsPass().run(block)
 
-    def slice_linearity_check(self, block: Block) -> Block:
+    def slice_borrow_check(self, block: Block) -> Block:
         """Pass 1.9: Post-fold slice-view linearity checker.
 
         Runs after :meth:`partial_eval` has resolved slice bounds to
@@ -410,7 +410,7 @@ class Transpiler(ABC, Generic[T]):
         The pass is a pass-through for the IR — it only raises on
         violations and leaves the block unchanged on success.
         """
-        return SliceLinearityCheckPass().run(block)
+        return SliceBorrowCheckPass().run(block)
 
     def analyze(self, block: Block) -> Block:
         """Pass 2: Validate and analyze dependencies."""
@@ -548,7 +548,7 @@ class Transpiler(ABC, Generic[T]):
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
-        partially_evaluated = self.slice_linearity_check(partially_evaluated)
+        partially_evaluated = self.slice_borrow_check(partially_evaluated)
         partially_evaluated = self.strip_slice_ops(partially_evaluated)
         analyzed = self.analyze(partially_evaluated)
         # Lower measurement-derived classical ops to ``RuntimeClassicalExpr``

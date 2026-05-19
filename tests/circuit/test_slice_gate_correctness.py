@@ -1041,7 +1041,7 @@ class TestPropertyBasedSliceCrossBackend:
 
     The slice bounds are passed via ``bindings`` so every case also
     exercises the symbolic-bounds → ``ConstantFoldingPass`` →
-    ``SliceLinearityCheckPass`` pipeline rather than fully-concrete
+    ``SliceBorrowCheckPass`` pipeline rather than fully-concrete
     literal slicing.
     """
 

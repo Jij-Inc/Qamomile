@@ -57,7 +57,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
             strip_slice_ops: When ``True`` (default), removes
                 ``SliceArrayOperation`` nodes after folding. Set to
                 ``False`` when a downstream pass — notably
-                ``SliceLinearityCheckPass`` — still needs to observe
+                ``SliceBorrowCheckPass`` — still needs to observe
                 slice declaration points in program order to decide
                 view liveness. A separate strip pass must then run
                 after the linearity check so segmentation still sees
@@ -113,7 +113,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 # result directly.  Strip the op so segmentation sees a
                 # pure quantum-segment sequence without a classical op
                 # interleaved in the middle.  When ``strip_slice_ops``
-                # is ``False``, keep the op so ``SliceLinearityCheckPass``
+                # is ``False``, keep the op so ``SliceBorrowCheckPass``
                 # can use its position as the view's declaration point;
                 # a later strip pass must remove it before segmentation.
                 if isinstance(op, SliceArrayOperation):
@@ -129,7 +129,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
                 # ReleaseSliceViewOperation is the symmetric counterpart
                 # of SliceArrayOperation: a declarative marker that tells
-                # SliceLinearityCheckPass to drop the view's borrow.  The
+                # SliceBorrowCheckPass to drop the view's borrow.  The
                 # same strip / keep policy applies — when
                 # ``strip_slice_ops`` is True the marker is removed (it
                 # carries no information needed downstream), otherwise
@@ -208,7 +208,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
         explicitly folding those fields the result retains symbolic
         BinOp values even after operand folding.  When the result is
         still in the IR (``strip_slice_ops=False``),
-        ``SliceLinearityCheckPass`` inspects the result directly to
+        ``SliceBorrowCheckPass`` inspects the result directly to
         decide view coverage, so it must see folded bounds.
 
         Args:

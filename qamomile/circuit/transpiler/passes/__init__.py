@@ -39,7 +39,7 @@ from .control_flow_visitor import (  # noqa: E402
     OperationTransformer,
     ValueCollector,
 )
-from .slice_linearity_check import SliceLinearityCheckPass  # noqa: E402
+from .slice_borrow_check import SliceBorrowCheckPass  # noqa: E402
 from .validate_while import ValidateWhileContractPass  # noqa: E402
 from .value_mapping import UUIDRemapper, ValueSubstitutor  # noqa: E402
 
@@ -53,7 +53,7 @@ __all__ = [
     "ConstantFoldingPass",
     "CompileTimeIfLoweringPass",
     "AffineValidationPass",
-    "SliceLinearityCheckPass",
+    "SliceBorrowCheckPass",
     "ControlFlowVisitor",
     "OperationTransformer",
     "OperationCollector",

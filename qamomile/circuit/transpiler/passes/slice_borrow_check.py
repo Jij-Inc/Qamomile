@@ -67,7 +67,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import (
-    SliceLinearityViolationError,
+    SliceBorrowViolationError,
     UnreturnedBorrowAtBlockEndError,
     ValidationError,
 )
@@ -153,7 +153,7 @@ def _slot_descriptor(key: BorrowKey) -> str:
 class _ConsumedSlotMarker:
     """Sentinel marking a physical qubit slot destroyed by a prior destructive op.
 
-    Installed by :meth:`SliceLinearityCheckPass._process_result_releases`
+    Installed by :meth:`SliceBorrowCheckPass._process_result_releases`
     when a destructive operation (``MeasureOperation``,
     ``MeasureVectorOperation``, ``CastOperation``) consumes a view's
     covered slots.  Subsequent operand access to the same slot is
@@ -183,7 +183,7 @@ Owner = Value | ArrayValue | _ConsumedSlotMarker
 State = dict[BorrowKey, Owner]
 
 
-class SliceLinearityCheckPass(Pass[Block, Block]):
+class SliceBorrowCheckPass(Pass[Block, Block]):
     """Post-fold linearity checker for sliced views and borrow state.
 
     Runs after :class:`ConstantFoldingPass` (so slice bounds are
@@ -220,9 +220,9 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         """Return the pass identifier for tracing/logging.
 
         Returns:
-            The short name ``"slice_linearity_check"``.
+            The short name ``"slice_borrow_check"``.
         """
-        return "slice_linearity_check"
+        return "slice_borrow_check"
 
     def run(self, input: Block) -> Block:
         """Run the borrow tracker over ``input``.
@@ -236,14 +236,14 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
 
         Raises:
             ValidationError: If called on an unexpected block kind.
-            SliceLinearityViolationError: If a slice view and a direct
+            SliceBorrowViolationError: If a slice view and a direct
                 access collide, or if two views overlap.
             UnreturnedBorrowAtBlockEndError: If any borrow remains
                 outstanding once the root block completes.
         """
         if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
-                f"SliceLinearityCheckPass expects AFFINE or HIERARCHICAL "
+                f"SliceBorrowCheckPass expects AFFINE or HIERARCHICAL "
                 f"block, got {input.kind}",
             )
 
@@ -445,7 +445,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             state: Mutable borrow tracker (slice views only).
 
         Raises:
-            SliceLinearityViolationError: If an operand's resolved slot
+            SliceBorrowViolationError: If an operand's resolved slot
                 is owned by a view that does not contain the operand.
         """
         # Mark whole-ArrayValue operands as "used" for drain tracking.
@@ -473,7 +473,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     for idx in range(length):
                         key = _const_key(v, idx)
                         if isinstance(state.get(key), _ConsumedSlotMarker):
-                            raise SliceLinearityViolationError(
+                            raise SliceBorrowViolationError(
                                 f"Whole-array operand '{v.name}' (slot {idx}) "
                                 f"is accessed after it was consumed by a "
                                 f"destructive view operation "
@@ -505,7 +505,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # earlier destructive view op (``measure(q[1::2])``).
                 # Any subsequent operand access — direct or via
                 # another view — is invalid.
-                raise SliceLinearityViolationError(
+                raise SliceBorrowViolationError(
                     f"Operand '{v.name}' accesses slot "
                     f"{_slot_descriptor(key)} after it was "
                     f"consumed by a destructive view operation; the physical "
@@ -518,7 +518,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # chain).  Otherwise it's a direct access colliding
                 # with the view.
                 if not self._is_element_of_view(v, existing):
-                    raise SliceLinearityViolationError(
+                    raise SliceBorrowViolationError(
                         self._format_view_vs_direct(existing, v, op, key)
                     )
                 # Same view — legitimate view-internal access, no state
@@ -661,7 +661,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         current loop / branch merge cannot propagate entry deletions
         out of the body, so such cross-body releases would leave the
         outer state inconsistent — they are rejected with
-        ``SliceLinearityViolationError`` for predictability.
+        ``SliceBorrowViolationError`` for predictability.
 
         Args:
             view_value: The sliced ``ArrayValue`` whose borrow is
@@ -671,7 +671,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             state: Mutable borrow tracker for the current scope.
 
         Raises:
-            SliceLinearityViolationError: When invoked inside a
+            SliceBorrowViolationError: When invoked inside a
                 control-flow body and any entry being removed was
                 recorded in the outer snapshot (cross-body release).
         """
@@ -691,7 +691,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 and owner.logical_id == target_logical_id
             ]
             if offenders:
-                raise SliceLinearityViolationError(
+                raise SliceBorrowViolationError(
                     f"Slice assignment inside a control-flow body "
                     f"attempted to release view '{view_value.name}', "
                     f"which was registered by the enclosing block.  "
@@ -739,7 +739,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 tried to drop the outer view.
 
         Raises:
-            SliceLinearityViolationError: If any entry in the innermost
+            SliceBorrowViolationError: If any entry in the innermost
                 outer snapshot is owned by ``drained_view``.
         """
         if not self._outer_snapshot_stack:
@@ -753,7 +753,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         ]
         if not offenders:
             return
-        raise SliceLinearityViolationError(
+        raise SliceBorrowViolationError(
             f"Slice construction inside a control-flow body would "
             f"implicitly drain view '{drained_view.name}' (registered "
             f"on '{root.name}' by the enclosing block) to make room "
@@ -786,7 +786,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             state: Mutable borrow tracker.
 
         Raises:
-            SliceLinearityViolationError: If any covered slot is already
+            SliceBorrowViolationError: If any covered slot is already
                 held by a different owner.
         """
         if av is None or not isinstance(av, ArrayValue):
@@ -842,7 +842,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 continue
             if isinstance(existing, _ConsumedSlotMarker):
                 # Attempting to slice into an already-destroyed slot.
-                raise SliceLinearityViolationError(
+                raise SliceBorrowViolationError(
                     f"Slice view '{av.name}' covers slot {idx} on "
                     f"'{root.name}', but that physical qubit was destroyed "
                     f"by a prior destructive view operation (measure / cast)."
@@ -854,7 +854,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 touched_views_coverage.setdefault(existing.uuid, set()).add(idx)
             else:
                 # Direct element borrow collides with the new view.
-                raise SliceLinearityViolationError(
+                raise SliceBorrowViolationError(
                     self._format_view_registration_conflict(existing, av, idx, root)
                 )
 
@@ -863,7 +863,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             if other_full is None:
                 # Symbolic / unresolvable bounds on the earlier view —
                 # we can't prove coverage equality, so be conservative.
-                raise SliceLinearityViolationError(
+                raise SliceBorrowViolationError(
                     self._format_view_registration_conflict(
                         other_view,
                         av,
@@ -914,7 +914,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # explicitly return / consume the outer view before
                 # constructing an overlapping inner view.  Matches the
                 # frontend's strict ``VectorView._wrap`` overlap check.
-                raise SliceLinearityViolationError(
+                raise SliceBorrowViolationError(
                     self._format_view_registration_conflict(
                         other_view,
                         av,

@@ -706,10 +706,10 @@ class TestControlFlowBodyViolations:
     """
 
     def test_release_of_outer_view_in_body_raises(self):
-        from qamomile.circuit.transpiler.errors import SliceLinearityViolationError
+        from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
 
         transpiler = QiskitTranspiler()
-        with pytest.raises(SliceLinearityViolationError):
+        with pytest.raises(SliceBorrowViolationError):
             transpiler.transpile(_body_release_of_outer_view)
 
 

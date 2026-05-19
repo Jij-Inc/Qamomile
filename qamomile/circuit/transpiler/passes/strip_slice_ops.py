@@ -3,7 +3,7 @@
 Both ops are purely declarative — the resulting sliced ``ArrayValue``
 carries all the emit-time metadata on its own (``slice_of`` /
 ``slice_start`` / ``slice_step``), and the release marker only exists
-so ``SliceLinearityCheckPass`` can observe explicit slice-assignment
+so ``SliceBorrowCheckPass`` can observe explicit slice-assignment
 borrow-returns in program order.  ``ConstantFoldingPass`` keeps these
 ops around when ``strip_slice_ops=False`` so the downstream linearity
 check can see them.  Once the linearity check has run, both ops are
@@ -30,7 +30,7 @@ from .control_flow_visitor import OperationTransformer
 class StripSliceArrayOpsPass(Pass[Block, Block]):
     """Remove ``SliceArrayOperation`` / ``ReleaseSliceViewOperation`` nodes.
 
-    Both ops are only meaningful to ``SliceLinearityCheckPass`` as
+    Both ops are only meaningful to ``SliceBorrowCheckPass`` as
     view-declaration / release markers; downstream passes (analyze,
     plan, emit) neither need nor expect them.  Dropping them here
     keeps the segmentation quantum-op-only.
@@ -51,7 +51,7 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
         resolution is unaffected.
 
         Args:
-            input: Block that has completed ``SliceLinearityCheckPass``.
+            input: Block that has completed ``SliceBorrowCheckPass``.
 
         Returns:
             A new block with all slice marker ops removed.

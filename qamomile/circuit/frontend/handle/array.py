@@ -261,7 +261,7 @@ class ArrayBase(Handle, Generic[T]):
         # For a view: check the parent's borrow table at this view's
         # covered slots.  ``_slice_covered_indices`` is None for
         # symbolic-bound views; in that case the IR-level
-        # SliceLinearityCheckPass picks up the violation post-fold.
+        # SliceBorrowCheckPass picks up the violation post-fold.
         slice_parent = getattr(self, "_slice_parent", None)
         covered = getattr(self, "_slice_covered_indices", None)
         if slice_parent is not None and covered is not None:
@@ -781,7 +781,7 @@ class Vector(ArrayBase[T]):
         released on both sides of the IR boundary: ``value.consume(...)``
         clears the frontend ``_borrowed_indices`` entries, and a
         :class:`ReleaseSliceViewOperation` is emitted so the post-fold
-        :class:`SliceLinearityCheckPass` can mirror the release in IR
+        :class:`SliceBorrowCheckPass` can mirror the release in IR
         state.  See :meth:`_return_slice_view` for the full validation
         sequence.
 
@@ -948,7 +948,7 @@ class Vector(ArrayBase[T]):
         #     anything along the chain (parent length, slice bound) is
         #     still a symbolic ``UInt`` at trace time, defer the deep
         #     checks (6) and (7) to the post-fold
-        #     ``SliceLinearityCheckPass`` — the bindings haven't been
+        #     ``SliceBorrowCheckPass`` — the bindings haven't been
         #     applied yet, so concrete coverage is unknowable here.
         try:
             lhs_covered: tuple[int, ...] | None = self._normalize_slice_to_covered(s)
@@ -1069,7 +1069,7 @@ class Vector(ArrayBase[T]):
                     self_root._borrowed_indices[key] = self
 
         # (9) IR release: emit a marker the post-fold linearity check
-        #     can observe.  Without this op, ``SliceLinearityCheckPass``
+        #     can observe.  Without this op, ``SliceBorrowCheckPass``
         #     would still treat the view as a live owner of the
         #     covered slots and reject any subsequent direct access
         #     to those slots.  Stripped after the linearity check by
@@ -1623,7 +1623,7 @@ class VectorView(Vector[T]):
 
         Symbolic slices (``q[lo:hi]`` with ``lo``/``hi`` ``UInt``) cannot
         enumerate their covered slots at trace time and therefore skip
-        the bulk-borrow here; ``SliceLinearityCheckPass`` picks them up
+        the bulk-borrow here; ``SliceBorrowCheckPass`` picks them up
         post-fold after bindings resolve the bounds to concrete values.
 
     Attributes:

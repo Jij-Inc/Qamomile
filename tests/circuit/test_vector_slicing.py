@@ -727,7 +727,7 @@ class TestVectorViewAsKernelArgument:
 
 
 # ---------------------------------------------------------------------------
-# V6: IR-level slice operation + SliceLinearityCheckPass
+# V6: IR-level slice operation + SliceBorrowCheckPass
 # ---------------------------------------------------------------------------
 
 
@@ -831,7 +831,7 @@ class TestViewAsKernelOperandViaCallBlock:
 
 
 class TestPostFoldLinearity:
-    """``SliceLinearityCheckPass`` catches post-fold aliasing."""
+    """``SliceBorrowCheckPass`` catches post-fold aliasing."""
 
     def test_symbolic_slice_vs_direct_access_caught_at_transpile(self):
         """``q[lo:hi] + q[0]`` aliases when ``lo=0``; caught at transpile.
@@ -841,14 +841,14 @@ class TestPostFoldLinearity:
         bulk-borrow tracker can enumerate the slice's coverage and
         catches the aliasing immediately (``QubitConsumedError``).
         When bounds stay symbolic — e.g. derived from an unbound
-        parameter through arithmetic — ``SliceLinearityCheckPass``
+        parameter through arithmetic — ``SliceBorrowCheckPass``
         resolves them post-fold and raises
-        ``SliceLinearityViolationError`` instead.
+        ``SliceBorrowViolationError`` instead.
         """
         pytest.importorskip("qiskit")
         from qamomile.circuit.transpiler.errors import (
             QubitConsumedError,
-            SliceLinearityViolationError,
+            SliceBorrowViolationError,
         )
         from qamomile.qiskit import QiskitTranspiler
 
@@ -862,7 +862,7 @@ class TestPostFoldLinearity:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((SliceLinearityViolationError, QubitConsumedError)):
+        with pytest.raises((SliceBorrowViolationError, QubitConsumedError)):
             transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
 
     def test_symbolic_slice_disjoint_from_direct_access_passes(self):
@@ -888,7 +888,7 @@ class TestPostFoldLinearity:
     def test_direct_access_before_view_use_is_caught(self):
         """Alias is caught even when the direct parent access precedes the view use.
 
-        Regression (P1-2): ``SliceLinearityCheckPass`` used to register
+        Regression (P1-2): ``SliceBorrowCheckPass`` used to register
         a view's bulk-borrow lazily — only when the view was first
         referenced as an operand.  That made ``region = q[lo2:hi];
         q[0] = h(q[0]); region[0] = x(region[0])`` (with ``lo=0``,
@@ -900,7 +900,7 @@ class TestPostFoldLinearity:
         pytest.importorskip("qiskit")
         from qamomile.circuit.transpiler.errors import (
             QubitConsumedError,
-            SliceLinearityViolationError,
+            SliceBorrowViolationError,
         )
         from qamomile.qiskit import QiskitTranspiler
 
@@ -917,7 +917,7 @@ class TestPostFoldLinearity:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((SliceLinearityViolationError, QubitConsumedError)):
+        with pytest.raises((SliceBorrowViolationError, QubitConsumedError)):
             transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
 
     def test_nested_const_view_locks_parent_slot(self):
@@ -1403,7 +1403,7 @@ class TestRound2Reviewer:
         """
         from qamomile.circuit.transpiler.errors import (
             QubitConsumedError,
-            SliceLinearityViolationError,
+            SliceBorrowViolationError,
         )
 
         @qmc.qkernel
@@ -1413,7 +1413,7 @@ class TestRound2Reviewer:
             _ = qmc.measure(odd)
             return qmc.measure(q)
 
-        with pytest.raises((QubitConsumedError, SliceLinearityViolationError)):
+        with pytest.raises((QubitConsumedError, SliceBorrowViolationError)):
             kern.block
 
     def test_element_access_after_view_measure_rejects(self):
@@ -1596,7 +1596,7 @@ class TestRound3Reviewer:
       (MeasureVectorOperation clbit-result shape stays symbolic → allocator emits 0 clbits)
     - R3-B: ``measure(q[1::2]); expval(q, Z(1))`` transpiles silently despite
       consumed-slot markers — caught neither at frontend trace time nor by
-      the IR SliceLinearityCheckPass
+      the IR SliceBorrowCheckPass
     """
 
     # ----- R3-A: constant-fold must fold operation *results* ----------------
@@ -1717,14 +1717,14 @@ class TestRound3Reviewer:
         assert block is not None
 
     def test_ir_check_catches_expval_over_consumed_slot(self):
-        """IR ``SliceLinearityCheckPass`` rejects whole-root expval after view-measure.
+        """IR ``SliceBorrowCheckPass`` rejects whole-root expval after view-measure.
 
         Complementary to the frontend trace-time guard: even if the IR is
         constructed directly (bypassing ``expval()``), the post-fold
         linearity checker must catch the consumed-slot violation.
         """
         pytest.importorskip("qiskit")
-        from qamomile.circuit.transpiler.errors import SliceLinearityViolationError
+        from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
 
         @qmc.qkernel
         def kern(obs: qmc.Observable) -> qmc.Float:
@@ -1738,7 +1738,7 @@ class TestRound3Reviewer:
 
         from qamomile.circuit.transpiler.errors import QubitConsumedError
 
-        with pytest.raises((QubitConsumedError, SliceLinearityViolationError)):
+        with pytest.raises((QubitConsumedError, SliceBorrowViolationError)):
             kern.block
 
 
@@ -2146,7 +2146,7 @@ class TestRound5Reviewer:
     ``resolve_slice_chain`` for sliced operands and falls back to the
     element_uuid path, producing an empty qubit_map and a far-away
     backend width-mismatch error.
-    R5-B: ``SliceLinearityCheckPass`` borrow-state keyed only by
+    R5-B: ``SliceBorrowCheckPass`` borrow-state keyed only by
     slot index aliases independent registers — consuming ``a[1]``
     spuriously blocks ``b[1]``.
     R5-C: The loop-body state merge inside ``_walk_nested`` only
@@ -2174,7 +2174,7 @@ class TestRound5Reviewer:
         H = qm_o.Z(1)
         transpiler = QiskitTranspiler()
         # If borrow keys were not namespaced, this would raise
-        # SliceLinearityViolationError or a stage-later EmitError; we
+        # SliceBorrowViolationError or a stage-later EmitError; we
         # only need the kernel to trace and transpile cleanly.
         exe = transpiler.transpile(kern, bindings={"obs": H})
         assert exe is not None
@@ -2203,7 +2203,7 @@ class TestRound5Reviewer:
         """A destructive view consume inside a loop body must mark consumed slots."""
         from qamomile.circuit.transpiler.errors import (
             QubitConsumedError,
-            SliceLinearityViolationError,
+            SliceBorrowViolationError,
         )
 
         @qmc.qkernel
@@ -2217,7 +2217,7 @@ class TestRound5Reviewer:
             return qmc.expval(q, obs)
 
         H = qm_o.Z(0)
-        with pytest.raises((QubitConsumedError, SliceLinearityViolationError)):
+        with pytest.raises((QubitConsumedError, SliceBorrowViolationError)):
             _ = kern.build(obs=H)
 
     def test_consumed_marker_in_loop_body_does_not_leak_across_registers(self):
@@ -2575,12 +2575,12 @@ class TestSliceAssignment:
         Releasing an outer-registered view from inside a control-flow body
         would require the loop / branch merge to propagate the entry
         deletion outward, which the current consumption-priority union
-        cannot do safely.  The pass raises ``SliceLinearityViolationError``
+        cannot do safely.  The pass raises ``SliceBorrowViolationError``
         with a hint pointing at the control-flow region.
         """
         pytest.importorskip("qiskit")
         from qamomile.circuit.transpiler.errors import (
-            SliceLinearityViolationError,
+            SliceBorrowViolationError,
         )
         from qamomile.qiskit import QiskitTranspiler
 
@@ -2594,5 +2594,5 @@ class TestSliceAssignment:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises(SliceLinearityViolationError, match="control-flow body"):
+        with pytest.raises(SliceBorrowViolationError, match="control-flow body"):
             transpiler.transpile(kern)

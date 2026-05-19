@@ -86,7 +86,7 @@ class ReleaseSliceViewOperation(Operation):
     Emitted by :meth:`Vector.__setitem__` when used with a slice index
     (``qs[a:b] = qmc.h(qs[a:b])``).  This op tells the post-fold
     linearity checker
-    (:class:`~qamomile.circuit.transpiler.passes.slice_linearity_check.SliceLinearityCheckPass`)
+    (:class:`~qamomile.circuit.transpiler.passes.slice_borrow_check.SliceBorrowCheckPass`)
     that the view referenced in ``operands[0]`` no longer owns its
     covered parent slots, mirroring the frontend's
     ``VectorView.consume(operation_name="slice assignment")`` borrow
@@ -97,7 +97,7 @@ class ReleaseSliceViewOperation(Operation):
     :class:`~qamomile.circuit.transpiler.passes.strip_slice_ops.StripSliceArrayOpsPass`
     removes both :class:`SliceArrayOperation` and
     :class:`ReleaseSliceViewOperation` after
-    :class:`SliceLinearityCheckPass` has observed them.  Reaching emit
+    :class:`SliceBorrowCheckPass` has observed them.  Reaching emit
     is a compiler-internal invariant violation and is rejected with a
     ``RuntimeError`` from :mod:`standard_emit`.
 
@@ -105,8 +105,8 @@ class ReleaseSliceViewOperation(Operation):
     / ``IfOperation``), this op only releases view borrows that were
     *created within the same body*.  Releasing a borrow that the
     enclosing block has registered (an "outer-snapshot" borrow) is
-    rejected by ``SliceLinearityCheckPass`` with
-    ``SliceLinearityViolationError`` — the loop-merge semantics of the
+    rejected by ``SliceBorrowCheckPass`` with
+    ``SliceBorrowViolationError`` — the loop-merge semantics of the
     pass cannot propagate entry deletions out of the body, so the only
     way to keep the static check consistent is to forbid that pattern.
 

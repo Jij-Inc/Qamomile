@@ -36,7 +36,7 @@ class PartialEvaluationPass(Pass[Block, Block]):
             )
 
         # Keep ``SliceArrayOperation`` nodes through partial_eval so
-        # the downstream ``SliceLinearityCheckPass`` can use them as
+        # the downstream ``SliceBorrowCheckPass`` can use them as
         # view-declaration markers and detect direct-access-over-view
         # aliases independently of the order in which the view is
         # first referenced.  They are stripped immediately after the

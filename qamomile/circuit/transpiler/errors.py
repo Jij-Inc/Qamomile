@@ -289,10 +289,10 @@ class UnreturnedBorrowError(AffineTypeError):
     pass
 
 
-class SliceLinearityViolationError(AffineTypeError):
+class SliceBorrowViolationError(AffineTypeError):
     """Aliasing detected between a slice view and a direct parent access.
 
-    Raised by :class:`SliceLinearityCheckPass` at transpile time when
+    Raised by :class:`SliceBorrowCheckPass` at transpile time when
     a parent array slot is simultaneously held by a ``VectorView`` and
     accessed directly, or when two overlapping views cover the same
     slot.  For slices with constant bounds this is normally caught at
@@ -305,7 +305,7 @@ class SliceLinearityViolationError(AffineTypeError):
         region = q[lo:hi]     # bindings give lo=0, hi=4 → covers {0,1,2,3}
         qa = region[0]        # borrows parent slot 0 via the view
         qb = q[0]             # borrows parent slot 0 directly
-        # SliceLinearityViolationError: slot 0 is held by a slice view
+        # SliceBorrowViolationError: slot 0 is held by a slice view
     """
 
     pass
@@ -314,7 +314,7 @@ class SliceLinearityViolationError(AffineTypeError):
 class UnreturnedBorrowAtBlockEndError(AffineTypeError):
     """Block completed with a slice view still owning parent slots.
 
-    Raised by :class:`SliceLinearityCheckPass` when the root block's
+    Raised by :class:`SliceBorrowCheckPass` when the root block's
     operation sequence finishes with a slice view still recorded as
     the owner of one or more parent slots — i.e. a view that was
     sliced but never returned via slice assignment

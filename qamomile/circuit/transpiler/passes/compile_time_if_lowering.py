@@ -296,7 +296,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # ``slice_start`` / ``slice_step`` / ``slice_of`` Values may be
         # phi-output references when the slice bounds come from an
         # ``if`` branch.  Without substituting the result fields, the
-        # post-fold ``SliceLinearityCheckPass`` sees a still-symbolic
+        # post-fold ``SliceBorrowCheckPass`` sees a still-symbolic
         # ``slice_start`` and silently skips coverage registration,
         # letting aliased direct-parent accesses slip through.
         from qamomile.circuit.ir.operation import SliceArrayOperation
