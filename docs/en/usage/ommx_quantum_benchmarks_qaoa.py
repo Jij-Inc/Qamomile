@@ -48,10 +48,10 @@
 # **OMMX Quantum Benchmarks** is a curated collection of optimization
 # benchmark instances distributed in this `ommx.v1.Instance` format. The
 # first dataset shipped is **QOBLIB** (Quantum Optimization Benchmarking
-# Library) [](https://arxiv.org/abs/2504.03832), which contains nine
-# problem families used in the recent quantum-optimization literature,
-# including LABS, Market Split, Independent Set, and Steiner-tree
-# packing.
+# Library) [arXiv:2504.03832](https://arxiv.org/abs/2504.03832), which
+# contains nine problem families used in the recent quantum-optimization
+# literature, including LABS, Market Split, Independent Set, and
+# Steiner-tree packing.
 #
 # Because each instance is just an `ommx.v1.Instance`, every Qamomile
 # entry point that already accepts `ommx.v1.Instance` — most importantly
