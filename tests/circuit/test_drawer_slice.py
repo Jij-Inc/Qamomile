@@ -71,6 +71,9 @@ def _nested_slice() -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(8, "q")
     even = q[0::2]
     even[0:2] = qmc.h(even[0:2])
+    # Strict-return: ``even`` still owns its non-overlap slots {4, 6};
+    # discharge it before measuring the parent.
+    q[0::2] = even
     return qmc.measure(q)
 
 

@@ -883,21 +883,31 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                         del state[old_key]
             elif new_covered.issubset(other_full):
                 # Nested slice: the new view is a strict subset of an
-                # existing outer view (``inner = q[0::2][1:3]``).  The
-                # outer view's life ends the moment a nested slice is
-                # taken from it — the frontend's ``VectorView._wrap``
-                # already drains the outer in this case.  Mirror the
-                # same semantic here: release every slot of the outer
-                # view (including those outside the new view's coverage,
-                # since the outer handle is no longer usable) before
-                # registering the inner.
+                # existing outer view (``inner = q[0::2][1:3]``).  Only
+                # the overlap slots are handed from the outer view to
+                # the inner — the outer keeps its non-overlap slots so
+                # it can later be slice-assigned back to its own
+                # parent (the frontend's ``_nested_slice`` does the
+                # same partial hand-off).  Slots outside ``new_covered``
+                # remain registered against the outer.
                 self._guard_drain_against_outer_snapshot(
-                    other_view, av, root, "nested-slice drain of outer view"
+                    other_view, av, root, "nested-slice handoff"
                 )
-                for slot in other_full:
+                for slot in new_covered:
                     old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:
                         del state[old_key]
+            elif other_full.issubset(new_covered):
+                # The existing view is a (nested) inner of ``av``.  This
+                # path fires when ``av`` is re-touched via element /
+                # operand reference after a nested inner was sliced off
+                # it (e.g. ``a = q[1:9]; b = a[1:5]; qmc.h(a[0])``).
+                # The parent-child relationship is legitimate; leave
+                # the inner's registration intact.  The final
+                # registration loop below preserves the inner's entries
+                # by only writing slots that are currently unowned or
+                # owned by ``av`` itself.
+                continue
             else:
                 # Strict-return: partial overlap with an existing live
                 # view is a linearity violation.  Callers must
@@ -913,9 +923,18 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     )
                 )
 
+        # Preserve nested inner-view registrations: when ``av`` is being
+        # re-touched and some of its slots are currently held by a
+        # nested inner (parent-child relationship validated above), do
+        # NOT overwrite those entries.  Only claim slots that are
+        # unowned or already owned by ``av`` itself.
         for idx in new_covered:
             key = _const_key(root, idx)
-            state[key] = av
+            existing = state.get(key)
+            if existing is None or (
+                isinstance(existing, ArrayValue) and existing.uuid == av.uuid
+            ):
+                state[key] = av
 
     def _collect_view_coverage(self, view: "ArrayValue") -> set[int] | None:
         """Return the full covered-slot set of ``view`` in root coordinates.

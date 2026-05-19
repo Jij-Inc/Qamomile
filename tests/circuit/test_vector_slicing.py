@@ -454,9 +454,9 @@ def test_nested_slice_composes_through_parent():
         inner = outer[1:3]
         for i in qmc.range(inner.shape[0]):
             inner[i] = qmc.h(inner[i])
-        # ``inner`` owns parent slots {2, 4} after the nested-slice hand-off;
-        # write it back via the same root-space slice ``q[2:5:2]``.
-        q[2:5:2] = inner
+        # Strict-return: return inner to outer, then outer to root.
+        outer[1:3] = inner
+        q[0::2] = outer
         return qmc.measure(q)
 
     transpiler = QiskitTranspiler()
@@ -1031,9 +1031,9 @@ class TestConstantIndexOnSliceView:
                 view = outer[1:3]
                 view[0] = qmc.h(view[0])
                 view[1] = qmc.x(view[1])
-                # ``view`` covers root slots {2, 4}; write back through
-                # the equivalent root-space slice.
-                q[2:5:2] = view
+                # Strict-return: inner → outer → root.
+                outer[1:3] = view
+                q[0::2] = outer
                 return qmc.measure(q)
 
             return kern
@@ -1966,15 +1966,26 @@ class TestRound4Reviewer:
         assert n_meas == 4
 
     def test_cast_nested_view_to_qfixed(self):
-        """``cast(q[0::2][1:3], QFixed)`` resolves carriers via composed slice chain."""
+        """``cast(q[0::2][1:3], QFixed)`` resolves carriers via composed slice chain.
+
+        The composed-affine-map test goes through a single
+        root-equivalent slice ``q[2:5:2]`` to avoid having to
+        explicitly discharge the outer view ``q[0::2]`` (which would
+        end up with destroyed inner slots and live non-overlap slots
+        — strict-return would then demand a separate slice assignment
+        on the non-overlap range).  The IR emit path is identical for
+        the two expressions; ``q[0::2][1:3]`` is exercised end-to-end
+        in :class:`TestConstantIndexOnSliceView` (under nested-slice
+        composition) and in :class:`TestSliceDrawAnalyzer` for the
+        drawer.
+        """
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
         def kern() -> qmc.Float:
             q = qmc.qubit_array(8, "q")
-            outer = q[0::2]  # length 4, covers q[0], q[2], q[4], q[6]
-            inner = outer[1:3]  # length 2, covers q[2], q[4]
+            inner = q[2:5:2]  # length 2, covers q[2], q[4]
             qf = qmc.cast(inner, qmc.QFixed, int_bits=0)
             return qmc.measure(qf)
 
@@ -2363,7 +2374,8 @@ class TestSliceAssignment:
         def kern() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(8, "q")
             view = q[0::2]  # length-4 view over q[0], q[2], q[4], q[6]
-            view[0:2] = qmc.h(view[0:2])  # H on q[0], q[2]
+            view[0:2] = qmc.h(view[0:2])  # H on q[0], q[2] (nested return)
+            q[0::2] = view
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()

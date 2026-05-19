@@ -580,6 +580,39 @@ def _body_release_of_outer_view() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
+# -- Nested-slice return-order violations -----------------------------------
+
+
+@qmc.qkernel
+def _nested_inner_returned_to_root_directly() -> qmc.Vector[qmc.Bit]:
+    """``a = q[1:9]; b = a[1:5]; q[2:6] = b`` skips the outer-view return."""
+    q = qmc.qubit_array(10, "q")
+    a = q[1:9]  # noqa: F841
+    b = a[1:5]
+    q[2:6] = b
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _nested_outer_returned_while_inner_live() -> qmc.Vector[qmc.Bit]:
+    """``q[1:9] = a`` with ``b`` still owning a's overlap slots."""
+    q = qmc.qubit_array(10, "q")
+    a = q[1:9]
+    b = a[1:5]  # noqa: F841
+    q[1:9] = a
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _nested_outer_access_at_inner_slot() -> qmc.Vector[qmc.Bit]:
+    """Touching ``a[overlap_idx]`` while inner ``b`` owns that slot."""
+    q = qmc.qubit_array(10, "q")
+    a = q[1:9]
+    b = a[1:5]  # noqa: F841
+    a[1] = qmc.h(a[1])  # a[1] is root q[2], owned by b
+    return qmc.measure(q)
+
+
 class TestStrictReturnViolations:
     """Every view-consuming op that's not destructive demands a slice-assign return.
 
@@ -678,3 +711,36 @@ class TestControlFlowBodyViolations:
         transpiler = QiskitTranspiler()
         with pytest.raises(SliceLinearityViolationError):
             transpiler.transpile(_body_release_of_outer_view)
+
+
+class TestNestedSliceReturnOrder:
+    """Nested slices must be returned inner→outer→root.
+
+    The slice assignment in :meth:`VectorView._return_slice_view`
+    refuses to release an inner view directly to the root parent,
+    refuses to release the outer view while the inner still owns
+    parent slots, and the element accessor refuses to touch an
+    outer-view slot that is currently owned by a nested inner.
+    """
+
+    def test_inner_returned_to_root_directly_raises(self):
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        with pytest.raises(
+            AffineTypeError, match="returned through its immediate outer view"
+        ):
+            _ = _nested_inner_returned_to_root_directly.block
+
+    def test_outer_returned_while_inner_live_raises(self):
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        with pytest.raises(AffineTypeError, match="no longer owns"):
+            _ = _nested_outer_returned_while_inner_live.block
+
+    def test_outer_access_at_inner_slot_raises(self):
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        with pytest.raises(
+            QubitConsumedError, match="currently held by another slice view"
+        ):
+            _ = _nested_outer_access_at_inner_slot.block

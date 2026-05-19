@@ -438,6 +438,44 @@ class ArrayBase(Handle, Generic[T]):
                 operation_name="array element access",
             )
 
+        # Nested-view cross-check: when ``self`` is a ``VectorView`` and
+        # we can resolve ``indices`` to a concrete root-space slot,
+        # reject access if the root parent's borrow table records that
+        # slot as owned by another live ``VectorView`` (a nested inner
+        # view sliced off ``self``).  Without this, accessing
+        # ``a[overlap_idx]`` after ``b = a[inner_range]`` would silently
+        # double-use the qubit ``b`` is also claiming.
+        if (
+            isinstance(self, VectorView)
+            and self.value.type.is_quantum()
+            and self._slice_covered_indices is not None
+            and len(indices) == 1
+        ):
+            local_idx = _as_int_const(indices[0])
+            if local_idx is not None and 0 <= local_idx < len(
+                self._slice_covered_indices
+            ):
+                root_idx = self._slice_covered_indices[local_idx]
+                root_key = (f"const:{root_idx}",)
+                root_owner = self._slice_parent._borrowed_indices.get(root_key)
+                if (
+                    isinstance(root_owner, ArrayBase)
+                    and root_owner is not self
+                    and not _is_destroyed_slot_owner(root_owner)
+                ):
+                    root_name = self._slice_parent.value.name or "array"
+                    raise QubitConsumedError(
+                        f"View element '{self.value.name}[{index_str}]' "
+                        f"resolves to '{root_name}[{root_idx}]', which is "
+                        f"currently held by another slice view "
+                        f"'{root_owner.value.name}' (typically a nested "
+                        f"inner slice).  Return the inner view via "
+                        f"``outer[range] = inner`` before accessing the "
+                        f"outer at this slot.",
+                        handle_name=f"{self.value.name}[{index_str}]",
+                        operation_name="array element access",
+                    )
+
         self._borrowed_indices[indices_key] = indices
 
         element_value = Value(
@@ -870,11 +908,33 @@ class Vector(ArrayBase[T]):
                 first_use_location=self._consumed_by,
             )
 
-        # (4) Root identity check.  ``VectorView._slice_parent`` is
-        #     always the root parent (``_nested_slice`` composes the
-        #     affine map back to root), so this works whether ``self``
-        #     is the root ``Vector`` or itself a ``VectorView``.
-        if value._slice_parent is not self_root:
+        # (4) Identity check.  Two flavours depending on whether the
+        #     RHS came from a top-level slice or a nested slice:
+        #
+        #     * top-level (``value._slice_outer_view is None``):
+        #       ``value._slice_parent`` is the root parent.  Slice
+        #       assignment must address the same root.
+        #     * nested (``value._slice_outer_view is not None``):
+        #       the nested view's IR ``slice_of`` chain still points
+        #       at the root, but the user is required to return the
+        #       view through its immediate outer first
+        #       (``outer[range] = inner``), then return the outer to
+        #       the root (``root[range] = outer``).  Allowing
+        #       ``root[range] = inner`` would skip the outer view's
+        #       release and leave the outer in an inconsistent
+        #       state.
+        if value._slice_outer_view is not None:
+            if value._slice_outer_view is not self:
+                raise AffineTypeError(
+                    f"Nested slice view '{value.value.name}' must be "
+                    f"returned through its immediate outer view first "
+                    f"(e.g. ``outer_view[a:b:c] = inner_view``); only "
+                    f"then can the outer view be returned to "
+                    f"'{self_root.value.name}'.",
+                    handle_name=value.value.name or "view",
+                    operation_name="slice assignment",
+                )
+        elif value._slice_parent is not self_root:
             raise AffineTypeError(
                 f"Slice assignment on '{self.value.name}' expects a "
                 f"VectorView whose root parent is "
@@ -990,6 +1050,23 @@ class Vector(ArrayBase[T]):
         #     non-destructive branch of ``VectorView.consume`` deletes
         #     the parent entry instead).
         value.consume(operation_name="slice assignment")
+
+        # (8.5) Re-register the LHS as owner of the just-released slots
+        #       when slice-assigning onto an outer view (nested return).
+        #       ``_nested_slice`` only hands the inner-covered slots
+        #       over from the outer view to the inner view, so when
+        #       the inner is returned via ``outer[range] = inner``,
+        #       the outer must reclaim them so it can still be
+        #       returned to its own parent later.
+        if (
+            isinstance(self, VectorView)
+            and lhs_covered is not None
+            and self_root.value.type.is_quantum()
+        ):
+            for idx in lhs_covered:
+                key = (f"const:{idx}",)
+                if self_root._borrowed_indices.get(key) is None:
+                    self_root._borrowed_indices[key] = self
 
         # (9) IR release: emit a marker the post-fold linearity check
         #     can observe.  Without this op, ``SliceLinearityCheckPass``
@@ -1572,6 +1649,11 @@ class VectorView(Vector[T]):
     _slice_start: UInt
     _slice_step: UInt
     _slice_covered_indices: tuple[int, ...] | None
+    # For nested slice views, the immediate outer ``VectorView`` from
+    # which this view was sliced — used by slice assignment to enforce
+    # the inner→outer→root return order.  ``None`` for top-level views
+    # sliced directly from a ``Vector``.
+    _slice_outer_view: "VectorView[T] | None"
 
     @classmethod
     def _wrap(
@@ -1624,6 +1706,7 @@ class VectorView(Vector[T]):
         instance._slice_start = start_uint
         instance._slice_step = step_uint
         instance._slice_covered_indices = covered_indices
+        instance._slice_outer_view = None
 
         if covered_indices is not None and parent.value.type.is_quantum():
             # Strict no-multi-view: while a view is live, the parent
@@ -1710,6 +1793,7 @@ class VectorView(Vector[T]):
         instance._slice_start = start_uint
         instance._slice_step = step_uint
         instance._slice_covered_indices = None
+        instance._slice_outer_view = None
         return instance
 
     def __post_init__(self) -> None:
@@ -1939,6 +2023,11 @@ class VectorView(Vector[T]):
         new_view._slice_parent = self._slice_parent
         new_view._slice_start = self._slice_start
         new_view._slice_step = self._slice_step
+        # Preserve the nested-slice outer link so strict-return is still
+        # enforced on the post-consume handle (e.g. ``view = qmc.h(b)``
+        # where ``b`` was a nested slice off ``a`` keeps requiring
+        # ``a[range] = view`` rather than ``root[range] = view``).
+        new_view._slice_outer_view = self._slice_outer_view
 
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
@@ -2034,6 +2123,10 @@ class VectorView(Vector[T]):
                 if self._slice_parent._borrowed_indices.get(key) is self:
                     self._slice_parent._borrowed_indices[key] = new_owner
         new_owner._slice_covered_indices = self._slice_covered_indices
+        # Preserve the nested-slice outer link across transfer so strict-
+        # return still demands the same outer→root return chain on the
+        # post-transfer handle.
+        new_owner._slice_outer_view = self._slice_outer_view
 
     def _nested_slice(self, s: slice) -> "VectorView[T]":
         """Compose a nested slice into a single view over the same parent.
@@ -2144,24 +2237,20 @@ class VectorView(Vector[T]):
         )
         get_current_tracer().add_operation(slice_op)
 
-        # Nested slicing transfers ownership: this outer view (``self``)
-        # gives up its borrow on the parent's slots so the new inner
-        # view can claim them.  Without this explicit release the
-        # overlap check in ``VectorView._wrap`` would reject the inner
-        # construction because the outer still owns the parent slots.
-        # Strict no-overlap is intentional for top-level same-range
-        # re-slicing (``a = q[0::2]; b = q[0::2]`` is forbidden); nested
-        # slicing is the legitimate way to derive a sub-view, and
-        # making it pass through this hand-off keeps the policy
-        # consistent: at any moment, each parent slot has at most one
-        # live owner.
-        if self._slice_covered_indices is not None:
-            for idx in self._slice_covered_indices:
+        # Nested slicing hands the *covered* slots over from ``self``
+        # to the new inner view.  Slots ``self`` covers but the new
+        # view does NOT touch stay registered against ``self`` in the
+        # root parent's borrow table — the outer view remains a valid
+        # owner for those slots and can be slice-assigned back to its
+        # parent once the inner view is returned.  This implements the
+        # "return inner to outer, then outer to root" semantics.
+        if nested_covered is not None:
+            for idx in nested_covered:
                 key = (f"const:{idx}",)
                 if self._slice_parent._borrowed_indices.get(key) is self:
                     del self._slice_parent._borrowed_indices[key]
 
-        return VectorView._wrap(
+        new_view = VectorView._wrap(
             parent=self._slice_parent,
             sliced_av=new_sliced_av,
             length=new_length,
@@ -2169,3 +2258,9 @@ class VectorView(Vector[T]):
             step_uint=new_step,
             covered_indices=nested_covered,
         )
+        # Record the immediate outer view so slice-assignment can
+        # enforce that the user returns the nested slice via
+        # ``outer[range] = inner`` (and then ``root[range] = outer``)
+        # rather than skipping straight back to the root.
+        new_view._slice_outer_view = self
+        return new_view
