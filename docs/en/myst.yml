@@ -68,6 +68,7 @@ project:
             - file: api/optimization/binary_model
             - file: api/optimization/converter
             - file: api/optimization/fqaoa
+            - file: api/optimization/pce
             - file: api/optimization/post_process
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
