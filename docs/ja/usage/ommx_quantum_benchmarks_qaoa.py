@@ -209,7 +209,8 @@ initial_params = rng.uniform(0, np.pi, 2 * p)
 cost_history: list[float] = []
 
 
-def cost_fn(params):
+def cost_fn(params: np.ndarray) -> float:
+    """`params`でQAOA回路をサンプリングし、スピンモデルでの平均エネルギーを返す。"""
     gammas = list(params[:p])
     betas = list(params[p:])
     job = executable.sample(

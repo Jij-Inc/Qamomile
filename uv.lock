@@ -3238,7 +3238,7 @@ dev = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "ommx-pyscipopt-adapter", specifier = ">=2.3.0" },
-    { name = "ommx-quantum-benchmarks", specifier = ">=0.0.1" },
+    { name = "ommx-quantum-benchmarks", specifier = ">=0.0.2" },
     { name = "openfermion", specifier = ">=1.6.0" },
     { name = "openfermionpyscf", specifier = ">=0.5" },
     { name = "pylatexenc", specifier = ">=2.10" },
