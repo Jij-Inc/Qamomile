@@ -22,6 +22,7 @@ from qamomile.circuit.frontend.ast_transform import (
 )
 from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
+    build_param_slots,
     create_dummy_input,
     func_to_block,
     handle_type_map,
@@ -922,6 +923,15 @@ class QKernel(Generic[P, R]):
                 if hasattr(result, "value"):
                     output_values.append(result.value)
 
+        param_slots = build_param_slots(
+            signature=self.signature,
+            input_types=self.input_types,
+            parameters=parameters,
+            kwargs=kwargs,
+            qubit_sizes=qubit_sizes,
+            bind_defaults=True,
+        )
+
         return Block(
             operations=tracer.operations,
             input_values=input_values,
@@ -929,6 +939,7 @@ class QKernel(Generic[P, R]):
             name=self.name,
             parameters=tracked_parameters,
             kind=BlockKind.TRACED,
+            param_slots=param_slots,
         )
 
     def build(
