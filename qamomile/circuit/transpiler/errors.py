@@ -312,51 +312,39 @@ class SliceBorrowViolationError(AffineTypeError):
 
 
 class UnreturnedBorrowAtBlockEndError(AffineTypeError):
-    """Block completed with a slice view still owning parent slots.
+    """Retained for backwards compatibility; no longer raised by the compiler.
 
-    Raised by :class:`SliceBorrowCheckPass` when the root block's
-    operation sequence finishes with a slice view still recorded as
-    the owner of one or more parent slots — i.e. a view that was
-    sliced but never returned via slice assignment
-    (``parent[a:b:c] = view``) and never destructively consumed
-    (``measure`` / ``cast`` / ``expval``).  Other consume forms
-    (broadcast gates, sub-kernel calls, ``pauli_evolve``,
-    controlled-U ``index_spec``) only *transfer* the borrow to a
-    freshly-wrapped view; that new view still has to come back
-    through slice assignment.  Strict-return requires every view to
-    be released explicitly before the parent is consumed.
+    The class historically marked "block completed with a slice view
+    still owning parent slots" — a leftover slice view that was
+    neither slice-assigned back to the parent nor destructively
+    consumed.  Slice views are now treated as **affine** at the
+    kernel boundary (mirroring how element borrows on a locally-
+    allocated register behave), so a leftover view at block end is
+    no longer flagged.  Natural ancilla / scratch-register patterns
+    such as Deutsch-Jozsa's ``ancilla = qs[n]`` and Simon's
+    ``qs2 = qs[n:2*n]`` (used by the oracle, then discarded
+    unmeasured) compile cleanly.
 
-    Direct element borrows (``q[i]``) emit no IR operation, so this
-    IR-level pass does **not** detect them; that path is covered by
-    the trace-time validator
-    (``func_to_block._validate_returned_arrays`` and
-    ``ArrayBase.validate_all_returned``), which raises
-    :class:`UnreturnedBorrowError` from the frontend.
+    The genuine hazards remain covered:
 
-    Example of incorrect code (caught post-fold, after bindings
-    resolve the slice bounds)::
+    * Consuming the parent (``measure`` / ``cast`` / ``expval`` /
+      passing it to another kernel) while a view is still live
+      raises :class:`UnreturnedBorrowError` from
+      ``ArrayBase.consume`` / ``validate_all_returned``.
+    * Returning the parent with an outstanding borrow raises
+      :class:`UnreturnedBorrowError` from
+      ``func_to_block._validate_returned_arrays``.
+    * Direct ``q[i]`` access on a slot a view currently owns is
+      caught at the frontend's element-access path and (for
+      symbolic-bound views) by
+      :meth:`SliceBorrowCheckPass._process_operand_borrows`.
+    * Overlapping live views are caught at
+      :meth:`VectorView._wrap` (concrete bounds) and at
+      :meth:`SliceBorrowCheckPass._register_slice_bulk_borrow_if_new`
+      (symbolic bounds).
 
-        @qmc.qkernel
-        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-            q = qmc.qubit_array(4, "q")
-            view = q[lo:hi]
-            for i in qmc.range(view.shape[0]):
-                view[i] = qmc.h(view[i])
-            return q   # → UnreturnedBorrowAtBlockEndError once bindings
-                       #   make {lo, hi} concrete and the pass sees
-                       #   ``view`` still owning slots on ``q``.
-
-    Correct code returns the view via slice assignment before
-    ``q`` is consumed::
-
-        @qmc.qkernel
-        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-            q = qmc.qubit_array(4, "q")
-            view = q[lo:hi]
-            for i in qmc.range(view.shape[0]):
-                view[i] = qmc.h(view[i])
-            q[lo:hi] = view    # explicit return
-            return q
+    Existing ``except UnreturnedBorrowAtBlockEndError`` blocks will
+    continue to import without error; they simply never trigger.
     """
 
     pass

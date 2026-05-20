@@ -439,12 +439,17 @@ print(executable.quantum_circuit)
 #   (`q[lo:hi]` for a `UInt lo` / `hi`) can only be checked once `bindings`
 #   make the bounds concrete. This pass walks the block after
 #   `partial_eval` and raises `SliceBorrowViolationError` on overlapping
-#   live views or use-after-destroy, and `UnreturnedBorrowAtBlockEndError`
-#   when a view's borrow on the parent register is still outstanding at
-#   block end (strict-return policy: a view must be returned via
-#   `parent[a:b:c] = view` or destructively consumed by `measure` / `cast` /
-#   `expval`). Direct element borrows (`q[i]`) emit no IR op and are
-#   handled by the trace-time validator instead.
+#   live views or use-after-destroy (a view's covered slot accessed after
+#   it was destroyed by an earlier `measure` / `cast` / `expval`). Slice
+#   views are treated as **affine** at the kernel boundary: a view left
+#   live at block end without being slice-assigned back is *not* flagged
+#   here — natural ancilla / scratch-register patterns (Deutsch-Jozsa's
+#   `ancilla = qs[n]`, Simon's `qs2 = qs[n:2*n]`) compile cleanly. The
+#   real hazards — consuming the parent or returning it while a view is
+#   live — are still caught eagerly by the frontend's
+#   `ArrayBase.consume` / `validate_all_returned` / `_validate_returned_arrays`.
+#   Direct element borrows (`q[i]`) emit no IR op and are handled by the
+#   trace-time validator instead.
 # - **`strip_slice_ops`** — once `slice_borrow_check` has verified the
 #   block, this pass removes the now-unneeded `SliceArrayOperation` and
 #   `ReleaseSliceViewOperation` declarative markers so segmentation /

@@ -457,6 +457,72 @@ class TestViewPassedToSubKernel:
         assert int(est.gates.total) == 3
 
 
+# ``TestScratchViewLeak._oracle`` lives at module scope for the same
+# reason as ``_h_all`` above: ``TestScratchViewLeak._kern`` references
+# it by bare name inside the kernel body.
+@qmc.qkernel
+def _scratch_oracle(
+    qs1: qmc.Vector[qmc.Qubit],
+    qs2: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Trivial Simon-style oracle: CX from each qs1[i] into qs2[i]."""
+    n = qs1.shape[0]
+    for i in qmc.range(n):
+        qs1[i], qs2[i] = qmc.cx(qs1[i], qs2[i])
+    return qs1, qs2
+
+
+class TestScratchViewLeak:
+    """A slice view used as a Simon-style scratch register can be discarded.
+
+    Slice views are affine at the kernel boundary: a view left live at
+    block end (no slice-assign back to the parent, no destructive
+    consume) is OK as long as no other rule is violated.  The classic
+    use case is a scratch register that the oracle writes into and
+    that the caller never measures — exactly the structure of Simon's
+    algorithm.  This regression pins that the pattern compiles
+    cleanly and emits a circuit that measures only the queried half.
+
+    Hazards that *would* fire even in this affine regime:
+
+    - touching a slot a live view owns → ``QubitConsumedError`` (see
+      ``TestMultiViewOverlap``);
+    - consuming or returning the parent while a view is live →
+      ``UnreturnedBorrowError`` (see ``TestStrictReturnViolations``).
+    """
+
+    @qmc.qkernel
+    def _kern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """Simon-style: oracle scratch ``qs2`` discarded after the H-fold."""
+        qs = qmc.qubit_array(2 * n, name="qs")
+        qs1 = qs[0:n]
+        qs2 = qs[n : 2 * n]
+        qs1 = qmc.h(qs1)
+        qs1, qs2 = _scratch_oracle(qs1, qs2)
+        qs1 = qmc.h(qs1)
+        return qmc.measure(qs1)  # qs2 left live — affine view discard
+
+    def test_transpile_compiles_cleanly(self):
+        """Simon-style kernel transpiles to a circuit that measures only ``qs1``."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(self._kern, bindings={"n": 2})
+        qc = exe.compiled_quantum[0].circuit
+        # 2n = 4 physical qubits, but only the first n=2 are measured.
+        assert qc.num_qubits == 4
+        assert qc.num_clbits == 2
+        measured_indices = sorted(
+            qc.qubits.index(inst.qubits[0])
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_indices == [0, 1], (
+            f"Only qs1 (root slots 0..n-1) should be measured; got {measured_indices}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Illegal slicing patterns — each test method inlines its own kernel
 # ---------------------------------------------------------------------------

@@ -1,23 +1,42 @@
-"""Post-fold block-wide slice-view linearity checker.
+"""Post-fold block-wide slice-view borrow check.
 
 Mirrors the slice-view subset of the frontend's
 ``ArrayBase._borrowed_indices`` borrow-tracker semantics on the IR
 after :class:`ConstantFoldingPass` has resolved slice bounds to
-concrete values.  This pass catches the bugs that the trace-time
-checker cannot see on its own — specifically, slices whose bounds
-were ``UInt`` at trace time so their covered slot set wasn't
-enumerable until bindings were applied:
+concrete values.  The pass exists to catch bugs the trace-time
+checker cannot see on its own — slices whose bounds were ``UInt``
+at trace time so their covered slot set was not enumerable until
+bindings were applied:
 
 1. Aliasing between a (now-concrete) slice view and another live
-   view of the same root parent.
+   view of the same root parent (raised as
+   :class:`SliceBorrowViolationError` from
+   :meth:`_register_slice_bulk_borrow_if_new`).
 2. A view whose newly-concrete coverage hits a slot that was
-   consumed by a destructive view operation earlier in the block.
-3. A view reaching the end of the block while still recorded as the
-   owner of its parent's slots — i.e. never released through a
-   slice-assign release, a registration-time drain (same-coverage
-   replacement / nested-slice handover), or a destructive consume.
-   When the state dict is non-empty at completion the pass raises
-   :class:`UnreturnedBorrowAtBlockEndError`.
+   consumed by a destructive view operation earlier in the block
+   (raised as :class:`SliceBorrowViolationError` from
+   :meth:`_process_operand_borrows`).
+
+Slice views are otherwise treated as **affine** at the kernel
+boundary: a view that goes out of scope without being slice-
+assigned back to the parent is no longer flagged here.  This
+mirrors how element borrows on locally-allocated registers behave
+— natural ancilla / scratch-register patterns such as
+Deutsch-Jozsa's ``ancilla = qs[n]`` and Simon's
+``qs2 = qs[n:2*n]`` (used by the oracle, then discarded
+unmeasured) compile cleanly.  The genuine hazards stay covered:
+
+* ``measure(parent)`` (or any other ``parent.consume()`` site) while
+  a view is live raises ``UnreturnedBorrowError`` from the
+  frontend's ``ArrayBase.consume`` / ``validate_all_returned``.
+* Returning the parent with an outstanding borrow raises
+  ``UnreturnedBorrowError`` from
+  ``func_to_block._validate_returned_arrays``.
+* Direct ``q[i]`` access on a slot a view currently owns is caught
+  at the frontend's element-access path / this pass's
+  :meth:`_process_operand_borrows` for symbolic-bound views.
+* Overlapping live views and use-after-destroy are caught at
+  registration time (see the two error sites above).
 
 Direct element borrows (``q[i]``) are intentionally **not** observed
 here.  Element access emits no IR operation, so the IR layer has
@@ -70,7 +89,6 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import (
     SliceBorrowViolationError,
-    UnreturnedBorrowAtBlockEndError,
     ValidationError,
 )
 
@@ -187,10 +205,15 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
     (``q[i]``) emit no IR operation and are left to the trace-time
     validator.
 
-    At the end of the walk, any non-empty entry becomes an
-    :class:`UnreturnedBorrowAtBlockEndError` — closing the pre-existing
-    silent hole where ``return q`` with an outstanding borrow went
-    unnoticed.
+    The pass does **not** flag a leftover slice view at block end —
+    slice views are affine at the kernel boundary, mirroring how
+    element borrows behave on a locally-allocated register (the
+    frontend's ``_validate_returned_arrays`` covers the genuine
+    leak: returning the parent with a live borrow).  Anything that
+    actually clashes with a live view (direct slot access,
+    destructive parent consume, overlapping views, use-after-
+    destroy) is rejected at the eager check points listed in the
+    module docstring.
     """
 
     def __init__(self) -> None:
@@ -230,9 +253,8 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         Raises:
             ValidationError: If called on an unexpected block kind.
             SliceBorrowViolationError: If a slice view and a direct
-                access collide, or if two views overlap.
-            UnreturnedBorrowAtBlockEndError: If any borrow remains
-                outstanding once the root block completes.
+                access collide, two views overlap, or a use-after-
+                destroy is observed.
         """
         if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
@@ -243,21 +265,29 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         state: State = {}
         self._walk(input.operations, state)
 
-        # ``_ConsumedSlotMarker`` entries are not outstanding borrows
-        # — they record physically-destroyed slots — and must be
-        # excluded from the unreturned-borrow check.
-        outstanding = {
-            k: v for k, v in state.items() if not isinstance(v, _ConsumedSlotMarker)
-        }
-        if outstanding:
-            raise UnreturnedBorrowAtBlockEndError(
-                "Block completed with outstanding borrows:\n"
-                + self._format_outstanding(outstanding)
-                + "\n\nReturn every borrowed element (via ``q[i] = ...``) or "
-                "consume the parent/view (via measure / expval / passing to "
-                "another kernel) before the block ends."
-            )
-
+        # NB: ``state`` may still contain live slice-view ownership
+        # entries when the block returns — i.e. the user took a slice
+        # view, used it (broadcast / sub-kernel / pauli_evolve /
+        # element loop) and let it go out of scope without slice-
+        # assigning it back.  We intentionally do NOT flag this here:
+        # slice views are treated as *affine* (at most once, discard
+        # allowed) at the kernel boundary, mirroring how element
+        # borrows behave on locally-allocated registers — see
+        # Deutsch-Jozsa ancilla and Simon's scratch-register patterns
+        # in ``tests/circuit/test_slice_pattern_correctness.py``.
+        #
+        # The actual hazards (live view + direct slot access, live
+        # view + parent consume, view overlap, use-after-destroy,
+        # returning the parent with a live borrow) are all caught
+        # eagerly elsewhere — by the trace-time bulk-borrow tracker
+        # for concrete-bound views, by ``_register_slice_bulk_borrow_if_new``'s
+        # conflict path for symbolic-bound views, by
+        # ``_process_operand_borrows`` for use-after-destroy, and by
+        # the frontend's ``_validate_returned_arrays`` for returned
+        # quantum arrays.  Leaking a view past kernel end without
+        # touching the parent is the only situation this method used
+        # to flag, and the lower-friction "affine" treatment makes
+        # natural ancilla / scratch patterns compile cleanly.
         return input
 
     # ------------------------------------------------------------------
@@ -1100,31 +1130,6 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
     # ------------------------------------------------------------------
     # Error message formatting
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _format_outstanding(state: State) -> str:
-        """Render outstanding borrows for the block-end error message.
-
-        Args:
-            state (State): Final borrow tracker.  ``_ConsumedSlotMarker``
-                entries have already been filtered out by the caller.
-
-        Returns:
-            str: A newline-separated list of
-                "<root_name>[idx] — held by slice view <view_name>".
-        """
-        lines: list[str] = []
-        for key, owner in state.items():
-            idx_str = _slot_descriptor(key).split(":", 1)[1]
-            assert isinstance(owner, ArrayValue), (
-                "Outstanding borrow owner must be a slice-view ArrayValue; "
-                f"got {type(owner).__name__}"
-            )
-            root = owner
-            while root.slice_of is not None:
-                root = root.slice_of
-            lines.append(f"  {root.name}[{idx_str}] — held by slice view {owner.name}")
-        return "\n".join(lines)
 
     @staticmethod
     def _format_view_vs_direct(
