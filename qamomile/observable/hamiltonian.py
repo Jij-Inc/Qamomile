@@ -91,10 +91,17 @@ _PAULI_MUL_TABLE: dict[tuple[Pauli, Pauli], tuple[Pauli, complex]] = {
 }
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class PauliOperator:
     """
     Represents a single Pauli operator acting on a specific qubit.
+
+    Frozen so that ``Hamiltonian.copy()`` can share term operator
+    references across the original and the copy without risk of one
+    side mutating an operator the other still observes.  None of the
+    existing callers mutate ``pauli`` or ``index`` after construction,
+    so freezing is a no-op behaviourally but makes the immutability
+    claim that ``Hamiltonian.copy()``'s docstring relies on real.
 
     Attributes:
         pauli (Pauli): The type of Pauli operator (X, Y, or Z).

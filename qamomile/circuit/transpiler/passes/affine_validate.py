@@ -69,10 +69,15 @@ class AffineValidationPass(Pass[Block, Block]):
             # likewise carries a sliced ArrayValue operand without
             # consuming it: the op is a declarative borrow-return
             # marker for SliceBorrowCheckPass and does not
-            # contribute to the affine-type consume count.  Both ops
-            # are normally stripped by ConstantFoldingPass /
-            # StripSliceArrayOpsPass before this pass, but we guard
-            # defensively in case ordering changes.
+            # contribute to the affine-type consume count.
+            #
+            # ``affine_validate`` runs *before* ``partial_eval`` (and
+            # therefore before ``slice_borrow_check`` /
+            # ``strip_slice_ops`` — see the pipeline in
+            # ``Transpiler.transpile()``), so both ops are still
+            # present in the block at this point and the affine-type
+            # walk would otherwise mis-count their array operand as a
+            # consume.  Skip them explicitly.
             if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
                 continue
 
