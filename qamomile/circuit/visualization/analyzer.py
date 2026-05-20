@@ -29,6 +29,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
     MeasureOperation,
+    MeasureQFixedOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -776,7 +777,7 @@ class CircuitAnalyzer:
                 continue
 
             # Generic: GateOperation, CallBlock/ControlledU/CompositeGate (box mode),
-            # MeasureOperation, MeasureVectorOperation
+            # MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation
             if isinstance(
                 op,
                 (
@@ -784,6 +785,7 @@ class CircuitAnalyzer:
                     CallBlockOperation,
                     MeasureOperation,
                     MeasureVectorOperation,
+                    MeasureQFixedOperation,
                     CompositeGateOperation,
                     ControlledUOperation,
                 ),
@@ -855,6 +857,36 @@ class CircuitAnalyzer:
                 label="M",
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
+                kind=VGateKind.MEASURE_VECTOR,
+            )
+
+        if isinstance(op, MeasureQFixedOperation):
+            # ``MeasureQFixedOperation`` is the HYBRID measurement that
+            # ``plan`` later splits into ``MeasureVectorOperation +
+            # DecodeQFixedOperation``.  The visualizer works on the
+            # pre-plan IR so it sees the unsplit form and must resolve
+            # the carrier qubits itself.  The operand is the QFixed
+            # ``Value`` produced by the upstream ``CastOperation``,
+            # which attaches a ``CastMetadata`` whose
+            # ``qubit_logical_ids`` field enumerates the source qubits
+            # in carrier order.  Each entry is of the form
+            # ``f"{root_logical_id}_{idx}"`` (without brackets);
+            # ``QInitOperation`` registers root qubits in
+            # ``qubit_map`` under ``f"{root_logical_id}_[{idx}]"``
+            # (with brackets).  We bridge the two encodings here so
+            # the carrier wires resolve precisely — including the
+            # non-contiguous indices a slice-source cast produces
+            # (e.g. ``cast(q[1::2], QFixed)`` covers root ``{1, 3}``).
+            qubit_indices = []
+            if op.operands:
+                qubit_indices = self._resolve_qfixed_carrier_indices(
+                    op.operands[0], qubit_map, logical_id_remap
+                )
+            return VGate(
+                node_key=node_key,
+                label="M",
+                qubit_indices=qubit_indices,
+                estimated_width=self.style.gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
             )
 
@@ -1913,6 +1945,8 @@ class CircuitAnalyzer:
                         if isinstance(rhs_val, (int, float)) and rhs_val < 0:
                             return result
                         return int(result)
+                    elif op.kind == BinOpKind.MIN:
+                        return lhs_val if lhs_val <= rhs_val else rhs_val
                 return None
 
         return None
@@ -2162,6 +2196,8 @@ class CircuitAnalyzer:
             if rhs_str == "1":
                 return lhs_str
             return f"{lhs_str}/{rhs_str}"
+        elif binop.kind == BinOpKind.MIN:
+            return f"min({lhs_str},{rhs_str})"
         else:
             _extra_ops: dict[BinOpKind, str] = {
                 BinOpKind.FLOORDIV: "//",
@@ -2324,6 +2360,116 @@ class CircuitAnalyzer:
             return count
         return None
 
+    def _resolve_qfixed_carrier_indices(
+        self,
+        operand: Value,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+    ) -> list[int]:
+        """Resolve a QFixed measurement operand to its carrier wire indices.
+
+        The operand is the QFixed ``Value`` produced by ``CastOperation``;
+        its ``metadata.cast.qubit_logical_ids`` carries one entry per
+        carrier qubit in measurement order, formatted as
+        ``f"{root_logical_id}_{idx}"``.  ``QInitOperation`` registers
+        each root element in ``qubit_map`` as ``f"{root_logical_id}_[{idx}]"``.
+        This helper bridges the two encodings: it parses each cast
+        carrier string, applies ``logical_id_remap`` to the root prefix
+        (in case the cast lives in an inlined block), reformats with
+        brackets, and looks up the result in ``qubit_map``.
+
+        Args:
+            operand (Value): The QFixed-typed operand of a
+                ``MeasureQFixedOperation`` (i.e. the result of a prior
+                ``CastOperation``).
+            qubit_map (dict[str, int]): Mapping from logical_id-derived
+                keys to qubit wire indices.
+            logical_id_remap (dict[str, str]): Mapping from formal-
+                parameter logical_ids to actual-argument logical_ids,
+                used when the cast occurs inside an inlined block.
+
+        Returns:
+            list[int]: The wire indices the QFixed measurement targets,
+                in carrier (most-significant-bit-first) order.  Empty
+                when the operand carries no cast metadata or when no
+                carrier entry resolves to a known wire.
+        """
+        cast_meta = getattr(operand.metadata, "cast", None)
+        if cast_meta is None or not cast_meta.qubit_logical_ids:
+            return []
+        indices: list[int] = []
+        for carrier_key in cast_meta.qubit_logical_ids:
+            # Carrier key format: ``f"{root_logical_id}_{idx}"`` (no
+            # brackets).  Split on the *last* ``_`` to recover the root
+            # prefix and idx; the root logical_id itself may contain
+            # underscores (UUIDs use them), so split from the right.
+            try:
+                root_lid, idx_str = carrier_key.rsplit("_", 1)
+                idx_int = int(idx_str)
+            except (ValueError, AttributeError):
+                continue
+            remapped_lid = logical_id_remap.get(root_lid, root_lid)
+            bracket_key = f"{remapped_lid}_[{idx_int}]"
+            wire = qubit_map.get(bracket_key)
+            if wire is not None:
+                indices.append(wire)
+        return indices
+
+    def _resolve_view_chain_to_root(
+        self,
+        array_value: "ArrayValue",
+    ) -> tuple["ArrayValue", int, int] | None:
+        """Walk the ``slice_of`` chain to the root array, composing the affine map.
+
+        For a sliced ``ArrayValue`` (i.e. one with ``slice_of is not None``),
+        the element-index in operand metadata is *view-local*: ``view[i]``
+        on ``q[0::2]`` records ``element_indices[0] = i`` against
+        ``parent_array = view_av``, not against ``q``.  Translating to a
+        physical wire index requires walking the ``slice_of`` chain to
+        the root and composing the start / step pairs of every hop.
+
+        At each hop ``cur = slice_of(child)`` the parent-space index of
+        ``child[i]`` is ``cur.slice_start + cur.slice_step * i``.
+        Composing through a chain accumulates as
+        ``(start, step) -> (cur.slice_start + cur.slice_step * start,
+        cur.slice_step * step)`` until ``cur.slice_of is None`` (root).
+
+        Args:
+            array_value (ArrayValue): A possibly-sliced ArrayValue.  When
+                ``slice_of is None`` the function returns the identity
+                transform ``(array_value, 0, 1)``.
+
+        Returns:
+            tuple[ArrayValue, int, int] | None: ``(root_av, start, step)``
+                so that the root-space index of a view-local ``idx`` is
+                ``start + step * idx``.  ``None`` when any
+                ``slice_start`` / ``slice_step`` along the chain is
+                symbolic (cannot compose the affine map at draw time).
+        """
+        cur = array_value
+        start = 0
+        step = 1
+        while getattr(cur, "slice_of", None) is not None:
+            slice_start = cur.slice_start
+            slice_step = cur.slice_step
+            if slice_start is None or not slice_start.is_constant():
+                return None
+            if slice_step is None or not slice_step.is_constant():
+                return None
+            s = slice_start.get_const()
+            st = slice_step.get_const()
+            if s is None or st is None:
+                return None
+            try:
+                s_int = int(s)
+                st_int = int(st)
+            except (TypeError, ValueError):
+                return None
+            start = s_int + st_int * start
+            step = st_int * step
+            cur = cur.slice_of
+        return cur, start, step
+
     def _resolve_parent_array_element(
         self,
         operand: Value,
@@ -2332,6 +2478,12 @@ class CircuitAnalyzer:
         param_values: dict,
     ) -> int | None:
         """Resolve a `q[i]` operand to its wire index when `i` is concrete.
+
+        Handles both direct ``q[i]`` and ``view[i]`` where ``view`` is a
+        slice of ``q``: when ``parent_array.slice_of`` is non-None, the
+        chain is walked via :meth:`_resolve_view_chain_to_root` so that
+        view-local ``i`` is composed with the chain's affine map to a
+        root-space index.
 
         Args:
             operand: IR Value expected to have `parent_array` and
@@ -2344,19 +2496,16 @@ class CircuitAnalyzer:
                 `element_indices[0]`.
 
         Returns:
-            The wire index `qubit_map[parent_lid] + int(i)` when the
-            operand is a parent-array element access with a resolvable
-            index. None if the operand is not a parent-array element
-            access, the parent is not in `qubit_map`, `element_indices`
-            is absent, or the index is symbolic and cannot be evaluated.
+            The wire index for the resolved element.  When the parent
+            is a slice view, the view-local index is composed with the
+            ``slice_of`` chain back to the root register.  ``None`` when
+            the parent / root is not in ``qubit_map``,
+            ``element_indices`` is absent, or any index / slice
+            metadata in the chain is symbolic and cannot be evaluated.
         """
         if not (hasattr(operand, "parent_array") and operand.parent_array is not None):
             return None
-        parent_lid = logical_id_remap.get(
-            operand.parent_array.logical_id, operand.parent_array.logical_id
-        )
-        if parent_lid not in qubit_map:
-            return None
+        parent_array = operand.parent_array
         if not (hasattr(operand, "element_indices") and operand.element_indices):
             return None
         idx_value = operand.element_indices[0]
@@ -2366,7 +2515,24 @@ class CircuitAnalyzer:
             idx = self._evaluate_value(idx_value, param_values)
         if idx is None:
             return None
-        return qubit_map[parent_lid] + int(idx)
+        idx_int = int(idx)
+        # Slice view → walk to root, compose affine map.
+        if getattr(parent_array, "slice_of", None) is not None:
+            resolved = self._resolve_view_chain_to_root(parent_array)
+            if resolved is None:
+                return None
+            root_av, start, step = resolved
+            root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+            if root_lid not in qubit_map:
+                return None
+            return qubit_map[root_lid] + start + step * idx_int
+        # Direct array element.
+        parent_lid = logical_id_remap.get(
+            parent_array.logical_id, parent_array.logical_id
+        )
+        if parent_lid not in qubit_map:
+            return None
+        return qubit_map[parent_lid] + idx_int
 
     def _resolve_non_element_operand(
         self,
@@ -3390,6 +3556,8 @@ class CircuitAnalyzer:
                 rhs_str = self._format_value_as_expression(
                     op.rhs, loop_vars, operations
                 )
+                if op.kind == BinOpKind.MIN:
+                    return f"min({lhs_str},{rhs_str})"
                 _binop_symbols: dict[BinOpKind, str] = {
                     BinOpKind.ADD: "+",
                     BinOpKind.SUB: "-",

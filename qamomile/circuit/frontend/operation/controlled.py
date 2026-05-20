@@ -533,15 +533,29 @@ class ControlledGate:
             else None
         )
 
+        from qamomile.circuit.frontend.handle.array import VectorView
+
         vector = args[0]
-        # Consume the Vector (affine type)
-        vector = vector.consume(operation_name="ControlledU[index_spec]")
+        # Slice-view input takes the ownership-transfer path so the
+        # caller can still slice-assign the result back to the parent
+        # under strict-return; the plain-Vector path uses the normal
+        # consume.
+        input_is_view = isinstance(vector, VectorView)
+        if input_is_view:
+            view_parent = vector._slice_parent
+            view_start = vector._slice_start
+            view_step = vector._slice_step
+            view_length = vector._shape[0]
+            input_value = vector.value
+        else:
+            consumed = vector.consume(operation_name="ControlledU[index_spec]")
+            input_value = consumed.value
 
         # operands: [ArrayValue, params...]
-        operands: list[Any] = [vector.value]
+        operands: list[Any] = [input_value]
         self._params_to_operands(params, operands)
 
-        results: list[Value[Any]] = [vector.value.next_version()]
+        results: list[Value[Any]] = [input_value.next_version()]
 
         nc = self._num_controls
         if isinstance(nc, UInt):
@@ -556,8 +570,19 @@ class ControlledGate:
             controlled_indices=ci_values,
         )
 
+        if input_is_view:
+            new_view = VectorView._wrap_unregistered(
+                parent=view_parent,
+                sliced_av=cast(ArrayValue[Any], results[0]),
+                length=view_length,
+                start_uint=view_start,
+                step_uint=view_step,
+            )
+            vector._transfer_borrow_to(new_view, "ControlledU[index_spec]")
+            return new_view
+
         return Vector._create_from_value(
-            cast(ArrayValue[Any], results[0]), vector.shape, vector.value.name
+            cast(ArrayValue[Any], results[0]), consumed.shape, consumed.value.name
         )
 
     def _call_symbolic(

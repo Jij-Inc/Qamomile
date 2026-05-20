@@ -51,8 +51,7 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
 
     # Apply H to every other qubit
-    for i in qmc.range(0, n, 2):
-        q[i] = qmc.h(q[i])
+    q[0::2] = qmc.h(q[0::2])
 
     # Entangle adjacent pairs
     for i in qmc.range(n - 1):

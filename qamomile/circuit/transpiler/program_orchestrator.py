@@ -338,6 +338,31 @@ class ProgramOrchestrator(Generic[T]):
                 if expval_seg.qubit_map:
                     hamiltonian = hamiltonian.remap_qubits(expval_seg.qubit_map)
 
+                # Pad ``_num_qubits`` to the circuit's width so the
+                # backend's observable-to-SparsePauliOp conversion emits
+                # a Pauli string of the same length as the circuit's
+                # qubit count. Without this, expval over a subset of
+                # qubits (``expval(q[1::2], Z(0))``) produces a 1- or
+                # 2-qubit observable and the backend estimator rejects
+                # it with a "circuit (N) vs observable (k)" mismatch.
+                #
+                # Critically, we must NOT mutate the user's binding.
+                # ``remap_qubits`` returns ``self`` when the qubit_map
+                # is empty (identity expval on the full register) — a
+                # direct ``hamiltonian._num_qubits = ...`` would then
+                # poison the user's binding and break reuse of the
+                # same observable on a differently-sized circuit
+                # (P1-1 regression).  Clone when the remap was a
+                # no-op, then pad the copy.
+                circuit_num_qubits = getattr(circuit, "num_qubits", None)
+                if (
+                    circuit_num_qubits is not None
+                    and hamiltonian.num_qubits < circuit_num_qubits
+                ):
+                    if hamiltonian is expval_seg.hamiltonian:
+                        hamiltonian = hamiltonian.copy()
+                    hamiltonian._num_qubits = circuit_num_qubits
+
                 exp_val = executor.estimate(circuit, hamiltonian)
                 context.set(expval_seg.result_ref, exp_val)
                 result_value = exp_val

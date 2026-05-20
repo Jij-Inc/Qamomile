@@ -31,11 +31,11 @@ Example:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
-from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle import Qubit, Vector, VectorView
 from qamomile.circuit.frontend.handle.utils import get_size as _get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
@@ -279,6 +279,10 @@ class IQFT(CompositeGate):
         )
 
 
+@overload
+def qft(qubits: VectorView[Qubit]) -> VectorView[Qubit]: ...
+@overload
+def qft(qubits: Vector[Qubit]) -> Vector[Qubit]: ...
 def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     """Apply Quantum Fourier Transform to a vector of qubits.
 
@@ -329,6 +333,10 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     return qubits
 
 
+@overload
+def iqft(qubits: VectorView[Qubit]) -> VectorView[Qubit]: ...
+@overload
+def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]: ...
 def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     """Apply Inverse Quantum Fourier Transform to a vector of qubits.
 

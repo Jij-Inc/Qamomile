@@ -184,8 +184,7 @@ def oracle_box():
 @qmc.qkernel
 def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(3, name="q")
-    for i in qmc.range(3):
-        q[i] = qmc.h(q[i])
+    q = qmc.h(q)
 
     q[0], q[1], q[2] = oracle_box(q[0], q[1], q[2])
     return q

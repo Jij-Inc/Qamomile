@@ -344,6 +344,33 @@ class Hamiltonian:
         """Return the number of terms in the Hamiltonian."""
         return len(self._terms)
 
+    def copy(self) -> Hamiltonian:
+        """Return an independent copy sharing no mutable state with ``self``.
+
+        Produces a new ``Hamiltonian`` with the same terms, constant,
+        and declared ``_num_qubits``.  The underlying ``_terms`` dict
+        is fresh, so subsequent ``add_term`` / ``constant`` mutations
+        on either instance do not affect the other.  ``PauliOperator``
+        instances inside the term tuples are reused — they are
+        ``dataclass(frozen=True)`` values and safely shared.
+
+        Returns:
+            A shallow-cloned ``Hamiltonian`` instance.
+
+        Example:
+            >>> H = Hamiltonian()
+            >>> H.add_term((PauliOperator(Pauli.Z, 0),), 1.0)
+            >>> H2 = H.copy()
+            >>> H2.add_term((PauliOperator(Pauli.X, 1),), 0.5)
+            >>> H.num_qubits  # unchanged by H2's mutation
+            1
+        """
+        clone = Hamiltonian(num_qubits=self._num_qubits)
+        clone.constant = self.constant
+        for operators, coeff in self._terms.items():
+            clone.add_term(operators, coeff)
+        return clone
+
     def remap_qubits(self, qubit_map: dict[int, int]) -> Hamiltonian:
         """Remap qubit indices according to the given mapping.
 

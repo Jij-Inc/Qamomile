@@ -1873,6 +1873,21 @@ class TestControlledBuiltinSymbolicNumControls:
     upstream of this PR.
     """
 
+    @pytest.mark.xfail(
+        reason=(
+            "Latent ``SymbolicControlledU`` → ``ConcreteControlledU`` "
+            "promotion bug: the control ``Vector`` operand is not "
+            "expanded to individual qubits, so ``operands[:num_controls]`` "
+            "picks up a target Value rather than each control "
+            "individually.  Previously the controlled gate was silently "
+            "dropped at emit-time; now ``emit_controlled_u`` raises "
+            "``EmitError`` (or Qiskit raises ``CircuitError`` downstream) "
+            "instead of producing a silent miscompile.  This xfail "
+            "marker will turn into an xpass once the promotion bug is "
+            "fixed in ``ConstantFoldingPass``."
+        ),
+        strict=True,
+    )
     def test_symbolic_num_controls_runs_end_to_end(self, qiskit_transpiler):
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Bit:

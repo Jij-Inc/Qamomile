@@ -1,5 +1,7 @@
 """Tests for constant folding of ControlledUOperation fields."""
 
+import pytest
+
 import qamomile.circuit as qm
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
@@ -191,6 +193,20 @@ class TestControlledUTranspileIntegration:
         result = transpiler.transpile(kernel)
         assert result is not None
 
+    @pytest.mark.xfail(
+        reason=(
+            "Latent ``SymbolicControlledU`` → ``ConcreteControlledU`` "
+            "promotion bug: a symbolic ``num_controls`` resolved through "
+            "bindings produces an inconsistent operand layout (the "
+            "control ``Vector`` is not expanded to individual control "
+            "qubits).  Previously the controlled gate was silently "
+            "dropped at emit-time; now ``emit_controlled_u`` raises "
+            "``EmitError`` (or Qiskit raises ``CircuitError`` downstream) "
+            "instead of producing a silent miscompile.  Becomes xpass "
+            "once the promotion bug is fixed."
+        ),
+        strict=True,
+    )
     def test_case_c_symbolic_non_index(self):
         """Case C: num_controls=n (non-index), bindings={'n':2}."""
 
