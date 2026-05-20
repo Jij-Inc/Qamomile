@@ -63,7 +63,23 @@ class ConsumeMode(enum.Enum):
 # implementation detail of :func:`_classify_consume`; new code should
 # query ``_classify_consume(...)`` rather than inspect the sets
 # directly.
-_DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset({"measure", "cast", "expval"})
+_DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset(
+    {
+        "measure",
+        "cast",
+        "expval",
+        # ``qkernel call (view dropped)`` is used by ``QKernel.__call__``
+        # to consume a ``VectorView`` argument whose corresponding output
+        # is *not* a sliced ``ArrayValue`` (e.g. the callee returns a
+        # scalar or a different register).  Without this consume the
+        # input view would remain live after the call even though it was
+        # logically handed to the callee — a use-after-move hole.
+        # Classify as destructive so the covered parent slots become
+        # consumed-slot markers, matching the semantics that the qubits
+        # passed to the callee can no longer be reused by the caller.
+        "qkernel call (view dropped)",
+    }
+)
 _BORROW_RELEASING_CONSUME_OPS: frozenset[str] = frozenset({"slice assignment"})
 
 

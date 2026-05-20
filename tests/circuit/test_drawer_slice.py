@@ -277,3 +277,4 @@ class TestSliceDrawSmoke:
             # The figure must have non-zero area and an axes attached.
             assert fig.get_size_inches()[0] > 0
             assert fig.get_size_inches()[1] > 0
+            assert len(fig.axes) > 0

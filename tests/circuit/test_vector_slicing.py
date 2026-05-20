@@ -725,6 +725,62 @@ class TestVectorViewAsKernelArgument:
 
         assert kern_with_return.block is not None
 
+    def test_view_passed_to_kernel_returning_non_view_is_consumed(self):
+        """A view handed to a sub-kernel whose result is not a sliced view is consumed.
+
+        Regression: ``QKernel.__call__`` used to defer ``VectorView``
+        consumption to a ``_transfer_borrow_to`` that only ran when a
+        matching sliced result existed.  If the callee returned a
+        scalar / different-shape array, the input view was left
+        un-consumed — re-use after the call gave silent
+        affine-type violations.  The fix destructively consumes
+        unmatched view inputs via ``"qkernel call (view dropped)"``,
+        so re-touching the covered slots is rejected loudly.
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def measure_half(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Bit]:
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def caller_reuses_view() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0::2]
+            _ = measure_half(evens)  # view dropped here; slots {0, 2} consumed
+            evens = qmc.h(evens)  # ← rejected: view _consumed=True
+            return qmc.measure(q)
+
+        with pytest.raises(QubitConsumedError):
+            _ = caller_reuses_view.block
+
+    def test_view_dropped_after_kernel_call_blocks_root_slot_reuse(self):
+        """``q[0]`` after a dropped-view kernel call is rejected as use-after-destroy.
+
+        Companion to the test above: the *covered parent slots* must
+        also be marked consumed, not just the view handle.  Without
+        the destructive consume, a kernel like ``measure_half(evens)``
+        would leak qubits — the caller could touch the same physical
+        qubits via the root register and the compiler would not
+        notice.
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def measure_half(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Bit]:
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def caller_touches_root() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0::2]
+            _ = measure_half(evens)  # destructively consumes {0, 2}
+            q[0] = qmc.h(q[0])  # ← rejected: slot 0 is destroyed
+            return qmc.measure(q)
+
+        with pytest.raises(QubitConsumedError):
+            _ = caller_touches_root.block
+
 
 # ---------------------------------------------------------------------------
 # V6: IR-level slice operation + SliceBorrowCheckPass

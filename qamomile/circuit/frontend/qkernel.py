@@ -562,6 +562,19 @@ class QKernel(Generic[P, R]):
                 else:
                     wrapped_results.append(handle_type(value=val))
 
+        # Any ``VectorView`` input that did NOT get its borrow transferred
+        # to a matching sliced result must still be consumed — the call
+        # logically passed it to the callee, so leaving it live would
+        # break the affine / strict-return contract (use-after-move).
+        # Use the destructive "qkernel call (view dropped)" consume name
+        # so the covered parent slots become consumed-slot markers; the
+        # qubits are effectively spent inside the callee (e.g. measure /
+        # expval kernels) and re-touching them in the caller is rejected
+        # rather than silently working with a corrupted state.
+        for in_view in input_view_metas.values():
+            if not in_view._consumed:
+                in_view.consume(operation_name="qkernel call (view dropped)")
+
         # Return tuple or single value to match Python function signature
         if len(wrapped_results) == 1:
             return cast(R, wrapped_results[0])

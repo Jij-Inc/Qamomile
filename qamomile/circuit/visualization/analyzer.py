@@ -2278,6 +2278,17 @@ class CircuitAnalyzer:
         ``f"{parent_lid}_[{idx}]"`` and register an alias if found.
         When param_values is provided, symbolic indices (e.g. loop variables)
         can be resolved via _evaluate_value.
+
+        For *view* elements (``value.parent_array.slice_of is not None``)
+        the ``parent_array`` is the view's own ``ArrayValue`` and is **not**
+        registered in ``qubit_map`` — only the root register is.  In that
+        case the chain is walked via :meth:`_resolve_view_chain_to_root`
+        so the view-local ``element_indices[0]`` is composed with the
+        chain's affine map to a root-space index, and the canonical key
+        is built against the root register.  Without this, inlined
+        sub-kernels called with ``view[i]`` would allocate a fresh wire
+        instead of mapping to the root register's wire (mirrors the same
+        composition done by :meth:`_resolve_parent_array_element`).
         """
         lid = logical_id_remap.get(value.logical_id, value.logical_id)
         # For symbolic array elements, skip cached UUID lookup —
@@ -2294,22 +2305,50 @@ class CircuitAnalyzer:
         if lid in qubit_map and not is_symbolic_array_element:
             return lid
         if hasattr(value, "parent_array") and value.parent_array is not None:
-            parent_lid = logical_id_remap.get(
-                value.parent_array.logical_id, value.parent_array.logical_id
-            )
+            parent_array = value.parent_array
+            # When the parent is a slice view, compose back to the root
+            # register so the canonical key references the wire that
+            # actually lives in ``qubit_map``.  The view itself was
+            # never registered as a wire owner.
+            chain_start = 0
+            chain_step = 1
+            chain_failed = False
+            if getattr(parent_array, "slice_of", None) is not None:
+                resolved = self._resolve_view_chain_to_root(parent_array)
+                if resolved is None:
+                    # Symbolic ``slice_start`` / ``slice_step`` along the
+                    # chain — fall back to the original ``parent_lid``
+                    # path; the caller's broader resolution may still
+                    # find a match through a different alias.
+                    chain_failed = True
+                else:
+                    root_av, chain_start, chain_step = resolved
+                    parent_array = root_av
+
+            if chain_failed:
+                parent_lid = logical_id_remap.get(
+                    value.parent_array.logical_id, value.parent_array.logical_id
+                )
+            else:
+                parent_lid = logical_id_remap.get(
+                    parent_array.logical_id, parent_array.logical_id
+                )
+
             if hasattr(value, "element_indices") and value.element_indices:
                 idx_value = value.element_indices[0]
                 if idx_value.is_constant():
                     idx = idx_value.get_const()
                     if idx is not None:
-                        element_key = f"{parent_lid}_[{int(idx)}]"
+                        root_idx = chain_start + chain_step * int(idx)
+                        element_key = f"{parent_lid}_[{root_idx}]"
                         if element_key in qubit_map:
                             qubit_map[lid] = qubit_map[element_key]
                             return element_key
                 elif param_values:
                     idx = self._evaluate_value(idx_value, param_values)
                     if idx is not None:
-                        element_key = f"{parent_lid}_[{int(idx)}]"
+                        root_idx = chain_start + chain_step * int(idx)
+                        element_key = f"{parent_lid}_[{root_idx}]"
                         if element_key in qubit_map:
                             # Don't cache — symbolic index may resolve
                             # differently across loop iterations
