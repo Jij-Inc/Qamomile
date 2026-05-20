@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle.utils import get_size as _get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
@@ -278,41 +279,30 @@ class IQFT(CompositeGate):
         )
 
 
-def _get_size(arr: Vector[Qubit]) -> int:
-    """Get array size as Python int.
-
-    Args:
-        arr: A Vector of Qubits
-
-    Returns:
-        The size of the array as an integer
-
-    Raises:
-        ValueError: If the array doesn't have a fixed size
-    """
-    size = arr.shape[0]
-    if isinstance(size, int):
-        return size
-    if hasattr(size, "value") and size.value.is_constant():
-        val = size.value.get_const()
-        if val is not None:
-            return int(val)
-    if hasattr(size, "init_value"):
-        return int(size.init_value)
-    raise ValueError("Array must have fixed size")
-
-
 def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     """Apply Quantum Fourier Transform to a vector of qubits.
 
     This is a convenience factory function that creates a QFT gate
     and applies it to the qubits.
 
+    When *qubits* has a concrete (compile-time known) shape this emits
+    the standard ``O(n^2)`` QFT decomposition.  When *qubits* is a
+    sub-kernel parameter whose shape is still symbolic at trace time
+    (e.g. ``def apply_qft(qs: Vector[Qubit]): return qft(qs)`` traced
+    standalone) the function silently returns *qubits* unchanged: with
+    no concrete ``n`` we cannot decide how many controlled-phase gates
+    to emit, so we leave the sub-kernel block empty and let the outer
+    composition layer re-trace once the shape is resolved.  This is
+    the only acceptable fallback while ``get_size`` is strict and the
+    composition machinery does not yet propagate concrete shapes back
+    into already-built sub-kernel blocks.
+
     Args:
-        qubits: Vector of qubits to transform
+        qubits (Vector[Qubit]): Vector of qubits to transform.
 
     Returns:
-        Transformed qubits (same vector, modified in place)
+        Vector[Qubit]: Transformed qubits (same vector, modified in
+            place).
 
     Example:
         @qmc.qkernel
@@ -320,7 +310,10 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
             qubits = qft(qubits)
             return qubits
     """
-    n = _get_size(qubits)
+    try:
+        n = _get_size(qubits)
+    except ValueError:
+        return qubits
     qft_gate = QFT(n)
 
     # Get individual qubits from vector
@@ -342,11 +335,17 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     This is a convenience factory function that creates an IQFT gate
     and applies it to the qubits.
 
+    The same symbolic-shape contract as :func:`qft` applies here:
+    when *qubits* has no compile-time-known shape (a sub-kernel
+    parameter traced standalone) the function silently returns
+    *qubits* unchanged, leaving the sub-kernel block empty.
+
     Args:
-        qubits: Vector of qubits to transform
+        qubits (Vector[Qubit]): Vector of qubits to transform.
 
     Returns:
-        Transformed qubits (same vector, modified in place)
+        Vector[Qubit]: Transformed qubits (same vector, modified in
+            place).
 
     Example:
         @qmc.qkernel
@@ -354,7 +353,10 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
             qubits = iqft(qubits)
             return qubits
     """
-    n = _get_size(qubits)
+    try:
+        n = _get_size(qubits)
+    except ValueError:
+        return qubits
     iqft_gate = IQFT(n)
 
     # Get individual qubits from vector

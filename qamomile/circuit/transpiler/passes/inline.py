@@ -123,6 +123,7 @@ class InlinePass(Pass[Block, Block]):
             operations=serialized_ops,
             kind=out_kind,
             parameters=input.parameters,
+            param_slots=input.param_slots,
         )
 
     def _serialize_operations(
