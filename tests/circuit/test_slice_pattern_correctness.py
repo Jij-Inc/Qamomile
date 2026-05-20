@@ -37,6 +37,17 @@ re-asserted here so the per-pattern claim stays auditable.
 Each failure case asserts both the error type and the detection point
 (frontend trace-time vs. post-fold IR pass) so the regression
 surfaces are explicit.
+
+Helper convention used throughout the file: kernels appear next to
+the test that exercises them.  When a kernel is shared across the
+``test_*`` methods of a single class, it lives inside that class as
+a class-level ``@qmc.qkernel`` attribute (Python looks ``self._kern``
+up via the class's ``__dict__``; ``QKernel`` is not a descriptor so
+no spurious ``self``-binding happens).  When a kernel is used by
+exactly one test method it is defined inline at the top of that
+method.  Only the cross-backend statevector helpers and the
+analytical reference builder are module-level — they are genuinely
+shared by every legal-pattern test class.
 """
 
 from __future__ import annotations
@@ -57,91 +68,7 @@ from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 from tests.transpiler.gate_test_specs import statevectors_equal  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# OK kernels — defined at module level so ``@qmc.qkernel`` can
-# read their source for AST tracing.
-# ---------------------------------------------------------------------------
-
-
-@qmc.qkernel
-def _evens_odds_cx_pattern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Evens / odds + H + CX, explicit slice-assign return."""
-    q = qmc.qubit_array(n, "q")
-    evens = q[0::2]
-    odds = q[1::2]
-    for i in qmc.range(odds.shape[0]):
-        evens[i] = qmc.h(evens[i])
-        evens[i], odds[i] = qmc.cx(evens[i], odds[i])
-    q[0::2] = evens
-    q[1::2] = odds
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _qft_on_view(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """``qft`` on a slice view, explicit slice-assign return."""
-    q = qmc.qubit_array(8, "q")
-    view = q[lo:hi]
-    view = qmc.qft(view)
-    q[lo:hi] = view
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _cast_slice_to_qfixed() -> qmc.Float:
-    """Cast a slice view to ``QFixed`` and measure."""
-    q = qmc.qubit_array(4, "q")
-    qf = qmc.cast(q[1::2], qmc.QFixed, int_bits=0)
-    return qmc.measure(qf)
-
-
-@qmc.qkernel
-def _inline_slice_assign_broadcast(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """In-place ``q[1:n-2] = qmc.h(q[1:n-2])`` slice assignment."""
-    q = qmc.qubit_array(n, "q")
-    q[1 : n - 2] = qmc.h(q[1 : n - 2])
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _top_level_slice_with_body_loop(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Top-level slice + per-element loop + top-level release."""
-    q = qmc.qubit_array(n, "q")
-    evens = q[0::2]
-    for i in qmc.range(evens.shape[0]):
-        evens[i] = qmc.h(evens[i])
-    q[0::2] = evens
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _auto_truncated_slice() -> qmc.Vector[qmc.Bit]:
-    """Python-style auto-truncation (``q[3:10]`` → ``q[3:4]``)."""
-    q = qmc.qubit_array(4, "q")
-    q[3:10] = qmc.h(q[3:10])
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Helper for H broadcast via per-element loop."""
-    n = q.shape[0]
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-    return q
-
-
-@qmc.qkernel
-def _view_passed_to_subkernel(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Pass a slice view as a ``Vector[Qubit]`` argument."""
-    q = qmc.qubit_array(num, "q")
-    evens = q[0::2]
-    evens = _h_all(evens)
-    q[0::2] = evens
-    return qmc.measure(q)
-
-
-# ---------------------------------------------------------------------------
-# Cross-backend statevector / sampling helpers
+# Cross-backend helpers (used by every legal-pattern test class below).
 # ---------------------------------------------------------------------------
 
 
@@ -270,12 +197,25 @@ def _reference_statevector(n_qubits: int, h_qubits: list[int]) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# evens / odds + H + CX, explicit return
+# Legal slicing patterns — each class defines its own kernel inline.
 # ---------------------------------------------------------------------------
 
 
 class TestEvensOddsCxPattern:
     """H on evens then CX(evens[i], odds[i]) produces Bell pairs."""
+
+    @qmc.qkernel
+    def _kern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """Evens / odds + H + CX, explicit slice-assign return."""
+        q = qmc.qubit_array(n, "q")
+        evens = q[0::2]
+        odds = q[1::2]
+        for i in qmc.range(odds.shape[0]):
+            evens[i] = qmc.h(evens[i])
+            evens[i], odds[i] = qmc.cx(evens[i], odds[i])
+        q[0::2] = evens
+        q[1::2] = odds
+        return qmc.measure(q)
 
     @pytest.mark.parametrize("n", [4, 6])
     def test_transpile_and_statevector_match(self, n: int):
@@ -288,7 +228,7 @@ class TestEvensOddsCxPattern:
         for i in range(n_pairs):
             ref_qc.cx(2 * i, 2 * i + 1)
         expected_sv = np.array(Statevector(ref_qc).data)
-        _assert_cross_backend_matches(_evens_odds_cx_pattern, bindings, expected_sv)
+        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
 
     @pytest.mark.parametrize(
         "n, exp_qubits, exp_single, exp_two",
@@ -298,20 +238,24 @@ class TestEvensOddsCxPattern:
         self, n: int, exp_qubits: int, exp_single: int, exp_two: int
     ):
         """Resource estimate matches H + CX counts inside the loop."""
-        est = estimate_resources(_evens_odds_cx_pattern.block, bindings={"n": n})
+        est = estimate_resources(self._kern.block, bindings={"n": n})
         assert int(est.qubits) == exp_qubits
         assert int(est.gates.single_qubit) == exp_single
         assert int(est.gates.two_qubit) == exp_two
         assert int(est.gates.total) == exp_single + exp_two
 
 
-# ---------------------------------------------------------------------------
-# qft on a slice view, explicit slice-assign return
-# ---------------------------------------------------------------------------
-
-
 class TestQftOnView:
     """``qft(q[lo:hi])`` applies QFT to the parent's slice."""
+
+    @qmc.qkernel
+    def _kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """``qft`` on a slice view, explicit slice-assign return."""
+        q = qmc.qubit_array(8, "q")
+        view = q[lo:hi]
+        view = qmc.qft(view)
+        q[lo:hi] = view
+        return qmc.measure(q)
 
     def test_transpile_and_statevector_match(self):
         """``qft(|000>) = |+++>``; the rest of the register stays |0>."""
@@ -328,7 +272,7 @@ class TestQftOnView:
             # Qiskit indexes qubit 0 as the least-significant bit.
             idx = (k & 0b1) << 1 | ((k >> 1) & 0b1) << 2 | ((k >> 2) & 0b1) << 3
             expected_sv[idx] = amp
-        _assert_cross_backend_matches(_qft_on_view, bindings, expected_sv)
+        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
         """``qft`` is wrapped as a composite gate; the top-level block reports 0 leaf gates.
@@ -341,14 +285,9 @@ class TestQftOnView:
         regression; we pin it so any future estimator change that
         starts unpacking composite gates is noticed.
         """
-        est = estimate_resources(_qft_on_view.block, bindings={"lo": 1, "hi": 4})
+        est = estimate_resources(self._kern.block, bindings={"lo": 1, "hi": 4})
         assert int(est.qubits) == 8
         assert int(est.gates.total) == 0
-
-
-# ---------------------------------------------------------------------------
-# cast a slice view to QFixed and measure
-# ---------------------------------------------------------------------------
 
 
 class TestCastSliceToQFixed:
@@ -358,10 +297,17 @@ class TestCastSliceToQFixed:
     decode of two |0> qubits with ``int_bits=0`` is the value 0.0.
     """
 
+    @qmc.qkernel
+    def _kern() -> qmc.Float:
+        """Cast a slice view to ``QFixed`` and measure."""
+        q = qmc.qubit_array(4, "q")
+        qf = qmc.cast(q[1::2], qmc.QFixed, int_bits=0)
+        return qmc.measure(qf)
+
     def test_transpile_and_run_returns_zero(self):
         """The Float result of measuring |0>^2 as QFixed is 0.0."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(_cast_slice_to_qfixed)
+        exe = transpiler.transpile(self._kern)
         got = exe.run(transpiler.executor()).result()
         assert float(got) == pytest.approx(0.0, abs=1e-9)
 
@@ -372,7 +318,7 @@ class TestCastSliceToQFixed:
         from qamomile.quri_parts import QuriPartsTranspiler
 
         transpiler = QuriPartsTranspiler()
-        exe = transpiler.transpile(_cast_slice_to_qfixed)
+        exe = transpiler.transpile(self._kern)
         got = exe.run(transpiler.executor()).result()
         assert float(got) == pytest.approx(0.0, abs=1e-9)
 
@@ -382,20 +328,15 @@ class TestCastSliceToQFixed:
         from qamomile.cudaq import CudaqTranspiler
 
         transpiler = CudaqTranspiler()
-        exe = transpiler.transpile(_cast_slice_to_qfixed)
+        exe = transpiler.transpile(self._kern)
         got = exe.run(transpiler.executor()).result()
         assert float(got) == pytest.approx(0.0, abs=1e-9)
 
     def test_resource_estimate(self):
         """4 qubits allocated, no gates."""
-        est = estimate_resources(_cast_slice_to_qfixed.block)
+        est = estimate_resources(self._kern.block)
         assert int(est.qubits) == 4
         assert int(est.gates.total) == 0
-
-
-# ---------------------------------------------------------------------------
-# q[1:n-2] = qmc.h(q[1:n-2])
-# ---------------------------------------------------------------------------
 
 
 class TestInlineSliceAssignBroadcast:
@@ -405,85 +346,111 @@ class TestInlineSliceAssignBroadcast:
     expected unitary is H on those three qubits.
     """
 
+    @qmc.qkernel
+    def _kern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """In-place ``q[1:n-2] = qmc.h(q[1:n-2])`` slice assignment."""
+        q = qmc.qubit_array(n, "q")
+        q[1 : n - 2] = qmc.h(q[1 : n - 2])
+        return qmc.measure(q)
+
     def test_transpile_and_statevector_match(self):
         bindings = {"n": 6}
         expected_sv = _reference_statevector(6, [1, 2, 3])
-        _assert_cross_backend_matches(
-            _inline_slice_assign_broadcast, bindings, expected_sv
-        )
+        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(
-            _inline_slice_assign_broadcast.block, bindings={"n": 6}
-        )
+        est = estimate_resources(self._kern.block, bindings={"n": 6})
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0
         assert int(est.gates.total) == 3
 
 
-# ---------------------------------------------------------------------------
-# top-level slice + body loop + top-level release
-# ---------------------------------------------------------------------------
-
-
 class TestTopLevelSliceWithBodyLoop:
     """``evens = q[0::2]; for i ...; q[0::2] = evens``."""
+
+    @qmc.qkernel
+    def _kern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """Top-level slice + per-element loop + top-level release."""
+        q = qmc.qubit_array(n, "q")
+        evens = q[0::2]
+        for i in qmc.range(evens.shape[0]):
+            evens[i] = qmc.h(evens[i])
+        q[0::2] = evens
+        return qmc.measure(q)
 
     def test_transpile_and_statevector_match(self):
         bindings = {"n": 4}
         expected_sv = _reference_statevector(4, [0, 2])
-        _assert_cross_backend_matches(
-            _top_level_slice_with_body_loop, bindings, expected_sv
-        )
+        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(
-            _top_level_slice_with_body_loop.block, bindings={"n": 4}
-        )
+        est = estimate_resources(self._kern.block, bindings={"n": 4})
         assert int(est.qubits) == 4
         assert int(est.gates.single_qubit) == 2
         assert int(est.gates.two_qubit) == 0
         assert int(est.gates.total) == 2
 
 
-# ---------------------------------------------------------------------------
-# auto-truncated slice (q[3:10] → q[3:4])
-# ---------------------------------------------------------------------------
-
-
 class TestAutoTruncatedSlice:
     """Out-of-range stop is truncated to the parent length."""
+
+    @qmc.qkernel
+    def _kern() -> qmc.Vector[qmc.Bit]:
+        """Python-style auto-truncation (``q[3:10]`` → ``q[3:4]``)."""
+        q = qmc.qubit_array(4, "q")
+        q[3:10] = qmc.h(q[3:10])
+        return qmc.measure(q)
 
     def test_transpile_and_statevector_match(self):
         # q[3:10] on a length-4 array is truncated to q[3:4]; only q[3]
         # gets H.
         expected_sv = _reference_statevector(4, [3])
-        _assert_cross_backend_matches(_auto_truncated_slice, {}, expected_sv)
+        _assert_cross_backend_matches(self._kern, {}, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(_auto_truncated_slice.block)
+        est = estimate_resources(self._kern.block)
         assert int(est.qubits) == 4
         assert int(est.gates.single_qubit) == 1
         assert int(est.gates.two_qubit) == 0
         assert int(est.gates.total) == 1
 
 
-# ---------------------------------------------------------------------------
-# view as qkernel argument
-# ---------------------------------------------------------------------------
+# ``_h_all`` is the sub-kernel that ``TestViewPassedToSubKernel._kern``
+# passes its slice view to.  It is *only* used by that test class, but
+# it must live at module scope because the body of ``_kern`` references
+# it as a bare name and Python's name resolution looks free names up
+# via the function's ``__globals__`` (the enclosing module's globals),
+# not via the surrounding class body.  Keeping ``_h_all`` immediately
+# above the class preserves visual proximity.
+@qmc.qkernel
+def _h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Broadcast H over every element of a ``Vector[Qubit]`` via a per-element loop."""
+    n = q.shape[0]
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+    return q
 
 
 class TestViewPassedToSubKernel:
-    """``evens = h_all(evens)`` passes a slice view to a sub-kernel."""
+    """Passing a slice view as a ``Vector[Qubit]`` argument to another kernel."""
+
+    @qmc.qkernel
+    def _kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """Pass a slice view as a ``Vector[Qubit]`` argument."""
+        q = qmc.qubit_array(num, "q")
+        evens = q[0::2]
+        evens = _h_all(evens)
+        q[0::2] = evens
+        return qmc.measure(q)
 
     def test_transpile_and_statevector_match(self):
         bindings = {"num": 6}
         expected_sv = _reference_statevector(6, [0, 2, 4])
-        _assert_cross_backend_matches(_view_passed_to_subkernel, bindings, expected_sv)
+        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(_view_passed_to_subkernel.block, bindings={"num": 6})
+        est = estimate_resources(self._kern.block, bindings={"num": 6})
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0
@@ -491,145 +458,8 @@ class TestViewPassedToSubKernel:
 
 
 # ---------------------------------------------------------------------------
-# Error-pattern kernels.  Each block below groups one conceptual
-# class of slice-policy violation.  Kernels are module-level so ``@qmc.qkernel`` can
-# read their source for AST tracing.
+# Illegal slicing patterns — each test method inlines its own kernel
 # ---------------------------------------------------------------------------
-
-
-# -- Strict-return violations: forgetting the slice-assign return -----------
-
-
-@qmc.qkernel
-def _strict_return_loop() -> qmc.Vector[qmc.Bit]:
-    """View borrow via element loop; ``q[0:4:2] = evens`` is forgotten."""
-    q = qmc.qubit_array(4, "q")
-    evens = q[0:4:2]
-    for i in qmc.range(evens.shape[0]):
-        evens[i] = qmc.h(evens[i])
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _strict_return_broadcast() -> qmc.Vector[qmc.Bit]:
-    """Broadcast transferred ownership onto ``view``; slice-assign forgotten."""
-    q = qmc.qubit_array(4, "q")
-    view = q[0::2]
-    view = qmc.h(view)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _strict_return_qkernel_call_callee(
-    q: qmc.Vector[qmc.Qubit],
-) -> qmc.Vector[qmc.Qubit]:
-    """Sub-kernel for the qkernel-call strict-return violation case."""
-    for i in qmc.range(2):
-        q[i] = qmc.h(q[i])
-    return q
-
-
-@qmc.qkernel
-def _strict_return_qkernel_call() -> qmc.Vector[qmc.Bit]:
-    """Sub-kernel call transferred ownership; slice-assign forgotten."""
-    q = qmc.qubit_array(4, "q")
-    view = q[0:2]
-    view = _strict_return_qkernel_call_callee(view)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _strict_return_pauli_evolve(
-    H: qmc.Observable, gamma: qmc.Float
-) -> qmc.Vector[qmc.Bit]:
-    """``pauli_evolve`` transferred ownership; slice-assign forgotten."""
-    q = qmc.qubit_array(4, "q")
-    view = q[0::2]
-    view = qmc.pauli_evolve(view, H, gamma)
-    return qmc.measure(q)
-
-
-# -- Multi-view overlap: two live views on the same root --------------------
-
-
-@qmc.qkernel
-def _multi_view_overlap_top_level() -> qmc.Vector[qmc.Bit]:
-    """``a = q[0:3]; b = q[0:2]`` — two live views with overlapping coverage."""
-    q = qmc.qubit_array(4, "q")
-    a = q[0:3]
-    b = q[0:2]
-    _ = a
-    _ = b
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _multi_view_overlap_in_body() -> qmc.Vector[qmc.Bit]:
-    """Outer view live across the body, body creates an overlapping inner view."""
-    q = qmc.qubit_array(4, "q")
-    even = q[0::2]  # noqa: F841 — kept live to force the overlap conflict
-    for _ in qmc.range(1):
-        v = q[0:3]
-        v = qmc.h(v)
-        q[0:3] = v
-    return qmc.measure(q)
-
-
-# -- Slice-assignment structural mismatches ----------------------------------
-
-
-@qmc.qkernel
-def _slice_assign_coverage_mismatch() -> qmc.Vector[qmc.Bit]:
-    """``q[0:2] = qmc.h(q[0:3])`` — LHS and RHS coverages differ."""
-    q = qmc.qubit_array(4, "q")
-    q[0:2] = qmc.h(q[0:3])
-    return qmc.measure(q)
-
-
-# -- Control-flow body violations: outer-view release inside a body ----------
-
-
-@qmc.qkernel
-def _body_release_of_outer_view() -> qmc.Vector[qmc.Bit]:
-    """Slice-assign that releases an outer view from inside a for body."""
-    q = qmc.qubit_array(4, "q")
-    even = q[0::2]
-    for _ in qmc.range(1):
-        q[0::2] = even
-    return qmc.measure(q)
-
-
-# -- Nested-slice return-order violations -----------------------------------
-
-
-@qmc.qkernel
-def _nested_inner_returned_to_root_directly() -> qmc.Vector[qmc.Bit]:
-    """``a = q[1:9]; b = a[1:5]; q[2:6] = b`` skips the outer-view return."""
-    q = qmc.qubit_array(10, "q")
-    a = q[1:9]  # noqa: F841
-    b = a[1:5]
-    q[2:6] = b
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _nested_outer_returned_while_inner_live() -> qmc.Vector[qmc.Bit]:
-    """``q[1:9] = a`` with ``b`` still owning a's overlap slots."""
-    q = qmc.qubit_array(10, "q")
-    a = q[1:9]
-    b = a[1:5]  # noqa: F841
-    q[1:9] = a
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _nested_outer_access_at_inner_slot() -> qmc.Vector[qmc.Bit]:
-    """Touching ``a[overlap_idx]`` while inner ``b`` owns that slot."""
-    q = qmc.qubit_array(10, "q")
-    a = q[1:9]
-    b = a[1:5]  # noqa: F841
-    a[1] = qmc.h(a[1])  # a[1] is root q[2], owned by b
-    return qmc.measure(q)
 
 
 class TestStrictReturnViolations:
@@ -638,7 +468,7 @@ class TestStrictReturnViolations:
     Skipping that return leaves the parent's bulk-borrow live and the
     next parent consume (``measure(q)`` etc.) raises
     ``UnreturnedBorrowError``.  Four entry points exercise the four
-    transfer-style ops the summary calls out: element loop, broadcast
+    transfer-style ops the policy calls out: element loop, broadcast
     gate, sub-kernel call, and ``pauli_evolve``.
     """
 
@@ -646,29 +476,64 @@ class TestStrictReturnViolations:
         """Element loop + no slice-assign on the loop's view."""
         from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            for i in qmc.range(evens.shape[0]):
+                evens[i] = qmc.h(evens[i])
+            return qmc.measure(q)
+
         with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _strict_return_loop.block
+            _ = kern.block
 
     def test_broadcast_without_slice_assign_raises(self):
         """``view = qmc.h(view)`` + no slice-assign on the returned view."""
         from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[0::2]
+            view = qmc.h(view)
+            return qmc.measure(q)
+
         with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _strict_return_broadcast.block
+            _ = kern.block
 
     def test_qkernel_call_without_slice_assign_raises(self):
         """``view = sub_kernel(view)`` + no slice-assign on the returned view."""
         from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 
+        @qmc.qkernel
+        def callee(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            for i in qmc.range(2):
+                q[i] = qmc.h(q[i])
+            return q
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[0:2]
+            view = callee(view)
+            return qmc.measure(q)
+
         with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _strict_return_qkernel_call.block
+            _ = kern.block
 
     def test_pauli_evolve_without_slice_assign_raises(self):
         """``view = qmc.pauli_evolve(view, ...)`` + no slice-assign on the returned view."""
         from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 
+        @qmc.qkernel
+        def kern(H: qmc.Observable, gamma: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[0::2]
+            view = qmc.pauli_evolve(view, H, gamma)
+            return qmc.measure(q)
+
         with pytest.raises(UnreturnedBorrowError, match="unreturned slice-view"):
-            _ = _strict_return_pauli_evolve.block
+            _ = kern.block
 
 
 class TestMultiViewOverlap:
@@ -682,20 +547,41 @@ class TestMultiViewOverlap:
     """
 
     def test_top_level_overlap_raises_at_trace(self):
+        """``a = q[0:3]; b = q[0:2]`` — two live views with overlapping coverage."""
         from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            a = q[0:3]
+            b = q[0:2]
+            _ = a
+            _ = b
+            return qmc.measure(q)
 
         with pytest.raises(
             QubitConsumedError, match="already owned by another slice view"
         ):
-            _ = _multi_view_overlap_top_level.block
+            _ = kern.block
 
     def test_body_internal_overlap_raises_at_trace(self):
+        """Outer view live across the body, body creates an overlapping inner view."""
         from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]  # noqa: F841 — kept live to force the overlap conflict
+            for _ in qmc.range(1):
+                v = q[0:3]
+                v = qmc.h(v)
+                q[0:3] = v
+            return qmc.measure(q)
 
         with pytest.raises(
             QubitConsumedError, match="already owned by another slice view"
         ):
-            _ = _multi_view_overlap_in_body.block
+            _ = kern.block
 
 
 class TestSliceAssignmentConsistency:
@@ -709,10 +595,17 @@ class TestSliceAssignmentConsistency:
     """
 
     def test_coverage_mismatch_raises_at_trace(self):
+        """``q[0:2] = qmc.h(q[0:3])`` — LHS and RHS coverages differ."""
         from qamomile.circuit.transpiler.errors import AffineTypeError
 
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q[0:2] = qmc.h(q[0:3])
+            return qmc.measure(q)
+
         with pytest.raises(AffineTypeError, match="coverage mismatch"):
-            _ = _slice_assign_coverage_mismatch.block
+            _ = kern.block
 
 
 class TestControlFlowBodyViolations:
@@ -725,11 +618,20 @@ class TestControlFlowBodyViolations:
     """
 
     def test_release_of_outer_view_in_body_raises(self):
+        """Slice-assign that releases an outer view from inside a for body."""
         from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]
+            for _ in qmc.range(1):
+                q[0::2] = even
+            return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
         with pytest.raises(SliceBorrowViolationError):
-            transpiler.transpile(_body_release_of_outer_view)
+            transpiler.transpile(kern)
 
 
 class TestNestedSliceReturnOrder:
@@ -743,23 +645,50 @@ class TestNestedSliceReturnOrder:
     """
 
     def test_inner_returned_to_root_directly_raises(self):
+        """``a = q[1:9]; b = a[1:5]; q[2:6] = b`` skips the outer-view return."""
         from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(10, "q")
+            a = q[1:9]  # noqa: F841
+            b = a[1:5]
+            q[2:6] = b
+            return qmc.measure(q)
 
         with pytest.raises(
             AffineTypeError, match="returned through its immediate outer view"
         ):
-            _ = _nested_inner_returned_to_root_directly.block
+            _ = kern.block
 
     def test_outer_returned_while_inner_live_raises(self):
+        """``q[1:9] = a`` with ``b`` still owning a's overlap slots."""
         from qamomile.circuit.transpiler.errors import AffineTypeError
 
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(10, "q")
+            a = q[1:9]
+            b = a[1:5]  # noqa: F841
+            q[1:9] = a
+            return qmc.measure(q)
+
         with pytest.raises(AffineTypeError, match="no longer owns"):
-            _ = _nested_outer_returned_while_inner_live.block
+            _ = kern.block
 
     def test_outer_access_at_inner_slot_raises(self):
+        """Touching ``a[overlap_idx]`` while inner ``b`` owns that slot."""
         from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(10, "q")
+            a = q[1:9]
+            b = a[1:5]  # noqa: F841
+            a[1] = qmc.h(a[1])  # a[1] is root q[2], owned by b
+            return qmc.measure(q)
 
         with pytest.raises(
             QubitConsumedError, match="currently held by another slice view"
         ):
-            _ = _nested_outer_access_at_inner_slot.block
+            _ = kern.block
