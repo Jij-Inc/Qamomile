@@ -59,6 +59,8 @@
 #    │  unroll_recursion            (iterated inline ↔ partial_eval)
 #    │  affine_validate             (safety net for affine types)
 #    │  partial_eval                (constant fold + compile-time ifs)
+#    │  slice_borrow_check          (post-fold slice-view borrow check)
+#    │  strip_slice_ops             (drop slice declaration markers)
 #    │  analyze                     (dependency graph + I/O validation)
 #    ▼
 # Block [ANALYZED]
@@ -327,6 +329,13 @@ print(pretty_print_block(block))
 # Note that `ForOperation` itself is **not** unrolled here. Loop unrolling, if
 # needed, is decided later by `LoopAnalyzer` during `emit` (see section 5),
 # so the `ForOperations` count does not drop in this stage.
+#
+# `partial_eval` runs `ConstantFoldingPass(strip_slice_ops=False)` on
+# purpose: `SliceArrayOperation` and `ReleaseSliceViewOperation` are
+# declarative markers used by the post-fold `slice_borrow_check` pass
+# (see section 4.7) to verify slice-view borrow / release order. The
+# dedicated `strip_slice_ops` pass removes them right after the check
+# has run, before `analyze` sees the block.
 
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
@@ -410,7 +419,7 @@ print(executable.quantum_circuit)
 #
 # ### 4.7 Passes we skipped
 #
-# Five passes are part of `transpile()` but we did not call them explicitly:
+# Seven passes are part of `transpile()` but we did not call them explicitly:
 #
 # - **`substitute`** — applies user-configured `SubstitutionRule`s to replace
 #   block targets or override composite-gate strategies. No-op when the
@@ -424,14 +433,33 @@ print(executable.quantum_circuit)
 #   not make the base case reachable.
 # - **`affine_validate`** — safety net that catches affine-type violations
 #   that slipped past frontend checks.
+# - **`slice_borrow_check`** — post-fold check for `Vector` slice views. The
+#   frontend already rejects overlapping concrete-bounds views at
+#   construction time, but views whose bounds were symbolic at trace time
+#   (`q[lo:hi]` for a `UInt lo` / `hi`) can only be checked once `bindings`
+#   make the bounds concrete. This pass walks the block after
+#   `partial_eval` and raises `SliceBorrowViolationError` on overlapping
+#   live views or use-after-destroy, and `UnreturnedBorrowAtBlockEndError`
+#   when a view's borrow on the parent register is still outstanding at
+#   block end (strict-return policy: a view must be returned via
+#   `parent[a:b:c] = view` or destructively consumed by `measure` / `cast` /
+#   `expval`). Direct element borrows (`q[i]`) emit no IR op and are
+#   handled by the trace-time validator instead.
+# - **`strip_slice_ops`** — once `slice_borrow_check` has verified the
+#   block, this pass removes the now-unneeded `SliceArrayOperation` and
+#   `ReleaseSliceViewOperation` declarative markers so segmentation /
+#   emit see a pure quantum-op stream. The sliced `ArrayValue` itself
+#   stays reachable through downstream operands' `slice_of` chains.
 # - **`validate_symbolic_shapes`** — rejects unresolved `Vector` shape dims
 #   reaching a `ForOperation` bound, with an actionable error message.
 #
 # They are idempotent and cheap, so `transpile()` always runs them. As a pass
 # author you mostly care about the order: `substitute` and
 # `resolve_parameter_shapes` run **before** `inline`; `affine_validate` runs
-# **after** it; `validate_symbolic_shapes` runs **after** `analyze` so the
-# dependency graph is available.
+# **after** it; `slice_borrow_check` runs **immediately after** `partial_eval`
+# (so the slice declaration markers are still present), with `strip_slice_ops`
+# cleaning them up before `analyze`; `validate_symbolic_shapes` runs **after**
+# `analyze` so the dependency graph is available.
 
 # %% [markdown]
 # ## 5. Control Flow (`if` / `for` / `while`) Through the Pipeline

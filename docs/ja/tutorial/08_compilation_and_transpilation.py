@@ -54,6 +54,8 @@
 #    │  unroll_recursion            (inline ↔ partial_evalの反復)
 #    │  affine_validate             (アフィン型のセーフティネット)
 #    │  partial_eval                (定数畳み込み + コンパイル時if)
+#    │  slice_borrow_check          (定数畳み込み後のスライスview借り出し検査)
+#    │  strip_slice_ops             (スライス宣言マーカーの削除)
 #    │  analyze                     (依存グラフ + I/O検証)
 #    ▼
 # Block [ANALYZED]
@@ -264,6 +266,8 @@ print(pretty_print_block(block))
 # 2. **`CompileTimeIfLoweringPass`** — 条件がコンパイル時に解決可能な`IfOperation`を、選ばれた分岐のOperation列で置き換えます。測定結果に依存する`IfOperation`はここでは触りません。
 #
 # なお、`ForOperation`自体は**このパスではアンロールされません**。ループ展開は必要であれば後段の`emit`で`LoopAnalyzer`が判定します（詳しくは5章）。そのためここで`ForOperations`の個数は減りません。
+#
+# `partial_eval`は意図的に`ConstantFoldingPass(strip_slice_ops=False)`を呼び出しています。`SliceArrayOperation`と`ReleaseSliceViewOperation`は宣言マーカーで、後段の`slice_borrow_check`パス（4.7節参照）が view の借り出し / 返却順序を検証するために必要です。検査が終わった直後の専用パス`strip_slice_ops`がこれらを削除し、`analyze`にブロックを渡す前に取り除きます。
 
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
@@ -318,15 +322,17 @@ print(executable.quantum_circuit)
 #
 # ### 4.7 スキップしたパス
 #
-# `transpile()`の一部でありながら明示的に呼ばなかったパスが5つあります:
+# `transpile()`の一部でありながら明示的に呼ばなかったパスが7つあります:
 #
 # - **`substitute`** — ユーザーが設定した`SubstitutionRule`を適用してブロックのターゲットを置換したり、複合ゲートの戦略を上書きします。`TranspilerConfig`にルールがない場合はno-opです。
 # - **`resolve_parameter_shapes`** — `bindings`が具体的な`Vector`や`Matrix`値を提供する場合、`{name}_dim{i}`のshape次元を埋めます。これにより下流で`arr.shape[0]`が具体的な`UInt`として解決されます。
 # - **`unroll_recursion`** — 自己再帰の`@qkernel`（例: Suzuki–Trotter、チュートリアル07参照）に対する`inline ↔ partial_eval`の固定点ループです。再帰が底まで展開されると終了し、bindingsでベースケースに到達できない場合はエラーになります。
 # - **`affine_validate`** — フロントエンドのチェックをすり抜けたアフィン型違反を捕まえるセーフティネットです。
+# - **`slice_borrow_check`** — `Vector`スライス view 用の定数畳み込み後検査です。フロントエンドは具体境界の重複 view を構築時点で reject しますが、トレース時に境界が symbolic だった view（`q[lo:hi]`で`lo`/`hi`が`UInt`の場合）は`bindings`で境界が具体的になった後でしか検査できません。このパスは`partial_eval`の直後でブロックを walk し、生きている view 同士の重複や破壊済みスロットへの再アクセスなら`SliceBorrowViolationError`を、view が親レジスタへの借り出しを残したままブロック末尾に到達したら`UnreturnedBorrowAtBlockEndError`を投げます（strict-return policy: view は`parent[a:b:c] = view`での返却、または`measure` / `cast` / `expval`での破壊的消費のどちらかで終了させる必要がある）。`q[i]`のような単一要素借り出しは IR Operation を出さないので、こちらは frontend のトレース時 validator が担当します。
+# - **`strip_slice_ops`** — `slice_borrow_check`の検査が終わった後で、不要になった`SliceArrayOperation`と`ReleaseSliceViewOperation`の宣言マーカーをブロックから取り除きます。これによりセグメンテーション / emit は純粋な量子 op 列だけを見るようになります。スライス済みの`ArrayValue`自体は下流オペランドの`slice_of`チェーンから引き続き参照できます。
 # - **`validate_symbolic_shapes`** — 未解決の`Vector`shape次元が`ForOperation`の境界に到達した場合、実行可能なエラーメッセージで拒否します。
 #
-# いずれも冪等かつ安価なので、`transpile()`は常にこれらを実行します。パスを書く側としては順序に注意するだけで十分です: `substitute`と`resolve_parameter_shapes`は`inline`の**前**、`affine_validate`は`inline`の**後**、`validate_symbolic_shapes`は`analyze`の**後**（依存グラフが使えるように）に実行されます。
+# いずれも冪等かつ安価なので、`transpile()`は常にこれらを実行します。パスを書く側としては順序に注意するだけで十分です: `substitute`と`resolve_parameter_shapes`は`inline`の**前**、`affine_validate`は`inline`の**後**、`slice_borrow_check`は`partial_eval`の**直後**（スライス宣言マーカーがまだ残っている状態で）、`strip_slice_ops`は`analyze`の前に走ってマーカーを掃除、`validate_symbolic_shapes`は`analyze`の**後**（依存グラフが使えるように）に実行されます。
 
 # %% [markdown]
 # ## 5. 制御フロー (`if` / `for` / `while`) の取り扱い
