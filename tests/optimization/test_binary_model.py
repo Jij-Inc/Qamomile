@@ -1,5 +1,6 @@
 import math
 import random
+import warnings
 
 import numpy as np
 import pytest
@@ -353,19 +354,50 @@ def test_from_higher_ising_duplicate_indices_all_cancel_to_constant():
     assert np.isclose(bm.linear[0], 1.0)
 
 
-def test_from_higher_ising_duplicate_indices_partial_cancel():
-    """from_higher_ising should keep odd-count indices: (0,1,1,2,2) → (0,)."""
+def test_from_higher_ising_duplicate_indices_odd_count_above_two():
+    """from_higher_ising should reduce an odd count > 2 to a single occurrence.
+
+    Distinct from the pair-cancel tests above: those only exercise
+    count-2 groups (drop) and count-1 survivors (keep). Here index 0
+    appears *three* times — an odd count greater than two — and must
+    collapse to a single ``(0,)`` rather than cancelling, while the
+    count-2 index 1 cancels in the same term. ``(0,0,0,1,1) → (0,)``.
+    """
     with pytest.warns(
         UserWarning,
         match="Duplicate variable indices in higher Ising term",
     ):
         bm = BinaryModel.from_higher_ising(
-            higher_ising={(0, 1, 1, 2, 2): 2.0}, constant=0.0
+            higher_ising={(0, 0, 0, 1, 1): 2.0}, constant=0.0
         )
 
-    # Only 0 has odd count → reduced to (0,).
+    # Index 0: count 3 (odd) → kept as a single occurrence.
+    # Index 1: count 2 (even) → cancels. Surviving term is linear (0,).
     assert bm.num_bits == 1
     assert np.isclose(bm.linear[0], 2.0)
+    assert bm.coefficients == {(0,): 2.0}
+
+
+def test_from_higher_ising_no_warning_on_unique_indices():
+    """from_higher_ising must NOT warn when every term already has unique indices.
+
+    The four ``_duplicate_indices_*`` tests confirm a UserWarning *is*
+    raised on reduction; this guards the opposite direction so a future
+    change to ``reduce_indices`` that spuriously warns on already-unique
+    input fails the suite instead of slipping through silently (the
+    project has no ``filterwarnings = error`` in pyproject.toml).
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning escalates to an error
+        bm = BinaryModel.from_higher_ising(
+            higher_ising={(0,): 1.0, (0, 1): 2.0, (0, 1, 2): 3.0},
+            constant=0.5,
+        )
+
+    assert bm.vartype == VarType.SPIN
+    assert bm.num_bits == 3
+    assert np.isclose(bm.constant, 0.5)
+    assert bm.coefficients == {(0,): 1.0, (0, 1): 2.0, (0, 1, 2): 3.0}
 
 
 def test_from_higher_ising_4th_order():
