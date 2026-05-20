@@ -6,11 +6,28 @@ time evolution operator of a Pauli Hamiltonian to a quantum state.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import cast, overload
 
 from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
+from qamomile.circuit.frontend.handle.array import VectorView
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+
+
+@overload
+def pauli_evolve(
+    q: VectorView[Qubit],
+    hamiltonian: Observable,
+    gamma: Float,
+) -> VectorView[Qubit]: ...
+
+
+@overload
+def pauli_evolve(
+    q: Vector[Qubit],
+    hamiltonian: Observable,
+    gamma: Float,
+) -> Vector[Qubit]: ...
 
 
 def pauli_evolve(
@@ -57,17 +74,29 @@ def pauli_evolve(
         exe = transpiler.transpile(cost_layer, bindings={"H": H, "gamma": 0.5})
         ```
     """
-    # Consume the qubit array (affine type enforcement)
-    consumed = q.consume("pauli_evolve")
-    qubits_value = consumed.value
+    # Slice-view input takes the ownership-transfer path so the
+    # caller can still slice-assign the result back to the parent
+    # under strict-return.  Other paths fall through to the plain
+    # consume below.
+    input_is_view = isinstance(q, VectorView)
+    if input_is_view:
+        view_parent = q._slice_parent
+        view_start = q._slice_start
+        view_step = q._slice_step
+        view_length = q._shape[0]
 
-    # Bump the SSA version of the input array. ``next_version`` preserves
-    # ``logical_id`` and ``shape`` so the result is recognised as the same
-    # logical register across the IR (resource allocation, inline-pass
-    # remapping for nested @qkernel calls, visualization, etc.) -- creating
-    # a fresh ArrayValue here would mint a new logical_id and drop the
-    # caller-side qubit identity, breaking measurement after a nested
-    # @qkernel that uses pauli_evolve internally (issue #354).
+    qubits_value = q.value
+
+    # Bump the SSA version of the input array.  ``next_version`` preserves
+    # ``logical_id``, ``shape``, and ``slice_of`` / ``slice_start`` /
+    # ``slice_step`` so the result is recognised as the same logical
+    # register across the IR (resource allocation, inline-pass remapping
+    # for nested @qkernel calls, visualization).  Creating a fresh
+    # ArrayValue here would mint a new logical_id and drop the caller-side
+    # qubit identity (breaks measurement after nested @qkernel — issue
+    # #354), and would also lose the slice chain (breaks ``expval`` on the
+    # result of ``pauli_evolve(q[1::2], H, gamma)``, which must walk back
+    # to the root parent's physical qubits).
     result_array = qubits_value.next_version()
 
     op = PauliEvolveOp(
@@ -78,6 +107,23 @@ def pauli_evolve(
     tracer = get_current_tracer()
     tracer.add_operation(op)
 
+    if input_is_view:
+        # Build the new VectorView around the bumped ArrayValue, then
+        # hand the parent's bulk-borrow over from the old view to the
+        # new one.  ``_transfer_borrow_to`` flips ``q._consumed`` and
+        # populates ``new_view._slice_covered_indices`` from ``q`` so
+        # the strict-return slice assignment can verify ownership.
+        new_view = VectorView._wrap_unregistered(
+            parent=view_parent,
+            sliced_av=result_array,
+            length=view_length,
+            start_uint=view_start,
+            step_uint=view_step,
+        )
+        q._transfer_borrow_to(new_view, "pauli_evolve")
+        return cast(Vector[Qubit], new_view)
+
+    consumed = q.consume("pauli_evolve")
     result_vector = cast(
         Vector[Qubit],
         Vector._create_from_value(value=result_array, shape=consumed._shape),

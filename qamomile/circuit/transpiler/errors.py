@@ -289,6 +289,28 @@ class UnreturnedBorrowError(AffineTypeError):
     pass
 
 
+class SliceBorrowViolationError(AffineTypeError):
+    """Aliasing detected between a slice view and a direct parent access.
+
+    Raised by :class:`SliceBorrowCheckPass` at transpile time when
+    a parent array slot is simultaneously held by a ``VectorView`` and
+    accessed directly, or when two overlapping views cover the same
+    slot.  For slices with constant bounds this is normally caught at
+    trace time; this error covers the post-fold case when slice bounds
+    were symbolic UInt parameters resolved by bindings.
+
+    Example of incorrect code (detected only after bindings resolve
+    ``lo``/``hi`` to concrete values)::
+
+        region = q[lo:hi]     # bindings give lo=0, hi=4 → covers {0,1,2,3}
+        qa = region[0]        # borrows parent slot 0 via the view
+        qb = q[0]             # borrows parent slot 0 directly
+        # SliceBorrowViolationError: slot 0 is held by a slice view
+    """
+
+    pass
+
+
 class QubitRebindError(AffineTypeError):
     """Quantum variable reassigned from a different quantum source.
 

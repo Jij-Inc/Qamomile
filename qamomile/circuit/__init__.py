@@ -18,6 +18,7 @@ from .frontend.handle import (
     Tuple,
     UInt,
     Vector,
+    VectorView,
 )
 from .frontend.operation.cast import cast
 from .frontend.operation.control_flow import for_items, items, range
@@ -115,6 +116,7 @@ __all__ = [
     "Tuple",
     "UInt",
     "Vector",
+    "VectorView",
     "Matrix",
     "Tensor",
     "Observable",
