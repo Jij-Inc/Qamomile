@@ -33,24 +33,6 @@ class QKernelEntry:
 # ============================================================
 
 
-@qmc.qkernel
-def _all_h(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Apply H gate to all qubits in a vector."""
-    n = qs.shape[0]
-    for i in qmc.range(n):
-        qs[i] = qmc.h(qs[i])
-    return qs
-
-
-@qmc.qkernel
-def _all_x(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Apply X gate to all qubits in a vector."""
-    n = qs.shape[0]
-    for i in qmc.range(n):
-        qs[i] = qmc.x(qs[i])
-    return qs
-
-
 def __emit_oracle(
     *qubits: qmc.Vector[qmc.Qubit] | qmc.Qubit,
     name: str,
@@ -536,7 +518,7 @@ def deutsch() -> qmc.Bit:
     qs = qmc.qubit_array(2, name="qs")
     qs[1] = qmc.x(qs[1])
 
-    qs = _all_h(qs)
+    qs = qmc.h(qs)
 
     (qs[0], qs[1]) = _two_qubit_oracle(qs[0], qs[1])
 
@@ -547,47 +529,48 @@ def deutsch() -> qmc.Bit:
 
 @qmc.qkernel
 def deutsch_jozsa(n: qmc.UInt) -> qmc.Bit:
-    qs = qmc.qubit_array(n, name="qs")
-    target = qmc.qubit(name="target")
+    qs = qmc.qubit_array(n + 1, name="qs")
+    targets = qs[0:n]
+    ancilla = qs[n]
 
-    qs = _all_h(qs)
-    target = qmc.x(target)
-    target = qmc.h(target)
+    targets = qmc.h(targets)
+    ancilla = qmc.x(ancilla)
+    ancilla = qmc.h(ancilla)
 
-    (qs, target) = _over_oracle(
-        qs,
-        target,
+    (targets, ancilla) = _over_oracle(
+        targets,
+        ancilla,
         name="deutsch_jozsa_oracle",
         resource_metadata=ResourceMetadata(query_complexity=1),
     )  # type: ignore
 
-    qs = _all_h(qs)  # type: ignore
+    targets = qmc.h(targets)  # type: ignore
 
-    return qmc.measure(qs)  # type: ignore
+    return qmc.measure(targets)  # type: ignore
 
 
 @qmc.qkernel
 def _simon(
     qs1: qmc.Vector[qmc.Qubit], qs2: qmc.Vector[qmc.Qubit]
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-    qs1 = _all_h(qs1)
+    qs1 = qmc.h(qs1)
     qs1, qs2 = _over_oracle(
         qs1,
         qs2,
         name="simon_oracle",
         resource_metadata=ResourceMetadata(query_complexity=1),
     )  # type: ignore
-    qs1 = _all_h(qs1)
+    qs1 = qmc.h(qs1)
     return qs1, qs2
 
 
 @qmc.qkernel
 def simon(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    qs1 = qmc.qubit_array(n, name="qs1")
-    qs2 = qmc.qubit_array(n, name="qs2")
+    qs = qmc.qubit_array(2 * n, name="qs")  # type: ignore
+    qs1 = qs[0:n]
+    qs2 = qs[n : 2 * n]
     qs1, qs2 = _simon(qs1, qs2)
-    bits = qmc.measure(qs1)
-    return bits
+    return qmc.measure(qs1)
 
 
 @qmc.qkernel
@@ -632,7 +615,7 @@ def phase_gate_qpe(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Qubit]:
     target = qmc.qubit(name="target")
     controlled_u = qmc.controlled(_phase)
 
-    qs = _all_h(qs)
+    qs = qmc.h(qs)
 
     for k in qmc.range(n):
         qs[k], target = controlled_u(qs[k], target, power=2**k, theta=theta)
@@ -662,7 +645,7 @@ def stub_oracle_qpe(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     qs = qmc.qubit_array(n, name="qs")
     target = qmc.qubit(name="target")
 
-    qs = _all_h(qs)
+    qs = qmc.h(qs)
 
     for k in qmc.range(n):
         for _rep in qmc.range(2**k):
@@ -710,7 +693,7 @@ def qaoa_state_umbiguous(
 ) -> qmc.Vector[qmc.Qubit]:
     qs = qmc.qubit_array(n, name="qs")
 
-    qs = _all_h(qs)
+    qs = qmc.h(qs)
 
     for layer in qmc.range(num_layers):
         # Ising layer
@@ -734,30 +717,36 @@ def qaoa_state_umbiguous(
 def _network_decomposition_controlled_z(
     qs: qmc.Vector[qmc.Qubit],
 ) -> qmc.Vector[qmc.Qubit]:
-    total_qubits = qs.shape[0]
-    n = total_qubits - 1  # number of control qubits
-    num_ancillas = n - 1
+    n = qs.shape[0]
+    ladder_qubits = qs[0 : n - 1]
+    target_qubit = qs[n - 1]
+    num_ancillas = n - 2
     ancillas = qmc.qubit_array(num_ancillas, name="ancillas")
-    target_position = total_qubits - 1
 
-    qs[0], qs[1], ancillas[0] = qmc.ccx(qs[0], qs[1], ancillas[0])
+    ladder_qubits[0], ladder_qubits[1], ancillas[0] = qmc.ccx(
+        ladder_qubits[0], ladder_qubits[1], ancillas[0]
+    )
     for i in qmc.range(0, num_ancillas - 1):
-        qs[i + 2], ancillas[i], ancillas[i + 1] = qmc.ccx(
-            qs[i + 2], ancillas[i], ancillas[i + 1]
+        ladder_qubits[i + 2], ancillas[i], ancillas[i + 1] = qmc.ccx(
+            ladder_qubits[i + 2], ancillas[i], ancillas[i + 1]
         )
 
-    qs[target_position] = qmc.h(qs[target_position])
-    ancillas[num_ancillas - 1], qs[target_position] = qmc.cx(
-        ancillas[num_ancillas - 1], qs[target_position]
+    target_qubit = qmc.h(target_qubit)
+    ancillas[num_ancillas - 1], target_qubit = qmc.cx(
+        ancillas[num_ancillas - 1], target_qubit
     )
-    qs[target_position] = qmc.h(qs[target_position])
+    target_qubit = qmc.h(target_qubit)
 
     for i in qmc.range(num_ancillas - 2, -1, -1):
-        qs[i + 2], ancillas[i], ancillas[i + 1] = qmc.ccx(
-            qs[i + 2], ancillas[i], ancillas[i + 1]
+        ladder_qubits[i + 2], ancillas[i], ancillas[i + 1] = qmc.ccx(
+            ladder_qubits[i + 2], ancillas[i], ancillas[i + 1]
         )
-    qs[0], qs[1], ancillas[0] = qmc.ccx(qs[0], qs[1], ancillas[0])
+    ladder_qubits[0], ladder_qubits[1], ancillas[0] = qmc.ccx(
+        ladder_qubits[0], ladder_qubits[1], ancillas[0]
+    )
 
+    qs[0:n] = ladder_qubits
+    qs[n - 1] = target_qubit
     return qs
 
 
@@ -769,14 +758,9 @@ def network_decomposition_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
-def __z(q: qmc.Qubit) -> qmc.Qubit:
-    return qmc.z(q)
-
-
-@qmc.qkernel
 def _naive_multi_controlled_z(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     n = qs.shape[0]
-    multi_controlled_z = qmc.controlled(__z, num_controls=n - 1)
+    multi_controlled_z = qmc.controlled(qmc.z, num_controls=n - 1)
     qs = multi_controlled_z(qs, target_indices=[n - 1])  # type: ignore
     return qs
 
@@ -806,11 +790,11 @@ def _grover_operator_network_decomposition(
     )  # type: ignore
     # Apply the diffusion operator,
     # which can be implemented as H + X + multi-controlled Z + X + H.
-    qs = _all_h(qs)
-    qs = _all_x(qs)
+    qs = qmc.h(qs)
+    qs = qmc.x(qs)
     qs = _network_decomposition_controlled_z(qs)
-    qs = _all_x(qs)
-    qs = _all_h(qs)
+    qs = qmc.x(qs)
+    qs = qmc.h(qs)
 
     return qs, q
 
@@ -820,7 +804,7 @@ def _grover_network_decomposition(
     qs: qmc.Vector[qmc.Qubit], q: qmc.Qubit, n_iters: qmc.UInt
 ) -> qmc.Vector[qmc.Qubit]:
     # Initialise all the qubits.
-    qs = _all_h(qs)
+    qs = qmc.h(qs)
     q = qmc.x(q)
     q = qmc.h(q)
 
@@ -845,7 +829,7 @@ def _grover_naive_multi_controlled_z(
     qs: qmc.Vector[qmc.Qubit], q: qmc.Qubit, n_iters: qmc.UInt
 ) -> qmc.Vector[qmc.Qubit]:
     # Initialise all the qubits.
-    qs = _all_h(qs)
+    qs = qmc.h(qs)
     q = qmc.x(q)
     q = qmc.h(q)
 
@@ -860,11 +844,11 @@ def _grover_naive_multi_controlled_z(
         )  # type: ignore
         # Apply the diffusion operator,
         # which can be implemented as H + X + multi-controlled Z + X + H.
-        qs = _all_h(qs)
-        qs = _all_x(qs)
+        qs = qmc.h(qs)
+        qs = qmc.x(qs)
         qs = _naive_multi_controlled_z(qs)
-        qs = _all_x(qs)
-        qs = _all_h(qs)
+        qs = qmc.x(qs)
+        qs = qmc.h(qs)
 
     return qs
 
@@ -891,8 +875,8 @@ def quantum_counting(
         _grover_operator_network_decomposition, num_controls=1
     )
 
-    qs1 = _all_h(qs1)
-    qs2 = _all_h(qs2)
+    qs1 = qmc.h(qs1)
+    qs2 = qmc.h(qs2)
     q = qmc.h(q)
 
     for t in qmc.range(n):
