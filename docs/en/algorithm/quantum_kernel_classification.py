@@ -54,13 +54,16 @@
 
 # %%
 import math
+import os
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 RANDOM_STATE = 7
-N_SAMPLES = 40
+N_SAMPLES = 20 if docs_test_mode else 40
 TEST_SIZE = 0.25
 
 LAYERS = 2       # number of feature-map repetitions (bound at transpile time)
-SHOTS = 1024
+SHOTS = 256 if docs_test_mode else 1024
 C_SVC = 1.0
 
 # %% [markdown]
@@ -438,7 +441,7 @@ print("RBF SVC            :", accuracy_score(y_test, y_pred_rbf))
 # ### Decision Boundary Helpers
 
 # %%
-GRID_SIZE = 15
+GRID_SIZE = 8 if docs_test_mode else 15
 
 
 def preprocess_for_kernel(X_raw_points: np.ndarray) -> np.ndarray:
