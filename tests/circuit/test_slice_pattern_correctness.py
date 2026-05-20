@@ -1,29 +1,42 @@
-"""Literal-as-written verification of every example in the slicing summary.
+"""Cross-backend correctness for representative Vector slicing patterns.
 
-The slicing summary (`.claude/my_claude/pr_357_slicing_summary.md`) shows
-worked-out code samples in Section 1 (legal patterns) and Section 2
-(illegal / error patterns).  This file pins every one of those samples
-under exactly the form the summary presents them in — same kernel body,
-same bindings — and asserts:
+This file groups slice tests into two complementary halves so any
+regression — silent miscompilation on the legal side, swallowed error
+on the illegal side — surfaces loudly under one ``pytest`` invocation.
 
-1. **Transpile** succeeds on every supported SDK
-   (Qiskit / QuriParts / CUDA-Q; the latter two via ``importorskip``).
-2. **Execute** produces the expected outcome — full-amplitude
-   statevector check against a Qiskit reference circuit for the
-   measurement kernels, ``run()`` for the QFixed-Float-return kernel.
-3. **Resource estimation** (``estimate_resources``) returns the same
-   qubit / gate counts on every run — even though the resource
-   estimator looks at the IR and is backend-agnostic, repeating it here
-   keeps the summary's claims auditable.
+**Legal patterns** (transpile + execute + resource estimate).  Each
+kernel is a small, self-contained example of a way users are expected
+to write slicing code — evens / odds Bell-pair loop, ``qft`` on a
+slice, ``cast`` to ``QFixed``, in-line ``q[a:b] = h(q[a:b])`` broadcast,
+top-level slice with a body loop, Python-style auto-truncation, and
+passing a view as a sub-kernel argument.  Each kernel is transpiled
+on every supported SDK (Qiskit / QuriParts / CUDA-Q via
+``importorskip``), the result statevector compared to an analytical
+Qiskit reference (or ``run()`` for the QFixed Float-return kernel),
+and ``estimate_resources`` pinned to the expected qubit / gate counts.
+A backend-agnostic IR-level resource estimator is intentionally
+re-asserted here so the per-pattern claim stays auditable.
 
-For Section 2 (negative patterns), the file pins the error type and the
-detection point (frontend trace vs. post-fold IR pass) so that any
-future regression that re-introduces silent miscompilation surfaces
-loudly here.
+**Illegal patterns** (error-raising), grouped by concept:
 
-The file is deliberately a one-to-one mirror of the summary's prose —
-if a sample is added / changed in the summary, the corresponding test
-here should be added / updated together with it.
+- ``TestStrictReturnViolations`` — every transfer-style view consume
+  (element loop, broadcast, sub-kernel call, ``pauli_evolve``) must
+  be followed by a slice-assign return; otherwise ``measure(q)``
+  raises ``UnreturnedBorrowError``.
+- ``TestMultiViewOverlap`` — two live views that share parent slots
+  are rejected at trace time by ``VectorView._wrap``.
+- ``TestSliceAssignmentConsistency`` — left- and right-hand sides of
+  ``q[a:b] = ...`` must cover the same slot set.
+- ``TestControlFlowBodyViolations`` — releasing an outer-registered
+  view from inside a loop / branch body is post-fold-rejected by
+  ``SliceBorrowCheckPass``'s outer-snapshot guard.
+- ``TestNestedSliceReturnOrder`` — nested slices must come back
+  inner→outer→root; inner-direct-to-root, outer-while-inner-live,
+  and outer-element-at-inner-slot all raise.
+
+Each failure case asserts both the error type and the detection point
+(frontend trace-time vs. post-fold IR pass) so the regression
+surfaces are explicit.
 """
 
 from __future__ import annotations
@@ -44,14 +57,14 @@ from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 from tests.transpiler.gate_test_specs import statevectors_equal  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Section 1 OK kernels — defined at module level so ``@qmc.qkernel`` can
+# OK kernels — defined at module level so ``@qmc.qkernel`` can
 # read their source for AST tracing.
 # ---------------------------------------------------------------------------
 
 
 @qmc.qkernel
-def _section_1_1(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Section 1-1: evens / odds + H + CX, explicit slice-assign return."""
+def _evens_odds_cx_pattern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Evens / odds + H + CX, explicit slice-assign return."""
     q = qmc.qubit_array(n, "q")
     evens = q[0::2]
     odds = q[1::2]
@@ -64,8 +77,8 @@ def _section_1_1(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
-def _section_1_2(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Section 1-2: ``qft`` on a slice view, explicit slice-assign return."""
+def _qft_on_view(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """``qft`` on a slice view, explicit slice-assign return."""
     q = qmc.qubit_array(8, "q")
     view = q[lo:hi]
     view = qmc.qft(view)
@@ -74,24 +87,24 @@ def _section_1_2(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
-def _section_1_3() -> qmc.Float:
-    """Section 1-3: cast a slice view to ``QFixed`` and measure."""
+def _cast_slice_to_qfixed() -> qmc.Float:
+    """Cast a slice view to ``QFixed`` and measure."""
     q = qmc.qubit_array(4, "q")
     qf = qmc.cast(q[1::2], qmc.QFixed, int_bits=0)
     return qmc.measure(qf)
 
 
 @qmc.qkernel
-def _section_1_4(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Section 1-4: in-place ``q[1:n-2] = qmc.h(q[1:n-2])`` slice assignment."""
+def _inline_slice_assign_broadcast(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """In-place ``q[1:n-2] = qmc.h(q[1:n-2])`` slice assignment."""
     q = qmc.qubit_array(n, "q")
     q[1 : n - 2] = qmc.h(q[1 : n - 2])
     return qmc.measure(q)
 
 
 @qmc.qkernel
-def _section_1_5(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Section 1-5: top-level slice + per-element loop + top-level release."""
+def _top_level_slice_with_body_loop(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Top-level slice + per-element loop + top-level release."""
     q = qmc.qubit_array(n, "q")
     evens = q[0::2]
     for i in qmc.range(evens.shape[0]):
@@ -101,8 +114,8 @@ def _section_1_5(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
-def _section_1_6() -> qmc.Vector[qmc.Bit]:
-    """Section 1-6: Python-style auto-truncation (``q[3:10]`` → ``q[3:4]``)."""
+def _auto_truncated_slice() -> qmc.Vector[qmc.Bit]:
+    """Python-style auto-truncation (``q[3:10]`` → ``q[3:4]``)."""
     q = qmc.qubit_array(4, "q")
     q[3:10] = qmc.h(q[3:10])
     return qmc.measure(q)
@@ -110,7 +123,7 @@ def _section_1_6() -> qmc.Vector[qmc.Bit]:
 
 @qmc.qkernel
 def _h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Helper for Section 1-7: H broadcast via per-element loop."""
+    """Helper for H broadcast via per-element loop."""
     n = q.shape[0]
     for i in qmc.range(n):
         q[i] = qmc.h(q[i])
@@ -118,8 +131,8 @@ def _h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
-def _section_1_7(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    """Section 1-7: pass a slice view as a ``Vector[Qubit]`` argument."""
+def _view_passed_to_subkernel(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Pass a slice view as a ``Vector[Qubit]`` argument."""
     q = qmc.qubit_array(num, "q")
     evens = q[0::2]
     evens = _h_all(evens)
@@ -257,12 +270,12 @@ def _reference_statevector(n_qubits: int, h_qubits: list[int]) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Section 1-1: evens / odds + H + CX, explicit return
+# evens / odds + H + CX, explicit return
 # ---------------------------------------------------------------------------
 
 
-class TestSection_1_1_EvensOddsCx:
-    """Section 1-1: H on evens then CX(evens[i], odds[i]) produces Bell pairs."""
+class TestEvensOddsCxPattern:
+    """H on evens then CX(evens[i], odds[i]) produces Bell pairs."""
 
     @pytest.mark.parametrize("n", [4, 6])
     def test_transpile_and_statevector_match(self, n: int):
@@ -275,7 +288,7 @@ class TestSection_1_1_EvensOddsCx:
         for i in range(n_pairs):
             ref_qc.cx(2 * i, 2 * i + 1)
         expected_sv = np.array(Statevector(ref_qc).data)
-        _assert_cross_backend_matches(_section_1_1, bindings, expected_sv)
+        _assert_cross_backend_matches(_evens_odds_cx_pattern, bindings, expected_sv)
 
     @pytest.mark.parametrize(
         "n, exp_qubits, exp_single, exp_two",
@@ -285,7 +298,7 @@ class TestSection_1_1_EvensOddsCx:
         self, n: int, exp_qubits: int, exp_single: int, exp_two: int
     ):
         """Resource estimate matches H + CX counts inside the loop."""
-        est = estimate_resources(_section_1_1.block, bindings={"n": n})
+        est = estimate_resources(_evens_odds_cx_pattern.block, bindings={"n": n})
         assert int(est.qubits) == exp_qubits
         assert int(est.gates.single_qubit) == exp_single
         assert int(est.gates.two_qubit) == exp_two
@@ -293,12 +306,12 @@ class TestSection_1_1_EvensOddsCx:
 
 
 # ---------------------------------------------------------------------------
-# Section 1-2: qft on a slice view, explicit slice-assign return
+# qft on a slice view, explicit slice-assign return
 # ---------------------------------------------------------------------------
 
 
-class TestSection_1_2_QftOnView:
-    """Section 1-2: ``qft(q[lo:hi])`` applies QFT to the parent's slice."""
+class TestQftOnView:
+    """``qft(q[lo:hi])`` applies QFT to the parent's slice."""
 
     def test_transpile_and_statevector_match(self):
         """``qft(|000>) = |+++>``; the rest of the register stays |0>."""
@@ -315,7 +328,7 @@ class TestSection_1_2_QftOnView:
             # Qiskit indexes qubit 0 as the least-significant bit.
             idx = (k & 0b1) << 1 | ((k >> 1) & 0b1) << 2 | ((k >> 2) & 0b1) << 3
             expected_sv[idx] = amp
-        _assert_cross_backend_matches(_section_1_2, bindings, expected_sv)
+        _assert_cross_backend_matches(_qft_on_view, bindings, expected_sv)
 
     def test_resource_estimate(self):
         """``qft`` is wrapped as a composite gate; the top-level block reports 0 leaf gates.
@@ -328,18 +341,18 @@ class TestSection_1_2_QftOnView:
         regression; we pin it so any future estimator change that
         starts unpacking composite gates is noticed.
         """
-        est = estimate_resources(_section_1_2.block, bindings={"lo": 1, "hi": 4})
+        est = estimate_resources(_qft_on_view.block, bindings={"lo": 1, "hi": 4})
         assert int(est.qubits) == 8
         assert int(est.gates.total) == 0
 
 
 # ---------------------------------------------------------------------------
-# Section 1-3: cast a slice view to QFixed and measure
+# cast a slice view to QFixed and measure
 # ---------------------------------------------------------------------------
 
 
-class TestSection_1_3_CastSliceToQFixed:
-    """Section 1-3: ``cast(q[1::2], QFixed)`` then ``measure(qf)``.
+class TestCastSliceToQFixed:
+    """``cast(q[1::2], QFixed)`` then ``measure(qf)``.
 
     The kernel applies no gates, so every qubit stays |0>.  The QFixed
     decode of two |0> qubits with ``int_bits=0`` is the value 0.0.
@@ -348,7 +361,7 @@ class TestSection_1_3_CastSliceToQFixed:
     def test_transpile_and_run_returns_zero(self):
         """The Float result of measuring |0>^2 as QFixed is 0.0."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(_section_1_3)
+        exe = transpiler.transpile(_cast_slice_to_qfixed)
         got = exe.run(transpiler.executor()).result()
         assert float(got) == pytest.approx(0.0, abs=1e-9)
 
@@ -359,7 +372,7 @@ class TestSection_1_3_CastSliceToQFixed:
         from qamomile.quri_parts import QuriPartsTranspiler
 
         transpiler = QuriPartsTranspiler()
-        exe = transpiler.transpile(_section_1_3)
+        exe = transpiler.transpile(_cast_slice_to_qfixed)
         got = exe.run(transpiler.executor()).result()
         assert float(got) == pytest.approx(0.0, abs=1e-9)
 
@@ -369,24 +382,24 @@ class TestSection_1_3_CastSliceToQFixed:
         from qamomile.cudaq import CudaqTranspiler
 
         transpiler = CudaqTranspiler()
-        exe = transpiler.transpile(_section_1_3)
+        exe = transpiler.transpile(_cast_slice_to_qfixed)
         got = exe.run(transpiler.executor()).result()
         assert float(got) == pytest.approx(0.0, abs=1e-9)
 
     def test_resource_estimate(self):
         """4 qubits allocated, no gates."""
-        est = estimate_resources(_section_1_3.block)
+        est = estimate_resources(_cast_slice_to_qfixed.block)
         assert int(est.qubits) == 4
         assert int(est.gates.total) == 0
 
 
 # ---------------------------------------------------------------------------
-# Section 1-4: q[1:n-2] = qmc.h(q[1:n-2])
+# q[1:n-2] = qmc.h(q[1:n-2])
 # ---------------------------------------------------------------------------
 
 
-class TestSection_1_4_SymbolicSliceAssign:
-    """Section 1-4: in-place ``q[1:n-2] = qmc.h(q[1:n-2])``.
+class TestInlineSliceAssignBroadcast:
+    """In-place ``q[1:n-2] = qmc.h(q[1:n-2])``.
 
     With ``n=6`` the slice covers ``q[1:4] = {1, 2, 3}``, so the
     expected unitary is H on those three qubits.
@@ -395,10 +408,14 @@ class TestSection_1_4_SymbolicSliceAssign:
     def test_transpile_and_statevector_match(self):
         bindings = {"n": 6}
         expected_sv = _reference_statevector(6, [1, 2, 3])
-        _assert_cross_backend_matches(_section_1_4, bindings, expected_sv)
+        _assert_cross_backend_matches(
+            _inline_slice_assign_broadcast, bindings, expected_sv
+        )
 
     def test_resource_estimate(self):
-        est = estimate_resources(_section_1_4.block, bindings={"n": 6})
+        est = estimate_resources(
+            _inline_slice_assign_broadcast.block, bindings={"n": 6}
+        )
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0
@@ -406,20 +423,24 @@ class TestSection_1_4_SymbolicSliceAssign:
 
 
 # ---------------------------------------------------------------------------
-# Section 1-5: top-level slice + body loop + top-level release
+# top-level slice + body loop + top-level release
 # ---------------------------------------------------------------------------
 
 
-class TestSection_1_5_TopLevelSliceWithBodyLoop:
-    """Section 1-5: ``evens = q[0::2]; for i ...; q[0::2] = evens``."""
+class TestTopLevelSliceWithBodyLoop:
+    """``evens = q[0::2]; for i ...; q[0::2] = evens``."""
 
     def test_transpile_and_statevector_match(self):
         bindings = {"n": 4}
         expected_sv = _reference_statevector(4, [0, 2])
-        _assert_cross_backend_matches(_section_1_5, bindings, expected_sv)
+        _assert_cross_backend_matches(
+            _top_level_slice_with_body_loop, bindings, expected_sv
+        )
 
     def test_resource_estimate(self):
-        est = estimate_resources(_section_1_5.block, bindings={"n": 4})
+        est = estimate_resources(
+            _top_level_slice_with_body_loop.block, bindings={"n": 4}
+        )
         assert int(est.qubits) == 4
         assert int(est.gates.single_qubit) == 2
         assert int(est.gates.two_qubit) == 0
@@ -427,21 +448,21 @@ class TestSection_1_5_TopLevelSliceWithBodyLoop:
 
 
 # ---------------------------------------------------------------------------
-# Section 1-6: auto-truncated slice (q[3:10] → q[3:4])
+# auto-truncated slice (q[3:10] → q[3:4])
 # ---------------------------------------------------------------------------
 
 
-class TestSection_1_6_AutoTruncatedSlice:
-    """Section 1-6: out-of-range stop is truncated to the parent length."""
+class TestAutoTruncatedSlice:
+    """Out-of-range stop is truncated to the parent length."""
 
     def test_transpile_and_statevector_match(self):
         # q[3:10] on a length-4 array is truncated to q[3:4]; only q[3]
         # gets H.
         expected_sv = _reference_statevector(4, [3])
-        _assert_cross_backend_matches(_section_1_6, {}, expected_sv)
+        _assert_cross_backend_matches(_auto_truncated_slice, {}, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(_section_1_6.block)
+        est = estimate_resources(_auto_truncated_slice.block)
         assert int(est.qubits) == 4
         assert int(est.gates.single_qubit) == 1
         assert int(est.gates.two_qubit) == 0
@@ -449,20 +470,20 @@ class TestSection_1_6_AutoTruncatedSlice:
 
 
 # ---------------------------------------------------------------------------
-# Section 1-7: view as qkernel argument
+# view as qkernel argument
 # ---------------------------------------------------------------------------
 
 
-class TestSection_1_7_ViewAsKernelArgument:
-    """Section 1-7: ``evens = h_all(evens)`` passes a slice view to a sub-kernel."""
+class TestViewPassedToSubKernel:
+    """``evens = h_all(evens)`` passes a slice view to a sub-kernel."""
 
     def test_transpile_and_statevector_match(self):
         bindings = {"num": 6}
         expected_sv = _reference_statevector(6, [0, 2, 4])
-        _assert_cross_backend_matches(_section_1_7, bindings, expected_sv)
+        _assert_cross_backend_matches(_view_passed_to_subkernel, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(_section_1_7.block, bindings={"num": 6})
+        est = estimate_resources(_view_passed_to_subkernel.block, bindings={"num": 6})
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0
@@ -470,10 +491,8 @@ class TestSection_1_7_ViewAsKernelArgument:
 
 
 # ---------------------------------------------------------------------------
-# Section 2: error patterns, grouped by concept
-#
-# Each conceptual group below mirrors a subsection of the summary's
-# Section 2-3.  The kernels are module-level so ``@qmc.qkernel`` can
+# Error-pattern kernels.  Each block below groups one conceptual
+# class of slice-policy violation.  Kernels are module-level so ``@qmc.qkernel`` can
 # read their source for AST tracing.
 # ---------------------------------------------------------------------------
 
