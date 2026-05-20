@@ -21,11 +21,18 @@ class SliceArrayOperation(Operation):
 
     ``SliceArrayOperation`` is classified as :attr:`OperationKind.CLASSICAL`
     because slicing is pure index selection — no new quantum operation
-    is introduced.  ``ConstantFoldingPass`` strips this operation from
-    the block before :mod:`~qamomile.circuit.transpiler.passes.separate`
-    sees it, so the op serves as a trace-time IR checkpoint (useful for
-    debugging and inspection) but never reaches emit.  Reaching emit is
-    a compiler-internal invariant violation.
+    is introduced.  The pipeline keeps this op through
+    ``PartialEvaluationPass`` (which invokes
+    ``ConstantFoldingPass(..., strip_slice_ops=False)``) so the
+    post-fold :class:`~qamomile.circuit.transpiler.passes.slice_borrow_check.SliceBorrowCheckPass`
+    can use it as a view-declaration marker; once that check has run,
+    ``StripSliceArrayOpsPass`` removes every ``SliceArrayOperation``
+    / ``ReleaseSliceViewOperation`` so segmentation
+    (:mod:`~qamomile.circuit.transpiler.passes.separate`) and the
+    downstream emit stage only see a pure quantum-op stream.  By the
+    time :mod:`~qamomile.circuit.transpiler.passes.separate` runs the
+    op has therefore been stripped — reaching emit is a compiler-
+    internal invariant violation.
 
     Attributes:
         operands: ``[parent_array, start, step]`` — the array being

@@ -428,13 +428,22 @@ class QKernel(Generic[P, R]):
         # call's result handles under strict-return.  Stash the
         # pre-consume metadata so the result-wrapping loop can pair
         # each sliced result ``ArrayValue`` with its originating input
-        # view by (root_logical_id, slice_start_uuid, slice_step_uuid)
-        # — a single root may have multiple disjoint views (e.g.
-        # ``q[0::2]`` and ``q[1::2]``) so logical_id alone is not
-        # specific enough.
+        # view by ``(root_logical_id, slice_start_uuid, slice_step_uuid,
+        # length_uuid)``.  A single root may carry multiple disjoint
+        # views (e.g. ``q[0::2]`` and ``q[1::2]``), and even views that
+        # share ``start`` / ``step`` may have different lengths
+        # (``q[lo:hi]`` and ``q[lo:hi2]`` reuse the same ``lo`` /
+        # ``step`` ``UInt`` Values but differ in their ``shape[0]``
+        # Value), so the length uuid is needed to disambiguate.  The
+        # block's ``call`` helper builds each pass-through result via
+        # ``inputs[i].next_version()`` which preserves
+        # ``slice_start`` / ``slice_step`` / ``shape`` as the same
+        # underlying ``Value`` references — so the result-side uuids
+        # match the input-side uuids exactly.
         from qamomile.circuit.frontend.handle.array import VectorView
 
-        input_view_metas: dict[tuple[str, str | None, str | None], VectorView[Any]] = {}
+        InputViewKey = tuple[str, str | None, str | None, str | None]
+        input_view_metas: dict[InputViewKey, VectorView[Any]] = {}
         for name, handle in bound_args.arguments.items():
             if isinstance(handle, VectorView) and handle._should_enforce_linear():
                 root_av = handle.value
@@ -446,7 +455,10 @@ class QKernel(Generic[P, R]):
                 step_uuid = (
                     handle._slice_step.value.uuid if handle._slice_step else None
                 )
-                input_view_metas[(root_av.logical_id, start_uuid, step_uuid)] = handle
+                length_uuid = handle.value.shape[0].uuid if handle.value.shape else None
+                input_view_metas[
+                    (root_av.logical_id, start_uuid, step_uuid, length_uuid)
+                ] = handle
 
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
@@ -515,10 +527,12 @@ class QKernel(Generic[P, R]):
                         val.slice_start.uuid if val.slice_start else None
                     )
                     result_step_uuid = val.slice_step.uuid if val.slice_step else None
+                    result_length_uuid = val.shape[0].uuid if val.shape else None
                     meta_key = (
                         result_root_av.logical_id,
                         result_start_uuid,
                         result_step_uuid,
+                        result_length_uuid,
                     )
                     in_view = input_view_metas.get(meta_key)
                     if in_view is not None and in_view._slice_parent is not None:
