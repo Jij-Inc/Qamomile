@@ -311,45 +311,6 @@ class SliceBorrowViolationError(AffineTypeError):
     pass
 
 
-class UnreturnedBorrowAtBlockEndError(AffineTypeError):
-    """Retained for backwards compatibility; no longer raised by the compiler.
-
-    The class historically marked "block completed with a slice view
-    still owning parent slots" — a leftover slice view that was
-    neither slice-assigned back to the parent nor destructively
-    consumed.  Slice views are now treated as **affine** at the
-    kernel boundary (mirroring how element borrows on a locally-
-    allocated register behave), so a leftover view at block end is
-    no longer flagged.  Natural ancilla / scratch-register patterns
-    such as Deutsch-Jozsa's ``ancilla = qs[n]`` and Simon's
-    ``qs2 = qs[n:2*n]`` (used by the oracle, then discarded
-    unmeasured) compile cleanly.
-
-    The genuine hazards remain covered:
-
-    * Consuming the parent (``measure`` / ``cast`` / ``expval`` /
-      passing it to another kernel) while a view is still live
-      raises :class:`UnreturnedBorrowError` from
-      ``ArrayBase.consume`` / ``validate_all_returned``.
-    * Returning the parent with an outstanding borrow raises
-      :class:`UnreturnedBorrowError` from
-      ``func_to_block._validate_returned_arrays``.
-    * Direct ``q[i]`` access on a slot a view currently owns is
-      caught at the frontend's element-access path and (for
-      symbolic-bound views) by
-      :meth:`SliceBorrowCheckPass._process_operand_borrows`.
-    * Overlapping live views are caught at
-      :meth:`VectorView._wrap` (concrete bounds) and at
-      :meth:`SliceBorrowCheckPass._register_slice_bulk_borrow_if_new`
-      (symbolic bounds).
-
-    Existing ``except UnreturnedBorrowAtBlockEndError`` blocks will
-    continue to import without error; they simply never trigger.
-    """
-
-    pass
-
-
 class QubitRebindError(AffineTypeError):
     """Quantum variable reassigned from a different quantum source.
 
