@@ -18,6 +18,7 @@ from qamomile.circuit.stdlib.qpe import qpe
 from qamomile.circuit.transpiler.errors import (
     AffineTypeError,
     QubitAliasError,
+    QubitBorrowConflictError,
     QubitConsumedError,
     QubitRebindError,
     UnreturnedBorrowError,
@@ -264,7 +265,7 @@ class TestArrayBorrowChecking:
             q0_again = qs[0]  # ERROR: element 0 is already borrowed
             return q0_again
 
-        with pytest.raises(QubitConsumedError) as exc_info:
+        with pytest.raises(QubitBorrowConflictError) as exc_info:
             bad_circuit.build()
 
         error = exc_info.value
@@ -1224,7 +1225,7 @@ class TestVectorQubitPatterns:
             q_again = qs[0]
             return q_again
 
-        with pytest.raises(QubitConsumedError):
+        with pytest.raises(QubitBorrowConflictError):
             bad_circuit.build()
 
 
