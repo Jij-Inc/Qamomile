@@ -304,7 +304,7 @@ ARTICLE_BODIES: dict[str, tuple[str, str | None, str | None]] = {
         HAM_QURI_BODY,
         HAM_CUDAQ_BODY,
     ),
-    "docs/en/tutorial/07_hermitian_decomposition.py": (
+    "docs/en/tutorial/08_hermitian_decomposition.py": (
         H07_QISKIT_BODY,
         H07_QURI_BODY,
         H07_CUDAQ_BODY,
