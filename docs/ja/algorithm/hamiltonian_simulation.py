@@ -106,6 +106,24 @@ Hx = 0.5 * Omega * qm_o.X(0)
 Hs = [Hz, Hx]
 
 # %% [markdown]
+# ### $[H_z, H_x] \neq 0$ の確認
+#
+# Trotter近似が必要になるのは$H_z$と$H_x$が可換でないからです。`qamomile.observable.commutator(a, b)`はハミルトニアン同士の交換子$[a, b] = a b - b a$を直接計算します。内部では各Pauli列ペアを1度だけ走査し、qubitパリティの規則(2つのPauli列は、両方とも非恒等かつ異なるPauliが乗っているqubitの数が奇数のときにだけ反交換)に従って、可換なペアを積を作る前に落とします。`Hz * Hx - Hx * Hz`のように一旦展開してから打ち消す素朴な計算より軽く、結果として完全に簡約された`Hamiltonian`が返ってくるので、そのまま検査したり解析値と比較したりできます。
+#
+# Rabiハミルトニアンの場合、教科書的な値は
+#
+# $$ [H_z, H_x] \;=\; \tfrac{\omega \Omega}{4}\,[Z, X] \;=\; i\,\tfrac{\omega \Omega}{2}\, Y $$
+#
+# であり、`commutator`はこれを厳密に再現します:
+
+# %%
+comm_zx = qm_o.commutator(Hz, Hx)
+print(comm_zx)
+
+expected = 1j * 0.5 * omega * Omega * qm_o.Y(0)
+assert comm_zx == expected
+
+# %% [markdown]
 # ## 厳密な参照状態
 #
 # 2x2行列の指数関数で厳密な状態$|\psi(T)\rangle = e^{-iHT}|0\rangle$が得られます。各Trotter近似は**フィデリティ誤差**$1 - |\langle\psi_\text{exact}|\psi_\text{trotter}\rangle|$によってこの状態と比較します。

@@ -378,6 +378,68 @@ class TestBackwardCompatibility:
         for ops, coeff in h6:
             assert coeff == -1.0
 
+
+class TestArithmeticNumQubitsPropagation:
+    """``__add__`` / ``__mul__`` / ``__sub__`` must preserve max(num_qubits).
+
+    Regression coverage for a bug where the binary operators inherited
+    ``num_qubits`` only from the left operand, so the right operand's
+    qubit register was silently dropped. For example,
+    ``Hamiltonian.identity(1, num_qubits=2) * Hamiltonian.identity(1, num_qubits=5)``
+    used to return ``num_qubits == 2``.
+    """
+
+    def test_add_takes_max_of_both_operands(self):
+        """``X(0) + Z(4)`` reports num_qubits == 5, not just 1."""
+        h = X(0) + Z(4)
+        assert h.num_qubits == 5
+
+    def test_add_respects_larger_right_declared_num_qubits(self):
+        """A declared register on the right operand survives addition."""
+        a = X(0)
+        b = Hamiltonian(num_qubits=7)
+        b.add_term((PauliOperator(Pauli.Z, 2),), 1.0)
+        assert (a + b).num_qubits == 7
+
+    def test_add_of_two_identity_hamiltonians_keeps_both_registers(self):
+        """Identity-only operands have no terms, so only the declared registers carry the info."""
+        a = Hamiltonian.identity(1.0, num_qubits=2)
+        b = Hamiltonian.identity(1.0, num_qubits=5)
+        assert (a + b).num_qubits == 5
+        assert (b + a).num_qubits == 5
+
+    def test_sub_takes_max_of_both_operands(self):
+        """Subtraction lowers through __add__ + scalar mul, so the same invariant must hold."""
+        a = Hamiltonian.identity(1.0, num_qubits=2)
+        b = Hamiltonian.identity(1.0, num_qubits=5)
+        assert (a - b).num_qubits == 5
+        assert (b - a).num_qubits == 5
+
+    def test_mul_takes_max_of_both_operands(self):
+        """Identity-only operands of different widths must keep the larger register after *."""
+        a = Hamiltonian.identity(1.0, num_qubits=2)
+        b = Hamiltonian.identity(1.0, num_qubits=5)
+        assert (a * b).num_qubits == 5
+        assert (b * a).num_qubits == 5
+
+    def test_mul_with_terms_respects_larger_right_declared_num_qubits(self):
+        """Even when the product yields terms, the declared register from the right operand is kept."""
+        a = X(0)
+        b = Hamiltonian(num_qubits=6)
+        b.add_term((PauliOperator(Pauli.Z, 1),), 1.0)
+        product = a * b
+        # The product term is X0 Z1 which only requires 2 qubits, but the
+        # declared register from ``b`` should be preserved at 6.
+        assert product.num_qubits == 6
+
+    def test_terms_driven_num_qubits_still_works(self):
+        """When neither operand declares num_qubits, the larger Pauli index still wins."""
+        h = X(0) + Z(4)
+        assert h.num_qubits == 5
+        product = X(0) * Z(4)
+        # X0 and Z4 act on disjoint qubits, so the product is the joint string X0 Z4.
+        assert product.num_qubits == 5
+
     def test_terms_property(self):
         """Test that terms property still works."""
         h = X(0) + Y(1)

@@ -242,4 +242,4 @@ for theta in [0.1, 0.5, 1.0]:
 # - The bind/sweep pattern — `transpile(bindings=..., parameters=...)` then loop —
 #   transpiles once and executes many times.
 #
-# **Next**: [Resource Estimation](03_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, and comparing design candidates.
+# **Next**: [Vector Slicing](03_vector_slicing.ipynb) — `VectorView`, slice assignment, nested slices, and passing views to helper kernels.

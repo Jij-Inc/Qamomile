@@ -485,7 +485,7 @@ print(executable.quantum_circuit)
 # How the pipeline handles control flow spans several layers — what the
 # frontend accepts, how each pass transforms it, and whether the backend
 # supports runtime branching. This section ties those layers together. See
-# [tutorial 05](05_classical_flow_patterns) for the user-facing patterns;
+# [tutorial 06](06_classical_flow_patterns) for the user-facing patterns;
 # here we focus on the compiler's view.
 #
 # ### 5.1 What the Frontend Accepts

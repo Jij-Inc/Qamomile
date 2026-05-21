@@ -323,4 +323,4 @@ print(qc_combined)
 # - These control flow patterns transpile to native quantum SDK instructions
 #   (e.g., Qiskit `if_else` and `while_loop`).
 #
-# **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper qkernels, composite gates, and stub gates for top-down design.
+# **Next**: [Reuse Patterns](07_reuse_patterns.ipynb) — helper qkernels, composite gates, and stub gates for top-down design.
