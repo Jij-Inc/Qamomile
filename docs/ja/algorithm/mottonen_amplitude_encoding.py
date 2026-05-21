@@ -45,7 +45,7 @@
 # > ⚠️ **前提条件: 入力量子ビットは全ゼロ状態** $|0\rangle^{\otimes n}$ **でなければなりません**。Qamomileの`amplitude_encoding(...)` / `amplitude_encoding_from_angles(...)`は$|0\rangle^{\otimes n}$から目標状態$|\psi\rangle$へ写すユニタリだけを emit します (Möttönen の一般構成は任意入力にも拡張できますが、実装は state-preparation の片側に特化しています)。それ以外の入力に適用すると別の出力 (目標振幅ベクトルとは無関係) が出てきます。Qamomileはruntimeで量子ビットの状態を追跡しないため、`qmc.qubit_array(n, ...)`の直後、他のゲートがレジスタに触れる前に呼び出す責任は呼び出し側にあります。
 
 # %%
-# Install the latest Qamomile through pip!
+# 最新のQamomileをpipからインストールします！
 # (Google Colab) 下の Transpiler タブで選んだ SDK に対応する行の先頭の
 # "# " を外して実行してください。
 # # !pip install qamomile                  # Qiskit (デフォルト)
