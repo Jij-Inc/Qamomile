@@ -181,4 +181,4 @@ for theta in [0.1, 0.5, 1.0]:
 # - The bind/sweep pattern — `transpile(bindings=..., parameters=...)` then loop —
 #   transpiles once and executes many times.
 #
-# **Next**: [Resource Estimation](03_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, and comparing design candidates.
+# **Next**: [Resource Estimation](04_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, and comparing design candidates.
