@@ -478,18 +478,37 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 if new_nc is not result_op.num_controls:
                     if isinstance(new_nc, int):
                         # Promote to ConcreteControlledU.
+                        #
+                        # ``SymbolicControlledU`` carries the controls as a
+                        # single ``Vector[Qubit]`` operand (``operands[0]``)
+                        # plus individual target / param operands.  The
+                        # promoted ``ConcreteControlledU`` expects the
+                        # operand layout ``[ctrl_0, ..., ctrl_{nc-1}, tgt_0,
+                        # ..., params...]`` with one ``Value`` per control
+                        # qubit.  Expand both operands and results so the
+                        # layout matches the concrete subclass; without
+                        # this step ``control_operands`` aliases the first
+                        # target into the control slice and the emit path
+                        # produces a partial-arity controlled gate.
+                        current_operands = (
+                            new_operands if changed else list(result_op.operands)
+                        )
+                        current_results = list(result_op.results)
+                        new_operands, new_results = (
+                            self._expand_symbolic_controlled_operands(
+                                current_operands, current_results, new_nc
+                            )
+                        )
+                        changed = True
                         power = extra_kwargs.get("power", result_op.power)
                         result_op = ConcreteControlledU(
-                            operands=new_operands
-                            if changed
-                            else list(result_op.operands),
-                            results=list(result_op.results),
+                            operands=new_operands,
+                            results=new_results,
                             num_controls=new_nc,
                             power=power,
                             block=result_op.block,
                         )
                         extra_kwargs = {}  # Already applied
-                        changed = True
                     else:
                         extra_kwargs["num_controls"] = new_nc
                         changed = True
@@ -599,6 +618,95 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 f"ControlledU power must be strictly positive, got {value}."
             )
         return value
+
+    def _expand_symbolic_controlled_operands(
+        self,
+        operands: list[Any],
+        results: list[Any],
+        num_controls: int,
+    ) -> tuple[list[Any], list[Any]]:
+        """Expand a ``SymbolicControlledU`` operand/result layout into the
+        ``ConcreteControlledU`` per-qubit layout.
+
+        ``SymbolicControlledU`` carries the controls as one
+        ``Vector[Qubit]`` operand at index 0; the matching result is a
+        new-version ``ArrayValue`` at result index 0.  The promoted
+        ``ConcreteControlledU`` expects ``num_controls`` individual qubit
+        ``Value`` operands (and matching results) followed by the target
+        and parameter slots.  This helper builds those per-qubit
+        ``Value``\\ s, anchoring them to the original ``ArrayValue``\\ s
+        via ``parent_array`` so the emit-time qubit resolver finds the
+        physical qubit through the existing slice / array-element path.
+
+        Args:
+            operands (list[Any]): Operand list with ``operands[0]`` set to
+                the control ``ArrayValue``; the remaining entries are the
+                target qubits and classical parameters in their original
+                order.
+            results (list[Any]): Result list whose first entry is the
+                next-version control ``ArrayValue``; the remaining entries
+                are the target output qubits in their original order.
+            num_controls (int): Concrete (folded) number of control
+                qubits.  The control vector's length is assumed to match.
+
+        Returns:
+            tuple[list[Any], list[Any]]: A pair ``(new_operands,
+            new_results)`` carrying the expanded per-qubit layout.
+
+        Raises:
+            ValidationError: If the operand or result layout does not
+                match the ``SymbolicControlledU`` contract (missing
+                control ``ArrayValue`` at index 0).
+        """
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue
+
+        if not operands or not isinstance(operands[0], ArrayValue):
+            raise ValidationError(
+                "SymbolicControlledU expected an ArrayValue at operands[0] "
+                "(the control Vector), but the layout did not match.  This "
+                "is a compiler bug; the SymbolicControlledU contract was "
+                "violated upstream of ConstantFoldingPass."
+            )
+        if not results or not isinstance(results[0], ArrayValue):
+            raise ValidationError(
+                "SymbolicControlledU expected an ArrayValue at results[0] "
+                "(the next-version control Vector), but the layout did "
+                "not match.  This is a compiler bug; the "
+                "SymbolicControlledU contract was violated upstream of "
+                "ConstantFoldingPass."
+            )
+
+        ctrl_vector_in = operands[0]
+        ctrl_vector_out = results[0]
+        tail_operands = list(operands[1:])
+        tail_results = list(results[1:])
+
+        ctrl_operands: list[Any] = []
+        ctrl_results: list[Any] = []
+        for i in range(num_controls):
+            idx_value = Value(
+                type=UIntType(),
+                name=f"const_{i}",
+            ).with_const(i)
+            ctrl_operands.append(
+                Value(
+                    type=QubitType(),
+                    name=f"{ctrl_vector_in.name}[{i}]",
+                    parent_array=ctrl_vector_in,
+                    element_indices=(idx_value,),
+                )
+            )
+            ctrl_results.append(
+                Value(
+                    type=QubitType(),
+                    name=f"{ctrl_vector_out.name}[{i}]",
+                    parent_array=ctrl_vector_out,
+                    element_indices=(idx_value,),
+                )
+            )
+
+        return ctrl_operands + tail_operands, ctrl_results + tail_results
 
     def _fold_value_list(
         self,

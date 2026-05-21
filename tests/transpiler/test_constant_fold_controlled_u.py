@@ -154,6 +154,70 @@ class TestConstantFoldControlledUFields:
                 f"Expected controlled_indices[{i}] const={expected}, got {const_val}"
             )
 
+    @pytest.mark.parametrize("n_value", [1, 2, 3])
+    def test_symbolic_promotion_expands_control_vector_operands(self, n_value):
+        """SymbolicControlledU -> ConcreteControlledU promotion must expand
+        the control Vector operand into ``num_controls`` per-qubit Values.
+
+        Without this expansion the promoted ``ConcreteControlledU`` keeps a
+        ``[ctrl_vector, tgt, ...]`` operand layout, so
+        ``control_operands = operands[:nc]`` accidentally aliases the
+        target into the control slice and the emit path produces a
+        partial-arity controlled gate (Qiskit raises ``CircuitError``).
+        """
+        from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+        from qamomile.circuit.ir.value import ArrayValue
+
+        @qm.qkernel
+        def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
+            ctrls = qm.qubit_array(n, "ctrls")
+            tgt = qm.qubit("tgt")
+            cg = qm.controlled(_zgate, num_controls=n)
+            ctrls, tgt = cg(ctrls, tgt)  # type: ignore
+            return qm.measure(ctrls)
+
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        block = transpiler.to_block(kernel, bindings={"n": n_value})
+        inlined = transpiler.inline(transpiler.substitute(block))
+        validated = transpiler.affine_validate(inlined)
+        folded = transpiler.constant_fold(validated, bindings={"n": n_value})
+
+        cu = self._find_controlled_u(folded.operations)
+        assert cu is not None, "ControlledUOperation not found after folding"
+        assert isinstance(cu, ConcreteControlledU), (
+            f"Expected promotion to ConcreteControlledU, "
+            f"got {type(cu).__name__}"
+        )
+        assert cu.num_controls == n_value
+        # Per-qubit control operands: each ``operands[i]`` for i<nc is a
+        # scalar Qubit Value whose ``parent_array`` references the original
+        # control Vector.
+        controls = cu.control_operands
+        assert len(controls) == n_value
+        for i, ctrl in enumerate(controls):
+            assert ctrl.parent_array is not None, (
+                f"control_operands[{i}] should carry parent_array; got "
+                f"a non-element Value instead"
+            )
+            assert not isinstance(ctrl, ArrayValue), (
+                f"control_operands[{i}] should be a scalar Qubit Value, "
+                f"not the bare control Vector"
+            )
+            assert ctrl.element_indices, (
+                f"control_operands[{i}] should have element_indices "
+                f"populated"
+            )
+            assert ctrl.element_indices[0].get_const() == i
+        # Per-qubit control results carry the matching parent_array — the
+        # next-version control Vector — so downstream MeasureVectorOperation
+        # on that Vector resolves each element.
+        ctrl_results = cu.results[: cu.num_controls]
+        for i, ctrl_out in enumerate(ctrl_results):
+            assert ctrl_out.parent_array is not None
+            assert ctrl_out.element_indices[0].get_const() == i
+
 
 # -- Integration tests: full transpilation -----------------------------------
 
@@ -193,22 +257,9 @@ class TestControlledUTranspileIntegration:
         result = transpiler.transpile(kernel)
         assert result is not None
 
-    @pytest.mark.xfail(
-        reason=(
-            "Latent ``SymbolicControlledU`` → ``ConcreteControlledU`` "
-            "promotion bug: a symbolic ``num_controls`` resolved through "
-            "bindings produces an inconsistent operand layout (the "
-            "control ``Vector`` is not expanded to individual control "
-            "qubits).  Previously the controlled gate was silently "
-            "dropped at emit-time; now ``emit_controlled_u`` raises "
-            "``EmitError`` (or Qiskit raises ``CircuitError`` downstream) "
-            "instead of producing a silent miscompile.  Becomes xpass "
-            "once the promotion bug is fixed."
-        ),
-        strict=True,
-    )
-    def test_case_c_symbolic_non_index(self):
-        """Case C: num_controls=n (non-index), bindings={'n':2}."""
+    @pytest.mark.parametrize("n_value", [1, 2, 3])
+    def test_case_c_symbolic_non_index(self, n_value):
+        """Case C: num_controls=n (non-index), parametrized over n_value."""
 
         @qm.qkernel
         def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
@@ -221,7 +272,7 @@ class TestControlledUTranspileIntegration:
         from qamomile.qiskit import QiskitTranspiler
 
         transpiler = QiskitTranspiler()
-        result = transpiler.transpile(kernel, bindings={"n": 2})
+        result = transpiler.transpile(kernel, bindings={"n": n_value})
         assert result is not None
 
     def test_case_d_concrete_nc_symbolic_index(self):
@@ -275,8 +326,6 @@ class TestControlledUTranspileIntegration:
 
 # -- Power field strict-int-cast unit tests ----------------------------------
 
-
-import pytest  # noqa: E402
 
 from qamomile.circuit.transpiler.passes.constant_fold import (  # noqa: E402
     ConstantFoldingPass,

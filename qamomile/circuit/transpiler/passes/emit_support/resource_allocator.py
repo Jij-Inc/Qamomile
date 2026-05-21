@@ -511,7 +511,7 @@ class ResourceAllocator:
 
         for i, result in enumerate(results):
             result_addr = QubitAddress(result.uuid)
-            if result_addr not in qubit_map and i < len(all_qubits):
+            if i < len(all_qubits):
                 operand = all_qubits[i]
                 chain_addr = self._resolve_root_qubit_address(operand)
                 if chain_addr is not None:
@@ -519,8 +519,23 @@ class ResourceAllocator:
                 else:
                     qubit_addr, _ = resolve_qubit_key(operand)
                 if qubit_addr is not None and qubit_addr in qubit_map:
-                    qubit_map[result_addr] = qubit_map[qubit_addr]
-                elif qubit_addr is not None:
+                    physical = qubit_map[qubit_addr]
+                    if result_addr not in qubit_map:
+                        qubit_map[result_addr] = physical
+                    # If the result is itself an array element, also
+                    # register the (parent_array.uuid, idx) key so that
+                    # downstream operations referencing the result's
+                    # parent ``ArrayValue`` (e.g. ``MeasureVectorOperation``
+                    # on a controlled-U's next-version control vector)
+                    # can resolve each element through the same path
+                    # used for QInit-allocated arrays.
+                    result_chain_addr = self._resolve_root_qubit_address(result)
+                    if (
+                        result_chain_addr is not None
+                        and result_chain_addr not in qubit_map
+                    ):
+                        qubit_map[result_chain_addr] = physical
+                elif qubit_addr is not None and result_addr not in qubit_map:
                     raise AssertionError(
                         f"Missing qubit address '{str(qubit_addr)}' in qubit_map when "
                         f"allocating result '{result.uuid}'. "
