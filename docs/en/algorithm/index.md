@@ -15,4 +15,5 @@ Concrete quantum algorithm examples built with Qamomile.
 - [Introduction to Quantum Error Correction](quantum_error_correction) — 3-qubit bit-flip/phase-flip codes, Shor's 9-qubit code, and stabilizers
 - [Steane [[7,1,3]] Code](steane_code) — CSS construction, syndrome decoding, and transversal Hadamard
 - [Quantum Selected Configuration Interaction (QSCI)](qsci) — Sample bitstrings from a quantum state, build an effective Hamiltonian, and diagonalize it classically with a strict variational guarantee
+- [Implementing Quantum-enhanced MCMC](qe_mcmc) — Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution
 - [Möttönen Amplitude Encoding](mottonen_amplitude_encoding) — Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multiplexers, with three input modes (concrete, bound `Vector[Float]`, runtime-parametric angles)

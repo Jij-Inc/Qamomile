@@ -179,6 +179,33 @@ See [docs/en/tutorial/09_compilation_and_transpilation.py](docs/en/tutorial/09_c
 
 [overlap-check]: qamomile/circuit/transpiler/transpiler.py#L475-L487
 
+The kernel's full classical parameter contract is also recorded on the IR itself via `Block.param_slots`: a tuple of `ParamSlot` entries, one per classical kernel argument, carrying `(name, type, kind, ndim, default, bound_value, differentiable)`. `kind` is `RUNTIME_PARAMETER` (the slot survives as a runtime parameter) or `COMPILE_TIME_BOUND` (the slot was folded by `bindings` or a Python signature default). The manifest survives the pipeline so downstream readers can recover the contract without an external Python-side side-car. Pure-quantum arguments (`Qubit`, `Vector[Qubit]`) and structural-container arguments (`Tuple`, `Dict`) do not appear in `param_slots`; they remain in `Block.input_values`.
+
+### Canonical Form
+
+`qamomile.circuit.ir.canonical` provides a normalization step that re-numbers every `Value.uuid` / `Value.logical_id` in a `Block` from a deterministic counter and rewrites every UUID reference embedded in operations and value metadata (`CastMetadata`, `QFixedMetadata`, `ArrayRuntimeMetadata`, `CastOperation.qubit_mapping`). This gives the IR a build-independent identity that is required for content-addressable hashing, IR diffing, and (later) wire serialization.
+
+Key contract:
+
+- **Scope**: `canonicalize` / `canonicalize_and_remap` / `to_canonical_bytes` / `content_hash` accept only `BlockKind.AFFINE` and `BlockKind.ANALYZED`. `HIERARCHICAL` blocks still contain `CallBlockOperation`s that point at sibling `Block`s by Python identity; inline them first. The function raises `ValueError` (kind mismatch) or `NotImplementedError` (residual `CallBlockOperation`) when these preconditions are violated.
+- **Stage neutrality**: canonicalize is a normalization, not a pipeline-stage advance. `Block.kind` is preserved. `classical_lowering` and `plan` MUST NOT be run before canonicalize if the canonical form is meant to be portable — those passes commit to qamomile-internal representations.
+- **Content-only equivalence**: display-only fields (`Block.name`, `Block.output_names`, `Value.name`) are **excluded** from `to_canonical_bytes`. Two structurally-identical kernels with different function names hash equally. `Block.label_args` is functional (it names input ports by position) and is included.
+- **Counter-based UUIDs**: the first `Value` visited gets `00000000-0000-0000-0000-000000000000`, then `…0001`, and so on. `uuid` and `logical_id` share the same monotonically increasing counter; their separate remap tables are exposed via `canonicalize_and_remap`.
+- **Byte format is internal**: `to_canonical_bytes` is intended only to back `content_hash`. It is not a wire format and may change between qamomile releases; do not rely on parsing it. A versioned serialization format is tracked separately.
+- **Hash stability prerequisite**: arbitrary Python objects stored in `ValueMetadata.array_runtime.const_array` / `dict_runtime.bound_data` are stringified via `repr`, so their `repr` must be stable for `content_hash` to be meaningful.
+
+### IR Serialization
+
+`qamomile.circuit.ir.serialize` provides wire-format I/O for `Block`s: `dump_json` / `load_json` and `dump_msgpack` / `load_msgpack`, on top of a shared intermediate Python `dict` (`to_dict` / `from_dict`). Both encoders write a top-level envelope `{"schema_version": <int>, "block": <block dict>}`; the current version is `qamomile.circuit.ir.serialize.SCHEMA_VERSION`.
+
+Key contract:
+
+- **Scope**: only `BlockKind.AFFINE` and `BlockKind.ANALYZED` are accepted at the top level. Inline `HIERARCHICAL` first. A residual `CallBlockOperation` raises `NotImplementedError`; nested Blocks embedded in `ControlledUOperation.block` or `CompositeGateOperation.implementation_block` may legitimately be `HIERARCHICAL` (e.g., the cached `kernel.block` of a leaf kernel passed to `qmc.controlled`) and pass through.
+- **Closed dispatch tables**: every `$type` tag is routed through a hard-coded factory map; the decoder NEVER does `importlib.import_module` or `getattr` on user data. Unknown tags raise `ValueError`. This is the load-bearing security invariant — the wire formats are safe in the same sense as JSON / msgpack themselves (no pickle-style arbitrary code execution).
+- **Numpy payloads**: `ParamSlot.bound_value` and metadata fields may carry `numpy.ndarray`s. They are wrapped as `{"$np_array": True, "dtype": ..., "shape": ..., "data": <bytes>}` with `dtype` restricted to an explicit allow-list (`float64`, `float32`, `int64`, `int32`, `uint8`, `complex128`, ...). The JSON path base64-encodes `data` at the wire boundary; msgpack passes the bytes through natively. msgpack output is therefore typically more compact than JSON for numpy-heavy IR.
+- **Schema version negotiation**: `from_dict` rejects payloads whose `schema_version` does not exactly match the loader's `SCHEMA_VERSION`. A migration table is reserved for a future PR; until then the receiver and sender must agree on the version.
+- **Value identity**: every `Value` appears once in `value_table` and is referenced elsewhere by its UUID. Round-tripping preserves UUIDs verbatim (run `canonicalize` first if you want build-independent identity).
+
 ## Docstring Convention (MANDATORY)
 
 All functions, methods, and classes in `qamomile/` — **public and private alike** — MUST carry a **Google-style docstring** with the appropriate sections filled in, not just a one-line summary. This is enforced by `/local-review` (missing docstrings are P2+).

@@ -22,6 +22,7 @@ from qamomile.circuit.frontend.ast_transform import (
 )
 from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
+    build_param_slots,
     create_dummy_input,
     func_to_block,
     handle_type_map,
@@ -355,6 +356,18 @@ class QKernel(Generic[P, R]):
         """
         Executes the kernel.
         If called within a tracing context, it emits a CallBlockOperation.
+
+        ``VectorView`` arguments flow through the same
+        ``CallBlockOperation`` path as plain ``Vector`` arguments: the
+        view's sliced ``ArrayValue`` (with its ``slice_of`` /
+        ``slice_start`` / ``slice_step`` metadata) is a first-class IR
+        Value, so it can be an operand of the call and be substituted
+        into the callee's dummy input by ``InlinePass``.  The emit-time
+        resolver walks the ``slice_of`` chain back to the root parent,
+        so the callee transparently operates on the slice's qubit
+        subset.  This also means self-recursive kernels with view
+        arguments (butterfly / divide-and-conquer patterns) work out of
+        the box — the forward-ref back-patching handles the recursion.
         """
         tracer = get_current_tracer()
 
@@ -412,10 +425,53 @@ class QKernel(Generic[P, R]):
                 key = parent._make_indices_key(indices)
                 parent._borrowed_indices.pop(key, None)
 
+        # Slice-view inputs need their bulk-borrow transferred onto the
+        # call's result handles under strict-return.  Stash the
+        # pre-consume metadata so the result-wrapping loop can pair
+        # each sliced result ``ArrayValue`` with its originating input
+        # view by ``(root_logical_id, slice_start_uuid, slice_step_uuid,
+        # length_uuid)``.  A single root may carry multiple disjoint
+        # views (e.g. ``q[0::2]`` and ``q[1::2]``), and even views that
+        # share ``start`` / ``step`` may have different lengths
+        # (``q[lo:hi]`` and ``q[lo:hi2]`` reuse the same ``lo`` /
+        # ``step`` ``UInt`` Values but differ in their ``shape[0]``
+        # Value), so the length uuid is needed to disambiguate.  The
+        # block's ``call`` helper builds each pass-through result via
+        # ``inputs[i].next_version()`` which preserves
+        # ``slice_start`` / ``slice_step`` / ``shape`` as the same
+        # underlying ``Value`` references — so the result-side uuids
+        # match the input-side uuids exactly.
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        InputViewKey = tuple[str, str | None, str | None, str | None]
+        input_view_metas: dict[InputViewKey, VectorView[Any]] = {}
+        for name, handle in bound_args.arguments.items():
+            if isinstance(handle, VectorView) and handle._should_enforce_linear():
+                root_av = handle.value
+                while root_av.slice_of is not None:
+                    root_av = root_av.slice_of
+                start_uuid = (
+                    handle._slice_start.value.uuid if handle._slice_start else None
+                )
+                step_uuid = (
+                    handle._slice_step.value.uuid if handle._slice_step else None
+                )
+                length_uuid = handle.value.shape[0].uuid if handle.value.shape else None
+                input_view_metas[
+                    (root_av.logical_id, start_uuid, step_uuid, length_uuid)
+                ] = handle
+
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
                 continue
-            # Consume quantum handles to enforce affine type
+            # ``VectorView`` argument consumption is deferred to
+            # ``_transfer_borrow_to`` after the call so the parent's
+            # borrow record can be rebound straight onto the result
+            # handle.  Everything else takes the regular ``consume``
+            # path to enforce affine type.
+            if isinstance(handle, VectorView) and handle._should_enforce_linear():
+                inputs_map[name] = handle.value
+                continue
             if handle._should_enforce_linear():
                 handle = handle.consume(operation_name=f"QKernel[{self.name}]")
             inputs_map[name] = handle.value
@@ -458,6 +514,41 @@ class QKernel(Generic[P, R]):
                 else:
                     # Fallback: empty shape (will need runtime resolution)
                     shape = ()
+
+                # If the result has slice metadata and we have a
+                # matching input view, wrap as ``VectorView`` and
+                # transfer the parent's bulk-borrow over.  Strict-
+                # return then demands the caller eventually slice-
+                # assign the wrapped result back to the parent.
+                if val.slice_of is not None:
+                    result_root_av = val
+                    while result_root_av.slice_of is not None:
+                        result_root_av = result_root_av.slice_of
+                    result_start_uuid = (
+                        val.slice_start.uuid if val.slice_start else None
+                    )
+                    result_step_uuid = val.slice_step.uuid if val.slice_step else None
+                    result_length_uuid = val.shape[0].uuid if val.shape else None
+                    meta_key = (
+                        result_root_av.logical_id,
+                        result_start_uuid,
+                        result_step_uuid,
+                        result_length_uuid,
+                    )
+                    in_view = input_view_metas.get(meta_key)
+                    if in_view is not None and in_view._slice_parent is not None:
+                        length = shape[0] if shape else val.shape[0]
+                        new_view = VectorView._wrap_unregistered(
+                            parent=in_view._slice_parent,
+                            sliced_av=val,
+                            length=length,
+                            start_uint=in_view._slice_start,
+                            step_uint=in_view._slice_step,
+                        )
+                        in_view._transfer_borrow_to(new_view, f"QKernel[{self.name}]")
+                        wrapped_results.append(new_view)
+                        continue
+
                 wrapped_results.append(
                     actual_class._create_from_value(value=val, shape=shape)
                 )
@@ -471,6 +562,19 @@ class QKernel(Generic[P, R]):
                     )
                 else:
                     wrapped_results.append(handle_type(value=val))
+
+        # Any ``VectorView`` input that did NOT get its borrow transferred
+        # to a matching sliced result must still be consumed — the call
+        # logically passed it to the callee, so leaving it live would
+        # break the affine / strict-return contract (use-after-move).
+        # Use the destructive "qkernel call (view dropped)" consume name
+        # so the covered parent slots become consumed-slot markers; the
+        # qubits are effectively spent inside the callee (e.g. measure /
+        # expval kernels) and re-touching them in the caller is rejected
+        # rather than silently working with a corrupted state.
+        for in_view in input_view_metas.values():
+            if not in_view._consumed:
+                in_view.consume(operation_name="qkernel call (view dropped)")
 
         # Return tuple or single value to match Python function signature
         if len(wrapped_results) == 1:
@@ -922,6 +1026,15 @@ class QKernel(Generic[P, R]):
                 if hasattr(result, "value"):
                     output_values.append(result.value)
 
+        param_slots = build_param_slots(
+            signature=self.signature,
+            input_types=self.input_types,
+            parameters=parameters,
+            kwargs=kwargs,
+            qubit_sizes=qubit_sizes,
+            bind_defaults=True,
+        )
+
         return Block(
             operations=tracer.operations,
             input_values=input_values,
@@ -929,6 +1042,7 @@ class QKernel(Generic[P, R]):
             name=self.name,
             parameters=tracked_parameters,
             kind=BlockKind.TRACED,
+            param_slots=param_slots,
         )
 
     def build(

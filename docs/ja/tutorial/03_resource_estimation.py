@@ -74,9 +74,8 @@ print("two-qubit gates:", est.gates.two_qubit)
 def scalable_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
 
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-        q[i] = qmc.ry(q[i], theta)
+    q = qmc.h(q)
+    q = qmc.ry(q, theta)
 
     for i in qmc.range(n - 1):
         q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])

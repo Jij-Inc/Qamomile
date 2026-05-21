@@ -15,6 +15,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
     QubitMap,
@@ -31,13 +32,32 @@ def emit_composite_gate(
     qubit_map: QubitMap,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a composite gate operation."""
+    """Emit a composite gate operation.
+
+    Resolves each qubit operand through ``resolve_qubit_index_detailed``
+    so that view-local operands (``qft(q[1::2])``) walk the ``slice_of``
+    chain and map to the root parent's physical qubits. Raises
+    ``EmitError`` if any operand cannot be resolved, rather than
+    silently dropping it (previously ``qft(view)`` emitted zero gates).
+
+    Raises:
+        EmitError: If any control or target qubit operand fails to
+            resolve to a physical qubit index.
+    """
     all_qubits = op.control_qubits + op.target_qubits
-    qubit_indices = [
-        qubit_map[QubitAddress(q.uuid)]
-        for q in all_qubits
-        if QubitAddress(q.uuid) in qubit_map
-    ]
+    qubit_indices: list[int] = []
+    for q in all_qubits:
+        result = emit_pass._resolver.resolve_qubit_index_detailed(
+            q, qubit_map, bindings
+        )
+        if not result.success or result.index is None:
+            raise EmitError(
+                f"Cannot resolve qubit operand '{q.name}' for composite gate "
+                f"{op.gate_type.name}. "
+                f"{result.failure_details or 'Qubit not found in qubit_map.'}",
+                operation=f"CompositeGateOperation[{op.gate_type.name}]",
+            )
+        qubit_indices.append(result.index)
 
     # Try native emitters first
     for emitter in emit_pass._composite_emitters:

@@ -91,10 +91,17 @@ _PAULI_MUL_TABLE: dict[tuple[Pauli, Pauli], tuple[Pauli, complex]] = {
 }
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class PauliOperator:
     """
     Represents a single Pauli operator acting on a specific qubit.
+
+    Frozen so that ``Hamiltonian.copy()`` can share term operator
+    references across the original and the copy without risk of one
+    side mutating an operator the other still observes.  None of the
+    existing callers mutate ``pauli`` or ``index`` after construction,
+    so freezing is a no-op behaviourally but makes the immutability
+    claim that ``Hamiltonian.copy()``'s docstring relies on real.
 
     Attributes:
         pauli (Pauli): The type of Pauli operator (X, Y, or Z).
@@ -343,6 +350,33 @@ class Hamiltonian:
     def __len__(self) -> int:
         """Return the number of terms in the Hamiltonian."""
         return len(self._terms)
+
+    def copy(self) -> Hamiltonian:
+        """Return an independent copy sharing no mutable state with ``self``.
+
+        Produces a new ``Hamiltonian`` with the same terms, constant,
+        and declared ``_num_qubits``.  The underlying ``_terms`` dict
+        is fresh, so subsequent ``add_term`` / ``constant`` mutations
+        on either instance do not affect the other.  ``PauliOperator``
+        instances inside the term tuples are reused — they are
+        ``dataclass(frozen=True)`` values and safely shared.
+
+        Returns:
+            A shallow-cloned ``Hamiltonian`` instance.
+
+        Example:
+            >>> H = Hamiltonian()
+            >>> H.add_term((PauliOperator(Pauli.Z, 0),), 1.0)
+            >>> H2 = H.copy()
+            >>> H2.add_term((PauliOperator(Pauli.X, 1),), 0.5)
+            >>> H.num_qubits  # unchanged by H2's mutation
+            1
+        """
+        clone = Hamiltonian(num_qubits=self._num_qubits)
+        clone.constant = self.constant
+        for operators, coeff in self._terms.items():
+            clone.add_term(operators, coeff)
+        return clone
 
     def remap_qubits(self, qubit_map: dict[int, int]) -> Hamiltonian:
         """Remap qubit indices according to the given mapping.

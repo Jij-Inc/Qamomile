@@ -99,8 +99,7 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
 
     # 偶数番目の量子ビットに H を適用
-    for i in qmc.range(0, n, 2):
-        q[i] = qmc.h(q[i])
+    q[0::2] = qmc.h(q[0::2])
 
     # 隣接するペアをエンタングル
     for i in qmc.range(n - 1):

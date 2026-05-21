@@ -434,11 +434,9 @@ def transversal_hadamard_to_plus_l() -> qmc.Vector[qmc.Bit]:
     data = qmc.qubit_array(7, name="data")
     data = encode_steane_zero(data)
 
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
-
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
+    # Broadcast: a single ``qmc.h(data)`` covers every qubit.
+    data = qmc.h(data)
+    data = qmc.h(data)
 
     return qmc.measure(data)
 
@@ -448,10 +446,9 @@ def transversal_hadamard_round_trip() -> qmc.Vector[qmc.Bit]:
     data = qmc.qubit_array(7, name="data")
     data = encode_steane_zero(data)
 
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
+    # Broadcast: a single ``qmc.h(data)`` covers every qubit.
+    data = qmc.h(data)
+    data = qmc.h(data)
 
     return qmc.measure(data)
 

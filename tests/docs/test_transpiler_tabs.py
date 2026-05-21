@@ -144,6 +144,22 @@ executor = CudaqExecutor()"""
 
 
 # ---------------------------------------------------------------------------
+# Pattern A (seeded) — executor for QeMCMC (qe_mcmc).
+# ---------------------------------------------------------------------------
+
+QE_MCMC_QISKIT_BODY = """from qiskit_aer import AerSimulator
+
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))"""
+
+QE_MCMC_QURI_BODY = """executor = transpiler.executor()"""
+
+QE_MCMC_CUDAQ_BODY = """import cudaq
+
+cudaq.set_random_seed(7)
+executor = transpiler.executor()"""
+
+
+# ---------------------------------------------------------------------------
 # Pattern C — statevector helpers (hamiltonian, 07).
 # ---------------------------------------------------------------------------
 
@@ -297,6 +313,11 @@ ARTICLE_BODIES: dict[str, tuple[str, str | None, str | None]] = {
         MOTTONEN_QISKIT_BODY,
         MOTTONEN_QURI_BODY,
         MOTTONEN_CUDAQ_BODY,
+    ),
+    "docs/en/algorithm/qe_mcmc.py": (
+        QE_MCMC_QISKIT_BODY,
+        QE_MCMC_QURI_BODY,
+        QE_MCMC_CUDAQ_BODY,
     ),
 }
 

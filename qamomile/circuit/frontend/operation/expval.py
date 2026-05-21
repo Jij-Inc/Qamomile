@@ -24,20 +24,45 @@ def expval(
 ) -> Float:
     """Compute the expectation value of an observable on a quantum state.
 
-    This function computes <psi|H|psi> where psi is the quantum state
-    represented by the qubits and H is the Hamiltonian observable.
+    This function computes ``<psi|H|psi>`` where ``psi`` is the quantum
+    state represented by ``qubits`` and ``H`` is the Hamiltonian
+    observable.
 
-    The quantum state (qubits) is NOT consumed by this operation - the
-    qubits can still be used for further operations after expval.
+    The quantum state is **consumed** by this operation: ``expval``
+    classifies as :attr:`ConsumeMode.DESTRUCTIVE`, the same category as
+    ``measure`` / ``cast``.  Conceptually an Estimator runs many shots
+    of the state to estimate the expectation, so the qubits cannot be
+    reused afterwards.  Any attempt to access the same qubits / view
+    slots after ``expval`` is rejected as use-after-destroy, both at
+    trace time and post-fold in the IR.
 
     Args:
-        qubits: The quantum register holding the prepared state.
-            Can be a Vector[Qubit] or a tuple of individual Qubits.
-        hamiltonian: The Observable parameter representing the Hamiltonian.
-            The actual qamomile.observable.Hamiltonian is provided via bindings.
+        qubits (Vector[Qubit] | tuple[Qubit, ...]): The quantum
+            register (or tuple of individual qubits) holding the
+            prepared state.  When a ``Vector`` is passed all
+            previously-borrowed elements must have been returned (the
+            strict-return policy is enforced by ``consume`` here).
+            When a slice view (``VectorView``) is passed its covered
+            parent slots become consumed-slot markers so the parent
+            cannot reuse them later.
+        hamiltonian (Observable): The Observable parameter
+            representing the Hamiltonian.  The actual
+            ``qamomile.observable.Hamiltonian`` is provided via
+            ``transpile(..., bindings={...})``.
 
     Returns:
-        Float containing the expectation value.
+        Float: A scalar handle holding the expectation value, suitable
+            for use as the kernel return value or as an operand to
+            further classical operations.
+
+    Raises:
+        QubitConsumedError: If ``qubits`` was already consumed (e.g.
+            measured / cast earlier in the kernel), or if any covered
+            slot of a passed view was destroyed by a prior destructive
+            view operation.
+        UnreturnedBorrowError: If ``qubits`` is a ``Vector`` with
+            outstanding element or slice-view borrows that have not
+            been returned.
 
     Example:
         ```python
@@ -53,7 +78,7 @@ def expval(
             q[0] = qm.ry(q[0], theta)
             q[0], q[1] = qm.cx(q[0], q[1])
 
-            # Expectation value -> Float
+            # Expectation value -> Float (q is consumed here)
             return qm.expval(q, H)
 
         # Pass Hamiltonian via bindings
@@ -62,10 +87,12 @@ def expval(
     """
     # Convert qubits to Value
     if isinstance(qubits, tuple):
-        # Tuple of individual Qubits - collect their values
-        # For now, we create a pseudo-ArrayValue to group them
-        # The emitter will handle unpacking
-        qubit_values = [q.value for q in qubits]
+        # Tuple of individual Qubits — consume each handle, mirroring
+        # ``measure``'s element path.  The IR operand still wraps the
+        # post-consume Values in a pseudo-ArrayValue so emit-time
+        # unpacking is unaffected.
+        consumed_qubits = tuple(q.consume(operation_name="expval") for q in qubits)
+        qubit_values = [q.value for q in consumed_qubits]
         qubits_value = ArrayValue(
             type=qubit_values[0].type,
             name="expval_qubits",
@@ -75,6 +102,27 @@ def expval(
             element_logical_ids=tuple(q.logical_id for q in qubit_values),
         )
     else:
+        # Guard for Vector[Qubit] operands: if any slot of the array was
+        # physically destroyed by a prior destructive view operation
+        # (e.g. ``measure(q[1::2])``), using the whole array in
+        # ``expval`` would try to estimate over a partially-collapsed
+        # quantum state.  Detect this at trace time so the error is
+        # surfaced before reaching the backend.
+        #
+        # We only call this on ``Vector`` (which is an ``ArrayBase``
+        # subclass and has ``_check_no_consumed_slots``).  A bare
+        # ``Qubit`` handle — supported for back-compat even though the
+        # public type signature requires ``Vector | tuple`` — cannot
+        # carry consumed-slot markers and is skipped.
+        if isinstance(qubits, Vector):
+            qubits._check_no_consumed_slots("expval")
+        # Destructive consume: validates outstanding borrows, marks
+        # covered slots as consumed for ``VectorView`` operands, and
+        # flips ``_consumed`` so any later use of the handle raises
+        # ``QubitConsumedError``.  The post-consume value is what we
+        # feed into ``ExpvalOp`` so the IR sees the SSA version that
+        # ``consume`` produced.
+        qubits = qubits.consume(operation_name="expval")
         qubits_value = qubits.value
 
     # Create result Float value

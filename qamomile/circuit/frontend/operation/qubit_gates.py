@@ -1,6 +1,6 @@
 from typing import Any, Sequence, Union, overload
 
-from qamomile.circuit.frontend.handle import Float, Qubit, Vector
+from qamomile.circuit.frontend.handle import Float, Qubit, Vector, VectorView
 from qamomile.circuit.frontend.handle.array import Vector as VectorClass
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
@@ -67,27 +67,39 @@ def _broadcast_single_qubit_gate(
     transpiler passes, resource estimation, and visualization continue to
     work without any broadcast-specific handling.
 
+    The input ``Vector[Qubit]`` handle is consumed (affine type
+    enforcement) — the caller must capture the returned new handle, just
+    as the scalar single-qubit gate path does. Dropping the return value
+    will trip ``QubitConsumedError`` on the next use of the original
+    handle.
+
     Args:
-        qubits: The `Vector[Qubit]` to apply the gate to. Must have all
-            previously-borrowed elements returned; otherwise the loop body's
-            element borrow will fail. The handle itself is not consumed —
-            the same instance is returned with element borrows released.
-        gate_type: The `GateOperationType` to apply to each element. Must
-            correspond to a non-parametric single-qubit gate
-            (e.g. `H`, `X`, `Y`, `Z`, `S`, `T`, `SDG`, `TDG`).
+        qubits (Vector[Qubit]): The `Vector[Qubit]` to apply the gate to.
+            Must have all previously-borrowed elements returned; otherwise
+            the loop body's element borrow will fail. This handle is
+            consumed by the call.
+        gate_type (GateOperationType): The `GateOperationType` to apply to
+            each element. Must correspond to a non-parametric single-qubit
+            gate (e.g. `H`, `X`, `Y`, `Z`, `S`, `T`, `SDG`, `TDG`).
 
     Returns:
-        The same `Vector[Qubit]` handle that was passed in, after the
-        broadcast loop has been emitted into the active tracer.
+        Vector[Qubit]: A fresh `Vector[Qubit]` handle wrapping the same
+            underlying array value, with the broadcast loop emitted into
+            the active tracer.
 
     Raises:
         UnreturnedBorrowError: If any element of `qubits` is still borrowed
             when broadcasting begins.
+        QubitConsumedError: If the input handle has already been consumed
+            (e.g. a previous broadcast result was dropped).
     """
     # Local import to avoid a frontend.operation circular import chain.
     from qamomile.circuit.frontend.operation.control_flow import for_loop
 
-    qubits.validate_all_returned()
+    # Consume the input handle up-front, mirroring `_measure_vector_qubit`
+    # and `pauli_evolve`. `ArrayBase.consume` runs `validate_all_returned`
+    # internally, so we drop the redundant explicit call.
+    qubits = qubits.consume(operation_name=gate_type.name)
     n = qubits.shape[0]
     # ``var_name`` is display-only — the IR uses UUIDs for identity. Use ``i``
     # so the visualization matches a hand-written ``for i in qmc.range(n)``.
@@ -108,22 +120,31 @@ def _broadcast_rotation_gate(
     per-qubit angle arrays remain a per-element-loop concern (e.g.
     `rx_layer`).
 
+    The input ``Vector[Qubit]`` handle is consumed (affine type
+    enforcement) — the caller must capture the returned new handle.
+
     Args:
-        qubits: The `Vector[Qubit]` to apply the rotation to.
-        angle: The rotation angle in radians, shared across all qubits in
-            the broadcast. Accepts a Python `float` or a `Float` handle.
-        gate_type: The rotation gate kind (`RX`, `RY`, `RZ`, or `P`).
+        qubits (Vector[Qubit]): The `Vector[Qubit]` to apply the rotation
+            to. This handle is consumed by the call.
+        angle (float | Float): The rotation angle in radians, shared
+            across all qubits in the broadcast. Accepts a Python `float`
+            or a `Float` handle.
+        gate_type (GateOperationType): The rotation gate kind (`RX`, `RY`,
+            `RZ`, or `P`).
 
     Returns:
-        The same `Vector[Qubit]` handle that was passed in.
+        Vector[Qubit]: A fresh `Vector[Qubit]` handle wrapping the same
+            underlying array value, with the broadcast loop emitted.
 
     Raises:
         UnreturnedBorrowError: If any element of `qubits` is still borrowed
             when broadcasting begins.
+        QubitConsumedError: If the input handle has already been consumed
+            (e.g. a previous broadcast result was dropped).
     """
     from qamomile.circuit.frontend.operation.control_flow import for_loop
 
-    qubits.validate_all_returned()
+    qubits = qubits.consume(operation_name=gate_type.name)
     n = qubits.shape[0]
     with for_loop(0, n, var_name="i") as i:
         qubits[i] = _apply_rotation_gate(qubits[i], angle, gate_type)
@@ -228,6 +249,8 @@ def _dispatch_single_qubit_gate(
 @overload
 def h(target: Qubit) -> Qubit: ...
 @overload
+def h(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
+@overload
 def h(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def h(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
     """Hadamard gate.
@@ -252,6 +275,8 @@ def h(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
 @overload
 def x(target: Qubit) -> Qubit: ...
 @overload
+def x(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
+@overload
 def x(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def x(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
     """Pauli-X gate (NOT gate).
@@ -272,6 +297,8 @@ def x(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
 
 @overload
 def y(target: Qubit) -> Qubit: ...
+@overload
+def y(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
 @overload
 def y(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def y(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
@@ -294,6 +321,8 @@ def y(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
 @overload
 def z(target: Qubit) -> Qubit: ...
 @overload
+def z(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
+@overload
 def z(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def z(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
     """Pauli-Z gate.
@@ -314,6 +343,8 @@ def z(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
 
 @overload
 def t(target: Qubit) -> Qubit: ...
+@overload
+def t(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
 @overload
 def t(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def t(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
@@ -336,6 +367,8 @@ def t(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
 @overload
 def s(target: Qubit) -> Qubit: ...
 @overload
+def s(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
+@overload
 def s(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def s(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
     """S gate (square root of Z).
@@ -357,6 +390,8 @@ def s(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
 @overload
 def sdg(target: Qubit) -> Qubit: ...
 @overload
+def sdg(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
+@overload
 def sdg(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def sdg(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
     """S-dagger gate (inverse of S gate).
@@ -377,6 +412,8 @@ def sdg(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
 
 @overload
 def tdg(target: Qubit) -> Qubit: ...
+@overload
+def tdg(target: VectorView[Qubit]) -> VectorView[Qubit]: ...
 @overload
 def tdg(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def tdg(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
@@ -442,21 +479,29 @@ def _broadcast_phase_gate(qubits: Vector[Qubit], theta: float | Float) -> Vector
     Lowers to a `ForOperation` so that downstream passes see the same IR
     they would for an explicit hand-written loop.
 
+    The input ``Vector[Qubit]`` handle is consumed (affine type
+    enforcement) — the caller must capture the returned new handle.
+
     Args:
-        qubits: The `Vector[Qubit]` to apply the phase gate to.
-        theta: Phase angle in radians, shared across all qubits.
+        qubits (Vector[Qubit]): The `Vector[Qubit]` to apply the phase
+            gate to. This handle is consumed by the call.
+        theta (float | Float): Phase angle in radians, shared across all
+            qubits.
 
     Returns:
-        The same `Vector[Qubit]` handle, with the broadcast loop emitted
-        into the active tracer.
+        Vector[Qubit]: A fresh `Vector[Qubit]` handle wrapping the same
+            underlying array value, with the broadcast loop emitted into
+            the active tracer.
 
     Raises:
         UnreturnedBorrowError: If any element of `qubits` is still borrowed
             when broadcasting begins.
+        QubitConsumedError: If the input handle has already been consumed
+            (e.g. a previous broadcast result was dropped).
     """
     from qamomile.circuit.frontend.operation.control_flow import for_loop
 
-    qubits.validate_all_returned()
+    qubits = qubits.consume(operation_name="P")
     n = qubits.shape[0]
     with for_loop(0, n, var_name="i") as i:
         qubits[i] = _apply_phase_gate(qubits[i], theta)
@@ -465,6 +510,8 @@ def _broadcast_phase_gate(qubits: Vector[Qubit], theta: float | Float) -> Vector
 
 @overload
 def p(target: Qubit, theta: float | Float) -> Qubit: ...
+@overload
+def p(target: VectorView[Qubit], theta: float | Float) -> VectorView[Qubit]: ...
 @overload
 def p(target: Vector[Qubit], theta: float | Float) -> Vector[Qubit]: ...
 def p(
@@ -586,6 +633,8 @@ def _dispatch_rotation_gate(
 @overload
 def rx(target: Qubit, angle: float | Float) -> Qubit: ...
 @overload
+def rx(target: VectorView[Qubit], angle: float | Float) -> VectorView[Qubit]: ...
+@overload
 def rx(target: Vector[Qubit], angle: float | Float) -> Vector[Qubit]: ...
 def rx(
     target: Union[Qubit, Vector[Qubit]], angle: float | Float
@@ -611,6 +660,8 @@ def rx(
 @overload
 def ry(target: Qubit, angle: float | Float) -> Qubit: ...
 @overload
+def ry(target: VectorView[Qubit], angle: float | Float) -> VectorView[Qubit]: ...
+@overload
 def ry(target: Vector[Qubit], angle: float | Float) -> Vector[Qubit]: ...
 def ry(
     target: Union[Qubit, Vector[Qubit]], angle: float | Float
@@ -635,6 +686,8 @@ def ry(
 
 @overload
 def rz(target: Qubit, angle: float | Float) -> Qubit: ...
+@overload
+def rz(target: VectorView[Qubit], angle: float | Float) -> VectorView[Qubit]: ...
 @overload
 def rz(target: Vector[Qubit], angle: float | Float) -> Vector[Qubit]: ...
 def rz(
