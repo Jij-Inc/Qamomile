@@ -883,14 +883,19 @@ class Vector(ArrayBase[T]):
             return self._return_slice_view(index, value)
         if isinstance(index, int):
             index = self._make_uint_index(index)
-        # Static narrowing: the slice branch above returns; non-slice
-        # indices must receive a single element handle, not a vector.
-        # The overload set enforces this at the call site; the assert
-        # backstops the runtime invariant for the type checker.
-        assert not isinstance(value, Vector), (
-            f"Element assignment to '{self.value.name}[{index}]' got a "
-            f"{type(value).__name__}; expected a single element handle."
-        )
+        # Non-slice indices must receive a single element handle, not a
+        # vector.  The overload set enforces this at the call site; the
+        # runtime check raises ``TypeError`` (mirroring the slice
+        # branch's existing behaviour for non-``VectorView`` RHS) so
+        # the error stays stable even under ``python -O``, and the
+        # type checker narrows ``value`` to ``T`` past this point.
+        if isinstance(value, Vector):
+            raise TypeError(
+                f"Element assignment to '{self.value.name}[{index}]' "
+                f"expected a single element handle, got "
+                f"{type(value).__name__}.  Use ``q[a:b] = ...`` for "
+                "slice-level assignment."
+            )
         self._return_element((index,), value)
 
     def _return_slice_view(self, s: slice, value: "T | Vector[T]") -> None:
@@ -1962,11 +1967,15 @@ class VectorView(Vector[T]):
         """
         if isinstance(index, slice):
             return self._return_slice_view(index, value)
-        # See ``Vector.__setitem__`` for the narrowing rationale.
-        assert not isinstance(value, Vector), (
-            f"Element assignment on view '{self.value.name}[{index}]' got a "
-            f"{type(value).__name__}; expected a single element handle."
-        )
+        # See ``Vector.__setitem__`` for the rationale; mirror its
+        # explicit ``TypeError`` so the surface is the same on a view.
+        if isinstance(value, Vector):
+            raise TypeError(
+                f"Element assignment on view '{self.value.name}[{index}]' "
+                f"expected a single element handle, got "
+                f"{type(value).__name__}.  Use ``view[a:b] = ...`` for "
+                "slice-level assignment."
+            )
         super().__setitem__(index, value)
 
     def _normalize_slice_to_covered(self, s: slice) -> tuple[int, ...]:

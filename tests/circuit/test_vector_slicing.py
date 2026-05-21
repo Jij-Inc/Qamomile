@@ -495,7 +495,9 @@ class TestSliceBulkBorrow:
             q[0] = qmc.h(q[0])
             return q
 
-        with pytest.raises(QubitBorrowConflictError, match="held by a VectorView slice"):
+        with pytest.raises(
+            QubitBorrowConflictError, match="held by a VectorView slice"
+        ):
             _ = kern.block
 
     def test_parent_access_on_non_covered_slot_is_fine(self):
@@ -710,7 +712,9 @@ class TestVectorViewAsKernelArgument:
             q[0] = qmc.x(q[0])
             return q
 
-        with pytest.raises(QubitBorrowConflictError, match="held by a VectorView slice"):
+        with pytest.raises(
+            QubitBorrowConflictError, match="held by a VectorView slice"
+        ):
             _ = kern_no_return.block
 
         # The strict-return form releases the borrow before touching q[0].

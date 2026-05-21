@@ -10,7 +10,7 @@ Qamomileを基礎から学ぶステップバイステップガイドです。
 
 1. [はじめての量子カーネル](01_your_first_quantum_kernel) — カーネルの定義・可視化・実行、アフィンルール
 2. [パラメータ付きカーネル](02_parameterized_kernels) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン
-3. [Vectorのスライシング](03_vector_slicing) — TODO
+3. [Vectorのスライシング](03_vector_slicing) — `VectorView`、スライス代入、ネストしたスライス、ヘルパーカーネルへの引き渡し
 4. [リソース推定](04_resource_estimation) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
 5. [実行モデル](05_execution_models) — `sample()`と`run()`、オブザーバブル、ビット順序
 6. [古典フローパターン](06_classical_flow_patterns) — ループ、スパースデータ、条件分岐

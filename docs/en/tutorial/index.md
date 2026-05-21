@@ -10,7 +10,7 @@ Step-by-step guides to learn Qamomile.
 
 1. [Your First Quantum Kernel](01_your_first_quantum_kernel) — Define, visualize, and execute a kernel; the affine rule
 2. [Parameterized Kernels](02_parameterized_kernels) — Structure vs runtime parameters, bind/sweep pattern
-3. [Vector Slicing](03_vector_slicing) — TODO
+3. [Vector Slicing](03_vector_slicing) — `VectorView`, slice assignment, nested slices, and passing views to helper kernels
 4. [Resource Estimation](04_resource_estimation) — Symbolic cost analysis, gate breakdown, scaling
 5. [Execution Models](05_execution_models) — `sample()` vs `run()`, observables, bit ordering
 6. [Classical Flow Patterns](06_classical_flow_patterns) — Loops, sparse data, conditional branching

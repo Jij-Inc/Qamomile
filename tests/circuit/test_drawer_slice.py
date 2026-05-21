@@ -491,12 +491,10 @@ class TestSliceSubKernelArgumentDraw:
         layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(vc)
 
         ranges_by_name: dict[str, tuple[float, float]] = {
-            br["name"]: (br["start_x"], br["end_x"])
-            for br in layout.block_ranges
+            br["name"]: (br["start_x"], br["end_x"]) for br in layout.block_ranges
         }
         assert (
-            "_h_all_helper" in ranges_by_name
-            and "_x_all_helper" in ranges_by_name
+            "_h_all_helper" in ranges_by_name and "_x_all_helper" in ranges_by_name
         ), ranges_by_name
         h_start, h_end = ranges_by_name["_h_all_helper"]
         x_start, x_end = ranges_by_name["_x_all_helper"]
