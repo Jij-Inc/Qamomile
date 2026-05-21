@@ -187,8 +187,7 @@ class TestConstantFoldControlledUFields:
         cu = self._find_controlled_u(folded.operations)
         assert cu is not None, "ControlledUOperation not found after folding"
         assert isinstance(cu, ConcreteControlledU), (
-            f"Expected promotion to ConcreteControlledU, "
-            f"got {type(cu).__name__}"
+            f"Expected promotion to ConcreteControlledU, got {type(cu).__name__}"
         )
         assert cu.num_controls == n_value
         # Per-qubit control operands: each ``operands[i]`` for i<nc is a
@@ -206,8 +205,7 @@ class TestConstantFoldControlledUFields:
                 f"not the bare control Vector"
             )
             assert ctrl.element_indices, (
-                f"control_operands[{i}] should have element_indices "
-                f"populated"
+                f"control_operands[{i}] should have element_indices populated"
             )
             assert ctrl.element_indices[0].get_const() == i
         # Per-qubit control results carry the matching parent_array — the
