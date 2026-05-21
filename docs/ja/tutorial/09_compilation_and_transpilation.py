@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # コンパイルとトランスパイル: 内部の仕組み
 #
 # このチュートリアルではQamomileの`@qkernel`がどのような処理フローを経て、Python関数から量子回路へと変換されるのかを、コンパイラの内部の視点から見ていきます。ユーザーが見るのは`@qkernel`を書き、`transpiler.transpile(...)`を呼び、executableを受け取る、という流れです。この章ではそのブラックボックスを開きます。
@@ -50,6 +54,8 @@
 #    │  unroll_recursion            (inline ↔ partial_evalの反復)
 #    │  affine_validate             (アフィン型のセーフティネット)
 #    │  partial_eval                (定数畳み込み + コンパイル時if)
+#    │  slice_borrow_check          (定数畳み込み後のスライスview借り出し検査)
+#    │  strip_slice_ops             (スライス宣言マーカーの削除)
 #    │  analyze                     (依存グラフ + I/O検証)
 #    ▼
 # Block [ANALYZED]
@@ -70,7 +76,7 @@
 # パスを実行する前に、出力することになる対象に名前を付けておきましょう。
 #
 # ### `Block`
-# 
+#
 # `Block` (`qamomile.circuit.ir.block`) はパイプラインを流れるコンテナです。以下を保持します:
 #
 # - `operations`: `Operation`インスタンスの順序付きリスト
@@ -104,7 +110,7 @@
 # `BlockKind.AFFINE`は、このaffine型不変条件（「各量子値は高々1回だけ使われている」）が検証可能な状態でブロックが仕上がっていることを意味します。実際の検証は`AffineValidationPass`が担当し、違反すると`AffineTypeError`が送出されます。
 #
 # ### `Value` と`Operation`
-# 
+#
 # **`Value`** (`qamomile.circuit.ir.value`) はSSAスタイルの型付き値です。`Qubit`に限らず`Float`、`UInt`、`Bit`などすべての値が`Value`として表現されます。ゲート適用や古典演算でその値が更新されるたびに、`Value.next_version()`が新しい`Value`を生成します。このとき`version`と`uuid`は新しくなりますが、`logical_id`と型・メタデータは保たれます。
 #
 # `logical_id`は「SSAのバージョンをまたいで**同じ論理的な変数**を指す」ための安定した識別子です。たとえば`q = qmc.h(q)`で新しい`Value`が作られても、元の`q`と同じ`logical_id`を持ちます。これは物理量子ビットへのマッピングではなく、IR上で「同じ変数の別バージョン」を結びつけるためのもので、`Float`パラメータや`Bit`などにも同じ仕組みが使われます（バックエンドの物理量子ビット割り当ては後段の`emit`で`ResourceAllocator`が決めます）。
@@ -127,7 +133,6 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.block import BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
@@ -202,7 +207,10 @@ block = transpiler.to_block(demo_kernel, bindings=bindings, parameters=parameter
 pretty_print_block(block)
 print("after to_block:   ", summarise(block))
 print("parameters:       ", list(block.parameters))
-print("CallBlockOps:     ", sum(1 for op in block.operations if isinstance(op, CallBlockOperation)))
+print(
+    "CallBlockOps:     ",
+    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+)
 # 注意: `CallBlockOperation`は`ForOperation`の本体内部にも存在しうるので、
 # 必ずしもトップレベルのリストにあるとは限りません。
 
@@ -260,11 +268,16 @@ print(pretty_print_block(block))
 # 2. **`CompileTimeIfLoweringPass`** — 条件がコンパイル時に解決可能な`IfOperation`を、選ばれた分岐のOperation列で置き換えます。測定結果に依存する`IfOperation`はここでは触りません。
 #
 # なお、`ForOperation`自体は**このパスではアンロールされません**。ループ展開は必要であれば後段の`emit`で`LoopAnalyzer`が判定します（詳しくは5章）。そのためここで`ForOperations`の個数は減りません。
+#
+# `partial_eval`は意図的に`ConstantFoldingPass(strip_slice_ops=False)`を呼び出しています。`SliceArrayOperation`と`ReleaseSliceViewOperation`は宣言マーカーで、後段の`slice_borrow_check`パス（4.7節参照）が view の借り出し / 返却順序を検証するために必要です。検査が終わった直後の専用パス`strip_slice_ops`がこれらを削除し、`analyze`にブロックを渡す前に取り除きます。
 
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
 print("after partial_eval:", summarise(block))
-print("ForOperations:    ", sum(1 for op in block.operations if isinstance(op, ForOperation)))
+print(
+    "ForOperations:    ",
+    sum(1 for op in block.operations if isinstance(op, ForOperation)),
+)
 
 # %% [markdown]
 # `UInt`を未バインドのまま残してループ境界に使うと、下流の`validate_symbolic_shapes`パスが該当する値の名前とともに`QamomileCompileError`を送出します。これは「このカーネルは実はコンパイル時に構造化されていない」という状況を、後段での分かりにくいクラッシュではなく読みやすいエラーへ変換することを担当するパスです。
@@ -293,7 +306,9 @@ print("after analyze:    ", summarise(block))
 plan = transpiler.plan(block)
 for i, step in enumerate(plan.steps):
     seg = step.segment
-    print(f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)")
+    print(
+        f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)"
+    )
 print("total unbound parameters:", list(plan.parameters))
 
 # %% [markdown]
@@ -314,20 +329,22 @@ print(executable.quantum_circuit)
 #
 # ### 4.7 スキップしたパス
 #
-# `transpile()`の一部でありながら明示的に呼ばなかったパスが5つあります:
+# `transpile()`の一部でありながら明示的に呼ばなかったパスが7つあります:
 #
 # - **`substitute`** — ユーザーが設定した`SubstitutionRule`を適用してブロックのターゲットを置換したり、複合ゲートの戦略を上書きします。`TranspilerConfig`にルールがない場合はno-opです。
 # - **`resolve_parameter_shapes`** — `bindings`が具体的な`Vector`や`Matrix`値を提供する場合、`{name}_dim{i}`のshape次元を埋めます。これにより下流で`arr.shape[0]`が具体的な`UInt`として解決されます。
 # - **`unroll_recursion`** — 自己再帰の`@qkernel`（例: Suzuki–Trotter、チュートリアル07参照）に対する`inline ↔ partial_eval`の固定点ループです。再帰が底まで展開されると終了し、bindingsでベースケースに到達できない場合はエラーになります。
 # - **`affine_validate`** — フロントエンドのチェックをすり抜けたアフィン型違反を捕まえるセーフティネットです。
+# - **`slice_borrow_check`** — `Vector`スライス view 用の定数畳み込み後検査です。フロントエンドは具体境界の重複 view を構築時点で reject しますが、トレース時に境界が symbolic だった view（`q[lo:hi]`で`lo`/`hi`が`UInt`の場合）は`bindings`で境界が具体的になった後でしか検査できません。このパスは`partial_eval`の直後でブロックを walk し、生きている view 同士の重複や破壊済みスロットへの再アクセス（先行する`measure` / `cast` / `expval`で消費されたスロットに後からアクセスするケース）には`SliceBorrowViolationError`を投げます。スライス view はカーネル境界では **affine** として扱われ、ブロック末尾で slice-assign 返却されないまま残っていても flag しません — Deutsch-Jozsa の`ancilla = qs[n]`や Simon's の`qs2 = qs[n:2*n]`（オラクルで使った後、測定せず破棄する scratch register）パターンが素直にコンパイルされます。本当に問題のあるケース — view が生きている間に親を consume / return する — は frontend の`ArrayBase.consume` / `validate_all_returned` / `_validate_returned_arrays`が引き続き捕まえます。`q[i]`のような単一要素借り出しは IR Operation を出さないので、こちらは frontend のトレース時 validator が担当します。
+# - **`strip_slice_ops`** — `slice_borrow_check`の検査が終わった後で、不要になった`SliceArrayOperation`と`ReleaseSliceViewOperation`の宣言マーカーをブロックから取り除きます。これによりセグメンテーション / emit は純粋な量子 op 列だけを見るようになります。スライス済みの`ArrayValue`自体は下流オペランドの`slice_of`チェーンから引き続き参照できます。
 # - **`validate_symbolic_shapes`** — 未解決の`Vector`shape次元が`ForOperation`の境界に到達した場合、実行可能なエラーメッセージで拒否します。
 #
-# いずれも冪等かつ安価なので、`transpile()`は常にこれらを実行します。パスを書く側としては順序に注意するだけで十分です: `substitute`と`resolve_parameter_shapes`は`inline`の**前**、`affine_validate`は`inline`の**後**、`validate_symbolic_shapes`は`analyze`の**後**（依存グラフが使えるように）に実行されます。
+# いずれも冪等かつ安価なので、`transpile()`は常にこれらを実行します。パスを書く側としては順序に注意するだけで十分です: `substitute`と`resolve_parameter_shapes`は`inline`の**前**、`affine_validate`は`inline`の**後**、`slice_borrow_check`は`partial_eval`の**直後**（スライス宣言マーカーがまだ残っている状態で）、`strip_slice_ops`は`analyze`の前に走ってマーカーを掃除、`validate_symbolic_shapes`は`analyze`の**後**（依存グラフが使えるように）に実行されます。
 
 # %% [markdown]
 # ## 5. 制御フロー (`if` / `for` / `while`) の取り扱い
 #
-# パイプラインが制御フローをどう扱うかは、フロントエンドで何を受け付けるかから、各パスがそれをどう変形するか、そしてバックエンドが実行時分岐をサポートするかまで、複数のレイヤーに関わります。ここではその全体像を整理します。ユーザー向けの書き方は[チュートリアル05](05_classical_flow_patterns)にあり、本章はコンパイラ側の視点に絞ります。
+# パイプラインが制御フローをどう扱うかは、フロントエンドで何を受け付けるかから、各パスがそれをどう変形するか、そしてバックエンドが実行時分岐をサポートするかまで、複数のレイヤーに関わります。ここではその全体像を整理します。ユーザー向けの書き方は[チュートリアル06](06_classical_flow_patterns)にあり、本章はコンパイラ側の視点に絞ります。
 #
 # ### 5.1 フロントエンドで受け付ける形
 #
@@ -432,6 +449,7 @@ print(executable.quantum_circuit)
 # ### 6.1 小さなデモカーネル
 #
 # 3量子ビット分のHadamard重ね合わせを`QFixed`として測定するだけの最小例を用意します。
+
 
 # %%
 @qmc.qkernel

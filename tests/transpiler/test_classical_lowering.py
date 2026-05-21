@@ -42,7 +42,48 @@ def _walk_ops(operations):
 
 
 def _count_ops_of_type(operations, op_type) -> int:
+    """Count operations of ``op_type`` across the op tree, recursing nested ops."""
     return sum(1 for op in _walk_ops(operations) if isinstance(op, op_type))
+
+
+@qmc.qkernel
+def _and_kernel() -> qmc.Bit:
+    """``if a & b:`` over two true measurements; target qubit ends in |1>."""
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
+    q2 = qmc.qubit("q2")
+    q0 = qmc.x(q0)
+    q1 = qmc.x(q1)
+    a = qmc.measure(q0)
+    b = qmc.measure(q1)
+    if a & b:
+        q2 = qmc.x(q2)
+    return qmc.measure(q2)
+
+
+@qmc.qkernel
+def _or_kernel() -> qmc.Bit:
+    """``if a | b:`` with ``a`` true and ``b`` false; target ends in |1>."""
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
+    q2 = qmc.qubit("q2")
+    q0 = qmc.x(q0)
+    a = qmc.measure(q0)
+    b = qmc.measure(q1)
+    if a | b:
+        q2 = qmc.x(q2)
+    return qmc.measure(q2)
+
+
+@qmc.qkernel
+def _not_kernel() -> qmc.Bit:
+    """``if ~a:`` with ``a`` measured from |0>; target ends in |1>."""
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
+    a = qmc.measure(q0)
+    if ~a:
+        q1 = qmc.x(q1)
+    return qmc.measure(q1)
 
 
 def _lower_to_classical_lowering(kernel, bindings=None):
@@ -219,60 +260,23 @@ class TestClassicalLoweringEndToEnd:
 
         return QiskitTranspiler()
 
-    def test_runtime_and_executes(self, transpiler):
-        """``if a & b:`` over measurements is now lowered to
-        RuntimeClassicalExpr and emitted via the new backend hook."""
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            pytest.param(_and_kernel, id="and"),
+            pytest.param(_or_kernel, id="or"),
+            pytest.param(_not_kernel, id="not"),
+        ],
+    )
+    def test_runtime_logical_executes(self, transpiler, kernel):
+        """Runtime ``&`` / ``|`` / ``~`` over measurements lower to
+        RuntimeClassicalExpr and emit via the new backend hook.
 
-        @qmc.qkernel
-        def kernel() -> qmc.Bit:
-            q0 = qmc.qubit("q0")
-            q1 = qmc.qubit("q1")
-            q2 = qmc.qubit("q2")
-            q0 = qmc.x(q0)
-            q1 = qmc.x(q1)
-            a = qmc.measure(q0)
-            b = qmc.measure(q1)
-            if a & b:
-                q2 = qmc.x(q2)
-            return qmc.measure(q2)
-
-        result = (
-            transpiler.transpile(kernel)
-            .sample(transpiler.executor(), shots=100)
-            .result()
-        )
-        assert result.results == [(1, 100)]
-
-    def test_runtime_or_executes(self, transpiler):
-        @qmc.qkernel
-        def kernel() -> qmc.Bit:
-            q0 = qmc.qubit("q0")
-            q1 = qmc.qubit("q1")
-            q2 = qmc.qubit("q2")
-            q0 = qmc.x(q0)
-            a = qmc.measure(q0)
-            b = qmc.measure(q1)
-            if a | b:
-                q2 = qmc.x(q2)
-            return qmc.measure(q2)
-
-        result = (
-            transpiler.transpile(kernel)
-            .sample(transpiler.executor(), shots=100)
-            .result()
-        )
-        assert result.results == [(1, 100)]
-
-    def test_runtime_not_executes(self, transpiler):
-        @qmc.qkernel
-        def kernel() -> qmc.Bit:
-            q0 = qmc.qubit("q0")
-            q1 = qmc.qubit("q1")
-            a = qmc.measure(q0)
-            if ~a:
-                q1 = qmc.x(q1)
-            return qmc.measure(q1)
-
+        Each kernel sets the gating measurement(s) so the predicate is
+        guaranteed true, then applies ``X`` to the target qubit and
+        measures it. The path is fully deterministic, so all 100 shots
+        must yield ``1``.
+        """
         result = (
             transpiler.transpile(kernel)
             .sample(transpiler.executor(), shots=100)

@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # はじめての量子カーネル
 #
 # 本チュートリアルでは、Qamomileを初めて使用するユーザーが量子カーネルを定義し、実行するまでの基本的なワークフローを紹介します。一方で、本チュートリアルでは量子計算の基礎や量子アルゴリズムの詳細には踏み込まないことに注意してください。
@@ -306,7 +310,8 @@ except Exception as e:
 # ## 次の章
 #
 # 1. [パラメータ付き量子カーネル](02_parameterized_kernels.ipynb) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン
-# 2. [リソース推定](03_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
-# 3. [実行モデル](04_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
-# 4. [古典フローパターン](05_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
-# 5. [再利用パターン](06_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ
+# 2. [Vectorのスライシング](03_vector_slicing.ipynb) — `VectorView`、スライス代入、ネストしたスライス、ヘルパーカーネルへの引き渡し
+# 3. [リソース推定](04_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
+# 4. [実行モデル](05_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
+# 5. [古典フローパターン](06_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
+# 6. [再利用パターン](07_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ

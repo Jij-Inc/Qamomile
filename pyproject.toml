@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "jijmodeling>=2.1.0",
+    "msgpack>=1.0.0",
     "ommx>=2.3.3",
     "qiskit>=2.3.0",
     "qiskit-aer>=0.17.2",
@@ -60,6 +61,7 @@ dev = [
     "zuban>=0.4.1",
     "griffe>=1.0.0",
     "ommx-pyscipopt-adapter>=2.3.0",
+    "scikit-learn>=1.6.0",
     "openfermion>=1.6.0",
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",

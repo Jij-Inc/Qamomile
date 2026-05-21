@@ -179,6 +179,33 @@ See [docs/en/tutorial/09_compilation_and_transpilation.py](docs/en/tutorial/09_c
 
 [overlap-check]: qamomile/circuit/transpiler/transpiler.py#L475-L487
 
+The kernel's full classical parameter contract is also recorded on the IR itself via `Block.param_slots`: a tuple of `ParamSlot` entries, one per classical kernel argument, carrying `(name, type, kind, ndim, default, bound_value, differentiable)`. `kind` is `RUNTIME_PARAMETER` (the slot survives as a runtime parameter) or `COMPILE_TIME_BOUND` (the slot was folded by `bindings` or a Python signature default). The manifest survives the pipeline so downstream readers can recover the contract without an external Python-side side-car. Pure-quantum arguments (`Qubit`, `Vector[Qubit]`) and structural-container arguments (`Tuple`, `Dict`) do not appear in `param_slots`; they remain in `Block.input_values`.
+
+### Canonical Form
+
+`qamomile.circuit.ir.canonical` provides a normalization step that re-numbers every `Value.uuid` / `Value.logical_id` in a `Block` from a deterministic counter and rewrites every UUID reference embedded in operations and value metadata (`CastMetadata`, `QFixedMetadata`, `ArrayRuntimeMetadata`, `CastOperation.qubit_mapping`). This gives the IR a build-independent identity that is required for content-addressable hashing, IR diffing, and (later) wire serialization.
+
+Key contract:
+
+- **Scope**: `canonicalize` / `canonicalize_and_remap` / `to_canonical_bytes` / `content_hash` accept only `BlockKind.AFFINE` and `BlockKind.ANALYZED`. `HIERARCHICAL` blocks still contain `CallBlockOperation`s that point at sibling `Block`s by Python identity; inline them first. The function raises `ValueError` (kind mismatch) or `NotImplementedError` (residual `CallBlockOperation`) when these preconditions are violated.
+- **Stage neutrality**: canonicalize is a normalization, not a pipeline-stage advance. `Block.kind` is preserved. `classical_lowering` and `plan` MUST NOT be run before canonicalize if the canonical form is meant to be portable — those passes commit to qamomile-internal representations.
+- **Content-only equivalence**: display-only fields (`Block.name`, `Block.output_names`, `Value.name`) are **excluded** from `to_canonical_bytes`. Two structurally-identical kernels with different function names hash equally. `Block.label_args` is functional (it names input ports by position) and is included.
+- **Counter-based UUIDs**: the first `Value` visited gets `00000000-0000-0000-0000-000000000000`, then `…0001`, and so on. `uuid` and `logical_id` share the same monotonically increasing counter; their separate remap tables are exposed via `canonicalize_and_remap`.
+- **Byte format is internal**: `to_canonical_bytes` is intended only to back `content_hash`. It is not a wire format and may change between qamomile releases; do not rely on parsing it. A versioned serialization format is tracked separately.
+- **Hash stability prerequisite**: arbitrary Python objects stored in `ValueMetadata.array_runtime.const_array` / `dict_runtime.bound_data` are stringified via `repr`, so their `repr` must be stable for `content_hash` to be meaningful.
+
+### IR Serialization
+
+`qamomile.circuit.ir.serialize` provides wire-format I/O for `Block`s: `dump_json` / `load_json` and `dump_msgpack` / `load_msgpack`, on top of a shared intermediate Python `dict` (`to_dict` / `from_dict`). Both encoders write a top-level envelope `{"schema_version": <int>, "block": <block dict>}`; the current version is `qamomile.circuit.ir.serialize.SCHEMA_VERSION`.
+
+Key contract:
+
+- **Scope**: only `BlockKind.AFFINE` and `BlockKind.ANALYZED` are accepted at the top level. Inline `HIERARCHICAL` first. A residual `CallBlockOperation` raises `NotImplementedError`; nested Blocks embedded in `ControlledUOperation.block` or `CompositeGateOperation.implementation_block` may legitimately be `HIERARCHICAL` (e.g., the cached `kernel.block` of a leaf kernel passed to `qmc.controlled`) and pass through.
+- **Closed dispatch tables**: every `$type` tag is routed through a hard-coded factory map; the decoder NEVER does `importlib.import_module` or `getattr` on user data. Unknown tags raise `ValueError`. This is the load-bearing security invariant — the wire formats are safe in the same sense as JSON / msgpack themselves (no pickle-style arbitrary code execution).
+- **Numpy payloads**: `ParamSlot.bound_value` and metadata fields may carry `numpy.ndarray`s. They are wrapped as `{"$np_array": True, "dtype": ..., "shape": ..., "data": <bytes>}` with `dtype` restricted to an explicit allow-list (`float64`, `float32`, `int64`, `int32`, `uint8`, `complex128`, ...). The JSON path base64-encodes `data` at the wire boundary; msgpack passes the bytes through natively. msgpack output is therefore typically more compact than JSON for numpy-heavy IR.
+- **Schema version negotiation**: `from_dict` rejects payloads whose `schema_version` does not exactly match the loader's `SCHEMA_VERSION`. A migration table is reserved for a future PR; until then the receiver and sender must agree on the version.
+- **Value identity**: every `Value` appears once in `value_table` and is referenced elsewhere by its UUID. Round-tripping preserves UUIDs verbatim (run `canonicalize` first if you want build-independent identity).
+
 ## Docstring Convention (MANDATORY)
 
 All functions, methods, and classes in `qamomile/` — **public and private alike** — MUST carry a **Google-style docstring** with the appropriate sections filled in, not just a one-line summary. This is enforced by `/local-review` (missing docstrings are P2+).
@@ -187,8 +214,8 @@ Required sections, in this order:
 
 1. **One-line summary** (imperative mood, ending with a period).
 2. *(Optional)* A longer description paragraph after a blank line.
-3. **`Args:`** — one entry per parameter. Include the type in the docstring even though it is also in the signature; describe meaning, units, valid range, and default behavior.
-4. **`Returns:`** — describe the returned value's type and meaning. For tuple returns, name each element. Omit this section only for functions that truly return `None`.
+3. **`Args:`** — one entry per parameter. Use the form `name (type): description`. The type **MUST** appear in the docstring even though it is also in the signature (this is standard Google style; type annotations in the signature alone are NOT sufficient). Describe meaning, units, valid range, and default behavior.
+4. **`Returns:`** — use the form `type: description`. The return type **MUST** be stated explicitly even though it is also in the signature. For tuple returns, name each element and give each its own type. Omit this section only for functions that truly return `None`.
 5. **`Raises:`** — list every exception the function can raise with the condition that triggers it. Omit only if the function genuinely cannot raise.
 6. *(When helpful)* **`Example:`** — a minimal runnable snippet, especially for public API surfaces and `@qkernel` building blocks. Error classes MUST include both correct and incorrect examples.
 
@@ -207,22 +234,23 @@ def transpile(
     analyze → plan → emit) and returns an executable bound to this backend.
 
     Args:
-        kernel: The `@qkernel`-decorated function to compile. Must be an
-            entry-point kernel with concrete (non-symbolic) shapes once
-            `bindings` are applied.
-        bindings: Compile-time parameter bindings, keyed by parameter name.
-            Values are coerced to the parameter's declared handle type.
-            Also resolves array shapes. Defaults to None, meaning no
-            bindings — the kernel must then have no free parameters.
-        parameters: Names of kernel parameters to preserve as backend
-            runtime parameters rather than binding at compile time. Each
-            name must refer to a non-array parameter of the kernel.
-            Defaults to None, meaning all unbound parameters are treated
-            as compile-time fixed.
+        kernel (QKernel): The `@qkernel`-decorated function to compile.
+            Must be an entry-point kernel with concrete (non-symbolic)
+            shapes once `bindings` are applied.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings,
+            keyed by parameter name. Values are coerced to the parameter's
+            declared handle type. Also resolves array shapes. Defaults to
+            None, meaning no bindings — the kernel must then have no free
+            parameters.
+        parameters (list[str] | None): Names of kernel parameters to
+            preserve as backend runtime parameters rather than binding at
+            compile time. Each name must refer to a non-array parameter
+            of the kernel. Defaults to None, meaning all unbound
+            parameters are treated as compile-time fixed.
 
     Returns:
-        An `ExecutableProgram[T]` wrapping the backend circuit and the
-        parameter metadata needed to re-bind runtime parameters.
+        ExecutableProgram[T]: Executable wrapping the backend circuit and
+            the parameter metadata needed to re-bind runtime parameters.
 
     Raises:
         QamomileCompileError: If analyze/plan detects a dependency or shape
@@ -298,6 +326,68 @@ Pure refactors that provably preserve IR output are exempt but still encouraged 
 - The same sampling + expval + randomization requirements apply to the new backend.
 
 Shipping a new backend without retro-actively extending algorithm/stdlib coverage leaves the backend silently unvalidated against real quantum programs.
+
+## Documentation Editing
+
+When making any change under `docs/` (article `.py`/`.ipynb`,
+section landing pages, build scripts, tag taxonomy, etc.), **read
+`docs/README.md` first**. It is the source-of-truth for the docs
+build pipeline and the conventions for adding or editing pages.
+
+Key invariants worth remembering:
+
+- **Auto-managed content (chip blocks, browse-by-tag sections,
+  per-tag pages) is never committed.** `build.sh build` copies the
+  docs tree into a gitignored `docs/_build_src/`, runs
+  `build_doc_tags.py` and `jupytext --update` against the copy, and
+  builds from there. The committed source carries no chip block or
+  `## Browse by tag` heading — those are synthesised into the
+  build-dir copy.
+- **`myst.yml` is hand-written for the tag mechanism.** Article
+  children and per-tag pages are discovered via `pattern:` toc
+  entries (`<section>/*.ipynb`, `tags/*.md`), so adding a new article
+  or new tag does not require editing `myst.yml`. Article ordering
+  inside a section's sidebar is alphabetical by filename — use
+  `01_`, `02_` prefixes if you need a curated order (the way
+  `tutorial/` does). The one exception is the `API Reference` toc
+  region: `docs/generate_api.py` (via `docs/api_gen/toc.py`'s
+  `inject_toc()`) rewrites that region between BEGIN/END markers as
+  part of API doc generation. `build_doc_tags.py` itself never
+  touches `myst.yml`.
+- The committed source must therefore stay clean. PRs that touch
+  tag taxonomy should only diff `tags:` frontmatter lines, not
+  chip-block bodies.
+
+## Documentation Tags (Whitelist)
+
+The doc-tag taxonomy is intentionally small and is enforced by a
+whitelist in `docs/scripts/build_doc_tags.py` (`ALLOWED_TAGS`). The
+whitelist is checked in CI by `tests/docs/test_tag_whitelist.py`, so
+any article with an out-of-whitelist tag fails on every PR.
+
+The whitelist contains two kinds of tags:
+
+- **Section tags** (`tutorial`, `algorithm`, `usage`, `integration`)
+  map 1:1 to the directory layout. **Every article must carry the
+  section tag matching its containing directory.** This keeps cross-
+  section discovery available via the per-tag pages even when the
+  reader is browsing by topic rather than by section.
+- **Topical tags** (domain / method family / article type / technique
+  / other) describe what the article is about. An article carries
+  zero or more topical tags in addition to its section tag.
+
+**Do NOT modify `ALLOWED_TAGS` unless the user has explicitly asked
+to add/remove a tag in this conversation.** A new tag is a deliberate
+taxonomy decision that the maintainer wants to make consciously, not a
+side-effect of writing an article. If a contributor needs a tag that
+doesn't exist:
+
+- Stop and ask the user whether the tag should be admitted, *before*
+  editing `ALLOWED_TAGS`.
+- If approved, the same commit must add the tag to `ALLOWED_TAGS` and
+  use it in the article frontmatter.
+- Don't reach for "it would be nice to also add `<tag>`" rationales.
+  Suggest staying within the existing set unless the user disagrees.
 
 ## Documentation Translation
 

@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Parameterized Quantum Kernels
 #
 # In Tutorial 01 we built qkernels with a fixed number of qubits. Qamomile allows you to treat values that determine circuit structure — such as the number of qubits and layers — as symbolic parameters. For instance, you can write a qkernel that contains `n` qubits and applies H gates to all of them, or one that applies a certain sequence of gates for `p` iterations. In Qamomile, parameters for circuit structure and those for rotation angles are required to be bound at different times: structure parameters must be bound at transpile time, while rotation angles must be bound at runtime.
@@ -177,4 +181,4 @@ for theta in [0.1, 0.5, 1.0]:
 # - The bind/sweep pattern — `transpile(bindings=..., parameters=...)` then loop —
 #   transpiles once and executes many times.
 #
-# **Next**: [Resource Estimation](03_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, and comparing design candidates.
+# **Next**: [Vector Slicing](03_vector_slicing.ipynb) — `VectorView`, slice assignment, nested slices, and passing views to helper kernels.

@@ -14,7 +14,11 @@ from __future__ import annotations
 import re
 from typing import Any, Generic, TypeVar
 
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     CompOp,
@@ -195,6 +199,23 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         for op in operations:
             if isinstance(op, QInitOperation):
                 continue
+            elif isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
+                # SliceArrayOperation / ReleaseSliceViewOperation are
+                # intentionally preserved through partial_eval /
+                # constant_fold so SliceBorrowCheckPass can validate
+                # view borrow / release post-fold; StripSliceArrayOpsPass
+                # (invoked from ``Transpiler.strip_slice_ops`` after the
+                # linearity check) is responsible for removing both
+                # before this point.  Reaching here means the strip
+                # stage was skipped or ran out of order — a
+                # compiler-internal invariant violation.  Fail loudly
+                # rather than silently emitting nothing.
+                raise RuntimeError(
+                    f"{type(op).__name__} reached emit — "
+                    f"StripSliceArrayOpsPass should have stripped it "
+                    f"after SliceBorrowCheckPass.  This is a "
+                    f"compiler bug; please report it."
+                )
             elif isinstance(op, GateOperation):
                 emit_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureOperation):
