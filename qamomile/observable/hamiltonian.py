@@ -646,3 +646,97 @@ def simplify_pauliop_terms(
             pauli_list.append(_pauli_list[0])
 
     return tuple(pauli_list), phase
+
+
+def _pauli_strings_anticommute(
+    term1: tuple[PauliOperator, ...],
+    term2: tuple[PauliOperator, ...],
+) -> bool:
+    """Decide whether two Pauli strings anticommute.
+
+    Two Pauli strings ``P`` and ``Q`` anticommute iff the number of
+    qubits on which both act with different non-identity Pauli
+    operators is odd. On every other qubit ``P`` and ``Q`` commute
+    trivially (one is identity, or the two Paulis are equal), so the
+    overall sign of ``PQ`` versus ``QP`` is ``(-1)`` raised to that
+    count.
+
+    Args:
+        term1 (tuple[PauliOperator, ...]): The first Pauli string,
+            expressed as a tuple of single-qubit Pauli operators with
+            at most one operator per qubit (the canonical form
+            produced by `simplify_pauliop_terms`).
+        term2 (tuple[PauliOperator, ...]): The second Pauli string,
+            in the same canonical form as `term1`.
+
+    Returns:
+        bool: True if the two strings anticommute (``PQ = -QP``),
+            False if they commute (``PQ = QP``).
+
+    Example:
+        >>> X0 = PauliOperator(Pauli.X, 0)
+        >>> Y0 = PauliOperator(Pauli.Y, 0)
+        >>> Z1 = PauliOperator(Pauli.Z, 1)
+        >>> _pauli_strings_anticommute((X0,), (Y0,))
+        True
+        >>> _pauli_strings_anticommute((X0,), (Z1,))
+        False
+    """
+    map1 = {op.index: op.pauli for op in term1 if op.pauli != Pauli.I}
+    map2 = {op.index: op.pauli for op in term2 if op.pauli != Pauli.I}
+
+    anticommute_count = 0
+    for qubit in map1.keys() & map2.keys():
+        if map1[qubit] != map2[qubit]:
+            anticommute_count += 1
+
+    return anticommute_count % 2 == 1
+
+
+def commutator(a: Hamiltonian, b: Hamiltonian) -> Hamiltonian:
+    """Compute the commutator ``[A, B] = A B - B A`` of two Hamiltonians.
+
+    Iterates over the Pauli-string terms of `a` and `b` once and uses
+    the fact that two Pauli strings either commute (``[P, Q] = 0``) or
+    anticommute (``[P, Q] = 2 P Q``). Commuting pairs are skipped
+    entirely, so for sparse or nearly-commuting Hamiltonians this is
+    cheaper than expanding ``a * b - b * a`` and then cancelling.
+    The asymptotic cost is still O(|a| * |b|) Pauli-string pairs in
+    the worst case where every pair anticommutes.
+
+    The constant parts of `a` and `b` commute with every Pauli string
+    and with each other, so they contribute nothing to the commutator
+    and are ignored.
+
+    Args:
+        a (Hamiltonian): The left operand of the commutator.
+        b (Hamiltonian): The right operand of the commutator.
+
+    Returns:
+        Hamiltonian: A new Hamiltonian equal to ``a * b - b * a``.
+            Its `num_qubits` is the maximum of `a.num_qubits` and
+            `b.num_qubits` so the qubit register is preserved even
+            when the commutator collapses to zero on a subset of
+            qubits.
+
+    Example:
+        >>> from qamomile.observable.hamiltonian import X, Y, commutator
+        >>> commutator(X(0), Y(0))
+        Hamiltonian((Z0,): 2j)
+        >>> commutator(X(0), X(1))
+        Hamiltonian()
+    """
+    result = Hamiltonian(num_qubits=max(a.num_qubits, b.num_qubits))
+
+    for term_a, coeff_a in a.terms.items():
+        for term_b, coeff_b in b.terms.items():
+            if not _pauli_strings_anticommute(term_a, term_b):
+                continue
+            product, phase = simplify_pauliop_terms(term_a + term_b)
+            scaled = 2.0 * phase * coeff_a * coeff_b
+            if product:
+                result.add_term(product, scaled)
+            else:
+                result.constant += scaled
+
+    return result
