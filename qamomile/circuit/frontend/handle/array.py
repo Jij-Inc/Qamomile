@@ -891,8 +891,9 @@ class Vector(ArrayBase[T]):
         # type checker narrows ``value`` to ``T`` past this point.
         if isinstance(value, Vector):
             display = self.value.name or "qs"
+            index_str = self._format_index((index,))
             raise TypeError(
-                f"Element assignment to '{display}[{index}]' "
+                f"Element assignment to '{display}[{index_str}]' "
                 f"expected a single element handle, got "
                 f"{type(value).__name__}.  Use ``{display}[a:b] = ...`` "
                 "for slice-level assignment."
@@ -1994,8 +1995,16 @@ class VectorView(Vector[T]):
         # explicit ``TypeError`` so the surface is the same on a view.
         if isinstance(value, Vector):
             display = self.value.name or "view"
+            # ``VectorView.__setitem__``'s int → UInt conversion lives
+            # in the inherited ``Vector.__setitem__``; convert here so
+            # the error message renders ``view[0]`` rather than the
+            # full ``UInt`` dataclass repr.
+            uint_index = (
+                self._make_uint_index(index) if isinstance(index, int) else index
+            )
+            index_str = self._format_index((uint_index,))
             raise TypeError(
-                f"Element assignment on view '{display}[{index}]' "
+                f"Element assignment on view '{display}[{index_str}]' "
                 f"expected a single element handle, got "
                 f"{type(value).__name__}.  Use ``{display}[a:b] = ...`` "
                 "for slice-level assignment."

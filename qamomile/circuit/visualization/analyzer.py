@@ -2370,8 +2370,14 @@ class CircuitAnalyzer:
         # Without this branch the lid falls through and the caller
         # allocates a phantom wire for a value that actually aliases
         # root slots (visible as ghost wires past ``num_qubits`` in
-        # rendered circuits).  Resolve to the root's first
-        # slice-covered element so the alias points at a real wire.
+        # rendered circuits).  Alias ``lid`` to the root's first
+        # slice-covered element's wire and return the *array* lid
+        # itself (NOT the element key) — callers (e.g. inline-block
+        # remap consumers, ControlledU / CompositeGate paths) keep
+        # using the returned string as a logical-id key for further
+        # ``f"{lid}_[{i}]"`` element-key construction; returning an
+        # element key here would yield malformed keys like
+        # ``f"q.lid_[0]_[{i}]"``.
         if (
             isinstance(value, ArrayValue)
             and getattr(value, "slice_of", None) is not None
@@ -2383,9 +2389,10 @@ class CircuitAnalyzer:
                 root_elem_key = f"{root_lid}_[{start}]"
                 if root_elem_key in qubit_map:
                     qubit_map[lid] = qubit_map[root_elem_key]
-                    return root_elem_key
+                    return lid
                 if root_lid in qubit_map:
-                    return root_lid
+                    qubit_map[lid] = qubit_map[root_lid] + start
+                    return lid
 
         if hasattr(value, "parent_array") and value.parent_array is not None:
             parent_array = value.parent_array
@@ -2820,6 +2827,14 @@ class CircuitAnalyzer:
                     operand, resolved_lid, qubit_map, param_values
                 )
                 if size is not None:
+                    # Loop-with-``else``: the ``else`` block runs only
+                    # when the loop completes without a break.  A
+                    # successful resolution (including an empty slice
+                    # where ``size == 0``) returns the accumulated
+                    # ``wires`` deterministically — matching the
+                    # function contract that documents ``[]`` as the
+                    # "zero qubits" outcome.  A missing-key break
+                    # falls through to the other resolution branches.
                     wires: list[int] = []
                     for i in range(size):
                         root_idx = start + step * i
@@ -2829,9 +2844,8 @@ class CircuitAnalyzer:
                         elif root_lid in qubit_map:
                             wires.append(qubit_map[root_lid] + root_idx)
                         else:
-                            wires = []
                             break
-                    if wires:
+                    else:
                         return wires
 
         if (
