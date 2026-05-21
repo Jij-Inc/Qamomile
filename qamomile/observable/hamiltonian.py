@@ -219,16 +219,43 @@ class Hamiltonian:
 
         operators, phase = simplify_pauliop_terms(operators)
         if operators:
-            # Sort the operators to ensure consistent representation
-            operators = tuple(
-                sorted(operators, key=lambda x: x.index * 10 + x.pauli.value)
-            )
-            if operators in self._terms:
-                self._terms[operators] += phase * coeff
-            else:
-                self._terms[operators] = phase * coeff
+            self._add_simplified_term(operators, phase * coeff)
         else:
             self.constant += phase * coeff
+
+    def _add_simplified_term(
+        self,
+        operators: tuple[PauliOperator, ...],
+        coeff: float | complex,
+    ) -> None:
+        """Add a pre-simplified Pauli term, skipping a second simplification pass.
+
+        Fast path for callers that have already run
+        ``simplify_pauliop_terms`` and know ``operators`` is a canonical
+        non-empty Pauli string — at most one operator per qubit, no
+        identities. The helper only sorts the operators into the
+        canonical (index, pauli) order and updates ``_terms``; it does
+        NOT re-run ``simplify_pauliop_terms`` or fold any phase, so the
+        caller is responsible for passing the fully resolved coefficient.
+
+        Args:
+            operators (tuple[PauliOperator, ...]): A pre-simplified,
+                non-empty Pauli string. Empty tuples must be routed by
+                the caller to ``self.constant`` directly.
+            coeff (float | complex): The fully resolved coefficient to
+                add. Summed with any existing coefficient for the same
+                canonicalized term.
+
+        Returns:
+            None: This method mutates ``self._terms`` in place.
+        """
+        sorted_ops = tuple(
+            sorted(operators, key=lambda x: x.index * 10 + x.pauli.value)
+        )
+        if sorted_ops in self._terms:
+            self._terms[sorted_ops] += coeff
+        else:
+            self._terms[sorted_ops] = coeff
 
     @property
     def num_qubits(self) -> int:
@@ -735,7 +762,9 @@ def commutator(a: Hamiltonian, b: Hamiltonian) -> Hamiltonian:
             product, phase = simplify_pauliop_terms(term_a + term_b)
             scaled = 2.0 * phase * coeff_a * coeff_b
             if product:
-                result.add_term(product, scaled)
+                # ``product`` is already simplified, so route around
+                # the second simplify pass inside ``add_term``.
+                result._add_simplified_term(product, scaled)
             else:
                 result.constant += scaled
 

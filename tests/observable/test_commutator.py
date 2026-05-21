@@ -38,27 +38,32 @@ def _naive_commutator(a: Hamiltonian, b: Hamiltonian) -> Hamiltonian:
 
 
 def _hamiltonians_close(a: Hamiltonian, b: Hamiltonian, *, atol: float = 1e-10) -> bool:
-    """Compare two Hamiltonians up to a numerical tolerance on coefficients.
+    """Compare two Hamiltonians up to an absolute tolerance on coefficients.
+
+    Pins ``np.isclose``'s ``rtol`` to ``0.0`` so the comparison is purely
+    absolute — without this, the default ``rtol=1e-5`` would silently
+    relax the threshold for large-magnitude coefficients and weaken the
+    equivalence check in ``test_random_hamiltonians_match_naive``.
 
     Args:
         a (Hamiltonian): The left-hand Hamiltonian to compare.
         b (Hamiltonian): The right-hand Hamiltonian to compare.
         atol (float): Absolute tolerance forwarded to ``np.isclose``
-            for both the constant term and every Pauli-string
-            coefficient. Defaults to 1e-10.
+            (with ``rtol=0.0``) for both the constant term and every
+            Pauli-string coefficient. Defaults to 1e-10.
 
     Returns:
         bool: True when the constant terms and all term coefficients
             (over the union of both ``terms`` dicts) agree within
             ``atol``; False otherwise.
     """
-    if not np.isclose(a.constant, b.constant, atol=atol):
+    if not np.isclose(a.constant, b.constant, atol=atol, rtol=0.0):
         return False
     keys = set(a.terms) | set(b.terms)
     for key in keys:
         ca = a.terms.get(key, 0.0)
         cb = b.terms.get(key, 0.0)
-        if not np.isclose(ca, cb, atol=atol):
+        if not np.isclose(ca, cb, atol=atol, rtol=0.0):
             return False
     return True
 
