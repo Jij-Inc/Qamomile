@@ -18,6 +18,7 @@ from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, 
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import (
     AffineTypeError,
+    QubitBorrowConflictError,
     QubitConsumedError,
     UnreturnedBorrowError,
 )
@@ -444,9 +445,12 @@ class ArrayBase(Handle, Generic[T]):
         """Get an element at the given indices.
 
         Raises:
-            QubitConsumedError: If the array was consumed, the element is
-                already borrowed (for quantum arrays), or the slot is
-                currently owned by a ``VectorView`` slice.
+            QubitConsumedError: If the array (or the targeted slot) was
+                already destroyed by a prior destructive operation
+                (``measure`` / ``cast`` / ``expval``).
+            QubitBorrowConflictError: If the element is already borrowed,
+                or the slot is currently owned by a ``VectorView`` slice
+                (whether on ``self`` or a nested outer view).
         """
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
@@ -480,7 +484,7 @@ class ArrayBase(Handle, Generic[T]):
                     operation_name="array element access",
                 )
             if isinstance(owner, ArrayBase):
-                raise QubitConsumedError(
+                raise QubitBorrowConflictError(
                     f"Parent slot '{self.value.name}[{index_str}]' is currently "
                     f"held by a VectorView slice.\n"
                     f"Access it through the view, or let the view finish "
@@ -488,7 +492,7 @@ class ArrayBase(Handle, Generic[T]):
                     handle_name=f"{self.value.name}[{index_str}]",
                     operation_name="array element access",
                 )
-            raise QubitConsumedError(
+            raise QubitBorrowConflictError(
                 f"Array element '{self.value.name}[{index_str}]' is already borrowed.\n"
                 f"Return it before borrowing again.\n\n"
                 f"Fix:\n"
@@ -525,7 +529,7 @@ class ArrayBase(Handle, Generic[T]):
                     and not _is_destroyed_slot_owner(root_owner)
                 ):
                     root_name = self._slice_parent.value.name or "array"
-                    raise QubitConsumedError(
+                    raise QubitBorrowConflictError(
                         f"View element '{self.value.name}[{index_str}]' "
                         f"resolves to '{root_name}[{root_idx}]', which is "
                         f"currently held by another slice view "
@@ -825,9 +829,11 @@ class Vector(ArrayBase[T]):
             index = self._make_uint_index(index)
         return self._get_element((index,))
 
-    def __setitem__(
-        self, index: "int | UInt | slice", value: "T | VectorView[T]"
-    ) -> None:
+    @overload
+    def __setitem__(self, index: int | UInt, value: T) -> None: ...
+    @overload
+    def __setitem__(self, index: slice, value: "Vector[T]") -> None: ...
+    def __setitem__(self, index: "int | UInt | slice", value: "T | Vector[T]") -> None:
         """Set element at the given index, or return a view via slice assignment.
 
         For an integer / ``UInt`` index this is the existing element
@@ -839,9 +845,16 @@ class Vector(ArrayBase[T]):
         side must be a ``VectorView`` covering exactly the same
         root-space slot set as ``self[index]`` would build (typically
         produced by a broadcast such as
-        ``qmc.h(self[index])``).  The view's parent ownership is
-        released on both sides of the IR boundary: ``value.consume(...)``
-        clears the frontend ``_borrowed_indices`` entries, and a
+        ``qmc.h(self[index])``).  Although the static type hint accepts
+        any ``Vector[T]``, the runtime rejects a non-``VectorView``
+        right-hand side with ``TypeError`` — the wider hint exists so
+        that helper kernels which broadcast over a view and annotate
+        their return as ``Vector[T]`` (the natural choice when the
+        helper is meant to work on either a whole register or a view)
+        can be slice-assigned without a cast.  The view's parent
+        ownership is released on both sides of the IR boundary:
+        ``value.consume(...)`` clears the frontend
+        ``_borrowed_indices`` entries, and a
         :class:`ReleaseSliceViewOperation` is emitted so the post-fold
         :class:`SliceBorrowCheckPass` can mirror the release in IR
         state.  See :meth:`_return_slice_view` for the full validation
@@ -870,9 +883,17 @@ class Vector(ArrayBase[T]):
             return self._return_slice_view(index, value)
         if isinstance(index, int):
             index = self._make_uint_index(index)
+        # Static narrowing: the slice branch above returns; non-slice
+        # indices must receive a single element handle, not a vector.
+        # The overload set enforces this at the call site; the assert
+        # backstops the runtime invariant for the type checker.
+        assert not isinstance(value, Vector), (
+            f"Element assignment to '{self.value.name}[{index}]' got a "
+            f"{type(value).__name__}; expected a single element handle."
+        )
         self._return_element((index,), value)
 
-    def _return_slice_view(self, s: slice, value: "T | VectorView[T]") -> None:
+    def _return_slice_view(self, s: slice, value: "T | Vector[T]") -> None:
         """Accept a ``VectorView`` as the explicit return of ``self[s]``.
 
         Validates that ``value`` covers the same root-space slot set
@@ -1756,8 +1777,8 @@ class VectorView(Vector[T]):
             A ``VectorView`` whose IR value is ``sliced_av``.
 
         Raises:
-            QubitConsumedError: If any covered parent slot is already
-                held by another slice view or currently borrowed.
+            QubitBorrowConflictError: If any covered parent slot is
+                already held by another slice view or currently borrowed.
         """
         instance = object.__new__(cls)
         # ``value`` is the sliced ArrayValue itself.  Element accesses
@@ -1793,7 +1814,7 @@ class VectorView(Vector[T]):
                 existing = parent._borrowed_indices.get(key)
                 if existing is not None:
                     if isinstance(existing, ArrayBase):
-                        raise QubitConsumedError(
+                        raise QubitBorrowConflictError(
                             f"Parent slot '{parent.value.name}[{idx}]' is already "
                             f"owned by another slice view '{existing.value.name}' "
                             f"and cannot be re-sliced while that view is live.  "
@@ -1802,7 +1823,7 @@ class VectorView(Vector[T]):
                             handle_name=f"{parent.value.name}[{idx}]",
                             operation_name="array slicing",
                         )
-                    raise QubitConsumedError(
+                    raise QubitBorrowConflictError(
                         f"Cannot slice across '{parent.value.name}[{idx}]' — "
                         f"it is currently borrowed.  Return the borrowed "
                         f"element before slicing.",
@@ -1903,9 +1924,11 @@ class VectorView(Vector[T]):
             return self._nested_slice(index)
         return super().__getitem__(index)
 
-    def __setitem__(
-        self, index: "int | UInt | slice", value: "T | VectorView[T]"
-    ) -> None:
+    @overload
+    def __setitem__(self, index: int | UInt, value: T) -> None: ...
+    @overload
+    def __setitem__(self, index: slice, value: "Vector[T]") -> None: ...
+    def __setitem__(self, index: "int | UInt | slice", value: "T | Vector[T]") -> None:
         """Return a borrowed element / sub-view to its parent slot(s).
 
         Element assignment (``view[i] = q``) delegates to the inherited
@@ -1915,7 +1938,10 @@ class VectorView(Vector[T]):
         must be a ``VectorView`` covering the same root-space slot set
         as ``view[a:b]`` would build (composed back to the shared root
         parent), and the view is consumed and recorded for release in
-        IR via :class:`ReleaseSliceViewOperation`.
+        IR via :class:`ReleaseSliceViewOperation`.  The static type
+        hint accepts ``Vector[T]`` for the slice case; the runtime
+        rejects a non-``VectorView`` right-hand side with ``TypeError``
+        (see :class:`Vector.__setitem__` for the rationale).
 
         Args:
             index: View-local index, or a ``slice`` describing the
@@ -1936,6 +1962,11 @@ class VectorView(Vector[T]):
         """
         if isinstance(index, slice):
             return self._return_slice_view(index, value)
+        # See ``Vector.__setitem__`` for the narrowing rationale.
+        assert not isinstance(value, Vector), (
+            f"Element assignment on view '{self.value.name}[{index}]' got a "
+            f"{type(value).__name__}; expected a single element handle."
+        )
         super().__setitem__(index, value)
 
     def _normalize_slice_to_covered(self, s: slice) -> tuple[int, ...]:

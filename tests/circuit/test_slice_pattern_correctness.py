@@ -614,7 +614,7 @@ class TestMultiViewOverlap:
 
     def test_top_level_overlap_raises_at_trace(self):
         """``a = q[0:3]; b = q[0:2]`` — two live views with overlapping coverage."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -626,13 +626,13 @@ class TestMultiViewOverlap:
             return qmc.measure(q)
 
         with pytest.raises(
-            QubitConsumedError, match="already owned by another slice view"
+            QubitBorrowConflictError, match="already owned by another slice view"
         ):
             _ = kern.block
 
     def test_body_internal_overlap_raises_at_trace(self):
         """Outer view live across the body, body creates an overlapping inner view."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -645,7 +645,7 @@ class TestMultiViewOverlap:
             return qmc.measure(q)
 
         with pytest.raises(
-            QubitConsumedError, match="already owned by another slice view"
+            QubitBorrowConflictError, match="already owned by another slice view"
         ):
             _ = kern.block
 
@@ -744,7 +744,7 @@ class TestNestedSliceReturnOrder:
 
     def test_outer_access_at_inner_slot_raises(self):
         """Touching ``a[overlap_idx]`` while inner ``b`` owns that slot."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -755,6 +755,6 @@ class TestNestedSliceReturnOrder:
             return qmc.measure(q)
 
         with pytest.raises(
-            QubitConsumedError, match="currently held by another slice view"
+            QubitBorrowConflictError, match="currently held by another slice view"
         ):
             _ = kern.block

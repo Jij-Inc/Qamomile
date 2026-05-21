@@ -485,7 +485,7 @@ class TestSliceBulkBorrow:
 
     def test_parent_access_on_covered_slot_is_rejected(self):
         """``q[0]`` after ``q[0:4:2]`` raises because slot 0 is slice-owned."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Qubit]:
@@ -495,7 +495,7 @@ class TestSliceBulkBorrow:
             q[0] = qmc.h(q[0])
             return q
 
-        with pytest.raises(QubitConsumedError, match="held by a VectorView slice"):
+        with pytest.raises(QubitBorrowConflictError, match="held by a VectorView slice"):
             _ = kern.block
 
     def test_parent_access_on_non_covered_slot_is_fine(self):
@@ -567,7 +567,7 @@ class TestSliceBulkBorrow:
         covered slots.
         """
 
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Qubit]:
@@ -579,7 +579,7 @@ class TestSliceBulkBorrow:
             return q
 
         with pytest.raises(
-            QubitConsumedError, match="already owned by another slice view"
+            QubitBorrowConflictError, match="already owned by another slice view"
         ):
             _ = kern.block
 
@@ -690,7 +690,7 @@ class TestVectorViewAsKernelArgument:
         sub-kernel's return value, not released.  Slice-assigning the
         returned view back releases the parent's slot.
         """
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -710,7 +710,7 @@ class TestVectorViewAsKernelArgument:
             q[0] = qmc.x(q[0])
             return q
 
-        with pytest.raises(QubitConsumedError, match="held by a VectorView slice"):
+        with pytest.raises(QubitBorrowConflictError, match="held by a VectorView slice"):
             _ = kern_no_return.block
 
         # The strict-return form releases the borrow before touching q[0].
@@ -895,7 +895,7 @@ class TestPostFoldLinearity:
         Scalar ``UInt`` parameters that are concrete in ``bindings`` now
         carry ``is_constant() == True`` at trace time, so the frontend's
         bulk-borrow tracker can enumerate the slice's coverage and
-        catches the aliasing immediately (``QubitConsumedError``).
+        catches the aliasing immediately (``QubitBorrowConflictError``).
         When bounds stay symbolic — e.g. derived from an unbound
         parameter through arithmetic — ``SliceBorrowCheckPass``
         resolves them post-fold and raises
@@ -903,7 +903,7 @@ class TestPostFoldLinearity:
         """
         pytest.importorskip("qiskit")
         from qamomile.circuit.transpiler.errors import (
-            QubitConsumedError,
+            QubitBorrowConflictError,
             SliceBorrowViolationError,
         )
         from qamomile.qiskit import QiskitTranspiler
@@ -918,7 +918,7 @@ class TestPostFoldLinearity:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((SliceBorrowViolationError, QubitConsumedError)):
+        with pytest.raises((SliceBorrowViolationError, QubitBorrowConflictError)):
             transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
 
     def test_symbolic_slice_disjoint_from_direct_access_passes(self):
@@ -955,7 +955,7 @@ class TestPostFoldLinearity:
         """
         pytest.importorskip("qiskit")
         from qamomile.circuit.transpiler.errors import (
-            QubitConsumedError,
+            QubitBorrowConflictError,
             SliceBorrowViolationError,
         )
         from qamomile.qiskit import QiskitTranspiler
@@ -973,7 +973,7 @@ class TestPostFoldLinearity:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((SliceBorrowViolationError, QubitConsumedError)):
+        with pytest.raises((SliceBorrowViolationError, QubitBorrowConflictError)):
             transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
 
     def test_nested_const_view_locks_parent_slot(self):
@@ -988,7 +988,7 @@ class TestPostFoldLinearity:
         The fix composes the two affine maps and enumerates the
         covered root indices for the bulk-borrow tracker.
         """
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Qubit]:
@@ -998,7 +998,7 @@ class TestPostFoldLinearity:
             inner[0] = qmc.h(inner[0])
             return q
 
-        with pytest.raises(QubitConsumedError):
+        with pytest.raises(QubitBorrowConflictError):
             kern.block  # trigger tracing
 
 
@@ -1562,16 +1562,16 @@ class TestRound2Reviewer:
         Under the strict no-multi-view policy
         (``VectorView._wrap``'s overlap check), constructing a second
         top-level view that overlaps an existing live view is rejected
-        immediately with ``QubitConsumedError``.  This replaces the
-        prior "opportunistic drain" semantics where an unused outer
-        view was silently drained by a later overlapping slice —
-        which made ``a = q[0:3]; b = q[1:4]`` succeed at the cost of
-        very surprising ownership transfer.  Nested slicing
+        immediately with ``QubitBorrowConflictError``.  This replaces
+        the prior "opportunistic drain" semantics where an unused
+        outer view was silently drained by a later overlapping slice
+        — which made ``a = q[0:3]; b = q[1:4]`` succeed at the cost
+        of very surprising ownership transfer.  Nested slicing
         (``view[0:2]``) is still allowed because ``_nested_slice``
         explicitly releases the outer view's borrow before the inner
         view's ``_wrap`` runs.
         """
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -1582,7 +1582,7 @@ class TestRound2Reviewer:
             return qmc.measure(q)
 
         with pytest.raises(
-            QubitConsumedError, match="already owned by another slice view"
+            QubitBorrowConflictError, match="already owned by another slice view"
         ):
             _ = kern.block
 
@@ -1819,7 +1819,7 @@ class TestRound4Reviewer:
 
     def test_two_same_range_views_with_destructive_consume_rejected(self):
         """``odd1=q[1::2]; odd2=q[1::2]; measure(odd1); expval(odd2,obs)`` is rejected."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern(obs: qmc.Observable) -> qmc.Float:
@@ -1829,12 +1829,12 @@ class TestRound4Reviewer:
             _ = qmc.measure(odd1)
             return qmc.expval(odd2, obs)
 
-        with pytest.raises(QubitConsumedError):
+        with pytest.raises(QubitBorrowConflictError):
             kern.block
 
     def test_drain_then_destructive_consume_marks_consumed_slots(self):
         """After drain transferring slot ownership, destructive consume still marks."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern(obs: qmc.Observable) -> qmc.Float:
@@ -1847,12 +1847,12 @@ class TestRound4Reviewer:
             _ = qmc.measure(view1)
             return qmc.expval(view2, obs)
 
-        with pytest.raises(QubitConsumedError):
+        with pytest.raises(QubitBorrowConflictError):
             kern.block
 
     def test_double_destructive_consume_on_same_slots_rejected(self):
         """``measure(q[1::2]); measure(q[1::2])`` raises rather than silently succeeding."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -1862,7 +1862,7 @@ class TestRound4Reviewer:
             _ = qmc.measure(v1)
             return qmc.measure(v2)
 
-        with pytest.raises(QubitConsumedError):
+        with pytest.raises(QubitBorrowConflictError):
             kern.block
 
     def test_disjoint_views_with_destructive_consume_each_allowed(self):
@@ -1882,7 +1882,7 @@ class TestRound4Reviewer:
 
     def test_consumed_marker_survives_non_destructive_view_consume(self):
         """A non-destructive consume on an overlapping view does not erase markers."""
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -1895,7 +1895,7 @@ class TestRound4Reviewer:
             # slip past the consumed-slot check.
             return qmc.measure(v2)
 
-        with pytest.raises(QubitConsumedError):
+        with pytest.raises(QubitBorrowConflictError):
             kern.block
 
     # ----- R4-C: cast(view, ...) carrier-key root-space resolution -----------
@@ -2484,13 +2484,13 @@ class TestSliceAssignment:
         Under the strict no-multi-view policy
         (``VectorView._wrap``'s overlap check), the second
         same-range view ``b`` is rejected immediately with
-        ``QubitConsumedError`` — no need for the downstream slice
-        assignment to detect a stale ``a``.  This is stricter than
-        the previous "opportunistic drain + ownership check at
+        ``QubitBorrowConflictError`` — no need for the downstream
+        slice assignment to detect a stale ``a``.  This is stricter
+        than the previous "opportunistic drain + ownership check at
         ``q[0:2] = a``" two-step rejection; the failure mode is now
         loud at the obvious site (the construction of ``b``).
         """
-        from qamomile.circuit.transpiler.errors import QubitConsumedError
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -2502,7 +2502,7 @@ class TestSliceAssignment:
             return qmc.measure(q)
 
         with pytest.raises(
-            QubitConsumedError, match="already owned by another slice view"
+            QubitBorrowConflictError, match="already owned by another slice view"
         ):
             _ = kern.block
 

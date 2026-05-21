@@ -251,6 +251,45 @@ class QubitConsumedError(AffineTypeError):
     pass
 
 
+class QubitBorrowConflictError(AffineTypeError):
+    """Qubit slot inaccessible because another live handle borrows it.
+
+    Raised when a qubit slot cannot be accessed because another live
+    handle currently borrows it — a slice view that has not been
+    returned, an outstanding element borrow, or any future borrow form
+    Qamomile may add.  Unlike :class:`QubitConsumedError`, the slot is
+    not destroyed: releasing the borrowing handle (slice assignment,
+    element write-back, etc.) restores access.
+
+    Example of incorrect code (overlapping slice views)::
+
+        a = q[0:3]      # q[0..2] now borrowed by ``a``
+        b = q[2:5]      # ERROR: q[2] is still borrowed by ``a``
+
+    Correct code::
+
+        a = q[0:3]
+        q[0:3] = a      # return ``a`` first
+        b = q[2:5]      # now safe
+
+    Example of incorrect code (element borrow not returned before
+    borrowing a neighbour)::
+
+        q0 = qubits[0]
+        q0 = qm.h(q0)
+        q1 = qubits[1]  # ERROR: q0 is still borrowed
+
+    Correct code::
+
+        q0 = qubits[0]
+        q0 = qm.h(q0)
+        qubits[0] = q0  # return the element first
+        q1 = qubits[1]  # now safe
+    """
+
+    pass
+
+
 class QubitAliasError(AffineTypeError):
     """Same qubit used multiple times in one operation.
 
