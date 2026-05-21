@@ -25,14 +25,6 @@ project:
       file: algorithm/index.md
       children:
         - pattern: algorithm/*.ipynb
-    - title: VQA
-      file: vqa/index.md
-      children:
-        - pattern: vqa/*.ipynb
-    - title: Optimization
-      file: optimization/index.md
-      children:
-        - pattern: optimization/*.ipynb
     - pattern: "tags/*.md"
       hidden: true
     - title: Usage
