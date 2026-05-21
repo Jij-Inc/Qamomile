@@ -890,11 +890,12 @@ class Vector(ArrayBase[T]):
         # the error stays stable even under ``python -O``, and the
         # type checker narrows ``value`` to ``T`` past this point.
         if isinstance(value, Vector):
+            display = self.value.name or "qs"
             raise TypeError(
-                f"Element assignment to '{self.value.name}[{index}]' "
+                f"Element assignment to '{display}[{index}]' "
                 f"expected a single element handle, got "
-                f"{type(value).__name__}.  Use ``q[a:b] = ...`` for "
-                "slice-level assignment."
+                f"{type(value).__name__}.  Use ``{display}[a:b] = ...`` "
+                "for slice-level assignment."
             )
         self._return_element((index,), value)
 
@@ -1782,8 +1783,13 @@ class VectorView(Vector[T]):
             A ``VectorView`` whose IR value is ``sliced_av``.
 
         Raises:
+            QubitConsumedError: If any covered parent slot has been
+                destroyed by a prior destructive operation
+                (``measure`` / ``cast`` / ``expval``) on an
+                overlapping view.
             QubitBorrowConflictError: If any covered parent slot is
-                already held by another slice view or currently borrowed.
+                already held by another live slice view or currently
+                borrowed.
         """
         instance = object.__new__(cls)
         # ``value`` is the sliced ArrayValue itself.  Element accesses
@@ -1818,6 +1824,23 @@ class VectorView(Vector[T]):
                 key = (f"const:{idx}",)
                 existing = parent._borrowed_indices.get(key)
                 if existing is not None:
+                    # A destructively-consumed view stays in
+                    # ``_borrowed_indices`` with ``_consumed=True`` to
+                    # leave a breadcrumb on its covered slots; touching
+                    # those slots later is a permanent-loss event, not
+                    # a releasable borrow conflict.  Surface it as
+                    # ``QubitConsumedError`` to match the semantic of
+                    # "the physical qubit is gone".
+                    if _is_destroyed_slot_owner(existing):
+                        raise QubitConsumedError(
+                            f"Cannot slice across "
+                            f"'{parent.value.name}[{idx}]' — it was "
+                            f"already destroyed by a prior destructive "
+                            f"view operation (e.g. measure / cast / "
+                            f"expval) on an overlapping view.",
+                            handle_name=f"{parent.value.name}[{idx}]",
+                            operation_name="array slicing",
+                        )
                     if isinstance(existing, ArrayBase):
                         raise QubitBorrowConflictError(
                             f"Parent slot '{parent.value.name}[{idx}]' is already "
@@ -1970,11 +1993,12 @@ class VectorView(Vector[T]):
         # See ``Vector.__setitem__`` for the rationale; mirror its
         # explicit ``TypeError`` so the surface is the same on a view.
         if isinstance(value, Vector):
+            display = self.value.name or "view"
             raise TypeError(
-                f"Element assignment on view '{self.value.name}[{index}]' "
+                f"Element assignment on view '{display}[{index}]' "
                 f"expected a single element handle, got "
-                f"{type(value).__name__}.  Use ``view[a:b] = ...`` for "
-                "slice-level assignment."
+                f"{type(value).__name__}.  Use ``{display}[a:b] = ...`` "
+                "for slice-level assignment."
             )
         super().__setitem__(index, value)
 

@@ -1902,6 +1902,33 @@ class TestRound4Reviewer:
         with pytest.raises(QubitBorrowConflictError):
             kern.block
 
+    def test_recreate_view_after_destructive_consume_raises_consumed(self):
+        """``measure(q[1::2])`` then ``q[1::2]`` again surfaces as
+        ``QubitConsumedError``, not the live-borrow conflict.
+
+        The earlier Round-4 tests pin the LIVE-overlap variant: ``v1 =
+        q[1::2]; v2 = q[1::2]`` rejects ``v2``'s construction before
+        any destructive consume happens (``QubitBorrowConflictError``).
+        This test pins the *post-destructive-consume* recreation path:
+        ``v1`` is created and immediately measured, leaving a
+        destroyed-slot breadcrumb in the parent's borrow table; a
+        later ``q[1::2]`` walks that table and must surface the slot
+        loss as ``QubitConsumedError`` (the slot is gone forever; no
+        amount of returning a handle restores it).
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            v1 = q[1::2]
+            _ = qmc.measure(v1)  # destroys q[1], q[3]
+            v2 = q[1::2]  # ← must raise QubitConsumedError
+            return qmc.measure(v2)
+
+        with pytest.raises(QubitConsumedError, match="already destroyed"):
+            kern.block
+
     # ----- R4-C: cast(view, ...) carrier-key root-space resolution -----------
 
     def test_cast_view_to_qfixed_measures_root_qubits(self):
