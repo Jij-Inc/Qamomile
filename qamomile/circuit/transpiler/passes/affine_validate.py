@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import AffineTypeError, ValidationError
@@ -58,6 +62,24 @@ class AffineValidationPass(Pass[Block, Block]):
         """
         for op in operations:
             op_name = type(op).__name__
+
+            # SliceArrayOperation takes the parent array as an operand
+            # but does NOT consume it — it only produces metadata
+            # describing a strided view.  ReleaseSliceViewOperation
+            # likewise carries a sliced ArrayValue operand without
+            # consuming it: the op is a declarative borrow-return
+            # marker for SliceBorrowCheckPass and does not
+            # contribute to the affine-type consume count.
+            #
+            # ``affine_validate`` runs *before* ``partial_eval`` (and
+            # therefore before ``slice_borrow_check`` /
+            # ``strip_slice_ops`` — see the pipeline in
+            # ``Transpiler.transpile()``), so both ops are still
+            # present in the block at this point and the affine-type
+            # walk would otherwise mis-count their array operand as a
+            # consume.  Skip them explicitly.
+            if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
+                continue
 
             # Check each operand
             for operand in op.operands:

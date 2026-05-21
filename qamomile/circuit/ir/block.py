@@ -6,6 +6,7 @@ import dataclasses
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
+from qamomile.circuit.ir.parameter import ParamSlot
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
@@ -43,12 +44,37 @@ class Block:
     # Parameters (unbound values for circuit parameters)
     parameters: dict[str, Value] = dataclasses.field(default_factory=dict)
 
+    # Per-classical-argument metadata describing the kernel's parameter
+    # contract (name, type, runtime-or-bound kind, default, bound_value,
+    # differentiability hint). Populated by the frontend (``func_to_block``
+    # / ``QKernel.build``) and preserved by every pass. Empty for
+    # synthetic blocks that have no Python-level classical interface
+    # (e.g., nested composite-gate implementation blocks).
+    param_slots: tuple[ParamSlot, ...] = dataclasses.field(default_factory=tuple)
+
     def __post_init__(self):
+        """Validate label_args / input_values agreement and param_slots disjointness.
+
+        Raises:
+            ValueError: If ``label_args`` is non-empty and its length
+                does not match ``input_values``, or if any
+                ``ParamSlot.name`` appears more than once across
+                ``param_slots``.
+        """
         if self.label_args and len(self.label_args) != len(self.input_values):
             raise ValueError(
                 f"label_args length ({len(self.label_args)}) must match "
                 f"input_values length ({len(self.input_values)})"
             )
+        if self.param_slots:
+            seen: set[str] = set()
+            for slot in self.param_slots:
+                if slot.name in seen:
+                    raise ValueError(
+                        f"Duplicate ParamSlot name {slot.name!r} in Block.param_slots; "
+                        f"every classical kernel argument may appear at most once."
+                    )
+                seen.add(slot.name)
 
     def unbound_parameters(self) -> list[str]:
         """Return list of unbound parameter names."""
