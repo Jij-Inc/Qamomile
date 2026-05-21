@@ -276,13 +276,13 @@ class QubitBorrowConflictError(AffineTypeError):
     borrowing a neighbour)::
 
         q0 = qubits[0]
-        q0 = qm.h(q0)
+        q0 = qmc.h(q0)
         q1 = qubits[1]  # ERROR: q0 is still borrowed
 
     Correct code::
 
         q0 = qubits[0]
-        q0 = qm.h(q0)
+        q0 = qmc.h(q0)
         qubits[0] = q0  # return the element first
         q1 = qubits[1]  # now safe
     """
@@ -315,12 +315,12 @@ class UnreturnedBorrowError(AffineTypeError):
 
     Example of incorrect code:
         q0 = qubits[0]
-        q0 = qm.h(q0)
+        q0 = qmc.h(q0)
         q1 = qubits[1]  # ERROR: q0 not returned yet
 
     Correct code:
         q0 = qubits[0]
-        q0 = qm.h(q0)
+        q0 = qmc.h(q0)
         qubits[0] = q0  # Return the borrowed element
         q1 = qubits[1]  # Now safe to borrow another
     """
