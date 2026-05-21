@@ -234,9 +234,10 @@ class Hamiltonian:
         ``simplify_pauliop_terms`` and know ``operators`` is a canonical
         non-empty Pauli string — at most one operator per qubit, no
         identities. The helper only sorts the operators into the
-        canonical (index, pauli) order and updates ``_terms``; it does
-        NOT re-run ``simplify_pauliop_terms`` or fold any phase, so the
-        caller is responsible for passing the fully resolved coefficient.
+        canonical ``(index, pauli.value)`` order and updates ``_terms``;
+        it does NOT re-run ``simplify_pauliop_terms`` or fold any phase,
+        so the caller is responsible for passing the fully resolved
+        coefficient.
 
         Args:
             operators (tuple[PauliOperator, ...]): A pre-simplified,
@@ -249,9 +250,7 @@ class Hamiltonian:
         Returns:
             None: This method mutates ``self._terms`` in place.
         """
-        sorted_ops = tuple(
-            sorted(operators, key=lambda x: x.index * 10 + x.pauli.value)
-        )
+        sorted_ops = tuple(sorted(operators, key=lambda x: (x.index, x.pauli.value)))
         if sorted_ops in self._terms:
             self._terms[sorted_ops] += coeff
         else:
@@ -698,13 +697,28 @@ def _pauli_strings_anticommute(
     overall sign of ``PQ`` versus ``QP`` is ``(-1)`` raised to that
     count.
 
+    Both inputs MUST be sorted by qubit index, free of ``Pauli.I``
+    entries, and carry at most one Pauli per qubit. Term tuples stored
+    on ``Hamiltonian._terms`` satisfy this contract because
+    ``Hamiltonian.add_term`` runs ``simplify_pauliop_terms`` *and then*
+    sorts by ``(index, pauli.value)`` before insertion. Note that
+    ``simplify_pauliop_terms`` by itself does NOT sort its returned
+    tuple — it preserves the insertion order of its internal per-qubit
+    dict — so external callers reusing this helper on the raw output of
+    ``simplify_pauliop_terms`` must sort the tuple themselves.
+
+    Under the canonical invariant the parity check is a single linear
+    merge over the two tuples — no per-call dict / set allocation is
+    needed, which matters because this helper is the inner-loop filter
+    of ``commutator``. Passing a non-canonical string (unsorted, or with
+    explicit ``Pauli.I`` entries) is undefined behavior.
+
     Args:
-        term1 (tuple[PauliOperator, ...]): The first Pauli string,
-            expressed as a tuple of single-qubit Pauli operators with
-            at most one operator per qubit (the canonical form
-            produced by `simplify_pauliop_terms`).
-        term2 (tuple[PauliOperator, ...]): The second Pauli string,
-            in the same canonical form as `term1`.
+        term1 (tuple[PauliOperator, ...]): The first canonical Pauli
+            string (one non-identity operator per qubit, sorted by
+            ``index``).
+        term2 (tuple[PauliOperator, ...]): The second canonical Pauli
+            string, in the same canonical form as ``term1``.
 
     Returns:
         bool: True if the two strings anticommute (``PQ = -QP``),
@@ -719,13 +733,23 @@ def _pauli_strings_anticommute(
         >>> _pauli_strings_anticommute((X0,), (Z1,))
         False
     """
-    map1 = {op.index: op.pauli for op in term1 if op.pauli != Pauli.I}
-    map2 = {op.index: op.pauli for op in term2 if op.pauli != Pauli.I}
-
+    i, j = 0, 0
+    n1, n2 = len(term1), len(term2)
     anticommute_count = 0
-    for qubit in map1.keys() & map2.keys():
-        if map1[qubit] != map2[qubit]:
-            anticommute_count += 1
+    while i < n1 and j < n2:
+        op1 = term1[i]
+        op2 = term2[j]
+        if op1.index < op2.index:
+            i += 1
+        elif op1.index > op2.index:
+            j += 1
+        else:
+            # Same qubit; canonical form rules out identities, so two
+            # distinct Paulis anticommute on this qubit.
+            if op1.pauli != op2.pauli:
+                anticommute_count += 1
+            i += 1
+            j += 1
 
     return anticommute_count % 2 == 1
 

@@ -6,8 +6,6 @@ equivalence with the naive ``a * b - b * a`` expansion over random
 multi-term Hamiltonians.
 """
 
-import itertools
-
 import numpy as np
 import pytest
 
@@ -88,9 +86,10 @@ def _random_hamiltonian(
             ``Hamiltonian._num_qubits`` floor.
         num_terms (int): Number of Pauli-string terms to add. Terms
             that collapse to identity (all-I draws) are still passed
-            through ``add_term`` and routed to ``constant``.
-        include_constant (bool): When True, also assigns a random
-            complex constant to the Hamiltonian. Defaults to True.
+            through ``add_term`` and accumulate into ``constant``.
+        include_constant (bool): When True, also adds a random complex
+            constant to the Hamiltonian on top of any identity-collapsed
+            contributions from the per-term loop. Defaults to True.
 
     Returns:
         Hamiltonian: A random Hamiltonian instance suitable for
@@ -108,7 +107,11 @@ def _random_hamiltonian(
         coeff = complex(rng.normal(), rng.normal())
         h.add_term(tuple(ops), coeff)
     if include_constant:
-        h.constant = complex(rng.normal(), rng.normal())
+        # ``+=`` so any identity-collapsed contributions accumulated by
+        # ``add_term`` in the loop above survive alongside the random
+        # constant we add here.  Using ``=`` would silently overwrite
+        # them and reduce coverage of identity-collapsed paths.
+        h.constant += complex(rng.normal(), rng.normal())
     return h
 
 
@@ -228,19 +231,24 @@ class TestNumQubitsPropagation:
 
 
 class TestPauliAnticommuteHelper:
-    """Direct coverage for the qubit-parity anticommutation predicate."""
+    """Direct coverage for the qubit-parity anticommutation predicate.
+
+    Inputs follow the canonical-form contract of
+    ``_pauli_strings_anticommute`` (no ``Pauli.I`` entries; passing
+    explicit identities is undefined behavior and intentionally not
+    covered here).
+    """
 
     @pytest.mark.parametrize(
         "p1,p2,expected",
-        list(
-            itertools.chain.from_iterable(
-                [
-                    [(Pauli.X, Pauli.Y, True), (Pauli.X, Pauli.Z, True)],
-                    [(Pauli.Y, Pauli.Z, True), (Pauli.X, Pauli.X, False)],
-                    [(Pauli.X, Pauli.I, False), (Pauli.I, Pauli.Y, False)],
-                ]
-            )
-        ),
+        [
+            (Pauli.X, Pauli.Y, True),
+            (Pauli.X, Pauli.Z, True),
+            (Pauli.Y, Pauli.Z, True),
+            (Pauli.X, Pauli.X, False),
+            (Pauli.Y, Pauli.Y, False),
+            (Pauli.Z, Pauli.Z, False),
+        ],
     )
     def test_single_qubit_table(self, p1: Pauli, p2: Pauli, expected: bool):
         """Single-qubit Pauli pairs follow the standard anticommutation table."""
