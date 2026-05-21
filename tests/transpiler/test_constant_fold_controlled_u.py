@@ -216,6 +216,42 @@ class TestConstantFoldControlledUFields:
             assert ctrl_out.parent_array is not None
             assert ctrl_out.element_indices[0].get_const() == i
 
+    @pytest.mark.parametrize(
+        ("vector_len", "num_controls"),
+        [
+            (2, 4),  # oversized num_controls (would OOB without check)
+            (4, 2),  # undersized num_controls (would silently drop qubits)
+        ],
+    )
+    def test_symbolic_promotion_rejects_vector_length_mismatch(
+        self, vector_len, num_controls
+    ):
+        """Length mismatch between control Vector and num_controls must
+        raise ValidationError during the symbolic→concrete promotion.
+
+        Without the check, the oversized case fails later with a
+        misleading ``QInit not allocated`` AssertionError from the
+        allocator, and the undersized case silently uses only the first
+        ``num_controls`` qubits of the Vector — both are confusing
+        failure modes that the explicit check turns into a single
+        clear error.
+        """
+        from qamomile.circuit.transpiler.errors import ValidationError
+
+        @qm.qkernel
+        def kernel(m: qm.UInt, n: qm.UInt) -> qm.Vector[qm.Bit]:
+            ctrls = qm.qubit_array(m, "ctrls")
+            tgt = qm.qubit("tgt")
+            cg = qm.controlled(_zgate, num_controls=n)
+            ctrls, tgt = cg(ctrls, tgt)  # type: ignore
+            return qm.measure(ctrls)
+
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(ValidationError, match="control Vector"):
+            transpiler.transpile(kernel, bindings={"m": vector_len, "n": num_controls})
+
 
 # -- Integration tests: full transpilation -----------------------------------
 

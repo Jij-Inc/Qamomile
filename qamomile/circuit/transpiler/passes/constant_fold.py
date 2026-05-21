@@ -656,7 +656,9 @@ class ConstantFoldingPass(Pass[Block, Block]):
         Raises:
             ValidationError: If the operand or result layout does not
                 match the ``SymbolicControlledU`` contract (missing
-                control ``ArrayValue`` at index 0).
+                control ``ArrayValue`` at index 0), or if the control
+                ``Vector``'s length resolves to a concrete value that
+                disagrees with *num_controls*.
         """
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
         from qamomile.circuit.ir.value import ArrayValue
@@ -679,6 +681,28 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
         ctrl_vector_in = operands[0]
         ctrl_vector_out = results[0]
+
+        # Verify the control Vector's length matches num_controls when both
+        # are resolvable to concrete integers.  Without this check, a
+        # mismatch silently uses the first num_controls elements of an
+        # over-sized Vector (rest of the Vector is dropped from the circuit)
+        # or, for an under-sized Vector, triggers a downstream allocator
+        # AssertionError whose surface message ("QInit was not allocated"
+        # — see ``_allocate_qubit_list``) hides the real cause.
+        if ctrl_vector_in.shape:
+            shape_const = ctrl_vector_in.shape[0].get_const()
+            if shape_const is not None:
+                vector_len = int(shape_const)
+                if vector_len != num_controls:
+                    raise ValidationError(
+                        f"SymbolicControlledU: control Vector "
+                        f"'{ctrl_vector_in.name}' has length {vector_len}, "
+                        f"but num_controls resolves to {num_controls}.  The "
+                        f"Vector passed as the first argument to a "
+                        f"symbolic-num_controls controlled gate must hold "
+                        f"exactly num_controls qubits."
+                    )
+
         tail_operands = list(operands[1:])
         tail_results = list(results[1:])
 
