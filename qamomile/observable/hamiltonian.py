@@ -469,8 +469,13 @@ class Hamiltonian:
                 h.add_term(term, coeff)
             h.constant += other.constant
 
-            if h.num_qubits < self.num_qubits:
-                h._num_qubits = self.num_qubits
+            # Preserve the qubit register from BOTH operands.  The previous
+            # logic only kept ``self.num_qubits``, so e.g.
+            # ``Hamiltonian.identity(1, num_qubits=2) + Hamiltonian.identity(1, num_qubits=5)``
+            # silently lost the right-hand register.
+            declared = max(self.num_qubits, other.num_qubits)
+            if h.num_qubits < declared:
+                h._num_qubits = declared
 
             return h
         elif isinstance(other, (int, float, complex)):
@@ -518,8 +523,13 @@ class Hamiltonian:
 
             h.constant += self.constant * other.constant
 
-            if h.num_qubits < self.num_qubits:
-                h._num_qubits = self.num_qubits
+            # Preserve the qubit register from BOTH operands.  The previous
+            # logic only kept ``self.num_qubits``, so e.g.
+            # ``Hamiltonian.identity(1, num_qubits=2) * Hamiltonian.identity(1, num_qubits=5)``
+            # silently lost the right-hand register.
+            declared = max(self.num_qubits, other.num_qubits)
+            if h.num_qubits < declared:
+                h._num_qubits = declared
 
             return h
         else:
