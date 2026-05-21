@@ -2840,11 +2840,31 @@ class CircuitAnalyzer:
             and operand.shape
             and resolved_lid in qubit_map
         ):
-            base_idx = qubit_map[resolved_lid]
             size = self._resolve_array_size(
                 operand, resolved_lid, qubit_map, param_values
             )
             if size is not None:
+                # Prefer per-element keys (``f"{resolved_lid}_[{k}]"``)
+                # when present.  ``QInitOperation`` populates them for
+                # ordinary registers and ``build_qubit_map``'s slice-
+                # view sub-kernel-argument handling populates them
+                # with non-contiguous wires when a slice view is
+                # passed as a helper qkernel argument.  The ``base +
+                # k`` formula is only correct for genuinely contiguous
+                # arrays where every wire is consecutive, so use the
+                # element-key lookup first and fall back to the
+                # formula only when no per-element entry exists.
+                element_keyed_wires: list[int] = []
+                for k in range(size):
+                    elem_key = f"{resolved_lid}_[{k}]"
+                    if elem_key in qubit_map:
+                        element_keyed_wires.append(qubit_map[elem_key])
+                    else:
+                        element_keyed_wires = []
+                        break
+                if element_keyed_wires:
+                    return element_keyed_wires
+                base_idx = qubit_map[resolved_lid]
                 return [base_idx + k for k in range(size)]
             return None
 

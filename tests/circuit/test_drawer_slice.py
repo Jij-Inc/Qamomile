@@ -89,6 +89,35 @@ def _h_all_helper(v: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
+def _h_broadcast_helper(v: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Helper that broadcasts H over the whole input via ``qmc.h(v)``.
+
+    Distinct from :func:`_h_all_helper` (which uses an explicit index
+    loop): this body exercises the ``ArrayValue`` + ``shape`` operand
+    resolution path in ``_resolve_non_element_operand`` (whole-vector
+    broadcast), as opposed to the per-element loop body.
+    """
+    return qmc.h(v)
+
+
+@qmc.qkernel
+def _stride_slice_broadcast_helper_call() -> qmc.Vector[qmc.Bit]:
+    """Stride slice handed to a broadcast helper over 6 qubits.
+
+    Exercises the ``ArrayValue`` + ``shape`` path with a non-
+    contiguous slice-aliased parameter (the helper's ``v`` aliases
+    root wires ``{0, 2, 4}``).  The ``base + k`` formula in that path
+    would render H on contiguous wires ``{0, 1, 2}``; the element-
+    key lookup added in the same fix routes it to ``{0, 2, 4}``.
+    """
+    q = qmc.qubit_array(6, "q")
+    evens = q[0::2]
+    evens = _h_broadcast_helper(evens)
+    q[0::2] = evens
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def _stride_slice_helper_call() -> qmc.Vector[qmc.Bit]:
     """Stride slice ``q[0::2]`` handed to a sub-kernel over 6 qubits."""
     q = qmc.qubit_array(6, "q")
@@ -504,3 +533,30 @@ class TestSliceSubKernelArgumentDraw:
             f"_h_all_helper=[{h_start}, {h_end}] overlaps "
             f"_x_all_helper=[{x_start}, {x_end}]"
         )
+
+    def test_broadcast_in_helper_lands_on_slice_wires(self):
+        """``qmc.h(v)`` inside a helper called with a slice view must
+        render on the slice's root-space wires, not phantom contiguous
+        ones.
+
+        Regression: ``_resolve_non_element_operand``'s
+        ``ArrayValue`` + ``shape`` branch always returned
+        ``[base_idx + k for k in range(size)]``.  For a slice-aliased
+        callee parameter (``build_qubit_map`` pre-populates
+        per-element keys to non-contiguous root wires), that formula
+        renders H on consecutive wires starting from the slice's
+        first wire instead of the actual stride wires the slice
+        covers.  The fix prefers ``f"{lid}_[{k}]"`` lookups when
+        present and only falls back to the formula for truly
+        contiguous arrays.
+        """
+        vc = _build_visual_circuit(_stride_slice_broadcast_helper_call)
+        # The helper call renders as a BLOCK_BOX whose qubit_indices
+        # must cover the stride wires (root q[0], q[2], q[4]).
+        boxes = [
+            c
+            for c in vc.children
+            if isinstance(c, VGate) and c.kind == VGateKind.BLOCK_BOX
+        ]
+        assert len(boxes) == 1, vc.children
+        assert sorted(boxes[0].qubit_indices) == [0, 2, 4], boxes[0].qubit_indices
