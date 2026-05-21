@@ -185,7 +185,7 @@ git log $TARGET...HEAD --oneline
 
 ### Step 1.5: Run Mechanical Checks (MANDATORY)
 
-Before any human-style review, run the mechanical checks that GitHub CI and CLAUDE.md require. **These are non-negotiable — execute them on every invocation of this skill and surface every failure in the final report. Never skip them, never "trust the diff looks clean", never stop after a single check fails.** Skipping these is itself a regression of the skill.
+Before any human-style review, run the mechanical checks that GitHub CI enforces on every PR. (CLAUDE.md's "Build and Development Commands" documents the same tools at a narrower `qamomile/`-only scope; this skill follows CI's wider `qamomile/ tests/` scope so the user sees what CI will see.) **These are non-negotiable — execute them on every invocation of this skill and surface every failure in the final report. Never skip them, never "trust the diff looks clean", never stop after one check reports violations.** Skipping these is itself a regression of the skill.
 
 ```bash
 # Ruff lint + isort
@@ -205,13 +205,21 @@ Run **all three** even if earlier ones fail — each surfaces a different class 
 
 Severity mapping:
 
-- **ruff `check` violation** — severity follows the underlying rule. A real bug rule (`B006` mutable default, `F841` unused assignment masking a typo, `B008` mutable arg in function call) is **P0**. A correctness-adjacent rule (`E722` bare except, `B904` missing `from e`) is **P0/P1** depending on whether Section E is already violated. A pure style nit (`E501` line length, `I001` import order) is **P3**. A missing-docstring rule (`D100`–`D107`) is **P2+** (CLAUDE.md "Docstring Convention (MANDATORY)").
+- **ruff `check` violation** — severity follows the underlying rule. A real bug rule (`B006` mutable default, `F841` unused assignment masking a typo, `B008` mutable arg in function call) is **P0**. `E722` (bare `except`) and `B904` (missing `from e` on re-raise) are also **P0** directly — the Severity Levels rubric at the top of this document lists "bare `except` swallowing" and "missing exception chaining" as P0 without conditioning on other sections, and the mechanical mapping must match. A pure style nit (`E501` line length, `I001` import order) is **P3**. A missing-docstring rule (`D100`–`D107`) is **P2+** (CLAUDE.md "Docstring Convention (MANDATORY)").
 - **ruff `format` divergence** — **P3**. Mechanically fixable with `uv run ruff format qamomile/ tests/`; mention the one-liner in the recommendation.
 - **zuban type error** — **P2** by default. **P1+** if it reveals a behavioral bug, a contract mismatch with a public API, or a `None`-related foot-gun.
 
-If a check tool itself fails to *run* (missing dependency, broken config, `uv` not on PATH, etc.), **stop the skill and report it as a P0** rather than silently moving on — a non-runnable check is functionally equivalent to a disabled check.
+Distinguish "the check ran and reported violations" (handled by the severity mapping above) from "the check could not be run at all". If a specific check tool fails to invoke — e.g., `zuban` is missing, a config file is broken, the formatter binary errors before reading any files — **continue with the remaining checks** and report the unrunnable tool as its own **P0** finding. A non-runnable check is functionally equivalent to a disabled one and the user must be told, but stopping early would hide the other tools' output that may still be actionable. **Only hard-stop the skill when `uv` itself is unavailable** so that none of the three commands can run; in that case Step 1.5 as a whole is uninvokable and the skill cannot produce a valid review — report that single P0 and exit.
 
-These checks scope to the whole `qamomile/` + `tests/` tree (matching CI), not just the diff. Pre-existing violations outside the diff still count, since the user will eventually be blocked by CI on them; report them too, but annotate as "pre-existing on `<target>`" so the user can distinguish "introduced by this branch" from "already broken on the base branch".
+These checks scope to the whole `qamomile/` + `tests/` tree (matching CI), not just the diff. Pre-existing violations outside the diff still count, since the user will eventually be blocked by CI on them; report them too. **The "pre-existing on `<target>`" annotation is optional and only valid when you actually verified it on the target branch.** If you want to label findings that way, run the same Step 1.5 commands against `<target>` in a temporary worktree and diff the outputs:
+
+```bash
+git worktree add /tmp/qamomile-base "$TARGET"
+( cd /tmp/qamomile-base && uv run ruff check qamomile/ tests/; uv run ruff format --check qamomile/ tests/; uv run zuban qamomile/ )
+git worktree remove /tmp/qamomile-base
+```
+
+If you skip the baseline, report each violation without claiming whether it is pre-existing — an unverified annotation is more misleading than no annotation at all.
 
 ### Step 2: Read Changed Files
 
