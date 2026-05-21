@@ -2731,16 +2731,28 @@ class CircuitAnalyzer:
         if idx is None:
             return None
         idx_int = int(idx)
-        # Slice view → walk to root, compose affine map.
+        # Slice view → walk to root, compose affine map.  Mirror the
+        # direct-element branch's ``element_key`` preference: when the
+        # root has per-element entries (an ordinary register, or a
+        # callee parameter slice-aliased to non-contiguous root wires
+        # by ``build_qubit_map``'s sub-kernel handling), the formula
+        # ``base + start + step * idx`` is only correct for contiguous
+        # wires.  Look up the canonical ``f"{root_lid}_[{root_idx}]"``
+        # key first and fall back to the formula only when no
+        # per-element entry exists.
         if getattr(parent_array, "slice_of", None) is not None:
             resolved = self._resolve_view_chain_to_root(parent_array)
             if resolved is None:
                 return None
             root_av, start, step = resolved
             root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+            root_idx = start + step * idx_int
+            root_elem_key = f"{root_lid}_[{root_idx}]"
+            if root_elem_key in qubit_map:
+                return qubit_map[root_elem_key]
             if root_lid not in qubit_map:
                 return None
-            return qubit_map[root_lid] + start + step * idx_int
+            return qubit_map[root_lid] + root_idx
         # Direct array element.  Prefer the canonical per-element key
         # (``f"{parent_lid}_[{idx}]"``) which is populated both by
         # ``QInitOperation`` for ordinary registers and by the slice-

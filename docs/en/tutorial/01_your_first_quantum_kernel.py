@@ -328,7 +328,8 @@ except Exception as e:
 # ## Next Chapters
 #
 # 1. [Parameterized QKernels](02_parameterized_kernels.ipynb) — structure vs runtime parameters, the bind/sweep pattern
-# 2. [Resource Estimation](04_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, comparing designs
-# 3. [Execution Models](05_execution_models.ipynb) — `sample()` vs `run()`, observables, bit ordering
-# 4. [Classical Flow Patterns](06_classical_flow_patterns.ipynb) — loops, sparse data, branching
-# 5. [Reuse Patterns](07_reuse_patterns.ipynb) — helper qkernels, composite gates, stubs
+# 2. [Vector Slicing](03_vector_slicing.ipynb) — `VectorView`, slice assignment, nested slices, passing views to helper kernels
+# 3. [Resource Estimation](04_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, comparing designs
+# 4. [Execution Models](05_execution_models.ipynb) — `sample()` vs `run()`, observables, bit ordering
+# 5. [Classical Flow Patterns](06_classical_flow_patterns.ipynb) — loops, sparse data, branching
+# 6. [Reuse Patterns](07_reuse_patterns.ipynb) — helper qkernels, composite gates, stubs

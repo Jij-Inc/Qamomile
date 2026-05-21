@@ -497,7 +497,7 @@ class ArrayBase(Handle, Generic[T]):
                 f"Return it before borrowing again.\n\n"
                 f"Fix:\n"
                 f"  q = {self.value.name}[{index_str}]\n"
-                f"  q = qm.h(q)\n"
+                f"  q = qmc.h(q)\n"
                 f"  {self.value.name}[{index_str}] = q  # Return the element first",
                 handle_name=f"{self.value.name}[{index_str}]",
                 operation_name="array element access",

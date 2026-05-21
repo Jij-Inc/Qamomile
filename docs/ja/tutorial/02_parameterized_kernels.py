@@ -165,4 +165,4 @@ for theta in [0.1, 0.5, 1.0]:
 # - パラメータ化された回路には`qmc.qubit_array(n)`と`qmc.range(n)`を使います。常にインデックスベースの更新`q[i] = qmc.gate(q[i])`を使ってください。
 # - バインド/スイープパターン — `transpile(bindings=..., parameters=...)` → ループ — で一度だけトランスパイルして複数回実行できます。
 #
-# **次へ**：[リソース推定](04_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析。
+# **次へ**：[Vectorのスライシング](03_vector_slicing.ipynb) — `VectorView`、スライス代入、ネストしたスライス、ヘルパーカーネルへの引き渡し。

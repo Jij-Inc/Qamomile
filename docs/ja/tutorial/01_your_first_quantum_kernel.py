@@ -310,7 +310,8 @@ except Exception as e:
 # ## 次の章
 #
 # 1. [パラメータ付き量子カーネル](02_parameterized_kernels.ipynb) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン
-# 2. [リソース推定](04_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
-# 3. [実行モデル](05_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
-# 4. [古典フローパターン](06_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
-# 5. [再利用パターン](07_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ
+# 2. [Vectorのスライシング](03_vector_slicing.ipynb) — `VectorView`、スライス代入、ネストしたスライス、ヘルパーカーネルへの引き渡し
+# 3. [リソース推定](04_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
+# 4. [実行モデル](05_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
+# 5. [古典フローパターン](06_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
+# 6. [再利用パターン](07_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ
