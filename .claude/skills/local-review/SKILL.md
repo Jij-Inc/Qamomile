@@ -183,6 +183,36 @@ git diff $TARGET...HEAD --name-status
 git log $TARGET...HEAD --oneline
 ```
 
+### Step 1.5: Run Mechanical Checks (MANDATORY)
+
+Before any human-style review, run the mechanical checks that GitHub CI and CLAUDE.md require. **These are non-negotiable — execute them on every invocation of this skill and surface every failure in the final report. Never skip them, never "trust the diff looks clean", never stop after a single check fails.** Skipping these is itself a regression of the skill.
+
+```bash
+# Ruff lint + isort
+# (CI: .github/workflows/ruff.yml — "Lint with ruff (Linter & isort)")
+uv run ruff check qamomile/ tests/
+
+# Ruff formatter check
+# (CI: .github/workflows/ruff.yml — "Check formatting with ruff (Formatter)")
+uv run ruff format --check qamomile/ tests/
+
+# Type checking
+# (CLAUDE.md "Build and Development Commands")
+uv run zuban qamomile/
+```
+
+Run **all three** even if earlier ones fail — each surfaces a different class of regression and the reviewer / user needs the full picture in one pass. Do not paraphrase the output; quote each failing line (file:line + message) verbatim in the report so the user can jump to it.
+
+Severity mapping:
+
+- **ruff `check` violation** — severity follows the underlying rule. A real bug rule (`B006` mutable default, `F841` unused assignment masking a typo, `B008` mutable arg in function call) is **P0**. A correctness-adjacent rule (`E722` bare except, `B904` missing `from e`) is **P0/P1** depending on whether Section E is already violated. A pure style nit (`E501` line length, `I001` import order) is **P3**. A missing-docstring rule (`D100`–`D107`) is **P2+** (CLAUDE.md "Docstring Convention (MANDATORY)").
+- **ruff `format` divergence** — **P3**. Mechanically fixable with `uv run ruff format qamomile/ tests/`; mention the one-liner in the recommendation.
+- **zuban type error** — **P2** by default. **P1+** if it reveals a behavioral bug, a contract mismatch with a public API, or a `None`-related foot-gun.
+
+If a check tool itself fails to *run* (missing dependency, broken config, `uv` not on PATH, etc.), **stop the skill and report it as a P0** rather than silently moving on — a non-runnable check is functionally equivalent to a disabled check.
+
+These checks scope to the whole `qamomile/` + `tests/` tree (matching CI), not just the diff. Pre-existing violations outside the diff still count, since the user will eventually be blocked by CI on them; report them too, but annotate as "pre-existing on `<target>`" so the user can distinguish "introduced by this branch" from "already broken on the base branch".
+
 ### Step 2: Read Changed Files
 
 Read every new or modified file in full. Understand each file's role in the architecture.
@@ -224,5 +254,12 @@ Common root-cause patterns to watch for: **dead code** (multiple nits on code ne
 ### Step 6: Report
 
 For each finding, give: severity (using the **Severity Levels** rubric at the top of this document), `file:line`, code snippet, the violated section, a short explanation, a concrete recommendation with corrected code, and — for consolidated findings — a `Root cause of:` line listing subsumed surface issues. End with a severity-grouped summary table.
+
+**Mechanical-check section (MANDATORY)**: the report MUST contain a top-of-report block titled `## Mechanical checks` that lists the three Step 1.5 commands and, for each, one of:
+
+- ✅ `passed` (with the exit code and a one-line confirmation), or
+- ❌ `failed` (with the verbatim failing lines, and each failure also surfaced as a numbered finding below per the severity mapping in Step 1.5).
+
+Never omit this section, even when all three pass — a clean run is itself the evidence the user needs to satisfy CLAUDE.md's "Run `/local-review` before opening a PR" rule. If you do omit it, the skill output is not a valid local-review run.
 
 If Step 5.5 did not stabilize, append: "Note: some findings may have deeper interdependencies warranting further investigation."
