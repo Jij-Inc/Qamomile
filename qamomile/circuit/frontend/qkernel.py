@@ -1027,9 +1027,13 @@ class QKernel(Generic[P, R]):
 
         for name, param in self.signature.parameters.items():
             param_type = self.input_types.get(name, param.annotation)
-            handle = arguments.get(name)
-            if not isinstance(handle, Handle):
-                return None
+            handle = arguments[name]
+            assert isinstance(handle, Handle), (
+                f"Internal invariant violated: argument {name!r} should "
+                f"already be a Handle by the time "
+                f"_extract_calltime_specialization runs (upstream check "
+                f"at __call__)."
+            )
 
             # Scalar Qubit: no specialization-relevant info to extract;
             # ``_create_traced_block`` will fall through to the regular
