@@ -1,0 +1,789 @@
+"""Unit tests for ``docs/scripts/inject_colab_launch.py``.
+
+Covers the post-build HTML passes we own, focusing on
+``sanitize_cite_ids`` — the citation-id sanitization pass added in
+PR #385 to stop React hydration mismatches from cascading on
+bibliography-heavy pages (mottonen / qsci). The other passes
+(``inject_script_tag``, ``inline_theme_css``, etc.) have load-bearing
+side effects and are exercised by the full ``./build.sh build`` run
+on CI / RTD, which is enough for them; this file zooms in on the
+sanitizer because its behavior is logic-heavy and easy to regress
+silently (wrong scope, drift between id and href, collision aliasing).
+
+Carries the ``docs`` pytest marker for category alignment with the
+rest of ``tests/docs/``.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_PATH = REPO_ROOT / "docs" / "scripts" / "inject_colab_launch.py"
+
+pytestmark = pytest.mark.docs
+
+
+def _load_module():
+    """Import ``docs/scripts/inject_colab_launch.py`` as a module.
+
+    The file lives outside any package, so we import by path. We
+    re-import on each call so test mutations of module globals (if
+    any future test adds them) can't leak between tests.
+
+    Returns:
+        ModuleType: A freshly imported copy of the script module.
+    """
+    spec = importlib.util.spec_from_file_location("inject_colab_launch", SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None, SCRIPT_PATH
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["inject_colab_launch"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def mod():
+    """Yield a freshly imported ``inject_colab_launch`` module."""
+    return _load_module()
+
+
+def _write_html(tmp_path: Path, name: str, body: str) -> Path:
+    """Write ``body`` into ``tmp_path/name`` and return the path.
+
+    Args:
+        tmp_path (Path): pytest's per-test temp dir.
+        name (str): Filename inside ``tmp_path``.
+        body (str): Raw HTML body to write.
+
+    Returns:
+        Path: Absolute path to the written file.
+    """
+    p = tmp_path / name
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+# ----------------------------------------------------------------- #
+# _sanitize_cite_id (the low-level character collapse)              #
+# ----------------------------------------------------------------- #
+
+
+def test_sanitize_cite_id_collapses_url_chars(mod):
+    """Slashes, colons, and dots in a DOI URL collapse to single dashes."""
+    raw = "https://doi.org/10.48550/arxiv.quant-ph/0407010"
+    assert mod._sanitize_cite_id(raw) == "https-doi-org-10-48550-arxiv-quant-ph-0407010"
+
+
+def test_sanitize_cite_id_preserves_safe_chars(mod):
+    """Already-safe labels round-trip exactly."""
+    raw = "mottonen2004_state_prep"
+    assert mod._sanitize_cite_id(raw) == raw
+
+
+def test_sanitize_cite_id_strips_edges(mod):
+    """Leading / trailing dashes are stripped after collapsing."""
+    assert mod._sanitize_cite_id("/abc/") == "abc"
+    assert mod._sanitize_cite_id("...abc...") == "abc"
+
+
+def test_sanitize_cite_id_empty_fallback(mod):
+    """All-unsafe input that collapses to empty gets a stable fallback."""
+    # `///` -> '-' after sub, then stripped to '', then fallback to 'id'.
+    assert mod._sanitize_cite_id("/" * 5) == "id"
+
+
+# ----------------------------------------------------------------- #
+# sanitize_cite_ids — scope, idempotency, href sync                 #
+# ----------------------------------------------------------------- #
+
+
+_DOI_BIB_HTML = """
+<html><body>
+<section id="references" class="myst-bibliography article-grid">
+  <ol>
+    <li class="myst-bibliography-item" id="cite-https://doi.org/10.48550/arxiv.quant-ph/0407010">
+      Author. <i>Title</i>.
+      <a href="https://doi.org/10.48550/arxiv.quant-ph/0407010">DOI</a>
+    </li>
+  </ol>
+</section>
+<a href="#cite-https://doi.org/10.48550/arxiv.quant-ph/0407010">In-text ref</a>
+</body></html>
+"""
+
+
+def test_sanitize_rewrites_doi_id_and_matching_fragment(tmp_path, mod):
+    """DOI-form id is collapsed; matching #cite fragment follows the same map."""
+    p = _write_html(tmp_path, "page.html", _DOI_BIB_HTML)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'id="cite-https-doi-org-10-48550-arxiv-quant-ph-0407010"' in out
+    assert 'href="#cite-https-doi-org-10-48550-arxiv-quant-ph-0407010"' in out
+    # The outbound DOI URL is NOT a #cite fragment and must not be touched.
+    assert 'href="https://doi.org/10.48550/arxiv.quant-ph/0407010"' in out
+
+
+def test_sanitize_is_idempotent(tmp_path, mod):
+    """A second run on the same file is a no-op."""
+    p = _write_html(tmp_path, "page.html", _DOI_BIB_HTML)
+    assert mod.sanitize_cite_ids(p) is True
+    snapshot = p.read_text(encoding="utf-8")
+    assert mod.sanitize_cite_ids(p) is False
+    assert p.read_text(encoding="utf-8") == snapshot
+
+
+def test_sanitize_already_safe_ids_are_noop(tmp_path, mod):
+    """Bibliography that already uses safe-character ids triggers no rewrite."""
+    safe_html = """
+<html><body>
+<section class="myst-bibliography">
+  <ol><li id="cite-mottonen2004">x</li></ol>
+</section>
+<a href="#cite-mottonen2004">ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", safe_html)
+    assert mod.sanitize_cite_ids(p) is False
+    assert p.read_text(encoding="utf-8") == safe_html
+
+
+class _SectionReSpy:
+    """Wraps ``_SECTION_RE`` and counts ``finditer`` calls for perf tests.
+
+    ``re.Pattern`` is a C-implemented immutable object, so the
+    standard ``mocker.spy`` route can't attach a counter to its
+    ``finditer`` method directly. We swap the module-level
+    ``_SECTION_RE`` for this wrapper via ``monkeypatch`` instead.
+
+    Attributes:
+        wrapped (re.Pattern): The original compiled section regex.
+        call_count (int): Number of ``finditer`` calls observed.
+    """
+
+    def __init__(self, wrapped):
+        """Capture the original regex.
+
+        Args:
+            wrapped (re.Pattern): The compiled regex to wrap.
+        """
+        self.wrapped = wrapped
+        self.call_count = 0
+
+    def finditer(self, *args, **kwargs):
+        """Count and forward to the wrapped regex.
+
+        Args:
+            *args: Forwarded to the wrapped ``re.Pattern.finditer``.
+            **kwargs: Forwarded to the wrapped ``re.Pattern.finditer``.
+
+        Returns:
+            Iterator[re.Match[str]]: Whatever the wrapped regex returns.
+        """
+        self.call_count += 1
+        return self.wrapped.finditer(*args, **kwargs)
+
+
+def test_sanitize_short_circuits_when_substring_markers_absent(
+    tmp_path, mod, monkeypatch
+):
+    """Pages without ``myst-bibliography`` or ``cite-`` skip the regex scan.
+
+    Most build outputs (tutorial / landing / API-reference pages) ship
+    neither marker. The cheap substring guard at the top of
+    ``sanitize_cite_ids`` makes those cases a single string scan
+    instead of running the full section / id / class-attr regex chain
+    on every file. Wrap the section regex's ``finditer`` to confirm
+    we never reach it on a marker-less page.
+    """
+    spy = _SectionReSpy(mod._SECTION_RE)
+    monkeypatch.setattr(mod, "_SECTION_RE", spy)
+    no_markers_html = "<html><body><p>nothing relevant here</p></body></html>"
+    p = _write_html(tmp_path, "page.html", no_markers_html)
+    assert mod.sanitize_cite_ids(p) is False
+    assert spy.call_count == 0
+
+
+def test_sanitize_short_circuits_on_partial_marker(tmp_path, mod, monkeypatch):
+    """``cite-`` present but no ``myst-bibliography`` section also short-circuits.
+
+    Code examples or hand-rolled cells can carry ``id="cite-…"`` ids
+    that are out-of-scope for us. The substring guard skips the full
+    scan when the bibliography anchor is missing, so we don't pay the
+    regex cost on pages where the only ``cite-`` substring belongs to
+    user content. The earlier scope test
+    (``test_sanitize_skips_pages_without_bibliography``) already
+    covers the behavioral half; this one pins the perf invariant.
+    """
+    spy = _SectionReSpy(mod._SECTION_RE)
+    monkeypatch.setattr(mod, "_SECTION_RE", spy)
+    html = """
+<html><body>
+<p>Code example: <span id="cite-https://example.com/x">tag</span></p>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is False
+    assert spy.call_count == 0
+
+
+def test_sanitize_skips_pages_without_bibliography(tmp_path, mod):
+    """A page without ``<section class="myst-bibliography">`` is untouched.
+
+    Even if it contains an ``id="cite-…"`` somewhere (e.g. a hand-rolled
+    HTML cell or a code example), we must not rewrite it — only the
+    SSR'd bibliography is in scope.
+    """
+    no_bib_html = """
+<html><body>
+<p>Code example: <span id="cite-https://example.com/x">tag</span></p>
+<a href="#cite-https://example.com/x">ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", no_bib_html)
+    assert mod.sanitize_cite_ids(p) is False
+    assert p.read_text(encoding="utf-8") == no_bib_html
+
+
+def test_sanitize_leaves_ids_outside_bibliography_alone(tmp_path, mod):
+    """Unsafe ``id="cite-…"`` outside the bibliography section stays put."""
+    mixed_html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/safe">in scope</li>
+</section>
+<p>Out-of-scope: <span id="cite-https://other.example/x">should NOT be rewritten</span></p>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", mixed_html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # In-scope id was sanitized.
+    assert 'id="cite-https-doi-org-safe"' in out
+    # Out-of-scope id was NOT.
+    assert 'id="cite-https://other.example/x"' in out
+
+
+def test_sanitize_leaves_unrelated_href_fragments_alone(tmp_path, mod):
+    """``href="#cite-foo"`` whose label isn't in the bibliography stays put.
+
+    Unknown fragments may point at a non-bibliography anchor (e.g.
+    something hand-rolled). Rewriting them would break the link.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/known">x</li>
+</section>
+<a href="#cite-https://doi.org/known">known</a>
+<a href="#cite-https://doi.org/unknown">unknown — leave alone</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'href="#cite-https-doi-org-known"' in out
+    # Unknown fragment must not have been rewritten.
+    assert 'href="#cite-https://doi.org/unknown"' in out
+
+
+def test_sanitize_decodes_percent_encoded_href(tmp_path, mod):
+    """URL-encoded ``href="#cite-…"`` resolves to the same map entry as the id.
+
+    Some renderers emit the fragment in percent-encoded form
+    (``#cite-https%3A%2F%2F…``). We decode before lookup so the
+    sanitized form still matches the unencoded ``<li id="cite-…">``.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/abc">x</li>
+</section>
+<a href="#cite-https%3A%2F%2Fdoi.org%2Fabc">encoded ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'href="#cite-https-doi-org-abc"' in out
+
+
+def test_sanitize_raises_on_collisions(tmp_path, mod):
+    """Two distinct raw labels that collapse to the same sanitized id fail.
+
+    ``cite-a/b`` and ``cite-a:b`` both sanitize to ``cite-a-b``;
+    shipping that would produce duplicate ids in the rendered page.
+    Build must fail loudly rather than silently emit broken HTML.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-a/b">first</li>
+  <li id="cite-a:b">second</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    with pytest.raises(RuntimeError, match="duplicate id attributes"):
+        mod.sanitize_cite_ids(p)
+
+
+def test_sanitize_raises_on_repeated_decoded_occurrences(tmp_path, mod):
+    """Same decoded label appearing in multiple SSR ``id`` attributes fails.
+
+    ``cite-a&amp;b`` and ``cite-a&b`` are two ``<li>`` items in the
+    source whose ``id`` values DECODE to the same string (``a&b``),
+    so both would rewrite to the same sanitized form ``cite-a-b``.
+    The SSR is already broken in this case — duplicate ids at the
+    DOM level — but our sanitizer would silently fan the two encoded
+    forms into the canonical one and hide the upstream problem. Fail
+    loud instead so the build surfaces the issue.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-a&amp;b">first</li>
+  <li id="cite-a&b">second</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    with pytest.raises(RuntimeError, match="duplicate id attributes"):
+        mod.sanitize_cite_ids(p)
+
+
+def test_sanitize_does_not_touch_outbound_doi_href(tmp_path, mod):
+    """``href="https://doi.org/…"`` (no ``#cite-`` prefix) is left alone."""
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/x">
+    <a href="https://doi.org/x">canonical DOI</a>
+  </li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    mod.sanitize_cite_ids(p)
+    out = p.read_text(encoding="utf-8")
+    # Internal id sanitized.
+    assert 'id="cite-https-doi-org-x"' in out
+    # External link still points to the real DOI URL.
+    assert 'href="https://doi.org/x"' in out
+
+
+# ----------------------------------------------------------------- #
+# Class-token correctness — ``not-myst-bibliography`` must NOT match #
+# ----------------------------------------------------------------- #
+
+
+def test_sanitize_does_not_match_namespaced_class_attribute(tmp_path, mod):
+    """Namespaced / prefixed ``…:class``, ``.class``, ``x-class`` are not real ``class``.
+
+    The matcher anchors on ``(?:^|\\s)class`` so ``class`` has to sit
+    at the start of the attribute span or be preceded by whitespace.
+    Anything that puts a non-whitespace char immediately before
+    ``class`` (``data-class``, ``x:class``, ``.class``) is some other
+    attribute name and must NOT select the section as in-scope.
+    """
+    parametrize = [
+        'data-class="myst-bibliography"',
+        ':class="myst-bibliography"',
+        'x:class="myst-bibliography"',
+        '.class="myst-bibliography"',
+    ]
+    for prefix in parametrize:
+        html = f"""
+<html><body>
+<section {prefix}>
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+        p = _write_html(tmp_path, "page.html", html)
+        assert mod.sanitize_cite_ids(p) is False, prefix
+        # ID still in its original DOI form — section was not in scope.
+        assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8"), prefix
+
+
+def test_sanitize_does_not_touch_href_inside_script_or_text(tmp_path, mod):
+    """``href="#cite-…"`` substrings inside ``<script>`` / text nodes stay.
+
+    A literal `` href="#cite-…"`` string can appear inside a
+    ``<script>`` body, a code example, a JSON data-island, or any
+    text node. The rewriter walks ``<tag>`` spans and parses
+    attributes attribute-by-attribute, so a substring outside any
+    real tag-attribute boundary cannot be touched. ``<pre>`` is NOT
+    a raw-text element (so a literal tag-shaped substring inside it
+    would be parsed as a real tag), but the bare ``href="..."`` form
+    used here lives between literal text characters, not inside any
+    real tag, so it's left alone by the same boundary logic.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<script>const link = ' href="#cite-https://doi.org/a"';</script>
+<pre>some text href="#cite-https://doi.org/a" more text</pre>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # In-scope id was sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # The substrings inside <script> and <pre> were NOT rewritten.
+    assert "const link = ' href=\"#cite-https://doi.org/a\"';" in out
+    assert 'some text href="#cite-https://doi.org/a" more text' in out
+
+
+def test_sanitize_catches_collision_on_raw_text_element_opening_tag(tmp_path, mod):
+    """``<script id="cite-…">`` collision with a bibliography id is still detected.
+
+    The raw-text skip range only covers the CONTENT of a
+    ``<script>`` / ``<style>`` / ``<textarea>`` / ``<title>`` block;
+    the opening tag itself stays visible to the walker so an
+    ``id="cite-…"`` attribute on it can participate in the
+    out-of-scope collision check. Without this, an existing
+    ``<script id="cite-https-doi-org-a">`` colocated with a
+    bibliography ``<li id="cite-https://doi.org/a">`` would
+    silently produce two elements with the same final id.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<script id="cite-https-doi-org-a">/* same final id after sanitize */</script>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    with pytest.raises(RuntimeError, match="out-of-scope id"):
+        mod.sanitize_cite_ids(p)
+
+
+def test_sanitize_skips_tag_shaped_strings_inside_raw_text_elements(tmp_path, mod):
+    """``<a href="#cite-…">`` substrings inside raw-text elements stay.
+
+    Per the HTML5 spec, ``<script>``, ``<style>``, ``<textarea>``,
+    and ``<title>`` parse their contents as character data — a
+    literal ``<a href="…">`` inside them is text, not a tag. The
+    sanitizer registers the CONTENT span (between the opening and
+    closing tags, captured as the ``body`` group in
+    ``_RAW_TEXT_RE``) as a skip range so the tag walker bypasses
+    any tag-shaped substring inside them. The opening tag itself
+    is still visible to the walker — that's what lets a colocated
+    ``<script id="cite-…">`` participate in the out-of-scope
+    collision check; see
+    ``test_sanitize_catches_collision_on_raw_text_element_opening_tag``.
+    Without this skip step, a script literal like ``const html =
+    '<a href="#cite-…">'`` would have its ``href`` silently
+    rewritten.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<script>const html = '<a href="#cite-https://doi.org/a">ref</a>';</script>
+<style>/* <a href="#cite-https://doi.org/a">text</a> */</style>
+<textarea>literal <a href="#cite-https://doi.org/a">tag</a> here</textarea>
+<title><a href="#cite-https://doi.org/a">in title</a></title>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # In-scope id was sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # All four raw-text spans kept their original tag-shaped
+    # substrings.
+    assert "const html = '<a href=\"#cite-https://doi.org/a\">ref</a>'" in out
+    assert '/* <a href="#cite-https://doi.org/a">text</a> */' in out
+    assert 'literal <a href="#cite-https://doi.org/a">tag</a> here' in out
+    assert '<a href="#cite-https://doi.org/a">in title</a>' in out
+
+
+def test_sanitize_skips_tag_shaped_strings_inside_html_comments(tmp_path, mod):
+    """``<a href="#cite-…">`` substrings inside HTML comments stay.
+
+    HTML comments (``<!-- … -->``) parse as character data. A
+    literal tag-shaped substring inside one is text, and the
+    sanitizer's skip-range scan keeps the rewriter from touching
+    it. Equally, a literal ``<section class="myst-bibliography">``
+    inside a comment must not bring a section "into scope".
+    """
+    html = """
+<html><body>
+<!-- <a href="#cite-https://doi.org/a">comment ref</a> -->
+<!-- <section class="myst-bibliography"><li id="cite-https://doi.org/x">x</li></section> -->
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # Real bibliography id sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # Commented-out substrings are character data, untouched.
+    assert '<a href="#cite-https://doi.org/a">comment ref</a>' in out
+    assert (
+        '<section class="myst-bibliography">'
+        '<li id="cite-https://doi.org/x">x</li>'
+        "</section>"
+    ) in out
+
+
+def test_sanitize_ignores_class_substring_inside_other_attr_value(tmp_path, mod):
+    """A ``class="…"`` substring inside another attribute's value is not a real class.
+
+    With quoted-attribute aware parsing, the bibliography section
+    detector only treats ``class="myst-bibliography"`` as the
+    enclosing element's class attribute when it really IS the
+    enclosing element's attribute. A substring like
+    ``data-note='foo class="myst-bibliography"'`` is the value of
+    ``data-note``, not a ``class`` attribute, so the surrounding
+    ``<section>`` must NOT be brought into scope.
+    """
+    html = """
+<html><body>
+<section data-note='foo class="myst-bibliography"'>
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is False
+    # The cite id is still in its original DOI form — section was
+    # not in scope.
+    assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8")
+
+
+def test_sanitize_does_not_match_data_href_attribute(tmp_path, mod):
+    """``data-href="#cite-…"`` must not be rewritten as a real ``href``.
+
+    The tag walker parses attributes attribute-by-attribute via
+    ``_parse_attrs``, so a dataset attribute whose name ends in
+    ``href`` is matched as a distinct attribute (``data-href``)
+    rather than a real ``href``. Text / script content is covered
+    by separate raw-text skip ranges.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<button data-href="#cite-https://doi.org/a">dataset attribute, not a real href</button>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # Bibliography id was sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # data-href was left alone.
+    assert 'data-href="#cite-https://doi.org/a"' in out
+
+
+def test_sanitize_raises_on_out_of_scope_id_collision(tmp_path, mod):
+    """An existing out-of-scope ``id="cite-…"`` blocking the sanitized name fails.
+
+    If a hand-rolled HTML cell or a code example already holds
+    ``id="cite-https-doi-org-x"`` and the bibliography ships
+    ``id="cite-https://doi.org/x"``, the sanitized form would be the
+    same value as the existing id — the rendered page would have
+    duplicate ids. Detected and raised so the build fails loud.
+    """
+    html = """
+<html><body>
+<p>Earlier in the page someone wrote a custom anchor:
+  <span id="cite-https-doi-org-a">tag</span>
+</p>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    with pytest.raises(RuntimeError, match="out-of-scope id"):
+        mod.sanitize_cite_ids(p)
+
+
+def test_sanitize_does_not_match_substring_class_token(tmp_path, mod):
+    """A ``<section>`` whose class contains ``not-myst-bibliography``
+    (or any other ``…myst-bibliography`` superstring) is NOT treated
+    as a bibliography section.
+
+    A naive ``\\bmyst-bibliography\\b`` regex finds a match inside
+    ``not-myst-bibliography`` because the hyphen counts as a word
+    boundary, which would silently sanitize ids in unrelated
+    sections. We split the class attribute on whitespace and look for
+    ``myst-bibliography`` as an exact token instead.
+    """
+    html = """
+<html><body>
+<section class="not-myst-bibliography prose">
+  <li id="cite-https://doi.org/x">should NOT be rewritten</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is False
+    out = p.read_text(encoding="utf-8")
+    assert 'id="cite-https://doi.org/x"' in out
+
+
+def test_sanitize_matches_class_token_with_neighbors(tmp_path, mod):
+    """``myst-bibliography`` is found when it shares the ``class``
+    attribute with other unrelated tokens (the realistic mystmd
+    case)."""
+    html = """
+<html><body>
+<section id="references" class="prose myst-bibliography subgrid-gap">
+  <li id="cite-https://doi.org/x">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'id="cite-https-doi-org-x"' in out
+
+
+# ----------------------------------------------------------------- #
+# HTML entity decoding — id raws and href fragments                  #
+# ----------------------------------------------------------------- #
+
+
+def test_sanitize_decodes_html_entity_in_id(tmp_path, mod):
+    """``id="cite-a&amp;b"`` is sanitized as if the literal label is
+    ``a&b``.
+
+    React computes the bibliography id from the citation's decoded
+    label (the JSON ``label`` field, post-entity-decode), not from
+    the raw SSR encoding. We must therefore decode entities BEFORE
+    sanitizing so the SSR and client agree on the result. Without
+    decoding, ``a&amp;b`` would collapse to ``a-amp-b`` while React
+    would produce ``a-b``, reintroducing the very mismatch this pass
+    is supposed to eliminate.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-a&amp;b">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'id="cite-a-b"' in out
+
+
+def test_sanitize_tolerates_multi_space_and_newline_id_attribute(tmp_path, mod):
+    """``<li ... \\n  id="cite-…">`` and similar wrap-formatted attrs match.
+
+    Pretty-printers and hand-edited HTML can put a newline + indent
+    between attributes, or multiple spaces around ``=``. A tight
+    ``\\sid="`` regex would silently skip such ids and leave them
+    unsanitized. The regex tolerates ``\\s+`` before ``id``, ``\\s*``
+    around ``=``, and either quote style.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li class="myst-bibliography-item"
+      id  =  "cite-https://doi.org/a">
+    a
+  </li>
+</section>
+<a href = "#cite-https://doi.org/a">ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'id  =  "cite-https-doi-org-a"' in out
+    assert 'href = "#cite-https-doi-org-a"' in out
+
+
+def test_sanitize_tolerates_uppercase_id_attribute(tmp_path, mod):
+    """``<li ID="cite-…">`` (uppercased attribute name) is also handled.
+
+    HTML attribute names are case-insensitive per the HTML5 spec.
+    mystmd lowercases its output today but an alternate serializer
+    or hand-edit could emit ``ID=`` or ``Id=``. The tag walker's
+    ``_parse_attrs`` lowercases attribute names before looking them
+    up, so any spelling still matches.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li ID="cite-https://doi.org/a">x</li>
+</section>
+<a HREF="#cite-https://doi.org/a">ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert 'ID="cite-https-doi-org-a"' in out
+    assert 'HREF="#cite-https-doi-org-a"' in out
+
+
+def test_sanitize_tolerates_single_quoted_id_attribute(tmp_path, mod):
+    """``<li id='cite-…'>`` (single-quoted) is also handled.
+
+    HTML5 lets attribute values be wrapped in either ``"`` or ``'``.
+    The tag walker parses both quote styles via the
+    ``"..."`` / ``'...'`` alternatives in ``_ATTR_RE`` and rewrites
+    only the captured value span — the surrounding quote characters
+    are untouched, so single-quoted citations round-trip with their
+    original single quotes instead of being silently re-emitted
+    with double quotes.
+    """
+    html = (
+        "<html><body>"
+        "<section class='myst-bibliography'>"
+        "<li id='cite-https://doi.org/a'>x</li>"
+        "</section>"
+        "<a href='#cite-https://doi.org/a'>ref</a>"
+        "</body></html>"
+    )
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    assert "id='cite-https-doi-org-a'" in out
+    assert "href='#cite-https-doi-org-a'" in out
+
+
+def test_sanitize_resolves_both_percent_and_entity_href_forms(tmp_path, mod):
+    """Percent-encoded and HTML-entity-encoded ``href="#cite-…"`` both
+    decode to the same map key and rewrite consistently.
+
+    Some renderers emit fragment identifiers with percent-encoding
+    (``#cite-a%26b``); others emit HTML entities (``#cite-a&amp;b``);
+    both must resolve to the same ``<li>`` and pick up the same
+    sanitized form.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-a&amp;b">x</li>
+</section>
+<a href="#cite-a%26b">percent-encoded ref</a>
+<a href="#cite-a&amp;b">entity ref</a>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # Both encoded forms point at the same sanitized id.
+    assert out.count('href="#cite-a-b"') == 2
