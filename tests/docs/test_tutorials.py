@@ -20,12 +20,9 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# Tutorials that require heavy external dependencies (torch, torchvision) or
-# long-running training and are skipped in CI.
-SKIP_TUTORIALS = {
-    "en/algorithm/hybrid_qnn",
-    "ja/algorithm/hybrid_qnn",
-}
+# Tutorials that require heavy external dependencies or long-running
+# computation and are skipped in CI.
+SKIP_TUTORIALS: set[str] = set()
 
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
@@ -50,6 +47,7 @@ TUTORIAL_PATTERNS = [
 OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
     "qsci": "quri_parts",
+    "hybrid_qnn": "torch",
 }
 
 

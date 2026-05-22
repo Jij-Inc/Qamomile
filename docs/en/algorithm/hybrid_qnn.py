@@ -52,6 +52,8 @@ from qamomile.circuit.algorithm import ry_layer, rz_layer, cz_entangling_layer
 import qamomile.observable as qmo
 from qamomile.qiskit import QiskitTranspiler
 
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+
 # %%
 N_QUBITS = 4
 N_LAYERS = 2
@@ -277,8 +279,8 @@ class QLayer(nn.Module):
 N_CLASSES = 4
 SELECTED_CLASSES = [0, 1, 5, 8]  # T-shirt, Trouser, Sandal, Bag
 CLASS_NAMES = ["T-shirt", "Trouser", "Sandal", "Bag"]
-N_TRAIN_PER_CLASS = 60
-N_TEST_PER_CLASS = 30
+N_TRAIN_PER_CLASS = 8 if docs_test_mode else 60
+N_TEST_PER_CLASS = 4 if docs_test_mode else 30
 
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -365,7 +367,7 @@ class EndToEndHybridHQNN(nn.Module):
         return logits, feats, q_out
 
 
-EPOCHS = 10
+EPOCHS = 2 if docs_test_mode else 10
 BATCH_SIZE = 4
 
 torch.manual_seed(42)
@@ -485,13 +487,16 @@ for i in range(n_show):
         28 * i + 14, -1.5,
         CLASS_NAMES[preds[i].item()],
         ha="center", va="bottom", fontsize=7, color=color,
+        clip_on=False,
     )
     axes[2].text(
         28 * i + 14, 29,
         CLASS_NAMES[y_test[i].item()],
         ha="center", va="top", fontsize=7,
+        clip_on=False,
     )
-axes[2].set_title("Sample Predictions (green=correct, red=wrong)")
+axes[2].set_ylim(33, -8)
+axes[2].set_title("Sample Predictions (green=correct, red=wrong)", pad=12)
 axes[2].axis("off")
 
 plt.tight_layout()
