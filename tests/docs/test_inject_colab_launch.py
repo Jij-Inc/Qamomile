@@ -410,6 +410,59 @@ def test_sanitize_does_not_match_namespaced_class_attribute(tmp_path, mod):
         assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8"), prefix
 
 
+def test_sanitize_does_not_touch_href_inside_script_or_text(tmp_path, mod):
+    """``href="#cite-…"`` substrings inside ``<script>`` / text nodes stay.
+
+    A literal `` href="#cite-…"`` string can appear inside a
+    ``<script>`` body, a code example, a JSON data-island, or any
+    text node. The rewriter walks ``<tag>`` spans and parses
+    attributes attribute-by-attribute, so a substring outside any
+    real tag-attribute boundary cannot be touched.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<script>const link = ' href="#cite-https://doi.org/a"';</script>
+<pre>some text href="#cite-https://doi.org/a" more text</pre>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # In-scope id was sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # The substrings inside <script> and <pre> were NOT rewritten.
+    assert "const link = ' href=\"#cite-https://doi.org/a\"';" in out
+    assert 'some text href="#cite-https://doi.org/a" more text' in out
+
+
+def test_sanitize_ignores_class_substring_inside_other_attr_value(tmp_path, mod):
+    """A ``class="…"`` substring inside another attribute's value is not a real class.
+
+    With quoted-attribute aware parsing, the bibliography section
+    detector only treats ``class="myst-bibliography"`` as the
+    enclosing element's class attribute when it really IS the
+    enclosing element's attribute. A substring like
+    ``data-note='foo class="myst-bibliography"'`` is the value of
+    ``data-note``, not a ``class`` attribute, so the surrounding
+    ``<section>`` must NOT be brought into scope.
+    """
+    html = """
+<html><body>
+<section data-note='foo class="myst-bibliography"'>
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is False
+    # The cite id is still in its original DOI form — section was
+    # not in scope.
+    assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8")
+
+
 def test_sanitize_does_not_match_data_href_attribute(tmp_path, mod):
     """``data-href="#cite-…"`` must not be rewritten as a real ``href``.
 

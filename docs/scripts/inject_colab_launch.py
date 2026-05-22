@@ -590,69 +590,105 @@ _SECTION_RE = re.compile(
     r"<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>",
     re.IGNORECASE | re.DOTALL,
 )
-# ``(?:^|\s)`` is the strict HTML attribute-name boundary: the
-# ``class`` literal must sit at the start of the matched span or be
-# preceded by whitespace. The default ``\bclass`` would match the
-# tail of ``data-class``, ``x:class``, ``.class``, etc. (Python's
-# ``\b`` only checks the word / non-word junction; ``-``, ``:``,
-# and ``.`` are all non-word, so they all create a boundary right
-# before ``class``). Requiring whitespace or string-start instead
-# rejects every namespace-prefixed or dataset-prefixed variant.
-_CLASS_ATTR_RE = re.compile(
-    r'(?:^|\s)class\s*=\s*(?P<q>["\'])(?P<value>[^"\']*)(?P=q)',
-    re.IGNORECASE,
-)
-# Match ``id="cite-…"`` on the rendered bibliography ``<li>`` (scoped
-# by the section / class-token check above). mystmd derives ``…``
-# from the citation's label, which for DOI-resolved citations is the
-# full URL (e.g.
-# ``cite-https://doi.org/10.48550/arxiv.quant-ph/0407010``). The
-# ``/``, ``:``, and ``.`` chars in that string cause the SSR ``id``
-# attribute to disagree with what React computes on the client
-# during hydration, and the failure cascades: a single citation
-# ``<li>`` produces on the order of 150 React #418 errors during
-# hydration, each of which recovers by re-rendering its enclosing
-# subtree client-side and is visible to the user as a flicker on
-# the affected cell outputs. Collapsing the unsafe chars to ``-``
-# aligns the SSR id with the client computation and eliminates the
-# mismatch.
+# Match an opening / self-closing HTML tag and the attribute span
+# between the tag name and ``>``. Used to scope ``href`` / ``id``
+# rewrites to ACTUAL tag content (so a substring like
+# ``href="#cite-..."`` sitting inside a ``<script>`` body or a text
+# node never gets rewritten). The ``[^>]*`` is the safe bound on
+# mystmd's output, which never embeds ``>`` inside attribute
+# values; if upstream ever does, we'd need to switch to a proper
+# HTML parser (the rewriter would then under-match, not
+# over-match, so it would only ship a partial fix rather than a
+# regression).
+_TAG_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9-]*(?P<attrs>[^>]*)>", re.DOTALL)
+# Walk a single tag's attribute span attribute-by-attribute. The
+# leading ``(?:^|\s)`` is the attribute-name boundary: an
+# attribute starts either at the beginning of the attrs span or
+# after whitespace. Without it, a namespaced spelling like
+# ``.class="..."`` or ``data-class="..."`` would be picked up at
+# the inner ``class`` substring.
 #
-# We anchor on the ``id=`` prefix so the regex does not accidentally
-# rewrite the citation's visible label text (which legitimately
-# contains ``https://`` etc.) or the ``href`` of the citation link
-# (which legitimately points at the doi.org URL). Both regexes
-# tolerate the HTML5-legal whitespace variations: ``\s+`` for the
-# leading attribute separator (mystmd emits one space today but
-# pretty-printers can emit a newline + indent), ``\s*`` around the
-# ``=``, and a captured quote char so single- or double-quoted
-# values both work. The closing quote in the value capture uses a
-# backreference so we never cross a quote boundary by accident.
-# ``re.IGNORECASE`` because HTML attribute names are case-insensitive
-# in the spec, so ``ID=`` and ``Id=`` from an alternate serializer
-# still match.
-_CITE_ID_IN_BIB_RE = re.compile(
-    r'(\s+id\s*=\s*(["\']))cite-([^"\']+)\2',
-    re.IGNORECASE,
-)
-# Cross-references back into the bibliography use a fragment of the
-# form ``href="#cite-…"``. mystmd doesn't emit these in our
-# tagged-pill citation style today, but the upstream renderer can
-# (e.g. footnote-style citation pills), and rewritten ids must stay
-# in sync with their cross-references so the fragment anchor still
-# resolves to its ``<li>`` after sanitization. Same whitespace /
-# quote-style tolerance as ``_CITE_ID_IN_BIB_RE``. The ``\s+`` before
-# ``href`` is load-bearing: without it, ``data-href="#cite-…"`` or a
-# string in inline JSON / a code block that happens to contain
-# ``href="#cite-…"`` would be silently rewritten too.
-_CITE_HREF_RE = re.compile(
-    r'(\s+href\s*=\s*(["\']))#cite-([^"\']+)\2',
-    re.IGNORECASE,
+# The value is split into two alternatives by quote style — one
+# for double-quoted (``[^"]*``) and one for single-quoted
+# (``[^']*``). A naive single arm with ``[^"\']*`` would close
+# the value at the FIRST quote of either style, so a single-
+# quoted value containing a literal ``"`` (e.g.
+# ``data-note='foo class="bar"'``) would terminate prematurely,
+# fail the closing-quote check, then the regex engine would
+# advance and re-match the inner ``class="bar"`` substring as a
+# second attribute. With per-quote alternatives that confusion
+# is impossible: the value scans only chars that aren't the
+# opening quote.
+#
+# ``re.IGNORECASE`` because HTML attribute names are case-
+# insensitive in spec.
+_ATTR_RE = re.compile(
+    r"""(?:^|\s)
+        (?P<name>[a-zA-Z_:][a-zA-Z0-9_.:\-]*)
+        \s*=\s*
+        (?:
+            "(?P<value_dq>[^"]*)"
+            |
+            '(?P<value_sq>[^']*)'
+        )""",
+    re.IGNORECASE | re.VERBOSE,
 )
 # Chars HTML5 + CSS-selector + React all accept in id values without
 # special encoding; everything else gets collapsed to a single ``-``.
 # Underscore is included because it is HTML5-id-safe and appears in
 # some upstream citation labels.
 _UNSAFE_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+# Marker that scopes citation ids in the bibliography.
+_CITE_PREFIX = "cite-"
+# Marker that scopes the fragment cross-references we follow.
+_CITE_HREF_PREFIX = "#cite-"
+
+
+def _parse_attrs(attrs: str) -> dict[str, tuple[str, int, int]]:
+    """Parse an HTML attribute span into ``{name → (value, span_start, span_end)}``.
+
+    The span coordinates are absolute offsets into the input
+    ``attrs`` string and point at the attribute VALUE (not including
+    the surrounding quotes), so callers can do in-place rewrites
+    with ``attrs[:start] + new_value + attrs[end:]``.
+
+    Walks the attribute list attribute-by-attribute so a substring
+    of one attribute's value cannot be mistaken for another
+    attribute. mystmd doesn't emit attribute values containing the
+    HTML chars our rewriter cares about (``class="…"``,
+    ``href="#cite-…"``), but a robust parse keeps the contract
+    consistent with the function's docstring claim that the
+    rewriter only touches real attributes.
+
+    Names are lower-cased so callers can look up by canonical
+    spelling. If a name appears more than once (invalid HTML), the
+    first occurrence wins.
+
+    Args:
+        attrs (str): The attribute span between the tag-name and
+            the closing ``>`` of an opening tag.
+
+    Returns:
+        dict[str, tuple[str, int, int]]: ``{lowercase_name →
+            (value, value_start, value_end)}``. Empty if the span
+            has no parseable attributes.
+    """
+    out: dict[str, tuple[str, int, int]] = {}
+    for match in _ATTR_RE.finditer(attrs):
+        name = match.group("name").lower()
+        if name in out:
+            continue
+        # Pick whichever alternative captured a value.
+        if match.group("value_dq") is not None:
+            value = match.group("value_dq")
+            start = match.start("value_dq")
+            end = match.end("value_dq")
+        else:
+            value = match.group("value_sq")
+            start = match.start("value_sq")
+            end = match.end("value_sq")
+        out[name] = (value, start, end)
+    return out
 
 
 def _has_class_token(class_value: str, token: str) -> bool:
@@ -838,26 +874,65 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     if "myst-bibliography" not in content or "cite-" not in content:
         return False
 
-    # Pass 1: walk every ``<section>``, keep only those whose class
-    # attribute actually contains ``myst-bibliography`` as a CSS
-    # token, and collect both the unique decoded labels (for the
-    # ``decoded → sanitized`` rewrite map) and every per-id-attribute
-    # occurrence (so we can detect duplicate-id outputs in pass 2 of
-    # the collision check).
+    # Iterating helper for tags inside a fragment of HTML. Walks
+    # opening / self-closing tags via ``_TAG_RE`` and yields
+    # ``(tag_match, parsed_attrs)`` pairs so callers don't repeat
+    # the parse work for the collision scan and the rewrite scan.
+    def _iter_tags_with_attrs(
+        haystack: str,
+        offset: int,
+    ) -> list[tuple[re.Match[str], dict[str, tuple[str, int, int]]]]:
+        return [
+            (tag_match, _parse_attrs(tag_match.group("attrs")))
+            for tag_match in _TAG_RE.finditer(haystack, offset)
+        ]
+
+    # Walk every ``<section>``, keep only those whose ``class``
+    # attribute (looked up via a proper attribute-by-attribute parse,
+    # so a substring of another attribute's quoted value cannot
+    # masquerade as ``class``) actually contains
+    # ``myst-bibliography`` as a CSS token. Track both the unique
+    # decoded labels (for the ``decoded → sanitized`` rewrite map)
+    # and every per-id-attribute occurrence (so the second collision
+    # mode below can detect duplicate-id outputs).
     decoded_to_sanitized: dict[str, str] = {}
     sanitized_origins: dict[str, list[str]] = {}
     sanitized_occurrences: dict[str, list[str]] = {}  # sanitized -> raw[]
     bibliography_spans: list[tuple[int, int]] = []
+    in_scope_id_positions: set[int] = set()  # absolute offsets, see collision pass
     for section_match in _SECTION_RE.finditer(content):
-        attrs = section_match.group("attrs")
-        class_match = _CLASS_ATTR_RE.search(attrs)
-        if class_match is None:
+        section_attrs = _parse_attrs(section_match.group("attrs"))
+        class_entry = section_attrs.get("class")
+        if class_entry is None:
             continue
-        if not _has_class_token(class_match.group("value"), "myst-bibliography"):
+        class_value, _, _ = class_entry
+        if not _has_class_token(class_value, "myst-bibliography"):
             continue
-        bibliography_spans.append((section_match.start(), section_match.end()))
-        for id_match in _CITE_ID_IN_BIB_RE.finditer(section_match.group(0)):
-            raw = id_match.group(3)
+        section_start, section_end = section_match.start(), section_match.end()
+        bibliography_spans.append((section_start, section_end))
+        # Walk every tag inside this bibliography section and pull the
+        # ``id`` attribute when its value starts with ``cite-``.
+        # ``_parse_attrs`` is what makes the scope correct: a
+        # ``data-foo="something id='cite-x'"`` substring won't be
+        # mistaken for a real ``id`` attribute.
+        for tag_match, tag_attrs in _iter_tags_with_attrs(content, section_start):
+            if tag_match.start() >= section_end:
+                break
+            id_entry = tag_attrs.get("id")
+            if id_entry is None:
+                continue
+            id_value, id_value_start_in_attrs, _id_value_end_in_attrs = id_entry
+            if not id_value.startswith(_CITE_PREFIX):
+                continue
+            raw = id_value[len(_CITE_PREFIX) :]
+            # Track the absolute start of the value span so the
+            # rewrite pass below can do an in-place substitution
+            # without re-parsing. ``tag_match.start("attrs")`` is
+            # already absolute in ``content``, so adding the
+            # parser-relative offset gives the absolute position of
+            # the value's first character.
+            value_abs_start = tag_match.start("attrs") + id_value_start_in_attrs
+            in_scope_id_positions.add(value_abs_start)
             decoded = _decode_id_raw(raw)
             sanitized = _sanitize_cite_id(decoded)
             sanitized_occurrences.setdefault(sanitized, []).append(raw)
@@ -891,16 +966,24 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     # happens to match the sanitized form of one of our bibliography
     # ids. We don't rewrite that out-of-scope id (different scope),
     # but the post-sanitize page would still ship two elements with
-    # the same ``id``. Scan every ``id="cite-…"`` outside the
-    # bibliography spans we collected above and check none of them
-    # collides with the sanitized values we're about to produce.
+    # the same ``id``. Walk every tag in the document via
+    # ``_TAG_RE`` + ``_parse_attrs`` (a substring of another
+    # attribute's value cannot reach this loop) and check the ones
+    # whose id starts with ``cite-`` and sit outside our captured
+    # bibliography spans.
     sanitized_values = set(decoded_to_sanitized.values())
     out_of_scope_collisions: dict[str, str] = {}
-    for id_match in _CITE_ID_IN_BIB_RE.finditer(content):
-        start = id_match.start()
-        if any(s <= start < e for s, e in bibliography_spans):
-            continue  # inside bibliography — already counted above
-        raw_existing = id_match.group(3)
+    for tag_match, tag_attrs in _iter_tags_with_attrs(content, 0):
+        id_entry = tag_attrs.get("id")
+        if id_entry is None:
+            continue
+        id_value, id_value_start_in_attrs, _id_value_end_in_attrs = id_entry
+        if not id_value.startswith(_CITE_PREFIX):
+            continue
+        value_abs_start = tag_match.start("attrs") + id_value_start_in_attrs
+        if value_abs_start in in_scope_id_positions:
+            continue
+        raw_existing = id_value[len(_CITE_PREFIX) :]
         decoded_existing = _decode_id_raw(raw_existing)
         if decoded_existing in sanitized_values:
             out_of_scope_collisions[decoded_existing] = raw_existing
@@ -930,38 +1013,66 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     if all(decoded == sanitized for decoded, sanitized in decoded_to_sanitized.items()):
         return False
 
-    # Pass 2: rewrite ids only inside bibliography section spans.
-    # ``match.group(1)`` is the captured prefix up to and including
-    # the opening quote; ``match.group(2)`` is the quote char alone,
-    # which we reuse as the closing quote so single-quoted attributes
-    # keep their single quotes.
-    def _id_repl(match: re.Match[str]) -> str:
-        decoded = _decode_id_raw(match.group(3))
-        sanitized = decoded_to_sanitized.get(decoded, match.group(3))
-        return f"{match.group(1)}cite-{sanitized}{match.group(2)}"
+    # Single rewrite pass. Walk every tag in the document and, for
+    # each tag, look up its parsed attributes. Two kinds of edits:
+    #
+    # 1. If the tag sits inside a bibliography section AND has an
+    #    ``id`` attribute that starts with ``cite-``, rewrite the
+    #    suffix to its sanitized form. Captured ``in_scope_id_positions``
+    #    from the first walk lets us skip out-of-scope ids without
+    #    re-checking the section regex.
+    # 2. If the tag has an ``href`` attribute that starts with
+    #    ``#cite-`` AND the decoded label is in our rewrite map,
+    #    rewrite the suffix. Unknown fragments are passed through
+    #    untouched.
+    #
+    # All edits are in-place attribute-value substitutions using the
+    # absolute spans returned by ``_parse_attrs``, so we never touch
+    # characters outside an actual quoted attribute value (so a
+    # ``href="#cite-…"`` substring inside a ``<script>`` body or a
+    # text node is impossible to rewrite by construction).
+    edits: list[tuple[int, int, str]] = []  # (start, end, replacement)
+    for tag_match, tag_attrs in _iter_tags_with_attrs(content, 0):
+        attrs_abs_start = tag_match.start("attrs")
 
-    pieces: list[str] = []
-    cursor = 0
-    for start, end in bibliography_spans:
-        pieces.append(content[cursor:start])
-        pieces.append(_CITE_ID_IN_BIB_RE.sub(_id_repl, content[start:end]))
-        cursor = end
-    pieces.append(content[cursor:])
-    new_content = "".join(pieces)
+        # (1) Bibliography-scoped id rewrite.
+        id_entry = tag_attrs.get("id")
+        if id_entry is not None:
+            id_value, id_value_start_in_attrs, id_value_end_in_attrs = id_entry
+            if id_value.startswith(_CITE_PREFIX):
+                abs_start = attrs_abs_start + id_value_start_in_attrs
+                abs_end = attrs_abs_start + id_value_end_in_attrs
+                if abs_start in in_scope_id_positions:
+                    raw = id_value[len(_CITE_PREFIX) :]
+                    decoded = _decode_id_raw(raw)
+                    sanitized = decoded_to_sanitized.get(decoded, raw)
+                    if sanitized != raw:
+                        edits.append((abs_start, abs_end, f"{_CITE_PREFIX}{sanitized}"))
 
-    # Pass 3: rewrite fragment cross-references anywhere using the
-    # same map. Unknown fragments (decoded label not in the map) are
-    # passed through — they point at non-bibliography anchors. Same
-    # group layout as ``_id_repl``: 1 = prefix-with-opening-quote,
-    # 2 = quote char, 3 = raw value after ``#cite-``.
-    def _href_repl(match: re.Match[str]) -> str:
-        decoded = _decode_href_raw(match.group(3))
-        sanitized = decoded_to_sanitized.get(decoded)
-        if sanitized is None or sanitized == match.group(3):
-            return match.group(0)
-        return f"{match.group(1)}#cite-{sanitized}{match.group(2)}"
+        # (2) Fragment cross-reference rewrite (anywhere in the doc).
+        href_entry = tag_attrs.get("href")
+        if href_entry is None:
+            continue
+        href_value, href_value_start_in_attrs, href_value_end_in_attrs = href_entry
+        if not href_value.startswith(_CITE_HREF_PREFIX):
+            continue
+        raw_href = href_value[len(_CITE_HREF_PREFIX) :]
+        decoded_href = _decode_href_raw(raw_href)
+        sanitized_href = decoded_to_sanitized.get(decoded_href)
+        if sanitized_href is None or sanitized_href == raw_href:
+            continue
+        abs_start = attrs_abs_start + href_value_start_in_attrs
+        abs_end = attrs_abs_start + href_value_end_in_attrs
+        edits.append((abs_start, abs_end, f"{_CITE_HREF_PREFIX}{sanitized_href}"))
 
-    new_content = _CITE_HREF_RE.sub(_href_repl, new_content)
+    if not edits:
+        return False
+
+    # Apply edits right-to-left so earlier indices stay valid.
+    edits.sort(key=lambda e: e[0], reverse=True)
+    new_content = content
+    for start, end, replacement in edits:
+        new_content = new_content[:start] + replacement + new_content[end:]
 
     if new_content == content:
         return False
