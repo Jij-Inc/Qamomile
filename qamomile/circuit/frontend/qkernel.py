@@ -309,7 +309,11 @@ class QKernel(Generic[P, R]):
             )
         elif v.source_kind == "quantum_arg":
             assert src is not None
-            pattern = f"{target} = {func}({src}, ...)" if func else f"{target} = ...({src}, ...)"
+            pattern = (
+                f"{target} = {func}({src}, ...)"
+                if func
+                else f"{target} = ...({src}, ...)"
+            )
             reason = f"a value derived from different quantum variable '{src}'"
             self_update = (
                 f"  - Use self-update: {target} = {func}({target}, ...)\n"
@@ -346,10 +350,7 @@ class QKernel(Generic[P, R]):
                 if func
                 else f"  - Pass '{target}' into the call so it is self-updated\n"
             )
-            fix = (
-                f"{self_update}"
-                f"  - Or bind the new value to a different name"
-            )
+            fix = f"{self_update}  - Or bind the new value to a different name"
         elif v.source_kind == "chained_assignment":
             pattern = f"{target} = ... = ..."
             reason = (
