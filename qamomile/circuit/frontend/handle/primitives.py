@@ -257,10 +257,12 @@ class Float(ArithmeticMixin, Handle):
 
         Lets users write the natural ``-x`` inside a ``@qkernel`` instead
         of the awkward ``0 - x`` idiom (GitHub issue #329). The negation
-        is lowered to the existing ``SUB`` IR op as ``0.0 - self``, so it
-        carries no new IR node and every backend that already supports
-        subtraction emits it unchanged. When ``self`` is a compile-time
-        constant the result is folded eagerly by ``_emit_binop``.
+        is lowered to the existing ``MUL`` IR op as ``self * -1.0`` —
+        multiplication by ``-1`` is the direct expression of unary minus
+        — so it carries no new IR node and every backend that already
+        supports multiplication emits it unchanged. When ``self`` is a
+        compile-time constant the result is folded eagerly by
+        ``_emit_binop``.
 
         Returns:
             Float: A new Float handle holding the negated value.
@@ -272,9 +274,9 @@ class Float(ArithmeticMixin, Handle):
             ...     q = qmc.qubit("q")
             ...     return qmc.rz(q, -theta)
         """
-        zero = self._make_float(0.0)
+        neg_one = self._make_float(-1.0)
         result = self._make_result()
-        _emit_binop(zero.value, self.value, result, BinOpKind.SUB)
+        _emit_binop(self.value, neg_one.value, result, BinOpKind.MUL)
         return result
 
     def __mul__(self, other: "int | float | Float") -> "Float":

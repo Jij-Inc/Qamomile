@@ -2,10 +2,10 @@
 
 ``Float.__neg__`` lets users write the natural ``-x`` inside a ``@qkernel``
 instead of the awkward ``0 - x`` idiom (GitHub issue #329). Negation is
-lowered to the existing ``SUB`` IR op as ``0.0 - self``, so it adds no new
-IR node and rides on every backend's existing subtraction support. When
+lowered to the existing ``MUL`` IR op as ``self * -1.0``, so it adds no new
+IR node and rides on every backend's existing multiplication support. When
 the operand is a compile-time-bound Float, ``partial_eval`` folds the
-``SUB`` into the literal negated constant baked into the emitted circuit.
+``MUL`` into the literal negated constant baked into the emitted circuit.
 
 These tests exercise three layers of evidence:
 
@@ -213,8 +213,8 @@ class TestNegConstantFold:
     def test_bound_neg_folds_to_constant_param(self, theta):
         """``-theta`` with ``theta`` bound emits a single ``rz`` with param ``-theta``.
 
-        When both operands of the underlying ``SUB`` are constants
-        (``0.0`` and the bound ``theta``), ``partial_eval`` folds the op,
+        When both operands of the underlying ``MUL`` are constants
+        (``-1.0`` and the bound ``theta``), ``partial_eval`` folds the op,
         so the emitted Qiskit circuit carries the literal ``-theta`` as
         the rotation parameter rather than a symbolic expression.
         """
