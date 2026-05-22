@@ -1007,19 +1007,21 @@ class QKernel(Generic[P, R]):
                 values, and ``qubit_sizes`` maps ``Vector[Qubit]``
                 argument names to their resolved first-axis sizes.
                 Scalar ``Qubit``, scalar ``Observable``, unbound
-                ``Vector[Observable]``, and multi-dimensional qubit
-                arrays (``Matrix[Qubit]`` / ``Tensor[Qubit]``) are
+                ``Vector[Observable]``, multi-dimensional qubit arrays
+                (``Matrix[Qubit]`` / ``Tensor[Qubit]``), unbound
+                ``Dict`` parameters, and ``Tuple`` parameters are
                 deliberately left out of all three buckets so that
                 :meth:`_create_traced_block` falls back to its standard
-                handling for those argument positions while still
-                specializing the rest of the call. Returns ``None``
-                when no specialization is beneficial (the call adds no
-                new compile-time information over the cached symbolic
-                block) or when an argument cannot be safely handled
-                (``Tuple``, a non-parameterizable classical type that
-                also has no compile-time constant, an unbound ``Dict``
-                parameter, etc.). In the ``None`` case ``__call__``
-                falls back to ``self.block``.
+                ``create_dummy_input`` handling for those argument
+                positions while still specializing the rest of the
+                call. Returns ``None`` only when no specialization is
+                beneficial (the call adds no new compile-time
+                information over the cached symbolic block) or when an
+                argument has a non-parameterizable classical type
+                (``Bit`` / ``bool`` / ``Vector[Bit]`` / ``Vector[bool]``)
+                with no compile-time constant — that combination has
+                nowhere to live in the specialization triple. In the
+                ``None`` case ``__call__`` falls back to ``self.block``.
         """
         parameters: list[str] = []
         bindings: dict[str, Any] = {}
@@ -1028,8 +1030,18 @@ class QKernel(Generic[P, R]):
         for name, param in self.signature.parameters.items():
             param_type = self.input_types.get(name, param.annotation)
             handle = arguments.get(name)
-            if not isinstance(handle, Handle):
-                return None
+            # ``QKernel.__call__`` rejects non-``Handle`` arguments before
+            # this method is reached, so an offending ``handle`` here is
+            # a programmer error in the upstream call site, not a
+            # normal specialization-abort condition. Use ``assert``
+            # (Section L of CLAUDE.md: ``assert`` for internal
+            # invariants).
+            assert isinstance(handle, Handle), (
+                f"Internal invariant violated: argument {name!r} should "
+                f"already be a Handle by the time "
+                f"_extract_calltime_specialization runs (upstream check "
+                f"at __call__)."
+            )
 
             # Scalar Qubit: no specialization-relevant info to extract;
             # ``_create_traced_block`` will fall through to the regular
@@ -1082,11 +1094,15 @@ class QKernel(Generic[P, R]):
                 qubit_sizes[name] = size
                 continue
 
-            # Classical scalar. Prefer the compile-time constant. Fall
-            # back to keeping it as a runtime parameter only when the
-            # type is parameterizable (``_validate_parameters`` rejects
-            # ``Bit`` / ``bool``); otherwise abort so the cached
-            # symbolic block path is used.
+            # Classical scalar. Bind the compile-time constant when
+            # available. If not, the only way to keep the value live
+            # through the specialized trace is as a runtime parameter
+            # via the ``parameters`` list — but ``_validate_parameters``
+            # only admits ``UInt`` / ``Float`` / ``int`` / ``float`` and
+            # their arrays. ``Bit`` / ``bool`` without a constant has
+            # nowhere to go (``bindings`` needs a value, ``parameters``
+            # would be rejected downstream), so we abort and let the
+            # cached symbolic ``self.block`` handle the call.
             if param_type in (int, UInt, float, Float, bool, Bit):
                 const_value = handle.value.get_const()
                 if const_value is not None:
@@ -1097,9 +1113,11 @@ class QKernel(Generic[P, R]):
                     return None
                 continue
 
-            # Classical array. Same pattern as scalars: bind when a
-            # constant array is known, otherwise either pass through as
-            # a runtime parameter (when parameterizable) or abort.
+            # Classical array. Same dead-end logic as scalars: bind the
+            # const array when available, otherwise list as a runtime
+            # parameter when parameterizable. ``Vector[Bit]`` /
+            # ``Vector[bool]`` without a const has neither option and
+            # aborts.
             if is_array_type(param_type):
                 const_array = handle.value.get_const_array()
                 if const_array is not None:
@@ -1115,15 +1133,30 @@ class QKernel(Generic[P, R]):
             # ``_create_bound_input``), so it can't distinguish the two.
             # Use the presence of ``dict_runtime`` metadata instead — it
             # is set if and only if the caller bound a concrete dict
-            # value, even if that dict is empty.
+            # value, even if that dict is empty. When no metadata is
+            # present, ``continue`` without entering any bucket so
+            # ``_create_traced_block``'s fall-through ``create_dummy_input``
+            # path produces a symbolic Dict dummy (the same shape the
+            # cached ``self.block`` would carry). Specialization on
+            # other arguments still proceeds — only this Dict stays
+            # symbolic.
             if is_dict_type(param_type):
                 if handle.value.metadata.dict_runtime is None:
-                    return None
+                    continue
                 bindings[name] = handle.value.get_bound_data()
                 continue
 
-            # Tuple and anything else not modeled above: fall back to
-            # the symbolic block path rather than guess.
+            # ``Tuple``. We do not yet have a ``_create_bound_input``
+            # branch for tuples and ``Tuple`` is not parameterizable,
+            # so there is no bucket we can place a tuple argument into.
+            # ``continue`` is still safe: ``_create_traced_block``'s
+            # fall-through ``create_dummy_input`` path creates a
+            # symbolic ``TupleValue`` dummy, matching the cached block.
+            if is_tuple_type(param_type):
+                continue
+
+            # Anything else not modeled above: abort and let the cached
+            # symbolic block path handle the call.
             return None
 
         # Skip specialization when it would not change the traced
