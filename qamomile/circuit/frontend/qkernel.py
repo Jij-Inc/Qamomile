@@ -992,15 +992,17 @@ class QKernel(Generic[P, R]):
         shapes are known.
 
         Args:
-            arguments (dict[str, Any]): Pre-consumption mapping from
+            arguments (dict[str, Any]): The bound-argument mapping from
                 parameter name to the caller's frontend
                 :class:`Handle`, as produced by
                 ``signature.bind(...).arguments`` in :meth:`__call__`.
-                The handles are inspected here before the call site
-                consumes them, so the extractor can read
-                ``handle.value`` metadata (``get_const``,
-                ``get_const_array``, ``dict_runtime``) without
-                affecting the affine-type ledger.
+                Quantum handles in this mapping have already been
+                ``consume()``-d by :meth:`__call__` before this
+                extractor runs, but ``consume`` only updates the
+                affine-type ledger and leaves ``handle.value``
+                untouched, so the metadata reads this method performs
+                (``get_const``, ``get_const_array``, ``dict_runtime``,
+                ``get_size`` on quantum arrays) are still valid.
 
         Returns:
             tuple[list[str], dict[str, Any], dict[str, int]] | None:

@@ -745,10 +745,11 @@ class TestNestedShapeDependentStdlib:
         symbolic block is used for the callee's behaviour on that
         argument position, so kernels that simply *take* a
         ``Matrix[Qubit]`` without applying shape-dependent stdlib to
-        it must still compose normally. (Trade-off documented in
-        SUMMARY's known-limitations entry: a callee that applies
-        ``qft`` / ``iqft`` to a ``Matrix[Qubit]`` argument continues
-        to silently no-op on those qubits.)
+        it must still compose normally. (Trade-off documented in the
+        ``Matrix[Qubit]`` / ``Tensor[Qubit]`` entry of
+        ``LIMITATIONS.md``: a callee that applies ``qft`` / ``iqft``
+        to a ``Matrix[Qubit]`` argument continues to silently no-op
+        on those qubits.)
         """
 
         @qkernel
