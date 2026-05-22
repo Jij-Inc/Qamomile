@@ -27,7 +27,7 @@
 # 対応する行の先頭の "# " を外して実行してください。
 # # !pip install qamomile                  # Qiskit (デフォルト)
 # # !pip install "qamomile[quri_parts]"    # QURI Parts
-# # !pip install "qamomile[cudaq-cu12]"    # CUDA 12.x ツールチェインの場合の CUDA-Q (CUDA 13.x なら cudaq-cu13)。Linux / macOS-arm64 / WSL2 のみ。
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA 12.x ツールチェインの場合の CUDA-Q (CUDA 13.x なら qamomile[cudaq-cu13])。Linux / macOS-arm64 / WSL2 のみ。
 
 # %% [markdown]
 # ---

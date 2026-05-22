@@ -50,7 +50,7 @@
 # "# " を外して実行してください。
 # # !pip install qamomile                  # Qiskit (デフォルト)
 # # !pip install "qamomile[quri_parts]"    # QURI Parts
-# # !pip install "qamomile[cudaq-cu12]"    # CUDA 12.x ツールチェインの場合の CUDA-Q (CUDA 13.x なら cudaq-cu13)。Linux / macOS-arm64 / WSL2 のみ。
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA 12.x ツールチェインの場合の CUDA-Q (CUDA 13.x なら qamomile[cudaq-cu13])。Linux / macOS-arm64 / WSL2 のみ。
 
 # %% [markdown]
 # この記事ではデフォルトで Qiskit を使います。Qamomile は同じ`@qkernel`を複数のSDKにトランスパイルできるので、別のSDKで読みたい場合はすぐ下にあるTranspilerと`statevector_of()`検証ヘルパの2つのセルを差し替えれば、本文の他のコードはそのままで動きます。Colabではまず上のセルにある対応する`pip install`行のコメントを外してください。

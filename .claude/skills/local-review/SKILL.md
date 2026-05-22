@@ -166,7 +166,7 @@ The **documentation** counterpart of this rule lives in Section I-bis below — 
      # below and remove the leading "# " from it to run.
      # # !pip install qamomile                  # Qiskit (default)
      # # !pip install "qamomile[quri_parts]"    # QURI Parts
-     # # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use cudaq-cu13 on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+     # # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use qamomile[cudaq-cu13] on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
      ```
 
      Articles with extra non-Qamomile packages append them to all three lines (e.g. ``qamomile openfermion pyscf openfermionpyscf``).
