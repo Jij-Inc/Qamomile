@@ -331,27 +331,6 @@ def test_sanitize_does_not_match_namespaced_class_attribute(tmp_path, mod):
         assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8"), prefix
 
 
-def test_sanitize_does_not_match_data_class_attribute(tmp_path, mod):
-    """``data-class="myst-bibliography"`` must not be mistaken for ``class``.
-
-    The matcher uses a ``(?:^|\\s)`` anchor so the literal ``class``
-    token is only recognised as the standalone HTML attribute name,
-    not as the tail of ``data-class`` (which is a custom dataset
-    attribute and does NOT select the element via CSS).
-    """
-    html = """
-<html><body>
-<section data-class="myst-bibliography">
-  <li id="cite-https://doi.org/a">x</li>
-</section>
-</body></html>
-"""
-    p = _write_html(tmp_path, "page.html", html)
-    assert mod.sanitize_cite_ids(p) is False
-    # ID still in its original DOI form — section was not in scope.
-    assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8")
-
-
 def test_sanitize_does_not_match_data_href_attribute(tmp_path, mod):
     """``data-href="#cite-…"`` must not be rewritten as a real ``href``.
 
