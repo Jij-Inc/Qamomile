@@ -67,21 +67,44 @@ class ResourceAllocator:
         self,
         operations: list[Operation],
         bindings: dict[str, Any] | None = None,
+        initial_qubit_map: QubitMap | None = None,
+        initial_clbit_map: ClbitMap | None = None,
     ) -> tuple[QubitMap, ClbitMap]:
         """Allocate qubit and clbit indices for all operations.
 
         Args:
-            operations: List of operations to allocate resources for
-            bindings: Optional variable bindings for resolving dynamic sizes
+            operations (list[Operation]): Operations to allocate resources
+                for.
+            bindings (dict[str, Any] | None): Optional variable bindings
+                for resolving dynamic sizes. Defaults to None (treated as
+                an empty mapping).
+            initial_qubit_map (QubitMap | None): Optional pre-populated
+                qubit address mapping. Used by callers that need to seed
+                the allocator with bindings established outside the
+                operation list — for instance, the inner-block emitter
+                in ``blockvalue_to_gate`` pre-allocates ``Vector[Qubit]``
+                input elements (the inner block has no ``QInitOperation``
+                for inputs, so per-element entries must be supplied here
+                or the assertion in ``_allocate_gate`` fires). The map is
+                copied; allocation continues from
+                ``max(values) + 1`` so new ``QInitOperation`` allocations
+                inside ``operations`` do not collide. Defaults to None
+                (treated as empty).
+            initial_clbit_map (ClbitMap | None): Optional pre-populated
+                clbit address mapping. Same semantics as
+                ``initial_qubit_map`` but for classical bits. Defaults to
+                None.
 
         Returns:
-            Tuple of (qubit_map, clbit_map) where each maps
-            QubitAddress to physical index
+            tuple[QubitMap, ClbitMap]: ``(qubit_map, clbit_map)`` where
+                each maps ``QubitAddress`` to a physical index. If an
+                initial map was supplied, its entries are preserved
+                verbatim in the returned map.
         """
-        qubit_map: QubitMap = {}
-        clbit_map: ClbitMap = {}
-        self._next_qubit_index = 0
-        self._next_clbit_index = 0
+        qubit_map: QubitMap = dict(initial_qubit_map) if initial_qubit_map else {}
+        clbit_map: ClbitMap = dict(initial_clbit_map) if initial_clbit_map else {}
+        self._next_qubit_index = max(qubit_map.values(), default=-1) + 1
+        self._next_clbit_index = max(clbit_map.values(), default=-1) + 1
         self._allocate_recursive(operations, qubit_map, clbit_map, bindings or {})
         return qubit_map, clbit_map
 

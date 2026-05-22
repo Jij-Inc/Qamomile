@@ -2118,3 +2118,209 @@ class TestControlledBuiltinCrossSDKExpval:
             f"SDK={transpiler_factory.__name__}, seed={seed}, theta={theta}: "
             f"builtin={val_b}, wrapper={val_w}"
         )
+
+
+# =============================================================================
+# Cross-SDK execution: user @qkernel with Vector[Qubit] input + index-spec
+# =============================================================================
+#
+# Regression for the bug where ``controlled(inner_kernel, ...)(qs,
+# target_indices=[...])`` tripped an allocator assertion when
+# ``inner_kernel`` took a ``Vector[Qubit]`` argument: the inner block has
+# no QInitOperation for its inputs, so the per-element ``QubitAddress``
+# keys for ``qs[i]`` references in the body were never registered before
+# ``ResourceAllocator._allocate_gate`` ran.  These tests cover the
+# Vector[Qubit]-input + index-spec combination across every supported
+# SDK (transpile + sample + expval), with randomized parameters.
+
+
+@qmc.qkernel
+def _shift_first_three(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Cyclic shift ``(q0, q1, q2) -> (q2, q0, q1)`` via two SWAPs.
+
+    Used as the inner kernel for the ``Vector[Qubit]``-input regression
+    test.  The deterministic permutation makes it easy to verify the
+    final basis state by hand: when the outer control is ``|1>`` the
+    three target qubits are permuted, and when it is ``|0>`` they are
+    untouched.
+    """
+    qs[0], qs[1] = qmc.swap(qs[0], qs[1])
+    qs[1], qs[2] = qmc.swap(qs[1], qs[2])
+    return qs
+
+
+@qmc.qkernel
+def _rotate_first_two(
+    qs: qmc.Vector[qmc.Qubit],
+    theta: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply ``RY(theta)`` to both ``qs[0]`` and ``qs[1]``.
+
+    Used to exercise the case where a ``Vector[Qubit]``-input inner
+    kernel also carries a classical parameter that must be threaded
+    through to the controlled gate's emit path.
+    """
+    qs[0] = qmc.ry(qs[0], theta)
+    qs[1] = qmc.ry(qs[1], theta)
+    return qs
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledIndexSpecVectorInnerKernel:
+    """Vector[Qubit]-input inner kernels under target_indices/controlled_indices.
+
+    Regression coverage for the ``IndexSpecControlledU`` emit path when
+    the inner ``@qmc.qkernel``'s only quantum input is a
+    ``Vector[Qubit]``.  Each test transpiles on every supported SDK and
+    runs both the sampling and expectation-value paths so the two
+    backend primitives are independently regressed.
+
+    The sampling tests are deterministic basis-state checks and need no
+    randomization; the expval test rides a random rotation angle so it
+    carries its own seed parametrization at method scope.
+    """
+
+    def test_target_indices_sampling(self, transpiler_factory):
+        """Controlled cyclic shift gates a deterministic basis state when ctrl=|1>.
+
+        Initial state |1110>: q[3] is the outer control (ON), q[0..2]
+        are the targets carrying |1,1,1>.  The inner ``_shift_first_three``
+        permutes (q0,q1,q2) -> (q2,q0,q1); on |1,1,1> this is a no-op,
+        so the final measurement should be |1110> with probability 1.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            qs[3] = qmc.x(qs[3])
+            cg = qmc.controlled(_shift_first_three, num_controls=1)
+            qs = cg(qs, target_indices=[0, 1, 2])
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel)
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support this controlled-U: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total > 0, f"no shots returned on SDK={transpiler_factory.__name__}"
+        # ``Vector[Bit]`` sampling yields ``((b0, b1, ...), count)``
+        # tuples in element order (q[0] first).  Every shot must be
+        # the deterministic outcome ``(1, 1, 1, 1)``.
+        for value, count in result.results:
+            assert tuple(value) == (1, 1, 1, 1), (
+                f"expected all shots to measure (1, 1, 1, 1), got value={value} "
+                f"count={count} on SDK={transpiler_factory.__name__}"
+            )
+
+    def test_controlled_indices_sampling(self, transpiler_factory):
+        """controlled_indices=[3] is equivalent to target_indices=[0,1,2].
+
+        With the outer control OFF (|0> on q[3]) and the three target
+        qubits prepared in |1,1,1>, the gate is the identity and the
+        measurement deterministically yields ``(1, 1, 1, 0)`` (q[0..2]
+        on, q[3] off).
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.controlled(_shift_first_three, num_controls=1)
+            qs = cg(qs, controlled_indices=[3])
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel)
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support this controlled-U: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total > 0, f"no shots returned on SDK={transpiler_factory.__name__}"
+        for value, count in result.results:
+            assert tuple(value) == (1, 1, 1, 0), (
+                f"expected all shots to measure (1, 1, 1, 0), got value={value} "
+                f"count={count} on SDK={transpiler_factory.__name__}"
+            )
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 42])
+    def test_expval_matches_wrapper_form(self, transpiler_factory, seed):
+        """Vector[Qubit]-input form must agree with the individual-Qubit-arg form.
+
+        Builds two equivalent circuits: one passes ``qs`` to the
+        ``Vector[Qubit]``-input inner kernel via index-spec, the other
+        uses individual ``Qubit`` arguments (the documented workaround
+        in the bug report).  Both must produce the same expectation
+        value for ``Σ_i Z_i`` over a randomized rotation parameter.
+        """
+        import qamomile.observable as qm_o
+
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+
+        # Vector[Qubit]-input form (the bug path).
+        @qmc.qkernel
+        def kernel_vector(obs: qmc.Observable) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.h(qs[0])  # Put outer control in superposition.
+            qs[1] = qmc.x(qs[1])  # Make inner state non-trivial.
+            cg = qmc.controlled(_rotate_first_two, num_controls=1)
+            qs = cg(qs, controlled_indices=[0], theta=theta)
+            return qmc.expval((qs[0], qs[1], qs[2]), obs)
+
+        # Equivalent individual-Qubit-arg form (the documented workaround).
+        @qmc.qkernel
+        def _rotate_first_two_scalar(
+            q0: qmc.Qubit,
+            q1: qmc.Qubit,
+            theta: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            q0 = qmc.ry(q0, theta)
+            q1 = qmc.ry(q1, theta)
+            return q0, q1
+
+        @qmc.qkernel
+        def kernel_scalar(obs: qmc.Observable) -> qmc.Float:
+            q0 = qmc.qubit(name="q0")
+            q1 = qmc.qubit(name="q1")
+            q2 = qmc.qubit(name="q2")
+            q0 = qmc.h(q0)
+            q1 = qmc.x(q1)
+            cg = qmc.controlled(_rotate_first_two_scalar, num_controls=1)
+            q0, q1, q2 = cg(q0, q1, q2, theta=theta)
+            return qmc.expval((q0, q1, q2), obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=3)
+        for i in range(3):
+            H += qm_o.Z(i)
+
+        t = transpiler_factory()
+        try:
+            exe_v = t.transpile(kernel_vector, bindings={"obs": H})
+            exe_s = t.transpile(kernel_scalar, bindings={"obs": H})
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support this controlled-U: {e}"
+            )
+
+        val_v = exe_v.run(t.executor()).result()
+        val_s = exe_s.run(t.executor()).result()
+
+        assert np.isclose(val_v, val_s, atol=1e-6), (
+            f"vector-input/scalar-arg expval mismatch on "
+            f"SDK={transpiler_factory.__name__}, seed={seed}, theta={theta}: "
+            f"vector={val_v}, scalar={val_s}"
+        )

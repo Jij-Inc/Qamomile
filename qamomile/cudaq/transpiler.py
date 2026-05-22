@@ -63,33 +63,131 @@ def _build_block_qubit_map(
     that SSA result versions inherit the same physical target as their
     operands.
 
-    This allows resolving which physical target an inner gate's operand
-    refers to, even across multiple SSA versions.
-    """
-    qubit_map: dict[str, int] = {}
+    Scalar ``Qubit`` inputs map one UUID -> one physical target;
+    ``Vector[Qubit]`` inputs (``ArrayValue`` carrying a quantum element
+    type) consume one physical index per element. The element UUIDs
+    themselves are unknown at seed time — they are created during the
+    inner kernel's tracing — so the body walk below also resolves any
+    operand whose ``parent_array`` matches a registered vector and
+    seeds ``qubit_map`` with the per-element UUID lazily.
 
-    # Seed from block inputs.
+    Args:
+        block_value (Any): Inner block whose ``input_values`` and
+            ``operations`` are walked. Missing attributes are treated as
+            an empty seed source.
+        target_indices (list[int]): Physical target indices the inner
+            block's quantum inputs map onto, in declaration order. Each
+            scalar input consumes one index; each ``Vector[Qubit]``
+            input consumes ``length`` consecutive indices, where
+            ``length`` is taken from the vector's per-element references
+            in the body (the maximum element_index + 1 actually used).
+
+    Returns:
+        dict[str, int]: Mapping from operand UUID (per-element or
+            scalar) to physical target index. Empty when ``block_value``
+            has no quantum inputs.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    qubit_map: dict[str, int] = {}
+    # ``Vector[Qubit]`` input UUID -> ``(start_index_in_target_indices,
+    # length)`` so the body walk below can map each per-element operand
+    # back to its physical target.
+    vector_inputs: dict[str, tuple[int, int]] = {}
+
     if hasattr(block_value, "input_values"):
         qubit_idx = 0
-        for iv in block_value.input_values:
-            if hasattr(iv, "type") and iv.type.is_quantum():
+        quantum_inputs = [
+            iv
+            for iv in block_value.input_values
+            if hasattr(iv, "type") and iv.type.is_quantum()
+        ]
+        # Determine each Vector[Qubit] input's length from
+        # ``target_indices`` (one of the vectors may absorb the
+        # remainder; for now require a single Vector input or none, to
+        # match the IndexSpecControlledU caller contract).
+        scalar_count = sum(1 for iv in quantum_inputs if not isinstance(iv, ArrayValue))
+        for iv in quantum_inputs:
+            if isinstance(iv, ArrayValue):
+                length = len(target_indices) - scalar_count
+                if length < 0:
+                    length = 0
+                vector_inputs[iv.uuid] = (qubit_idx, length)
+                # Seed each element UUID once we walk the body; for now
+                # also store the base UUID for any downstream lookup
+                # that addresses the array as a whole.
+                if qubit_idx < len(target_indices) and length > 0:
+                    qubit_map[iv.uuid] = target_indices[qubit_idx]
+                qubit_idx += length
+            else:
                 if qubit_idx < len(target_indices):
                     qubit_map[iv.uuid] = target_indices[qubit_idx]
                 qubit_idx += 1
 
-    # Propagate through operations: result inherits operand's target.
+    # Walk all operations once to:
+    #   (a) seed each per-element operand UUID of a Vector[Qubit] input,
+    #   (b) propagate SSA so result versions inherit operand targets.
     if hasattr(block_value, "operations"):
         for op in block_value.operations:
             if isinstance(op, GateOperation):
+                for operand in op.qubit_operands:
+                    _seed_vector_element_uuid(
+                        operand, vector_inputs, target_indices, qubit_map
+                    )
                 for i, result in enumerate(op.results):
                     if hasattr(result, "type") and result.type.is_quantum():
-                        # Find the corresponding operand's physical target.
-                        if i < len(op.operands):
-                            operand = op.operands[i]
-                            if hasattr(operand, "uuid") and operand.uuid in qubit_map:
+                        if i < len(op.qubit_operands):
+                            operand = op.qubit_operands[i]
+                            if operand.uuid in qubit_map:
                                 qubit_map[result.uuid] = qubit_map[operand.uuid]
 
     return qubit_map
+
+
+def _seed_vector_element_uuid(
+    operand: Any,
+    vector_inputs: dict[str, tuple[int, int]],
+    target_indices: list[int],
+    qubit_map: dict[str, int],
+) -> None:
+    """Seed ``qubit_map`` with a Vector[Qubit] element operand's UUID.
+
+    Resolves an ``operand`` that addresses an element of a ``Vector[Qubit]``
+    input (i.e., ``operand.parent_array`` matches a registered vector
+    and ``operand.element_indices[0]`` is a constant) to its physical
+    target via ``vector_inputs`` and stores it under ``operand.uuid``.
+    Non-element operands and elements with non-constant indices are
+    ignored — they either belong to a scalar input (already seeded) or
+    fall outside the controlled helper's current resolution capability.
+
+    Args:
+        operand (Any): A gate operand to seed.
+        vector_inputs (dict[str, tuple[int, int]]): Map from
+            ``Vector[Qubit]`` input UUID to ``(start_offset, length)``
+            in ``target_indices``.
+        target_indices (list[int]): The physical target index list the
+            inner block's quantum inputs map onto.
+        qubit_map (dict[str, int]): UUID-to-physical-target map; mutated
+            in place when the operand is a recognized Vector[Qubit]
+            element.
+    """
+    parent = getattr(operand, "parent_array", None)
+    if parent is None:
+        return
+    if parent.uuid not in vector_inputs:
+        return
+    indices = tuple(getattr(operand, "element_indices", ()))
+    if not indices:
+        return
+    idx_val = indices[0]
+    if not idx_val.is_constant():
+        return
+    elem_idx = int(idx_val.get_const())
+    start, length = vector_inputs[parent.uuid]
+    if elem_idx < 0 or elem_idx >= length:
+        return
+    physical = target_indices[start + elem_idx]
+    qubit_map.setdefault(operand.uuid, physical)
 
 
 def _resolve_gate_targets(
@@ -102,6 +200,20 @@ def _resolve_gate_targets(
     For each quantum operand of the gate, looks up the corresponding
     physical target via ``qubit_map``.  Falls back to ``fallback_targets``
     if no mapping is found.
+
+    Args:
+        op (GateOperation): The gate operation whose operand targets are
+            being resolved.
+        qubit_map (dict[str, int]): UUID-to-physical-target map seeded
+            by ``_build_block_qubit_map``.
+        fallback_targets (list[int]): Default physical targets used when
+            no operand resolves through ``qubit_map``.
+
+    Returns:
+        list[int]: Per-operand physical target indices in
+            ``op.qubit_operands`` order, or ``fallback_targets`` when no
+            operand resolved through the map (matches prior behavior so
+            unrelated controlled callers keep working).
     """
     resolved: list[int] = []
     for operand in op.operands:

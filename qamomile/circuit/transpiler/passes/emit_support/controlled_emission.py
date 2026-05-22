@@ -617,7 +617,40 @@ def blockvalue_to_gate(
     num_qubits: int,
     bindings: dict[str, Any],
 ) -> Any:
-    """Convert a Block to a backend gate."""
+    """Convert a Block to a backend gate.
+
+    Pre-populates ``local_qubit_map`` with one entry per quantum input in
+    declaration order, then runs the allocator over the block's body.
+    For ``Vector[Qubit]`` inputs (``ArrayValue`` with a quantum element
+    type) the entry expands into per-element ``QubitAddress(uuid, i)``
+    keys — the inner block has no ``QInitOperation`` for inputs, so
+    without these the allocator's element-resolution assertion fires for
+    every ``qs[i]`` reference in the body.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass driving the
+            conversion. Used for its ``_allocator``, ``_emitter``,
+            ``_resolver``, and ``_emit_operations``.
+        block_value (Any): The inner block to convert. Expected to expose
+            ``operations`` and ``input_values``; anything else returns
+            ``None`` (the caller falls back to gate-by-gate
+            decomposition).
+        num_qubits (int): Total physical qubits the resulting gate will
+            occupy in the parent circuit. Used as the fallback length
+            for a single ``Vector[Qubit]`` input whose shape is symbolic
+            and unresolvable from ``bindings``, and as the sub-circuit
+            width when the block has no qubit-producing operations.
+        bindings (dict[str, Any]): Parameter bindings forwarded to the
+            allocator and ``_emit_operations``. Also consulted when
+            resolving ``Vector[Qubit]`` input shapes.
+
+    Returns:
+        Any: A backend gate object produced by
+            ``emit_pass._emitter.circuit_to_gate``, or ``None`` when the
+            conversion is unable to proceed (missing ``operations``,
+            allocator / emitter exception, etc.) so the caller can fall
+            back to gate-by-gate emission.
+    """
     if not hasattr(block_value, "operations"):
         return None
 
@@ -626,21 +659,20 @@ def blockvalue_to_gate(
         local_clbit_map: ClbitMap = {}
 
         if hasattr(block_value, "input_values"):
-            qubit_idx = 0
-            for input_val in block_value.input_values:
-                if hasattr(input_val, "type") and input_val.type.is_quantum():
-                    local_qubit_map[QubitAddress(input_val.uuid)] = qubit_idx
-                    qubit_idx += 1
+            _populate_input_qubit_map(
+                emit_pass,
+                block_value.input_values,
+                num_qubits,
+                bindings,
+                local_qubit_map,
+            )
 
         local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
-            block_value.operations
+            block_value.operations,
+            bindings,
+            initial_qubit_map=local_qubit_map,
+            initial_clbit_map=local_clbit_map,
         )
-
-        # Remap to ensure input qubits come first
-        if hasattr(block_value, "input_values"):
-            for i, input_val in enumerate(block_value.input_values):
-                if hasattr(input_val, "type") and input_val.type.is_quantum():
-                    local_qubit_map[QubitAddress(input_val.uuid)] = i
 
         qubit_count = (
             max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
@@ -666,3 +698,129 @@ def blockvalue_to_gate(
             exc_info=True,
         )
         return None
+
+
+def _populate_input_qubit_map(
+    emit_pass: "StandardEmitPass",
+    input_values: list[Any],
+    num_qubits: int,
+    bindings: dict[str, Any],
+    qubit_map: QubitMap,
+) -> None:
+    """Pre-populate ``qubit_map`` with the inner block's quantum inputs.
+
+    Scalar ``Qubit`` inputs consume one physical index each;
+    ``Vector[Qubit]`` inputs (``ArrayValue`` with a quantum element type)
+    consume ``length`` consecutive indices, one per element, keyed as
+    ``QubitAddress(uuid, i)``. The base ``QubitAddress(uuid)`` is also
+    registered for the vector so any downstream lookup that addresses
+    the array as a whole resolves to its first element.
+
+    Args:
+        emit_pass (StandardEmitPass): Provides the value resolver used
+            to resolve symbolic ``Vector[Qubit]`` shapes against
+            ``bindings``.
+        input_values (list[Any]): The inner block's ``input_values``.
+            Non-quantum inputs (``Float``, ``UInt``, ...) are skipped.
+        num_qubits (int): Total qubit count the resulting gate will
+            occupy. Used as the fallback length for a single
+            ``Vector[Qubit]`` input whose shape Value is not present in
+            ``bindings``.
+        bindings (dict[str, Any]): Parameter bindings consulted when
+            resolving a vector's symbolic shape.
+        qubit_map (QubitMap): Mapping mutated in place. Each registered
+            entry maps a ``QubitAddress`` (scalar or array element) to a
+            consecutive physical index starting at 0.
+
+    Raises:
+        EmitError: If a ``Vector[Qubit]`` input's length cannot be
+            resolved and cannot be inferred from ``num_qubits`` (multiple
+            unresolvable vector inputs, or vector length exceeds the
+            remaining qubit budget).
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    quantum_inputs = [
+        iv for iv in input_values if hasattr(iv, "type") and iv.type.is_quantum()
+    ]
+
+    scalar_count = sum(1 for iv in quantum_inputs if not isinstance(iv, ArrayValue))
+    vector_inputs = [iv for iv in quantum_inputs if isinstance(iv, ArrayValue)]
+
+    resolved_lengths: dict[str, int] = {}
+    unresolved: list[ArrayValue] = []
+    for iv in vector_inputs:
+        length = _resolve_vector_input_length(emit_pass, iv, bindings)
+        if length is None:
+            unresolved.append(iv)
+        else:
+            resolved_lengths[iv.uuid] = length
+
+    # Fall back to ``num_qubits`` for the single unresolved Vector[Qubit]
+    # input. The caller's ``num_qubits`` is the total qubit count of the
+    # emitted gate, so subtracting scalars and any resolved vector
+    # lengths leaves exactly the remaining vector's length.
+    if len(unresolved) == 1:
+        inferred = num_qubits - scalar_count - sum(resolved_lengths.values())
+        if inferred < 0:
+            raise EmitError(
+                f"Vector[Qubit] input {unresolved[0].name!r} has an unresolved "
+                f"length and the remaining qubit budget "
+                f"({num_qubits - scalar_count - sum(resolved_lengths.values())}) "
+                f"is negative; bind the vector's shape before transpilation.",
+                operation="ControlledUOperation",
+            )
+        resolved_lengths[unresolved[0].uuid] = inferred
+    elif len(unresolved) > 1:
+        raise EmitError(
+            f"Cannot resolve Vector[Qubit] input shapes for inner block "
+            f"({[iv.name for iv in unresolved]!r}); only one symbolic "
+            f"length can be inferred from the gate's qubit count. Bind "
+            f"the remaining shapes before transpilation.",
+            operation="ControlledUOperation",
+        )
+
+    qubit_idx = 0
+    for input_val in quantum_inputs:
+        if isinstance(input_val, ArrayValue):
+            length = resolved_lengths[input_val.uuid]
+            for i in range(length):
+                qubit_map[QubitAddress(input_val.uuid, i)] = qubit_idx + i
+            base_addr = QubitAddress(input_val.uuid)
+            if base_addr not in qubit_map and length > 0:
+                qubit_map[base_addr] = qubit_idx
+            qubit_idx += length
+        else:
+            qubit_map[QubitAddress(input_val.uuid)] = qubit_idx
+            qubit_idx += 1
+
+
+def _resolve_vector_input_length(
+    emit_pass: "StandardEmitPass",
+    input_val: Any,
+    bindings: dict[str, Any],
+) -> int | None:
+    """Resolve a ``Vector[Qubit]`` input's length from its shape Value.
+
+    Args:
+        emit_pass (StandardEmitPass): Provides ``_resolver`` for shape
+            resolution.
+        input_val (Any): An ``ArrayValue`` representing a ``Vector[Qubit]``
+            input. The first element of ``input_val.shape`` is the
+            length Value (constant or symbolic).
+        bindings (dict[str, Any]): Bindings consulted when the shape
+            Value is symbolic.
+
+    Returns:
+        int | None: The resolved length, or ``None`` when ``input_val.shape``
+            is empty (no dimension Value at all) or when the first
+            dimension is symbolic and not present in ``bindings``. The
+            caller treats both cases as "unresolved" and falls back to
+            inferring the length from the surrounding qubit budget.
+    """
+    if not input_val.shape:
+        return None
+    size_val = input_val.shape[0]
+    if size_val.is_constant():
+        return int(size_val.get_const())
+    return emit_pass._resolver.resolve_int_value(size_val, bindings)
