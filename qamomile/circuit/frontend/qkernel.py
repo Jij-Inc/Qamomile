@@ -17,6 +17,7 @@ from typing import (
 import numpy as np
 
 from qamomile.circuit.frontend.ast_transform import (
+    RebindViolation,
     collect_quantum_rebind_violations,
     transform_control_flow,
 )
@@ -39,7 +40,10 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
-from qamomile.circuit.transpiler.errors import FrontendTransformError
+from qamomile.circuit.transpiler.errors import (
+    FrontendTransformError,
+    QubitRebindError,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
@@ -225,21 +229,29 @@ class QKernel(Generic[P, R]):
         # once ``func_to_block`` returns.  See _finalize_pending_self_calls.
         self._pending_self_calls: list[CallBlockOperation] = []
 
-        # AST-level quantum rebind analysis (deferred raise until build/block)
+        # AST-level quantum rebind analysis: a violation is a structural error
+        # in the kernel definition itself, so raise eagerly at decoration time
+        # rather than deferring to .block / build().
         quantum_params = _get_quantum_param_names(input_types)
         if quantum_params:
-            self._rebind_violations = collect_quantum_rebind_violations(
+            violations = collect_quantum_rebind_violations(
                 self.raw_func, quantum_params
             )
-        else:
-            self._rebind_violations = []
+            if violations:
+                self._raise_rebind_violation(violations[0])
 
-    def _check_rebind_violations(self) -> None:
-        if not self._rebind_violations:
-            return
-        from qamomile.circuit.transpiler.errors import QubitRebindError
+    def _raise_rebind_violation(self, v: RebindViolation) -> None:
+        """Raise ``QubitRebindError`` for the first detected violation.
 
-        v = self._rebind_violations[0]
+        Args:
+            v (RebindViolation): The violation record produced by
+                ``collect_quantum_rebind_violations``. Its ``lineno`` is
+                relative to the start of the kernel function definition.
+
+        Raises:
+            QubitRebindError: Always — this helper exists solely to format
+                the message consistently.
+        """
         if v.func_name:
             pattern = f"{v.target_name} = {v.func_name}({v.source_name}, ...)"
             fix = (
@@ -253,7 +265,8 @@ class QKernel(Generic[P, R]):
                 f"  - Remove the assignment if '{v.target_name}' is no longer needed"
             )
         raise QubitRebindError(
-            f"Forbidden quantum variable reassignment at line {v.lineno}: "
+            f"Kernel '{self.name}': forbidden quantum variable reassignment "
+            f"at line {v.lineno} (relative to the function definition): "
             f"'{pattern}' overwrites quantum variable '{v.target_name}' "
             f"with a value derived from different quantum variable "
             f"'{v.source_name}'.\n\nTo fix, either:\n{fix}",
@@ -264,7 +277,6 @@ class QKernel(Generic[P, R]):
     @property
     def block(self) -> Block:
         """Compile the function to a hierarchical Block if not already compiled."""
-        self._check_rebind_violations()
         if self._block is None:
             if self._block_building:
                 # Re-entry from outside ``__call__``'s forward-ref branch.
@@ -1096,8 +1108,6 @@ class QKernel(Generic[P, R]):
             result = transpiler.emit(graph, binding={"theta": 0.5})
             ```
         """
-        self._check_rebind_violations()
-
         if parameters is None:
             parameters = self._auto_detect_parameters(kwargs)
 

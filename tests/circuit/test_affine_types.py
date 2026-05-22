@@ -1800,53 +1800,38 @@ def _make_rebind_subkernels():
 class TestQuantumRebindDetectionBasics:
     """Core AST-level detection and compatibility behavior."""
 
-    def test_build_scalar_overwrite_call_rejected(self):
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = qm.h(b)
-            return a
-
+    def test_scalar_overwrite_call_rejected(self):
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = qm.h(b)
+                return a
 
-    def test_build_scalar_overwrite_direct_rejected(self):
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = b
-            return a
-
+    def test_scalar_overwrite_direct_rejected(self):
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = b
+                return a
 
-    def test_transpile_scalar_overwrite_rebind_rejected(self):
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = qm.h(b)
-            return a
-
+    def test_vector_overwrite_direct_rejected(self):
         with pytest.raises(QubitRebindError):
-            _ = bad.block
+            @qkernel
+            def bad(
+                qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+            ) -> qm.Vector[qm.Qubit]:
+                qs1 = qs2
+                return qs1
 
-    def test_build_vector_overwrite_direct_rejected(self):
-        @qkernel
-        def bad(
-            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
-        ) -> qm.Vector[qm.Qubit]:
-            qs1 = qs2
-            return qs1
-
+    def test_error_raised_at_definition(self):
+        """A rebind violation aborts ``@qkernel`` itself; no QKernel object is created."""
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = qm.h(b)
+                return a
 
-    def test_error_not_raised_at_definition(self):
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = qm.h(b)
-            return a
-
-        assert bad.name == "bad"
-        with pytest.raises(QubitRebindError):
-            bad.build()
+        assert "bad" not in locals()
 
     def test_implicit_discard_still_allowed(self):
         @qkernel
@@ -1860,19 +1845,32 @@ class TestQuantumRebindDetectionBasics:
     def test_rebind_error_message_deterministic_with_multiple_quantum_args(self):
         """Error message should consistently reference the first traversed quantum arg."""
 
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit, c: qm.Qubit) -> qm.Qubit:
-            a = qm.cx(b, c)  # a's origin is a; neither b nor c matches
-            return a
+        def define_bad() -> None:
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit, c: qm.Qubit) -> qm.Qubit:
+                a = qm.cx(b, c)  # a's origin is a; neither b nor c matches
+                return a
 
         with pytest.raises(QubitRebindError) as exc_info:
-            bad.build()
+            define_bad()
         msg = str(exc_info.value)
         assert "b" in msg or "c" in msg
         for _ in range(5):
             with pytest.raises(QubitRebindError) as exc2:
-                bad.build()
+                define_bad()
             assert str(exc2.value) == msg
+
+    def test_rebind_error_message_includes_kernel_name(self):
+        """Error message identifies the offending kernel by name."""
+        with pytest.raises(QubitRebindError) as exc_info:
+            @qkernel
+            def my_uniquely_named_kernel(
+                a: qm.Qubit, b: qm.Qubit
+            ) -> qm.Qubit:
+                a = qm.h(b)
+                return a
+
+        assert "Kernel 'my_uniquely_named_kernel'" in str(exc_info.value)
 
 
 class TestQuantumRebindDetectionSingleQubit:
@@ -1882,13 +1880,11 @@ class TestQuantumRebindDetectionSingleQubit:
         "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
     )
     def test_scalar_overwrite_from_other_qubit_rejected(self, name, gate):
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = gate(b)
-            return a
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = gate(b)
+                return a
 
     @pytest.mark.parametrize(
         "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
@@ -1960,13 +1956,11 @@ class TestQuantumRebindDetectionSingleQubit:
         "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
     )
     def test_rotation_scalar_overwrite_from_other_qubit_rejected(self, name, gate):
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit, theta: qm.Float) -> qm.Qubit:
-            a = gate(b, theta)
-            return a
-
         with pytest.raises(QubitRebindError):
-            bad.build(parameters=["theta"])
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit, theta: qm.Float) -> qm.Qubit:
+                a = gate(b, theta)
+                return a
 
     @pytest.mark.parametrize(
         "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
@@ -2046,13 +2040,11 @@ class TestQuantumRebindDetectionTwoQubit:
         ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
     )
     def test_scalar_tuple_overwrite_first_mismatch_rejected(self, name, gate):
-        @qkernel
-        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = gate(q1, q3)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = gate(q1, q3)
+                return q1, q2
 
     @pytest.mark.parametrize(
         "name,gate",
@@ -2060,13 +2052,11 @@ class TestQuantumRebindDetectionTwoQubit:
         ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
     )
     def test_scalar_tuple_overwrite_second_mismatch_rejected(self, name, gate):
-        @qkernel
-        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = gate(q3, q2)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = gate(q3, q2)
+                return q1, q2
 
     @pytest.mark.parametrize(
         "name,gate",
@@ -2074,15 +2064,13 @@ class TestQuantumRebindDetectionTwoQubit:
         ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
     )
     def test_scalar_tuple_overwrite_all_mismatch_rejected(self, name, gate):
-        @qkernel
-        def bad(
-            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
-        ) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = gate(q3, q4)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(
+                q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
+            ) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = gate(q3, q4)
+                return q1, q2
 
     @pytest.mark.parametrize(
         "name,gate",
@@ -2120,15 +2108,13 @@ class TestQuantumRebindDetectionTwoQubit:
         ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
     )
     def test_param_scalar_tuple_mismatch_rejected(self, name, gate):
-        @qkernel
-        def bad(
-            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, theta: qm.Float
-        ) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = gate(q1, q3, theta)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build(parameters=["theta"])
+            @qkernel
+            def bad(
+                q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, theta: qm.Float
+            ) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = gate(q1, q3, theta)
+                return q1, q2
 
     @pytest.mark.parametrize(
         "name,gate",
@@ -2174,6 +2160,9 @@ class TestQuantumRebindDetectionTwoQubit:
     def test_vector_element_tuple_overwrite_from_other_vector_rejected(
         self, name, gate
     ):
+        # No quantum-typed kernel arguments, so the AST-level rebind analyzer
+        # does not run; the violation is caught by the IR-level affine check
+        # during build().
         @qkernel
         def bad() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
             qs1 = qubit_array(2, "qs1")
@@ -2185,7 +2174,7 @@ class TestQuantumRebindDetectionTwoQubit:
             qs1[1] = q1
             return qs1, qs2
 
-        with pytest.raises((QubitRebindError, AffineTypeError)):
+        with pytest.raises(AffineTypeError):
             bad.build()
 
     @pytest.mark.parametrize(
@@ -2232,6 +2221,9 @@ class TestQuantumRebindDetectionTwoQubit:
     def test_param_vector_element_tuple_overwrite_from_other_vector_rejected(
         self, name, gate
     ):
+        # Same as the no-param variant: the AST analyzer only inspects
+        # quantum-typed kernel arguments, so a `theta: qm.Float` parameter
+        # does not engage it. The violation is caught at build time.
         @qkernel
         def bad(theta: qm.Float) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
             qs1 = qubit_array(2, "qs1")
@@ -2243,7 +2235,7 @@ class TestQuantumRebindDetectionTwoQubit:
             qs1[1] = q1
             return qs1, qs2
 
-        with pytest.raises((QubitRebindError, AffineTypeError)):
+        with pytest.raises(AffineTypeError):
             bad.build(parameters=["theta"])
 
     @pytest.mark.parametrize(
@@ -2286,15 +2278,13 @@ class TestQuantumRebindDetectionTwoQubit:
         "name,gate", _THREE_QUBIT_GATES, ids=[g[0] for g in _THREE_QUBIT_GATES]
     )
     def test_three_qubit_tuple_mixed_origin_rejected(self, name, gate):
-        @qkernel
-        def bad(
-            a: qm.Qubit, b: qm.Qubit, c: qm.Qubit, d: qm.Qubit
-        ) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-            a, b, c = gate(a, b, d)
-            return a, b, c
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(
+                a: qm.Qubit, b: qm.Qubit, c: qm.Qubit, d: qm.Qubit
+            ) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+                a, b, c = gate(a, b, d)
+                return a, b, c
 
     @pytest.mark.parametrize(
         "name,gate", _THREE_QUBIT_GATES, ids=[g[0] for g in _THREE_QUBIT_GATES]
@@ -2333,13 +2323,11 @@ class TestQuantumRebindDetectionComposite:
     def test_single_qubit_composite_overwrite_rejected(self):
         gate = _SingleRebindComposite()
 
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = gate(b)
-            return a
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = gate(b)
+                return a
 
     def test_single_qubit_composite_self_update_allowed(self):
         gate = _SingleRebindComposite()
@@ -2366,13 +2354,11 @@ class TestQuantumRebindDetectionComposite:
     def test_two_qubit_composite_tuple_mismatch_rejected(self):
         gate = _TwoRebindComposite()
 
-        @qkernel
-        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = gate(q1, q3)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = gate(q1, q3)
+                return q1, q2
 
     def test_two_qubit_composite_self_update_allowed(self):
         gate = _TwoRebindComposite()
@@ -2416,13 +2402,11 @@ class TestQuantumRebindDetectionViaQKernel:
     def test_scalar_overwrite_rejected(self):
         k1, _, _ = _make_rebind_subkernels()
 
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = k1(b)
-            return a
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = k1(b)
+                return a
 
     def test_scalar_self_update_allowed(self):
         k1, _, _ = _make_rebind_subkernels()
@@ -2449,37 +2433,31 @@ class TestQuantumRebindDetectionViaQKernel:
     def test_tuple_overwrite_first_mismatch_rejected(self):
         _, k2, _ = _make_rebind_subkernels()
 
-        @qkernel
-        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = k2(q1, q3)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = k2(q1, q3)
+                return q1, q2
 
     def test_tuple_overwrite_second_mismatch_rejected(self):
         _, k2, _ = _make_rebind_subkernels()
 
-        @qkernel
-        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = k2(q3, q2)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = k2(q3, q2)
+                return q1, q2
 
     def test_tuple_overwrite_all_mismatch_rejected(self):
         _, k2, _ = _make_rebind_subkernels()
 
-        @qkernel
-        def bad(
-            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
-        ) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = k2(q3, q4)
-            return q1, q2
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(
+                q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
+            ) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = k2(q3, q4)
+                return q1, q2
 
     def test_tuple_self_update_allowed(self):
         _, k2, _ = _make_rebind_subkernels()
@@ -2509,27 +2487,23 @@ class TestQuantumRebindDetectionViaQKernel:
         """Tuple result alias used to overwrite an existing quantum var should be rejected."""
         _, k2, _ = _make_rebind_subkernels()
 
-        @qkernel
-        def bad(a: qm.Qubit, b: qm.Qubit, c: qm.Qubit) -> qm.Qubit:
-            x, _y = k2(b, c)
-            a = x
-            return a
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit, c: qm.Qubit) -> qm.Qubit:
+                x, _y = k2(b, c)
+                a = x
+                return a
 
     def test_vector_whole_overwrite_rejected(self):
         _, _, kv = _make_rebind_subkernels()
 
-        @qkernel
-        def bad(
-            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
-        ) -> qm.Vector[qm.Qubit]:
-            qs1 = kv(qs2)
-            return qs1
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(
+                qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+            ) -> qm.Vector[qm.Qubit]:
+                qs1 = kv(qs2)
+                return qs1
 
     def test_vector_whole_self_update_allowed(self):
         _, _, kv = _make_rebind_subkernels()
@@ -2558,24 +2532,20 @@ class TestQuantumRebindDetectionViaQKernel:
     def test_scalar_overwrite_from_vector_element_const_index_rejected(self):
         """Overwriting an existing scalar qubit from qs[0] should raise rebind error."""
 
-        @qkernel
-        def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit]) -> qm.Qubit:
-            a = qs[0]
-            return a
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit]) -> qm.Qubit:
+                a = qs[0]
+                return a
 
     def test_scalar_overwrite_from_vector_element_symbolic_index_rejected(self):
         """Overwriting an existing scalar qubit from qs[i] should raise rebind error."""
 
-        @qkernel
-        def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit], i: qm.UInt) -> qm.Qubit:
-            a = qs[i]
-            return a
-
         with pytest.raises(QubitRebindError):
-            bad.build(i=0)
+            @qkernel
+            def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit], i: qm.UInt) -> qm.Qubit:
+                a = qs[i]
+                return a
 
     def test_scalar_new_binding_from_vector_element_symbolic_index_allowed(self):
         """Binding qs[i] to a new name should remain allowed."""
@@ -2635,15 +2605,13 @@ class TestQuantumRebindDetectionStdlib:
         "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]
     )
     def test_vector_whole_overwrite_rejected(self, name, gate):
-        @qkernel
-        def bad(
-            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
-        ) -> qm.Vector[qm.Qubit]:
-            qs1 = gate(qs2)
-            return qs1
-
         with pytest.raises(QubitRebindError):
-            bad.build()
+            @qkernel
+            def bad(
+                qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+            ) -> qm.Vector[qm.Qubit]:
+                qs1 = gate(qs2)
+                return qs1
 
     @pytest.mark.parametrize(
         "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]

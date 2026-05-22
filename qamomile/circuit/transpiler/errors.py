@@ -355,7 +355,17 @@ class QubitRebindError(AffineTypeError):
 
     When a quantum variable is reassigned, the RHS must consume the
     same variable (self-update pattern). Reassigning from a different
-    quantum variable silently discards the original quantum state.
+    quantum variable would silently discard the original quantum state.
+
+    The check runs at ``@qkernel`` decoration time as a static AST
+    analysis (see ``frontend.ast_transform.collect_quantum_rebind_violations``)
+    and raises immediately — the wrapped ``QKernel`` object is never
+    constructed when a violation is present. The check engages only when
+    at least one kernel argument has a quantum-handle type (``Qubit`` or
+    ``Vector[Qubit]``); kernels that derive their quantum state purely
+    from internal ``qubit_array(...)`` calls are validated later by the
+    IR-level affine type check during ``build()`` instead, which raises
+    the parent ``AffineTypeError`` rather than this subclass.
 
     Example of incorrect code:
         a = qm.h(b)  # ERROR: 'a' was quantum, now overwritten from 'b'
