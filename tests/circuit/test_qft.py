@@ -734,17 +734,21 @@ class TestNestedShapeDependentStdlib:
         )
         assert iqft_ops[0].num_target_qubits == n
 
-    def test_matrix_qubit_sub_kernel_raises_not_implemented(self):
-        """Call-time spec on ``Matrix[Qubit]`` callee args must error loudly.
+    def test_matrix_qubit_sub_kernel_compiles_without_specialization(self):
+        """A nested call with a ``Matrix[Qubit]`` arg still compiles.
 
-        Higher-rank quantum-array specialization is not yet wired up
-        in ``_extract_calltime_specialization``. Silently falling back
-        to the cached symbolic block would mean shape-dependent stdlib
-        (qft / iqft / qpe) applied inside the callee on the
-        ``Matrix[Qubit]`` register no-ops without warning — exactly
-        the failure mode this PR is closing for the ``Vector[Qubit]``
-        case. Raise ``NotImplementedError`` instead so the user sees
-        the unsupported case at the call site.
+        Higher-rank quantum-array specialization is not yet
+        implemented in ``_extract_calltime_specialization`` — the
+        extractor leaves ``Matrix[Qubit]`` / ``Tensor[Qubit]``
+        arguments out of all three buckets and ``continue``s, the
+        same way it handles ``Dict`` / ``Tuple``. The cached
+        symbolic block is used for the callee's behaviour on that
+        argument position, so kernels that simply *take* a
+        ``Matrix[Qubit]`` without applying shape-dependent stdlib to
+        it must still compose normally. (Trade-off documented in
+        SUMMARY's known-limitations entry: a callee that applies
+        ``qft`` / ``iqft`` to a ``Matrix[Qubit]`` argument continues
+        to silently no-op on those qubits.)
         """
 
         @qkernel
@@ -752,13 +756,19 @@ class TestNestedShapeDependentStdlib:
             return qs
 
         @qkernel
-        def outer() -> qmc.Vector[qmc.Bit]:
+        def outer() -> Matrix[Qubit]:
             qs = qubit_array((2, 3), "qs")
             qs = inner(qs)
-            return qmc.measure(qs)
+            return qs
 
-        with pytest.raises(NotImplementedError, match=r"Matrix\[Qubit\]"):
-            outer.build()
+        # The kernel must build without error; the inner ``Matrix``
+        # argument is left symbolic at the specialization extractor
+        # and inline substitution wires it up to the caller's
+        # allocated register. (``.transpile`` is not exercised here
+        # because ``Matrix[Qubit]`` is not a valid classical-I/O
+        # entrypoint — the build path is what the regression guards.)
+        block = outer.build()
+        assert block is not None
 
     @pytest.mark.parametrize("seed", [0, 1, 7])
     @pytest.mark.parametrize("n", [1, 2, 3])

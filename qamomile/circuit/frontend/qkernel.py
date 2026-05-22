@@ -992,10 +992,15 @@ class QKernel(Generic[P, R]):
         shapes are known.
 
         Args:
-            arguments (dict[str, Any]): Pre-consume mapping from
+            arguments (dict[str, Any]): Pre-consumption mapping from
                 parameter name to the caller's frontend
                 :class:`Handle`, as produced by
                 ``signature.bind(...).arguments`` in :meth:`__call__`.
+                The handles are inspected here before the call site
+                consumes them, so the extractor can read
+                ``handle.value`` metadata (``get_const``,
+                ``get_const_array``, ``dict_runtime``) without
+                affecting the affine-type ledger.
 
         Returns:
             tuple[list[str], dict[str, Any], dict[str, int]] | None:
@@ -1008,30 +1013,26 @@ class QKernel(Generic[P, R]):
                 argument names to their resolved first-axis sizes.
                 Arguments that cannot enter any of the three buckets
                 (scalar ``Qubit``, scalar ``Observable``, unbound
-                ``Vector[Observable]``, unbound ``Dict`` parameters,
-                ``Tuple`` parameters, and non-parameterizable
-                classical types like ``Bit`` / ``bool`` /
-                ``Vector[Bit]`` / ``Vector[bool]`` without a
-                compile-time constant) are deliberately left out so
-                that :meth:`_create_traced_block` falls back to its
-                standard ``create_dummy_input`` path for those argument
-                positions; specialization of the rest of the call
-                proceeds normally and inline-time substitution
-                supplies the caller's actual Value. Returns ``None``
-                only when no specialization is beneficial — i.e. the
-                call adds no new compile-time information over the
-                cached symbolic block. In the ``None`` case
-                ``__call__`` falls back to ``self.block``.
-
-        Raises:
-            NotImplementedError: If ``arguments`` contains a quantum
-                array argument that is not a 1-D ``Vector[Qubit]``
-                (e.g., ``Matrix[Qubit]`` / ``Tensor[Qubit]``).
-                Higher-rank quantum-array specialization is not yet
-                implemented, and silently falling back to the cached
-                symbolic block would lose shape-dependent stdlib gates
-                applied inside the callee — surfacing the limitation
-                as an exception prevents that.
+                ``Vector[Observable]``, multi-dimensional qubit
+                arrays — ``Matrix[Qubit]`` / ``Tensor[Qubit]`` —
+                unbound ``Dict`` parameters, ``Tuple`` parameters,
+                and non-parameterizable classical types like
+                ``Bit`` / ``bool`` / ``Vector[Bit]`` / ``Vector[bool]``
+                without a compile-time constant) are deliberately
+                left out so that :meth:`_create_traced_block` handles
+                those argument positions via its standard path
+                (``_create_parameter_input`` for ``Observable``,
+                ``create_dummy_input`` fall-through for everything
+                else); specialization of the rest of the call proceeds
+                normally and inline-time substitution supplies the
+                caller's actual Value. Returns ``None`` in two cases:
+                (a) the extractor encounters an argument type that
+                does not match any of the modeled branches above (the
+                catch-all at the bottom of the loop), or (b) the
+                modeled branches contributed no useful information
+                (``bindings`` and ``qubit_sizes`` are both empty at
+                the end). In the ``None`` case ``__call__`` falls
+                back to ``self.block``.
         """
         parameters: list[str] = []
         bindings: dict[str, Any] = {}
@@ -1084,31 +1085,27 @@ class QKernel(Generic[P, R]):
             # case: we extract the first-axis size via ``get_size`` and
             # carry it in ``qubit_sizes`` so the callee re-traces with
             # a concrete shape. ``Matrix[Qubit]`` / ``Tensor[Qubit]``
-            # are higher-rank registers; we do not yet have the
-            # multi-dim shape extraction nor the ``create_dummy_input
-            # (shape=...)`` plumbing for them, so passing one through a
-            # nested call would mean shape-dependent stdlib stays
-            # silently no-op'd on those qubits. Surface that as an
-            # explicit ``NotImplementedError`` rather than letting the
-            # call silently produce a wrong-unitary circuit.
+            # are higher-rank registers; we do not yet extract their
+            # multi-dim shape nor have the ``create_dummy_input
+            # (shape=...)`` plumbing for them, so we treat them like
+            # ``Dict`` / ``Tuple`` — leave the argument out of all
+            # three buckets and ``continue``. ``_create_traced_block``
+            # falls through to ``create_dummy_input`` for that
+            # position (matching the cached block), and the rest of
+            # the call still benefits from specialization. The
+            # trade-off: if the callee applies shape-dependent stdlib
+            # to the higher-rank register, that op continues to
+            # silently no-op — same as the pre-#392 baseline for
+            # that specific case. Raising here instead would forbid
+            # any nested call that takes a ``Matrix[Qubit]`` /
+            # ``Tensor[Qubit]``, even kernels that never touch
+            # shape-dependent stdlib on it.
             if (
                 is_array_type(param_type)
                 and _get_array_element_type(param_type) is Qubit
             ):
                 if getattr(param_type, "__origin__", param_type) is not Vector:
-                    raise NotImplementedError(
-                        f"Nested @qkernel call of '{self.name}' received "
-                        f"argument {name!r} of type {param_type!r}. "
-                        f"Call-time specialization currently supports only "
-                        f"``Vector[Qubit]`` for quantum-array inputs; "
-                        f"``Matrix[Qubit]`` / ``Tensor[Qubit]`` are not "
-                        f"yet supported and would silently lose "
-                        f"shape-dependent stdlib gates (qft, iqft, qpe) "
-                        f"applied inside the callee. Reshape the call "
-                        f"site so the callee receives a 1-D "
-                        f"``Vector[Qubit]`` view, or file an issue if "
-                        f"you need higher-rank specialization."
-                    )
+                    continue
                 # ``_get_size`` is declared over ``Vector``; the two
                 # checks above narrow ``handle`` to a ``Vector[Qubit]``,
                 # but the type system cannot see that — cast for the
