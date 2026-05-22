@@ -417,7 +417,11 @@ def test_sanitize_does_not_touch_href_inside_script_or_text(tmp_path, mod):
     ``<script>`` body, a code example, a JSON data-island, or any
     text node. The rewriter walks ``<tag>`` spans and parses
     attributes attribute-by-attribute, so a substring outside any
-    real tag-attribute boundary cannot be touched.
+    real tag-attribute boundary cannot be touched. ``<pre>`` is NOT
+    a raw-text element (so a literal tag-shaped substring inside it
+    would be parsed as a real tag), but the bare ``href="..."`` form
+    used here lives between literal text characters, not inside any
+    real tag, so it's left alone by the same boundary logic.
     """
     html = """
 <html><body>
@@ -436,6 +440,74 @@ def test_sanitize_does_not_touch_href_inside_script_or_text(tmp_path, mod):
     # The substrings inside <script> and <pre> were NOT rewritten.
     assert "const link = ' href=\"#cite-https://doi.org/a\"';" in out
     assert 'some text href="#cite-https://doi.org/a" more text' in out
+
+
+def test_sanitize_skips_tag_shaped_strings_inside_raw_text_elements(tmp_path, mod):
+    """``<a href="#cite-…">`` substrings inside raw-text elements stay.
+
+    Per the HTML5 spec, ``<script>``, ``<style>``, ``<textarea>``,
+    and ``<title>`` parse their contents as character data — a
+    literal ``<a href="…">`` inside them is text, not a tag. The
+    sanitizer captures their full ``<element>…</element>`` spans
+    as skip ranges so the tag walker bypasses any tag-shaped
+    substring inside them. Without this, a script literal like
+    ``const html = '<a href="#cite-…">'`` would have its ``href``
+    silently rewritten.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<script>const html = '<a href="#cite-https://doi.org/a">ref</a>';</script>
+<style>/* <a href="#cite-https://doi.org/a">text</a> */</style>
+<textarea>literal <a href="#cite-https://doi.org/a">tag</a> here</textarea>
+<title><a href="#cite-https://doi.org/a">in title</a></title>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # In-scope id was sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # All four raw-text spans kept their original tag-shaped
+    # substrings.
+    assert "const html = '<a href=\"#cite-https://doi.org/a\">ref</a>'" in out
+    assert '/* <a href="#cite-https://doi.org/a">text</a> */' in out
+    assert 'literal <a href="#cite-https://doi.org/a">tag</a> here' in out
+    assert '<a href="#cite-https://doi.org/a">in title</a>' in out
+
+
+def test_sanitize_skips_tag_shaped_strings_inside_html_comments(tmp_path, mod):
+    """``<a href="#cite-…">`` substrings inside HTML comments stay.
+
+    HTML comments (``<!-- … -->``) parse as character data. A
+    literal tag-shaped substring inside one is text, and the
+    sanitizer's skip-range scan keeps the rewriter from touching
+    it. Equally, a literal ``<section class="myst-bibliography">``
+    inside a comment must not bring a section "into scope".
+    """
+    html = """
+<html><body>
+<!-- <a href="#cite-https://doi.org/a">comment ref</a> -->
+<!-- <section class="myst-bibliography"><li id="cite-https://doi.org/x">x</li></section> -->
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # Real bibliography id sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # Commented-out substrings are character data, untouched.
+    assert '<a href="#cite-https://doi.org/a">comment ref</a>' in out
+    assert (
+        '<section class="myst-bibliography">'
+        '<li id="cite-https://doi.org/x">x</li>'
+        "</section>"
+    ) in out
 
 
 def test_sanitize_ignores_class_substring_inside_other_attr_value(tmp_path, mod):
@@ -466,10 +538,11 @@ def test_sanitize_ignores_class_substring_inside_other_attr_value(tmp_path, mod)
 def test_sanitize_does_not_match_data_href_attribute(tmp_path, mod):
     """``data-href="#cite-…"`` must not be rewritten as a real ``href``.
 
-    The ``\\s+`` before ``href`` in ``_CITE_HREF_RE`` forces a real
-    attribute boundary, so dataset attributes whose names end in
-    ``href`` (or strings that happen to contain ``href="#cite-…"``
-    inside script / text content) are not rewritten.
+    The tag walker parses attributes attribute-by-attribute via
+    ``_parse_attrs``, so a dataset attribute whose name ends in
+    ``href`` is matched as a distinct attribute (``data-href``)
+    rather than a real ``href``. Text / script content is covered
+    by separate raw-text skip ranges.
     """
     html = """
 <html><body>
@@ -615,8 +688,9 @@ def test_sanitize_tolerates_uppercase_id_attribute(tmp_path, mod):
 
     HTML attribute names are case-insensitive per the HTML5 spec.
     mystmd lowercases its output today but an alternate serializer
-    or hand-edit could emit ``ID=`` or ``Id=``. ``_CITE_ID_IN_BIB_RE``
-    uses ``re.IGNORECASE`` so any spelling still matches.
+    or hand-edit could emit ``ID=`` or ``Id=``. The tag walker's
+    ``_parse_attrs`` lowercases attribute names before looking them
+    up, so any spelling still matches.
     """
     html = """
 <html><body>

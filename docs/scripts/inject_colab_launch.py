@@ -601,6 +601,24 @@ _SECTION_RE = re.compile(
 # over-match, so it would only ship a partial fix rather than a
 # regression).
 _TAG_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9-]*(?P<attrs>[^>]*)>", re.DOTALL)
+# HTML5 raw-text / escapable-raw-text elements whose contents are
+# parsed as character data, NOT as nested tags. A literal ``<a
+# href="...">`` substring sitting inside any of these is just text
+# from the rewriter's perspective and must NOT be treated as a tag.
+# This regex captures the entire ``<element>…</element>`` span so
+# the tag walker can skip everything inside it (including the
+# opening ``<element>`` tag itself, which has no cite-id / cite-href
+# attributes worth rewriting anyway).
+_RAW_TEXT_RE = re.compile(
+    r"""<(?P<tag>script|style|textarea|title)\b[^>]*>
+        .*?
+        </(?P=tag)\s*>""",
+    re.IGNORECASE | re.DOTALL | re.VERBOSE,
+)
+# HTML comments: ``<!-- ... -->``. Same reasoning — the comment body
+# is character data; substrings shaped like tags inside the comment
+# must be skipped.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # Walk a single tag's attribute span attribute-by-attribute. The
 # leading ``(?:^|\s)`` is the attribute-name boundary: an
 # attribute starts either at the beginning of the attrs span or
@@ -874,8 +892,33 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     if "myst-bibliography" not in content or "cite-" not in content:
         return False
 
+    # Find raw-text and comment spans up front so the tag walker
+    # can ignore tag-shaped substrings sitting inside them. Without
+    # this step, a line like ``<script>const html='<a
+    # href="#cite-…">';</script>`` would have its ``<a>`` substring
+    # treated as a real tag and the ``href`` rewritten — exactly
+    # the scope leak we just patched on the attribute side. The
+    # spans are non-overlapping by construction (HTML5 parses
+    # raw-text and comment contents as character data; the regex
+    # matches their closing tokens directly).
+    skip_ranges: list[tuple[int, int]] = []
+    for raw_text_match in _RAW_TEXT_RE.finditer(content):
+        skip_ranges.append((raw_text_match.start(), raw_text_match.end()))
+    for comment_match in _HTML_COMMENT_RE.finditer(content):
+        skip_ranges.append((comment_match.start(), comment_match.end()))
+    skip_ranges.sort()
+
+    def _is_in_skip_range(pos: int) -> bool:
+        """Return True if ``pos`` falls inside any raw-text / comment span.
+
+        Linear scan is fine — typical pages have at most a handful of
+        such spans, so a binary search wouldn't repay its complexity.
+        """
+        return any(start <= pos < end for start, end in skip_ranges)
+
     # Iterating helper for tags inside a fragment of HTML. Walks
-    # opening / self-closing tags via ``_TAG_RE`` and yields
+    # opening / self-closing tags via ``_TAG_RE``, drops anything
+    # falling inside a raw-text / comment span, and yields
     # ``(tag_match, parsed_attrs)`` pairs so callers don't repeat
     # the parse work for the collision scan and the rewrite scan.
     def _iter_tags_with_attrs(
@@ -885,6 +928,7 @@ def sanitize_cite_ids(html_path: Path) -> bool:
         return [
             (tag_match, _parse_attrs(tag_match.group("attrs")))
             for tag_match in _TAG_RE.finditer(haystack, offset)
+            if not _is_in_skip_range(tag_match.start())
         ]
 
     # Walk every ``<section>``, keep only those whose ``class``
@@ -901,6 +945,11 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     bibliography_spans: list[tuple[int, int]] = []
     in_scope_id_positions: set[int] = set()  # absolute offsets, see collision pass
     for section_match in _SECTION_RE.finditer(content):
+        # A literal ``<section class="myst-bibliography">…</section>``
+        # substring sitting inside a ``<script>`` body or HTML comment
+        # is not a real section. Skip it.
+        if _is_in_skip_range(section_match.start()):
+            continue
         section_attrs = _parse_attrs(section_match.group("attrs"))
         class_entry = section_attrs.get("class")
         if class_entry is None:
