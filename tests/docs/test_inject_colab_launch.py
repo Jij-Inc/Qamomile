@@ -152,6 +152,85 @@ def test_sanitize_already_safe_ids_are_noop(tmp_path, mod):
     assert p.read_text(encoding="utf-8") == safe_html
 
 
+class _SectionReSpy:
+    """Wraps ``_SECTION_RE`` and counts ``finditer`` calls for perf tests.
+
+    ``re.Pattern`` is a C-implemented immutable object, so the
+    standard ``mocker.spy`` route can't attach a counter to its
+    ``finditer`` method directly. We swap the module-level
+    ``_SECTION_RE`` for this wrapper via ``monkeypatch`` instead.
+
+    Attributes:
+        wrapped (re.Pattern): The original compiled section regex.
+        call_count (int): Number of ``finditer`` calls observed.
+    """
+
+    def __init__(self, wrapped):
+        """Capture the original regex.
+
+        Args:
+            wrapped (re.Pattern): The compiled regex to wrap.
+        """
+        self.wrapped = wrapped
+        self.call_count = 0
+
+    def finditer(self, *args, **kwargs):
+        """Count and forward to the wrapped regex.
+
+        Args:
+            *args: Forwarded to the wrapped ``re.Pattern.finditer``.
+            **kwargs: Forwarded to the wrapped ``re.Pattern.finditer``.
+
+        Returns:
+            Iterator[re.Match[str]]: Whatever the wrapped regex returns.
+        """
+        self.call_count += 1
+        return self.wrapped.finditer(*args, **kwargs)
+
+
+def test_sanitize_short_circuits_when_substring_markers_absent(
+    tmp_path, mod, monkeypatch
+):
+    """Pages without ``myst-bibliography`` or ``cite-`` skip the regex scan.
+
+    Most build outputs (tutorial / landing / API-reference pages) ship
+    neither marker. The cheap substring guard at the top of
+    ``sanitize_cite_ids`` makes those cases a single string scan
+    instead of running the full section / id / class-attr regex chain
+    on every file. Wrap the section regex's ``finditer`` to confirm
+    we never reach it on a marker-less page.
+    """
+    spy = _SectionReSpy(mod._SECTION_RE)
+    monkeypatch.setattr(mod, "_SECTION_RE", spy)
+    no_markers_html = "<html><body><p>nothing relevant here</p></body></html>"
+    p = _write_html(tmp_path, "page.html", no_markers_html)
+    assert mod.sanitize_cite_ids(p) is False
+    assert spy.call_count == 0
+
+
+def test_sanitize_short_circuits_on_partial_marker(tmp_path, mod, monkeypatch):
+    """``cite-`` present but no ``myst-bibliography`` section also short-circuits.
+
+    Code examples or hand-rolled cells can carry ``id="cite-…"`` ids
+    that are out-of-scope for us. The substring guard skips the full
+    scan when the bibliography anchor is missing, so we don't pay the
+    regex cost on pages where the only ``cite-`` substring belongs to
+    user content. The earlier scope test
+    (``test_sanitize_skips_pages_without_bibliography``) already
+    covers the behavioral half; this one pins the perf invariant.
+    """
+    spy = _SectionReSpy(mod._SECTION_RE)
+    monkeypatch.setattr(mod, "_SECTION_RE", spy)
+    html = """
+<html><body>
+<p>Code example: <span id="cite-https://example.com/x">tag</span></p>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is False
+    assert spy.call_count == 0
+
+
 def test_sanitize_skips_pages_without_bibliography(tmp_path, mod):
     """A page without ``<section class="myst-bibliography">`` is untouched.
 

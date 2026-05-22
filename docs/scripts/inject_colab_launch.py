@@ -231,28 +231,33 @@ THEME_INIT_SCRIPT = (
     #
     # ``reveal`` does the full cleanup so that EVERY trigger path
     # (idle-detection, ``hardCap``, ``wallClock``, 1 s fallback)
-    # disconnects the observer and cancels the hard-cap timer the
-    # moment it runs. This matters most for the ``hardCap`` /
-    # ``wallClock`` paths: if the tab is backgrounded,
-    # ``requestAnimationFrame`` is throttled and ``checkIdle`` may
-    # not get a chance to run for many seconds after the timeout
-    # fired, so deferring cleanup to ``checkIdle`` would leave the
-    # ``MutationObserver`` attached well past the user-visible
-    # reveal. The ``obs``/``hardCap`` vars are declared up front and
-    # assigned inside the observer setup block; ``reveal`` guards
-    # both with null checks so the early-return fallback path works
-    # without ever assigning them.
+    # disconnects the observer and cancels both timers the moment it
+    # runs. This matters most for the ``hardCap`` / ``wallClock``
+    # paths: if the tab is backgrounded, ``requestAnimationFrame`` is
+    # throttled and ``checkIdle`` may not get a chance to run for
+    # many seconds after the timeout fired, so deferring cleanup to
+    # ``checkIdle`` would leave the ``MutationObserver`` attached
+    # well past the user-visible reveal. Storing the wall-clock
+    # ``setTimeout`` handle (``wallClock``) and cancelling it from
+    # ``reveal`` also avoids the no-op wakeup that would otherwise
+    # fire 10 s after every page load. The ``obs`` / ``hardCap`` /
+    # ``wallClock`` vars are declared up front and assigned later;
+    # ``reveal`` guards all three with null checks so the early-
+    # return fallback path works without ever assigning ``obs`` /
+    # ``hardCap``.
     "var revealed=false;"
     "var obs=null;"
     "var hardCap=null;"
+    "var wallClock=null;"
     "function reveal(){"
     "if(revealed)return;"
     "revealed=true;"
     "if(obs){obs.disconnect();obs=null;}"
     "if(hardCap){clearTimeout(hardCap);hardCap=null;}"
+    "if(wallClock){clearTimeout(wallClock);wallClock=null;}"
     'd.classList.remove("qamomile-preloading");'
     "}"
-    "setTimeout(reveal,10000);"
+    "wallClock=setTimeout(reveal,10000);"
     "if(typeof MutationObserver!=='function'"
     "||typeof requestAnimationFrame!=='function'"
     "||typeof performance==='undefined'"
@@ -819,6 +824,19 @@ def sanitize_cite_ids(html_path: Path) -> bool:
             create duplicate ``id`` attributes on the rendered page.
     """
     content = html_path.read_text(encoding="utf-8")
+
+    # Cheap substring guard so the full regex scan only runs on
+    # pages that can possibly carry a sanitizable bibliography id.
+    # Most build outputs (tutorial pages, landing pages, API
+    # reference pages) ship neither a ``<section
+    # class="myst-bibliography">`` nor a ``cite-`` id, so the early
+    # return turns the per-file cost into a single substring search.
+    # We require BOTH markers: the section anchor (so we don't try
+    # to sanitize stray ``cite-`` ids the regex would scope out
+    # anyway) and the ``cite-`` prefix (so an empty bibliography
+    # section doesn't trigger the full scan either).
+    if "myst-bibliography" not in content or "cite-" not in content:
+        return False
 
     # Pass 1: walk every ``<section>``, keep only those whose class
     # attribute actually contains ``myst-bibliography`` as a CSS
