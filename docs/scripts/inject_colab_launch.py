@@ -228,10 +228,28 @@ THEME_INIT_SCRIPT = (
     # Feature detection: if any of the three APIs is missing, fall
     # back to a 1-second blanket reveal. Better than waiting for the
     # 10 s wall clock and far better than crashing in flight.
+    #
+    # ``reveal`` does the full cleanup so that EVERY trigger path
+    # (idle-detection, ``hardCap``, ``wallClock``, 1 s fallback)
+    # disconnects the observer and cancels the hard-cap timer the
+    # moment it runs. This matters most for the ``hardCap`` /
+    # ``wallClock`` paths: if the tab is backgrounded,
+    # ``requestAnimationFrame`` is throttled and ``checkIdle`` may
+    # not get a chance to run for many seconds after the timeout
+    # fired, so deferring cleanup to ``checkIdle`` would leave the
+    # ``MutationObserver`` attached well past the user-visible
+    # reveal. The ``obs``/``hardCap`` vars are declared up front and
+    # assigned inside the observer setup block; ``reveal`` guards
+    # both with null checks so the early-return fallback path works
+    # without ever assigning them.
     "var revealed=false;"
+    "var obs=null;"
+    "var hardCap=null;"
     "function reveal(){"
     "if(revealed)return;"
     "revealed=true;"
+    "if(obs){obs.disconnect();obs=null;}"
+    "if(hardCap){clearTimeout(hardCap);hardCap=null;}"
     'd.classList.remove("qamomile-preloading");'
     "}"
     "setTimeout(reveal,10000);"
@@ -253,8 +271,8 @@ THEME_INIT_SCRIPT = (
     "},{once:true});"
     "}"
     "var lastMut=performance.now();"
-    "var hardCap=setTimeout(reveal,8000);"
-    "var obs=new MutationObserver(function(){"
+    "hardCap=setTimeout(reveal,8000);"
+    "obs=new MutationObserver(function(){"
     "lastMut=performance.now();"
     "});"
     "obs.observe(d,{"
@@ -264,15 +282,16 @@ THEME_INIT_SCRIPT = (
     "characterData:true"
     "});"
     "function checkIdle(){"
-    "if(revealed){obs.disconnect();return;}"
+    # ``reveal`` already disconnected the observer and cleared the
+    # hard cap by the time it set ``revealed=true``; we only need to
+    # bail out of the rAF loop here.
+    "if(revealed)return;"
     # Both gates must be satisfied: DOMContentLoaded fired AND 250 ms
     # since the last mutation. The DCL gate prevents an early reveal
     # while deferred / module scripts are still loading their bundles
     # (and the MutationObserver therefore sees a quiet DOM that does
     # NOT mean hydration is done).
     "if(dclFired&&performance.now()-lastMut>=250){"
-    "obs.disconnect();"
-    "clearTimeout(hardCap);"
     "reveal();"
     "}else{"
     "requestAnimationFrame(checkIdle);"
