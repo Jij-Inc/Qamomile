@@ -473,11 +473,17 @@ def test_sanitize_skips_tag_shaped_strings_inside_raw_text_elements(tmp_path, mo
     Per the HTML5 spec, ``<script>``, ``<style>``, ``<textarea>``,
     and ``<title>`` parse their contents as character data — a
     literal ``<a href="…">`` inside them is text, not a tag. The
-    sanitizer captures their full ``<element>…</element>`` spans
-    as skip ranges so the tag walker bypasses any tag-shaped
-    substring inside them. Without this, a script literal like
-    ``const html = '<a href="#cite-…">'`` would have its ``href``
-    silently rewritten.
+    sanitizer registers the CONTENT span (between the opening and
+    closing tags, captured as the ``body`` group in
+    ``_RAW_TEXT_RE``) as a skip range so the tag walker bypasses
+    any tag-shaped substring inside them. The opening tag itself
+    is still visible to the walker — that's what lets a colocated
+    ``<script id="cite-…">`` participate in the out-of-scope
+    collision check; see
+    ``test_sanitize_catches_collision_on_raw_text_element_opening_tag``.
+    Without this skip step, a script literal like ``const html =
+    '<a href="#cite-…">'`` would have its ``href`` silently
+    rewritten.
     """
     html = """
 <html><body>

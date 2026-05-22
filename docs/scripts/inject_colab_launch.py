@@ -595,12 +595,17 @@ _SECTION_RE = re.compile(
 # between the tag name and ``>``. Used to scope ``href`` / ``id``
 # rewrites to ACTUAL tag content (so a substring like
 # ``href="#cite-..."`` sitting inside a ``<script>`` body or a text
-# node never gets rewritten). The ``[^>]*`` is the safe bound on
-# mystmd's output, which never embeds ``>`` inside attribute
-# values; if upstream ever does, we'd need to switch to a proper
-# HTML parser (the rewriter would then under-match, not
-# over-match, so it would only ship a partial fix rather than a
-# regression).
+# node never gets rewritten). The ``[^>]*`` works for mystmd's
+# output, which never embeds ``>`` inside attribute values.
+# Known limitation: if upstream ever does embed a ``>`` inside an
+# attribute value (HTML5 lets you do this — ``<div title="a>b">``
+# is legal but rare in machine-generated HTML), the regex closes
+# the tag at the embedded ``>``, leaves the trailing characters
+# unparsed, and may parse them as if they were a fresh tag. In the
+# worst case that means a follow-on ``<section ...>`` substring
+# inside an attribute value could be misread as a real section.
+# mystmd doesn't emit such markup today; the safe escalation is a
+# proper HTML parser.
 _TAG_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9-]*(?P<attrs>[^>]*)>", re.DOTALL)
 # HTML5 raw-text / escapable-raw-text elements whose contents are
 # parsed as character data, NOT as nested tags. A literal ``<a
