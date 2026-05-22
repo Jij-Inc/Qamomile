@@ -38,7 +38,7 @@
 # below and remove the leading "# " from it to run.
 # # !pip install qamomile                  # Qiskit (default)
 # # !pip install "qamomile[quri_parts]"    # QURI Parts
-# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use cudaq-cu13 on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use qamomile[cudaq-cu13] on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
 
 # %% [markdown]
 # This article uses Qiskit by default. Qamomile transpiles the same
