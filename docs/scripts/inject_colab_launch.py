@@ -554,16 +554,25 @@ def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
 # never nests sections inside ``<section class="myst-bibliography">``
 # (the body is a flat ``<header>`` + ``<ol><li>…</li></ol>``), so
 # this is theoretical, but if upstream ever changes we'll need to
-# switch to a proper HTML parser. The collision check would surface
-# the regression: any cite-id beyond the inner ``</section>`` would
-# silently fall out of scope and could leave duplicate ids in the
-# rendered page.
+# switch to a proper HTML parser. The regression is **silent**: any
+# cite-id beyond the inner ``</section>`` falls out of our scope
+# scan and is left in its DOI-URL form, so the React hydration
+# cascade returns for whichever citations sit past the boundary
+# (the collision detection only runs on ids we did capture, so it
+# does not catch this case). Treat the parser switch as a hard
+# requirement if upstream ever nests sections inside the
+# bibliography.
 _SECTION_RE = re.compile(
     r"<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>",
     re.IGNORECASE | re.DOTALL,
 )
+# ``(?<![\w-])`` is the attribute-name boundary: it forbids
+# ``data-class="…"`` from matching as if it were ``class="…"``. The
+# default ``\b`` would, since ``\b`` treats the ``-`` in ``data-`` as
+# a non-word char and considers the boundary between ``-`` and ``c``
+# to be a word break — exactly what we don't want.
 _CLASS_ATTR_RE = re.compile(
-    r'\bclass\s*=\s*(?P<q>["\'])(?P<value>[^"\']*)(?P=q)',
+    r'(?<![\w-])class\s*=\s*(?P<q>["\'])(?P<value>[^"\']*)(?P=q)',
     re.IGNORECASE,
 )
 # Match ``id="cite-…"`` on the rendered bibliography ``<li>`` (scoped
@@ -604,9 +613,12 @@ _CITE_ID_IN_BIB_RE = re.compile(
 # (e.g. footnote-style citation pills), and rewritten ids must stay
 # in sync with their cross-references so the fragment anchor still
 # resolves to its ``<li>`` after sanitization. Same whitespace /
-# quote-style tolerance as ``_CITE_ID_IN_BIB_RE``.
+# quote-style tolerance as ``_CITE_ID_IN_BIB_RE``. The ``\s+`` before
+# ``href`` is load-bearing: without it, ``data-href="#cite-…"`` or a
+# string in inline JSON / a code block that happens to contain
+# ``href="#cite-…"`` would be silently rewritten too.
 _CITE_HREF_RE = re.compile(
-    r'(href\s*=\s*(["\']))#cite-([^"\']+)\2',
+    r'(\s+href\s*=\s*(["\']))#cite-([^"\']+)\2',
     re.IGNORECASE,
 )
 # Chars HTML5 + CSS-selector + React all accept in id values without
@@ -738,11 +750,11 @@ def sanitize_cite_ids(html_path: Path) -> bool:
        ``#cite-https%3A%2F%2F…`` or ``#cite-a&amp;b`` still match the
        original ``<li>`` label.
 
-    Collisions: any path that would produce two ``<li>`` elements
-    sharing the same sanitized ``id`` value fails loudly because the
+    Collisions: any path that would produce two elements sharing the
+    same ``id`` value on the rendered page fails loudly because the
     resulting HTML would be invalid and fragment navigation would
-    pick one of the duplicates arbitrarily. Two such paths are
-    detected and both raise ``RuntimeError``:
+    pick one of the duplicates arbitrarily. Three such paths are
+    detected and all raise ``RuntimeError``:
 
     1. **Distinct decoded labels** that happen to collapse to the
        same sanitized form (e.g. ``cite-a/b`` and ``cite-a:b`` both
@@ -755,6 +767,13 @@ def sanitize_cite_ids(html_path: Path) -> bool:
        broken in that case (duplicate ids at the DOM level) but
        otherwise our pass would silently fan the encoded forms into
        the canonical one and hide the upstream issue.
+    3. **Out-of-scope ``id="cite-…"`` collision** — an existing
+       ``id="cite-…"`` outside the bibliography (e.g. a hand-rolled
+       HTML cell, a code example, a custom anchor) that already
+       holds the sanitized form of one of our bibliography ids.
+       We don't rewrite the out-of-scope id (scoped pass), but
+       once the bibliography id is sanitized, both elements would
+       carry the same ``id`` value on the rendered page.
 
     Idempotent: re-running on a sanitized HTML is a no-op — the
     sanitized labels match the unchanged sanitized form, and no
@@ -771,10 +790,11 @@ def sanitize_cite_ids(html_path: Path) -> bool:
 
     Raises:
         RuntimeError: If two distinct decoded citation labels collapse
-            to the same sanitized form, or if the same decoded label
-            appears as multiple SSR ``id`` occurrences. Either case
-            would create duplicate ``id`` attributes on the rendered
-            page.
+            to the same sanitized form, if the same decoded label
+            appears as multiple SSR ``id`` occurrences, or if an
+            existing out-of-scope ``id="cite-…"`` already holds the
+            sanitized form of a bibliography id. All three would
+            create duplicate ``id`` attributes on the rendered page.
     """
     content = html_path.read_text(encoding="utf-8")
 
@@ -826,7 +846,25 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     occurrence_collisions = {
         s: rs for s, rs in sanitized_occurrences.items() if len(rs) > 1
     }
-    if distinct_collisions or occurrence_collisions:
+    # Third failure mode: an out-of-scope ``id="cite-…"`` already in
+    # the page (e.g. a hand-rolled HTML cell or a code example) that
+    # happens to match the sanitized form of one of our bibliography
+    # ids. We don't rewrite that out-of-scope id (different scope),
+    # but the post-sanitize page would still ship two elements with
+    # the same ``id``. Scan every ``id="cite-…"`` outside the
+    # bibliography spans we collected above and check none of them
+    # collides with the sanitized values we're about to produce.
+    sanitized_values = set(decoded_to_sanitized.values())
+    out_of_scope_collisions: dict[str, str] = {}
+    for id_match in _CITE_ID_IN_BIB_RE.finditer(content):
+        start = id_match.start()
+        if any(s <= start < e for s, e in bibliography_spans):
+            continue  # inside bibliography — already counted above
+        raw_existing = id_match.group(3)
+        decoded_existing = _decode_id_raw(raw_existing)
+        if decoded_existing in sanitized_values:
+            out_of_scope_collisions[decoded_existing] = raw_existing
+    if distinct_collisions or occurrence_collisions or out_of_scope_collisions:
         parts: list[str] = []
         for sanitized, decoded_raws in sorted(distinct_collisions.items()):
             parts.append(f"{sanitized!r} <- distinct labels {sorted(decoded_raws)!r}")
@@ -835,6 +873,10 @@ def sanitize_cite_ids(html_path: Path) -> bool:
                 continue  # already reported with richer detail
             parts.append(
                 f"{sanitized!r} <- repeated occurrences {sorted(raw_occurrences)!r}"
+            )
+        for sanitized, raw_existing in sorted(out_of_scope_collisions.items()):
+            parts.append(
+                f"{sanitized!r} <- already used by out-of-scope id {raw_existing!r}"
             )
         details = "; ".join(parts)
         raise RuntimeError(

@@ -302,6 +302,76 @@ def test_sanitize_does_not_touch_outbound_doi_href(tmp_path, mod):
 # ----------------------------------------------------------------- #
 
 
+def test_sanitize_does_not_match_data_class_attribute(tmp_path, mod):
+    """``data-class="myst-bibliography"`` must not be mistaken for ``class``.
+
+    The matcher uses a ``(?<![\\w-])`` lookbehind so the literal
+    ``class`` token is only recognised as the standalone HTML
+    attribute name, not as the tail of ``data-class`` (which is a
+    custom dataset attribute and does NOT select the element via CSS).
+    """
+    html = """
+<html><body>
+<section data-class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is False
+    # ID still in its original DOI form — section was not in scope.
+    assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8")
+
+
+def test_sanitize_does_not_match_data_href_attribute(tmp_path, mod):
+    """``data-href="#cite-…"`` must not be rewritten as a real ``href``.
+
+    The ``\\s+`` before ``href`` in ``_CITE_HREF_RE`` forces a real
+    attribute boundary, so dataset attributes whose names end in
+    ``href`` (or strings that happen to contain ``href="#cite-…"``
+    inside script / text content) are not rewritten.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<button data-href="#cite-https://doi.org/a">dataset attribute, not a real href</button>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    assert mod.sanitize_cite_ids(p) is True
+    out = p.read_text(encoding="utf-8")
+    # Bibliography id was sanitized.
+    assert 'id="cite-https-doi-org-a"' in out
+    # data-href was left alone.
+    assert 'data-href="#cite-https://doi.org/a"' in out
+
+
+def test_sanitize_raises_on_out_of_scope_id_collision(tmp_path, mod):
+    """An existing out-of-scope ``id="cite-…"`` blocking the sanitized name fails.
+
+    If a hand-rolled HTML cell or a code example already holds
+    ``id="cite-https-doi-org-x"`` and the bibliography ships
+    ``id="cite-https://doi.org/x"``, the sanitized form would be the
+    same value as the existing id — the rendered page would have
+    duplicate ids. Detected and raised so the build fails loud.
+    """
+    html = """
+<html><body>
+<p>Earlier in the page someone wrote a custom anchor:
+  <span id="cite-https-doi-org-a">tag</span>
+</p>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    with pytest.raises(RuntimeError, match="out-of-scope id"):
+        mod.sanitize_cite_ids(p)
+
+
 def test_sanitize_does_not_match_substring_class_token(tmp_path, mod):
     """A ``<section>`` whose class contains ``not-myst-bibliography``
     (or any other ``…myst-bibliography`` superstring) is NOT treated
