@@ -15,14 +15,6 @@ import qamomile.circuit as qmc
 
 
 @qmc.qkernel
-def _ry_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
-    return qmc.ry(q, theta)
-
-
-_controlled_ry = qmc.controlled(_ry_gate)
-
-
-@qmc.qkernel
 def initial_occupations(
     q: qmc.Vector[qmc.Qubit],
     num_fermions: qmc.UInt,
@@ -40,9 +32,18 @@ def givens_rotation(
     j: qmc.UInt,
     theta: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
-    """Apply a single Givens rotation between qubits *i* and *j*."""
+    """Apply a single Givens rotation between qubits *i* and *j*.
+
+    The controlled-RY factory is constructed inside the function rather
+    than at module level so importing ``fqaoa`` does not trigger
+    eager wrapper synthesis (compile/exec + tracing) for every install.
+    The synthesized wrapper is cached per-callable inside
+    ``qmc.controlled``, so the only real cost happens on the first
+    Givens rotation; subsequent calls hit the cache.
+    """
+    controlled_ry = qmc.controlled(qmc.ry)
     q[j], q[i] = qmc.cx(q[j], q[i])
-    q[i], q[j] = _controlled_ry(q[i], q[j], theta=-2.0 * theta)
+    q[i], q[j] = controlled_ry(q[i], q[j], angle=-2.0 * theta)
     q[j], q[i] = qmc.cx(q[j], q[i])
     return q
 
