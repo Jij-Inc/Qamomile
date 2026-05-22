@@ -566,13 +566,16 @@ _SECTION_RE = re.compile(
     r"<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>",
     re.IGNORECASE | re.DOTALL,
 )
-# ``(?<![\w-])`` is the attribute-name boundary: it forbids
-# ``data-class="…"`` from matching as if it were ``class="…"``. The
-# default ``\b`` would, since ``\b`` treats the ``-`` in ``data-`` as
-# a non-word char and considers the boundary between ``-`` and ``c``
-# to be a word break — exactly what we don't want.
+# ``(?:^|\s)`` is the strict HTML attribute-name boundary: the
+# ``class`` literal must sit at the start of the matched span or be
+# preceded by whitespace. The default ``\bclass`` would match the
+# tail of ``data-class``, ``x:class``, ``.class``, etc. (Python's
+# ``\b`` only checks the word / non-word junction; ``-``, ``:``,
+# and ``.`` are all non-word, so they all create a boundary right
+# before ``class``). Requiring whitespace or string-start instead
+# rejects every namespace-prefixed or dataset-prefixed variant.
 _CLASS_ATTR_RE = re.compile(
-    r'(?<![\w-])class\s*=\s*(?P<q>["\'])(?P<value>[^"\']*)(?P=q)',
+    r'(?:^|\s)class\s*=\s*(?P<q>["\'])(?P<value>[^"\']*)(?P=q)',
     re.IGNORECASE,
 )
 # Match ``id="cite-…"`` on the rendered bibliography ``<li>`` (scoped

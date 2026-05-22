@@ -302,13 +302,42 @@ def test_sanitize_does_not_touch_outbound_doi_href(tmp_path, mod):
 # ----------------------------------------------------------------- #
 
 
+def test_sanitize_does_not_match_namespaced_class_attribute(tmp_path, mod):
+    """Namespaced / prefixed ``…:class``, ``.class``, ``x-class`` are not real ``class``.
+
+    The matcher anchors on ``(?:^|\\s)class`` so ``class`` has to sit
+    at the start of the attribute span or be preceded by whitespace.
+    Anything that puts a non-whitespace char immediately before
+    ``class`` (``data-class``, ``x:class``, ``.class``) is some other
+    attribute name and must NOT select the section as in-scope.
+    """
+    parametrize = [
+        'data-class="myst-bibliography"',
+        ':class="myst-bibliography"',
+        'x:class="myst-bibliography"',
+        '.class="myst-bibliography"',
+    ]
+    for prefix in parametrize:
+        html = f"""
+<html><body>
+<section {prefix}>
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+</body></html>
+"""
+        p = _write_html(tmp_path, "page.html", html)
+        assert mod.sanitize_cite_ids(p) is False, prefix
+        # ID still in its original DOI form — section was not in scope.
+        assert 'id="cite-https://doi.org/a"' in p.read_text(encoding="utf-8"), prefix
+
+
 def test_sanitize_does_not_match_data_class_attribute(tmp_path, mod):
     """``data-class="myst-bibliography"`` must not be mistaken for ``class``.
 
-    The matcher uses a ``(?<![\\w-])`` lookbehind so the literal
-    ``class`` token is only recognised as the standalone HTML
-    attribute name, not as the tail of ``data-class`` (which is a
-    custom dataset attribute and does NOT select the element via CSS).
+    The matcher uses a ``(?:^|\\s)`` anchor so the literal ``class``
+    token is only recognised as the standalone HTML attribute name,
+    not as the tail of ``data-class`` (which is a custom dataset
+    attribute and does NOT select the element via CSS).
     """
     html = """
 <html><body>
