@@ -11,6 +11,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
+from qamomile.circuit.ir.operation.gate import MeasureVectorOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.stdlib.qft import IQFT, QFT, iqft, qft
@@ -765,9 +766,19 @@ class TestNestedShapeDependentStdlib:
         """The exact #392 shape: inner kernel sized by UInt keeps IQFT.
 
         Goes through the explicit pipeline so the regression bound is
-        the IR after :meth:`Transpiler.inline`, where the inner
-        ``CompositeGateOperation`` (gate_type=IQFT) must appear with the
-        expected concrete ``num_target_qubits``.
+        the IR after :meth:`Transpiler.inline`. Asserts both halves of
+        the original failure mode:
+
+        - The inner ``CompositeGateOperation`` (``gate_type=IQFT``) must
+          appear exactly once with the expected concrete
+          ``num_target_qubits`` (the original symptom).
+        - The outer ``MeasureVectorOperation`` must survive inlining,
+          with its operand pointing at the same logical register as
+          the IQFT's results. An earlier intermediate fix recovered
+          the IQFT but dropped the measure because the specialized
+          block had no ``ReturnOperation`` for the inline pass to use
+          when remapping cloned return Values; this assertion guards
+          that regression.
         """
 
         @qkernel
@@ -793,3 +804,29 @@ class TestNestedShapeDependentStdlib:
         ]
         assert len(iqft_ops) == 1
         assert iqft_ops[0].num_target_qubits == n
+
+        measure_ops = [
+            op for op in block.operations if isinstance(op, MeasureVectorOperation)
+        ]
+        assert len(measure_ops) == 1, (
+            f"expected exactly one MeasureVectorOperation, got {len(measure_ops)}"
+        )
+        # The measure must consume the post-IQFT register. Without the
+        # ``ReturnOperation`` emitted by the specialized callee trace,
+        # the inline pass would leave the measure's operand pointing
+        # at the pre-inline ArrayValue while the IQFT's qubit results
+        # point at the cloned post-inline ArrayValue — a UUID mismatch
+        # that drops the measure in the final emit. Compare register
+        # ``logical_id``s (a stable identity preserved across cloning)
+        # to pin down the operand mapping at the IR level.
+        measure_operand = measure_ops[0].operands[0]
+        iqft_parent_logical_ids = {
+            res.parent_array.logical_id
+            for res in iqft_ops[0].results
+            if res.parent_array is not None
+        }
+        assert iqft_parent_logical_ids, (
+            "IQFT result Values should carry a ``parent_array`` "
+            "pointing at the qubit register after inline"
+        )
+        assert measure_operand.logical_id in iqft_parent_logical_ids
