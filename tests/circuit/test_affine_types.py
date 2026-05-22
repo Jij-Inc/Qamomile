@@ -2160,22 +2160,21 @@ class TestQuantumRebindDetectionTwoQubit:
     def test_vector_element_tuple_overwrite_from_other_vector_rejected(
         self, name, gate
     ):
-        # No quantum-typed kernel arguments, so the AST-level rebind analyzer
-        # does not run; the violation is caught by the IR-level affine check
-        # during build().
-        @qkernel
-        def bad() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
-            qs1 = qubit_array(2, "qs1")
-            qs2 = qubit_array(2, "qs2")
-            q0, q1 = qs1[0], qs1[1]
-            p0, p1 = qs2[0], qs2[1]
-            q0, q1 = gate(p0, p1)
-            qs1[0] = q0
-            qs1[1] = q1
-            return qs1, qs2
-
-        with pytest.raises(AffineTypeError):
-            bad.build()
+        # No quantum-typed kernel arguments, but the analyzer's constructor
+        # tracking promotes ``qs1`` / ``qs2`` to quantum origins, so the
+        # cross-array rebind is now flagged at decoration time as a
+        # ``QubitRebindError`` (a subclass of ``AffineTypeError``).
+        with pytest.raises(QubitRebindError):
+            @qkernel
+            def bad() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+                qs1 = qubit_array(2, "qs1")
+                qs2 = qubit_array(2, "qs2")
+                q0, q1 = qs1[0], qs1[1]
+                p0, p1 = qs2[0], qs2[1]
+                q0, q1 = gate(p0, p1)
+                qs1[0] = q0
+                qs1[1] = q1
+                return qs1, qs2
 
     @pytest.mark.parametrize(
         "name,gate",
@@ -2221,22 +2220,22 @@ class TestQuantumRebindDetectionTwoQubit:
     def test_param_vector_element_tuple_overwrite_from_other_vector_rejected(
         self, name, gate
     ):
-        # Same as the no-param variant: the AST analyzer only inspects
-        # quantum-typed kernel arguments, so a `theta: qm.Float` parameter
-        # does not engage it. The violation is caught at build time.
-        @qkernel
-        def bad(theta: qm.Float) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
-            qs1 = qubit_array(2, "qs1")
-            qs2 = qubit_array(2, "qs2")
-            q0, q1 = qs1[0], qs1[1]
-            p0, p1 = qs2[0], qs2[1]
-            q0, q1 = gate(p0, p1, theta)
-            qs1[0] = q0
-            qs1[1] = q1
-            return qs1, qs2
-
-        with pytest.raises(AffineTypeError):
-            bad.build(parameters=["theta"])
+        # ``theta`` is a classical parameter, so it does not seed any
+        # quantum origin — but constructor tracking on ``qs1`` / ``qs2``
+        # still catches the cross-array rebind at decoration time.
+        with pytest.raises(QubitRebindError):
+            @qkernel
+            def bad(
+                theta: qm.Float,
+            ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+                qs1 = qubit_array(2, "qs1")
+                qs2 = qubit_array(2, "qs2")
+                q0, q1 = qs1[0], qs1[1]
+                p0, p1 = qs2[0], qs2[1]
+                q0, q1 = gate(p0, p1, theta)
+                qs1[0] = q0
+                qs1[1] = q1
+                return qs1, qs2
 
     @pytest.mark.parametrize(
         "name,gate",
@@ -2685,3 +2684,244 @@ class TestQuantumRebindDetectionStdlib:
 
         graph = ok.build()
         assert graph is not None
+
+
+class TestQuantumRebindFreshAllocation:
+    """Rebinding an existing quantum variable to a freshly allocated qubit."""
+
+    def test_scalar_fresh_allocation_rejected(self):
+        """`q = qm.qubit("s")` silently discards the parameter — rejected."""
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+                q = qm.qubit("s")
+                return q
+
+        msg = str(exc.value)
+        assert "freshly allocated quantum value" in msg
+        assert "'q'" in msg
+
+    def test_array_fresh_allocation_rejected(self):
+        """`qs = qm.qubit_array(...)` over an existing Vector param — rejected."""
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(qs: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+                qs = qm.qubit_array(2, "qs2")
+                return qs
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+    def test_unqualified_constructor_rejected(self):
+        """`qubit_array(...)` without `qm.` prefix is also recognized."""
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(qs: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+                qs = qubit_array(2, "fresh")
+                return qs
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+    def test_fresh_then_alias_rejected(self):
+        """Constructor result tracked as origin: `tmp = qubit(...); q = tmp` rejected."""
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+                tmp = qm.qubit("s")
+                q = tmp
+                return q
+
+        assert "alias of a different quantum variable" in str(exc.value)
+
+    def test_two_back_to_back_fresh_allocations_rejected(self):
+        """`tmp = qubit("a"); tmp = qubit("b")` rejected (origin tracking on tmp)."""
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad() -> qm.Qubit:
+                tmp = qm.qubit("a")
+                tmp = qm.qubit("b")
+                return tmp
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+
+class TestQuantumRebindAnnAssign:
+    """Annotated assignment (`q: qm.Qubit = ...`) goes through the same rules."""
+
+    def test_annotated_fresh_allocation_rejected(self):
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+                q: qm.Qubit = qm.qubit("s")
+                return q
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+    def test_annotated_quantum_arg_rejected(self):
+        with pytest.raises(QubitRebindError):
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a: qm.Qubit = qm.h(b)
+                return a
+
+    def test_annotated_self_update_allowed(self):
+        @qkernel
+        def ok(q: qm.Qubit) -> qm.Qubit:
+            q: qm.Qubit = qm.h(q)
+            return q
+
+        assert ok.build() is not None
+
+
+class TestQuantumRebindChainedAssignment:
+    """`q1 = q2 = expr` cannot be statically verified as self-update."""
+
+    def test_chained_with_existing_quantum_rejected(self):
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = b = qm.qubit("s")  # noqa: F841 — `b` is the rebind target under test
+                return a
+
+        msg = str(exc.value)
+        assert "chained assignment" in msg
+
+    def test_chained_with_no_existing_quantum_allowed(self):
+        """No-existing-quantum chained assignment falls through silently."""
+        @qkernel
+        def ok() -> qm.Qubit:
+            a = b = qm.qubit("c")  # noqa: F841 — exercising chained-assign analysis
+            return a
+
+        # Currently allowed: neither a nor b was previously quantum.
+        # (Tracking through chained assigns is intentionally out of
+        # scope for this analyzer pass — see RebindViolation docstring.)
+        # build() may still fail later for unrelated reasons; the
+        # important assertion is that @qkernel itself does not raise
+        # QubitRebindError.
+        assert ok.name == "ok"
+
+
+class TestQuantumRebindTupleLiteralRHS:
+    """`a, b = (e1, e2)` element-wise check with permutation special case."""
+
+    def test_fresh_allocations_rejected(self):
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(
+                q1: qm.Qubit, q2: qm.Qubit
+            ) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = (qm.qubit("a"), qm.qubit("b"))
+                return q1, q2
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+    def test_name_only_swap_allowed(self):
+        @qkernel
+        def ok(
+            q1: qm.Qubit, q2: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = (q2, q1)
+            return q1, q2
+
+        assert ok.build() is not None
+
+    def test_call_swap_allowed(self):
+        @qkernel
+        def ok(
+            q1: qm.Qubit, q2: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = (qm.h(q2), qm.h(q1))
+            return q1, q2
+
+        assert ok.build() is not None
+
+    def test_mixed_fresh_and_self_rejected(self):
+        """`q1, q2 = (qm.qubit(...), qm.h(q1))` flags the fresh allocation on q1."""
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(
+                q1: qm.Qubit, q2: qm.Qubit
+            ) -> tuple[qm.Qubit, qm.Qubit]:
+                q1, q2 = (qm.qubit("fresh"), qm.h(q1))
+                return q1, q2
+
+        # First violation reported should be the fresh allocation on q1.
+        assert "freshly allocated quantum value" in str(exc.value)
+
+
+class TestQuantumRebindMeasureConsumesAliases:
+    """`measure` / `expval` pops every alias of the consumed origin."""
+
+    def test_measure_then_reassign_param_allowed(self):
+        """`bit = measure(q); q = qm.qubit(...)` must not trigger a false rebind."""
+        @qkernel
+        def ok(q: qm.Qubit) -> qm.Bit:
+            bit = qm.measure(q)
+            q = qm.qubit("fresh")
+            _ = qm.measure(q)
+            return bit
+
+        # The check must complete without QubitRebindError; later
+        # passes may still reject for unrelated reasons (e.g. unused
+        # second measurement), so only assert decoration succeeded.
+        assert ok.name == "ok"
+
+    def test_measure_via_alias_consumes_origin(self):
+        """`alias = q; measure(alias); q = qm.qubit(...)` is allowed (alias-aware pop)."""
+        @qkernel
+        def ok(q: qm.Qubit) -> qm.Bit:
+            alias = q
+            bit = qm.measure(alias)
+            q = qm.qubit("fresh")
+            _ = qm.measure(q)
+            return bit
+
+        assert ok.name == "ok"
+
+    def test_measure_does_not_pop_unrelated_quantum(self):
+        """Measuring `q1` must not silence subsequent rebind detection on `q2`."""
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(q1: qm.Qubit, q2: qm.Qubit) -> qm.Bit:
+                bit = qm.measure(q1)
+                q2 = qm.qubit("fresh")  # noqa: F841 — rebind target under test
+                return bit
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+
+class TestQuantumRebindErrorMessageDispatch:
+    """Each source_kind formats its own (pattern, reason, fix) triple."""
+
+    def test_direct_alias_message(self):
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = b
+                return a
+
+        msg = str(exc.value)
+        assert "an alias of a different quantum variable 'b'" in msg
+        assert "Use a new variable: new_var = b" in msg
+
+    def test_quantum_arg_message(self):
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+                a = qm.h(b)
+                return a
+
+        msg = str(exc.value)
+        assert "different quantum variable 'b'" in msg
+        assert "Use self-update: a = h(a, ...)" in msg
+
+    def test_fresh_allocation_message(self):
+        with pytest.raises(QubitRebindError) as exc:
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+                q = qm.qubit("s")
+                return q
+
+        msg = str(exc.value)
+        assert "freshly allocated quantum value" in msg
+        assert "Bind the new allocation to a new name" in msg

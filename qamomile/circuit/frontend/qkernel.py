@@ -232,16 +232,26 @@ class QKernel(Generic[P, R]):
         # AST-level quantum rebind analysis: a violation is a structural error
         # in the kernel definition itself, so raise eagerly at decoration time
         # rather than deferring to .block / build().
-        quantum_params = _get_quantum_param_names(input_types)
-        if quantum_params:
-            violations = collect_quantum_rebind_violations(
-                self.raw_func, quantum_params
-            )
-            if violations:
-                self._raise_rebind_violation(violations[0])
+        #
+        # The analyzer is run unconditionally rather than only when the kernel
+        # has quantum-typed parameters: its constructor-tracking logic (LHS of
+        # ``q = qm.qubit(...)`` / ``qm.qubit_array(...)``) seeds new origins
+        # from inside the body, so kernels that derive all of their quantum
+        # state from internal allocations are still subject to rebind checks.
+        violations = collect_quantum_rebind_violations(
+            self.raw_func, _get_quantum_param_names(input_types)
+        )
+        if violations:
+            self._raise_rebind_violation(violations[0])
 
     def _raise_rebind_violation(self, v: RebindViolation) -> None:
         """Raise ``QubitRebindError`` for the first detected violation.
+
+        The message is composed from ``v.source_kind``-specific
+        ``(pattern, reason, fix)`` triples so that each violation kind
+        explains itself in domain-appropriate language rather than
+        forcing a generic "different quantum variable" sentence onto a
+        fresh allocation or a chained assignment.
 
         Args:
             v (RebindViolation): The violation record produced by
@@ -251,28 +261,109 @@ class QKernel(Generic[P, R]):
         Raises:
             QubitRebindError: Always — this helper exists solely to format
                 the message consistently.
+            ValueError: If ``v.source_kind`` is not one of the documented
+                discriminator values. This is an internal-consistency
+                check; user code should never trigger it.
         """
-        if v.func_name:
-            pattern = f"{v.target_name} = {v.func_name}({v.source_name}, ...)"
-            fix = (
-                f"  - Use self-update: {v.target_name} = {v.func_name}({v.target_name}, ...)\n"
-                f"  - Use a new variable: new_var = {v.func_name}({v.source_name}, ...)"
-            )
-        else:
-            pattern = f"{v.target_name} = {v.source_name}"
-            fix = (
-                f"  - Use a new variable: new_var = {v.source_name}\n"
-                f"  - Remove the assignment if '{v.target_name}' is no longer needed"
-            )
+        pattern, reason, fix = self._format_rebind_violation(v)
         raise QubitRebindError(
             f"Kernel '{self.name}': forbidden quantum variable reassignment "
             f"at line {v.lineno} (relative to the function definition): "
             f"'{pattern}' overwrites quantum variable '{v.target_name}' "
-            f"with a value derived from different quantum variable "
-            f"'{v.source_name}'.\n\nTo fix, either:\n{fix}",
+            f"with {reason}.\n\nTo fix:\n{fix}",
             handle_name=v.target_name,
             operation_name="assignment_rebind",
         )
+
+    @staticmethod
+    def _format_rebind_violation(v: RebindViolation) -> tuple[str, str, str]:
+        """Format a violation into ``(pattern, reason, fix)`` strings.
+
+        Separating formatting from the raise lets unit tests assert the
+        per-kind wording without going through ``QubitRebindError``.
+
+        Args:
+            v (RebindViolation): The violation record.
+
+        Returns:
+            tuple[str, str, str]: ``(pattern, reason, fix)`` where
+                ``pattern`` is a code-shaped illustration of the
+                offending assignment, ``reason`` explains why it is
+                rejected, and ``fix`` is a bullet list of remediation
+                suggestions (newline-separated, two-space-indented).
+
+        Raises:
+            ValueError: If ``v.source_kind`` is not one of the
+                documented discriminator values.
+        """
+        target = v.target_name
+        func = v.func_name
+        src = v.source_name
+        if v.source_kind == "direct_alias":
+            assert src is not None
+            pattern = f"{target} = {src}"
+            reason = f"an alias of a different quantum variable '{src}'"
+            fix = (
+                f"  - Use a new variable: new_var = {src}\n"
+                f"  - Remove the assignment if '{target}' is no longer needed"
+            )
+        elif v.source_kind == "quantum_arg":
+            assert src is not None
+            pattern = f"{target} = {func}({src}, ...)" if func else f"{target} = ...({src}, ...)"
+            reason = f"a value derived from different quantum variable '{src}'"
+            self_update = (
+                f"  - Use self-update: {target} = {func}({target}, ...)\n"
+                if func
+                else f"  - Use self-update: {target} = ...({target}, ...)\n"
+            )
+            new_var = (
+                f"  - Use a new variable: new_var = {func}({src}, ...)"
+                if func
+                else f"  - Use a new variable: new_var = ...({src}, ...)"
+            )
+            fix = self_update + new_var
+        elif v.source_kind == "fresh_allocation":
+            pattern = f"{target} = {func}(...)" if func else f"{target} = ...(...)"
+            reason = "a freshly allocated quantum value"
+            new_var = (
+                f"  - Bind the new allocation to a new name: new_var = {func}(...)"
+                if func
+                else "  - Bind the new allocation to a new name: new_var = ...(...)"
+            )
+            fix = (
+                f"{new_var}\n"
+                f"  - Or remove the original '{target}' if it is no longer needed"
+            )
+        elif v.source_kind == "unknown_call":
+            pattern = f"{target} = {func}(...)" if func else f"{target} = ...(...)"
+            reason = (
+                "a value that does not thread the original quantum variable "
+                "through the call"
+            )
+            self_update = (
+                f"  - Pass '{target}' into the call so it is self-updated: "
+                f"{target} = {func}({target}, ...)\n"
+                if func
+                else f"  - Pass '{target}' into the call so it is self-updated\n"
+            )
+            fix = (
+                f"{self_update}"
+                f"  - Or bind the new value to a different name"
+            )
+        elif v.source_kind == "chained_assignment":
+            pattern = f"{target} = ... = ..."
+            reason = (
+                "a chained assignment, which cannot be verified as a "
+                "self-update for every target"
+            )
+            fix = (
+                f"  - Write a separate assignment for '{target}'\n"
+                f"  - Avoid chained ``a = b = expr`` when any target is "
+                f"a quantum variable"
+            )
+        else:
+            raise ValueError(f"unknown rebind source_kind: {v.source_kind!r}")
+        return pattern, reason, fix
 
     @property
     def block(self) -> Block:
