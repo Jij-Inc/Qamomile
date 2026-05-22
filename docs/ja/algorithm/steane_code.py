@@ -78,7 +78,6 @@
 # :::
 # ::::
 
-<<<<<<< HEAD
 # %%
 # Transpiler — この記事はデフォルトでQiskitを使います。
 # 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
@@ -156,12 +155,10 @@ def _is_steane_zero_word(outcome) -> bool:
     ]
     return all(check == 0 for check in h_checks) and sum(bits) % 2 == 0
 
-=======
 # %% [markdown]
 # ## 1. スタビライザ形式論
 #
 # 前編では、$Z_0Z_1$ や $X_0X_1$ のようなパリティ演算子を **スタビライザ** と呼びました。まずこの言葉を正式に整理します。
->>>>>>> origin/main
 
 # %% [markdown]
 # ### 1.1 スタビライザとは

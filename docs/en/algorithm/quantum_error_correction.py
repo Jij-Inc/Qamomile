@@ -240,21 +240,13 @@ transpiler = QiskitTranspiler()
 import math
 
 import qamomile.circuit as qmc
-<<<<<<< HEAD
+from qamomile.circuit.transpiler.job import SampleResult
 
 # %%
 # Executor — by default this article uses Qiskit's AerSimulator with
 # a fixed seed. If you picked a different tab above, copy that tab's
 # snippet over the lines below (and make sure the matching pip install
 # line at the top of this article is uncommented).
-=======
-from qamomile.circuit.transpiler.job import SampleResult
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-
-# Create a seeded backend for reproducible documentation output.
->>>>>>> origin/main
 from qiskit_aer import AerSimulator
 
 _seeded_executor = transpiler.executor(

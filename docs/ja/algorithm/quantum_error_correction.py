@@ -214,20 +214,12 @@ transpiler = QiskitTranspiler()
 import math
 
 import qamomile.circuit as qmc
-<<<<<<< HEAD
+from qamomile.circuit.transpiler.job import SampleResult
 
 # %%
 # Executor — この記事はデフォルトで Qiskit の AerSimulator (シード固定) を使います。
 # 上のタブで別のSDKを選んだ場合は、対応するタブのスニペットで以下を上書きしてください
 # （あわせて記事冒頭のpipセルで対応する行のコメントも外しておくこと）。
-=======
-from qamomile.circuit.transpiler.job import SampleResult
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-
-# ドキュメントの出力を再現可能にするため、シード付きのバックエンドを用意します。
->>>>>>> origin/main
 from qiskit_aer import AerSimulator
 
 _seeded_executor = transpiler.executor(

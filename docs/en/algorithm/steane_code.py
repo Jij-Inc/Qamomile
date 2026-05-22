@@ -93,7 +93,6 @@
 # :::
 # ::::
 
-<<<<<<< HEAD
 # %%
 # Transpiler — by default this article uses Qiskit. If you picked a
 # different tab above (QURI Parts / CUDA-Q), copy the two lines from
@@ -188,12 +187,10 @@ def _is_steane_zero_word(outcome) -> bool:
     ]
     return all(check == 0 for check in h_checks) and sum(bits) % 2 == 0
 
-=======
 # %% [markdown]
 # ## 1. Stabilizer Formalism
 #
 # In the first part, we called parity operators such as $Z_0Z_1$ and $X_0X_1$ **stabilizers**. We first formalize this term.
->>>>>>> origin/main
 
 # %% [markdown]
 # ### 1.1 What Is a Stabilizer
