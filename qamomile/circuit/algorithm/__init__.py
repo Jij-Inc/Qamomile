@@ -18,6 +18,10 @@ from .fqaoa import (
     initial_occupations,
     mixer_layer,
 )
+from .hhl_rotation import (
+    hhl_middle_block_2clock_le,
+    reciprocal_rotation_2clock_le,
+)
 from .qaoa import (
     hubo_ising_cost,
     hubo_qaoa_layers,
@@ -60,6 +64,9 @@ __all__ = [
     "cost_layer",
     "fqaoa_layers",
     "fqaoa_state",
+    # HHL
+    "reciprocal_rotation_2clock_le",
+    "hhl_middle_block_2clock_le",
     # State preparation
     "computational_basis_state",
     "MottonenAmplitudeEncoding",
