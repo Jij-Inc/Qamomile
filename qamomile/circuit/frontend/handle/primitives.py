@@ -252,6 +252,33 @@ class Float(ArithmeticMixin, Handle):
         _emit_binop(other.value, self.value, result, BinOpKind.SUB)
         return result
 
+    def __neg__(self) -> "Float":
+        """Negate this Float handle, returning the unary-minus result.
+
+        Lets users write the natural ``-x`` inside a ``@qkernel`` instead
+        of the awkward ``0 - x`` idiom (GitHub issue #329). The negation
+        is lowered to the existing ``MUL`` IR op as ``self * -1.0`` —
+        multiplication by ``-1`` is the direct expression of unary minus
+        — so it carries no new IR node and every backend that already
+        supports multiplication emits it unchanged. When ``self`` is a
+        compile-time constant the result is folded eagerly by
+        ``_emit_binop``.
+
+        Returns:
+            Float: A new Float handle holding the negated value.
+
+        Example:
+            >>> import qamomile.circuit as qmc
+            >>> @qmc.qkernel
+            ... def circuit(theta: qmc.Float) -> qmc.Qubit:
+            ...     q = qmc.qubit("q")
+            ...     return qmc.rz(q, -theta)
+        """
+        neg_one = self._make_float(-1.0)
+        result = self._make_result()
+        _emit_binop(self.value, neg_one.value, result, BinOpKind.MUL)
+        return result
+
     def __mul__(self, other: "int | float | Float") -> "Float":
         other = self._coerce(other)
         result = self._make_result()
