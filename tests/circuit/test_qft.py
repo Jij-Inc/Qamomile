@@ -536,13 +536,6 @@ class TestNestedShapeDependentStdlib:
     the IQFT vanished from the transpiled circuit.
     """
 
-    def _count_composite_ops(self, ops, gate_type):
-        return sum(
-            1
-            for op in ops
-            if isinstance(op, CompositeGateOperation) and op.gate_type == gate_type
-        )
-
     @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_classical_scalar_drives_inner_shape(self, qiskit_transpiler, n):
         """Inner kernel sized by a UInt scalar keeps its IQFT under nesting."""
