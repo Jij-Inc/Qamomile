@@ -1,4 +1,5 @@
 import ast
+import enum
 import inspect
 import textwrap
 import types
@@ -1335,6 +1336,38 @@ def transform_control_flow(func: Callable):
 # ---------------------------------------------------------------------------
 
 
+class RebindSourceKind(enum.StrEnum):
+    """Discriminator for the source of a detected rebind violation.
+
+    Each value classifies *why* the analyzer believes an existing
+    quantum binding is being silently discarded, and lets downstream
+    error-message formatting render a domain-appropriate explanation
+    instead of forcing a generic "different quantum variable" sentence
+    onto, e.g., a fresh allocation.
+
+    Members:
+        DIRECT_ALIAS: ``q = other_q`` or ``q = qs[i]``.
+        QUANTUM_ARG: ``q = f(other_q, ...)`` where ``other_q`` has a
+            different origin than ``q``.
+        FRESH_ALLOCATION: ``q = qm.qubit(...)`` /
+            ``qm.qubit_array(...)`` — the original quantum state is
+            silently discarded in favor of a freshly allocated one.
+        UNKNOWN_CALL: ``q = some_func(...)`` where the call references
+            no known quantum variable and is not a recognized quantum
+            constructor; conservatively treated as a rebind because
+            the original ``q`` is not threaded through the RHS.
+        CHAINED_ASSIGNMENT: ``q1 = q2 = expr`` where at least one
+            target is an existing quantum variable; chained binding
+            semantics are too ambiguous to verify self-update.
+    """
+
+    DIRECT_ALIAS = "direct_alias"
+    QUANTUM_ARG = "quantum_arg"
+    FRESH_ALLOCATION = "fresh_allocation"
+    UNKNOWN_CALL = "unknown_call"
+    CHAINED_ASSIGNMENT = "chained_assignment"
+
+
 @dataclass
 class RebindViolation:
     """A detected forbidden quantum variable rebinding.
@@ -1346,24 +1379,9 @@ class RebindViolation:
             the source has no statically-known quantum name — e.g. a
             fresh allocation via ``qm.qubit(...)`` or an opaque call
             whose return type cannot be inferred.
-        source_kind (str): Discriminator for downstream error message
-            formatting. One of:
-
-              - ``"direct_alias"``: ``q = other_q`` or ``q = qs[i]``.
-              - ``"quantum_arg"``: ``q = f(other_q, ...)`` where
-                ``other_q`` has a different origin than ``q``.
-              - ``"fresh_allocation"``: ``q = qm.qubit(...)`` /
-                ``qm.qubit_array(...)`` — the original quantum state is
-                silently discarded in favor of a freshly allocated one.
-              - ``"unknown_call"``: ``q = some_func(...)`` where the
-                call references no known quantum variable and is not a
-                recognized quantum constructor; conservatively treated
-                as a rebind because the original ``q`` is not threaded
-                through the RHS.
-              - ``"chained_assignment"``: ``q1 = q2 = expr`` where at
-                least one target is an existing quantum variable;
-                chained binding semantics are too ambiguous to verify
-                self-update.
+        source_kind (RebindSourceKind): Discriminator for downstream
+            error message formatting. See :class:`RebindSourceKind` for
+            the meaning of each member.
         func_name (str | None): Name of the function/method invoked on
             the RHS, when the RHS is a ``Call``. ``None`` for direct
             aliases.
@@ -1374,7 +1392,7 @@ class RebindViolation:
 
     target_name: str
     source_name: str | None
-    source_kind: str
+    source_kind: RebindSourceKind
     func_name: str | None
     lineno: int
 
@@ -1558,7 +1576,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     if self.quantum_vars[target] != self.quantum_vars[source]:
                         self.violations.append(
                             RebindViolation(
-                                target, source, "direct_alias", None, lineno
+                                target,
+                                source,
+                                RebindSourceKind.DIRECT_ALIAS,
+                                None,
+                                lineno,
                             )
                         )
                     self.quantum_vars[target] = self.quantum_vars[source]
@@ -1575,7 +1597,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     if self.quantum_vars[target] != self.quantum_vars[source]:
                         self.violations.append(
                             RebindViolation(
-                                target, source, "direct_alias", None, lineno
+                                target,
+                                source,
+                                RebindSourceKind.DIRECT_ALIAS,
+                                None,
+                                lineno,
                             )
                         )
                     self.quantum_vars[target] = self.quantum_vars[source]
@@ -1608,7 +1634,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     if is_constructor:
                         self.violations.append(
                             RebindViolation(
-                                target, None, "fresh_allocation", func_name, lineno
+                                target,
+                                None,
+                                RebindSourceKind.FRESH_ALLOCATION,
+                                func_name,
+                                lineno,
                             )
                         )
                     elif quantum_args:
@@ -1616,7 +1646,7 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                             RebindViolation(
                                 target,
                                 quantum_args[0],
-                                "quantum_arg",
+                                RebindSourceKind.QUANTUM_ARG,
                                 func_name,
                                 lineno,
                             )
@@ -1624,7 +1654,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     else:
                         self.violations.append(
                             RebindViolation(
-                                target, None, "unknown_call", func_name, lineno
+                                target,
+                                None,
+                                RebindSourceKind.UNKNOWN_CALL,
+                                func_name,
+                                lineno,
                             )
                         )
 
@@ -1687,7 +1721,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             # RHS call has no known quantum input. Every existing
             # quantum target is being silently discarded.
             func_name = self._get_func_name(value)
-            kind = "fresh_allocation" if is_constructor else "unknown_call"
+            kind = (
+                RebindSourceKind.FRESH_ALLOCATION
+                if is_constructor
+                else RebindSourceKind.UNKNOWN_CALL
+            )
             for tgt in target_names:
                 if tgt in self.quantum_vars:
                     self.violations.append(
@@ -1716,7 +1754,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                 func_name = self._get_func_name(value)
                 self.violations.append(
                     RebindViolation(
-                        tgt, mapped_source, "quantum_arg", func_name, lineno
+                        tgt,
+                        mapped_source,
+                        RebindSourceKind.QUANTUM_ARG,
+                        func_name,
+                        lineno,
                     )
                 )
 
@@ -1797,7 +1839,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             if isinstance(tgt, ast.Name) and tgt.id in self.quantum_vars:
                 self.violations.append(
                     RebindViolation(
-                        tgt.id, None, "chained_assignment", func_name, lineno
+                        tgt.id,
+                        None,
+                        RebindSourceKind.CHAINED_ASSIGNMENT,
+                        func_name,
+                        lineno,
                     )
                 )
 
