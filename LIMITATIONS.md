@@ -98,21 +98,33 @@ stdlib on it. The silent-no-op trade-off is consistent with how
 `Dict` / `Tuple` / unbound runtime classicals are already handled
 in this PR.
 
-**Future fix**: extend `_extract_calltime_specialization` to
-record multi-dimensional shapes in a new bucket (a
-`qubit_shapes: dict[str, tuple[int, ...]]`), and extend
-`create_dummy_input` to accept multi-rank concrete shapes. Both
-are small mechanical changes; the only reason they are not in this
-PR is scope. Alternatively, the deferred-shape composite IR (next
+**Future fix**: change `_extract_calltime_specialization`'s
+`qubit_sizes: dict[str, int]` to a `qubit_shapes:
+dict[str, tuple[int, ...]]` carrying the full shape, then route
+each entry through `_create_traced_block` with the full tuple
+instead of `(qubit_sizes[name],)`. `create_dummy_input` itself
+already accepts any-rank concrete shapes via its `shape=` kwarg
+and validates `len(shape) == ndim`, so the change is confined to
+the specialization data model and the one `_create_traced_block`
+call site. Alternatively, the deferred-shape composite IR (next
 entry) makes this entry moot.
 
 ## `qmc.qft` / `qmc.iqft` standalone no-op fallback is preserved
 
-The stdlib helpers `qft` / `iqft` (and indirectly `qpe` through the
-same `get_size` contract) silently return the input register
-unchanged when `get_size(qubits)` raises `ValueError`. The factory
-docstring documents this as the fallback for the outer composition
-layer to re-trace once the shape is resolved.
+The stdlib helpers `qft` / `iqft` silently return the input
+register unchanged when `get_size(qubits)` raises `ValueError`.
+`qpe` has the same concrete-shape hazard but a slightly different
+failure shape: it routes through `_get_concrete_size` in
+`qamomile/circuit/stdlib/qpe.py`, which falls back to the symbolic
+`UInt`'s `init_value` (default `0`) rather than raising. The
+result is that a symbolic-counting-size QPE emits a 0-width
+`CompositeGateOperation(IQFT)` and a 0-width `Cast`-to-`QFixed`
+while the surrounding QPE structure (controlled-U loop, etc.) is
+still emitted — partial / incorrect rather than the clean no-op
+of `qft` / `iqft`. The factory docstrings document the
+``get_size``-based fallback for `qft` / `iqft` as the way the
+outer composition layer is expected to re-trace once the shape is
+resolved.
 
 **When it bites**: a kernel containing shape-dependent stdlib that
 is built directly via `my_kernel.build()` without bindings, or
@@ -135,10 +147,16 @@ who hit it see the documented no-op rather than a crash.
 `qmc.qft` / `qmc.iqft` to always emit a `CompositeGateOperation`
 even when the input shape is symbolic, with `num_target_qubits`
 typed as `int | Value`. Lower it at `resolve_parameter_shapes`
-once bindings are applied. This is the codex-recommended
-medium-term refactor and obviates both the standalone no-op above
-and the recursive-layer limitation. The design surface is
-non-trivial: `CompositeGateOperation` itself, serialization,
-canonicalization, resource estimation, backend emitters, and the
-decomposition strategies under `qamomile/circuit/stdlib/` all
-need to handle the symbolic-shape case.
+once bindings are applied. `qpe` needs the parallel change in
+`_emit_iqft_and_cast_to_qfixed`: drop the `_get_concrete_size`
+fallback to `init_value`, emit the inner `CompositeGateOperation
+(IQFT)` and the `Cast`-to-`QFixed` with a symbolic size carried in
+metadata, and lower both at the same `resolve_parameter_shapes`
+stage. This is the codex-recommended medium-term refactor and
+obviates both the standalone no-op above and the recursive-layer
+limitation. The design surface is non-trivial:
+`CompositeGateOperation` itself, `CastOperation` (or
+`QFixedMetadata`), serialization, canonicalization, resource
+estimation, backend emitters, and the decomposition strategies
+under `qamomile/circuit/stdlib/` all need to handle the
+symbolic-shape case.
