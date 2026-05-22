@@ -212,7 +212,9 @@ class _ExpectedCudaqSourceBuilder:
             return
         if kind == "if_start":
             # args[0] can be an int clbit index or a str compound predicate
-            cond_text = self._clbit_ref(args[0]) if isinstance(args[0], int) else args[0]
+            cond_text = (
+                self._clbit_ref(args[0]) if isinstance(args[0], int) else args[0]
+            )
             self._emit(f"if {cond_text}:")
             self._indent += 1
             return
@@ -226,7 +228,9 @@ class _ExpectedCudaqSourceBuilder:
             return
         if kind == "while_start":
             # args[0] can be an int clbit index or a str compound predicate
-            cond_text = self._clbit_ref(args[0]) if isinstance(args[0], int) else args[0]
+            cond_text = (
+                self._clbit_ref(args[0]) if isinstance(args[0], int) else args[0]
+            )
             self._emit(f"while {cond_text}:")
             self._indent += 1
             return
