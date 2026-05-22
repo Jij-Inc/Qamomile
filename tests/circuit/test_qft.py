@@ -5,7 +5,7 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.constructors import qubit_array
-from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle import Matrix, Qubit, Vector
 from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
@@ -16,6 +16,32 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.stdlib.qft import IQFT, QFT, iqft, qft
 from tests.circuit.conftest import run_statevector
+
+# ---------------------------------------------------------------------------
+# Module-level kernels for the self-recursive + shape-dependent stdlib
+# regression. Self-recursive @qkernel definitions must be at module level
+# so the AST transformer can resolve the recursive name (function-local
+# closures bind the name only after the decorator has run, which fires
+# the "Closure variable is not yet bound" branch).
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _rec_iqft(depth: qmc.UInt, qs: Vector[Qubit]) -> Vector[Qubit]:
+    """Apply IQFT and recurse ``depth`` more times. Used by the self-
+    recursion regression test in ``TestNestedShapeDependentStdlib``."""
+    qs = iqft(qs)
+    if depth > qmc.uint(0):
+        qs = _rec_iqft(depth - qmc.uint(1), qs)
+    return qs
+
+
+@qmc.qkernel
+def _rec_iqft_top(depth: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Wrap ``_rec_iqft`` with a concrete-size register and measure."""
+    qs = qmc.qubit_array(3, "qs")
+    qs = _rec_iqft(depth, qs)
+    return qmc.measure(qs)
 
 
 class TestQFT:
@@ -612,18 +638,89 @@ class TestNestedShapeDependentStdlib:
         # Exactly one QInit for the outer register, none from the specialized callee.
         assert len(qinits) == 1
 
+    @pytest.mark.parametrize("depth", [0, 1, 2])
+    def test_self_recursive_with_shape_dependent_stdlib_limitation(
+        self, qiskit_transpiler, depth
+    ):
+        """Documents a known limitation of call-time specialization.
+
+        ``_rec_iqft(depth, qs)`` applies ``qmc.iqft`` once and then
+        recurses ``depth`` more times, so the program semantically
+        applies IQFT ``(depth + 1)`` times. The call-time
+        specialization in :meth:`QKernel.__call__` only fires for the
+        *outermost* call: the body's recursive self-call sees
+        ``self._specializing == True`` and falls back to the cached
+        symbolic ``self.block`` where the inner ``qmc.iqft`` had no-op'd
+        on the symbolic-shape register. After ``inline ↔ partial_eval``
+        unrolling the recursion, only the outer IQFT remains in the IR.
+
+        This test pins that limitation down. If a future change relaxes
+        the ``_specializing`` guard (e.g. allows bounded
+        re-specialization for self-recursive callees with concrete
+        bindings), the expected IQFT count will rise to ``depth + 1``
+        and this test should be updated to match — the goal here is to
+        flag the behavior change consciously, not to enforce the
+        current shortcut forever.
+        """
+        block = qiskit_transpiler.to_block(_rec_iqft_top, bindings={"depth": depth})
+        block = qiskit_transpiler.substitute(block)
+        block = qiskit_transpiler.resolve_parameter_shapes(
+            block, bindings={"depth": depth}
+        )
+        block = qiskit_transpiler.inline(block)
+        block = qiskit_transpiler.unroll_recursion(block, bindings={"depth": depth})
+        iqft_ops = [
+            op
+            for op in block.operations
+            if isinstance(op, CompositeGateOperation)
+            and op.gate_type == CompositeGateType.IQFT
+        ]
+        # Documented limitation: exactly one IQFT survives regardless
+        # of ``depth``. Mathematically the kernel applies IQFT
+        # ``depth + 1`` times.
+        assert len(iqft_ops) == 1
+        assert iqft_ops[0].num_target_qubits == 3
+
+    def test_matrix_qubit_sub_kernel_raises_not_implemented(self):
+        """Call-time spec on ``Matrix[Qubit]`` callee args must error loudly.
+
+        Higher-rank quantum-array specialization is not yet wired up
+        in ``_extract_calltime_specialization``. Silently falling back
+        to the cached symbolic block would mean shape-dependent stdlib
+        (qft / iqft / qpe) applied inside the callee on the
+        ``Matrix[Qubit]`` register no-ops without warning — exactly
+        the failure mode this PR is closing for the ``Vector[Qubit]``
+        case. Raise ``NotImplementedError`` instead so the user sees
+        the unsupported case at the call site.
+        """
+
+        @qkernel
+        def inner(qs: Matrix[Qubit]) -> Matrix[Qubit]:
+            return qs
+
+        @qkernel
+        def outer() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array((2, 3), "qs")
+            qs = inner(qs)
+            return qmc.measure(qs)
+
+        with pytest.raises(NotImplementedError, match=r"Matrix\[Qubit\]"):
+            outer.build()
+
     @pytest.mark.parametrize("seed", [0, 1, 7])
     @pytest.mark.parametrize("n", [1, 2, 3])
     def test_392_cross_backend_sampling(self, n, seed):
-        """Cross-backend sampling: IQFT on |+...+> returns uniform bitstrings.
+        """Cross-backend sampling: ``IQFT|+...+>`` collapses to ``|0...0>``.
 
         Verifies that the nested-call IQFT fix produces identical
         behavior on every quantum SDK backend Qamomile ships with.
 
         The kernel prepares ``H^{⊗n}|0...0> = |+...+>`` inside an inner
-        ``prepare`` kernel that *also* applies IQFT, then measures from
-        the outer kernel. ``IQFT|+...+>`` is just ``|0...0>``, so every
-        measured bitstring must be all-zero on every backend. This
+        ``prepare`` kernel that *also* applies IQFT, then measures
+        from the outer kernel. Because ``IQFT|+...+> = |0...0>``
+        exactly, every measured bitstring must be the all-zero string
+        on every backend (any other bitstring would indicate the
+        nested-call IQFT was lost or emitted incorrectly). This
         protects both the IR-level fix and each backend's emit pass.
 
         Args:

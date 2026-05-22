@@ -1007,21 +1007,30 @@ class QKernel(Generic[P, R]):
                 values, and ``qubit_sizes`` maps ``Vector[Qubit]``
                 argument names to their resolved first-axis sizes.
                 Scalar ``Qubit``, scalar ``Observable``, unbound
-                ``Vector[Observable]``, multi-dimensional qubit arrays
-                (``Matrix[Qubit]`` / ``Tensor[Qubit]``), unbound
-                ``Dict`` parameters, and ``Tuple`` parameters are
-                deliberately left out of all three buckets so that
-                :meth:`_create_traced_block` falls back to its standard
-                ``create_dummy_input`` handling for those argument
-                positions while still specializing the rest of the
-                call. Returns ``None`` only when no specialization is
-                beneficial (the call adds no new compile-time
-                information over the cached symbolic block) or when an
-                argument has a non-parameterizable classical type
+                ``Vector[Observable]``, unbound ``Dict`` parameters,
+                and ``Tuple`` parameters are deliberately left out of
+                all three buckets so that :meth:`_create_traced_block`
+                falls back to its standard ``create_dummy_input``
+                handling for those argument positions while still
+                specializing the rest of the call. Returns ``None``
+                only when no specialization is beneficial (the call
+                adds no new compile-time information over the cached
+                symbolic block) or when an argument has a
+                non-parameterizable classical type
                 (``Bit`` / ``bool`` / ``Vector[Bit]`` / ``Vector[bool]``)
                 with no compile-time constant — that combination has
                 nowhere to live in the specialization triple. In the
                 ``None`` case ``__call__`` falls back to ``self.block``.
+
+        Raises:
+            NotImplementedError: If ``arguments`` contains a quantum
+                array argument that is not a 1-D ``Vector[Qubit]``
+                (e.g., ``Matrix[Qubit]`` / ``Tensor[Qubit]``).
+                Higher-rank quantum-array specialization is not yet
+                implemented, and silently falling back to the cached
+                symbolic block would lose shape-dependent stdlib gates
+                applied inside the callee — surfacing the limitation
+                as an exception prevents that.
         """
         parameters: list[str] = []
         bindings: dict[str, Any] = {}
@@ -1070,19 +1079,35 @@ class QKernel(Generic[P, R]):
                     bindings[name] = const_array
                 continue
 
-            # Quantum array: only ``Vector[Qubit]`` is currently safe to
-            # specialize — ``Matrix[Qubit]`` / ``Tensor[Qubit]`` callees
-            # need multi-dim shape info that we do not yet extract, and
-            # passing a 1-element shape tuple would fail the
-            # ``create_dummy_input`` dimensionality check. For higher-
-            # rank quantum arrays, leave that argument's shape symbolic
-            # — specialization on other arguments may still proceed.
+            # Quantum array. ``Vector[Qubit]`` is the fully supported
+            # case: we extract the first-axis size via ``get_size`` and
+            # carry it in ``qubit_sizes`` so the callee re-traces with
+            # a concrete shape. ``Matrix[Qubit]`` / ``Tensor[Qubit]``
+            # are higher-rank registers; we do not yet have the
+            # multi-dim shape extraction nor the ``create_dummy_input
+            # (shape=...)`` plumbing for them, so passing one through a
+            # nested call would mean shape-dependent stdlib stays
+            # silently no-op'd on those qubits. Surface that as an
+            # explicit ``NotImplementedError`` rather than letting the
+            # call silently produce a wrong-unitary circuit.
             if (
                 is_array_type(param_type)
                 and _get_array_element_type(param_type) is Qubit
             ):
                 if getattr(param_type, "__origin__", param_type) is not Vector:
-                    continue
+                    raise NotImplementedError(
+                        f"Nested @qkernel call of '{self.name}' received "
+                        f"argument {name!r} of type {param_type!r}. "
+                        f"Call-time specialization currently supports only "
+                        f"``Vector[Qubit]`` for quantum-array inputs; "
+                        f"``Matrix[Qubit]`` / ``Tensor[Qubit]`` are not "
+                        f"yet supported and would silently lose "
+                        f"shape-dependent stdlib gates (qft, iqft, qpe) "
+                        f"applied inside the callee. Reshape the call "
+                        f"site so the callee receives a 1-D "
+                        f"``Vector[Qubit]`` view, or file an issue if "
+                        f"you need higher-rank specialization."
+                    )
                 # ``_get_size`` is declared over ``Vector``; the two
                 # checks above narrow ``handle`` to a ``Vector[Qubit]``,
                 # but the type system cannot see that — cast for the
