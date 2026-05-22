@@ -34,7 +34,7 @@ from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
-from qamomile.circuit.frontend.handle.utils import get_size as _get_qubit_array_size
+from qamomile.circuit.frontend.handle.utils import get_size as _get_size
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
@@ -1027,13 +1027,9 @@ class QKernel(Generic[P, R]):
 
         for name, param in self.signature.parameters.items():
             param_type = self.input_types.get(name, param.annotation)
-            handle = arguments[name]
-            assert isinstance(handle, Handle), (
-                f"Internal invariant violated: argument {name!r} should "
-                f"already be a Handle by the time "
-                f"_extract_calltime_specialization runs (upstream check "
-                f"at __call__)."
-            )
+            handle = arguments.get(name)
+            if not isinstance(handle, Handle):
+                return None
 
             # Scalar Qubit: no specialization-relevant info to extract;
             # ``_create_traced_block`` will fall through to the regular
@@ -1075,12 +1071,12 @@ class QKernel(Generic[P, R]):
             ):
                 if getattr(param_type, "__origin__", param_type) is not Vector:
                     continue
-                # ``_get_qubit_array_size`` is declared over ``Vector``;
-                # the two checks above narrow ``handle`` to a
-                # ``Vector[Qubit]``, but the type system cannot see
-                # that — cast for the call.
+                # ``_get_size`` is declared over ``Vector``; the two
+                # checks above narrow ``handle`` to a ``Vector[Qubit]``,
+                # but the type system cannot see that — cast for the
+                # call.
                 try:
-                    size = _get_qubit_array_size(cast(Vector[Qubit], handle))
+                    size = _get_size(cast(Vector[Qubit], handle))
                 except ValueError:
                     continue
                 qubit_sizes[name] = size
