@@ -681,6 +681,59 @@ class TestNestedShapeDependentStdlib:
         assert len(iqft_ops) == 1
         assert iqft_ops[0].num_target_qubits == 3
 
+    @pytest.mark.parametrize("n", [2, 3])
+    def test_runtime_vector_bit_arg_does_not_block_other_specialization(
+        self, qiskit_transpiler, n
+    ):
+        """A runtime ``Vector[Bit]`` co-argument must not block IQFT spec.
+
+        ``_extract_calltime_specialization`` previously aborted the
+        whole call when it saw a non-parameterizable runtime classical
+        without a compile-time constant — re-introducing the original
+        #392 failure mode for callees that take both a shape-relevant
+        argument and a runtime classical. The extractor now
+        ``continue``s past such arguments so specialization on the
+        shape-relevant arg still fires, and inline-time substitution
+        supplies the runtime classical Value.
+
+        The kernel below feeds a ``Vector[Bit]`` produced by a
+        measurement (so it carries no compile-time constant) into a
+        helper that also takes a concrete ``Vector[Qubit]``. The
+        IQFT inside the helper must still emit with the resolved
+        qubit-register size.
+        """
+
+        @qkernel
+        def helper(
+            qs: Vector[Qubit], flags: qmc.Vector[qmc.Bit]
+        ) -> tuple[Vector[Qubit], qmc.Vector[qmc.Bit]]:
+            qs = iqft(qs)
+            return qs, flags
+
+        @qkernel
+        def top() -> qmc.Vector[qmc.Bit]:
+            q_aux = qmc.qubit_array(2, "q_aux")
+            aux_bits = qmc.measure(q_aux)  # runtime Vector[Bit]
+            qs = qmc.qubit_array(n, "qs")
+            qs, _ = helper(qs, aux_bits)
+            return qmc.measure(qs)
+
+        block = qiskit_transpiler.to_block(top)
+        block = qiskit_transpiler.substitute(block)
+        block = qiskit_transpiler.resolve_parameter_shapes(block)
+        block = qiskit_transpiler.inline(block)
+        iqft_ops = [
+            op
+            for op in block.operations
+            if isinstance(op, CompositeGateOperation)
+            and op.gate_type == CompositeGateType.IQFT
+        ]
+        assert len(iqft_ops) == 1, (
+            f"expected IQFT specialization to fire despite runtime "
+            f"Vector[Bit] co-argument, got {len(iqft_ops)} IQFT op(s)"
+        )
+        assert iqft_ops[0].num_target_qubits == n
+
     def test_matrix_qubit_sub_kernel_raises_not_implemented(self):
         """Call-time spec on ``Matrix[Qubit]`` callee args must error loudly.
 

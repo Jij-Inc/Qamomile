@@ -1006,21 +1006,22 @@ class QKernel(Generic[P, R]):
                 classical arguments to their compile-time-known Python
                 values, and ``qubit_sizes`` maps ``Vector[Qubit]``
                 argument names to their resolved first-axis sizes.
-                Scalar ``Qubit``, scalar ``Observable``, unbound
+                Arguments that cannot enter any of the three buckets
+                (scalar ``Qubit``, scalar ``Observable``, unbound
                 ``Vector[Observable]``, unbound ``Dict`` parameters,
-                and ``Tuple`` parameters are deliberately left out of
-                all three buckets so that :meth:`_create_traced_block`
-                falls back to its standard ``create_dummy_input``
-                handling for those argument positions while still
-                specializing the rest of the call. Returns ``None``
-                only when no specialization is beneficial (the call
-                adds no new compile-time information over the cached
-                symbolic block) or when an argument has a
-                non-parameterizable classical type
-                (``Bit`` / ``bool`` / ``Vector[Bit]`` / ``Vector[bool]``)
-                with no compile-time constant — that combination has
-                nowhere to live in the specialization triple. In the
-                ``None`` case ``__call__`` falls back to ``self.block``.
+                ``Tuple`` parameters, and non-parameterizable
+                classical types like ``Bit`` / ``bool`` /
+                ``Vector[Bit]`` / ``Vector[bool]`` without a
+                compile-time constant) are deliberately left out so
+                that :meth:`_create_traced_block` falls back to its
+                standard ``create_dummy_input`` path for those argument
+                positions; specialization of the rest of the call
+                proceeds normally and inline-time substitution
+                supplies the caller's actual Value. Returns ``None``
+                only when no specialization is beneficial — i.e. the
+                call adds no new compile-time information over the
+                cached symbolic block. In the ``None`` case
+                ``__call__`` falls back to ``self.block``.
 
         Raises:
             NotImplementedError: If ``arguments`` contains a quantum
@@ -1120,37 +1121,37 @@ class QKernel(Generic[P, R]):
                 continue
 
             # Classical scalar. Bind the compile-time constant when
-            # available. If not, the only way to keep the value live
-            # through the specialized trace is as a runtime parameter
-            # via the ``parameters`` list — but ``_validate_parameters``
-            # only admits ``UInt`` / ``Float`` / ``int`` / ``float`` and
-            # their arrays. ``Bit`` / ``bool`` without a constant has
-            # nowhere to go (``bindings`` needs a value, ``parameters``
-            # would be rejected downstream), so we abort and let the
-            # cached symbolic ``self.block`` handle the call.
+            # available. If not, list the name in ``parameters`` only
+            # when the type is parameterizable
+            # (``_validate_parameters`` admits ``UInt`` / ``Float`` /
+            # ``int`` / ``float`` and their arrays). For
+            # non-parameterizable types like ``Bit`` / ``bool``, neither
+            # bucket fits — but we ``continue`` past the argument
+            # rather than aborting the whole specialization:
+            # ``_create_traced_block``'s fall-through
+            # ``create_dummy_input`` path creates a symbolic dummy
+            # (matching the cached ``self.block``) and inline-time
+            # substitution supplies the caller's actual Value. The
+            # rest of the call still gets specialized.
             if param_type in (int, UInt, float, Float, bool, Bit):
                 const_value = handle.value.get_const()
                 if const_value is not None:
                     bindings[name] = const_value
                 elif self._is_parameterizable_type(param_type):
                     parameters.append(name)
-                else:
-                    return None
                 continue
 
-            # Classical array. Same dead-end logic as scalars: bind the
-            # const array when available, otherwise list as a runtime
-            # parameter when parameterizable. ``Vector[Bit]`` /
-            # ``Vector[bool]`` without a const has neither option and
-            # aborts.
+            # Classical array. Same approach as scalars: bind the const
+            # array when available, list as a runtime parameter when
+            # parameterizable, or ``continue`` and let
+            # ``_create_traced_block`` fall through for
+            # ``Vector[Bit]`` / ``Vector[bool]``.
             if is_array_type(param_type):
                 const_array = handle.value.get_const_array()
                 if const_array is not None:
                     bindings[name] = const_array
                 elif self._is_parameterizable_type(param_type):
                     parameters.append(name)
-                else:
-                    return None
                 continue
 
             # Dict. ``handle.value.parameter_name()`` is set both for
