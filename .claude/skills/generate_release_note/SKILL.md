@@ -76,6 +76,16 @@ Rules that apply throughout the body.
 - **Avoid "deliberately" / "意図的に"** when stating that a feature is unsupported. Say "not supported" / "サポートしていません" without the modifier. There is almost no case where the meaning changes if you omit "deliberately".
 - **No references to non-public internal discussions or design meetings**: do not write "(2026-05-16 IR-design discussion)" or "(internal RFC #42)" or any reference to artefacts outside the public repo. Release notes are written **strictly from the diff between the previous version tag and the latest main plus public PRs / issues / code**. When writing the `**Why**:` paragraph, ground the motivation in facts visible in the code (e.g., "this kernel needs this IR node").
 - **Do not literally translate English metaphors like "sibling", "twin", or "umbrella"**. Describe the relationship in plain technical terms ("parent class", "the same kind of", "bundled", ...).
+- **Avoid the "X participates in the Y system" / "Xは Y システムに参加する" pattern**. It's vague jargon. Either state the concrete consequence (e.g., "raises `QubitConsumedError` when ...") or drop the sentence entirely.
+- **Avoid "previously" / "これまで" framing when the feature is brand-new**. If the slicing didn't exist in v0.12.2, you can't say "previously these errors slipped silently" — there was no "previously". Just describe what the new pass / check does.
+- **Avoid jargon coinages**. Examples: "shot job" / "ショットジョブ" → "at execution time" / "実行時に"; "classical (non-quantum) kernel argument" / "古典(非量子)カーネル引数" → "classical kernel argument" / "古典的な値の引数". Redundant parenthetical clarifications like "(non-quantum)" / "(非量子)" usually signal the writer over-explaining a term that's already clear in context.
+- **Cut implementation-detail prose the user can't act on**. Sentences about which internal helper resolves what, which subsystem participates in which protocol, etc., belong in code comments or design docs — not in a release note. If removing the sentence does not change what the user knows about the public API surface, remove it.
+
+#### `## Breaking Changes`
+
+Restrict this section to changes the user can detect from **their own code**: removed / moved public imports, signature changes, behaviour-compatibility breaks, new exception types raised on existing code paths.
+
+**Documentation renames / renumbering are NOT breaking changes** — users don't import URLs. A tutorial file rename only affects external bookmarks (a docs / SEO concern). Cover it in `## Documentation`, not here. The same applies to renamed sections in articles, changed sidebar slugs, etc.
 
 #### `## New Features`
 
@@ -84,7 +94,7 @@ Use `### <feature name>` for each feature heading and include:
 1. **A one- or two-paragraph description** — what the user can now do and how it works, from the user's point of view. Cluster PR links at the end (always render as `[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)` — plain `(#NNN)` is forbidden, see Phase 6).
 2. **A code example** — only snippets verified by Phase 5.
 3. **Expected output** — if the snippet calls `print(...)`, include a ` ```text` block whose content matches the actual output **exactly**.
-4. **A tutorial pointer** — if there is a corresponding tutorial, end with "See [Tutorial NN](...)".
+4. **A tutorial pointer** — if there is a corresponding tutorial, end with `See [Tutorial NN](...)`. **Do not append a parenthetical enumerating subtopics already covered by the linked tutorial** (e.g. `See [Tutorial 03 — Vector Slicing](...) for the walk-through (broadcast shorthand, nested views, helper-kernel passing, ...)` — drop the parenthetical). The reader who follows the link will see the table of contents anyway.
 
 #### `## Internal Changes`
 
@@ -208,6 +218,8 @@ The `v<X.Y.Z>` tag will 404 momentarily before release; understand that it resol
    ```markdown
    - [v<X.Y.Z>](v<X_Y_Z>) — <one-line summary: roughly three key features; backticks OK>
    ```
+
+   **Scope of the index.md summary**: list **only user-facing frontend changes** (new public APIs, breaking changes the user has to act on). Skip internal IR / compiler primitives, new tutorials, and other documentation additions — those are detailed in the body of the release note, not in the per-version one-liner. The reader scanning the index wants to know "what does this release add to my code", not "what work happened internally". A typical v0.12.3-style entry mentions roughly three user-touchable items and stops.
 
 ### Phase 8: Japanese version
 
