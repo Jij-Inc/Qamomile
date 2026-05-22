@@ -73,6 +73,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 SCRIPT_TAG_ID = "qamomile-colab-launch-script"
@@ -605,15 +606,18 @@ _TAG_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9-]*(?P<attrs>[^>]*)>", re.DOTALL)
 # parsed as character data, NOT as nested tags. A literal ``<a
 # href="...">`` substring sitting inside any of these is just text
 # from the rewriter's perspective and must NOT be treated as a tag.
-# This regex captures the entire ``<element>…</element>`` span so
-# the tag walker can skip everything inside it (including the
-# opening ``<element>`` tag itself, which has no cite-id / cite-href
-# attributes worth rewriting anyway).
+# The ``body`` named group captures only the CONTENT between the
+# opening and closing tags so the skip range covers exactly the
+# character-data portion — the opening tag itself stays visible to
+# the tag walker, which matters when it carries an
+# ``id="cite-..."`` attribute the collision scan needs to see (e.g.
+# ``<script id="cite-https-doi-org-a">…</script>`` colliding with
+# a sanitized bibliography id of the same form).
 _RAW_TEXT_RE = re.compile(
-    r"""<(?P<tag>script|style|textarea|title)\b[^>]*>
-        .*?
-        </(?P=tag)\s*>""",
-    re.IGNORECASE | re.DOTALL | re.VERBOSE,
+    r"<(?P<tag>script|style|textarea|title)\b[^>]*>"
+    r"(?P<body>.*?)"
+    r"</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
 )
 # HTML comments: ``<!-- ... -->``. Same reasoning — the comment body
 # is character data; substrings shaped like tags inside the comment
@@ -903,8 +907,15 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     # matches their closing tokens directly).
     skip_ranges: list[tuple[int, int]] = []
     for raw_text_match in _RAW_TEXT_RE.finditer(content):
-        skip_ranges.append((raw_text_match.start(), raw_text_match.end()))
+        # Skip only the CONTENT (``body`` group), not the opening
+        # tag. The opening tag stays visible to the walker so its
+        # ``id="cite-..."`` attribute, if any, can participate in
+        # the out-of-scope collision check.
+        skip_ranges.append((raw_text_match.start("body"), raw_text_match.end("body")))
     for comment_match in _HTML_COMMENT_RE.finditer(content):
+        # Comments have no opening / closing "tag" the walker would
+        # match (``<!--`` doesn't satisfy ``_TAG_RE``'s ``[a-zA-Z]``
+        # head), so it's safe to cover the entire comment span.
         skip_ranges.append((comment_match.start(), comment_match.end()))
     skip_ranges.sort()
 
@@ -921,15 +932,20 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     # falling inside a raw-text / comment span, and yields
     # ``(tag_match, parsed_attrs)`` pairs so callers don't repeat
     # the parse work for the collision scan and the rewrite scan.
+    # Yields lazily so a caller that ``break``s early (the
+    # bibliography section walk does, once ``section_end`` is past)
+    # actually short-circuits the regex scan and the per-tag
+    # ``_parse_attrs`` work — eager list construction would parse
+    # every tag in the document on every section-iter call,
+    # turning N bibliography sections into O(N · tags) work.
     def _iter_tags_with_attrs(
         haystack: str,
         offset: int,
-    ) -> list[tuple[re.Match[str], dict[str, tuple[str, int, int]]]]:
-        return [
-            (tag_match, _parse_attrs(tag_match.group("attrs")))
-            for tag_match in _TAG_RE.finditer(haystack, offset)
-            if not _is_in_skip_range(tag_match.start())
-        ]
+    ) -> Iterator[tuple[re.Match[str], dict[str, tuple[str, int, int]]]]:
+        for tag_match in _TAG_RE.finditer(haystack, offset):
+            if _is_in_skip_range(tag_match.start()):
+                continue
+            yield tag_match, _parse_attrs(tag_match.group("attrs"))
 
     # Walk every ``<section>``, keep only those whose ``class``
     # attribute (looked up via a proper attribute-by-attribute parse,
@@ -942,8 +958,13 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     decoded_to_sanitized: dict[str, str] = {}
     sanitized_origins: dict[str, list[str]] = {}
     sanitized_occurrences: dict[str, list[str]] = {}  # sanitized -> raw[]
-    bibliography_spans: list[tuple[int, int]] = []
-    in_scope_id_positions: set[int] = set()  # absolute offsets, see collision pass
+    # Absolute offsets (into ``content``) of every cite-id attribute
+    # value that lives inside a bibliography section. The out-of-
+    # scope collision pass and the rewrite pass both key off this
+    # set rather than the section spans, because cite ids may sit
+    # at any tag inside the section and the only thing that matters
+    # for those passes is "is THIS id attribute inside scope".
+    in_scope_id_positions: set[int] = set()
     for section_match in _SECTION_RE.finditer(content):
         # A literal ``<section class="myst-bibliography">…</section>``
         # substring sitting inside a ``<script>`` body or HTML comment
@@ -958,7 +979,6 @@ def sanitize_cite_ids(html_path: Path) -> bool:
         if not _has_class_token(class_value, "myst-bibliography"):
             continue
         section_start, section_end = section_match.start(), section_match.end()
-        bibliography_spans.append((section_start, section_end))
         # Walk every tag inside this bibliography section and pull the
         # ``id`` attribute when its value starts with ``cite-``.
         # ``_parse_attrs`` is what makes the scope correct: a
@@ -1018,8 +1038,10 @@ def sanitize_cite_ids(html_path: Path) -> bool:
     # the same ``id``. Walk every tag in the document via
     # ``_TAG_RE`` + ``_parse_attrs`` (a substring of another
     # attribute's value cannot reach this loop) and check the ones
-    # whose id starts with ``cite-`` and sit outside our captured
-    # bibliography spans.
+    # whose id starts with ``cite-`` and whose absolute value-start
+    # is NOT in ``in_scope_id_positions`` — i.e. ids we already
+    # captured as part of a bibliography section above are skipped,
+    # everything else gets the collision check.
     sanitized_values = set(decoded_to_sanitized.values())
     out_of_scope_collisions: dict[str, str] = {}
     for tag_match, tag_attrs in _iter_tags_with_attrs(content, 0):

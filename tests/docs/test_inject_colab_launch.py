@@ -442,6 +442,31 @@ def test_sanitize_does_not_touch_href_inside_script_or_text(tmp_path, mod):
     assert 'some text href="#cite-https://doi.org/a" more text' in out
 
 
+def test_sanitize_catches_collision_on_raw_text_element_opening_tag(tmp_path, mod):
+    """``<script id="cite-…">`` collision with a bibliography id is still detected.
+
+    The raw-text skip range only covers the CONTENT of a
+    ``<script>`` / ``<style>`` / ``<textarea>`` / ``<title>`` block;
+    the opening tag itself stays visible to the walker so an
+    ``id="cite-…"`` attribute on it can participate in the
+    out-of-scope collision check. Without this, an existing
+    ``<script id="cite-https-doi-org-a">`` colocated with a
+    bibliography ``<li id="cite-https://doi.org/a">`` would
+    silently produce two elements with the same final id.
+    """
+    html = """
+<html><body>
+<section class="myst-bibliography">
+  <li id="cite-https://doi.org/a">x</li>
+</section>
+<script id="cite-https-doi-org-a">/* same final id after sanitize */</script>
+</body></html>
+"""
+    p = _write_html(tmp_path, "page.html", html)
+    with pytest.raises(RuntimeError, match="out-of-scope id"):
+        mod.sanitize_cite_ids(p)
+
+
 def test_sanitize_skips_tag_shaped_strings_inside_raw_text_elements(tmp_path, mod):
     """``<a href="#cite-…">`` substrings inside raw-text elements stay.
 
@@ -711,9 +736,12 @@ def test_sanitize_tolerates_single_quoted_id_attribute(tmp_path, mod):
     """``<li id='cite-…'>`` (single-quoted) is also handled.
 
     HTML5 lets attribute values be wrapped in either ``"`` or ``'``.
-    The regex captures the quote char and reuses it as the closing
-    quote so single-quoted citations round-trip with single quotes
-    instead of getting silently rewritten with double quotes.
+    The tag walker parses both quote styles via the
+    ``"..."`` / ``'...'`` alternatives in ``_ATTR_RE`` and rewrites
+    only the captured value span — the surrounding quote characters
+    are untouched, so single-quoted citations round-trip with their
+    original single quotes instead of being silently re-emitted
+    with double quotes.
     """
     html = (
         "<html><body>"
