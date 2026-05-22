@@ -1,17 +1,21 @@
 """End-to-end coverage of ``RuntimeOpKind`` on the CUDA-Q backend.
 
 Mirrors the Qiskit-side tests in ``tests/transpiler/test_runtime_op_kinds.py``
-for the AND / OR / NOT runtime classical expressions that the frontend
-constructs under measurement taint. Per H-bis, every algorithm /
-backend-relevant change must be exercised end-to-end on each supported
-backend; this file pins that contract for CUDA-Q's
-``_emit_runtime_classical_expr`` lowering.
+for the runtime classical expressions that the frontend constructs under
+measurement taint. Per H-bis, every algorithm / backend-relevant change must
+be exercised end-to-end on each supported backend; this file pins that
+contract for CUDA-Q's ``_emit_runtime_classical_expr`` lowering.
 
 The Qamomile CUDA-Q emit pass lowers each ``RuntimeClassicalExpr`` to a
 Python source-text expression (e.g. ``"(__b0 and __b1)"``) inside the
-generated ``@cudaq.kernel`` body. The kernel then runs via
-``cudaq.run`` (auto-selected by ``CudaqEmitPass`` whenever the IR
-contains runtime-conditional control flow).
+generated ``@cudaq.kernel`` body. The kernel then runs via ``cudaq.run``
+(auto-selected by ``CudaqEmitPass`` whenever the IR contains runtime-conditional
+control flow).
+
+Note: Only logical operators (AND, OR, NOT) appear in the IR for Bit-based
+control flow. Comparison operators (EQ, NEQ, LT, LE, GT, GE) are applicable
+to UInt/Float values and are not yet exercised in this file since the articles
+only use Bit comparisons through logical operations.
 """
 
 from __future__ import annotations

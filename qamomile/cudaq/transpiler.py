@@ -508,6 +508,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 raise EmitError(
                     f"Cannot resolve operands for RuntimeClassicalExpr({kind!r})"
                 )
+            # CUDA-Q supports logical and comparison operators.
+            # Arithmetic operators (ADD, SUB, MUL, DIV, FLOORDIV, POW) are not yet supported.
             op_text = {
                 RuntimeOpKind.AND: "and",
                 RuntimeOpKind.OR: "or",
@@ -520,7 +522,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             }.get(kind)
             if op_text is None:
                 raise EmitError(
-                    f"Unsupported RuntimeClassicalExpr kind for CUDA-Q backend: {kind}"
+                    f"Unsupported RuntimeClassicalExpr kind for CUDA-Q backend: {kind}. "
+                    f"Only logical (AND, OR) and comparison (EQ, NEQ, LT, LE, GT, GE) operators are supported."
                 )
             result_text = f"({lhs} {op_text} {rhs})"
 
