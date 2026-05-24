@@ -124,7 +124,7 @@
 import math
 
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.job import SampleResult
+from qamomile.circuit import SampleResult
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
