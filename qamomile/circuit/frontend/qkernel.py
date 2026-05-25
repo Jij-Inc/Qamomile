@@ -1342,7 +1342,10 @@ class QKernel(Generic[P, R]):
             Block: The specialized hierarchical block, ready to be the
                 target of :meth:`Block.call` from the caller's tracer.
         """
-        self._check_rebind_violations()
+        # Rebind-violation analysis runs eagerly in ``__init__`` (see
+        # ``_raise_rebind_violation``), so a kernel that reaches this
+        # point is already free of statically-detectable violations.
+        # No per-call check is needed here.
         self._validate_parameters(parameters)
         block = self._create_traced_block(
             parameters,
