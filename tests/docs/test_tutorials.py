@@ -55,7 +55,7 @@ TUTORIAL_PATTERNS = [
 OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
     "qsci": "quri_parts",
-    "quri_parts_support": "quri_parts",
+    "quri_parts_support": "quri_parts.qulacs",
     "hybrid_qnn": "torch",
 }
 
