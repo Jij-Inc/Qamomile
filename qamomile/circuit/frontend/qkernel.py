@@ -250,35 +250,16 @@ class QKernel(Generic[P, R]):
             self.raw_func, _get_quantum_param_names(input_types)
         )
         if violations:
-            self._raise_rebind_violation(violations[0])
-
-    def _raise_rebind_violation(self, v: RebindViolation) -> None:
-        """Raise ``QubitRebindError`` for the first detected violation.
-
-        The message is composed from ``v.source_kind``-specific
-        ``(pattern, reason, fix)`` triples so that each violation kind
-        explains itself in domain-appropriate language rather than
-        forcing a generic "different quantum variable" sentence onto a
-        fresh allocation or a chained assignment.
-
-        Args:
-            v (RebindViolation): The violation record produced by
-                ``collect_quantum_rebind_violations``. Its ``lineno`` is
-                relative to the start of the kernel function definition.
-
-        Raises:
-            QubitRebindError: Always — this helper exists solely to format
-                the message consistently.
-        """
-        pattern, reason, fix = self._format_rebind_violation(v)
-        raise QubitRebindError(
-            f"Kernel '{self.name}': forbidden quantum variable reassignment "
-            f"at line {v.lineno} (relative to the function definition): "
-            f"'{pattern}' overwrites quantum variable '{v.target_name}' "
-            f"with {reason}.\n\nTo fix:\n{fix}",
-            handle_name=v.target_name,
-            operation_name="assignment_rebind",
-        )
+            v = violations[0]
+            pattern, reason, fix = self._format_rebind_violation(v)
+            raise QubitRebindError(
+                f"Kernel '{self.name}': forbidden quantum variable reassignment "
+                f"at line {v.lineno} (relative to the function definition): "
+                f"'{pattern}' overwrites quantum variable '{v.target_name}' "
+                f"with {reason}.\n\nTo fix:\n{fix}",
+                handle_name=v.target_name,
+                operation_name="assignment_rebind",
+            )
 
     @staticmethod
     def _format_rebind_violation(v: RebindViolation) -> tuple[str, str, str]:
@@ -1342,10 +1323,12 @@ class QKernel(Generic[P, R]):
             Block: The specialized hierarchical block, ready to be the
                 target of :meth:`Block.call` from the caller's tracer.
         """
-        # Rebind-violation analysis runs eagerly in ``__init__`` (see
-        # ``_raise_rebind_violation``), so a kernel that reaches this
-        # point is already free of statically-detectable violations.
-        # No per-call check is needed here.
+        # Rebind-violation analysis runs eagerly in ``__init__`` (the
+        # ``collect_quantum_rebind_violations`` call there raises
+        # ``QubitRebindError`` immediately on any violation), so a
+        # kernel that reaches this point is already free of
+        # statically-detectable violations. No per-call check is
+        # needed here.
         self._validate_parameters(parameters)
         block = self._create_traced_block(
             parameters,
