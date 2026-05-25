@@ -2136,7 +2136,11 @@ class TestControlledBuiltinCrossSDKExpval:
 
 @qmc.qkernel
 def _shift_first_three(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Cyclic shift ``(q0, q1, q2) -> (q2, q0, q1)`` via two SWAPs.
+    """Cyclic shift ``(q0, q1, q2) -> (q1, q2, q0)`` via two SWAPs.
+
+    Tracing the two swaps starting from ``(a, b, c)``: ``swap(q0, q1)``
+    gives ``(b, a, c)``, then ``swap(q1, q2)`` gives ``(b, c, a)`` — i.e.,
+    the new ``q_i`` holds the original ``q_{(i+1) mod 3}``.
 
     Used as the inner kernel for the ``Vector[Qubit]``-input regression
     test.  The deterministic permutation makes it easy to verify the

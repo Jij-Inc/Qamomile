@@ -255,12 +255,11 @@ def _resolve_gate_targets(
             unrelated controlled callers keep working).
     """
     resolved: list[int] = []
-    for operand in op.operands:
-        if hasattr(operand, "type") and operand.type.is_quantum():
-            if operand.uuid in qubit_map:
-                resolved.append(qubit_map[operand.uuid])
-            elif fallback_targets:
-                resolved.append(fallback_targets[0])
+    for operand in op.qubit_operands:
+        if operand.uuid in qubit_map:
+            resolved.append(qubit_map[operand.uuid])
+        elif fallback_targets:
+            resolved.append(fallback_targets[0])
     return resolved if resolved else fallback_targets
 
 

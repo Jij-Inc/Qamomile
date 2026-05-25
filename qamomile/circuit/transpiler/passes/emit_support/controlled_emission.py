@@ -733,9 +733,13 @@ def _populate_input_qubit_map(
             consecutive physical index starting at 0.
 
     Raises:
-        EmitError: Three failure modes are surfaced loudly rather than
+        EmitError: Four failure modes are surfaced loudly rather than
             silently mis-mapping qubits:
 
+            * A resolved ``Vector[Qubit]`` length (from a constant shape
+              or a binding) is negative. ``range(length)`` would be
+              empty and ``qubit_idx += length`` would step the cursor
+              backwards, producing overlapping physical assignments.
             * Multiple unresolvable ``Vector[Qubit]`` inputs (only one
               symbolic length can be inferred from the remaining
               ``num_qubits`` budget).
@@ -762,6 +766,13 @@ def _populate_input_qubit_map(
         length = _resolve_vector_input_length(emit_pass, iv, bindings)
         if length is None:
             unresolved.append(iv)
+        elif length < 0:
+            raise EmitError(
+                f"Vector[Qubit] input {iv.name!r} resolved to a negative "
+                f"length ({length}); shapes must be non-negative. Check "
+                f"the binding for {iv.shape[0].name!r}.",
+                operation="ControlledUOperation",
+            )
         else:
             resolved_lengths[iv.uuid] = length
 
