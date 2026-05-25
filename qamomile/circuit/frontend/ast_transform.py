@@ -1453,12 +1453,20 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
       - ``alias = q``             (new alias — target was not quantum before)
       - ``a, b = f(a, b)``        / ``a, b = (g(b), h(a))`` (1-to-1 quantum permutation)
 
-    The analyzer is a single-pass ``ast.NodeVisitor``. It does not model
-    Python control flow: branches and loops are visited body-first and
-    the resulting ``quantum_vars`` state reflects the last seen
-    assignment. This is sufficient for the rebind-detection use case
-    because every violating assignment is flagged at the statement
-    where it appears, regardless of branching.
+    The analyzer is a single-pass ``ast.NodeVisitor`` and does not
+    model Python control flow precisely. To keep compile-time-if
+    dead-branch rebinds — which the IR's ``CompileTimeIfLoweringPass``
+    will later resolve by selecting one branch and discarding the
+    other — from being rejected at decoration time, ``visit_If`` /
+    ``visit_For`` / ``visit_While`` route every branch through
+    :meth:`_visit_branch_scope`, which snapshots ``quantum_vars``
+    before and restores it after each ``body`` / ``orelse``, AND
+    truncates any violations recorded inside the branch back to the
+    pre-branch length. Top-level (non-branch-internal) rebinds are
+    flagged as usual; branch-internal rebinds are deliberately not
+    reported at decoration time. The companion gap on the IR side
+    (``AffineValidationPass`` does not detect silent-discard
+    patterns) is tracked in ``LIMITATIONS.md``.
     """
 
     def __init__(self, quantum_param_names: set[str]) -> None:
