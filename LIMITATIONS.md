@@ -1,6 +1,6 @@
 # Known Limitations
 
-This file collects known limitations that survive (or were introduced by) the call-time specialization fix for issue #392. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path.
+This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover both the call-time specialization fix for issue #392 and the eager qkernel rebind-detection change.
 
 ## Re-trace cost is uncached
 
@@ -41,3 +41,37 @@ The stdlib helpers `qft` / `iqft` silently return the input register unchanged w
 **Why we did not raise instead**: the no-op fallback is also reached during `QKernel.block` lazy build, which traces the kernel body with all parameters symbolic before any binding is applied. Raising at that point would break every kernel that uses shape-dependent stdlib on a parameter-driven register, including the ones the nested-call path now handles correctly. The standalone build path is a debug / inspection surface (`transpile()` itself rejects quantum-I/O entrypoints), so users who hit it see the documented no-op rather than a crash.
 
 **Future fix**: deferred-shape composite IR — change `qmc.qft` / `qmc.iqft` to always emit a `CompositeGateOperation` even when the input shape is symbolic, with `num_target_qubits` typed as `int | Value`. Lower it at `resolve_parameter_shapes` once bindings are applied. `qpe` needs the parallel change in `_emit_iqft_and_cast_to_qfixed`: drop the `_get_concrete_size` fallback to `init_value`, emit the inner `CompositeGateOperation(IQFT)` and the `Cast`-to-`QFixed` with a symbolic size carried in metadata, and lower both at the same `resolve_parameter_shapes` stage. This is the codex-recommended medium-term refactor and obviates both the standalone no-op above and the recursive-layer limitation. The design surface is non-trivial: `CompositeGateOperation` itself, `CastOperation` (or `QFixedMetadata`), serialization, canonicalization, resource estimation, backend emitters, and the decomposition strategies under `qamomile/circuit/stdlib/` all need to handle the symbolic-shape case.
+
+## Rebind analysis silently allows branch-internal silent discard
+
+The qkernel rebind analyzer (`QuantumRebindAnalyzer` in `qamomile/circuit/frontend/ast_transform.py`) walks `if` / `for` / `while` bodies inside a snapshot-restore scope (`_visit_branch_scope`) that not only restores `quantum_vars` but also **truncates any violations recorded inside the branch back to the pre-branch length**. This is what lets compile-time-`if` dead-branch rebinds like `if flag: ... ; else: alt = qubit_array(...); q = alt` decorate successfully — the compile-time-if lowering pass selects one branch and discards the other, so flagging the dead-branch rebind at decoration time would reject legitimate code.
+
+**When it bites**: a *runtime* conditional that silently discards a parameter via a fresh allocation:
+
+```python
+@qm.qkernel
+def k(q: qm.Qubit, cond: qm.Bit) -> qm.Bit:
+    if cond:
+        q = qm.qubit("fresh")   # discards q only when cond is true
+    return qm.measure(q)
+```
+
+The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation because the assignment is inside an `if` body. The IR-level safety net does NOT close the gap either: `AffineValidationPass` in `qamomile/circuit/transpiler/passes/affine_validate.py` only enforces "consumed at most once" and explicitly does **not** detect "never consumed" / silent-discard patterns, despite the docstring's "Quantum values are not silently discarded" line.
+
+**Why this trade-off was chosen**: the AST analyzer is flow-insensitive and cannot tell compile-time-if from runtime-if. Distinguishing them would require either pulling the constant-folding logic into the frontend or moving the check to the IR layer after `CompileTimeIfLoweringPass`. Both are larger refactors than the eager-raise PR's scope. Top-level (non-branch-internal) bypasses continue to raise at decoration time, and silent-discard inside branches is at least no worse than it was before the eager-raise change.
+
+**Future fix**: either (a) a dedicated IR-level silent-discard pass that runs after `inline` and `partial_eval` (where compile-time `if`s have been folded away and only genuine runtime branches remain), or (b) a flow-sensitive frontend extension that propagates a per-branch consume set and reports inputs that no branch consumed. (a) is more in line with Qamomile's "delegate concretization to IR / emit" principle and would also retroactively cover any other silent-discard pattern the AST analyzer cannot see.
+
+## Rebind analyzer is blind to alias-imported `measure` / `expval` / quantum constructors
+
+`QuantumRebindAnalyzer` recognizes `measure` / `expval` and `qubit` / `qubit_array` by **syntactic name only** — `_is_classical_returning_call` and `_is_quantum_constructor_call` check `call.func.id` (for bare names) or `call.func.attr` (for attribute access) against a frozen-set of known names. They do not resolve `func.__globals__` to identify the actual callable, so an import alias is not recognized as the same primitive.
+
+**When it bites**: `from qamomile.circuit import measure as my_measure` (and the analogous renaming of constructors) creates three different behaviors compared to using `qm.measure(...)` / bare `measure(...)`:
+
+- **`q = factory("s")`** (alias constructor used directly, single-line assignment) — caught as `UNKNOWN_CALL` because the call has no quantum arguments and the target was already quantum. The error wording is generic ("a value that does not thread the original quantum variable through the call") rather than the more specific `FRESH_ALLOCATION` wording, but the violation IS reported.
+- **`tmp = factory("s"); q = tmp`** (alias constructor result threaded through an intermediate name) — slips through. Because the constructor isn't recognized, `tmp` is never registered as a fresh quantum origin in `quantum_vars`, so the subsequent `q = tmp` falls through Case 1 of `_check_single_assign` (`tmp not in self.quantum_vars`) and no violation is recorded.
+- **`my_measure(q)` followed by `q = qm.qubit("fresh")`** — false positive. Because the alias measure isn't recognized as classical-returning, `q` stays in `quantum_vars` and the subsequent fresh allocation trips a `FRESH_ALLOCATION` violation even though `q` was genuinely consumed.
+
+**Workaround**: refer to the primitives by their qualified path (`qm.measure(...)` / `qmc.qubit_array(...)`) or import the unaliased name. The four syntactic forms accepted by `_is_classical_returning_call` and `_is_quantum_constructor_call` (`Name` and `Attribute` for each of the two names) cover both bare and `<module>.<name>` styles, so unless the importer deliberately renames the symbol the analyzer sees it correctly.
+
+**Future fix**: replace the syntactic-name check with an identity-based one. Each `QKernel` has access to the user function's `__globals__` (and surrounding closure cells), so the analyzer can resolve `call.func.id` to a Python object at decoration time and compare against the canonical `qamomile.circuit.measure` / `qamomile.circuit.expval` / `qamomile.circuit.qubit` / `qamomile.circuit.qubit_array` references. Closure-bound aliases would need a separate pass over the function's `__closure__`. Attribute-form aliases (`obj.measure(...)` where `obj` is not `qm` / `qmc`) remain ambiguous and would either require local type information or a structurally-conservative fall-back.

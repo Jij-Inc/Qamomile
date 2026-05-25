@@ -17,6 +17,8 @@ from typing import (
 import numpy as np
 
 from qamomile.circuit.frontend.ast_transform import (
+    RebindSourceKind,
+    RebindViolation,
     collect_quantum_rebind_violations,
     transform_control_flow,
 )
@@ -41,7 +43,10 @@ from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
-from qamomile.circuit.transpiler.errors import FrontendTransformError
+from qamomile.circuit.transpiler.errors import (
+    FrontendTransformError,
+    QubitRebindError,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
@@ -232,46 +237,143 @@ class QKernel(Generic[P, R]):
         # once ``func_to_block`` returns.  See _finalize_pending_self_calls.
         self._pending_self_calls: list[CallBlockOperation] = []
 
-        # AST-level quantum rebind analysis (deferred raise until build/block)
-        quantum_params = _get_quantum_param_names(input_types)
-        if quantum_params:
-            self._rebind_violations = collect_quantum_rebind_violations(
-                self.raw_func, quantum_params
-            )
-        else:
-            self._rebind_violations = []
-
-    def _check_rebind_violations(self) -> None:
-        if not self._rebind_violations:
-            return
-        from qamomile.circuit.transpiler.errors import QubitRebindError
-
-        v = self._rebind_violations[0]
-        if v.func_name:
-            pattern = f"{v.target_name} = {v.func_name}({v.source_name}, ...)"
-            fix = (
-                f"  - Use self-update: {v.target_name} = {v.func_name}({v.target_name}, ...)\n"
-                f"  - Use a new variable: new_var = {v.func_name}({v.source_name}, ...)"
-            )
-        else:
-            pattern = f"{v.target_name} = {v.source_name}"
-            fix = (
-                f"  - Use a new variable: new_var = {v.source_name}\n"
-                f"  - Remove the assignment if '{v.target_name}' is no longer needed"
-            )
-        raise QubitRebindError(
-            f"Forbidden quantum variable reassignment at line {v.lineno}: "
-            f"'{pattern}' overwrites quantum variable '{v.target_name}' "
-            f"with a value derived from different quantum variable "
-            f"'{v.source_name}'.\n\nTo fix, either:\n{fix}",
-            handle_name=v.target_name,
-            operation_name="assignment_rebind",
+        # AST-level quantum rebind analysis: a violation is a structural error
+        # in the kernel definition itself, so raise eagerly at decoration time
+        # rather than deferring to .block / build().
+        #
+        # The analyzer is run unconditionally rather than only when the kernel
+        # has quantum-typed parameters: its constructor-tracking logic (LHS of
+        # ``q = qm.qubit(...)`` / ``qm.qubit_array(...)``) seeds new origins
+        # from inside the body, so kernels that derive all of their quantum
+        # state from internal allocations are still subject to rebind checks.
+        violations = collect_quantum_rebind_violations(
+            self.raw_func, _get_quantum_param_names(input_types)
         )
+        if violations:
+            v = violations[0]
+            pattern, reason, fix = self._format_rebind_violation(v)
+            raise QubitRebindError(
+                f"Kernel '{self.name}': forbidden quantum variable reassignment "
+                f"at body line {v.lineno} (counting the first statement of "
+                f"the function body as line 1): "
+                f"'{pattern}' overwrites quantum variable '{v.target_name}' "
+                f"with {reason}.\n\nTo fix:\n{fix}",
+                handle_name=v.target_name,
+                operation_name="assignment_rebind",
+            )
+
+    @staticmethod
+    def _format_rebind_violation(v: RebindViolation) -> tuple[str, str, str]:
+        """Format a violation into ``(pattern, reason, fix)`` strings.
+
+        Separating formatting from the raise lets unit tests assert the
+        per-kind wording without going through ``QubitRebindError``.
+        Dispatch on ``v.source_kind`` is done via ``match`` against the
+        :class:`RebindSourceKind` enum members; the trailing ``case _:``
+        is an unreachable internal-invariant guard (the analyzer can
+        only produce one of the defined members).
+
+        Args:
+            v (RebindViolation): The violation record.
+
+        Returns:
+            tuple[str, str, str]: ``(pattern, reason, fix)`` where
+                ``pattern`` is a code-shaped illustration of the
+                offending assignment, ``reason`` explains why it is
+                rejected, and ``fix`` is a bullet list of remediation
+                suggestions (newline-separated, two-space-indented).
+        """
+        target = v.target_name
+        func = v.func_name
+        src = v.source_name
+        # Render the actual RHS source if the analyzer captured one
+        # (e.g. ``qs[i]`` for a Subscript source); otherwise fall back
+        # to the underlying source_name (``qs``).
+        src_expr = v.source_expr if v.source_expr is not None else src
+        match v.source_kind:
+            case RebindSourceKind.DIRECT_ALIAS:
+                if src is None:
+                    raise AssertionError(
+                        f"DIRECT_ALIAS violation for '{target}' has no "
+                        f"source_name; analyzer must set source_name for "
+                        f"this kind"
+                    )
+                pattern = f"{target} = {src_expr}"
+                reason = f"an alias of a different quantum variable '{src}'"
+                fix = (
+                    f"  - Use a new variable: new_var = {src_expr}\n"
+                    f"  - Remove the assignment if '{target}' is no longer needed"
+                )
+            case RebindSourceKind.QUANTUM_ARG:
+                if src is None:
+                    raise AssertionError(
+                        f"QUANTUM_ARG violation for '{target}' has no "
+                        f"source_name; analyzer must set source_name for "
+                        f"this kind"
+                    )
+                pattern = (
+                    f"{target} = {func}({src}, ...)"
+                    if func
+                    else f"{target} = ...({src}, ...)"
+                )
+                reason = f"a value derived from different quantum variable '{src}'"
+                self_update = (
+                    f"  - Use self-update: {target} = {func}({target}, ...)\n"
+                    if func
+                    else f"  - Use self-update: {target} = ...({target}, ...)\n"
+                )
+                new_var = (
+                    f"  - Use a new variable: new_var = {func}({src}, ...)"
+                    if func
+                    else f"  - Use a new variable: new_var = ...({src}, ...)"
+                )
+                fix = self_update + new_var
+            case RebindSourceKind.FRESH_ALLOCATION:
+                pattern = f"{target} = {func}(...)" if func else f"{target} = ...(...)"
+                reason = "a freshly allocated quantum value"
+                new_var = (
+                    f"  - Bind the new allocation to a new name: new_var = {func}(...)"
+                    if func
+                    else "  - Bind the new allocation to a new name: new_var = ...(...)"
+                )
+                fix = (
+                    f"{new_var}\n"
+                    f"  - Or remove the original '{target}' if it is no longer needed"
+                )
+            case RebindSourceKind.UNKNOWN_CALL:
+                pattern = f"{target} = {func}(...)" if func else f"{target} = ...(...)"
+                reason = (
+                    "a value that does not thread the original quantum variable "
+                    "through the call"
+                )
+                self_update = (
+                    f"  - Pass '{target}' into the call so it is self-updated: "
+                    f"{target} = {func}({target}, ...)\n"
+                    if func
+                    else f"  - Pass '{target}' into the call so it is self-updated\n"
+                )
+                fix = f"{self_update}  - Or bind the new value to a different name"
+            case RebindSourceKind.CHAINED_ASSIGNMENT:
+                pattern = f"{target} = ... = ..."
+                reason = (
+                    "a chained assignment, which cannot be verified as a "
+                    "self-update for every target"
+                )
+                fix = (
+                    f"  - Write a separate assignment for '{target}'\n"
+                    f"  - Avoid chained ``a = b = expr`` when any target is "
+                    f"a quantum variable"
+                )
+            case _:
+                # Defensive: every analyzer-produced source_kind is an
+                # enum member above. ``raise AssertionError`` (not
+                # ``assert``) so the invariant survives ``python -O``.
+                raise AssertionError(f"unhandled RebindSourceKind: {v.source_kind!r}")
+        return pattern, reason, fix
 
     @property
     def block(self) -> Block:
         """Compile the function to a hierarchical Block if not already compiled."""
-        self._check_rebind_violations()
         if self._block is None:
             if self._block_building:
                 # Re-entry from outside ``__call__``'s forward-ref branch.
@@ -1226,7 +1328,12 @@ class QKernel(Generic[P, R]):
             Block: The specialized hierarchical block, ready to be the
                 target of :meth:`Block.call` from the caller's tracer.
         """
-        self._check_rebind_violations()
+        # Rebind-violation analysis runs eagerly in ``__init__`` (the
+        # ``collect_quantum_rebind_violations`` call there raises
+        # ``QubitRebindError`` immediately on any violation), so a
+        # kernel that reaches this point is already free of
+        # statically-detectable violations. No per-call check is
+        # needed here.
         self._validate_parameters(parameters)
         block = self._create_traced_block(
             parameters,
@@ -1464,8 +1571,6 @@ class QKernel(Generic[P, R]):
             result = transpiler.emit(graph, binding={"theta": 0.5})
             ```
         """
-        self._check_rebind_violations()
-
         if parameters is None:
             parameters = self._auto_detect_parameters(kwargs)
 
