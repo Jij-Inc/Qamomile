@@ -286,6 +286,10 @@ class QKernel(Generic[P, R]):
         target = v.target_name
         func = v.func_name
         src = v.source_name
+        # Render the actual RHS source if the analyzer captured one
+        # (e.g. ``qs[i]`` for a Subscript source); otherwise fall back
+        # to the underlying source_name (``qs``).
+        src_expr = v.source_expr if v.source_expr is not None else src
         match v.source_kind:
             case RebindSourceKind.DIRECT_ALIAS:
                 if src is None:
@@ -294,10 +298,10 @@ class QKernel(Generic[P, R]):
                         f"source_name; analyzer must set source_name for "
                         f"this kind"
                     )
-                pattern = f"{target} = {src}"
+                pattern = f"{target} = {src_expr}"
                 reason = f"an alias of a different quantum variable '{src}'"
                 fix = (
-                    f"  - Use a new variable: new_var = {src}\n"
+                    f"  - Use a new variable: new_var = {src_expr}\n"
                     f"  - Remove the assignment if '{target}' is no longer needed"
                 )
             case RebindSourceKind.QUANTUM_ARG:

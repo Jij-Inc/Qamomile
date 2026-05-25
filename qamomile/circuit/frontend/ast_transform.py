@@ -1374,11 +1374,22 @@ class RebindViolation:
 
     Attributes:
         target_name (str): Name of the LHS variable being overwritten.
-        source_name (str | None): Name of the RHS variable / first
-            quantum argument the new value is derived from. ``None`` when
+        source_name (str | None): Name of the underlying quantum
+            variable the new value is derived from — for a
+            ``Subscript`` source like ``a = qs[i]`` this is the base
+            array name ``qs`` (the quantum binding being aliased
+            from), not the full subscript expression. ``None`` when
             the source has no statically-known quantum name — e.g. a
             fresh allocation via ``qm.qubit(...)`` or an opaque call
             whose return type cannot be inferred.
+        source_expr (str | None): Full RHS source string, used in the
+            rendered error pattern when it differs from ``source_name``.
+            Set via ``ast.unparse(value)`` for ``Subscript`` sources
+            (``"qs[i]"``) so the message shows the actual code shape;
+            ``None`` for plain ``Name`` sources where ``source_name``
+            already matches the RHS text, and for kinds without a
+            single-name source (fresh allocations, opaque calls,
+            chained assignments).
         source_kind (RebindSourceKind): Discriminator for downstream
             error message formatting. See :class:`RebindSourceKind` for
             the meaning of each member.
@@ -1387,12 +1398,14 @@ class RebindViolation:
             aliases.
         lineno (int): 1-based source line of the offending assignment,
             counted from the first statement of the function body
-            (i.e., the first body statement is line 1). The analyzer
-            walks ``ast.parse(textwrap.dedent(inspect.getsource(func)))``
-            so raw ``ast`` line numbers include the decorator / ``def``
-            lines; ``collect_quantum_rebind_violations`` subtracts the
-            ``FunctionDef`` node's ``lineno`` from every violation to
-            produce this body-relative form.
+            (i.e., the first body statement is line 1, regardless of
+            blank lines or comments between the ``def`` line and that
+            first statement). The analyzer walks
+            ``ast.parse(textwrap.dedent(inspect.getsource(func)))`` so
+            raw ``ast`` line numbers include the decorator / ``def``
+            lines; ``collect_quantum_rebind_violations`` subtracts
+            ``node.body[0].lineno - 1`` from every violation to produce
+            this body-relative form.
     """
 
     target_name: str
@@ -1400,6 +1413,7 @@ class RebindViolation:
     source_kind: RebindSourceKind
     func_name: str | None
     lineno: int
+    source_expr: str | None = None
 
 
 # Recognized quantum-handle constructors. The analyzer treats the LHS of
@@ -1690,6 +1704,7 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                                 RebindSourceKind.DIRECT_ALIAS,
                                 None,
                                 lineno,
+                                source_expr=ast.unparse(value),
                             )
                         )
                     self.quantum_vars[target] = self.quantum_vars[source]
@@ -2178,16 +2193,18 @@ def collect_quantum_rebind_violations(
             analyzer = QuantumRebindAnalyzer(quantum_param_names)
             for stmt in node.body:
                 analyzer.visit(stmt)
-            # Normalize each violation's lineno from "absolute within
-            # the inspect.getsource() snippet" (which counts from the
-            # decorator / def line) to "1-based within the function
-            # body" — the first statement of the body becomes line 1.
-            # Subtracting ``node.lineno`` (the ``def`` line) achieves
-            # this because every body statement's lineno is strictly
-            # greater than the def line.
-            funcdef_lineno = node.lineno
-            for v in analyzer.violations:
-                v.lineno -= funcdef_lineno
+            # Normalize each violation's lineno so the FIRST body
+            # statement becomes line 1, independent of any blank
+            # lines / comments / multi-line signatures between the
+            # ``def`` line and that first statement. Subtracting
+            # ``node.body[0].lineno - 1`` achieves this; subtracting
+            # ``node.lineno`` (the ``def`` line) would leave the
+            # offset off by one or more whenever there are leading
+            # blank lines in the body source.
+            if node.body:
+                body_offset = node.body[0].lineno - 1
+                for v in analyzer.violations:
+                    v.lineno -= body_offset
             return analyzer.violations
 
     return []

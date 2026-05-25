@@ -3156,6 +3156,45 @@ class TestQuantumRebindErrorMessageDispatch:
 
         assert "at body line 2 " in str(exc.value)
 
+    def test_message_line_robust_to_blank_lines_before_body(self):
+        """Blank / comment-only lines between the ``def`` and the
+        first body statement must not shift the reported body line:
+        the actual first body statement is still line 1."""
+        with pytest.raises(QubitRebindError) as exc:
+            # fmt: off
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+
+                # leading comment / blank lines before the first body
+                # statement — these must not be counted as body lines.
+
+                q = qm.qubit("s")  # first actual body statement
+                return q
+            # fmt: on
+
+        assert "at body line 1 " in str(exc.value)
+
+    def test_subscript_alias_pattern_renders_full_rhs(self):
+        """A ``Subscript`` source like ``a = qs[0]`` renders the full
+        subscript in the offending-code pattern, not just the base
+        array name. The underlying quantum variable name in the
+        reason wording is still the base array (``qs``)."""
+        with pytest.raises(QubitRebindError) as exc:
+
+            @qkernel
+            def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit]) -> qm.Qubit:
+                a = qs[0]  # noqa: F841 — rebind target
+                return a
+
+        msg = str(exc.value)
+        # The pattern shows the actual RHS source, including the index.
+        assert "'a = qs[0]' overwrites" in msg
+        # The reason mentions the underlying array name (the quantum
+        # variable being aliased from), not the indexed expression.
+        assert "an alias of a different quantum variable 'qs'" in msg
+        # The fix suggestion uses the full RHS too.
+        assert "Use a new variable: new_var = qs[0]" in msg
+
     def test_unknown_call_message(self):
         """A call with no quantum args and no recognized constructor
         kind triggers ``UNKNOWN_CALL`` and renders the matching reason
