@@ -733,10 +733,19 @@ def _populate_input_qubit_map(
             consecutive physical index starting at 0.
 
     Raises:
-        EmitError: If a ``Vector[Qubit]`` input's length cannot be
-            resolved and cannot be inferred from ``num_qubits`` (multiple
-            unresolvable vector inputs, or vector length exceeds the
-            remaining qubit budget).
+        EmitError: Three failure modes are surfaced loudly rather than
+            silently mis-mapping qubits:
+
+            * Multiple unresolvable ``Vector[Qubit]`` inputs (only one
+              symbolic length can be inferred from the remaining
+              ``num_qubits`` budget).
+            * A single unresolvable ``Vector[Qubit]`` whose inferred
+              length ``num_qubits - scalar_count - sum(resolved)`` is
+              negative.
+            * Total quantum-input footprint
+              ``scalar_count + sum(resolved_vector_lengths)`` exceeds
+              ``num_qubits`` (i.e., a resolved or bound vector shape
+              overflows the gate's declared qubit width).
     """
     from qamomile.circuit.ir.value import ArrayValue
 
@@ -765,9 +774,8 @@ def _populate_input_qubit_map(
         if inferred < 0:
             raise EmitError(
                 f"Vector[Qubit] input {unresolved[0].name!r} has an unresolved "
-                f"length and the remaining qubit budget "
-                f"({num_qubits - scalar_count - sum(resolved_lengths.values())}) "
-                f"is negative; bind the vector's shape before transpilation.",
+                f"length and the remaining qubit budget ({inferred}) is "
+                f"negative; bind the vector's shape before transpilation.",
                 operation="ControlledUOperation",
             )
         resolved_lengths[unresolved[0].uuid] = inferred
@@ -777,6 +785,23 @@ def _populate_input_qubit_map(
             f"({[iv.name for iv in unresolved]!r}); only one symbolic "
             f"length can be inferred from the gate's qubit count. Bind "
             f"the remaining shapes before transpilation.",
+            operation="ControlledUOperation",
+        )
+
+    # Sanity-check the total budget. The inferred-length branch above
+    # cannot overflow (its length is computed to fit exactly), but a
+    # vector whose length was resolved from a binding or a constant
+    # shape can legitimately be larger than the gate's qubit width if
+    # the caller misconfigured things. Reject upfront rather than
+    # silently writing physical indices past ``num_qubits - 1``.
+    total = scalar_count + sum(resolved_lengths.values())
+    if total > num_qubits:
+        raise EmitError(
+            f"Inner block's quantum inputs require {total} physical "
+            f"qubits (scalars={scalar_count}, vector lengths="
+            f"{sorted(resolved_lengths.values())}) but the controlled "
+            f"gate only provides {num_qubits}. Check the bound vector "
+            f"shapes against the gate's expected target count.",
             operation="ControlledUOperation",
         )
 

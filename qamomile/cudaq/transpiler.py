@@ -64,12 +64,18 @@ def _build_block_qubit_map(
     operands.
 
     Scalar ``Qubit`` inputs map one UUID -> one physical target;
-    ``Vector[Qubit]`` inputs (``ArrayValue`` carrying a quantum element
-    type) consume one physical index per element. The element UUIDs
-    themselves are unknown at seed time — they are created during the
-    inner kernel's tracing — so the body walk below also resolves any
-    operand whose ``parent_array`` matches a registered vector and
-    seeds ``qubit_map`` with the per-element UUID lazily.
+    a single ``Vector[Qubit]`` input (``ArrayValue`` carrying a quantum
+    element type) absorbs the remaining target indices, one per
+    element. Multiple ``Vector[Qubit]`` inputs cannot be resolved here
+    because the helper has no shape information to allocate them
+    individually — the only consumer today is ``IndexSpecControlledU``,
+    whose caller contract is "exactly one Vector[Qubit] operand". The
+    function therefore enforces "at most one ``Vector[Qubit]`` input"
+    and raises ``EmitError`` otherwise. The element UUIDs themselves
+    are unknown at seed time — they are created during the inner
+    kernel's tracing — so the body walk below also resolves any operand
+    whose ``parent_array`` matches the registered vector and seeds
+    ``qubit_map`` with the per-element UUID lazily.
 
     Args:
         block_value (Any): Inner block whose ``input_values`` and
@@ -77,15 +83,19 @@ def _build_block_qubit_map(
             an empty seed source.
         target_indices (list[int]): Physical target indices the inner
             block's quantum inputs map onto, in declaration order. Each
-            scalar input consumes one index; each ``Vector[Qubit]``
-            input consumes ``length`` consecutive indices, where
-            ``length`` is taken from the vector's per-element references
-            in the body (the maximum element_index + 1 actually used).
+            scalar input consumes one index; the single ``Vector[Qubit]``
+            input (if any) consumes the remaining
+            ``len(target_indices) - scalar_count`` indices.
 
     Returns:
         dict[str, int]: Mapping from operand UUID (per-element or
             scalar) to physical target index. Empty when ``block_value``
             has no quantum inputs.
+
+    Raises:
+        EmitError: If the inner block declares more than one
+            ``Vector[Qubit]`` input, or if the scalar inputs alone
+            already exceed ``len(target_indices)``.
     """
     from qamomile.circuit.ir.value import ArrayValue
 
@@ -102,19 +112,31 @@ def _build_block_qubit_map(
             for iv in block_value.input_values
             if hasattr(iv, "type") and iv.type.is_quantum()
         ]
-        # Determine each Vector[Qubit] input's length from
-        # ``target_indices`` (one of the vectors may absorb the
-        # remainder; for now require a single Vector input or none, to
-        # match the IndexSpecControlledU caller contract).
+        vector_count = sum(1 for iv in quantum_inputs if isinstance(iv, ArrayValue))
+        if vector_count > 1:
+            raise EmitError(
+                f"CUDA-Q controlled helper supports at most one "
+                f"Vector[Qubit] input in the inner block, got "
+                f"{vector_count}. Wrap the helper so it takes individual "
+                f"Qubit arguments, or split the work across multiple "
+                f"controlled gates.",
+                operation="ControlledUOperation",
+            )
         scalar_count = sum(1 for iv in quantum_inputs if not isinstance(iv, ArrayValue))
+        if scalar_count > len(target_indices):
+            raise EmitError(
+                f"CUDA-Q controlled helper inner block has {scalar_count} "
+                f"scalar Qubit inputs but only {len(target_indices)} "
+                f"target indices are available.",
+                operation="ControlledUOperation",
+            )
         for iv in quantum_inputs:
             if isinstance(iv, ArrayValue):
+                # Single-vector enforced above, so this vector takes
+                # the entire remaining target budget.
                 length = len(target_indices) - scalar_count
-                if length < 0:
-                    length = 0
                 vector_inputs[iv.uuid] = (qubit_idx, length)
-                # Seed each element UUID once we walk the body; for now
-                # also store the base UUID for any downstream lookup
+                # Also store the base UUID for any downstream lookup
                 # that addresses the array as a whole.
                 if qubit_idx < len(target_indices) and length > 0:
                     qubit_map[iv.uuid] = target_indices[qubit_idx]
@@ -170,6 +192,16 @@ def _seed_vector_element_uuid(
         qubit_map (dict[str, int]): UUID-to-physical-target map; mutated
             in place when the operand is a recognized Vector[Qubit]
             element.
+
+    Raises:
+        EmitError: If the resolved physical slot ``start + elem_idx``
+            falls outside ``target_indices``. ``_build_block_qubit_map``
+            already constrains ``start + length`` to fit, so this only
+            triggers on a corrupted ``vector_inputs`` table or an
+            unexpected mismatch between ``target_indices`` and the
+            inner block's declared inputs — both internal-invariant
+            violations rather than user-facing miscompiles, but
+            surfacing them loudly beats a silent ``IndexError``.
     """
     parent = getattr(operand, "parent_array", None)
     if parent is None:
@@ -186,8 +218,15 @@ def _seed_vector_element_uuid(
     start, length = vector_inputs[parent.uuid]
     if elem_idx < 0 or elem_idx >= length:
         return
-    physical = target_indices[start + elem_idx]
-    qubit_map.setdefault(operand.uuid, physical)
+    slot = start + elem_idx
+    if slot < 0 or slot >= len(target_indices):
+        raise EmitError(
+            f"CUDA-Q controlled helper: Vector[Qubit] element index "
+            f"{elem_idx} resolves to physical slot {slot}, outside the "
+            f"available target range [0, {len(target_indices)}).",
+            operation="ControlledUOperation",
+        )
+    qubit_map.setdefault(operand.uuid, target_indices[slot])
 
 
 def _resolve_gate_targets(

@@ -2183,10 +2183,11 @@ class TestControlledIndexSpecVectorInnerKernel:
     def test_target_indices_sampling(self, transpiler_factory):
         """Controlled cyclic shift gates a deterministic basis state when ctrl=|1>.
 
-        Initial state |1110>: q[3] is the outer control (ON), q[0..2]
-        are the targets carrying |1,1,1>.  The inner ``_shift_first_three``
-        permutes (q0,q1,q2) -> (q2,q0,q1); on |1,1,1> this is a no-op,
-        so the final measurement should be |1110> with probability 1.
+        Initial state is |1111> after X on every qubit: q[3] is the
+        outer control (ON), q[0..2] are the targets carrying |1,1,1>.
+        The inner ``_shift_first_three`` permutes (q0,q1,q2) ->
+        (q1,q2,q0); on |1,1,1> this is a no-op, so the final
+        measurement deterministically yields ``(1, 1, 1, 1)``.
         """
 
         @qmc.qkernel
