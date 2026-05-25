@@ -1515,12 +1515,23 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             (``if flag: ... ; else: alt = qubit_array(...); q = alt``)
             are not rejected at decoration time. These patterns rely on
             the compile-time-if lowering pass selecting one branch and
-            discarding the other, and the post-lowering
-            ``affine_validate`` pass is what catches any genuine
-            violation that survives the selected branch. The
-            single-pass AST analyzer cannot tell compile-time-if from
-            runtime-if, so it conservatively defers branch-internal
-            decisions to the IR layer.
+            discarding the other; the AST analyzer cannot tell
+            compile-time-if from runtime-if, so it conservatively
+            allows branch-internal rebinds to keep the user's
+            compile-time-if usage working.
+
+        **Known limitation.** Suppressing branch-internal violations
+        means a kernel that genuinely discards an outer quantum binding
+        inside a runtime ``if`` / ``for`` / ``while`` branch (e.g. a
+        runtime ``if cond: q = qm.qubit("fresh")``) is NOT reported by
+        ``collect_quantum_rebind_violations``. The IR-level
+        ``AffineValidationPass`` does NOT close this gap either — it
+        only enforces "consumed at most once" and does not detect
+        "never consumed" / "silent discard" patterns. A dedicated
+        IR-level silent-discard pass (or a flow-sensitive frontend
+        analyzer) would be needed to catch these; this is tracked as a
+        follow-up. Top-level (non-branch-internal) bypasses continue
+        to be caught at decoration time.
 
         Args:
             node (ast.If | ast.For | ast.While): The control-flow node.

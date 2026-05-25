@@ -2972,6 +2972,93 @@ class TestQuantumRebindMeasureConsumesAliases:
         assert "freshly allocated quantum value" in str(exc.value)
 
 
+class TestQuantumRebindBranchScopeContract:
+    """Lock in the documented branch-scope behavior for ``if`` / ``for`` / ``while``.
+
+    The analyzer suppresses violations detected inside an ``if`` /
+    ``for`` / ``while`` body so that legitimate compile-time-if
+    dead-branch patterns (``if flag: ... ; else: alt = qubit_array(...);
+    q = alt``) decorate successfully. The IR-level
+    ``AffineValidationPass`` does NOT detect "silent discard" inside
+    runtime branches, so the suppression is a deliberate coverage gap
+    rather than a deferred check — see ``QubitRebindError`` and
+    ``QuantumRebindAnalyzer._visit_branch_scope`` docstrings. These
+    tests lock that contract in so a future change that re-enables
+    branch-internal raising (or breaks the legitimate dead-branch
+    pattern) is caught.
+    """
+
+    def test_top_level_rebind_still_flagged(self):
+        """Outside any branch, a fresh-allocation rebind still raises."""
+        with pytest.raises(QubitRebindError) as exc:
+
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+                q = qm.qubit("fresh")
+                return q
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+    def test_rebind_inside_if_branch_silenced(self):
+        """A rebind nested in an ``if`` body is NOT raised at decoration time."""
+
+        @qkernel
+        def silenced(q: qm.Qubit, flag: bool) -> qm.Bit:
+            if flag:
+                # If raised, this would be a fresh_allocation violation
+                # on the parameter ``q``. The analyzer silences it so
+                # the compile-time-if dead-branch case still works.
+                q = qm.qubit("fresh")
+            return qm.measure(q)
+
+        # Decoration must succeed; .build() is not asserted here because
+        # the kernel has a runtime ``flag`` parameter and the IR-level
+        # pipeline rightly cannot resolve it without bindings.
+        assert silenced.name == "silenced"
+
+    def test_compile_time_if_dead_branch_array_rebind_allowed(self):
+        """Compile-time-if dead-branch ``q = alt`` (the failing-CI pattern) decorates."""
+        flag = True  # noqa: F841 — closure-captured compile-time constant
+
+        @qkernel
+        def circuit() -> qm.Bit:
+            q = qm.qubit("q")
+            if flag:
+                q = qm.x(q)
+            else:
+                alt = qm.qubit("alt")
+                q = alt
+            return qm.measure(q)
+
+        # Decoration must succeed; whether downstream lowering can fold
+        # the if is a transpiler-level concern, not asserted here.
+        assert circuit.name == "circuit"
+
+    def test_rebind_inside_for_body_silenced(self):
+        """A rebind nested in a ``for`` body is NOT raised at decoration time."""
+
+        @qkernel
+        def silenced(q: qm.Qubit) -> qm.Bit:
+            for _ in qm.range(2):
+                q = qm.qubit("fresh")
+            return qm.measure(q)
+
+        assert silenced.name == "silenced"
+
+    def test_rebind_after_if_still_flagged(self):
+        """Branch suppression does not leak out: a rebind after ``if`` is raised."""
+        with pytest.raises(QubitRebindError) as exc:
+
+            @qkernel
+            def bad(q: qm.Qubit, flag: bool) -> qm.Qubit:
+                if flag:
+                    q = qm.h(q)  # self-update — OK
+                q = qm.qubit("fresh")  # outside the if — rebind, flag this
+                return q
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+
 class TestQuantumRebindErrorMessageDispatch:
     """Each source_kind formats its own (pattern, reason, fix) triple."""
 

@@ -370,11 +370,21 @@ class QubitRebindError(AffineTypeError):
 
     Branch-internal rebinds (assignments inside an ``if`` / ``for`` /
     ``while`` body) are NOT flagged at decoration time: compile-time
-    conditional branches legitimately rebind quantum names, and
-    distinguishing compile-time from runtime branches requires the IR
-    layer. The post-lowering ``affine_validate`` transpiler pass
-    catches genuine branch-internal violations, raising the parent
-    ``AffineTypeError`` rather than this subclass.
+    conditional branches legitimately rebind quantum names (the
+    compile-time-if lowering pass selects one branch and discards the
+    other), and the single-pass AST analyzer cannot distinguish
+    compile-time from runtime branches. To keep those compile-time
+    patterns working, branch-internal violations are suppressed.
+
+    This is a known coverage gap. ``AffineValidationPass`` in the IR
+    layer only enforces "consumed at most once" and does NOT detect
+    "never consumed" / "silent discard" patterns, so a genuine runtime
+    ``if cond: q = qm.qubit("fresh")`` that discards a parameter is
+    currently not raised by either layer. A dedicated IR-level
+    silent-discard pass (or a flow-sensitive frontend analyzer) would
+    be needed to close it; this is tracked as follow-up. Top-level
+    (non-branch-internal) bypasses continue to raise at decoration
+    time.
 
     Example of incorrect code:
         a = qm.h(b)  # ERROR: 'a' was quantum, now overwritten from 'b'
