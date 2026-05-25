@@ -1556,36 +1556,74 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
     def visit_If(self, node: ast.If) -> None:
         """Visit ``if``/``else`` body with branch-local scope.
 
-        See :meth:`_visit_branch_scope` for the snapshot-restore
-        protocol applied to ``body`` and ``orelse``.
+        ``node.test`` is walked first (before the branch-scope
+        snapshot) so that any consume effect inside the condition
+        (e.g. ``if qm.measure(q):``) is reflected in the outer
+        analyzer state, not silently rolled back when the branch
+        scope restores. See :meth:`_visit_branch_scope` for the
+        snapshot-restore protocol applied to ``body`` and ``orelse``.
 
         Args:
             node (ast.If): The ``if`` statement.
         """
+        self.visit(node.test)
         self._visit_branch_scope(node)
 
     def visit_For(self, node: ast.For) -> None:
         """Visit a ``for`` loop's body and ``else`` with branch-local scope.
 
-        Same protocol as :meth:`visit_If`. The loop target itself is
-        not modeled — Qamomile's frontend rewrites ``qmc.range(...)``
-        loops via the control-flow transformer, so the iterator
-        variable is a classical index and never quantum.
+        ``node.iter`` is walked first (before the branch-scope
+        snapshot) so that any consume effect inside the iterable
+        expression is reflected in the outer analyzer state. The
+        loop target itself is not modeled — Qamomile's frontend
+        rewrites ``qmc.range(...)`` loops via the control-flow
+        transformer, so the iterator variable is a classical index
+        and never quantum.
 
         Args:
             node (ast.For): The ``for`` statement.
         """
+        self.visit(node.iter)
         self._visit_branch_scope(node)
 
     def visit_While(self, node: ast.While) -> None:
         """Visit a ``while`` loop's body and ``else`` with branch-local scope.
 
-        Same protocol as :meth:`visit_If`.
+        Same protocol as :meth:`visit_If`. ``node.test`` is walked
+        before the branch-scope snapshot.
 
         Args:
             node (ast.While): The ``while`` statement.
         """
+        self.visit(node.test)
         self._visit_branch_scope(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Apply consume effects when a classical-returning call is seen.
+
+        ``_check_single_assign`` / ``_check_tuple_assign`` already
+        invoke :meth:`_consume_quantum_args` when a classical-returning
+        call appears on the RHS of an assignment. This visitor handles
+        the cases where the same call appears *outside* an assignment:
+        as a bare expression statement (``qm.measure(q)``), inside an
+        ``if`` / ``while`` condition, inside a ``for`` iterable, or
+        nested inside any other expression visited via
+        ``generic_visit``. Without this hook, those forms would leave
+        ``q`` in ``quantum_vars`` and trip a false-positive
+        ``FRESH_ALLOCATION`` violation on a later rebind of ``q``.
+
+        Re-visiting from inside a covered assignment path is benign:
+        ``_consume_quantum_args`` is idempotent — by the time
+        ``visit_Call`` runs as part of ``generic_visit`` after the
+        assignment dispatch, the relevant origins are already gone
+        from ``quantum_vars`` and the second call is a no-op.
+
+        Args:
+            node (ast.Call): The call expression.
+        """
+        if self._is_classical_returning_call(node):
+            self._consume_quantum_args(node)
+        self.generic_visit(node)
 
     # ------------------------------------------------------------------
     # single assignment:  name = expr

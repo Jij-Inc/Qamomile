@@ -3125,3 +3125,28 @@ class TestQuantumRebindErrorMessageDispatch:
         msg = str(exc.value)
         assert "freshly allocated quantum value" in msg
         assert "Bind the new allocation to a new name" in msg
+
+    def test_unknown_call_message(self):
+        """A call with no quantum args and no recognized constructor
+        kind triggers ``UNKNOWN_CALL`` and renders the matching reason
+        / fix wording."""
+
+        def some_classical_func() -> int:
+            """Stand-in for an arbitrary non-Qamomile call referenced
+            from a kernel body."""
+            return 0
+
+        with pytest.raises(QubitRebindError) as exc:
+
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+                q = some_classical_func()  # noqa: F841 — rebind target
+                return q
+
+        msg = str(exc.value)
+        assert "does not thread the original quantum variable" in msg
+        assert (
+            "Pass 'q' into the call so it is self-updated: "
+            "q = some_classical_func(q, ...)"
+        ) in msg
+        assert "Or bind the new value to a different name" in msg
