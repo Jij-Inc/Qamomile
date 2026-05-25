@@ -1865,7 +1865,15 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             == sorted(t for t in target_origins if t is not None)
         ):
             for tgt, origin in zip(target_names, elt_origins):
-                assert origin is not None
+                if origin is None:
+                    # The all-not-None preconditions above guarantee
+                    # this is unreachable; ``raise AssertionError``
+                    # (not ``assert``) so the invariant holds under
+                    # ``python -O``.
+                    raise AssertionError(
+                        f"permutation fast-path reached with None origin "
+                        f"for target '{tgt}'"
+                    )
                 self.quantum_vars[tgt] = origin
             return
 
@@ -1963,14 +1971,40 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
         case: if ``alias = q`` and the call is ``bit = measure(alias)``,
         both ``alias`` and ``q`` are removed.
 
+        Subscript-form arguments (``measure(qs[0])``) are intentionally
+        NOT treated as a whole-array consume: a per-element measurement
+        only consumes that element, and the array name ``qs`` must stay
+        in ``quantum_vars`` so a subsequent rebind like
+        ``qs = qm.qubit_array(...)`` is still flagged as silently
+        discarding the unmeasured remaining elements. Only ``Name``-form
+        arguments (and ``Name``s nested in ``Tuple`` / ``List`` / ``Set``
+        / ``Starred``) drop the array origin.
+
         Args:
             call (ast.Call): The classical-returning call whose quantum
                 arguments are being consumed.
         """
-        quantum_args = self._extract_quantum_args(call)
-        consumed_origins = {
-            self.quantum_vars[a] for a in quantum_args if a in self.quantum_vars
-        }
+        whole_consumed: set[str] = set()
+
+        def _collect_whole(expr: ast.expr) -> None:
+            """Collect Name-form quantum args; deliberately skip Subscript."""
+            if isinstance(expr, ast.Name) and expr.id in self.quantum_vars:
+                whole_consumed.add(expr.id)
+            elif isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+                for elt in expr.elts:
+                    _collect_whole(elt)
+            elif isinstance(expr, ast.Starred):
+                _collect_whole(expr.value)
+            # Intentionally skip ast.Subscript: per-element consumption
+            # does not invalidate the parent array's binding.
+
+        for arg in call.args:
+            _collect_whole(arg)
+        for kw in call.keywords:
+            if kw.value is not None:
+                _collect_whole(kw.value)
+
+        consumed_origins = {self.quantum_vars[n] for n in whole_consumed}
         if not consumed_origins:
             return
         self.quantum_vars = {

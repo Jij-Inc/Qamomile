@@ -2971,6 +2971,34 @@ class TestQuantumRebindMeasureConsumesAliases:
 
         assert "freshly allocated quantum value" in str(exc.value)
 
+    def test_per_element_measure_does_not_drop_array_origin(self):
+        """Subscript-arg ``measure(qs[0])`` consumes only the element,
+        so a later whole-array rebind still raises."""
+        with pytest.raises(QubitRebindError) as exc:
+
+            @qkernel
+            def bad() -> qm.Bit:
+                qs = qubit_array(2, "qs")
+                bit = qm.measure(qs[0])
+                qs = qubit_array(2, "fresh")  # noqa: F841 — rebind target under test
+                return bit
+
+        assert "freshly allocated quantum value" in str(exc.value)
+
+    def test_whole_array_measure_then_rebind_allowed(self):
+        """Name-arg ``measure(qs)`` consumes the whole array; the
+        subsequent ``qs = qubit_array(...)`` is allowed because the
+        original array was fully consumed, not silently discarded."""
+
+        @qkernel
+        def ok() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(2, "qs")
+            _ = qm.measure(qs)
+            qs = qubit_array(2, "fresh")
+            return qm.measure(qs)
+
+        assert ok.name == "ok"
+
 
 class TestQuantumRebindBranchScopeContract:
     """Lock in the documented branch-scope behavior for ``if`` / ``for`` / ``while``.
