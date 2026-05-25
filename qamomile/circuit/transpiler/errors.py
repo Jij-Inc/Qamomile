@@ -358,7 +358,7 @@ class QubitRebindError(AffineTypeError):
     quantum variable would silently discard the original quantum state.
 
     The check runs at qkernel decoration time as a static AST analysis
-    (see ``frontend.ast_transform.collect_quantum_rebind_violations``)
+    (see ``qamomile.circuit.frontend.ast_transform.collect_quantum_rebind_violations``)
     and raises immediately — the wrapped ``QKernel`` object is never
     constructed when a violation is present. The check is run
     unconditionally for every decorated kernel: kernel-level quantum
