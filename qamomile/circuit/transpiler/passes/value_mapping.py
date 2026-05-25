@@ -318,9 +318,9 @@ class ValueSubstitutor:
             fields are left unchanged.
         """
         new_parent_array = v.parent_array
-        if v.parent_array is not None and v.parent_array.uuid in self._value_map:
-            sub_pa = self._chase_transitive(v.parent_array)
-            if isinstance(sub_pa, ArrayValue):
+        if v.parent_array is not None:
+            sub_pa = self.substitute_value(v.parent_array)
+            if isinstance(sub_pa, ArrayValue) and sub_pa is not v.parent_array:
                 new_parent_array = sub_pa
 
         new_element_indices = v.element_indices
@@ -349,9 +349,12 @@ class ValueSubstitutor:
                 new_shape = tuple(new_shape_list)
 
             new_slice_of = v.slice_of
-            if v.slice_of is not None and v.slice_of.uuid in self._value_map:
-                sub_slice_of = self._chase_transitive(v.slice_of)
-                if isinstance(sub_slice_of, ArrayValue):
+            if v.slice_of is not None:
+                sub_slice_of = self.substitute_value(v.slice_of)
+                if (
+                    isinstance(sub_slice_of, ArrayValue)
+                    and sub_slice_of is not v.slice_of
+                ):
                     new_slice_of = sub_slice_of
             new_slice_start = v.slice_start
             if v.slice_start is not None and v.slice_start.uuid in self._value_map:
@@ -461,11 +464,22 @@ class ValueSubstitutor:
             new_shape: tuple[Value, ...] | None = None
             changed = False
 
-            # Check if this is an array element whose parent_array should be substituted
-            if v.parent_array is not None and v.parent_array.uuid in self._value_map:
-                new_parent = self._chase_transitive(v.parent_array)
-                if isinstance(new_parent, ArrayValue):
-                    new_parent_array = new_parent
+            # Substitute the parent_array.  ``v.parent_array`` itself may
+            # not be in the map (it can be a freshly-cloned slice-view
+            # ``ArrayValue`` whose own ``slice_of`` is the callee dummy
+            # being substituted), so a direct ``uuid in self._value_map``
+            # check would leave the parent_array's stale internal fields
+            # in place.  Recursing through ``substitute_value`` walks the
+            # parent_array's fields so the slice chain is rewritten
+            # consistently when a sub-kernel containing
+            # ``qs[a:b] = qmc.h(qs[a:b])`` is inlined.
+            if v.parent_array is not None:
+                sub_parent = self.substitute_value(v.parent_array)
+                if (
+                    isinstance(sub_parent, ArrayValue)
+                    and sub_parent is not v.parent_array
+                ):
+                    new_parent_array = sub_parent
                     changed = True
 
             # Also check element_indices for substitution
@@ -520,9 +534,16 @@ class ValueSubstitutor:
                 new_slice_start_v = v.slice_start
                 new_slice_step_v = v.slice_step
 
-                if v.slice_of is not None and v.slice_of.uuid in self._value_map:
-                    sub_slice_of = self._chase_transitive(v.slice_of)
-                    if isinstance(sub_slice_of, ArrayValue):
+                # ``slice_of`` may also point at a freshly-cloned sliced
+                # ``ArrayValue`` whose own slice metadata still references
+                # the callee dummy.  Recurse through ``substitute_value``
+                # so nested slices (slice-of-slice) get rewritten too.
+                if v.slice_of is not None:
+                    sub_slice_of = self.substitute_value(v.slice_of)
+                    if (
+                        isinstance(sub_slice_of, ArrayValue)
+                        and sub_slice_of is not v.slice_of
+                    ):
                         new_slice_of_v = sub_slice_of
                         slice_meta_changed = True
 

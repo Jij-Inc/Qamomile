@@ -366,6 +366,411 @@ class TestInlineSliceAssignBroadcast:
         assert int(est.gates.total) == 3
 
 
+# Module-scope sub-kernels used by ``TestInlineCallSliceBroadcast``.
+# They live at module scope (rather than as class attributes) for the
+# same name-resolution reason as ``_h_all``: the entry kernels reference
+# them by bare name, which is looked up via the function's
+# ``__globals__``.
+
+
+@qmc.qkernel
+def _slice_broadcast_inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply ``qs[0:2] = qmc.h(qs[0:2])`` inside a sub-kernel.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register whose first two
+            qubits are broadcast-H'd in-place.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The same register with the slice
+            assignment applied.
+    """
+    qs[0:2] = qmc.h(qs[0:2])
+    return qs
+
+
+@qmc.qkernel
+def _symbolic_slice_inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply ``qs[0:n-1] = qmc.h(qs[0:n-1])`` with symbolic bound.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register; the slice covers
+            every element except the last.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The same register with the symbolic
+            slice broadcast applied.
+    """
+    n = qs.shape[0]
+    qs[0 : n - 1] = qmc.h(qs[0 : n - 1])
+    return qs
+
+
+@qmc.qkernel
+def _nested_slice_inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply a slice-of-slice broadcast inside a sub-kernel.
+
+    Builds ``s1 = qs[0:4]`` (a view) and then broadcasts H on
+    ``s1[0:2]`` (a view of a view).  The two-level slice chain
+    stresses recursive ``slice_of`` rewriting through ``InlinePass``.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 4.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with H applied to
+            ``qs[0]`` and ``qs[1]``.
+    """
+    s1 = qs[0:4]
+    s1[0:2] = qmc.h(s1[0:2])
+    qs[0:4] = s1
+    return qs
+
+
+@qmc.qkernel
+def _multi_slice_inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply two independent slice broadcasts in the same sub-kernel.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 4.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with H applied to every
+            element via two non-overlapping slice broadcasts.
+    """
+    qs[0:2] = qmc.h(qs[0:2])
+    qs[2:4] = qmc.h(qs[2:4])
+    return qs
+
+
+@qmc.qkernel
+def _slice_and_scalar_inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Mix a slice broadcast with a scalar element gate.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 3.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with H applied to
+            ``qs[0]`` / ``qs[1]`` via slice broadcast and to ``qs[2]``
+            via a scalar element gate.
+    """
+    qs[0:2] = qmc.h(qs[0:2])
+    qs[2] = qmc.h(qs[2])
+    return qs
+
+
+@qmc.qkernel
+def _slice_inner_for_two_level(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Innermost slice broadcast for the two-level inline chain.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 2.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with H applied to
+            ``qs[0]`` and ``qs[1]``.
+    """
+    qs[0:2] = qmc.h(qs[0:2])
+    return qs
+
+
+@qmc.qkernel
+def _slice_mid_for_two_level(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Mid layer that forwards to ``_slice_inner_for_two_level``.
+
+    Used as the intermediate level in the entry → mid → innermost
+    chain so the slice broadcast is reached after two levels of
+    inlining.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 2.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The same register, with the innermost
+            slice broadcast applied.
+    """
+    qs = _slice_inner_for_two_level(qs)
+    return qs
+
+
+# Deep-chain helpers for the four-level inline test.  Each layer simply
+# forwards to the next, so the entire chain only does one slice
+# broadcast at the innermost level.  The chain stresses that
+# ``InlinePass`` rewrites slice metadata consistently across an
+# arbitrary number of inline levels — the recursive ``substitute_value``
+# in ``ValueSubstitutor`` is bounded only by the depth of the call /
+# slice graph, so a chain that compiles at depth 4 also compiles at
+# any greater depth.
+
+
+@qmc.qkernel
+def _deep_chain_l0(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Innermost layer of the deep-inline chain — performs the slice broadcast.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 2.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with H applied to
+            ``qs[0]`` and ``qs[1]``.
+    """
+    qs[0:2] = qmc.h(qs[0:2])
+    return qs
+
+
+@qmc.qkernel
+def _deep_chain_l1(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Second-to-innermost forwarder for the deep-inline chain.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 2.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with the innermost slice
+            broadcast applied.
+    """
+    qs = _deep_chain_l0(qs)
+    return qs
+
+
+@qmc.qkernel
+def _deep_chain_l2(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Mid forwarder for the deep-inline chain.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 2.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with the innermost slice
+            broadcast applied.
+    """
+    qs = _deep_chain_l1(qs)
+    return qs
+
+
+@qmc.qkernel
+def _deep_chain_l3(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Outermost forwarder for the deep-inline chain (entry sees this).
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 2.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with the innermost slice
+            broadcast applied.
+    """
+    qs = _deep_chain_l2(qs)
+    return qs
+
+
+# Companion helpers that wrap a slice-of-slice inside a multi-level
+# inline chain — the slice broadcast lives two levels of inlining deep
+# AND inside a slice view of a slice, so the recursion through
+# ``substitute_value`` must walk both the inline chain and the slice
+# chain at the same time.
+
+
+@qmc.qkernel
+def _nested_slice_innermost(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Innermost layer for the nested-slice deep-inline chain.
+
+    Builds ``s1 = qs[0:4]`` and broadcasts H on ``s1[0:2]``.  The two
+    slice levels are walked by emit-time root resolution; the outer
+    inline call must have rewritten ``s1.slice_of`` to the caller's
+    actual register for that walk to terminate at a real qubit.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 4.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with H applied to
+            ``qs[0]`` and ``qs[1]``.
+    """
+    s1 = qs[0:4]
+    s1[0:2] = qmc.h(s1[0:2])
+    qs[0:4] = s1
+    return qs
+
+
+@qmc.qkernel
+def _nested_slice_mid(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Mid layer that forwards to ``_nested_slice_innermost``.
+
+    Args:
+        qs (qmc.Vector[qmc.Qubit]): Quantum register of length >= 4.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The register with the slice-of-slice
+            broadcast applied at the innermost level.
+    """
+    qs = _nested_slice_innermost(qs)
+    return qs
+
+
+@qmc.qkernel
+def _view_arg_slicer(view: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Re-slice a ``Vector[Qubit]`` parameter and apply a slice broadcast.
+
+    The caller is expected to pass a ``VectorView`` (e.g.
+    ``q[0::2]``); the sub-kernel further slices it with ``view[0:2]``
+    and applies H.  The two slice levels chain through ``InlinePass``.
+
+    Args:
+        view (qmc.Vector[qmc.Qubit]): Vector or view of length >= 2.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: The same handle with H applied to
+            ``view[0]`` and ``view[1]``.
+    """
+    view[0:2] = qmc.h(view[0:2])
+    return view
+
+
+class TestInlineCallSliceBroadcast:
+    """Slice broadcast lives in a sub-kernel and is reached via inline.
+
+    Companion to :class:`TestInlineSliceAssignBroadcast`, which covers
+    the same ``qs[a:b] = qmc.h(qs[a:b])`` pattern written directly in
+    the entry kernel.  This class is a regression net for the bug
+    where ``InlinePass`` left a sliced ``ArrayValue``'s ``slice_of``
+    pointing at the callee's cloned ``qs`` parameter even after the
+    parameter itself was substituted to the caller's register.  The
+    emit pass then chased the stale UUID on the element values inside
+    the broadcast loop and aborted with ``QubitIndexResolutionError``.
+
+    Each test transpiles on every supported backend and compares the
+    resulting statevector to an analytical Qiskit reference, so a
+    structural regression that compiles but emits the wrong qubit
+    indices is also caught.
+    """
+
+    @qmc.qkernel
+    def _kern_concrete() -> qmc.Vector[qmc.Bit]:
+        """Concrete slice ``qs[0:2]`` broadcast reached through inline."""
+        qs = qmc.qubit_array(3, "qs")
+        qs = _slice_broadcast_inner(qs)
+        return qmc.measure(qs)
+
+    def test_concrete_transpile_and_statevector_match(self):
+        """The inlined ``qs[0:2] = qmc.h(qs[0:2])`` applies H to qs[0]/qs[1] only."""
+        expected_sv = _reference_statevector(3, [0, 1])
+        _assert_cross_backend_matches(self._kern_concrete, {}, expected_sv)
+
+    @qmc.qkernel
+    def _kern_symbolic(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """Symbolic slice ``qs[0:n-1]`` broadcast reached through inline."""
+        qs = qmc.qubit_array(n, "qs")
+        qs = _symbolic_slice_inner(qs)
+        return qmc.measure(qs)
+
+    @pytest.mark.parametrize("n", [3, 5, 7])
+    def test_symbolic_transpile_and_statevector_match(self, n: int):
+        """``qs[0:n-1]`` covers every qubit except the last across multiple sizes."""
+        expected_sv = _reference_statevector(n, list(range(n - 1)))
+        _assert_cross_backend_matches(self._kern_symbolic, {"n": n}, expected_sv)
+
+    @qmc.qkernel
+    def _kern_nested_slice() -> qmc.Vector[qmc.Bit]:
+        """Slice-of-slice broadcast reached through inline."""
+        qs = qmc.qubit_array(6, "qs")
+        qs = _nested_slice_inner(qs)
+        return qmc.measure(qs)
+
+    def test_nested_slice_transpile_and_statevector_match(self):
+        """``s1 = qs[0:4]; s1[0:2] = h(s1[0:2])`` applies H to qs[0]/qs[1]."""
+        expected_sv = _reference_statevector(6, [0, 1])
+        _assert_cross_backend_matches(self._kern_nested_slice, {}, expected_sv)
+
+    @qmc.qkernel
+    def _kern_multi_slice() -> qmc.Vector[qmc.Bit]:
+        """Two independent slice broadcasts inside the inlined sub-kernel."""
+        qs = qmc.qubit_array(4, "qs")
+        qs = _multi_slice_inner(qs)
+        return qmc.measure(qs)
+
+    def test_multi_slice_transpile_and_statevector_match(self):
+        """Both ``qs[0:2]`` and ``qs[2:4]`` broadcasts survive inlining."""
+        expected_sv = _reference_statevector(4, [0, 1, 2, 3])
+        _assert_cross_backend_matches(self._kern_multi_slice, {}, expected_sv)
+
+    @qmc.qkernel
+    def _kern_slice_and_scalar() -> qmc.Vector[qmc.Bit]:
+        """Slice broadcast plus a scalar element gate inside the sub-kernel."""
+        qs = qmc.qubit_array(3, "qs")
+        qs = _slice_and_scalar_inner(qs)
+        return qmc.measure(qs)
+
+    def test_slice_and_scalar_transpile_and_statevector_match(self):
+        """Mixing slice and scalar element gates in one inlined sub-kernel works."""
+        expected_sv = _reference_statevector(3, [0, 1, 2])
+        _assert_cross_backend_matches(self._kern_slice_and_scalar, {}, expected_sv)
+
+    @qmc.qkernel
+    def _kern_two_level_inline() -> qmc.Vector[qmc.Bit]:
+        """Entry → mid → innermost chain; slice broadcast lives in the innermost."""
+        qs = qmc.qubit_array(3, "qs")
+        qs = _slice_mid_for_two_level(qs)
+        return qmc.measure(qs)
+
+    def test_two_level_inline_transpile_and_statevector_match(self):
+        """Slice metadata survives two levels of inlining."""
+        expected_sv = _reference_statevector(3, [0, 1])
+        _assert_cross_backend_matches(self._kern_two_level_inline, {}, expected_sv)
+
+    @qmc.qkernel
+    def _kern_view_arg_inner_slice(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """Pass ``q[0::2]`` to a sub-kernel that further slices it."""
+        q = qmc.qubit_array(num, "q")
+        evens = q[0::2]
+        evens = _view_arg_slicer(evens)
+        q[0::2] = evens
+        return qmc.measure(q)
+
+    def test_view_arg_inner_slice_transpile_and_statevector_match(self):
+        """Slice chain ``q[0::2][0:2]`` resolves to root qubits q[0] / q[2]."""
+        # num=6: evens = q[0::2] = {q[0], q[2], q[4]}.  The sub-kernel
+        # applies H to view[0:2] = {evens[0], evens[1]} = {q[0], q[2]}.
+        expected_sv = _reference_statevector(6, [0, 2])
+        _assert_cross_backend_matches(
+            self._kern_view_arg_inner_slice, {"num": 6}, expected_sv
+        )
+
+    @qmc.qkernel
+    def _kern_four_level_inline() -> qmc.Vector[qmc.Bit]:
+        """Four-level inline chain (entry → l3 → l2 → l1 → l0) with slice broadcast at the innermost.
+
+        Exercises that ``InlinePass`` rewrites slice metadata
+        consistently across an arbitrary depth of inline calls; the
+        recursive ``substitute_value`` in ``ValueSubstitutor`` is
+        bounded only by the depth of the call / slice graph, so a
+        depth-4 chain that compiles also compiles at any greater
+        depth.
+        """
+        qs = qmc.qubit_array(3, "qs")
+        qs = _deep_chain_l3(qs)
+        return qmc.measure(qs)
+
+    def test_four_level_inline_transpile_and_statevector_match(self):
+        """Slice metadata survives four levels of inlining."""
+        expected_sv = _reference_statevector(3, [0, 1])
+        _assert_cross_backend_matches(self._kern_four_level_inline, {}, expected_sv)
+
+    @qmc.qkernel
+    def _kern_nested_slice_two_level_inline() -> qmc.Vector[qmc.Bit]:
+        """Nested slice (slice-of-slice) reached through two levels of inline."""
+        qs = qmc.qubit_array(6, "qs")
+        qs = _nested_slice_mid(qs)
+        return qmc.measure(qs)
+
+    def test_nested_slice_two_level_inline_transpile_and_statevector_match(self):
+        """Slice-of-slice broadcast through two levels of inlining."""
+        expected_sv = _reference_statevector(6, [0, 1])
+        _assert_cross_backend_matches(
+            self._kern_nested_slice_two_level_inline, {}, expected_sv
+        )
+
+
 class TestTopLevelSliceWithBodyLoop:
     """``evens = q[0::2]; for i ...; q[0::2] = evens``."""
 
