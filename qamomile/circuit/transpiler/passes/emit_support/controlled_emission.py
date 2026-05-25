@@ -316,9 +316,18 @@ def emit_controlled_u_with_index_spec(
             operation="ControlledUOperation",
         )
 
+    # Walk any ``slice_of`` chain on the operand so that a view
+    # (``controlled(x_gate)(q[1::2], target_indices=[1])``) resolves
+    # to the root parent's physical qubits via the composed affine
+    # map ``root_idx = start + step * view_local_idx``.  For a
+    # non-view ArrayValue the helper returns ``(vector_value, 0, 1)``
+    # and the loop body is identical to the pre-view code path.
+    root_av, slice_start, slice_step = emit_pass._resolver.resolve_slice_chain(
+        vector_value, bindings, operation="ControlledUOperation"
+    )
     all_phys_indices = []
     for i in range(vector_size):
-        qubit_addr = QubitAddress(vector_value.uuid, i)
+        qubit_addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
         if qubit_addr in qubit_map:
             all_phys_indices.append(qubit_map[qubit_addr])
         else:
@@ -435,20 +444,54 @@ def emit_controlled_u(
     target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
     param_operands = [v for v in remaining_operands if v.type.is_classical()]
 
-    control_indices = []
+    # Resolve every control and target operand to its physical qubit
+    # index.  Any resolution failure — partial or total — is now a
+    # loud ``EmitError``.  Partial-failure would emit a wrong-arity
+    # controlled gate; total-failure would silently drop the gate
+    # entirely.  Both are silent miscompile vectors and are rejected.
+    #
+    # Historical note: total-failure previously took a silent-return
+    # path because the ``SymbolicControlledU`` → ``ConcreteControlledU``
+    # promotion in ``ConstantFoldingPass`` can produce an inconsistent
+    # operand layout (the control Vector is not expanded to individual
+    # qubits, so ``operands[:num_controls]`` picks up a target Value
+    # rather than each control individually).  That promotion bug is
+    # tracked separately; if it triggers post-this-change, the
+    # ``EmitError`` here surfaces it instead of silently dropping the
+    # gate.
+    control_indices: list[int] = []
     for q in control_operands:
         idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
         if idx is not None:
             control_indices.append(idx)
 
-    target_indices = []
+    target_indices: list[int] = []
     for q in target_qubit_operands:
         idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
         if idx is not None:
             target_indices.append(idx)
 
-    if not control_indices or not target_indices:
-        return
+    if len(control_indices) < len(control_operands):
+        raise EmitError(
+            f"ControlledUOperation: only "
+            f"{len(control_indices)}/{len(control_operands)} control "
+            f"operand(s) could be resolved to physical qubits. "
+            f"Emitting a partial- or zero-arity controlled gate would "
+            f"silently miswire the circuit (or drop it entirely).  "
+            f"This typically indicates broken parent_array / slice "
+            f"metadata on the control operands, or a stale "
+            f"``SymbolicControlledU`` → ``ConcreteControlledU`` "
+            f"promotion in ``ConstantFoldingPass``.",
+            operation="ControlledUOperation",
+        )
+    if len(target_indices) < len(target_qubit_operands):
+        raise EmitError(
+            f"ControlledUOperation: only "
+            f"{len(target_indices)}/{len(target_qubit_operands)} "
+            f"target operand(s) could be resolved to physical qubits.  "
+            f"Same partial- or zero-arity hazard as above.",
+            operation="ControlledUOperation",
+        )
 
     local_bindings = emit_pass._resolver.bind_block_params(
         block_value, param_operands, bindings

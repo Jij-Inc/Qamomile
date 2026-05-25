@@ -20,6 +20,10 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+# Tutorials that require heavy external dependencies or long-running
+# computation and are skipped in CI.
+SKIP_TUTORIALS: set[str] = set()
+
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/ja/tutorial/**/*.py",
@@ -52,6 +56,7 @@ OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
     "qsci": "quri_parts",
     "quri_parts_support": "quri_parts",
+    "hybrid_qnn": "torch",
 }
 
 
@@ -103,6 +108,10 @@ def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypa
     monkeypatch.setenv("QAMOMILE_DOCS_TEST", "1")
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
+
+    test_id = get_test_id(tutorial_file)
+    if test_id in SKIP_TUTORIALS:
+        pytest.skip("Long-running tutorial requiring heavy dependencies, skip in CI")
 
     for stem, module in OPTIONAL_SKIP_MODULES.items():
         if stem in tutorial_file.stem:
