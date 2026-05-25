@@ -1385,9 +1385,14 @@ class RebindViolation:
         func_name (str | None): Name of the function/method invoked on
             the RHS, when the RHS is a ``Call``. ``None`` for direct
             aliases.
-        lineno (int): Source line of the offending assignment, relative
-            to the kernel ``def`` (since the analyzer parses the
-            dedented function source).
+        lineno (int): 1-based source line of the offending assignment,
+            counted from the first statement of the function body
+            (i.e., the first body statement is line 1). The analyzer
+            walks ``ast.parse(textwrap.dedent(inspect.getsource(func)))``
+            so raw ``ast`` line numbers include the decorator / ``def``
+            lines; ``collect_quantum_rebind_violations`` subtracts the
+            ``FunctionDef`` node's ``lineno`` from every violation to
+            produce this body-relative form.
     """
 
     target_name: str
@@ -2173,6 +2178,16 @@ def collect_quantum_rebind_violations(
             analyzer = QuantumRebindAnalyzer(quantum_param_names)
             for stmt in node.body:
                 analyzer.visit(stmt)
+            # Normalize each violation's lineno from "absolute within
+            # the inspect.getsource() snippet" (which counts from the
+            # decorator / def line) to "1-based within the function
+            # body" — the first statement of the body becomes line 1.
+            # Subtracting ``node.lineno`` (the ``def`` line) achieves
+            # this because every body statement's lineno is strictly
+            # greater than the def line.
+            funcdef_lineno = node.lineno
+            for v in analyzer.violations:
+                v.lineno -= funcdef_lineno
             return analyzer.violations
 
     return []

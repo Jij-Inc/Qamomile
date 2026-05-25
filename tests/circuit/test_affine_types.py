@@ -3126,6 +3126,36 @@ class TestQuantumRebindErrorMessageDispatch:
         assert "freshly allocated quantum value" in msg
         assert "Bind the new allocation to a new name" in msg
 
+    def test_message_line_is_body_relative(self):
+        """The ``line N`` in the rendered error message is 1-based
+        relative to the function body (first body statement is line 1),
+        not relative to the ``inspect.getsource`` snippet which would
+        also count the decorator / ``def`` lines."""
+        with pytest.raises(QubitRebindError) as exc:
+
+            @qkernel
+            def bad(q: qm.Qubit) -> qm.Qubit:
+                q = qm.qubit("s")  # body line 1
+                return q
+
+        msg = str(exc.value)
+        # First body statement is line 1; never 3 (snippet line of the
+        # assign for a typical decorator + def + body kernel).
+        assert "at body line 1 " in msg
+        assert "first statement of the function body as line 1" in msg
+
+    def test_message_line_offsets_for_later_body_statements(self):
+        """A violation on the second body statement reports body line 2."""
+        with pytest.raises(QubitRebindError) as exc:
+
+            @qkernel
+            def bad(q: qm.Qubit, r: qm.Qubit) -> qm.Qubit:
+                r = qm.h(r)  # body line 1 — self-update, OK
+                q = qm.qubit("s")  # body line 2 — flagged
+                return q
+
+        assert "at body line 2 " in str(exc.value)
+
     def test_unknown_call_message(self):
         """A call with no quantum args and no recognized constructor
         kind triggers ``UNKNOWN_CALL`` and renders the matching reason

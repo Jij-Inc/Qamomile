@@ -254,7 +254,8 @@ class QKernel(Generic[P, R]):
             pattern, reason, fix = self._format_rebind_violation(v)
             raise QubitRebindError(
                 f"Kernel '{self.name}': forbidden quantum variable reassignment "
-                f"at line {v.lineno} (relative to the function definition): "
+                f"at body line {v.lineno} (counting the first statement of "
+                f"the function body as line 1): "
                 f"'{pattern}' overwrites quantum variable '{v.target_name}' "
                 f"with {reason}.\n\nTo fix:\n{fix}",
                 handle_name=v.target_name,
