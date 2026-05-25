@@ -2781,6 +2781,49 @@ class TestQuantumRebindFreshAllocation:
 
         assert "freshly allocated quantum value" in str(exc.value)
 
+    def test_throwaway_underscore_allowed_for_repeated_allocation(self):
+        """`_ = qubit(...)` may repeat; the underscore is a Python throwaway."""
+
+        @qkernel
+        def ok() -> qm.Bit:
+            _ = qm.qubit("ancilla_a")
+            _ = qm.qubit("ancilla_b")
+            q = qm.qubit("real")
+            q = qm.x(q)
+            return qm.measure(q)
+
+        # Decoration must succeed; build must succeed too (the IR-level
+        # check rightly allows the unused qubits to be allocated).
+        assert ok.build() is not None
+
+    def test_throwaway_underscore_in_tuple_unpack_allowed(self):
+        """``_, real = some_call(...)`` does not flag and does not track ``_``."""
+
+        @qkernel
+        def two_qubits() -> tuple[qm.Qubit, qm.Qubit]:
+            q1 = qm.qubit("q1")
+            q2 = qm.qubit("q2")
+            return q1, q2
+
+        @qkernel
+        def ok() -> qm.Bit:
+            _, real = two_qubits()
+            real = qm.x(real)
+            return qm.measure(real)
+
+        assert ok.build() is not None
+
+    def test_throwaway_underscore_consumes_measure_arg(self):
+        """``_ = qm.measure(q)`` still consumes ``q`` so a later fresh ``q`` is OK."""
+
+        @qkernel
+        def ok(q: qm.Qubit) -> qm.Bit:
+            _ = qm.measure(q)  # consumes q's origin even though LHS is throwaway
+            q = qm.qubit("fresh")
+            return qm.measure(q)
+
+        assert ok.name == "ok"
+
 
 class TestQuantumRebindAnnAssign:
     """Annotated assignment (`q: qm.Qubit = ...`) goes through the same rules."""

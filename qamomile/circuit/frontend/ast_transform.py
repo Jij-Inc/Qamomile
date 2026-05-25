@@ -1588,6 +1588,20 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             value (ast.expr): RHS expression.
             lineno (int): Source line for diagnostic reporting.
         """
+        # Python "throwaway" convention. ``_`` is the universally
+        # recognized name for a binding the user intentionally does not
+        # care about (``_ = qmc.qubit("ancilla")`` to allocate a qubit
+        # without naming it). We do not register ``_`` into
+        # ``quantum_vars`` and do not flag rebinds on it, so back-to-back
+        # ``_ = ...`` assignments are not surfaced as fresh-allocation
+        # violations. RHS consume effects are still propagated for
+        # classical-returning calls so downstream analysis stays
+        # consistent (e.g. ``_ = qm.measure(q)`` still consumes ``q``).
+        if target == "_":
+            if isinstance(value, ast.Call) and self._is_classical_returning_call(value):
+                self._consume_quantum_args(value)
+            return
+
         # Case 1: Name = Name  (direct alias / overwrite)
         if isinstance(value, ast.Name):
             source = value.id
@@ -1765,12 +1779,21 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     )
             if is_constructor:
                 for tgt in target_names:
+                    if tgt == "_":
+                        continue
                     self.quantum_vars[tgt] = tgt
             return
 
         arg_origins = [self.quantum_vars.get(a, a) for a in quantum_args]
 
         for i, tgt in enumerate(target_names):
+            # Python "throwaway" convention. ``_`` positions are
+            # ignored — we do not track them and do not flag rebinds on
+            # them. See the matching skip at the head of
+            # ``_check_single_assign`` for the rationale.
+            if tgt == "_":
+                continue
+
             mapped_source = (
                 quantum_args[i] if i < len(quantum_args) else quantum_args[-1]
             )
