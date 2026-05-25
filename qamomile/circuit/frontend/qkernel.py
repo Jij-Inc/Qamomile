@@ -299,7 +299,12 @@ class QKernel(Generic[P, R]):
         src = v.source_name
         match v.source_kind:
             case RebindSourceKind.DIRECT_ALIAS:
-                assert src is not None
+                if src is None:
+                    raise AssertionError(
+                        f"DIRECT_ALIAS violation for '{target}' has no "
+                        f"source_name; analyzer must set source_name for "
+                        f"this kind"
+                    )
                 pattern = f"{target} = {src}"
                 reason = f"an alias of a different quantum variable '{src}'"
                 fix = (
@@ -307,7 +312,12 @@ class QKernel(Generic[P, R]):
                     f"  - Remove the assignment if '{target}' is no longer needed"
                 )
             case RebindSourceKind.QUANTUM_ARG:
-                assert src is not None
+                if src is None:
+                    raise AssertionError(
+                        f"QUANTUM_ARG violation for '{target}' has no "
+                        f"source_name; analyzer must set source_name for "
+                        f"this kind"
+                    )
                 pattern = (
                     f"{target} = {func}({src}, ...)"
                     if func
@@ -363,9 +373,8 @@ class QKernel(Generic[P, R]):
                 )
             case _:
                 # Defensive: every analyzer-produced source_kind is an
-                # enum member above. Treat any other value as a
-                # programmer-error invariant violation per Section L of
-                # the local-review rubric.
+                # enum member above. ``raise AssertionError`` (not
+                # ``assert``) so the invariant survives ``python -O``.
                 raise AssertionError(f"unhandled RebindSourceKind: {v.source_kind!r}")
         return pattern, reason, fix
 

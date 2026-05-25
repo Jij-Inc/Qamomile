@@ -1493,38 +1493,70 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             self._check_single_assign(node.target.id, node.value, node.lineno)
         self.generic_visit(node)
 
-    def visit_If(self, node: ast.If) -> None:
-        """Visit ``if``/``else`` body with snapshot-restore scoping.
+    def _visit_branch_scope(
+        self,
+        node: ast.If | ast.For | ast.While,
+    ) -> None:
+        """Visit a control-flow node's body / orelse with branch-local scope.
 
-        The analyzer is flow-insensitive: it walks the AST in source
-        order without modeling branching. To prevent a branch-local
-        binding (e.g. ``q = qm.qubit("inner")`` introduced inside an if
-        body) from leaking into the post-``if`` analysis state — which
-        would spuriously flag a later store-only rebind of the same
-        name — each branch is analyzed against a snapshot of
-        ``quantum_vars`` and the snapshot is restored after the branch.
-        Violations detected *inside* the branch are retained, only the
-        binding state changes roll back.
+        Used by :meth:`visit_If`, :meth:`visit_For`, and
+        :meth:`visit_While`. The analyzer is flow-insensitive: it walks
+        the AST in source order without modeling branching. To prevent
+        branch-local effects from leaking out, each branch is analyzed
+        against a snapshot of both ``quantum_vars`` and the current
+        ``violations`` length:
+
+          - ``quantum_vars`` is restored after every branch body so a
+            branch-local binding (e.g. ``q = qm.qubit("inner")`` inside
+            an ``if``) does not leak into post-branch analysis and
+            spuriously flag a later store-only rebind of the same name.
+          - ``violations`` are truncated to their pre-branch length so
+            that legitimate compile-time-if dead-branch patterns
+            (``if flag: ... ; else: alt = qubit_array(...); q = alt``)
+            are not rejected at decoration time. These patterns rely on
+            the compile-time-if lowering pass selecting one branch and
+            discarding the other, and the post-lowering
+            ``affine_validate`` pass is what catches any genuine
+            violation that survives the selected branch. The
+            single-pass AST analyzer cannot tell compile-time-if from
+            runtime-if, so it conservatively defers branch-internal
+            decisions to the IR layer.
+
+        Args:
+            node (ast.If | ast.For | ast.While): The control-flow node.
+                ``body`` and ``orelse`` are each visited with the
+                snapshot-restore protocol.
+        """
+        snapshot_vars = self.quantum_vars.copy()
+        snapshot_violations = len(self.violations)
+        for stmt in node.body:
+            self.visit(stmt)
+        self.quantum_vars = snapshot_vars.copy()
+        del self.violations[snapshot_violations:]
+        for stmt in node.orelse:
+            self.visit(stmt)
+        self.quantum_vars = snapshot_vars
+        del self.violations[snapshot_violations:]
+        # We intentionally do NOT call ``generic_visit`` here: the
+        # children have already been visited in the per-branch loops
+        # above, and falling through would re-visit them and
+        # double-count branch state changes.
+
+    def visit_If(self, node: ast.If) -> None:
+        """Visit ``if``/``else`` body with branch-local scope.
+
+        See :meth:`_visit_branch_scope` for the snapshot-restore
+        protocol applied to ``body`` and ``orelse``.
 
         Args:
             node (ast.If): The ``if`` statement.
         """
-        snapshot = self.quantum_vars.copy()
-        for stmt in node.body:
-            self.visit(stmt)
-        self.quantum_vars = snapshot.copy()
-        for stmt in node.orelse:
-            self.visit(stmt)
-        self.quantum_vars = snapshot
-        # We intentionally do NOT call ``generic_visit`` here: the
-        # children have already been visited in the per-branch loops
-        # above, and falling through would cause double-counting of
-        # any rebind violations inside the body.
+        self._visit_branch_scope(node)
 
     def visit_For(self, node: ast.For) -> None:
-        """Visit a ``for`` loop's body and ``else`` with snapshot-restore scoping.
+        """Visit a ``for`` loop's body and ``else`` with branch-local scope.
 
-        Same rationale as :meth:`visit_If`. The loop target itself is
+        Same protocol as :meth:`visit_If`. The loop target itself is
         not modeled — Qamomile's frontend rewrites ``qmc.range(...)``
         loops via the control-flow transformer, so the iterator
         variable is a classical index and never quantum.
@@ -1532,29 +1564,17 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
         Args:
             node (ast.For): The ``for`` statement.
         """
-        snapshot = self.quantum_vars.copy()
-        for stmt in node.body:
-            self.visit(stmt)
-        self.quantum_vars = snapshot.copy()
-        for stmt in node.orelse:
-            self.visit(stmt)
-        self.quantum_vars = snapshot
+        self._visit_branch_scope(node)
 
     def visit_While(self, node: ast.While) -> None:
-        """Visit a ``while`` loop's body and ``else`` with snapshot-restore scoping.
+        """Visit a ``while`` loop's body and ``else`` with branch-local scope.
 
-        Same rationale as :meth:`visit_If`.
+        Same protocol as :meth:`visit_If`.
 
         Args:
             node (ast.While): The ``while`` statement.
         """
-        snapshot = self.quantum_vars.copy()
-        for stmt in node.body:
-            self.visit(stmt)
-        self.quantum_vars = snapshot.copy()
-        for stmt in node.orelse:
-            self.visit(stmt)
-        self.quantum_vars = snapshot
+        self._visit_branch_scope(node)
 
     # ------------------------------------------------------------------
     # single assignment:  name = expr
@@ -1701,7 +1721,19 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
         if not target_names:
             return
 
-        if isinstance(value, ast.Tuple) and len(value.elts) == len(targets.elts):
+        # Tuple-literal RHS: pair each target with the same-position RHS
+        # element. Only take this path when every LHS target is a plain
+        # ``Name``; if any LHS element is a ``Subscript`` / ``Starred`` /
+        # nested ``Tuple``, ``target_names`` is shorter than
+        # ``targets.elts`` and ``zip(target_names, value.elts)`` would
+        # mis-associate Name targets with RHS positions belonging to the
+        # non-Name targets. Defer mixed shapes to the call path (which
+        # leaves them alone) until a proper target-tree walker is added.
+        if (
+            isinstance(value, ast.Tuple)
+            and len(targets.elts) == len(value.elts)
+            and len(target_names) == len(targets.elts)
+        ):
             self._check_tuple_literal_rhs(target_names, value.elts, lineno)
             return
 
