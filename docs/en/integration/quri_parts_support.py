@@ -79,7 +79,7 @@ plt.show()
 # Because of that, the $1/2$ factor is handled slightly differently in the cost and mixer layers.
 # In the mixer layer, we pass $2\beta$ to `rx`, so the $1/2$ cancels and we get the textbook $e^{-i\beta X}$.
 # In the cost layer, we pass $J_{ij} \cdot \gamma$ to `rzz`, so the $1/2$ remains.
-# This coefficient difference is absorbed into the variational parameter $\gamma$: the $\gamma$ used here is half of the textbook QAOA $\gamma$.
+# This coefficient difference is absorbed into the variational parameter $\gamma$: the $\gamma$ used here is twice the textbook QAOA $\gamma$.
 # :::
 
 # %%

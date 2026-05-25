@@ -79,7 +79,7 @@ plt.show()
 # そのため、$1/2$ 係数の扱いはコスト層とミキサー層で少し異なります。
 # ミキサー層では `rx` に $2\beta$ を渡すので、$1/2$ が打ち消され、教科書通りの $e^{-i\beta X}$ になります。
 # 一方、コスト層では `rzz` に $J_{ij} \cdot \gamma$ を渡すため、$1/2$ は残ります。
-# この係数の違いは変分パラメータ $\gamma$ に吸収しています。つまり、ここで使う $\gamma$ は教科書の QAOA の $\gamma$ の半分に相当します。
+# この係数の違いは変分パラメータ $\gamma$ に吸収しています。つまり、ここで使う $\gamma$ は教科書の QAOA の $\gamma$ の 2 倍に相当します。
 # :::
 
 # %%
@@ -374,7 +374,7 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
 from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
 
-noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)]) # 脱分極ノイズを指定
+noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)])
 noisy_sampler = create_qulacs_noisesimulator_sampler(noise_model)
 noisy_executor = transpiler.executor(sampler=noisy_sampler)
 
