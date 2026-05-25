@@ -17,17 +17,20 @@
 # tags: [algorithm, error-correction]
 # ---
 #
-# # 量子誤り訂正(2): Steane [[7,1,3]] 符号
+# # スタビライザ形式論と Steane 符号
 #
-# [前の記事](quantum_error_correction.ipynb)では、3量子ビット符号と Shor の9量子ビット符号を実装しました。本記事では、より構造がきれいな **Steane [[7,1,3]] 符号** を扱います。
+# [量子誤り訂正入門](quantum_error_correction.ipynb)(前編)では、3量子ビット bit-flip / phase-flip 符号と Shor の9量子ビット符号を作り、最後に「パリティ演算子=スタビライザ」という名前を与えました。
 #
-# Steane 符号は、古典の Hamming [7,4,3] 符号から作る CSS 符号です。7つの物理量子ビットで1つの論理量子ビットを守り、任意の単一量子ビット Pauli エラー($X$, $Y$, $Z$)を訂正できます。
+# 後編では、このスタビライザを形式的に扱います。そして古典の Hamming 符号から系統的に量子符号を作る **CSS 構成** と、その代表例 **Steane 符号** を実装します。Steane 符号は、Shor 符号と同じ $d=3$ を9量子ビットより少ない7量子ビットで実現します。
 #
-# 本記事で実装することは3つです。
+# この記事で扱うこと:
 #
-# 1. Hamming 符号の構造から Steane 符号のスタビライザーを作る。
-# 2. 6つのスタビライザーを測り、シンドロームから単一エラーを訂正する。
-# 3. 物理 $H$ を7つ並べるだけで論理 Hadamard $\bar{H}$ になることを確認する。
+# 1. **スタビライザ形式論** ― スタビライザ、生成子、シンドロームを正式に整理する。
+# 2. **CSS 構成** ― 古典 Hamming 符号から Steane 符号のスタビライザを作る。
+# 3. Steane 符号の符号化・シンドローム測定・訂正を実装する。
+# 4. 7つの物理 Hadamard が論理 Hadamard になることを確かめる。
+#
+# **前提知識**: [前編](quantum_error_correction.ipynb)の内容(シンドローム測定、Pauli エラー、スタビライザという用語)。
 
 # %%
 # 最新のQamomileをpipからインストールします。
@@ -35,41 +38,67 @@
 # # or
 # # !uv add qamomile
 
-# %%
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-
-# Create a seeded backend for reproducible documentation output
-from qiskit_aer import AerSimulator
-
-_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
-_seeded_executor = transpiler.executor(backend=_seeded_backend)
-
-
-def _bits7(outcome) -> list[int]:
-    """Return seven measured bits in qubit-index order."""
-    if isinstance(outcome, (list, tuple)):
-        return list(outcome)
-    return [(outcome >> i) & 1 for i in range(7)]
-
-
-def _is_steane_zero_word(outcome) -> bool:
-    """Return True when the outcome is an even Hamming codeword."""
-    bits = _bits7(outcome)
-    h_checks = [
-        bits[3] ^ bits[4] ^ bits[5] ^ bits[6],
-        bits[1] ^ bits[2] ^ bits[5] ^ bits[6],
-        bits[0] ^ bits[2] ^ bits[4] ^ bits[6],
-    ]
-    return all(check == 0 for check in h_checks) and sum(bits) % 2 == 0
-
+# %% [markdown]
+# ## 1. スタビライザ形式論
+#
+# 前編では、$Z_0Z_1$ や $X_0X_1$ のようなパリティ演算子を **スタビライザ** と呼びました。まずこの言葉を正式に整理します。
 
 # %% [markdown]
-# ## 1. Hamming 符号から CSS 符号へ
+# ### 1.1 スタビライザとは
 #
-# 古典 Hamming [7,4,3] 符号のパリティ検査行列を次のように取ります。
+# **スタビライザ** とは、符号空間のすべての状態を変えない Pauli 演算子 $S$ のことです。任意の符号語 $\lvert\psi\rangle$ に対して
+#
+# $$S\lvert\psi\rangle = \lvert\psi\rangle$$
+#
+# が成り立ちます。「符号空間とは、スタビライザの固有値 $+1$ の固有空間である」と言い換えられます。
+#
+# たとえば bit-flip 符号の符号語は $\lvert000\rangle$ と $\lvert111\rangle$ です。$Z_0Z_1$ をかけると、$Z_0Z_1\lvert000\rangle=\lvert000\rangle$、$Z_0Z_1\lvert111\rangle=(-1)(-1)\lvert111\rangle=\lvert111\rangle$ となり、どちらも変わりません。だから $Z_0Z_1$ は bit-flip 符号のスタビライザです。
+
+# %% [markdown]
+# ### 1.2 生成子とシンドローム
+#
+# 1つの符号にはたくさんのスタビライザがありますが、すべてを並べる必要はありません。いくつかの **生成子(generator)** を選べば、残りはその積で得られます。bit-flip 符号なら $Z_0Z_1$ と $Z_0Z_2$ の2つが生成子です。
+#
+# スタビライザ生成子を測定すると、結果は固有値 $+1$ か $-1$ になります。
+#
+# - エラーがなければ、状態は符号空間にあり、すべての生成子が $+1$ を返します。
+# - エラー $E$ が入ると、$E$ と **反交換する** 生成子の測定値が $-1$ に変わります。
+#
+# この $\pm1$(ビットで表せば $0/1$)のパターンが **シンドローム** です。前編で補助量子ビットに取り出していた値は、まさにスタビライザ生成子の測定結果でした。どの生成子が $-1$ になったかを見れば、エラーの位置と種類が分かります。
+
+# %% [markdown]
+# ### 1.3 前編の符号をスタビライザで見る
+#
+# 前編の3つの符号は、すべてスタビライザ生成子で記述できます。
+#
+# | 符号 | スタビライザ生成子 |
+# | --- | --- |
+# | 3量子ビット bit-flip | $Z_0Z_1,\ Z_0Z_2$ |
+# | 3量子ビット phase-flip | $X_0X_1,\ X_0X_2$ |
+# | Shor 9量子ビット | $Z_0Z_1,\ Z_0Z_2,\ Z_3Z_4,\ Z_3Z_5,\ Z_6Z_7,\ Z_6Z_8,\ X_0X_1X_2X_3X_4X_5,\ X_3X_4X_5X_6X_7X_8$ |
+#
+# bit-flip 符号は $Z$ 型の生成子だけ、phase-flip 符号は $X$ 型の生成子だけを持ちます。Shor 符号は両方を持ち、$Z$ 型が $X$ エラーを、$X$ 型が $Z$ エラーを検出します。この「$X$ 型と $Z$ 型を別々に持つ」構造が、次節の CSS 構成につながります。
+
+# %% [markdown]
+# ### 1.4 $[[n,k,d]]$ と符号距離
+#
+# スタビライザ符号は $[[n,k,d]]$ という3つの数で特徴づけられます。
+#
+# - $n$:物理量子ビット数。
+# - $k$:守る論理量子ビット数。生成子1つにつき自由度が1つ減るので、$k = n - (\text{生成子の数})$ です。
+# - $d$:**符号距離**。スタビライザすべてと交換するが、それ自身はスタビライザでない Pauli 演算子 ― これを **論理演算子** と呼びます ― のうち、最小の重み(かかる量子ビット数)です。
+#
+# 距離 $d$ の符号は $\lfloor(d-1)/2\rfloor$ 個までのエラーを訂正できます。任意の単一量子ビットエラーを訂正するには $d\ge3$ が必要です。前編の3量子ビット符号は $d=1$、Shor 符号は $d=3$ でした。これから作る Steane 符号は $[[7,1,3]]$ です。
+
+# %% [markdown]
+# ## 2. 古典 Hamming 符号から CSS 符号へ
+#
+# **CSS 符号(Calderbank-Shor-Steane 符号)** は、古典の誤り訂正符号から量子符号を系統的に作る方法です。Steane 符号はその代表例で、古典の Hamming 符号をもとにします。
+
+# %% [markdown]
+# ### 2.1 古典 Hamming [7,4,3] 符号
+#
+# 古典の Hamming [7,4,3] 符号は、7ビットで4ビットの情報を守り、1ビットの誤りを訂正できる古典符号です。この符号は **パリティ検査行列** $H$ で定義されます。
 #
 # $$
 # H =
@@ -80,16 +109,31 @@ def _is_steane_zero_word(outcome) -> bool:
 # \end{pmatrix}
 # $$
 #
-# 列 $j$ は $j+1$ の2進表現です。そのため、3ビットのシンドロームを読むだけで、どのビットに誤りが起きたかが一意に分かります。
+# 7ビットの語 $c$ が符号語であることは、$Hc=0$(各行とのパリティがすべて偶数)と同値です。
+
+# %% [markdown]
+# ### 2.2 列が誤り位置を指す仕掛け
 #
-# CSS 符号では、同じパリティ検査行列から2種類のスタビライザーを作ります。
+# $H$ の列をよく見ると、第 $j$ 列は数 $j+1$ の2進表現になっています(第0列は $001$、第1列は $010$、…、第6列は $111$)。
 #
-# - $Z$ 型スタビライザー: $X$ エラーを検出する。
-# - $X$ 型スタビライザー: $Z$ エラーを検出する。
+# 1ビットの誤りが位置 $j$ に入ると、$Hc$ はちょうど第 $j$ 列に等しくなります。つまり $Hc$ の3ビットを2進数として読めば、それがそのまま誤りの位置を指します。古典 Hamming 符号は、この仕掛けで誤り位置を一発で特定します。
+
+# %% [markdown]
+# ### 2.3 CSS 構成:$X$ 型と $Z$ 型のスタビライザ
 #
-# Steane 符号の生成子は次の6つです。
+# CSS 構成は、このパリティ検査行列 $H$ から2種類のスタビライザを作ります。
 #
-# | 種類 | スタビライザー | 検出するエラー |
+# - **$Z$ 型スタビライザ**:$H$ の各行を、$1$ の立つ位置に $Z$ を置いた演算子に読み替える。$X$ エラーを検出する。
+# - **$X$ 型スタビライザ**:同じ各行を、$X$ を置いた演算子に読み替える。$Z$ エラーを検出する。
+#
+# $X$ エラーは $Z$ 型スタビライザと反交換し、$Z$ エラーは $X$ 型スタビライザと反交換します。だから $Z$ 型で $X$ エラーの位置を、$X$ 型で $Z$ エラーの位置を、それぞれ古典 Hamming 符号と同じやり方で特定できます。前編の Shor 符号で見た「$X$ と $Z$ を独立に直す」が、ここでは古典符号から自動的に出てきます。
+
+# %% [markdown]
+# ### 2.4 Steane 符号の6つの生成子
+#
+# Hamming 行列 $H$ の3つの行から、$Z$ 型・$X$ 型それぞれ3つ、合わせて6つのスタビライザ生成子が得られます。
+#
+# | 型 | スタビライザ | 検出するエラー |
 # | --- | --- | --- |
 # | $X$ 型 | $X_3X_4X_5X_6$ | $Z$ |
 # | $X$ 型 | $X_1X_2X_5X_6$ | $Z$ |
@@ -97,39 +141,85 @@ def _is_steane_zero_word(outcome) -> bool:
 # | $Z$ 型 | $Z_3Z_4Z_5Z_6$ | $X$ |
 # | $Z$ 型 | $Z_1Z_2Z_5Z_6$ | $X$ |
 # | $Z$ 型 | $Z_0Z_2Z_4Z_6$ | $X$ |
+#
+# 物理量子ビット7個、生成子6個なので、守れる論理量子ビットは $7-6=1$ 個。これが Steane $[[7,1,3]]$ 符号です。
 
 # %% [markdown]
-# ## 2. $\lvert0_L\rangle$ のエンコード
+# 実装に入る前に、Qamomile と Qiskit バックエンドを読み込み、補助関数を用意します。`_bits7` / `_passes_hamming_checks` / `_is_steane_zero_word` は、測定結果が Hamming 符号語や $\lvert0_L\rangle$ の符号語かを判定するユーティリティです。QEC の本筋ではないので、読み飛ばして構いません。
+
+# %%
+import qamomile.circuit as qmc
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+
+# ドキュメントの出力を再現可能にするため、シード付きのバックエンドを用意します。
+from qiskit_aer import AerSimulator
+
+_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
+_seeded_executor = transpiler.executor(backend=_seeded_backend)
+
+
+def _bits7(outcome) -> list[int]:
+    """測定結果を、量子ビット番号順の7ビットのリストで返す。"""
+    if isinstance(outcome, (list, tuple)):
+        return list(outcome)
+    return [(outcome >> i) & 1 for i in range(7)]
+
+
+def _passes_hamming_checks(outcome) -> bool:
+    """測定結果が Hamming [7,4,3] 符号語(3つのパリティ検査をすべて満たす)かを返す。"""
+    bits = _bits7(outcome)
+    h_checks = [
+        bits[3] ^ bits[4] ^ bits[5] ^ bits[6],
+        bits[1] ^ bits[2] ^ bits[5] ^ bits[6],
+        bits[0] ^ bits[2] ^ bits[4] ^ bits[6],
+    ]
+    return all(check == 0 for check in h_checks)
+
+
+def _is_steane_zero_word(outcome) -> bool:
+    """測定結果が |0_L> の符号語(偶数重みの Hamming 符号語)かを返す。"""
+    return _passes_hamming_checks(outcome) and sum(_bits7(outcome)) % 2 == 0
+
+
+# %% [markdown]
+# ## 3. 論理 $\lvert0_L\rangle$ の符号化
 #
-# Steane 符号の $\lvert0_L\rangle$ は、偶重みの Hamming 符号語8個の重ね合わせです。
+# ### 3.1 論理ゼロは偶数重み Hamming 符号語の重ね合わせ
 #
-# $$
-# \lvert0_L\rangle =
-# \frac{1}{2\sqrt{2}}
-# \sum_{c \in C,\; w(c)\ {\rm even}} \lvert c\rangle
-# $$
+# Steane 符号の論理 $\lvert0_L\rangle$ は、重みが偶数の Hamming 符号語をすべて足し合わせた重ね合わせです。
 #
-# 次の回路では、3つの $X$ 型スタビライザーに対応するパターンを順に作り、$\lvert0\rangle^{\otimes 7}$ から $\lvert0_L\rangle$ を準備します。
+# $$\lvert0_L\rangle = \frac{1}{2\sqrt2}\sum_{c\in C,\ w(c)\,\text{は偶数}} \lvert c\rangle$$
+#
+# ここで $C$ は Hamming 符号語の集合、$w(c)$ はその重みです。偶数重みの Hamming 符号語は8個あるので、8項の重ね合わせになります。
+
+# %% [markdown]
+# ### 3.2 符号化回路
+#
+# 次の回路は、$\lvert0\rangle^{\otimes7}$ から $\lvert0_L\rangle$ を作ります。3つの $X$ 型スタビライザのパターン($X_3X_4X_5X_6$、$X_1X_2X_5X_6$、$X_0X_2X_4X_6$)を、Hadamard と CNOT で順に書き込みます。
 
 
 # %%
 @qmc.qkernel
 def encode_steane_zero(data: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    # X3 X4 X5 X6 のパターンを書き込む。
     data[3] = qmc.h(data[3])
     data[3], data[4] = qmc.cx(data[3], data[4])
     data[3], data[5] = qmc.cx(data[3], data[5])
     data[3], data[6] = qmc.cx(data[3], data[6])
 
+    # X1 X2 X5 X6 のパターンを書き込む。
     data[1] = qmc.h(data[1])
     data[1], data[2] = qmc.cx(data[1], data[2])
     data[1], data[5] = qmc.cx(data[1], data[5])
     data[1], data[6] = qmc.cx(data[1], data[6])
 
+    # X0 X2 X4 X6 のパターンを書き込む。
     data[0] = qmc.h(data[0])
     data[0], data[2] = qmc.cx(data[0], data[2])
     data[0], data[4] = qmc.cx(data[0], data[4])
     data[0], data[6] = qmc.cx(data[0], data[6])
-
     return data
 
 
@@ -142,28 +232,37 @@ def encode_zero_and_measure() -> qmc.Vector[qmc.Bit]:
 
 
 # %% [markdown]
-# エンコーダを測定して、出てくるビット列が偶重み Hamming 符号語だけになっているか確認します。
+# ### 3.3 符号化の確認
+#
+# 符号化器の出力を測定し、観測されるビット列がすべて偶数重みの Hamming 符号語($\lvert0_L\rangle$ の符号語)になっているかを確かめます。
 
 # %%
-print("|0_L⟩ をエンコードして測定")
+print("Encode and measure |0_L>")
 exe = transpiler.transpile(encode_zero_and_measure)
 result = exe.sample(_seeded_executor, shots=1024).result()
-valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
 total = sum(count for _, count in result.results)
-print(f"  偶重み Hamming 符号語の割合: {valid / total:.3f}")
-print(f"  観測された符号語数: {len(result.results)}")
+valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
+print(f"  |0_L> codeword ratio: {valid / total:.3f}")
+print(f"  distinct codewords observed: {len(result.results)}")
 
 # %% [markdown]
-# ## 3. シンドローム測定と訂正
+# ## 4. シンドローム測定と訂正
 #
-# Steane 符号では $X$ エラーと $Z$ エラーを別々に扱えます。
+# ### 4.1 $X$ と $Z$ を独立にデコードする
 #
-# - $Z$ 型スタビライザーを測ると、$X$ 成分のシンドロームが得られる。
-# - $X$ 型スタビライザーを測ると、$Z$ 成分のシンドロームが得られる。
+# CSS 符号の利点は、$X$ エラーと $Z$ エラーを完全に独立に扱えることです。
 #
-# シンドローム表は Hamming 符号の列そのものです。
+# - $Z$ 型スタビライザを測ると、$X$ エラーのシンドロームが得られる。
+# - $X$ 型スタビライザを測ると、$Z$ エラーのシンドロームが得られる。
 #
-# | 誤り位置 | シンドローム $(s_2,s_1,s_0)$ |
+# それぞれ3ビットのシンドロームで、2.2 で見た Hamming 行列の列の仕掛けがそのまま使えます。
+
+# %% [markdown]
+# ### 4.2 シンドローム表
+#
+# 3ビットのシンドローム $(s_2,s_1,s_0)$ は、エラーの位置をそのまま2進数で表します。
+#
+# | エラー位置 | シンドローム $(s_2,s_1,s_0)$ |
 # | --- | --- |
 # | なし | $(0,0,0)$ |
 # | $q_0$ | $(0,0,1)$ |
@@ -174,7 +273,12 @@ print(f"  観測された符号語数: {len(result.results)}")
 # | $q_5$ | $(1,1,0)$ |
 # | $q_6$ | $(1,1,1)$ |
 #
-# 実装では `error_type` を `1=X`, `2=Y`, `3=Z` として渡します。`error_pos` は `0..6` の物理量子ビット位置です。
+# $Z$ 型スタビライザから得た $(s_2,s_1,s_0)$ は $X$ エラーの位置を、$X$ 型から得たものは $Z$ エラーの位置を指します。
+
+# %% [markdown]
+# ### 4.3 実装
+#
+# `error_type` は `1=X`、`2=Y`、`3=Z`、`error_pos` はエラーを入れる量子ビット番号 `0..6` です。
 
 
 # %%
@@ -183,20 +287,23 @@ def steane_run(
     error_type: qmc.UInt,
     error_pos: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
+    # データ用に7量子ビット、シンドローム測定用に補助量子ビットを6つ確保する。
     data = qmc.qubit_array(7, name="data")
     anc = qmc.qubit_array(6, name="anc")
 
+    # |0_L> に符号化する。
     data = encode_steane_zero(data)
 
+    # error_type / error_pos で指定した X / Y / Z エラーを注入する。
     for i in qmc.range(7):
-        if (error_type == 1) & (error_pos == i):  # 1 means X error.
+        if (error_type == 1) & (error_pos == i):  # 1: X エラー
             data[i] = qmc.x(data[i])
-        if (error_type == 2) & (error_pos == i):  # 2 means Y error.
+        if (error_type == 2) & (error_pos == i):  # 2: Y エラー
             data[i] = qmc.y(data[i])
-        if (error_type == 3) & (error_pos == i):  # 3 means Z error.
+        if (error_type == 3) & (error_pos == i):  # 3: Z エラー
             data[i] = qmc.z(data[i])
 
-    # Z-type stabilizers: detect the X component.
+    # Z 型スタビライザ: X エラーのシンドローム (sx_2, sx_1, sx_0) を測る。
     data[3], anc[0] = qmc.cx(data[3], anc[0])
     data[4], anc[0] = qmc.cx(data[4], anc[0])
     data[5], anc[0] = qmc.cx(data[5], anc[0])
@@ -215,7 +322,7 @@ def steane_run(
     data[6], anc[2] = qmc.cx(data[6], anc[2])
     sx_0 = qmc.measure(anc[2])
 
-    # X-type stabilizers: detect the Z component.
+    # X 型スタビライザ: Z エラーのシンドローム (sz_2, sz_1, sz_0) を測る。
     anc[3] = qmc.h(anc[3])
     anc[3], data[3] = qmc.cx(anc[3], data[3])
     anc[3], data[4] = qmc.cx(anc[3], data[4])
@@ -240,6 +347,7 @@ def steane_run(
     anc[5] = qmc.h(anc[5])
     sz_0 = qmc.measure(anc[5])
 
+    # X 成分の訂正: シンドローム (sx_2, sx_1, sx_0) が指す位置に X をかける。
     if (~sx_2) & (~sx_1) & sx_0:
         data[0] = qmc.x(data[0])
     if (~sx_2) & sx_1 & (~sx_0):
@@ -255,6 +363,7 @@ def steane_run(
     if sx_2 & sx_1 & sx_0:
         data[6] = qmc.x(data[6])
 
+    # Z 成分の訂正: シンドローム (sz_2, sz_1, sz_0) が指す位置に Z をかける。
     if (~sz_2) & (~sz_1) & sz_0:
         data[0] = qmc.z(data[0])
     if (~sz_2) & sz_1 & (~sz_0):
@@ -274,13 +383,14 @@ def steane_run(
 
 
 # %% [markdown]
-# $X$, $Y$, $Z$ の全単一エラー、つまり 21 通りを実行します。訂正後に測定したビット列がすべて $\lvert0_L\rangle$ の符号語であれば成功です。
+# ### 4.4 検証:21通りの単一エラー
+#
+# $X$、$Y$、$Z$ を7つの量子ビットそれぞれに入れた、計21通りの単一エラーを試します。訂正後、測定されるビット列はすべて $\lvert0_L\rangle$ の符号語に戻るはずです。
 
 # %%
-print("Steane 符号: X/Y/Z × 7 位置の単一エラーを訂正")
-print(f"  {'誤り':4s} | {'位置':5s} | |0_L⟩ 符号語")
-print(f"  {'-' * 4}-+-{'-' * 5}-+-{'-' * 12}")
-
+print("Steane code: correct X/Y/Z on all 7 locations")
+print(f"  {'err':4s} | {'pos':5s} | |0_L> codeword")
+print(f"  {'-' * 4}-+-{'-' * 5}-+-{'-' * 14}")
 for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]:
     for pos in range(7):
         exe = transpiler.transpile(
@@ -288,102 +398,103 @@ for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]:
             bindings={"error_type": error_type, "error_pos": pos},
         )
         result = exe.sample(_seeded_executor, shots=128).result()
+        total = sum(count for _, count in result.results)
         valid = sum(
             count for outcome, count in result.results if _is_steane_zero_word(outcome)
         )
-        total = sum(count for _, count in result.results)
         print(f"  {name:4s} | q[{pos}]  | {valid / total:.3f}")
 
 # %% [markdown]
-# すべて 1.000 になれば、どの位置の $X$, $Y$, $Z$ エラーでも $\lvert0_L\rangle$ の符号空間へ戻せています。$Y=iXZ$ なので、$Y$ エラーでは $X$ 成分と $Z$ 成分の両方が検出され、両方の訂正が入ります。
+# 比率が 1.000 なら、その単一 Pauli エラーに対して状態が $\lvert0_L\rangle$ の符号空間に戻ったことを意味します。$Y=iXZ$ のエラーは $X$ 成分と $Z$ 成分の訂正の両方を引き起こしますが、CSS 符号ではこの2つが独立なので、そのまま訂正できます。
 
 # %% [markdown]
-# ## 4. 横断的 Hadamard
+# ## 5. Transversal な Hadamard ゲート
 #
-# Steane 符号の重要な性質として、論理 Hadamard $\bar{H}$ を物理 Hadamard 7個で実装できます。
+# ### 5.1 transversal ゲートとは
 #
-# $$
-# \bar{H} = H^{\otimes 7}
-# $$
+# 論理量子ビットに論理ゲートをかけるとき、各物理量子ビットに **それぞれ独立に** 物理ゲートをかけるだけで済む場合、そのゲートを **transversal(横断的)** と言います。
 #
-# これは $X$ 型と $Z$ 型のスタビライザーが同じ Hamming パターンを持つためです。各物理量子ビットに独立にゲートを当てるだけなので、1つの物理ゲートの失敗が複数量子ビットへ広がりにくく、フォールトトレラント計算で重要です。
+# transversal なゲートはフォールトトレラント量子計算で重要です。物理ゲートが互いに独立なので、1つの物理ゲートが故障しても、その誤りが1ブロック内の複数の量子ビットに広がりません。
+#
+# Steane 符号の大きな特徴は、論理 Hadamard $\bar H$ が transversal なことです。7つの物理量子ビットそれぞれに $H$ をかけるだけで、論理 Hadamard になります。
+#
+# $$\bar H = H^{\otimes 7}$$
+#
+# これは、Steane 符号の $X$ 型と $Z$ 型のスタビライザが同じ Hamming パターンを持つ ― CSS 構成で同じ行列 $H$ を使った ― ことの帰結です。
+
+# %% [markdown]
+# ### 5.2 論理 Hadamard を確かめる
+#
+# $\bar H = H^{\otimes7}$ であることを、2つの性質で確かめます。
+#
+# **性質1: $\bar H$ は $\lvert0_L\rangle$ を $\lvert+_L\rangle$ に移す。**
+# $\lvert+_L\rangle$ は $\lvert0_L\rangle$ と $\lvert1_L\rangle$ の重ね合わせです。$\lvert0_L\rangle$ が偶数重みの Hamming 符号語からなるのに対し、$\lvert1_L\rangle$ は奇数重みの Hamming 符号語からなります。したがって $\lvert+_L\rangle$ を測ると、偶数・奇数いずれの重みの Hamming 符号語も現れます($\lvert0_L\rangle$ なら偶数重みのみ)。
 
 
 # %%
 @qmc.qkernel
-def transversal_hadamard_to_plus_l() -> qmc.Vector[qmc.Bit]:
+def transversal_h_to_plus() -> qmc.Vector[qmc.Bit]:
     data = qmc.qubit_array(7, name="data")
     data = encode_steane_zero(data)
-
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
-
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
-
+    # transversal Hadamard を1回かける: |0_L> -> |+_L>。
+    data = qmc.h(data)
     return qmc.measure(data)
 
 
+# %%
+print("Transversal H: |0_L> -> |+_L>")
+exe = transpiler.transpile(transversal_h_to_plus)
+result = exe.sample(_seeded_executor, shots=1024).result()
+total = sum(count for _, count in result.results)
+hamming = sum(
+    count for outcome, count in result.results if _passes_hamming_checks(outcome)
+)
+odd = sum(count for outcome, count in result.results if sum(_bits7(outcome)) % 2 == 1)
+print(f"  Hamming codeword ratio: {hamming / total:.3f}")
+print(f"  odd-weight (|1_L>) fraction: {odd / total:.3f}")
+
+# %% [markdown]
+# Hamming 符号語の比率は 1.000 で、奇数重みの符号語も約半分現れます。偶数重みしか出ない $\lvert0_L\rangle$ とは異なる ― 状態が $\lvert+_L\rangle$ に移っていることが確認できます。
+#
+# **性質2: $\bar H$ を2回かけると恒等変換に戻る($\bar H^2 = I$)。**
+# $\lvert0_L\rangle$ に $H^{\otimes7}$ を2回かけると、$\lvert0_L\rangle$ に戻るはずです。
+
+
+# %%
 @qmc.qkernel
-def transversal_hadamard_round_trip() -> qmc.Vector[qmc.Bit]:
+def transversal_h_round_trip() -> qmc.Vector[qmc.Bit]:
     data = qmc.qubit_array(7, name="data")
     data = encode_steane_zero(data)
-
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
-    for i in qmc.range(7):
-        data[i] = qmc.h(data[i])
-
+    # transversal Hadamard を2回かける: H^2 = I なので |0_L> に戻る。
+    data = qmc.h(data)
+    data = qmc.h(data)
     return qmc.measure(data)
 
 
-def _logical_x_parity(outcome) -> int:
-    """Return the measured parity for logical X = X0 X1 X2."""
-    bits = _bits7(outcome)
-    return (bits[0] + bits[1] + bits[2]) % 2
-
-
-# %% [markdown]
-# まず、$\bar{H}\lvert0_L\rangle=\lvert+_L\rangle$ になっていることを確認します。$\lvert+_L\rangle$ は論理 $X$ の +1 固有状態なので、$X$ 基底で測ると $q_0 \oplus q_1 \oplus q_2 = 0$ になります。
-
 # %%
-print("横断的 H: |0_L⟩ -> |+_L⟩")
-exe_plus = transpiler.transpile(transversal_hadamard_to_plus_l)
-result_plus = exe_plus.sample(_seeded_executor, shots=1024).result()
-parity_zero = sum(
-    count for outcome, count in result_plus.results if _logical_x_parity(outcome) == 0
-)
-total_plus = sum(count for _, count in result_plus.results)
-print(f"  q[0]⊕q[1]⊕q[2] = 0 の割合: {parity_zero / total_plus:.3f}")
+print("Transversal H round trip: |0_L> -> H -> H -> |0_L>")
+exe = transpiler.transpile(transversal_h_round_trip)
+result = exe.sample(_seeded_executor, shots=1024).result()
+total = sum(count for _, count in result.results)
+valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
+print(f"  |0_L> codeword ratio: {valid / total:.3f}")
 
 # %% [markdown]
-# 次に、横断的 $H$ を2回当てると $\bar{H}^2=I$ なので $\lvert0_L\rangle$ に戻ることを確認します。
-
-# %%
-print("横断的 H の round trip: |0_L⟩ -> H -> H -> |0_L⟩")
-exe_round_trip = transpiler.transpile(transversal_hadamard_round_trip)
-result_round_trip = exe_round_trip.sample(_seeded_executor, shots=1024).result()
-valid = sum(
-    count
-    for outcome, count in result_round_trip.results
-    if _is_steane_zero_word(outcome)
-)
-total = sum(count for _, count in result_round_trip.results)
-print(f"  |0_L⟩ 符号語の割合: {valid / total:.3f}")
+# 比率は 1.000 ― 2回の transversal Hadamard で $\lvert0_L\rangle$ に戻りました。7つの物理 $H$ が、確かに論理 $\bar H$ として働いています。
 
 # %% [markdown]
-# ## 5. まとめ
+# ## 6. まとめ
 #
-# 本記事では Steane [[7,1,3]] 符号を実装しました。
+# この記事では、スタビライザ形式論と Steane $[[7,1,3]]$ 符号を扱いました。
 #
-# - Hamming [7,4,3] 符号から、3つの $X$ 型スタビライザーと3つの $Z$ 型スタビライザーを作った。
-# - $Z$ 型スタビライザーで $X$ 成分を、$X$ 型スタビライザーで $Z$ 成分を検出した。
-# - 21 通りの単一 Pauli エラー($X/Y/Z \times 7$ 位置)を訂正できることを確認した。
-# - 物理 $H$ 7個が論理 Hadamard $\bar{H}$ として働くことを確認した。
+# - **スタビライザ形式論** ― 符号空間を Pauli 演算子(スタビライザ)の $+1$ 固有空間として捉え、生成子の測定値としてシンドロームを定義した。
+# - **CSS 構成** ― 古典 Hamming [7,4,3] 符号のパリティ検査行列から、$X$ 型と $Z$ 型のスタビライザを作った。
+# - **Steane 符号** ― $\lvert0_L\rangle$ の符号化、6つのスタビライザによるシンドローム測定、21通りの単一 Pauli エラーの訂正を実装した。
+# - **transversal な Hadamard** ― 7つの物理 $H$ が論理 $\bar H$ になることを確かめた。
 #
-# Steane 符号は Shor 符号より少ない物理量子ビットで同じ距離 $d=3$ を持ち、CSS 符号と横断的 Clifford ゲートの基本例になっています。
+# Steane 符号は、Shor 符号と同じ $d=3$ を9量子ビットより少ない7量子ビットで実現し、CSS 構成と transversal な Clifford ゲートのきれいな例になっています。
 #
-# ### 次へ
+# ### その先
 #
-# - [量子誤り訂正(1)](quantum_error_correction.ipynb) — 3量子ビット bit-flip / phase-flip / Shor 符号
-# - 表面符号 — 2D 格子上のローカルなスタビライザーと繰り返しシンドローム測定
+# - **表面符号(surface code)** ― スタビライザを2次元格子上の局所的な演算子にした符号。現在の超伝導量子コンピュータでの誤り訂正の主役で、シンドローム測定を繰り返し行う点が新しい。
+# - **フォールトトレラント量子計算** ― 符号化したまま論理ゲートを実行し、誤りを増幅させずに計算を進める枠組み。transversal なゲートはその出発点です。

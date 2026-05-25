@@ -1,203 +1,273 @@
 ---
 name: generate_release_note
-description: 前バージョンタグから現在のmainまでの変更をもとに，QamomileのEN/JAリリースノート(`docs/{en,ja}/release_notes/v<X_Y_Z>.md`)を作成する。構成順・スニペット検証・リンク規約・関連ファイル更新を定義。
+description: Generate Qamomile's EN/JA release notes (`docs/{en,ja}/release_notes/v<X_Y_Z>.md`) from the diff between the previous version tag and current main. Defines the section order, snippet verification, link conventions, and the related-file updates.
 ---
 
-# リリースノート生成スキル
+# Release Note Generation Skill
 
-`docs/en/release_notes/v<X_Y_Z>.md`と`docs/ja/release_notes/v<X_Y_Z>.md`を作成し，関連する目次ファイルも更新する。引数で前バージョンタグと新バージョンを受け取る（例: `/generate_release_note v0.11.1 v0.12.0`）。新バージョンが省略された場合は`pyproject.toml`等から推測して確認する。
+Create `docs/en/release_notes/v<X_Y_Z>.md` and `docs/ja/release_notes/v<X_Y_Z>.md`, and update the related index files. The skill takes the previous version tag and the new version as arguments (e.g. `/generate_release_note v0.11.1 v0.12.0`). If the new version is omitted, infer it from `pyproject.toml` etc. and confirm with the user.
 
-## ワークフロー
+## Workflow
 
-### Phase 1: 変更の収集
+### Phase 1: Gather changes
 
-1. `git tag --list | sort -V`で既存タグを確認し，前バージョンタグを特定
-2. `git log <prev_tag>..HEAD --oneline --no-merges | wc -l`でコミット規模を把握
-3. `git log <prev_tag>..HEAD --oneline --merges`でマージされたPR一覧を取得
-4. `git diff <prev_tag>..HEAD --stat | tail -50`で大きく変わったファイル群を確認
-5. `git log <prev_tag>..HEAD --diff-filter=A --name-only --format= | sort -u`で新規追加ファイルを抽出
-6. 既存リリースノート(`docs/en/release_notes/v<最新>.md`)を読み，スタイル(言い回し，1行ブラブ，`pip install`，セクション構成)を確認
+1. List existing tags with `git tag --list | sort -V` and identify the previous version tag.
+2. Get a rough sense of the commit volume with `git log <prev_tag>..HEAD --oneline --no-merges | wc -l`.
+3. Get the list of merged PRs with `git log <prev_tag>..HEAD --oneline --merges`.
+4. Spot the files that changed substantially with `git diff <prev_tag>..HEAD --stat | tail -50`.
+5. Extract newly added files with `git log <prev_tag>..HEAD --diff-filter=A --name-only --format= | sort -u`.
+6. Read the most recent release note (`docs/en/release_notes/v<latest>.md`) to absorb the existing style (phrasing, one-line blurb, `pip install`, section layout).
 
-### Phase 2: 変更の分類
+### Phase 2: Classify changes
 
-各変更をユーザー視点で以下のカテゴリに分類する。**コミットメッセージのprefix(feat/fix等)に依存せず**，実際にユーザーが触る面が変わるかで判断する。
+Classify each change from the **user's** point of view. **Do NOT rely on commit-message prefixes (`feat`/`fix` etc.)** — decide by whether the user-facing surface actually changes.
 
-| カテゴリ | 判定基準 |
+| Category | Criterion |
 |---|---|
-| **破壊的変更** | 公開importパスの削除/移動，シグネチャ変更，挙動の互換性破壊。privateにムーブされた場合(`qamomile.optimization.utils` → `qamomile._utils`)も含む |
-| **新機能** | ユーザーが直接呼び出す新しい公開API・新モジュール |
-| **内部的な変更** | コンパイラ・フロントエンドの新しい能力。それ自体が公開APIの拡張(新パラメータ型，新パス等) |
-| **バグ修正** | ユーザー視点で挙動が変わる修正(可視化の見た目，性能など) |
-| **ドキュメント** | 新チュートリアル，新VQA，indexページの変更 |
-| **DX/Tooling** | CI，lint設定，AGENTS.md等。**書かない**ことも多い(ユーザーに見えないため) |
+| **Breaking Changes** | Public import path removed/moved, signature changed, behaviour-compatibility broken. Including moves to private (e.g. `qamomile.optimization.utils` → `qamomile._utils`). |
+| **New Features** | New public API or module the user calls directly. |
+| **Internal Changes** | New compiler / frontend capabilities that are themselves a public-API extension (new parameter types, new passes, etc.). |
+| **Bug Fixes** | Fixes that change user-visible behaviour (visualization rendering, performance, etc.). |
+| **Documentation** | New tutorials, new VQAs, index-page changes. |
+| **DX / Tooling** | CI, lint config, AGENTS.md, etc. **Often omitted** because the user doesn't see it. |
 
-### Phase 3: 構成順(必須)
+### Phase 3: Section order (mandatory)
 
-セクションは**この順番**で並べる。
+The sections must appear in **this order**:
 
 ````markdown
 # Qamomile vX.Y.Z
 
-<1段落の概要 — このリリースの「大きな話」を1〜2文で>
+<one-paragraph overview — the "big story" of this release in 1–2 sentences>
 
 ```
 pip install qamomile==X.Y.Z
 ```
 
-## Breaking Changes        # 1. 破壊的変更(あれば)
-## New Features            # 2. 新機能(目玉から順)
-## Internal Changes        # 3. 内部的な変更
-## Bug Fixes               # 4. バグ修正
-## Documentation           # 5. ドキュメント
-## Learn More              # 6. リンク
+## Breaking Changes        # 1. breaking changes (if any)
+## New Features            # 2. new features (headline first)
+## Internal Changes        # 3. internal changes
+## Bug Fixes               # 4. bug fixes
+## Documentation           # 5. documentation
+## Learn More              # 6. links
 ````
 
-破壊的変更がない場合は`## Breaking Changes`セクション自体を省略する。`## DX / Tooling`を出すかは判断 — 大抵は出さない。
+If there are no breaking changes, drop the `## Breaking Changes` section entirely. Whether to surface `## DX / Tooling` is a judgement call — usually skip it.
 
-### Phase 4: セクション執筆ルール
+### Phase 4: Per-section writing rules
+
+#### The overview paragraph
+
+**Write strictly from the user's point of view: what the user can now do.** Anything the user doesn't directly touch belongs in the body sections, not the overview.
+
+- Name only the public APIs / features the user actually calls.
+- **Avoid enumerations**: at most "one API name + one or two representative examples" per feature. Do not list feature catalogues like `q[1::2]`, `q[lo:hi]`, nested views, slice-bounded composite gates, ... in the overview.
+- **No internal-implementation vocabulary**: keep IR primitive names, compiler-pass names, new exception-class hierarchies, "affine types", supported-SDK enumerations, etc. out of the overview.
+- **Compress internal updates the user doesn't touch into a single sentence**: e.g., "There are also internal IR updates that lay the groundwork for treating a compiled `@qkernel` as a portable subgraph of an outer DSL's computation graph." Component names like canonical form, content hash, param_slots, JSON/msgpack serialization belong in the body (`## Internal Changes`), not the overview.
+- The overview should land in **3–5 sentences / 5–8 lines**. If it grows beyond that, suspect enumeration or leaked implementation vocabulary.
+
+**Why**: the overview is read by people who want to know what this release means for their code in three seconds. Anyone who wants details reads the body. Stuffing component names into the overview makes the release look like internal-only churn and buries the headline feature.
+
+#### Shared phrasing rules
+
+Rules that apply throughout the body.
+
+- **For class relationships, only state the parent-subclass relationship**. Do not write same-level "sibling" relationships like "`Foo` is a sibling of `Bar`" or its Japanese equivalent "`Foo`は`Bar`の兄弟例外". Saying "subclass of `AffineTypeError`" / "`AffineTypeError`のサブクラス" is enough. "兄弟例外" reads unnaturally in Japanese anyway.
+- **Avoid "deliberately" / "意図的に"** when stating that a feature is unsupported. Say "not supported" / "サポートしていません" without the modifier. There is almost no case where the meaning changes if you omit "deliberately".
+- **No references to non-public internal discussions or design meetings**: do not write "(2026-05-16 IR-design discussion)" or "(internal RFC #42)" or any reference to artefacts outside the public repo. Release notes are written **strictly from the diff between the previous version tag and the latest main plus public PRs / issues / code**. When writing the `**Why**:` paragraph, ground the motivation in facts visible in the code (e.g., "this kernel needs this IR node").
+- **Do not literally translate English metaphors like "sibling", "twin", or "umbrella"**. Describe the relationship in plain technical terms ("parent class", "the same kind of", "bundled", ...).
+- **Avoid the "X participates in the Y system" / "Xは Y システムに参加する" pattern**. It's vague jargon. Either state the concrete consequence (e.g., "raises `QubitConsumedError` when ...") or drop the sentence entirely.
+- **Avoid "previously" / "これまで" framing when the feature is brand-new**. If the slicing didn't exist in v0.12.2, you can't say "previously these errors slipped silently" — there was no "previously". Just describe what the new pass / check does.
+- **Avoid jargon coinages**. Examples: "shot job" / "ショットジョブ" → "at execution time" / "実行時に"; "classical (non-quantum) kernel argument" / "古典(非量子)カーネル引数" → "classical kernel argument" / "古典的な値の引数". Redundant parenthetical clarifications like "(non-quantum)" / "(非量子)" usually signal the writer over-explaining a term that's already clear in context.
+- **Cut implementation-detail prose the user can't act on**. Sentences about which internal helper resolves what, which subsystem participates in which protocol, etc., belong in code comments or design docs — not in a release note. If removing the sentence does not change what the user knows about the public API surface, remove it.
+- **Use the canonical product brand name in prose, not the Python class spelling**: `Qiskit`, `QURI Parts` (with a space), `CUDA-Q`, `qBraid` — match how each vendor styles its own product. The Python symbols (`QuriPartsTranspiler`, `CudaqTranspiler`, `qamomile.quri_parts`, ...) are PascalCase / snake_case for language reasons and stay as-is **only inside code spans or backticks**. Outside backticks (prose, headings, the index.md summary), use the brand spelling. Confirm against the most recent release note (`docs/en/release_notes/v<latest>.md`) and `docs/{en,ja}/index.md` before introducing a new occurrence.
+
+#### `## Breaking Changes`
+
+Restrict this section to changes the user can detect from **their own code**: removed / moved public imports, signature changes, behaviour-compatibility breaks, new exception types raised on existing code paths.
+
+**Documentation renames / renumbering are NOT breaking changes** — users don't import URLs. A tutorial file rename only affects external bookmarks (a docs / SEO concern). Cover it in `## Documentation`, not here. The same applies to renamed sections in articles, changed sidebar slugs, etc.
 
 #### `## New Features`
 
-各機能ごとに `### <機能名>` で見出しを付け，以下を含める:
+Use `### <feature name>` for each feature heading and include:
 
-1. **1〜2段落の説明** — 何ができるか，どう動くかをユーザー視点で。最後にPRリンクをまとめる（必ず`[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)`形式でリンク化する。プレーンな`(#NNN)`は不可 — 詳細はPhase 6参照）
-2. **使用例コード** — Phase 5で検証済みのもののみ
-3. **期待される出力** — `print`系の出力がある場合は ` ```text` ブロックで，実際の出力に**完全一致**するもの
-4. **チュートリアルへの導線** — 該当チュートリアルがあれば末尾に「See [Tutorial NN](...)」
+1. **A one- or two-paragraph description** — what the user can now do and how it works, from the user's point of view. Cluster PR links at the end (always render as `[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)` — plain `(#NNN)` is forbidden, see Phase 6).
+2. **A code example** — only snippets verified by Phase 5.
+3. **Expected output** — if the snippet calls `print(...)`, include a ` ```text` block whose content matches the actual output **exactly**.
+4. **A tutorial pointer** — if there is a corresponding tutorial, end with `See [Tutorial NN](...)`. **Do not append a parenthetical enumerating subtopics already covered by the linked tutorial** (e.g. `See [Tutorial 03 — Vector Slicing](...) for the walk-through (broadcast shorthand, nested views, helper-kernel passing, ...)` — drop the parenthetical). The reader who follows the link will see the table of contents anyway.
 
 #### `## Internal Changes`
 
-セクション冒頭に，これらの内部的な変更が**何のためのものか**を1段落で書く。例:
+Open the section with a one-paragraph statement of **what these internal changes are for**. Example:
 
 > The Trotter feature above is built on three new compiler/frontend capabilities. They are independently usable, but their direct motivation is making `trotterized_time_evolution` expressible as natural Python.
 
-各変更ごとに `### <変更名>` で見出しを付け，以下を含める:
+Then use `### <change name>` for each change and include:
 
-1. **仕様の説明** — 何が変わったか，何ができるようになったか
-2. **使用例コード** — Phase 5で検証済みのもの
-3. **`**Why**:` 段落** — なぜこの変更を行ったか
-   - メイン機能(目玉)を支えるための変更なら，その機能を引用してWhyに書く
-   - **独立した変更ならそれと明記する**(無理に主機能と結びつけない — 例: 「**Unlike the items above, this is not part of the X feature**」)
-   - 「ifサポートを強化したから boolも自然な完成形になった」のように，**設計思想**としてWhyを書くこともある(機能Aのために機能Bを「必要としている」とは限らない)
+1. **A specification** — what changed, what is now possible.
+2. **A code example** — verified per Phase 5.
+3. **A `**Why**:` paragraph** — why the change was made.
+   - If the change supports a headline feature, cite that feature in the Why.
+   - **If the change is independent, say so explicitly** (don't force a connection to the headline — e.g. "**Unlike the items above, this is not part of the X feature**").
+   - The Why can also be a **design-philosophy** statement (e.g. "strengthening `if` support naturally completed `bool` handling") — feature A doesn't always strictly "need" feature B.
 
 #### `## Bug Fixes`
 
-箇条書き。1つ1つは1〜2文。**個別の可視化修正を全部列挙しない** — 「visualization polish:」のように束ねる。
+Bullet list. One or two sentences each. **Do not enumerate every individual visualizer fix** — bundle them under a single entry like "visualization polish:".
 
 #### `## Documentation`
 
-新チュートリアル，新VQA，index更新。各エントリは1行で，**チュートリアル名はリンクテキスト**にする。EN版では「in EN and JA」と書かない(EN文書がJAに言及する必要はない)。
+New tutorials, new VQAs, index updates. One line per entry, with the **tutorial name as the link text**. In the EN version, don't write things like "in EN and JA" (the EN doc has no business referencing JA).
 
-### Phase 5: スニペット検証(必須)
+### Phase 5: Snippet verification (mandatory)
 
-リリースノート内の**全ての**コード例は以下を満たすこと:
+**Every** code example in the release note must satisfy:
 
-1. `QiskitTranspiler().transpile(kernel, bindings=...)` が成功する
-2. `executable.sample(transpiler.executor(), shots=...).result()` が値を返す
+1. `QiskitTranspiler().transpile(kernel, bindings=...)` succeeds.
+2. `executable.sample(transpiler.executor(), shots=...).result()` returns a value.
 
-検証手順:
+Verification procedure:
 
 ```bash
-# /tmp配下に検証スクリプトを書く(リポジトリには残さない)
+# Write the verification script under /tmp (do not commit it)
 cat > /tmp/verify_release_snippets.py <<'EOF'
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
-# ... 各スニペットをそのままコピーして実行
+# ... paste each snippet verbatim and run it
 EOF
 uv run python /tmp/verify_release_snippets.py
 ```
 
-エラーが出たら**スニペット側を修正**する(機能側のバグでない限り)。修正後にmdへ反映。
+If a snippet errors, **fix the snippet** (unless the underlying feature is genuinely buggy). Then reflect the fix back into the md.
 
-#### よくある落とし穴
+#### Common pitfalls
 
-| 症状 | 原因 | 対処 |
+| Symptom | Cause | Fix |
 |---|---|---|
-| `EntrypointValidationError: ... quantum inputs/outputs` | quantum I/Oカーネルを直接`transpile()`に渡している | 外側にclassical I/Oのエントリポイントを書く(`qmc.qubit_array(...)`で確保→`qmc.measure()`で返す) |
-| `AffineTypeError: Cannot return a value to 'q[0]' that was not borrowed` | `q[0] = my_kernel(q[0], ...)`という配列代入。アフィン型システムがユーザーカーネル経由のborrowを追えない | 単一qubitなら`qmc.qubit(name="q")` + `q = my_kernel(q, ...)`，配列なら`q = my_kernel(q, ...)`で全体を渡す |
-| `MultipleQuantumSegmentsError: Found N quantum segments` | `parameters=[...]`で量子値の経路が分裂 | 全スカラーを`bindings`にまとめて渡す。**ランタイムパラメータを使わない** |
-| `Line N: only the 'if' branch has a 'return' statement` | `@qkernel`内で`if`に`return`，後続コードに別の`return` | 全分岐に`return`を置くか，**末尾に1つだけ`return`を置く**(`if/else`構造に書き換え) |
-| 出力が文書と食い違う | `Hamiltonian.terms`のreprは`(Z0, Z1)`であり`(Z(0), Z(1))`ではない等，実際のreprを確認していない | 検証スクリプトの出力をコピペでmdに貼る |
+| `EntrypointValidationError: ... quantum inputs/outputs` | A kernel with quantum I/O is passed directly to `transpile()`. | Wrap it in an outer entry-point kernel with classical I/O (`qmc.qubit_array(...)` for allocation, `qmc.measure()` for return). |
+| `AffineTypeError: Cannot return a value to 'q[0]' that was not borrowed` | Array assignment like `q[0] = my_kernel(q[0], ...)`. The affine type system cannot trace borrows that flow through a user kernel. | For single qubits use `qmc.qubit(name="q")` + `q = my_kernel(q, ...)`. For arrays pass the whole register: `q = my_kernel(q, ...)`. |
+| `MultipleQuantumSegmentsError: Found N quantum segments` | `parameters=[...]` splits the quantum value's flow. | Put every scalar into `bindings`. **Do not use runtime parameters here**. |
+| `Line N: only the 'if' branch has a 'return' statement` | A `return` inside an `if` plus another `return` after the `if` in a `@qkernel`. | Put a `return` in every branch, or **keep exactly one `return` at the end** (refactor into `if/else`). |
+| Output disagrees with the doc | The actual `repr` wasn't checked. For example `Hamiltonian.terms` renders as `(Z0, Z1)`, not `(Z(0), Z(1))`. | Paste the verifier script's actual output into the md. |
 
-#### mdに含めるもの・含めないもの
+#### What goes in the md vs. what does not
 
-- ✅ 含める: カーネル定義，`transpile()`呼び出し
-- ❌ 含めない: `executable.sample(...)`等の実行行(検証用なので非掲載)
+- ✅ Include: kernel definition, the `transpile()` call.
+- ❌ Exclude: execution lines like `executable.sample(...)` (verification-only, not displayed).
 
-### Phase 6: リンク規約
+### Phase 5b: Cross-check technical claims against code (mandatory)
 
-| 種類 | 形式 |
+Snippet execution only catches "works / doesn't work". The **factual claims in the prose** — pass names, class names, counts, subclass relationships, raised exception types, supported arguments, preconditions — must be cross-checked against the code separately.
+
+**Do not quote PR-description prose verbatim**:
+
+- PR-description prose often contains pass / class names that were **renamed or deleted during review** (e.g., `SliceLinearityCheckPass` ended up as `SliceBorrowCheckPass`).
+- Counts like "N raise sites" or "three new passes" may also be stale relative to the merged code.
+- Treat PR prose as draft text. Before it lands in a release note, `grep` for the corresponding code (class definition / `__all__` / `__init__.py` / actual `raise` line) and confirm.
+
+**What to cross-check against what**:
+
+| Claim type | Cross-check against |
 |---|---|
-| PR参照 | `[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)` — **必ずリンク化**。プレーンな`(#NNN)`は使わない |
-| チュートリアル/最適化/VQAノートリンク | `https://github.com/Jij-Inc/Qamomile/blob/v<X.Y.Z>/docs/en/<section>/<file>.ipynb` 形式 — **リリースタグ付きGitHub blob URL**。`<section>`は`tutorial` / `optimization` / `vqa`など。ReadTheDocsホスト型URLや相対パスは使わない |
-| GitHubリポジトリ | `https://github.com/Jij-Inc/Qamomile` |
+| Class / function / module names | `grep`/`rg` for the same-named definition under `qamomile/` |
+| Public API path (`qamomile.foo.bar`) | `__all__` / re-export in `qamomile/foo/__init__.py` |
+| Subclass relationship (`X is a subclass of Y`) | Read `class X(Y):` directly |
+| Raised exception type | `grep` `raise <ExceptionName>` near the claim site |
+| Counts ("N raise sites") | Measure with `grep -c` |
+| Pipeline order / stages | Read the body of `Transpiler.transpile()` |
+| Expected `print(...)` output in examples | Actually run it once and paste the output (overlaps with Phase 5) |
 
-`Learn More` / `さらに詳しく` セクションに Tutorials トップへのリンクは入れない — RTD ホストのサイドバー目次に常時表示されるため冗長になる。
+**Automated cross-check via the codex skill (recommended)**:
 
-タグ`v<X.Y.Z>`はリリース前なので一時的に404するが，リリース時に解決する旨を理解しておく。
+Hand each subsection of the finished md to codex and ask it to compare the claims with the code. Report format: `file:line + claim + what the code says + severity (P0/P1/P2/P3)`.
 
-### Phase 7: 関連ファイル更新(EN)
+```bash
+codex exec --skip-git-repo-check --sandbox read-only --color never \
+  "Verify the technical claims in docs/en/release_notes/v<X_Y_Z>.md against the code..." \
+  < /dev/null
+```
 
-1. `docs/en/myst.yml`の`release_notes`セクションの`children`の**先頭**に追加:
+**Iterate**: when codex reports findings, fix the prose and re-run with `codex exec resume --last --skip-git-repo-check "Applied the fixes; please re-verify." < /dev/null`. Loop **until codex returns zero findings** (P3 is a judgement call; P2 and above must be fixed).
+
+> **Note**: `codex exec resume` does **not** accept the `--color` flag (only `codex exec` does). Omit `--color` on resume.
+
+### Phase 6: Link conventions
+
+| Kind | Format |
+|---|---|
+| PR reference | `[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)` — **always render as a link**. Plain `(#NNN)` is forbidden. |
+| Tutorial / optimization / VQA notebook link | `https://github.com/Jij-Inc/Qamomile/blob/v<X.Y.Z>/docs/en/<section>/<file>.ipynb` — **GitHub blob URL with the release tag**. `<section>` is `tutorial` / `optimization` / `vqa` etc. Do not use the ReadTheDocs-hosted URLs or relative paths. |
+| GitHub repository | `https://github.com/Jij-Inc/Qamomile` |
+
+Do not put a link to the Tutorials top page in the `Learn More` / `さらに詳しく` section — it's always visible in the RTD-hosted sidebar TOC, so the link is redundant.
+
+The `v<X.Y.Z>` tag will 404 momentarily before release; understand that it resolves when the release lands.
+
+### Phase 7: Related-file updates (EN)
+
+1. Add the new release note at the **top** of the `release_notes` section's `children` in `docs/en/myst.yml`:
    ```yaml
        - title: Release Notes
          file: release_notes/index.md
          children:
-           - file: release_notes/v<X_Y_Z>.md   # 新規追加
-           - file: release_notes/v<前>.md
+           - file: release_notes/v<X_Y_Z>.md   # newly added
+           - file: release_notes/v<previous>.md
            ...
    ```
-2. `docs/en/release_notes/index.md`の**先頭**に1行追加:
+2. Prepend one line to `docs/en/release_notes/index.md`:
    ```markdown
-   - [v<X.Y.Z>](v<X_Y_Z>) — <1行サマリー: 主要機能を3つ程度，バッククォート使用OK>
+   - [v<X.Y.Z>](v<X_Y_Z>) — <one-line summary: roughly three key features; backticks OK>
    ```
 
-### Phase 8: 日本語版作成
+   **Scope of the index.md summary**: list **only user-facing frontend changes** (new public APIs, breaking changes the user has to act on). Skip internal IR / compiler primitives, new tutorials, and other documentation additions — those are detailed in the body of the release note, not in the per-version one-liner. The reader scanning the index wants to know "what does this release add to my code", not "what work happened internally". A typical v0.12.3-style entry mentions roughly three user-touchable items and stops.
 
-`/translate`スキルのルール(`.claude/skills/translate/SKILL.md`)に従って訳す。リリースノート固有の追加ルール:
+### Phase 8: Japanese version
 
-#### 翻訳ルール(リリースノート版)
+Follow the rules in the `/translate` skill (`.claude/skills/translate/SKILL.md`). Release-note-specific additions:
 
-- **見出し**:
+#### Translation rules (release-note edition)
+
+- **Headings**:
   - `Breaking Changes` → 破壊的変更
   - `New Features` → 新機能
   - `Internal Changes` → 内部的な変更
   - `Bug Fixes` → バグ修正
   - `Documentation` → ドキュメント
   - `Learn More` → さらに詳しく
-- **`**Why**:`** はそのまま英語ラベルで残す(構造的なマーカーのため)
-- **チュートリアル名**は日本語に訳す:
+- **`**Why**:`** stays as the English label (it's a structural marker).
+- **Tutorial names** are translated to Japanese:
   - `Tutorial 07 — Hamiltonian Simulation` → `チュートリアル07 — ハミルトニアンシミュレーション`
-- **チュートリアルリンク**は`docs/en/...`を`docs/ja/...`に変更:
+- **Tutorial links** swap `docs/en/...` for `docs/ja/...`:
   - `.../blob/v0.12.0/docs/en/tutorial/07_xxx.ipynb` → `.../blob/v0.12.0/docs/ja/tutorial/07_xxx.ipynb`
-- **コード内コメント**は日本語に訳す。**コード本体は変更しない**
-- **日本語と英数字の間にスペースを入れない**(translate skill ルール2)
-- **広く認知されている技術用語は英語のまま**(`@qkernel`, `Hamiltonian`, `Vector[Observable]`, `pauli_evolve`, `Suzuki–Trotter`等)
+- **In-code comments** are translated to Japanese. **The code itself does not change.**
+- **No space between Japanese characters and digits / ASCII** (translate-skill rule 2).
+- **Widely-known technical terms stay in English** (`@qkernel`, `Hamiltonian`, `Vector[Observable]`, `pauli_evolve`, `Suzuki–Trotter`, etc.).
 
-#### JAファイル更新
+#### JA file updates
 
-1. `docs/ja/release_notes/v<X_Y_Z>.md`を作成
-2. `docs/ja/myst.yml`の`release_notes` `children`先頭に追加
-3. `docs/ja/release_notes/index.md`先頭に1行追加(リンクサマリーも日本語化)
+1. Create `docs/ja/release_notes/v<X_Y_Z>.md`.
+2. Add it to the top of `release_notes` `children` in `docs/ja/myst.yml`.
+3. Prepend one line to `docs/ja/release_notes/index.md` (translate the summary too).
 
-## チェックリスト
+## Checklist
 
-最終確認:
+Final pass:
 
-- [ ] EN/JA両方の`v<X_Y_Z>.md`を作成
-- [ ] **全コード例**が`transpile()` + `sample()`で成功(`/tmp/verify_*.py`で確認済み)
-- [ ] mdには`transpile()`まで掲載，`sample()`は非掲載
-- [ ] PR番号が**全て**リンク化されている
-- [ ] チュートリアルリンクがGitHub blob URL + 正しいリリースタグ
-- [ ] EN本文に「in EN and JA」のような表現なし
-- [ ] 内部的な変更ごとに`**Why**:`段落あり
-- [ ] 独立した内部変更には「not part of <主機能> feature」と明記
-- [ ] EN/JA myst.ymlのtoc更新
-- [ ] EN/JA release_notes/index.md先頭に1行追加
-- [ ] JAは日英間にスペースなし
-- [ ] JAのチュートリアル名が日本語に訳されている
-- [ ] JAのチュートリアルリンクが`docs/ja/...`を指している
+- [ ] Both `v<X_Y_Z>.md` (EN and JA) created.
+- [ ] **Every code example** succeeds via `transpile()` + `sample()` (verified through `/tmp/verify_*.py`).
+- [ ] The md shows up to `transpile()`; `sample()` is hidden.
+- [ ] **Every** PR number is rendered as a link.
+- [ ] Tutorial links use a GitHub blob URL with the correct release tag.
+- [ ] No "in EN and JA" phrasing in the EN body.
+- [ ] Each internal-change entry has a `**Why**:` paragraph.
+- [ ] Independent internal changes carry a "not part of <headline feature>" note.
+- [ ] EN/JA `myst.yml` toc updated.
+- [ ] One-line entry prepended to EN/JA `release_notes/index.md`.
+- [ ] JA has no spaces between Japanese and ASCII characters.
+- [ ] JA tutorial names are translated to Japanese.
+- [ ] JA tutorial links point at `docs/ja/...`.
 
-## 構成例(参考)
+## Reference example
 
-直近の例として[docs/en/release_notes/v0_12_0.md](../../../docs/en/release_notes/v0_12_0.md)を参照。Trotter機能を主軸に，それを支えるinternal changes(self-recursive `@qkernel`，`Vector[Observable]`，`bool`)，それと独立した変更(MLIR pretty-printer)を区別して書いている。
+For a recent example see [docs/en/release_notes/v0_12_0.md](../../../docs/en/release_notes/v0_12_0.md). It centers the Trotter feature and separates the internal changes that support it (self-recursive `@qkernel`, `Vector[Observable]`, `bool`) from independent changes (the MLIR pretty-printer).

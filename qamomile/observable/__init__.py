@@ -1,4 +1,4 @@
-from .hamiltonian import Hamiltonian, Pauli, PauliOperator, X, Y, Z
+from .hamiltonian import Hamiltonian, Pauli, PauliOperator, X, Y, Z, commutator
 
 __all__ = [
     "Hamiltonian",
@@ -7,4 +7,5 @@ __all__ = [
     "X",
     "Y",
     "Z",
+    "commutator",
 ]

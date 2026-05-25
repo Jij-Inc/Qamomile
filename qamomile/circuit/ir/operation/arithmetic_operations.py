@@ -55,6 +55,7 @@ class BinOpKind(enum.Enum):
     DIV = enum.auto()
     FLOORDIV = enum.auto()
     POW = enum.auto()
+    MIN = enum.auto()
 
 
 @dataclasses.dataclass

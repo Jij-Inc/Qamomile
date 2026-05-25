@@ -31,6 +31,7 @@ from .state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
+    computational_basis_state,
 )
 from .trotter import trotterized_time_evolution
 
@@ -60,6 +61,7 @@ __all__ = [
     "fqaoa_layers",
     "fqaoa_state",
     # State preparation
+    "computational_basis_state",
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",

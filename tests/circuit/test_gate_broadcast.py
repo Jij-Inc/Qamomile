@@ -19,6 +19,7 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.transpiler.errors import QubitConsumedError
 
 # ---------------------------------------------------------------------------
 # IR-shape assertions (no backend required)
@@ -572,3 +573,138 @@ class TestBroadcastInputValidation:
         """Calling ``rx`` with a non-Qubit target raises TypeError."""
         with pytest.raises(TypeError, match="Expected Qubit or Vector"):
             qmc.rx("not a qubit", 0.5)  # type: ignore[arg-type]
+
+
+class TestBroadcastConsumesVectorHandle:
+    """Broadcast over ``Vector[Qubit]`` consumes the Vector handle.
+
+    Single-qubit gates already consume their input ``Qubit`` handle, so
+    ``qmc.h(q)`` without re-assignment makes ``q`` unusable on the next
+    call. The Vector broadcast path must give the same guarantee: writing
+    ``qmc.h(qs)`` and dropping the return value must mark ``qs`` consumed,
+    so any subsequent use of ``qs`` raises ``QubitConsumedError`` rather
+    than silently emitting another loop. Without this contract, the affine
+    type rule (every quantum handle used at most once) is enforced for
+    scalars but quietly bypassed for Vectors.
+
+    Note: ``@qmc.qkernel`` decoration is lazy — tracing only runs on
+    ``.block`` access. Tests therefore force ``.block`` inside
+    ``pytest.raises`` so the consume violation actually surfaces.
+    """
+
+    @pytest.mark.parametrize(
+        "gate",
+        [qmc.h, qmc.x, qmc.y, qmc.z, qmc.s, qmc.sdg, qmc.t, qmc.tdg],
+        ids=["h", "x", "y", "z", "s", "sdg", "t", "tdg"],
+    )
+    def test_non_parametric_broadcast_consumes_when_return_dropped(self, gate):
+        """Dropping the broadcast return value makes the next use of the Vector raise.
+
+        Builds a kernel that calls a non-parametric gate broadcast without
+        re-assigning the result, then tries to ``measure`` the same Vector.
+        The measurement must trip ``QubitConsumedError`` at tracing time.
+        """
+
+        @qmc.qkernel
+        def _bad() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            gate(qs)  # return value intentionally dropped
+            return qmc.measure(qs)
+
+        with pytest.raises(QubitConsumedError):
+            _bad.block  # force tracing
+
+    @pytest.mark.parametrize(
+        "gate",
+        [qmc.rx, qmc.ry, qmc.rz, qmc.p],
+        ids=["rx", "ry", "rz", "p"],
+    )
+    def test_parametric_broadcast_consumes_when_return_dropped(self, gate):
+        """Same contract as the non-parametric case, for rotation/phase gates."""
+
+        @qmc.qkernel
+        def _bad() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            gate(qs, 0.5)  # return value intentionally dropped
+            return qmc.measure(qs)
+
+        with pytest.raises(QubitConsumedError):
+            _bad.block
+
+    def test_broadcast_then_broadcast_without_reassign_raises(self):
+        """Two consecutive broadcasts both dropping the return raise on the second.
+
+        Ensures the failure point is the second broadcast call itself, not
+        a downstream measure — so users get the diagnostic at the line
+        where the affine rule was violated, even when no measurement
+        follows.
+        """
+
+        @qmc.qkernel
+        def _bad() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qmc.h(qs)  # qs consumed
+            qmc.x(qs)  # raises: qs already consumed
+            return qmc.measure(qs)
+
+        with pytest.raises(QubitConsumedError):
+            _bad.block
+
+    def test_broadcast_reassign_pattern_compiles_cleanly(self):
+        """The canonical ``qs = qmc.gate(qs)`` pattern remains valid for every gate.
+
+        Sanity check that the new consume contract does not regress the
+        common reassign idiom: every gate type chains through a single
+        kernel, lowers to one ``ForOperation`` per call in source order,
+        and each loop body contains exactly one ``GateOperation`` of the
+        matching gate kind (no spurious or reordered ops introduced by
+        the consume-at-start refactor).
+        """
+
+        @qmc.qkernel
+        def _good() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs = qmc.h(qs)
+            qs = qmc.x(qs)
+            qs = qmc.y(qs)
+            qs = qmc.z(qs)
+            qs = qmc.s(qs)
+            qs = qmc.sdg(qs)
+            qs = qmc.t(qs)
+            qs = qmc.tdg(qs)
+            qs = qmc.rx(qs, 0.3)
+            qs = qmc.ry(qs, 0.4)
+            qs = qmc.rz(qs, 0.5)
+            qs = qmc.p(qs, 0.6)
+            return qmc.measure(qs)
+
+        assert _good.block is not None
+        fors = [op for op in _good.block.operations if isinstance(op, ForOperation)]
+        # 12 broadcast gate calls → 12 ForOperations in source order
+        # (one per gate); ``measure`` lowers to a single
+        # ``MeasureVectorOperation``, not a ``ForOperation``.
+        expected_gate_types = [
+            GateOperationType.H,
+            GateOperationType.X,
+            GateOperationType.Y,
+            GateOperationType.Z,
+            GateOperationType.S,
+            GateOperationType.SDG,
+            GateOperationType.T,
+            GateOperationType.TDG,
+            GateOperationType.RX,
+            GateOperationType.RY,
+            GateOperationType.RZ,
+            GateOperationType.P,
+        ]
+        assert len(fors) == len(expected_gate_types)
+        for for_op, expected in zip(fors, expected_gate_types):
+            gate_ops = [op for op in for_op.operations if isinstance(op, GateOperation)]
+            assert len(gate_ops) == 1, (
+                f"Expected one gate inside the {expected.name} broadcast loop, "
+                f"got {len(gate_ops)}"
+            )
+            assert gate_ops[0].gate_type is expected, (
+                f"Expected {expected.name} inside its broadcast loop, "
+                f"got {gate_ops[0].gate_type.name}"
+            )
