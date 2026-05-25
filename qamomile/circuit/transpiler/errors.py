@@ -355,7 +355,36 @@ class QubitRebindError(AffineTypeError):
 
     When a quantum variable is reassigned, the RHS must consume the
     same variable (self-update pattern). Reassigning from a different
-    quantum variable silently discards the original quantum state.
+    quantum variable would silently discard the original quantum state.
+
+    The check runs at qkernel decoration time as a static AST analysis
+    (see ``qamomile.circuit.frontend.ast_transform.collect_quantum_rebind_violations``)
+    and raises immediately — the wrapped ``QKernel`` object is never
+    constructed when a violation is present. The check is run
+    unconditionally for every decorated kernel: kernel-level quantum
+    parameters (``Qubit`` / ``Vector[Qubit]``) seed origins from the
+    signature, and the analyzer's recognition of internal quantum
+    constructors (``qubit(...)`` / ``qubit_array(...)``) seeds further
+    origins from inside the body so kernels that derive all of their
+    quantum state from internal allocations are also covered.
+
+    Branch-internal rebinds (assignments inside an ``if`` / ``for`` /
+    ``while`` body) are NOT flagged at decoration time: compile-time
+    conditional branches legitimately rebind quantum names (the
+    compile-time-if lowering pass selects one branch and discards the
+    other), and the single-pass AST analyzer cannot distinguish
+    compile-time from runtime branches. To keep those compile-time
+    patterns working, branch-internal violations are suppressed.
+
+    This is a known coverage gap. ``AffineValidationPass`` in the IR
+    layer only enforces "consumed at most once" and does NOT detect
+    "never consumed" / "silent discard" patterns, so a genuine runtime
+    ``if cond: q = qm.qubit("fresh")`` that discards a parameter is
+    currently not raised by either layer. A dedicated IR-level
+    silent-discard pass (or a flow-sensitive frontend analyzer) would
+    be needed to close it; this is tracked as follow-up. Top-level
+    (non-branch-internal) bypasses continue to raise at decoration
+    time.
 
     Example of incorrect code:
         a = qm.h(b)  # ERROR: 'a' was quantum, now overwritten from 'b'
