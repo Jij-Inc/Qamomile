@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import keyword
 import linecache
@@ -12,6 +13,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Sequence,
     Union,
     cast,
     get_args,
@@ -30,7 +32,10 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import QubitAliasError
+from qamomile.circuit.transpiler.errors import (
+    QubitAliasError,
+    QubitBorrowConflictError,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -114,6 +119,40 @@ def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
 # stays consistent with the collision guard automatically — there is no
 # second list to keep in sync.
 _RESERVED_WRAPPER_NAMES: frozenset[str] = frozenset(_wrapper_namespace(None).keys())
+
+
+@dataclasses.dataclass
+class _ControlEntry:
+    """Bookkeeping for one positional control or sub-quantum handle.
+
+    The new ``ControlledGate.__call__`` concrete path consumes handles
+    in two stages: scalar ``Qubit`` and whole-``Vector`` arguments are
+    consumed eagerly via :meth:`Handle.consume`, while ``VectorView``
+    arguments defer the consume until ``_wrap_results_by_input_kind``
+    can build the fresh result view and rebind the parent's bulk-borrow
+    through :meth:`VectorView._transfer_borrow_to` (same pattern as
+    ``QKernel.__call__``).
+
+    Attributes:
+        original (Any): The handle as it was passed in by the caller
+            (``Qubit`` / ``Vector`` / ``VectorView``).  Preserved so
+            ``_wrap_results_by_input_kind`` can rebuild an output handle
+            of the same kind and, for ``VectorView``, perform the
+            deferred borrow transfer.
+        consumed (Any | None): The post-consume handle for ``Qubit`` and
+            ``Vector`` (whose consume is eager).  ``None`` for
+            ``VectorView``, signalling that the consume is deferred and
+            ``original`` should still be used to read the current
+            ``ArrayValue``.
+    """
+
+    original: Any
+    consumed: Any | None = None
+
+    @property
+    def is_deferred_view(self) -> bool:
+        """Whether this entry represents a ``VectorView`` whose consume is deferred."""
+        return self.consumed is None
 
 
 class ControlledGate:
@@ -363,6 +402,801 @@ class ControlledGate:
         tracer.add_operation(op)
         return op
 
+    # ------------------------------------------------------------------
+    # §10 helpers for the new concrete ``__call__`` path.
+    #
+    # Each helper has a narrow contract so the new ``_call_concrete``
+    # method below can read top-to-bottom as a small choreography
+    # (split → partition → validate → consume → emit → wrap).  The
+    # helpers also keep the symbolic and index-spec paths free of new
+    # branches: those keep calling the original ``_params_to_operands``
+    # and friends until they are removed in a later step.
+    # ------------------------------------------------------------------
+
+    def _split_controls_by_count(
+        self,
+        args: tuple[Any, ...],
+        num_controls: int,
+    ) -> tuple[list[Any], list[Any]]:
+        """Split *args* into the leading ``num_controls`` qubits and the rest.
+
+        Counts qubits by **element count**: scalar ``Qubit`` contributes
+        one, ``Vector``/``VectorView`` contributes its length.  Walks
+        *args* left to right and stops as soon as the cumulative count
+        reaches ``num_controls``.  The boundary between control and
+        sub-kernel arguments **must fall on an argument boundary** —
+        splitting an argument in the middle is rejected with
+        :class:`ValueError` (see the table in §2.1 of the design doc).
+
+        Args:
+            args (tuple[Any, ...]): Positional arguments handed to
+                :meth:`ControlledGate.__call__` in concrete-mode.
+            num_controls (int): The concrete control qubit count
+                ``N`` configured on this gate.
+
+        Returns:
+            tuple[list[Any], list[Any]]: A pair ``(controls,
+                sub_call_args)``.  ``controls`` is the prefix of *args*
+                whose total qubit count is exactly ``num_controls``;
+                ``sub_call_args`` is everything that follows.
+
+        Raises:
+            ValueError: If *args* runs out of qubits before reaching
+                ``num_controls``, or if the boundary falls inside a
+                single ``Vector``/``VectorView`` argument (i.e. the
+                running count would jump past ``num_controls``), or if
+                a symbolic-length ``VectorView`` is mixed with other
+                positional args in the control region (decision #16).
+        """
+        from qamomile.circuit.frontend.handle.array import (
+            ArrayBase,
+            _as_int_const,
+        )
+
+        controls: list[Any] = []
+        running = 0
+        for idx, arg in enumerate(args):
+            if running == num_controls:
+                return controls, list(args[idx:])
+            if isinstance(arg, ArrayBase):
+                length = arg._shape[0] if arg._shape else None
+                length_int = _as_int_const(length) if length is not None else None
+                if length_int is None:
+                    # Symbolic-length view/vector in the control region:
+                    # only acceptable when it stands alone as the
+                    # entire control prefix (decision #16).
+                    if controls or running != 0:
+                        raise ValueError(
+                            "concrete num_controls: a symbolic-length "
+                            "Vector / VectorView can only appear as the "
+                            "first positional argument when it represents "
+                            "the entire control prefix; mixing it with "
+                            "other positional control args is ambiguous "
+                            "(see design decision #16)."
+                        )
+                    # Defer the count vs. num_controls check to emit time.
+                    controls.append(arg)
+                    return controls, list(args[idx + 1 :])
+                next_running = running + length_int
+            elif isinstance(arg, Qubit):
+                next_running = running + 1
+            else:
+                raise ValueError(
+                    f"concrete num_controls: positional argument #{idx} "
+                    f"in the control region must be a Qubit, Vector[Qubit], "
+                    f"or VectorView[Qubit]; got {type(arg).__name__}."
+                )
+            if next_running > num_controls:
+                raise ValueError(
+                    f"concrete num_controls={num_controls}: positional "
+                    f"argument #{idx} would push the control qubit count "
+                    f"from {running} to {next_running}, crossing the "
+                    f"control / sub-kernel boundary mid-argument.  Split "
+                    f"the argument so the boundary falls between args."
+                )
+            controls.append(arg)
+            running = next_running
+
+        if running < num_controls:
+            raise ValueError(
+                f"ControlledU requires at least {num_controls + 1} qubits "
+                f"({num_controls} controls + at least 1 sub-kernel target); "
+                f"got only {running} control qubit(s) and no sub-kernel "
+                f"arguments after them."
+            )
+        return controls, []
+
+    @staticmethod
+    def _collect_sub_quantum_args(sub_args_resolved: dict[str, Any]) -> list[Any]:
+        """Filter to only quantum handles (``Qubit`` / ``Vector`` / ``VectorView``).
+
+        Args:
+            sub_args_resolved (dict[str, Any]): The sub-kernel argument
+                dict returned by :meth:`_bind_to_sub_signature` (already
+                in signature order or, for mock kernels, in
+                caller-positional + caller-kwarg order).
+
+        Returns:
+            list[Any]: The quantum handles from *sub_args_resolved* in
+                the same iteration order.
+        """
+        from qamomile.circuit.frontend.handle.array import ArrayBase
+
+        return [
+            h for h in sub_args_resolved.values() if isinstance(h, (Qubit, ArrayBase))
+        ]
+
+    @staticmethod
+    def _handle_logical_slots(handle: Any) -> tuple[str, frozenset[int] | None]:
+        """Summarise a handle's physical qubit footprint for alias detection.
+
+        The result is a pair ``(key, covered)`` where *key* identifies
+        the storage region the handle claims and *covered* is the set
+        of slot indices within that region the handle holds (``None``
+        when coverage cannot be resolved statically).  Two handles
+        overlap iff their keys match and their covered sets intersect;
+        a ``None`` coverage on one side means the static check is
+        skipped (the borrow-tracking layer on element / slice creation
+        already catches the dangerous variants before we get here).
+
+        Scalar ``Qubit`` handles intentionally use their **per-element**
+        ``Value.logical_id`` as the key (not the underlying array's
+        id).  ``ArrayBase._get_element`` mints a fresh ``Value`` each
+        time, so distinct element accesses to the same array still
+        come out with distinct keys — matching the historical alias
+        check that only flagged the exact "same Qubit handle reused"
+        case (e.g. ``qq = q[i]; cg(qq, qq)``).  Overlap between an
+        element and a sibling slice is caught upstream by the array's
+        own borrow record at access time.
+
+        Args:
+            handle (Any): A scalar ``Qubit`` / ``Vector`` / ``VectorView``.
+
+        Returns:
+            tuple[str, frozenset[int] | None]: The storage key and the
+                covered slot set (``None`` when coverage is symbolic).
+        """
+        from qamomile.circuit.frontend.handle.array import (
+            ArrayBase,
+            VectorView,
+            _as_int_const,
+            _coverage_from_array_value,
+        )
+
+        if isinstance(handle, Qubit):
+            # Treat each scalar Qubit handle as occupying a single-slot
+            # virtual register keyed by its per-element ``logical_id``.
+            # See docstring for why we do not traverse ``parent_array``.
+            return handle.value.logical_id, frozenset({0})
+
+        assert isinstance(handle, ArrayBase)
+        if isinstance(handle, VectorView):
+            covered = handle._slice_covered_indices
+            if covered is None:
+                covered = _coverage_from_array_value(handle.value)
+            root_av = handle.value
+            while root_av.slice_of is not None:
+                root_av = root_av.slice_of
+            if covered is None:
+                return root_av.logical_id, None
+            return root_av.logical_id, frozenset(covered)
+
+        # Whole Vector: covers every slot of its own logical register.
+        length_int = _as_int_const(handle._shape[0]) if handle._shape else None
+        if length_int is None:
+            return handle.value.logical_id, None
+        return handle.value.logical_id, frozenset(range(length_int))
+
+    def _validate_no_alias_or_overlap(self, handles: list[Any]) -> None:
+        """Reject duplicate physical qubits across *handles*.
+
+        Walks *handles* left to right and accumulates per-root coverage
+        sets; raises as soon as two handles claim the same physical
+        slot, or as soon as a scalar ``Qubit`` re-appears under the
+        same ``logical_id``.  Symbolic-length views (whose coverage
+        cannot be resolved statically) are recorded as "covers
+        anything" — they collide with any other entry under the same
+        root id, which keeps the static check conservative.
+
+        Args:
+            handles (list[Any]): The complete set of quantum handles
+                passed to this call: controls followed by the
+                sub-kernel's quantum arguments.
+
+        Raises:
+            QubitAliasError: When two scalar ``Qubit`` handles share a
+                logical id (the classic "same qubit twice" case).
+            QubitBorrowConflictError: When two register-level handles
+                overlap on at least one physical slot, or when one
+                handle's coverage is symbolic and another touches the
+                same root register (deferred-to-emit collisions are
+                conservatively treated as a conflict).
+        """
+        seen_logical: set[str] = set()
+        per_root_concrete: dict[str, set[int]] = {}
+        per_root_symbolic: set[str] = set()
+
+        for handle in handles:
+            if isinstance(handle, Qubit):
+                lid = handle.value.logical_id
+                if lid in seen_logical:
+                    name = handle.name or handle.value.name or "unnamed"
+                    raise QubitAliasError(
+                        f"Cannot use the same qubit in multiple positions of "
+                        f"ControlledU.\nQubit '{name}' appears more than once.\n\n"
+                        f"Fix: Use distinct qubits for each control and target.",
+                        handle_name=name,
+                        operation_name="ControlledU",
+                    )
+                seen_logical.add(lid)
+
+            root_id, covered = self._handle_logical_slots(handle)
+            if covered is None:
+                if root_id in per_root_concrete or root_id in per_root_symbolic:
+                    raise QubitBorrowConflictError(
+                        f"ControlledU received overlapping quantum arguments "
+                        f"on root register '{root_id}'.  At least one of "
+                        f"the overlapping handles has a symbolic-length "
+                        f"coverage that cannot be statically narrowed.",
+                        handle_name=str(getattr(handle, "name", None) or root_id),
+                        operation_name="ControlledU",
+                    )
+                per_root_symbolic.add(root_id)
+                continue
+
+            if root_id in per_root_symbolic:
+                raise QubitBorrowConflictError(
+                    f"ControlledU received overlapping quantum arguments "
+                    f"on root register '{root_id}'.  A previous handle on "
+                    f"the same root has symbolic-length coverage.",
+                    handle_name=str(getattr(handle, "name", None) or root_id),
+                    operation_name="ControlledU",
+                )
+
+            taken = per_root_concrete.setdefault(root_id, set())
+            overlap = taken & covered
+            if overlap:
+                raise QubitBorrowConflictError(
+                    f"ControlledU received overlapping quantum arguments "
+                    f"on root register '{root_id}': slot(s) "
+                    f"{sorted(overlap)} appear in more than one position "
+                    f"(e.g. ``cg(qs[0:3], qs[2])``).",
+                    handle_name=str(getattr(handle, "name", None) or root_id),
+                    operation_name="ControlledU",
+                )
+            taken.update(covered)
+
+    @staticmethod
+    def _consume_with_borrow_transfer(
+        handles: list[Any],
+        operation_name: str,
+    ) -> list[_ControlEntry]:
+        """Consume *handles*, deferring the consume for ``VectorView`` inputs.
+
+        Scalar ``Qubit`` and whole ``Vector`` handles take the
+        straightforward :meth:`Handle.consume` path so the affine /
+        consumed-slot bookkeeping fires immediately.  ``VectorView``
+        handles have their consume **deferred** to
+        :meth:`_wrap_results_by_input_kind`, mirroring
+        ``QKernel.__call__``'s VectorView handling: the deferred
+        consume lets the caller build a fresh result view wrapping the
+        next-versioned slice ``ArrayValue`` and then re-route the
+        parent's bulk-borrow record directly to that result view via
+        :meth:`VectorView._transfer_borrow_to`.  Without the deferral
+        ``VectorView.consume`` would hand the borrow back to a private
+        new-view wrapper around the *current* ``ArrayValue``, leaving
+        the operation result handle without ownership of the parent
+        slots.
+
+        Args:
+            handles (list[Any]): Quantum handles to consume in order.
+            operation_name (str): Operation name passed through to
+                :meth:`Handle.consume` for the eager-consume branch
+                (currently ``"ControlledU[control]"`` or
+                ``"ControlledU[target]"``).
+
+        Returns:
+            list[_ControlEntry]: One entry per input handle, in order.
+                Scalar ``Qubit`` / ``Vector`` entries have both
+                ``original`` and ``consumed`` populated; ``VectorView``
+                entries have ``consumed`` set to ``None`` (deferred).
+
+        Raises:
+            QubitConsumedError: Surfaced from :meth:`Handle.consume`
+                when a non-view handle has already been consumed.
+        """
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        entries: list[_ControlEntry] = []
+        for handle in handles:
+            if isinstance(handle, VectorView):
+                entries.append(_ControlEntry(original=handle, consumed=None))
+                continue
+            consumed = (
+                handle.consume(operation_name=operation_name)
+                if handle._should_enforce_linear()
+                else handle
+            )
+            entries.append(_ControlEntry(original=handle, consumed=consumed))
+        return entries
+
+    def _bind_to_sub_signature(
+        self,
+        sub_positional_args: Sequence[Any],
+        sub_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind sub-kernel arguments to the wrapped kernel's signature.
+
+        For genuine ``@qmc.qkernel`` wrappers (and the auto-synthesised
+        built-in wrappers) the binding is delegated to
+        :meth:`inspect.Signature.bind` so positional / keyword mixing
+        and Python defaults work out of the box.  ``apply_defaults`` is
+        then called so kernels with a default-valued classical
+        parameter (``def sub(qa, theta=0.5)``) end up with that
+        default baked into the resulting dict.
+
+        For test-mock kernels (``ControlledGate(_mock_qkernel(), ...)``)
+        no real signature exists.  In that case we keep the historical
+        "positional → quantum, kwargs → classical" behaviour by
+        synthesising stable string keys (``"@pos0"``, ``"@pos1"``, ...
+        for positional args; the original kwarg names for kwargs) so
+        downstream helpers can iterate uniformly.  The keys are
+        opaque — only :meth:`_collect_sub_quantum_args` and
+        :meth:`_build_operands` consume them.
+
+        Args:
+            sub_positional_args (Sequence[Any]): Positional arguments
+                that follow the control prefix.
+            sub_kwargs (dict[str, Any]): Keyword arguments passed to
+                ``cg(...)`` after stripping the reserved ``power`` and
+                ``controlled_indices`` kwargs.
+
+        Returns:
+            dict[str, Any]: An ordered dict mapping parameter name
+                (real qkernel path) or synthesised positional key
+                (mock path) to its bound argument.
+
+        Raises:
+            TypeError: If :meth:`inspect.Signature.bind` reports a
+                conflict (unexpected kwarg, missing required arg).
+                Unexpected-kwarg errors are re-raised with the
+                "unknown parameter" wording the previous
+                ``_params_to_operands`` enforced so existing callers'
+                error-message expectations remain stable.
+        """
+        input_types = getattr(self._qkernel, "input_types", None)
+        signature = getattr(self._qkernel, "signature", None)
+
+        if not isinstance(input_types, dict) or not isinstance(
+            signature, inspect.Signature
+        ):
+            # Mock path: no real signature, so just key positional args
+            # by index and pass kwargs through untouched.
+            bound: dict[str, Any] = {}
+            for idx, value in enumerate(sub_positional_args):
+                bound[f"@pos{idx}"] = value
+            for name, value in sub_kwargs.items():
+                bound[name] = value
+            return bound
+
+        # Check for unknown kwargs up-front so the legacy "unknown
+        # parameter(s)" message wins over ``inspect.Signature.bind``'s
+        # "missing a required argument" / "unexpected keyword argument"
+        # variants.  Without this, a typo'd kwarg paired with a missing
+        # real one (the most common case in practice) surfaces as the
+        # less-informative "missing required argument" error.
+        extras = sorted(set(sub_kwargs) - set(input_types))
+        if extras:
+            classical_names = [
+                n
+                for n, decl in input_types.items()
+                if decl is UInt or decl is int or decl is Float or decl is float
+            ]
+            raise TypeError(
+                f"controlled(): unknown parameter(s) {extras!r}. "
+                f"The wrapped kernel's classical parameters are "
+                f"{classical_names!r}."
+            )
+
+        bound_args = signature.bind(*sub_positional_args, **sub_kwargs)
+        bound_args.apply_defaults()
+        return dict(bound_args.arguments)
+
+    def _build_operands(
+        self,
+        consumed_controls: list[_ControlEntry],
+        consumed_sub_quantum: list[_ControlEntry],
+        sub_classical_dict: dict[str, Any],
+    ) -> list[Any]:
+        """Lay out the IR operand list for a ``ConcreteControlledU``.
+
+        Layout (matches the existing ``ControlledUOperation`` operand
+        contract):
+
+        - ``operands[:num_controls]`` — per-element scalar control
+          ``Value`` s.  Scalar ``Qubit`` inputs contribute their
+          ``.value`` directly; ``VectorView`` and whole-``Vector``
+          inputs are expanded into one scalar ``Value`` per covered
+          qubit so the IR-level ``control_operands`` /
+          ``target_operands`` properties keep working with no change.
+        - ``operands[num_controls:num_controls + sum(M)]`` —
+          sub-kernel quantum operands.  Kept as ``ArrayValue`` or
+          scalar ``Value`` unchanged; the per-element expansion for
+          sub-kernel ``Vector[Qubit]`` arguments is performed at emit
+          time (see design §12.1).
+        - ``operands[…:]`` — classical parameter operands, appended by
+          the existing :meth:`_params_to_operands` so type-coercion
+          and unknown-kwarg rejection stay in one place.
+
+        Args:
+            consumed_controls (list[_ControlEntry]): Per-control entries
+                from :meth:`_consume_with_borrow_transfer`.
+            consumed_sub_quantum (list[_ControlEntry]): Per-sub-quantum
+                entries from :meth:`_consume_with_borrow_transfer`.
+            sub_classical_dict (dict[str, Any]): The classical-only
+                slice of the bound sub-kernel arguments (param name →
+                value, in signature order for real qkernels).
+
+        Returns:
+            list[Any]: The flat operand list ready to hand to
+                ``ConcreteControlledU(operands=...)``.
+        """
+        operands: list[Any] = []
+        for entry in consumed_controls:
+            operands.extend(self._expand_control_to_scalars(entry))
+        for entry in consumed_sub_quantum:
+            operands.append(self._sub_quantum_operand_value(entry))
+        self._params_to_operands(sub_classical_dict, operands)
+        return operands
+
+    def _build_results(
+        self,
+        consumed_controls: list[_ControlEntry],
+        consumed_sub_quantum: list[_ControlEntry],
+    ) -> list[Value]:
+        """Build the IR result list paired one-to-one with operands.
+
+        The control region produces one ``next_version`` scalar
+        ``Value`` per covered qubit, matching the per-element control
+        operands.  The sub-quantum region produces one
+        ``next_version`` ``Value`` per entry, preserving the operand
+        kind (``ArrayValue`` → ``ArrayValue``, scalar → scalar).
+
+        Args:
+            consumed_controls (list[_ControlEntry]): The same entries
+                that were handed to :meth:`_build_operands` for the
+                control region.
+            consumed_sub_quantum (list[_ControlEntry]): The same entries
+                that were handed to :meth:`_build_operands` for the
+                sub-quantum region.
+
+        Returns:
+            list[Value]: Result ``Value`` s in operand order
+                (controls first, then sub-quantum).  Classical params
+                are not represented because controlled-U has no
+                classical outputs.
+        """
+        results: list[Value] = []
+        for entry in consumed_controls:
+            operands_for_entry = self._expand_control_to_scalars(entry)
+            results.extend(op.next_version() for op in operands_for_entry)
+        for entry in consumed_sub_quantum:
+            results.append(self._sub_quantum_operand_value(entry).next_version())
+        return results
+
+    @staticmethod
+    def _expand_control_to_scalars(entry: _ControlEntry) -> list[Value]:
+        """Expand a control entry into one scalar ``Value`` per qubit.
+
+        Scalar ``Qubit`` entries pass through unchanged.  Whole
+        ``Vector`` and ``VectorView`` entries are expanded into
+        ``length`` scalar ``Value`` s of ``QubitType``, each pointing
+        at the source ``ArrayValue`` via ``parent_array`` and
+        recording its compile-time index via ``element_indices``.  No
+        ``_borrowed_indices`` slot is created — these synthetic
+        scalars are pure IR plumbing for the controlled-U emit pass,
+        not user-visible borrows.
+
+        Args:
+            entry (_ControlEntry): One bookkeeping entry produced by
+                :meth:`_consume_with_borrow_transfer`.
+
+        Returns:
+            list[Value]: A list whose length equals the qubit count
+                contributed by *entry*.
+
+        Raises:
+            NotImplementedError: For symbolic-length ``Vector`` /
+                ``VectorView`` controls — the per-element expansion
+                needs a concrete length at compose time.  The fix is
+                tracked under Step 2.b (emit-side handling of
+                symbolic-length controls).
+        """
+        from qamomile.circuit.frontend.handle.array import (
+            ArrayBase,
+            _as_int_const,
+        )
+
+        source = entry.original if entry.is_deferred_view else entry.consumed
+        if isinstance(source, Qubit):
+            return [source.value]
+        assert isinstance(source, ArrayBase)
+        length = source._shape[0] if source._shape else None
+        length_int = _as_int_const(length) if length is not None else None
+        if length_int is None:
+            raise NotImplementedError(
+                "concrete num_controls with a symbolic-length Vector / "
+                "VectorView control is not yet implemented in the frontend "
+                "(tracked under Step 2.b of the controlled-API redesign)."
+            )
+        array_value = source.value
+        scalars: list[Value] = []
+        for i in range(length_int):
+            idx_value = Value(
+                type=UIntType(),
+                name=f"ctrl_idx_{i}",
+            ).with_const(i)
+            element = Value(
+                type=array_value.type,
+                name=(f"{array_value.name}[{i}]" if array_value.name else f"ctrl[{i}]"),
+                parent_array=array_value,
+                element_indices=(idx_value,),
+            )
+            scalars.append(element)
+        return scalars
+
+    @staticmethod
+    def _sub_quantum_operand_value(entry: _ControlEntry) -> Value | ArrayValue:
+        """Pick the IR ``Value`` representing one sub-kernel quantum operand.
+
+        Scalar ``Qubit`` inputs hand back their consumed ``.value``;
+        ``Vector`` / ``VectorView`` inputs hand back their *current*
+        ``ArrayValue`` (the slice ``ArrayValue`` for views).  The
+        per-element expansion of sub-kernel array operands is the
+        emit-time helper added by Step 2.b — at the IR level we keep
+        the whole-array shape to preserve aliasing information.
+
+        Args:
+            entry (_ControlEntry): A sub-quantum bookkeeping entry.
+
+        Returns:
+            Value | ArrayValue: The ``ArrayValue`` (for ``Vector`` /
+                ``VectorView``) or scalar ``Value`` (for ``Qubit``) to
+                place in the operand list.
+        """
+        source: Any = entry.original if entry.is_deferred_view else entry.consumed
+        assert source is not None
+        return source.value
+
+    def _wrap_results_by_input_kind(
+        self,
+        consumed_controls: list[_ControlEntry],
+        consumed_sub_quantum: list[_ControlEntry],
+        results: list[Value],
+        operation_name: str = "ControlledU",
+    ) -> tuple[Any, ...]:
+        """Aggregate per-element results back into input-kind handles.
+
+        Each input handle gets one output handle of the same kind:
+
+        - Scalar ``Qubit`` → scalar ``Qubit`` wrapping its corresponding
+          per-element result, with ``parent`` / ``indices`` carried
+          over to preserve array write-back support.
+        - Whole ``Vector`` → ``Vector`` wrapping the ``next_version``
+          of the source ``ArrayValue``.
+        - ``VectorView`` → fresh ``VectorView`` wrapping the
+          ``next_version`` of the source slice ``ArrayValue``;
+          ownership of the parent's bulk borrow is rebound through
+          :meth:`VectorView._transfer_borrow_to` so the deferred
+          consume completes here.
+
+        Args:
+            consumed_controls (list[_ControlEntry]): Bookkeeping entries
+                for the control region, in operand order.
+            consumed_sub_quantum (list[_ControlEntry]): Bookkeeping
+                entries for the sub-quantum region, in operand order.
+            results (list[Value]): The full IR result list — controls
+                first (one scalar ``Value`` per covered qubit), then
+                one ``Value`` per sub-quantum entry.
+            operation_name (str): Name used as the
+                ``_transfer_borrow_to`` operation tag for deferred
+                ``VectorView`` consumes.  Defaults to ``"ControlledU"``.
+
+        Returns:
+            tuple[Any, ...]: One output handle per input handle, in the
+                same order as the caller supplied them (controls
+                followed by sub-kernel quantum args).
+        """
+        wrapped: list[Any] = []
+        cursor = 0
+        for entry in consumed_controls:
+            count = self._entry_qubit_count(entry)
+            entry_results = results[cursor : cursor + count]
+            cursor += count
+            wrapped.append(
+                self._wrap_entry_output(
+                    entry,
+                    entry_results,
+                    operation_name=f"{operation_name}[control]",
+                )
+            )
+        for entry in consumed_sub_quantum:
+            wrapped.append(
+                self._wrap_entry_output(
+                    entry,
+                    [results[cursor]],
+                    operation_name=f"{operation_name}[target]",
+                )
+            )
+            cursor += 1
+        assert cursor == len(results), (
+            f"unexpected leftover results after wrapping ({len(results) - cursor})"
+        )
+        return tuple(wrapped)
+
+    @staticmethod
+    def _entry_qubit_count(entry: _ControlEntry) -> int:
+        """How many per-qubit results a control entry consumes."""
+        from qamomile.circuit.frontend.handle.array import (
+            ArrayBase,
+            _as_int_const,
+        )
+
+        source = entry.original if entry.is_deferred_view else entry.consumed
+        if isinstance(source, Qubit):
+            return 1
+        assert isinstance(source, ArrayBase)
+        length = source._shape[0] if source._shape else None
+        length_int = _as_int_const(length) if length is not None else None
+        if length_int is None:
+            raise NotImplementedError(
+                "concrete num_controls with a symbolic-length Vector / "
+                "VectorView control is not yet implemented in the frontend."
+            )
+        return length_int
+
+    @staticmethod
+    def _wrap_entry_output(
+        entry: _ControlEntry,
+        entry_results: list[Value],
+        operation_name: str,
+    ) -> Any:
+        """Build a single output handle for one control or sub-quantum entry.
+
+        Args:
+            entry (_ControlEntry): The bookkeeping entry whose output
+                handle is being constructed.
+            entry_results (list[Value]): The IR result ``Value`` s
+                belonging to *entry* — one for scalar ``Qubit`` /
+                whole ``Vector``, ``length`` for ``VectorView``.
+            operation_name (str): Operation tag forwarded to
+                :meth:`VectorView._transfer_borrow_to` when the entry's
+                consume was deferred.
+
+        Returns:
+            Any: A ``Qubit`` / ``Vector`` / ``VectorView`` whose
+                runtime kind matches ``entry.original``.
+        """
+        from qamomile.circuit.frontend.handle.array import (
+            ArrayBase,
+            Vector,
+            VectorView,
+        )
+
+        original = entry.original
+        if isinstance(original, Qubit):
+            (result_value,) = entry_results
+            return Qubit(
+                value=result_value,
+                parent=original.parent,
+                indices=original.indices,
+            )
+
+        assert isinstance(original, ArrayBase)
+        source: Any = original if entry.is_deferred_view else entry.consumed
+        assert source is not None
+        source_av = cast(ArrayValue, source.value)
+        new_av = source_av.next_version()
+
+        if isinstance(original, VectorView):
+            view = cast(VectorView, original)
+            new_view = VectorView._wrap_unregistered(
+                parent=view._slice_parent,
+                sliced_av=new_av,
+                length=view._shape[0],
+                start_uint=view._slice_start,
+                step_uint=view._slice_step,
+            )
+            view._transfer_borrow_to(new_view, operation_name)
+            return new_view
+
+        # Whole Vector
+        consumed_vector = cast(Vector, source)
+        return Vector._create_from_value(
+            new_av,
+            consumed_vector._shape,
+            consumed_vector.value.name,
+        )
+
+    def _call_concrete(
+        self,
+        args: tuple[Any, ...],
+        sub_kwargs: dict[str, Any],
+        power: int | Value,
+    ) -> tuple[Any, ...]:
+        """Concrete-``num_controls`` path for :meth:`ControlledGate.__call__`.
+
+        Chains the §10 helpers (split → bind → validate → consume →
+        operands/results → emit → wrap) so the body of ``__call__``
+        stays a thin dispatcher.  The legacy index-spec and symbolic
+        paths still live below (``_call_with_index_spec`` /
+        ``_call_symbolic``) and are unchanged in this step.
+
+        Args:
+            args (tuple[Any, ...]): Positional arguments to ``cg(...)``
+                including the leading control qubits.
+            sub_kwargs (dict[str, Any]): Caller kwargs after stripping
+                the reserved ``power`` and ``controlled_indices`` keys.
+            power (int | Value): Normalised power (output of
+                :meth:`_normalize_power`).
+
+        Returns:
+            tuple[Any, ...]: One output handle per input handle, in the
+                concatenation order ``(controls, sub_kernel_quantum)``.
+
+        Raises:
+            ValueError: From :meth:`_split_controls_by_count` when the
+                control boundary can't be honoured by the args.
+            QubitAliasError / QubitBorrowConflictError: From
+                :meth:`_validate_no_alias_or_overlap` on duplicate
+                qubits.
+            QubitConsumedError: From :meth:`_consume_with_borrow_transfer`
+                when a non-view handle has already been consumed.
+            TypeError: From :meth:`_bind_to_sub_signature` or
+                :meth:`_params_to_operands` on unknown/typoed kwargs
+                or unsupported classical parameter types.
+        """
+        num_controls = cast(int, self._num_controls)
+
+        controls, sub_positional = self._split_controls_by_count(args, num_controls)
+        sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
+        if not sub_quantum_args:
+            raise ValueError(
+                f"ControlledU requires at least one quantum sub-kernel "
+                f"argument (target).  Got {num_controls} control(s) and "
+                f"no sub-kernel quantum arg (see design decision #9)."
+            )
+        # Anything left over is classical.  ``id``-based filtering is
+        # used because two distinct Handle instances may compare equal
+        # but should still be treated as separate operands here.
+        quantum_ids = {id(h) for h in sub_quantum_args}
+        sub_classical_dict = {
+            name: value
+            for name, value in sub_args_resolved.items()
+            if id(value) not in quantum_ids
+        }
+
+        self._validate_no_alias_or_overlap(controls + sub_quantum_args)
+
+        consumed_controls = self._consume_with_borrow_transfer(
+            controls, "ControlledU[control]"
+        )
+        consumed_sub_quantum = self._consume_with_borrow_transfer(
+            sub_quantum_args, "ControlledU[target]"
+        )
+
+        operands = self._build_operands(
+            consumed_controls, consumed_sub_quantum, sub_classical_dict
+        )
+        results = self._build_results(consumed_controls, consumed_sub_quantum)
+
+        self._build_and_emit_op(operands, results, num_controls, power)
+
+        return self._wrap_results_by_input_kind(
+            consumed_controls, consumed_sub_quantum, results
+        )
+
     def __call__(
         self,
         *args: Any,
@@ -413,64 +1247,8 @@ class ControlledGate:
         if isinstance(num_controls, UInt):
             return self._call_symbolic(args, normalized_power, params)
 
-        # --- Concrete path (existing logic, unchanged) ---
-
-        # Split args into controls and targets
-        if len(args) <= num_controls:
-            raise ValueError(
-                f"ControlledU requires at least {num_controls + 1} qubits "
-                f"({num_controls} controls + at least 1 target), got {len(args)}."
-            )
-        controls = args[:num_controls]
-        target_args = args[num_controls:]
-
-        # Check for aliasing (same physical qubit used in multiple positions)
-        seen_ids: set[str] = set()
-        for q in args:
-            lid = q.value.logical_id
-            if lid in seen_ids:
-                q_name = q.name or "unnamed"
-                raise QubitAliasError(
-                    f"Cannot use the same qubit in multiple positions of ControlledU.\n"
-                    f"Qubit '{q_name}' appears more than once.\n\n"
-                    f"Fix: Use distinct qubits for each control and target.",
-                    handle_name=q_name,
-                    operation_name="ControlledU",
-                )
-            seen_ids.add(lid)
-
-        # Consume all qubit handles (enforces affine type)
-        controls = tuple(
-            c.consume(operation_name="ControlledU[control]") for c in controls
-        )
-        target_args = tuple(
-            t.consume(operation_name="ControlledU[target]") for t in target_args
-        )
-
-        # Build operands: [control(s), target(s), param(s)]
-        operands: list[Any] = [c.value for c in controls] + [
-            t.value for t in target_args
-        ]
-        self._params_to_operands(params, operands)
-
-        # Build results: [control_out(s), target_out(s)]
-        results: list[Value] = [c.value.next_version() for c in controls] + [
-            t.value.next_version() for t in target_args
-        ]
-
-        self._build_and_emit_op(
-            operands,
-            results,
-            num_controls,
-            normalized_power,
-        )
-
-        # Return output handles
-        ctrl_outs = self._wrap_qubit_outputs(list(controls), results)
-        tgt_outs = self._wrap_qubit_outputs(
-            list(target_args), results, offset=num_controls
-        )
-        return tuple(ctrl_outs + tgt_outs)
+        # Concrete path: delegate to the §10-helper-based pipeline.
+        return self._call_concrete(args, params, normalized_power)
 
     def _call_with_index_spec(
         self,
