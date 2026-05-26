@@ -1,13 +1,10 @@
 ---
 name: local-review
-description: Review code on the current branch for Qamomile philosophy and convention compliance. Compares changed files against `main` (or a specified target branch) and evaluates them against Qamomile's design principles.
-argument-hint: <target-branch (default: main)>
+description: Review code on the current branch for Qamomile philosophy and convention compliance. Compares changed files against `main` and evaluates them against Qamomile's design principles.
 model: opus
 ---
 
 You are an expert code reviewer for the Qamomile quantum optimization SDK. Review the changes on the current branch against Qamomile's design philosophy and coding conventions.
-
-If `$ARGUMENTS` is provided, use it as the target branch. Otherwise, default to `main`.
 
 ## Severity Levels
 
@@ -177,10 +174,9 @@ Applies to changes under `qamomile/optimization/`.
 ### Step 1: Gather Diff
 
 ```bash
-TARGET="${ARGUMENTS:-main}"
-git diff $TARGET...HEAD --stat
-git diff $TARGET...HEAD --name-status
-git log $TARGET...HEAD --oneline
+git diff main...HEAD --stat
+git diff main...HEAD --name-status
+git log main...HEAD --oneline
 ```
 
 ### Step 1.5: Run Mechanical Checks (MANDATORY)
@@ -211,10 +207,10 @@ Severity mapping:
 
 Distinguish "the check ran and reported violations" (handled by the severity mapping above) from "the check could not be run at all". If a specific check tool fails to invoke — e.g., `zuban` is missing, a config file is broken, the formatter binary errors before reading any files — **continue with the remaining checks** and report the unrunnable tool as its own **P0** finding. A non-runnable check is functionally equivalent to a disabled one and the user must be told, but stopping early would hide the other tools' output that may still be actionable. **Only hard-stop the skill when `uv` itself is unavailable** so that none of the three commands can run; in that case Step 1.5 as a whole is uninvokable and the skill cannot produce a valid review — report that single P0 and exit.
 
-These checks scope to the whole `qamomile/` + `tests/` tree (matching CI), not just the diff. Pre-existing violations outside the diff still count, since the user will eventually be blocked by CI on them; report them too. **The "pre-existing on `<target>`" annotation is optional and only valid when you actually verified it on the target branch.** If you want to label findings that way, run the same Step 1.5 commands against `<target>` in a temporary worktree and diff the outputs:
+These checks scope to the whole `qamomile/` + `tests/` tree (matching CI), not just the diff. Pre-existing violations outside the diff still count, since the user will eventually be blocked by CI on them; report them too. **The "pre-existing on `main`" annotation is optional and only valid when you actually verified it on `main`.** If you want to label findings that way, run the same Step 1.5 commands against `main` in a temporary worktree and diff the outputs:
 
 ```bash
-git worktree add /tmp/qamomile-base "$TARGET"
+git worktree add /tmp/qamomile-base main
 ( cd /tmp/qamomile-base && uv run ruff check qamomile/ tests/; uv run ruff format --check qamomile/ tests/; uv run zuban qamomile/ )
 git worktree remove /tmp/qamomile-base
 ```
