@@ -291,17 +291,65 @@ power_demo_symbolic.draw(k=3)
 # %% [markdown]
 # ## 4. Concrete-mode-only patterns
 #
-# *(to be written)*
+# The shapes in this section require a Python-`int` value for
+# `num_controls`. They have no symbolic counterpart because
+# symbolic mode takes exactly **one** `Vector[Qubit]` argument as
+# its control pool — neither the multi-positional CCX form nor
+# the scalar / `VectorView` mixed prefix below is expressible
+# that way.
 
 # %% [markdown]
 # ### 4.1 Multiple separate positional control args (CCX style)
 #
-# *(to be written)*
+# With `num_controls=2`, the call site lists each control qubit
+# as its own positional argument before the target. The example
+# below is the canonical CCX (Toffoli): two controls `c0`, `c1`
+# and a target `t`. The same pattern extends to `num_controls=3`
+# (CCCX), `num_controls=4`, etc., as long as you have that many
+# distinct `Qubit` handles to pass in.
+
+
+# %%
+@qmc.qkernel
+def toffoli_demo() -> qmc.Bit:
+    c0 = qmc.qubit(name="c0")
+    c1 = qmc.qubit(name="c1")
+    t = qmc.qubit(name="t")
+    c0 = qmc.x(c0)
+    c1 = qmc.x(c1)
+    ccx = qmc.control(qmc.x, num_controls=2)
+    c0, c1, t = ccx(c0, c1, t)
+    return qmc.measure(t)
+
+
+toffoli_demo.draw()
 
 # %% [markdown]
 # ### 4.2 Mixing scalar Qubit and `VectorView` controls
 #
-# *(to be written)*
+# The positional control prefix in concrete mode may freely mix
+# scalar `Qubit` handles, `VectorView` slices, and whole
+# `Vector[Qubit]`s, as long as the total qubit count adds up to
+# `num_controls`. Here the three controls for a `num_controls=3`
+# controlled-H come from `qs[0]` (a scalar `Qubit`, 1 qubit) plus
+# `qs[1:3]` (a `VectorView`, 2 qubits). The same freedom does
+# not exist in symbolic mode, which takes exactly one control
+# argument.
+
+
+# %%
+@qmc.qkernel
+def mixed_controls_demo() -> qmc.Vector[qmc.Bit]:
+    qs = qmc.qubit_array(5, "qs")
+    qs[0] = qmc.x(qs[0])
+    qs[1] = qmc.x(qs[1])
+    qs[2] = qmc.x(qs[2])
+    cg = qmc.control(qmc.h, num_controls=3)
+    qs[0], qs[1:3], qs[3] = cg(qs[0], qs[1:3], qs[3])
+    return qmc.measure(qs)
+
+
+mixed_controls_demo.draw()
 
 # %% [markdown]
 # ## 5. Symbolic-mode-only patterns
