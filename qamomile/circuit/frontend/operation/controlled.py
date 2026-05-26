@@ -394,14 +394,11 @@ class ControlledGate:
         return op
 
     # ------------------------------------------------------------------
-    # §10 helpers for the new concrete ``__call__`` path.
+    # Helpers for ``__call__``'s concrete and symbolic paths.
     #
-    # Each helper has a narrow contract so the new ``_call_concrete``
-    # method below can read top-to-bottom as a small choreography
-    # (split → partition → validate → consume → emit → wrap).  The
-    # helpers also keep the symbolic and index-spec paths free of new
-    # branches: those keep calling the original ``_params_to_operands``
-    # and friends until they are removed in a later step.
+    # Each helper has a narrow contract so ``_call_concrete`` and
+    # ``_call_symbolic`` can read top-to-bottom as a small choreography
+    # (split → partition → validate → consume → emit → wrap).
     # ------------------------------------------------------------------
 
     def _split_controls_by_count(
@@ -1160,11 +1157,10 @@ class ControlledGate:
     ) -> tuple[Any, ...]:
         """Concrete-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
-        Chains the §10 helpers (split → bind → validate → consume →
+        Chains the helpers (split → bind → validate → consume →
         operands/results → emit → wrap) so the body of ``__call__``
-        stays a thin dispatcher.  The legacy index-spec and symbolic
-        paths still live below (``_call_with_index_spec`` /
-        ``_call_symbolic``) and are unchanged in this step.
+        stays a thin dispatcher.  The symbolic counterpart lives in
+        :meth:`_call_symbolic`.
 
         Args:
             args (tuple[Any, ...]): Positional arguments to ``cg(...)``
