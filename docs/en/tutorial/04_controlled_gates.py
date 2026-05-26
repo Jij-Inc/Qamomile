@@ -417,11 +417,15 @@ mixed_controls_demo.draw()
 # The simplest symbolic shape: `num_controls=n` with the entire
 # pool (length `n`) used as the active controls. The kernel
 # parameter `n` is concretised at transpile time via `bindings`.
-# The control-gate shape itself adapts to whatever value `n`
-# takes; the example below is bound at `n=3` and refers to
-# `ctrls[0..2]` literally for the initial X gates, so this
-# particular body needs `n=3` (a different body could be written
-# to scale with `n`).
+# The controlled-gate shape itself adapts once `n` is bound; in
+# this demo we bind `n=3` because the surrounding body literally
+# initializes `ctrls[0]`, `ctrls[1]`, `ctrls[2]` with `qmc.x`,
+# so binding `n < 3` would index out of range and binding
+# `n > 3` would leave some pool slots in `|0>` (transpilation
+# would still succeed, but the prepared state would not match
+# the "all controls active" intent of the demo). Replace the
+# fixed initializations with a loop if you want a body that
+# scales with `n`.
 
 
 # %%
@@ -744,8 +748,10 @@ expect_error("power=True (bool)", TypeError, case_power_bool)
 # is rejected the same way). A `qmc.UInt` handle that *resolves*
 # to zero is a different story: `qmc.control` does not see the
 # value at evaluation time, so the rejection happens later
-# during transpile (as a `ValidationError` / `EmitError`,
-# depending on which pass first sees the size mismatch).
+# during transpilation or emission and surfaces as a
+# validation / emit / backend-side error depending on which
+# pass catches it first. Bind any symbolic `num_controls` to a
+# strictly positive value.
 
 
 # %%
