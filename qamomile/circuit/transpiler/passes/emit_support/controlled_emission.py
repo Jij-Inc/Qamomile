@@ -451,13 +451,11 @@ def emit_controlled_u_with_symbolic_indices(
     # Sub-quantum result bookkeeping mirrors the ConcreteControlledU
     # path so downstream lookups via ``view_out[i]`` resolve.
     sub_quantum_results = [r for r in op.results[1:] if r.type.is_quantum()]
-    from qamomile.circuit.ir.value import ArrayValue as _ArrayValue2
-
     for i, result in enumerate(sub_quantum_results):
         if i >= len(target_index_groups):
             break
         indices = target_index_groups[i]
-        if isinstance(result, _ArrayValue2):
+        if isinstance(result, _ArrayValue):
             for j, phys in enumerate(indices):
                 qubit_map[QubitAddress(result.uuid, j)] = phys
             if indices:

@@ -1027,7 +1027,24 @@ class ControlledGate:
 
     @staticmethod
     def _entry_qubit_count(entry: _ControlEntry) -> int:
-        """How many per-qubit results a control entry consumes."""
+        """How many per-qubit results a control entry consumes.
+
+        Args:
+            entry (_ControlEntry): The bookkeeping entry whose result
+                count is being requested.
+
+        Returns:
+            int: ``1`` for a scalar ``Qubit`` entry; the array length
+                for a concrete-length ``Vector`` / ``VectorView``
+                entry.
+
+        Raises:
+            NotImplementedError: For a symbolic-length ``Vector`` /
+                ``VectorView`` entry — the per-element count needs a
+                concrete length at compose time, which is the same
+                restriction the per-element expansion in
+                :meth:`_expand_control_to_scalars` enforces.
+        """
         from qamomile.circuit.frontend.handle.array import (
             ArrayBase,
             _as_int_const,

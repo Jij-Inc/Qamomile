@@ -333,6 +333,83 @@ class TestControlledValidation:
             with pytest.raises(ValueError):
                 cg(*qs)
 
+    def test_controlled_indices_in_concrete_mode_raises(self):
+        """Concrete-``num_controls`` rejects ``controlled_indices`` at compose time.
+
+        The redesign restricted ``controlled_indices`` to symbolic
+        mode (design §1.1, decision #5); concrete mode has no
+        selection step.
+        """
+        cg = ControlledGate(_mock_qkernel(), num_controls=2)
+        c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
+        with trace():
+            with pytest.raises(ValueError, match="only valid in symbolic mode"):
+                cg(c0, c1, tgt, controlled_indices=[0])
+
+
+class TestNormalizeControlledIndices:
+    """Compose-time validation rules for ``controlled_indices`` entries.
+
+    Drives ``ControlledGate._normalize_controlled_indices`` directly
+    (rather than through the full ``__call__`` pipeline) so the test
+    intent stays focused on the per-entry rules: sequence-type check,
+    per-entry type check (``bool`` rejection, ``int`` / ``UInt``
+    accepted, anything else rejected), and literal-``int`` duplicate
+    / negative checks.  The ``UInt``-aware checks (mixed ``int`` /
+    ``UInt`` duplicates, range) are deliberately deferred to emit
+    time and not exercised here.
+    """
+
+    @staticmethod
+    def _make_cg():
+        return ControlledGate(_mock_qkernel(), num_controls=1)
+
+    def test_non_sequence_raises_type_error(self):
+        cg = self._make_cg()
+        with pytest.raises(TypeError, match="must be a Sequence"):
+            cg._normalize_controlled_indices(42)  # type: ignore[arg-type]
+
+    def test_bool_entry_raises_type_error(self):
+        cg = self._make_cg()
+        with pytest.raises(TypeError, match="bool entry"):
+            cg._normalize_controlled_indices([True, 1])
+
+    def test_string_entry_raises_type_error(self):
+        cg = self._make_cg()
+        with pytest.raises(TypeError, match="must be int or UInt"):
+            cg._normalize_controlled_indices(["0", 1])  # type: ignore[list-item]
+
+    def test_duplicate_literal_int_raises_value_error(self):
+        cg = self._make_cg()
+        with pytest.raises(ValueError, match="duplicate int entry"):
+            cg._normalize_controlled_indices([0, 0])
+
+    def test_negative_literal_int_raises_value_error(self):
+        cg = self._make_cg()
+        with pytest.raises(ValueError, match="negative entry"):
+            cg._normalize_controlled_indices([-1, 0])
+
+    def test_accepts_literal_ints(self):
+        cg = self._make_cg()
+        result = cg._normalize_controlled_indices([0, 1, 2])
+        assert len(result) == 3
+        for i, v in enumerate(result):
+            assert v.get_const() == i
+
+    def test_accepts_uint_handles(self):
+        from qamomile.circuit.frontend.handle.primitives import UInt as UIntHandle
+        from qamomile.circuit.ir.types.primitives import UIntType
+
+        cg = self._make_cg()
+        v0 = Value(type=UIntType(), name="i0").with_const(0)
+        v1 = Value(type=UIntType(), name="i1").with_const(1)
+        result = cg._normalize_controlled_indices(
+            [UIntHandle(value=v0), UIntHandle(value=v1)]
+        )
+        assert len(result) == 2
+        assert result[0] is v0
+        assert result[1] is v1
+
 
 class TestControlledPowerValidation:
     """Tests for power parameter validation in ControlledGate."""

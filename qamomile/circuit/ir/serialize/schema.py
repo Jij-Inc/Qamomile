@@ -17,7 +17,9 @@ Top-level envelope
 
 ``SCHEMA_VERSION`` increments whenever the schema changes in a way
 that breaks forward / backward compatibility (added required fields,
-removed fields, semantic changes). The current version is 1.
+removed fields, semantic changes).  The current value and the
+per-bump history are recorded next to the constant at the bottom of
+this module.
 
 Block dict
 ----------
