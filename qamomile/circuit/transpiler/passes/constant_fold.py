@@ -470,13 +470,24 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         extra_kwargs["controlled_indices"] = new_ci
                         changed = True
             elif isinstance(result_op, SymbolicControlledU):
+                # Always fold the ``controlled_indices`` Value list first
+                # so the IR carries constant ints when the bindings
+                # supply them (matches the IndexSpecControlledU branch
+                # above).
+                if result_op.controlled_indices is not None:
+                    new_ci = self._fold_value_list(
+                        list(result_op.controlled_indices), folded_values
+                    )
+                    if new_ci is not None:
+                        extra_kwargs["controlled_indices"] = tuple(new_ci)
+                        changed = True
                 # Fold num_controls: Value -> int.  If resolved to int,
-                # promote to ConcreteControlledU.
+                # consider promoting to ConcreteControlledU.
                 new_nc = self._resolve_field_value(
                     result_op.num_controls, folded_values
                 )
                 if new_nc is not result_op.num_controls:
-                    if isinstance(new_nc, int):
+                    if isinstance(new_nc, int) and result_op.controlled_indices is None:
                         # Promote to ConcreteControlledU.
                         #
                         # ``SymbolicControlledU`` carries the controls as a
@@ -490,6 +501,16 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         # this step ``control_operands`` aliases the first
                         # target into the control slice and the emit path
                         # produces a partial-arity controlled gate.
+                        #
+                        # Skipped when ``controlled_indices`` is non-``None``
+                        # because the pass-through semantics of non-selected
+                        # pool elements cannot be represented in the
+                        # promoted ``ConcreteControlledU`` operand layout
+                        # (no scalar slot stands for "this slot is part of
+                        # the control register but is not actually a
+                        # control on this op"); the
+                        # ``emit_controlled_u_with_symbolic_indices`` emit
+                        # path consumes the un-promoted form directly.
                         current_operands = (
                             new_operands if changed else list(result_op.operands)
                         )
