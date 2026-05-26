@@ -301,5 +301,6 @@ else:
     )
 
 # %% [markdown]
-# **Next**: [Resource Estimation](04_resource_estimation.ipynb) — symbolic
-# cost analysis, gate breakdowns, and comparing design candidates.
+# **Next**: [Controlled Gates](04_controlled_gates.ipynb) — `qmc.control`
+# for built-in gates and sub-kernels, concrete vs symbolic control counts,
+# and the catalogue of patterns that do not compose.

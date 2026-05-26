@@ -270,4 +270,4 @@ else:
     )
 
 # %% [markdown]
-# **次へ**: [リソース推定](04_resource_estimation.ipynb) シンボリックなコスト分析、ゲート内訳、設計候補の比較を扱います。
+# **次へ**: [制御ゲート](04_controlled_gates.ipynb) — `qmc.control`によるビルトインゲートやサブカーネルの制御、concrete/symbolicの制御数の指定、合成できないパターンのカタログを扱います。
