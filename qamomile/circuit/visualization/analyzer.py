@@ -33,6 +33,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
@@ -1000,7 +1001,12 @@ class CircuitAnalyzer:
             u_name = getattr(op.block, "name", "U") or "U"
             power_val = self._resolve_controlled_u_power(op, param_values)
             label = f"{u_name}^{power_val}" if power_val > 1 else u_name
-            box_width = self._estimate_label_box_width(label)
+            controlled_gate_type = self._controlled_u_single_gate_type(op, power_val)
+            box_width = (
+                self.style.gate_width
+                if controlled_gate_type is not None
+                else self._estimate_label_box_width(label)
+            )
             # Control qubits first, then target qubits
             control_indices: list[int] = []
             for qval in op.control_operands:
@@ -1022,6 +1028,7 @@ class CircuitAnalyzer:
                 qubit_indices=control_indices + target_indices,
                 estimated_width=box_width,
                 kind=VGateKind.CONTROLLED_U_BOX,
+                gate_type=controlled_gate_type,
                 box_width=box_width,
                 control_count=len(control_indices),
             )
@@ -1029,6 +1036,46 @@ class CircuitAnalyzer:
         raise TypeError(
             f"Unsupported operation type for _build_vgate: {type(op).__name__}"
         )
+
+    def _controlled_u_single_gate_type(
+        self, op: ControlledUOperation, power: int
+    ) -> GateOperationType | None:
+        """Return the wrapped gate type when controlled-U is a single gate.
+
+        Args:
+            op (ControlledUOperation): Controlled operation whose wrapped
+                block may contain one concrete `GateOperation`.
+            power (int): Resolved controlled-U power. Values greater than one
+                are left in box form so the exponent remains visible.
+
+        Returns:
+            GateOperationType | None: Wrapped gate type when the controlled
+                block is exactly one gate plus an optional return operation;
+                otherwise None.
+        """
+        if power != 1:
+            return None
+        block = op.block
+        if block is None:
+            return None
+        body_ops = [
+            body_op
+            for body_op in block.operations
+            if not isinstance(body_op, ReturnOperation)
+        ]
+        if len(body_ops) != 1 or not isinstance(body_ops[0], GateOperation):
+            return None
+        gate_type = body_ops[0].gate_type
+        if gate_type not in {
+            GateOperationType.X,
+            GateOperationType.Z,
+            GateOperationType.CX,
+            GateOperationType.CZ,
+            GateOperationType.SWAP,
+            GateOperationType.TOFFOLI,
+        }:
+            return None
+        return gate_type
 
     def _build_vexpval(
         self,
