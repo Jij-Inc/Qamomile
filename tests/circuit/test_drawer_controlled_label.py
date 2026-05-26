@@ -26,16 +26,16 @@ from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import VGate, VGateKind
 
 
-def _controlled_u_label(kernel) -> str:
-    """Extract the label of the single CONTROLLED_U_BOX node in *kernel*.
+def _controlled_u_box(kernel) -> VGate:
+    """Return the single CONTROLLED_U_BOX ``VGate`` produced by *kernel*.
 
     Args:
         kernel: A ``@qmc.qkernel`` whose top-level Block contains
             exactly one ``ControlledUOperation``.
 
     Returns:
-        str: The ``VGate.label`` string assigned by
-        ``CircuitAnalyzer.build_visual_ir``.
+        VGate: The ``VGate`` (with ``label``, ``power``, etc.) that
+        the analyzer emitted for the controlled-U operation.
 
     Raises:
         AssertionError: If the kernel does not produce exactly one
@@ -53,7 +53,12 @@ def _controlled_u_label(kernel) -> str:
     assert len(boxes) == 1, (
         f"expected exactly one CONTROLLED_U_BOX VGate, found {len(boxes)}"
     )
-    return boxes[0].label
+    return boxes[0]
+
+
+def _controlled_u_label(kernel) -> str:
+    """Convenience wrapper returning just the controlled-U box label."""
+    return _controlled_u_box(kernel).label
 
 
 def test_controlled_box_label_includes_default_arg_value() -> None:
@@ -73,10 +78,12 @@ def test_controlled_box_label_includes_default_arg_value() -> None:
         return qmc.measure(t)
 
     label = _controlled_u_label(kernel)
-    # Format: ``<block_name>(<param>=<formatted_value>)``.  The value
-    # rendering goes through ``_format_parameter`` which prints two
-    # decimals in the (0.01, 10) range, so math.pi / 2 ≈ 1.57.
-    assert label == "_phase(theta=1.57)", label
+    # Format: ``<block_name>(<param>=<formatted_value>)``.  The
+    # parameter name passes through ``_format_symbolic_param`` so
+    # Greek-letter names render in TeX (``$\theta$``); the value
+    # passes through ``_format_parameter`` which prints two decimals
+    # in the (0.01, 10) range, so math.pi / 2 ≈ 1.57.
+    assert label == r"_phase($\theta$=1.57)", label
 
 
 def test_controlled_box_label_includes_multiple_kwargs() -> None:
@@ -98,7 +105,7 @@ def test_controlled_box_label_includes_multiple_kwargs() -> None:
         return qmc.measure(t)
 
     label = _controlled_u_label(kernel)
-    assert label == "_two_param(alpha=0.70, beta=1.30)", label
+    assert label == r"_two_param($\alpha$=0.70, $\beta$=1.30)", label
 
 
 def test_controlled_box_label_uses_tex_name_for_builtin_gate() -> None:
@@ -117,8 +124,13 @@ def test_controlled_box_label_uses_tex_name_for_builtin_gate() -> None:
     assert label == "$R_x$(angle=0.79)", label
 
 
-def test_controlled_box_label_appends_power() -> None:
-    """``power=k`` is appended to the right of the param suffix."""
+def test_controlled_box_power_lives_on_vgate_not_label() -> None:
+    """``power=k`` rides on ``VGate.power``; the label stays clean.
+
+    Verifies the split between in-label text (just the wrapped
+    callable + classical kwargs) and the ``power`` field that the
+    renderer turns into an outer ``pow=N`` wrapper box.
+    """
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
@@ -129,5 +141,22 @@ def test_controlled_box_label_appends_power() -> None:
         c, t = cg(c, t, angle=math.pi / 4, power=3)
         return qmc.measure(t)
 
-    label = _controlled_u_label(kernel)
-    assert label == "$R_x$(angle=0.79)^3", label
+    box = _controlled_u_box(kernel)
+    assert box.label == "$R_x$(angle=0.79)", box.label
+    assert box.power == 3, box.power
+
+
+def test_controlled_box_power_defaults_to_one() -> None:
+    """When ``power`` is omitted, ``VGate.power == 1``."""
+
+    @qmc.qkernel
+    def kernel() -> qmc.Bit:
+        c = qmc.qubit(name="c")
+        t = qmc.qubit(name="t")
+        c = qmc.x(c)
+        cg = qmc.control(qmc.rx)
+        c, t = cg(c, t, angle=math.pi / 4)
+        return qmc.measure(t)
+
+    box = _controlled_u_box(kernel)
+    assert box.power == 1, box.power

@@ -1049,9 +1049,19 @@ class CircuitAnalyzer:
             # numeric constant or the symbolic name (Greek letters get
             # TeX rendering via ``_format_symbolic_param``).
             param_suffix = self._format_controlled_param_suffix(op, param_values)
-            base_label = f"{u_name}{param_suffix}"
-            label = f"{base_label}^{power_val}" if power_val > 1 else base_label
+            # The label carries only the wrapped-callable name plus its
+            # bound classical parameters.  When ``power_val > 1`` the
+            # renderer draws an outer ``pow=N`` wrapper box around the
+            # inner controlled-U rectangle, matching how
+            # ``VInlineBlock`` renders an expanded controlled-U block —
+            # this keeps the visual treatment of ``power`` consistent
+            # between the collapsed and inline views.
+            label = f"{u_name}{param_suffix}"
             box_width = self._estimate_label_box_width(label)
+            if power_val > 1:
+                # Reserve a little extra horizontal space so the outer
+                # wrapper box does not clip into adjacent gates.
+                box_width += 2 * self.style.power_wrapper_margin
             # Control qubits first, then target qubits
             control_indices: list[int] = []
             for qval in op.control_operands:
@@ -1075,6 +1085,7 @@ class CircuitAnalyzer:
                 kind=VGateKind.CONTROLLED_U_BOX,
                 box_width=box_width,
                 control_count=len(control_indices),
+                power=power_val,
             )
 
         raise TypeError(
@@ -1968,7 +1979,12 @@ class CircuitAnalyzer:
             raw = v.name or ""
             if raw.startswith(_CTRL_PARAM_PREFIX):
                 raw = raw[len(_CTRL_PARAM_PREFIX) :]
-            pname = raw or "?"
+            pname_raw = raw or "?"
+            # Route the parameter name through the same symbolic
+            # formatter used by inline gates so Greek-letter names
+            # (``theta``, ``alpha``, ``beta``, ...) render in TeX
+            # rather than as ASCII text.
+            pname_disp = self._format_symbolic_param(pname_raw)
 
             # Resolve the value: bound constant first, then logical_id
             # remap, then a generic _evaluate_value, then the symbolic
@@ -1983,15 +1999,15 @@ class CircuitAnalyzer:
                 elif isinstance(resolved, str):
                     pval = self._format_symbolic_param(resolved)
                 else:
-                    pval = self._format_symbolic_param(pname)
+                    pval = pname_disp
             else:
                 evaluated = self._evaluate_value(v, param_values or {})
                 if isinstance(evaluated, (int, float)):
                     pval = self._format_parameter(evaluated)
                 else:
-                    pval = self._format_symbolic_param(pname)
+                    pval = pname_disp
 
-            parts.append(f"{pname}={pval}")
+            parts.append(f"{pname_disp}={pval}")
         return f"({', '.join(parts)})"
 
     def _resolve_controlled_u_power(

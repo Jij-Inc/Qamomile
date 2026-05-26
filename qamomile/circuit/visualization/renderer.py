@@ -743,6 +743,54 @@ class MatplotlibRenderer:
                 zorder=PORDER_TEXT,
             )
 
+            # When the wrapped unitary is raised to a power, draw an
+            # outer dashed wrapper that encloses both the control dots
+            # and the target box, with a ``pow=N`` annotation top-right.
+            # This mirrors the rendering of an expanded controlled-U
+            # block by ``_draw_block_border`` so the collapsed and
+            # inline views stay visually consistent.
+            if getattr(node, "power", 1) > 1:
+                margin = self.style.power_wrapper_margin
+                lp = self.style.label_padding
+                pow_text = f"pow={node.power}"
+                pow_text_height = self._calculate_text_height(
+                    ax, pow_text, self.style.subfont_size
+                )
+                pow_label_height = pow_text_height + 2 * lp
+
+                outer_left = x_pos - width / 2 - margin
+                outer_right = x_pos + width / 2 + margin
+                outer_bottom = min(all_y) - self.style.gate_height / 2 - margin
+                outer_top = (
+                    max(max(all_y), max_target_y)
+                    + self.style.gate_height / 2
+                    + margin
+                    + pow_label_height
+                )
+
+                outer_rect = mpatches.Rectangle(
+                    (outer_left, outer_bottom),
+                    outer_right - outer_left,
+                    outer_top - outer_bottom,
+                    facecolor="none",
+                    edgecolor=self.style.block_border_color,
+                    linewidth=1.5,
+                    linestyle="--",
+                    zorder=PORDER_GATE - 0.5,
+                )
+                ax.add_patch(outer_rect)
+
+                ax.text(
+                    outer_right - self.style.label_horizontal_padding,
+                    outer_top - lp,
+                    pow_text,
+                    ha="right",
+                    va="top",
+                    fontsize=self.style.subfont_size,
+                    color=self.style.block_border_color,
+                    zorder=PORDER_TEXT,
+                )
+
     def _draw_vexpval(
         self,
         ax: Axes,
