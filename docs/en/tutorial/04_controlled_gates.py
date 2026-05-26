@@ -423,11 +423,14 @@ mcx_demo.draw(n=4)
 # controls you want, the `controlled_indices=` keyword (symbolic
 # mode only) picks exactly which pool slots are wired in. The
 # remaining slots are passed through untouched — they sit on the
-# wires but emit no extra gate of their own.
+# wires but emit no extra gate of their own. The indices do not
+# have to be contiguous.
 #
-# In the example the pool `pool` has 4 qubits but only the first
-# three (`controlled_indices=[0, 1, 2]`) act as active controls;
-# `pool[3]` is along for the ride.
+# In the example below the pool has 4 qubits but the three
+# active controls are `pool[0]`, `pool[1]`, `pool[3]`
+# (`controlled_indices=[0, 1, 3]`). `pool[2]` is along for the
+# ride: no control dot is drawn on it, and the vertical
+# connection line of the MCX skips over it.
 
 
 # %%
@@ -437,9 +440,9 @@ def subset_pool(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     tgt = qmc.qubit(name="tgt")
     pool[0] = qmc.x(pool[0])
     pool[1] = qmc.x(pool[1])
-    pool[2] = qmc.x(pool[2])
+    pool[3] = qmc.x(pool[3])  # pool[2] left at |0> — it is the inactive slot
     cg = qmc.control(qmc.x, num_controls=k_ctrls)
-    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 2])
+    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 3])
     return qmc.measure(pool)
 
 
@@ -450,10 +453,15 @@ subset_pool.draw(n=4, k_ctrls=3)
 #
 # Each entry inside `controlled_indices` may be a Python `int`
 # literal, a `qmc.UInt` handle, or any arithmetic expression
-# over `UInt` values (such as `k - 1`). Literal-`int` entries
-# are validated at compose time; entries that involve `UInt`
-# handles are validated at transpile time once `bindings` make
-# them concrete.
+# over `UInt` values. Literal-`int` entries are validated at
+# compose time; entries that involve `UInt` handles are validated
+# at transpile time once `bindings` make them concrete.
+#
+# Here the third active control is `pool[n - 1]` — "the last
+# pool slot" expressed as `UInt` arithmetic. At `n = 4` it still
+# resolves to slot 3, which leaves `pool[2]` inactive; the
+# compiled circuit is the same as in 5.3 and only the way the
+# index is spelled differs.
 
 
 # %%
@@ -463,9 +471,9 @@ def subset_pool_with_uint(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]
     tgt = qmc.qubit(name="tgt")
     pool[0] = qmc.x(pool[0])
     pool[1] = qmc.x(pool[1])
-    pool[2] = qmc.x(pool[2])
+    pool[3] = qmc.x(pool[3])
     cg = qmc.control(qmc.x, num_controls=k_ctrls)
-    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, k_ctrls - 1])
+    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, n - 1])
     return qmc.measure(pool)
 
 

@@ -190,14 +190,14 @@ def _controlled_u_box_with_bindings(kernel, **bindings) -> VGate:
 
 
 def test_controlled_box_subset_indices_filter_inactive_pool_slots() -> None:
-    """``controlled_indices`` drops inactive pool slots from VGate.
+    """Non-contiguous ``controlled_indices`` drop the skipped slot from VGate.
 
     The diagram for a ``SymbolicControlledU`` with
-    ``controlled_indices=[0, 1, 2]`` over a 4-qubit pool should
-    show three control dots (the active slots) and skip the fourth
-    one entirely.  ``control_count`` is the active count, not the
-    full pool size, and ``qubit_indices`` no longer includes the
-    inactive pool slot.
+    ``controlled_indices=[0, 1, 3]`` over a 4-qubit pool should
+    keep three control dots (the active slots, on the pool's
+    wire indices) and omit pool[2] entirely.  ``control_count``
+    is the active count and the inactive slot's wire index does
+    not appear in the control prefix of ``qubit_indices``.
     """
 
     @qmc.qkernel
@@ -205,31 +205,34 @@ def test_controlled_box_subset_indices_filter_inactive_pool_slots() -> None:
         pool = qmc.qubit_array(n, "pool")
         tgt = qmc.qubit(name="tgt")
         cg = qmc.control(qmc.x, num_controls=k_ctrls)
-        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 2])
+        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 3])
         return qmc.measure(pool)
 
     box = _controlled_u_box_with_bindings(kernel, n=4, k_ctrls=3)
     assert box.control_count == 3, box.control_count
-    # qubit_indices = active controls + targets; pool[3] (an inactive
-    # slot) must NOT appear in the control prefix.
     controls = box.qubit_indices[: box.control_count]
-    assert len(controls) == 3, controls
+    # The pool sits on wires 0..3; controlled_indices=[0, 1, 3]
+    # should keep wires 0, 1, 3 and drop wire 2.
+    assert controls == [0, 1, 3], controls
 
 
 def test_controlled_box_subset_indices_with_uint_entry_resolves_via_bindings() -> None:
-    """``controlled_indices`` entries that involve ``UInt`` arithmetic resolve from bindings."""
+    """``controlled_indices`` entries that involve ``UInt`` arithmetic resolve from bindings.
+
+    With ``[0, 1, n - 1]`` and ``n=4`` the third entry resolves
+    to 3, leaving wire 2 inactive — matching the literal
+    ``[0, 1, 3]`` shape of the previous test.
+    """
 
     @qmc.qkernel
     def kernel(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
         pool = qmc.qubit_array(n, "pool")
         tgt = qmc.qubit(name="tgt")
         cg = qmc.control(qmc.x, num_controls=k_ctrls)
-        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, k_ctrls - 1])
+        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, n - 1])
         return qmc.measure(pool)
 
     box = _controlled_u_box_with_bindings(kernel, n=4, k_ctrls=3)
-    # k_ctrls=3 so the last index resolves to 2 — the same active
-    # set as the literal case above; pool[3] is still inactive.
     assert box.control_count == 3, box.control_count
     controls = box.qubit_indices[: box.control_count]
-    assert len(controls) == 3, controls
+    assert controls == [0, 1, 3], controls
