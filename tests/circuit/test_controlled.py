@@ -24,7 +24,6 @@ from qamomile.circuit.ir.types.primitives import FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import (
     EmitError,
-    QubitAliasError,
     QubitConsumedError,
 )
 from tests.transpiler.gate_test_specs import (
@@ -294,20 +293,31 @@ class TestControlledGateCall:
                 cg(_make_qubit("ctrl2"), tgt)
 
     def test_aliasing_control_and_target_raises(self):
-        """Same qubit as both control and target raises QubitAliasError."""
+        """Reusing the same qubit as control + target raises QubitConsumedError.
+
+        Frontend Step 6 dropped the bespoke
+        ``_validate_no_alias_or_overlap`` entry-point check; the
+        underlying ``Handle.consume()`` linear-type machinery catches
+        the duplicate on the second consume, so the error class is
+        ``QubitConsumedError`` (not ``QubitAliasError``).
+        """
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         q = _make_qubit("q")
         with trace() as tracer:  # noqa: F841
-            with pytest.raises(QubitAliasError):
+            with pytest.raises(QubitConsumedError):
                 cg(q, q)
 
     def test_aliasing_duplicate_controls_raises(self):
-        """Same qubit used as multiple controls raises QubitAliasError."""
+        """Reusing the same qubit across two control slots raises QubitConsumedError.
+
+        Same rationale as :meth:`test_aliasing_control_and_target_raises`
+        — the linear-type layer catches the duplicate.
+        """
         cg = ControlledGate(_mock_qkernel(), num_controls=2)
         q = _make_qubit("q")
         tgt = _make_qubit("tgt")
         with trace() as tracer:  # noqa: F841
-            with pytest.raises(QubitAliasError):
+            with pytest.raises(QubitConsumedError):
                 cg(q, q, tgt)
 
 

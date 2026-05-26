@@ -31,10 +31,6 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import (
-    QubitAliasError,
-    QubitBorrowConflictError,
-)
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -514,145 +510,20 @@ class ControlledGate:
             h for h in sub_args_resolved.values() if isinstance(h, (Qubit, ArrayBase))
         ]
 
-    @staticmethod
-    def _handle_logical_slots(handle: Any) -> tuple[str, frozenset[int] | None]:
-        """Summarise a handle's physical qubit footprint for alias detection.
-
-        The result is a pair ``(key, covered)`` where *key* identifies
-        the storage region the handle claims and *covered* is the set
-        of slot indices within that region the handle holds (``None``
-        when coverage cannot be resolved statically).  Two handles
-        overlap iff their keys match and their covered sets intersect;
-        a ``None`` coverage on one side means the static check is
-        skipped (the borrow-tracking layer on element / slice creation
-        already catches the dangerous variants before we get here).
-
-        Scalar ``Qubit`` handles intentionally use their **per-element**
-        ``Value.logical_id`` as the key (not the underlying array's
-        id).  ``ArrayBase._get_element`` mints a fresh ``Value`` each
-        time, so distinct element accesses to the same array still
-        come out with distinct keys — matching the historical alias
-        check that only flagged the exact "same Qubit handle reused"
-        case (e.g. ``qq = q[i]; cg(qq, qq)``).  Overlap between an
-        element and a sibling slice is caught upstream by the array's
-        own borrow record at access time.
-
-        Args:
-            handle (Any): A scalar ``Qubit`` / ``Vector`` / ``VectorView``.
-
-        Returns:
-            tuple[str, frozenset[int] | None]: The storage key and the
-                covered slot set (``None`` when coverage is symbolic).
-        """
-        from qamomile.circuit.frontend.handle.array import (
-            ArrayBase,
-            VectorView,
-            _as_int_const,
-            _coverage_from_array_value,
-        )
-
-        if isinstance(handle, Qubit):
-            # Treat each scalar Qubit handle as occupying a single-slot
-            # virtual register keyed by its per-element ``logical_id``.
-            # See docstring for why we do not traverse ``parent_array``.
-            return handle.value.logical_id, frozenset({0})
-
-        assert isinstance(handle, ArrayBase)
-        if isinstance(handle, VectorView):
-            covered = handle._slice_covered_indices
-            if covered is None:
-                covered = _coverage_from_array_value(handle.value)
-            root_av = handle.value
-            while root_av.slice_of is not None:
-                root_av = root_av.slice_of
-            if covered is None:
-                return root_av.logical_id, None
-            return root_av.logical_id, frozenset(covered)
-
-        # Whole Vector: covers every slot of its own logical register.
-        length_int = _as_int_const(handle._shape[0]) if handle._shape else None
-        if length_int is None:
-            return handle.value.logical_id, None
-        return handle.value.logical_id, frozenset(range(length_int))
-
-    def _validate_no_alias_or_overlap(self, handles: list[Any]) -> None:
-        """Reject duplicate physical qubits across *handles*.
-
-        Walks *handles* left to right and accumulates per-root coverage
-        sets; raises as soon as two handles claim the same physical
-        slot, or as soon as a scalar ``Qubit`` re-appears under the
-        same ``logical_id``.  Symbolic-length views (whose coverage
-        cannot be resolved statically) are recorded as "covers
-        anything" — they collide with any other entry under the same
-        root id, which keeps the static check conservative.
-
-        Args:
-            handles (list[Any]): The complete set of quantum handles
-                passed to this call: controls followed by the
-                sub-kernel's quantum arguments.
-
-        Raises:
-            QubitAliasError: When two scalar ``Qubit`` handles share a
-                logical id (the classic "same qubit twice" case).
-            QubitBorrowConflictError: When two register-level handles
-                overlap on at least one physical slot, or when one
-                handle's coverage is symbolic and another touches the
-                same root register (deferred-to-emit collisions are
-                conservatively treated as a conflict).
-        """
-        seen_logical: set[str] = set()
-        per_root_concrete: dict[str, set[int]] = {}
-        per_root_symbolic: set[str] = set()
-
-        for handle in handles:
-            if isinstance(handle, Qubit):
-                lid = handle.value.logical_id
-                if lid in seen_logical:
-                    name = handle.name or handle.value.name or "unnamed"
-                    raise QubitAliasError(
-                        f"Cannot use the same qubit in multiple positions of "
-                        f"ControlledU.\nQubit '{name}' appears more than once.\n\n"
-                        f"Fix: Use distinct qubits for each control and target.",
-                        handle_name=name,
-                        operation_name="ControlledU",
-                    )
-                seen_logical.add(lid)
-
-            root_id, covered = self._handle_logical_slots(handle)
-            if covered is None:
-                if root_id in per_root_concrete or root_id in per_root_symbolic:
-                    raise QubitBorrowConflictError(
-                        f"ControlledU received overlapping quantum arguments "
-                        f"on root register '{root_id}'.  At least one of "
-                        f"the overlapping handles has a symbolic-length "
-                        f"coverage that cannot be statically narrowed.",
-                        handle_name=str(getattr(handle, "name", None) or root_id),
-                        operation_name="ControlledU",
-                    )
-                per_root_symbolic.add(root_id)
-                continue
-
-            if root_id in per_root_symbolic:
-                raise QubitBorrowConflictError(
-                    f"ControlledU received overlapping quantum arguments "
-                    f"on root register '{root_id}'.  A previous handle on "
-                    f"the same root has symbolic-length coverage.",
-                    handle_name=str(getattr(handle, "name", None) or root_id),
-                    operation_name="ControlledU",
-                )
-
-            taken = per_root_concrete.setdefault(root_id, set())
-            overlap = taken & covered
-            if overlap:
-                raise QubitBorrowConflictError(
-                    f"ControlledU received overlapping quantum arguments "
-                    f"on root register '{root_id}': slot(s) "
-                    f"{sorted(overlap)} appear in more than one position "
-                    f"(e.g. ``cg(qs[0:3], qs[2])``).",
-                    handle_name=str(getattr(handle, "name", None) or root_id),
-                    operation_name="ControlledU",
-                )
-            taken.update(covered)
+    # ``_validate_no_alias_or_overlap`` used to live here as an entry-
+    # point alias / overlap check, mirroring the
+    # ``_check_qubit_alias`` helper in ``qubit_gates.py``.  In practice
+    # every adversarial call shape (``cg(q, q)``, ``cg(qs[0:3], qs[2])``,
+    # ``cg(qs[0:3], qs[0:3])``, ``cg(qs[0:3], qs[1:4])``) is already
+    # rejected by the linear-type / borrow-tracking layer one step
+    # earlier — by ``Handle.consume()`` (scalar duplicates →
+    # ``QubitConsumedError``) or by ``ArrayBase._get_element`` /
+    # ``Vector._make_slice_view`` 's borrow table (view-touching
+    # overlaps → ``QubitBorrowConflictError``).  The bespoke check was
+    # therefore pure duplication and was removed; the underlying
+    # safety guarantees are unchanged, only the error class on the
+    # ``cg(q, q)`` shape moved from ``QubitAliasError`` to
+    # ``QubitConsumedError``.
 
     @staticmethod
     def _consume_with_borrow_transfer(
@@ -1177,11 +1048,10 @@ class ControlledGate:
         Raises:
             ValueError: From :meth:`_split_controls_by_count` when the
                 control boundary can't be honoured by the args.
-            QubitAliasError / QubitBorrowConflictError: From
-                :meth:`_validate_no_alias_or_overlap` on duplicate
-                qubits.
-            QubitConsumedError: From :meth:`_consume_with_borrow_transfer`
-                when a non-view handle has already been consumed.
+            QubitConsumedError / QubitBorrowConflictError: From the
+                ``Handle.consume()`` / array borrow-tracker layer when
+                an argument duplicates a slot that another argument
+                also touches.
             TypeError: From :meth:`_bind_to_sub_signature` or
                 :meth:`_params_to_operands` on unknown/typoed kwargs
                 or unsupported classical parameter types.
@@ -1207,8 +1077,11 @@ class ControlledGate:
             if id(value) not in quantum_ids
         }
 
-        self._validate_no_alias_or_overlap(controls + sub_quantum_args)
-
+        # Alias / overlap checking is delegated entirely to the
+        # ``Handle.consume()`` / array borrow-tracker layer below:
+        # scalar duplicates raise ``QubitConsumedError`` on the
+        # second consume, and view-touching overlaps raise
+        # ``QubitBorrowConflictError`` at element / slice access time.
         consumed_controls = self._consume_with_borrow_transfer(
             controls, "ControlledU[control]"
         )
@@ -1299,10 +1172,11 @@ class ControlledGate:
                 a ``controlled_indices`` entry is not ``int`` / ``UInt``,
                 or a sub-kernel kwarg does not match the wrapped
                 kernel's signature.
-            QubitAliasError / QubitBorrowConflictError: Duplicate
-                physical qubits across the control + sub-kernel args.
-            QubitConsumedError: A control or sub-kernel quantum arg
-                was already consumed before the call.
+            QubitConsumedError / QubitBorrowConflictError: Duplicate
+                physical qubits across the control + sub-kernel args
+                (caught by the ``Handle.consume()`` / array
+                borrow-tracker layer), or a quantum arg that was
+                already consumed before the call.
         """
         normalized_power = self._normalize_power(power)
         num_controls = self._num_controls
@@ -1425,8 +1299,8 @@ class ControlledGate:
         Raises:
             ValueError: ``args[0]`` is not a ``Vector`` / ``VectorView``,
                 or the sub-kernel has no quantum arguments.
-            TypeError / QubitAliasError / QubitBorrowConflictError /
-            QubitConsumedError: As documented on :meth:`__call__`.
+            TypeError / QubitConsumedError / QubitBorrowConflictError:
+                As documented on :meth:`__call__`.
         """
         from qamomile.circuit.frontend.handle.array import ArrayBase
 
@@ -1463,8 +1337,9 @@ class ControlledGate:
             if id(value) not in quantum_ids
         }
 
-        self._validate_no_alias_or_overlap([c_qs] + sub_quantum_args)
-
+        # Alias / overlap checking is delegated to the
+        # ``Handle.consume()`` / array borrow-tracker layer below
+        # (same rationale as in ``_call_concrete``).
         consumed_pool_entry = self._consume_with_borrow_transfer(
             [c_qs], "ControlledU[control]"
         )[0]

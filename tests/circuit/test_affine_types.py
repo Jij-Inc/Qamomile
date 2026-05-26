@@ -1506,7 +1506,14 @@ class TestControlledGateAffine:
             bad_circuit.build()
 
     def test_controlled_alias_raises(self):
-        """Same qubit as both control and target should raise QubitAliasError."""
+        """Reusing the same qubit as control + target raises QubitConsumedError.
+
+        Step 6 of the controlled-API redesign dropped the bespoke
+        entry-point ``_validate_no_alias_or_overlap`` check; the
+        ``Handle.consume()`` linear-type layer catches the duplicate
+        on the second consume, so the error class is
+        ``QubitConsumedError`` instead of ``QubitAliasError``.
+        """
         sub = self._make_sub_kernel()
         ctrl_h = qm.controlled(sub)
 
@@ -1514,7 +1521,7 @@ class TestControlledGateAffine:
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
             return ctrl_h(q, q)  # same qubit in both positions
 
-        with pytest.raises(QubitAliasError):
+        with pytest.raises(QubitConsumedError):
             bad_circuit.build()
 
     def test_double_controlled_proper_use_works(self):
