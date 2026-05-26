@@ -96,10 +96,11 @@ from __future__ import annotations
 
 # The current schema version. Bump on every breaking change.
 #
-# Version history:
-#   1 — initial wire format.
-#   2 — ``SymbolicControlledU`` gains a ``controlled_index_refs`` slot
-#       (per the controlled-API redesign, step 3).  The field is always
-#       written; a ``None`` value reproduces the v1 semantics ("use the
-#       entire control vector as the pool").
-SCHEMA_VERSION: int = 2
+# Note: ``SymbolicControlledU`` gained an optional
+# ``controlled_index_refs`` slot during the controlled-API redesign,
+# but the field is kept additive-only (encoder writes it, decoder reads
+# it with ``d.get(...)``-with-default semantics so a v1 payload without
+# the field decodes to ``controlled_indices=None``).  This is
+# deliberately a forward-compatible addition rather than a schema
+# bump; the version stays at 1.
+SCHEMA_VERSION: int = 1
