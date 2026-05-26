@@ -399,6 +399,10 @@ To translate English docs (`docs/en/`) into Japanese (`docs/ja/`), use the `/tra
 
 Translation rules (tone, spacing, terminology, soft line breaks, etc.) are defined in `.claude/skills/translate/SKILL.md`. Always use this skill when translating documentation.
 
+## Skills for Other AI Agents
+
+The skill definitions under `.claude/skills/<name>/SKILL.md` are also exposed via a symlink at `.agents/skills/`. Other AI agents (Codex CLI, Cursor, Aider, ...) that do not auto-discover `.claude/skills/` can read the same files via `.agents/skills/<name>/SKILL.md`. The body of each SKILL.md is portable — it contains no Claude Code-specific syntax — while the frontmatter fields (`model:`, `argument-hint:`, etc.) are Claude Code-only and are silently ignored by other agents. To invoke a skill from another agent, point it at the SKILL.md path and ask it to follow the instructions instead of using a Claude Code slash command (`/local-review`, etc.).
+
 ## Commits, Pull Requests, and Issues
 
 The rules below apply to any text Claude writes that lands in the project's permanent record or on GitHub — commit messages, PR titles / bodies, issue titles / bodies, PR review comments, code review replies, and inline source code comments. Consult this section **before** creating any commit, PR, or issue.
