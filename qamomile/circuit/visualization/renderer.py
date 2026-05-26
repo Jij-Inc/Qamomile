@@ -706,6 +706,11 @@ class MatplotlibRenderer:
         )
         ax.add_line(line)
 
+        if self._draw_vcontrolled_u_special_gate(
+            ax, node.gate_type, x_pos, control_y, target_y
+        ):
+            return
+
         # Draw control dots
         for y in control_y:
             self._draw_control_dot(ax, x_pos, y)
@@ -792,6 +797,57 @@ class MatplotlibRenderer:
                     color=self.style.block_border_color,
                     zorder=PORDER_TEXT,
                 )
+
+    def _draw_vcontrolled_u_special_gate(
+        self,
+        ax: Axes,
+        gate_type: GateOperationType | None,
+        x_pos: float,
+        control_y: list[float],
+        target_y: list[float],
+    ) -> bool:
+        """Draw a controlled built-in gate without falling back to a box.
+
+        Args:
+            ax (Axes): Matplotlib Axes to draw on.
+            gate_type (GateOperationType | None): Built-in gate type wrapped
+                by the `ControlledUOperation`.
+            x_pos (float): X coordinate of the operation.
+            control_y (list[float]): Y coordinates of explicit control wires.
+            target_y (list[float]): Y coordinates of wrapped-gate operands.
+
+        Returns:
+            bool: True when a dedicated symbol was drawn; False when the
+                caller should draw the generic controlled-U box.
+        """
+        if gate_type is None or not target_y:
+            return False
+
+        if gate_type == GateOperationType.SWAP:
+            if len(target_y) != 2:
+                return False
+            for y in control_y:
+                self._draw_control_dot(ax, x_pos, y)
+            for y in target_y:
+                self._draw_swap_x(ax, x_pos, y)
+            return True
+
+        if gate_type in {
+            GateOperationType.X,
+            GateOperationType.CX,
+            GateOperationType.TOFFOLI,
+        }:
+            for y in control_y + target_y[:-1]:
+                self._draw_control_dot(ax, x_pos, y)
+            self._draw_target_x(ax, x_pos, target_y[-1])
+            return True
+
+        if gate_type in {GateOperationType.Z, GateOperationType.CZ}:
+            for y in control_y + target_y:
+                self._draw_control_dot(ax, x_pos, y)
+            return True
+
+        return False
 
     def _draw_vexpval(
         self,
