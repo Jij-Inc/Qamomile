@@ -166,7 +166,9 @@ def prepare_dicke(
     # belong to that stage and are applied immediately after the pair gate.
     # The conditional is isolated in _apply_triplet_if_stage_matches so that
     # the Dict handle for triplets never enters the phi-variable list of an if.
-    for (t, c), angle in pairs.items():
+    for pair, angle in qmc.items(pairs):
+        t = pair[0]
+        c = pair[1]
         q = scs_gate_2q(q, t, c, angle)
         for indices, angle3 in qmc.items(triplets):
             q = _apply_triplet_if_stage_matches(q, indices, angle3, c)
