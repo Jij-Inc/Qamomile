@@ -256,6 +256,55 @@ class TestConstantFoldControlledUFields:
         assert isinstance(cu, SymbolicControlledU)
         assert cu.controlled_indices is not None
 
+    def test_blocked_promotion_keeps_num_controls_as_value(self):
+        """``num_controls`` stays a ``Value`` (not a bare ``int``) when promotion is blocked.
+
+        When ``num_controls`` resolves to a concrete int but
+        ``controlled_indices`` is set (so promotion to
+        ``ConcreteControlledU`` is skipped), the folded value must
+        be written back as a ``Value`` carrying the constant on its
+        ``ScalarMetadata`` rather than as a raw ``int``.  Downstream
+        passes (serialize, compile-time-if lowering) walk
+        ``op.num_controls`` expecting a ``Value`` with a UUID; a
+        raw ``int`` there triggers ``AttributeError`` on the first
+        consumer that touches it.
+        """
+
+        @qm.qkernel
+        def kernel(n: qm.UInt, k: qm.UInt) -> qm.Vector[qm.Bit]:
+            pool = qm.qubit_array(n, "pool")
+            tgt = qm.qubit("tgt")
+            cg = qm.control(_zgate, num_controls=k)
+            _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, n - 1])
+            return qm.measure(_pool_out)
+
+        from qamomile.circuit.ir.serialize import dump_json
+        from qamomile.circuit.ir.value import Value
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        bindings = {"n": 4, "k": 3}
+        block = transpiler.to_block(kernel, bindings=bindings)
+        inlined = transpiler.inline(transpiler.substitute(block))
+        validated = transpiler.affine_validate(inlined)
+        folded = transpiler.constant_fold(validated, bindings=bindings)
+
+        cu = self._find_controlled_u(folded.operations)
+        assert cu is not None
+        assert isinstance(cu, SymbolicControlledU)
+        # The bug Copilot flagged: num_controls used to become a
+        # bare ``int`` here, crashing every downstream consumer.
+        assert isinstance(cu.num_controls, Value), (
+            f"SymbolicControlledU.num_controls must stay a Value; "
+            f"got {type(cu.num_controls).__name__}"
+        )
+        assert cu.num_controls.get_const() == 3
+        # End-to-end smoke: the folded block must serialize cleanly
+        # (the original failure was an AttributeError from the
+        # encoder calling ``ctx.register_value(op.num_controls)``).
+        payload = dump_json(folded)
+        assert len(payload) > 0
+
 
 # -- Integration tests: full transpilation -----------------------------------
 

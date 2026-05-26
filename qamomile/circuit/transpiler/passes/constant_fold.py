@@ -504,6 +504,20 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         )
                         extra_kwargs = {}  # Already applied
                     else:
+                        if isinstance(new_nc, int):
+                            # ``SymbolicControlledU.num_controls`` is
+                            # contractually a ``Value`` with a UUID
+                            # (serialize, if-lowering, and the IR
+                            # walkers depend on it).  When the
+                            # constant fold resolves it to an ``int``
+                            # but promotion to ``ConcreteControlledU``
+                            # is blocked (e.g. ``controlled_indices``
+                            # is set), bind the constant onto a fresh
+                            # copy of the original ``UInt`` ``Value``
+                            # so the IR shape stays
+                            # ``Value(..., const_value=<int>)`` rather
+                            # than a bare ``int``.
+                            new_nc = result_op.num_controls.with_const(new_nc)
                         extra_kwargs["num_controls"] = new_nc
                         changed = True
             # ConcreteControlledU: num_controls is already int, nothing to fold.

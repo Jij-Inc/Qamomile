@@ -1673,7 +1673,7 @@ class TestArrayConsumeUnreturnedBorrow:
         assert graph is not None
 
     def test_controlled_with_unreturned_vector_borrow_raises(self):
-        """controlled() called on a Vector with an unreturned borrow should raise.
+        """control() called on a Vector with an unreturned borrow should raise.
 
         Migrated from the old ``target_indices``-on-Vector form: the
         regression concern (an unreturned element borrow blocks any
@@ -1701,7 +1701,7 @@ class TestArrayConsumeUnreturnedBorrow:
             bad_controlled.build()
 
     def test_controlled_symbolic_controls_with_unreturned_borrow_raises(self):
-        """controlled() with symbolic num_controls on a Vector with unreturned borrow should raise."""
+        """control() with symbolic num_controls on a Vector with unreturned borrow should raise."""
         from qamomile.circuit.frontend.handle.primitives import UInt
         from qamomile.circuit.ir.types.primitives import UIntType
         from qamomile.circuit.ir.value import Value
