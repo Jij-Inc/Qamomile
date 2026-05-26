@@ -59,6 +59,42 @@ if TYPE_CHECKING:
 _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
 
 
+# TeX labels for built-in gate names when they appear as the wrapped
+# block of a ``ControlledUOperation`` (e.g. ``qmc.control(qmc.rx)`` —
+# ``block.name`` is ``"rx"``, which is the same string the
+# ``GateOperationType.RX`` branch of ``_get_gate_label`` would
+# pretty-print as ``$R_x$``).  Keep this mapping in sync with the
+# ``tex_labels`` table inside ``CircuitAnalyzer._get_gate_label``.
+_BUILTIN_TEX_LABELS: dict[str, str] = {
+    "rx": r"$R_x$",
+    "ry": r"$R_y$",
+    "rz": r"$R_z$",
+    "rzz": r"$R_{zz}$",
+    "p": r"$P$",
+    "cp": r"$CP$",
+    "h": r"$H$",
+    "x": r"$X$",
+    "y": r"$Y$",
+    "z": r"$Z$",
+    "t": r"$T$",
+    "tdg": r"$T^{\dagger}$",
+    "s": r"$S$",
+    "sdg": r"$S^{\dagger}$",
+    "cx": r"$CX$",
+    "cz": r"$CZ$",
+    "swap": r"$SWAP$",
+    "ccx": r"$CCX$",
+}
+
+
+# Prefix that ``ControlledGate.__call__`` attaches to a wrapped
+# kernel's classical-parameter Value names (e.g. ``ctrl_param_theta``
+# for an inner ``theta`` parameter).  The drawer strips it so the
+# rendered label reads ``_phase(theta=π/2)`` rather than
+# ``_phase(ctrl_param_theta=π/2)``.
+_CTRL_PARAM_PREFIX: str = "ctrl_param_"
+
+
 class CircuitAnalyzer:
     """Analyzes IR blocks for circuit visualization.
 
@@ -997,9 +1033,24 @@ class CircuitAnalyzer:
             )
 
         if isinstance(op, ControlledUOperation):
-            u_name = getattr(op.block, "name", "U") or "U"
+            raw_name = getattr(op.block, "name", "U") or "U"
+            # Built-in gates wrapped via ``qmc.control(qmc.rx)`` etc.
+            # carry their lowercase gate name on ``block.name``; render
+            # them with the same TeX label the inline-gate path uses
+            # (``$R_x$`` instead of ``rx``).  User kernels fall through
+            # unchanged so ``_phase`` stays ``_phase``.
+            u_name = _BUILTIN_TEX_LABELS.get(raw_name, raw_name)
             power_val = self._resolve_controlled_u_power(op, param_values)
-            label = f"{u_name}^{power_val}" if power_val > 1 else u_name
+            # Append a parameter suffix when the wrapped block has
+            # classical parameters bound at the call site.  Each entry
+            # is ``name=value`` where ``name`` is the wrapped kernel's
+            # own parameter name (the leading ``ctrl_param_`` Value
+            # prefix is stripped) and ``value`` is either the resolved
+            # numeric constant or the symbolic name (Greek letters get
+            # TeX rendering via ``_format_symbolic_param``).
+            param_suffix = self._format_controlled_param_suffix(op, param_values)
+            base_label = f"{u_name}{param_suffix}"
+            label = f"{base_label}^{power_val}" if power_val > 1 else base_label
             box_width = self._estimate_label_box_width(label)
             # Control qubits first, then target qubits
             control_indices: list[int] = []
@@ -1876,6 +1927,72 @@ class CircuitAnalyzer:
         collect_qubits(op.true_operations)
         collect_qubits(op.false_operations)
         return list(affected), is_precise
+
+    def _format_controlled_param_suffix(
+        self,
+        op: ControlledUOperation,
+        param_values: dict,
+    ) -> str:
+        """Render the ``(p1=v1, p2=v2, ...)`` suffix for a controlled-U box.
+
+        Walks ``op.param_operands`` (the classical parameters bound to
+        the wrapped block at the call site) and returns the formatted
+        suffix that follows the wrapped-callable name on the box label.
+        The leading ``ctrl_param_`` prefix that
+        ``ControlledGate.__call__`` attaches to each Value name is
+        stripped so the rendered label uses the wrapped kernel's own
+        parameter name.  Bound numeric constants are formatted via
+        :meth:`_format_parameter`; unresolved symbolic parameters fall
+        back to :meth:`_format_symbolic_param` so Greek-letter names
+        like ``theta`` render in TeX.
+
+        Args:
+            op (ControlledUOperation): The controlled-U op whose
+                classical parameters should be rendered.
+            param_values (dict): The same ``param_values`` mapping the
+                surrounding ``_build_vgate`` call uses to resolve
+                Values inside inline blocks.
+
+        Returns:
+            str: A string of the form ``"(name=value, ...)"`` when
+            ``op.param_operands`` is non-empty, or ``""`` when the
+            wrapped block takes no classical parameters.
+        """
+        params = list(getattr(op, "param_operands", ()) or ())
+        if not params:
+            return ""
+        parts: list[str] = []
+        for v in params:
+            # Drop the ctrl_param_ prefix to recover the wrapped
+            # kernel's own parameter name.
+            raw = v.name or ""
+            if raw.startswith(_CTRL_PARAM_PREFIX):
+                raw = raw[len(_CTRL_PARAM_PREFIX) :]
+            pname = raw or "?"
+
+            # Resolve the value: bound constant first, then logical_id
+            # remap, then a generic _evaluate_value, then the symbolic
+            # name as a final fallback.
+            const_val = v.get_const() if hasattr(v, "get_const") else None
+            if isinstance(const_val, (int, float)):
+                pval = self._format_parameter(const_val)
+            elif param_values and v.logical_id in param_values:
+                resolved = param_values[v.logical_id]
+                if isinstance(resolved, (int, float)):
+                    pval = self._format_parameter(resolved)
+                elif isinstance(resolved, str):
+                    pval = self._format_symbolic_param(resolved)
+                else:
+                    pval = self._format_symbolic_param(pname)
+            else:
+                evaluated = self._evaluate_value(v, param_values or {})
+                if isinstance(evaluated, (int, float)):
+                    pval = self._format_parameter(evaluated)
+                else:
+                    pval = self._format_symbolic_param(pname)
+
+            parts.append(f"{pname}={pval}")
+        return f"({', '.join(parts)})"
 
     def _resolve_controlled_u_power(
         self,
