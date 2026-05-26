@@ -30,14 +30,10 @@ from __future__ import annotations
 
 import itertools
 import math
-from typing import Any
 
 import ommx.v1
 
 import qamomile.observable as qm_o
-from qamomile.circuit.frontend.qkernel import QKernel
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, VarType
 from qamomile.optimization.converter import (
     binary_sampleset_to_ommx_samples,
@@ -52,39 +48,63 @@ class PCEEncoder:
     """Pauli Correlation Encoding (PCE) encoder.
 
     Builds the deterministic mapping from each binary variable to a
-    distinct :math:`k`-body Pauli correlator on :math:`n` qubits, where
-    :math:`n` is the smallest integer satisfying
-    :math:`\\binom{n}{k} \\cdot 3^k \\ge \\text{num\\_vars}`.
+    distinct :math:`k`-body Pauli correlator on :math:`n` qubits. By
+    default, :math:`n` is the smallest integer satisfying
+    :math:`\\binom{n}{k} \\cdot 3^k \\ge \\text{num\\_vars}`; callers may
+    instead pass an explicit ``num_qubits`` to use a larger register
+    (e.g., to match a hardware topology), provided it is at least the
+    computed minimum.
 
     The enumeration first iterates over all :math:`\\binom{n}{k}` qubit
     combinations in lexicographic order, then over the :math:`3^k`
     assignments of ``X``, ``Y``, ``Z`` on those qubits. The first
     ``spin_model.num_bits`` correlators are assigned to variables in index
-    order; the remaining correlators are unused.
+    order; the remaining correlators are unused. Because the lexicographic
+    enumeration depends on ``num_qubits``, the per-variable correlator
+    assignment may differ when ``num_qubits`` is set above the minimum.
 
     Args:
         spin_model (BinaryModel): The problem in SPIN vartype. Must not
             contain higher-order (HUBO) terms.
-        k (int): Compression rate — the body (weight) of each Pauli
-            correlator. Must be a positive integer.
+        correlator_order (int): Compression rate — the body (weight) of
+            each Pauli correlator (denoted :math:`k` in the math). Must
+            be a positive integer.
+        num_qubits (int | None): Number of qubits to host the encoding.
+            Defaults to ``None``, meaning the encoder uses
+            :meth:`min_num_qubits` — the smallest :math:`n` satisfying
+            the capacity inequality. When given, must be at least that
+            minimum.
 
     Raises:
-        ValueError: If ``k`` is not a positive integer, if ``spin_model``
-            is not in SPIN vartype, or if ``spin_model`` contains HUBO
-            terms.
+        ValueError: If ``correlator_order`` is not a positive integer, if
+            ``spin_model`` is not in SPIN vartype, if ``spin_model``
+            contains HUBO terms, or if ``num_qubits`` is below the
+            minimum required for the problem at the given
+            ``correlator_order``.
 
     Example:
         >>> from qamomile.optimization.binary_model import BinaryModel, VarType
         >>> spin = BinaryModel(...).change_vartype(VarType.SPIN)
-        >>> encoder = PCEEncoder(spin, k=2)
+        >>> encoder = PCEEncoder(spin, correlator_order=2)
         >>> encoder.num_qubits
         4
+        >>> # Override to use a larger register:
+        >>> wide_encoder = PCEEncoder(spin, correlator_order=2, num_qubits=6)
+        >>> wide_encoder.num_qubits
+        6
         >>> encoder.pauli_encoding[0]  # Hamiltonian with one Pauli string
     """
 
-    def __init__(self, spin_model: BinaryModel, k: int) -> None:
-        if k < 1:
-            raise ValueError(f"k must be a positive integer, got {k}.")
+    def __init__(
+        self,
+        spin_model: BinaryModel,
+        correlator_order: int,
+        num_qubits: int | None = None,
+    ) -> None:
+        if correlator_order < 1:
+            raise ValueError(
+                f"correlator_order must be a positive integer, got {correlator_order}."
+            )
         if spin_model.vartype != VarType.SPIN:
             raise ValueError("PCEEncoder requires a SPIN-type BinaryModel.")
         if spin_model.higher:
@@ -98,51 +118,67 @@ class PCEEncoder:
                 "reject HUBO inputs here to make that boundary explicit."
             )
 
+        min_n = PCEEncoder.min_num_qubits(spin_model.num_bits, correlator_order)
+        if num_qubits is None:
+            n = min_n
+        else:
+            if num_qubits < min_n:
+                raise ValueError(
+                    f"num_qubits={num_qubits} is too small to host "
+                    f"{spin_model.num_bits} variables at "
+                    f"correlator_order={correlator_order}; "
+                    f"need at least {min_n}."
+                )
+            n = num_qubits
+
         self.spin_model: BinaryModel = spin_model
-        self.k: int = k
-        self._num_qubits: int = PCEEncoder.min_num_qubits(spin_model.num_bits, k)
+        self.correlator_order: int = correlator_order
+        self._num_qubits: int = n
         self._pauli_encoding: dict[int, qm_o.Hamiltonian] = self._build_encoding()
 
     @staticmethod
-    def min_num_qubits(num_vars: int, k: int) -> int:
+    def min_num_qubits(num_vars: int, correlator_order: int) -> int:
         """Return the smallest ``n >= k`` with ``C(n, k) * 3**k >= num_vars``.
 
-        The result is always at least ``k`` because a :math:`k`-body
-        correlator requires at least ``k`` qubits (``C(n, k) = 0`` for
-        ``n < k``).  When ``num_vars == 0`` the method returns ``k``
-        directly.
+        Here ``k`` denotes the ``correlator_order`` argument. The result
+        is always at least ``k`` because a :math:`k`-body correlator
+        requires at least ``k`` qubits (``C(n, k) = 0`` for ``n < k``).
+        When ``num_vars == 0`` the method returns ``k`` directly.
 
         Args:
             num_vars (int): Number of variables to encode. Must be
                 non-negative.
-            k (int): Compression rate (number of non-identity Paulis per
-                correlator). Must be a positive integer.
+            correlator_order (int): Compression rate (number of
+                non-identity Paulis per correlator; :math:`k` in the
+                math). Must be a positive integer.
 
         Returns:
-            int: The minimum number of qubits ``n`` (with ``n >= k``)
-            required to host ``num_vars`` distinct :math:`k`-body Pauli
-            correlators.
+            int: The minimum number of qubits ``n`` (with
+            ``n >= correlator_order``) required to host ``num_vars``
+            distinct :math:`k`-body Pauli correlators.
 
         Raises:
-            ValueError: If ``k`` is not a positive integer or ``num_vars``
-                is negative.
+            ValueError: If ``correlator_order`` is not a positive integer
+                or ``num_vars`` is negative.
 
         Example:
-            >>> PCEEncoder.min_num_qubits(num_vars=10, k=2)
+            >>> PCEEncoder.min_num_qubits(num_vars=10, correlator_order=2)
             3
-            >>> # Lower bound: result is always >= k
-            >>> PCEEncoder.min_num_qubits(num_vars=0, k=3)
+            >>> # Lower bound: result is always >= correlator_order
+            >>> PCEEncoder.min_num_qubits(num_vars=0, correlator_order=3)
             3
         """
-        if k < 1:
-            raise ValueError(f"k must be a positive integer, got {k}.")
+        if correlator_order < 1:
+            raise ValueError(
+                f"correlator_order must be a positive integer, got {correlator_order}."
+            )
         if num_vars < 0:
             raise ValueError(f"num_vars must be non-negative, got {num_vars}.")
         if num_vars == 0:
-            return k
+            return correlator_order
 
-        n = k
-        while math.comb(n, k) * (3**k) < num_vars:
+        n = correlator_order
+        while math.comb(n, correlator_order) * (3**correlator_order) < num_vars:
             n += 1
         return n
 
@@ -150,9 +186,15 @@ class PCEEncoder:
         """Enumerate :math:`k`-body Pauli correlators and assign one per variable.
 
         Returns:
-            dict[int, qm_o.Hamiltonian]: Mapping from variable index to a
-            single-term Hamiltonian on ``self.num_qubits`` qubits with
-            coefficient ``1.0``.
+            dict[int, qm_o.Hamiltonian]: Mapping from a :class:`BinaryModel`
+            **new** variable index (the contiguous 0-based index into
+            ``spin_model``, *not* the caller's original variable IDs;
+            see :attr:`BinaryModel.index_new_to_origin` /
+            :attr:`BinaryModel.index_origin_to_new` for the round-trip)
+            to a single-term Hamiltonian on ``self.num_qubits`` qubits
+            with coefficient ``1.0``. Mapping decoded keys back to the
+            user's original variable IDs is the job of :meth:`decode`,
+            which uses :attr:`BinaryModel.index_new_to_origin`.
         """
         num_vars = self.spin_model.num_bits
         n = self._num_qubits
@@ -160,10 +202,12 @@ class PCEEncoder:
 
         encoding: dict[int, qm_o.Hamiltonian] = {}
         var_idx = 0
-        for qubit_indices in itertools.combinations(range(n), self.k):
+        for qubit_indices in itertools.combinations(range(n), self.correlator_order):
             if var_idx >= num_vars:
                 break
-            for pauli_assignment in itertools.product(pauli_choices, repeat=self.k):
+            for pauli_assignment in itertools.product(
+                pauli_choices, repeat=self.correlator_order
+            ):
                 if var_idx >= num_vars:
                     break
                 h = qm_o.Hamiltonian(num_qubits=n)
@@ -178,12 +222,33 @@ class PCEEncoder:
 
     @property
     def num_qubits(self) -> int:
-        """Number of qubits required by the encoding."""
+        """Number of qubits used by the PCE encoding.
+
+        Equal to the ``num_qubits`` argument passed to :meth:`__init__`
+        when given, or to :meth:`min_num_qubits` (the smallest ``n >= k``
+        satisfying :math:`\\binom{n}{k} \\cdot 3^k \\ge \\text{num\\_vars}`)
+        when ``num_qubits`` was left at its default. Every Pauli
+        correlator in :attr:`pauli_encoding` acts on exactly this many
+        qubits.
+
+        Returns:
+            int: The qubit count used by every correlator Hamiltonian in
+            :attr:`pauli_encoding`.
+        """
         return self._num_qubits
 
     @property
     def pauli_encoding(self) -> dict[int, qm_o.Hamiltonian]:
-        """Mapping from variable index to its Pauli correlator Hamiltonian."""
+        """Mapping from variable index to its Pauli correlator Hamiltonian.
+
+        Returns:
+            dict[int, qm_o.Hamiltonian]: Dictionary keyed by variable index
+            ``i`` in ``range(spin_model.num_bits)``. Each value is a
+            single-term Hamiltonian on :attr:`num_qubits` qubits whose
+            Pauli string is the :math:`k`-body correlator
+            :math:`P_i` assigned to that variable, with coefficient
+            ``1.0``.
+        """
         return self._pauli_encoding
 
 
@@ -191,14 +256,18 @@ class PCEConverter:
     """Converter for Pauli Correlation Encoding (PCE).
 
     PCE compresses :math:`N` optimization variables into the expectation
-    values of :math:`k`-body Pauli correlators on :math:`n` qubits, where
-    :math:`n` is chosen as the smallest integer satisfying
-    :math:`\\binom{n}{k} \\cdot 3^k \\ge N`. Each variable :math:`i` is
-    associated with a distinct correlator :math:`P_i`, and the decoded spin
-    value is :math:`s_i = \\operatorname{sgn}\\langle P_i \\rangle`.
+    values of :math:`k`-body Pauli correlators on :math:`n` qubits. By
+    default, :math:`n` is chosen as the smallest integer satisfying
+    :math:`\\binom{n}{k} \\cdot 3^k \\ge N`; callers may instead pass an
+    explicit ``num_qubits`` (at least the minimum) to host the encoding
+    on a larger register. Each variable :math:`i` is associated with a
+    distinct correlator :math:`P_i`, and the decoded spin value is
+    :math:`s_i = \\operatorname{sgn}\\langle P_i \\rangle`.
 
-    PCE does not prescribe a specific ansatz — users provide their own
-    variational circuit via :meth:`transpile`. The classical cost that the
+    PCE does not prescribe a specific ansatz — users build their own
+    variational circuit and transpile it directly with their backend's
+    :class:`~qamomile.circuit.transpiler.transpiler.Transpiler` (this
+    converter does not wrap that step). The classical cost that the
     outer optimizer should minimize is
 
     .. math::
@@ -210,9 +279,9 @@ class PCEConverter:
     user's ansatz. Use :meth:`get_encoded_pauli_list` to obtain the
     observables to feed into the backend's estimator.
 
-    The encoding is built once at construction (parametrized by ``k``) and
-    cached on the encoder. To re-encode with a different ``k``, construct a
-    new :class:`PCEConverter`.
+    The encoding is built once at construction (parametrized by
+    ``correlator_order``) and cached on the encoder. To re-encode with a
+    different ``correlator_order``, construct a new :class:`PCEConverter`.
 
     Although the public API mirrors
     :class:`~qamomile.optimization.qrao.base_converter.QRACConverterBase`
@@ -239,9 +308,15 @@ class PCEConverter:
             which is the natural domain for sign rounding.
 
     Example:
-        >>> converter = PCEConverter(instance, k=2)
+        >>> converter = PCEConverter(instance, correlator_order=2)
         >>> observables = converter.get_encoded_pauli_list()
-        >>> executable = converter.transpile(my_ansatz, transpiler)
+        >>> # Transpile the user's ansatz directly with the backend
+        >>> # transpiler (PCEConverter does not wrap this step):
+        >>> executable = transpiler.transpile(
+        ...     my_ansatz,
+        ...     bindings={"P": observables[0]},
+        ...     parameters=["thetas"],
+        ... )
         >>> # ... evaluate <P_i> for each i via executable ...
         >>> sampleset = converter.decode([0.7, -0.2, 0.9, -0.4])
     """
@@ -249,7 +324,8 @@ class PCEConverter:
     def __init__(
         self,
         instance: ommx.v1.Instance | BinaryModel,
-        k: int,
+        correlator_order: int,
+        num_qubits: int | None = None,
     ) -> None:
         """Initialize the converter from an OMMX instance or BinaryModel.
 
@@ -265,13 +341,23 @@ class PCEConverter:
                 optimization problem. ``ommx.v1.Instance`` inputs are
                 converted via ``to_qubo()``; ``BinaryModel`` inputs retain
                 their declared vartype as the target output vartype.
-            k (int): Compression rate — the body (weight) of each Pauli
-                correlator. Must be a positive integer.
+            correlator_order (int): Compression rate — the body (weight)
+                of each Pauli correlator (denoted :math:`k` in the math).
+                Must be a positive integer.
+            num_qubits (int | None): Number of qubits to host the
+                encoding. Defaults to ``None``, meaning the converter
+                uses :meth:`min_num_qubits` — the smallest :math:`n`
+                large enough to host every variable's correlator. When
+                given, must be at least that minimum; supplying a larger
+                value is supported for callers that want to match a
+                specific hardware register width.
 
         Raises:
             TypeError: If ``instance`` is neither an ``ommx.v1.Instance``
                 nor a :class:`BinaryModel`.
-            ValueError: If ``k`` is not a positive integer or if the
+            ValueError: If ``correlator_order`` is not a positive integer,
+                if ``num_qubits`` is below the minimum required for the
+                problem at the given ``correlator_order``, or if the
                 problem contains higher-order (HUBO) terms (raised by
                 :class:`PCEEncoder`).
         """
@@ -281,52 +367,97 @@ class PCEConverter:
         self.instance, self.original_vartype, self.spin_model = normalize_problem_input(
             instance
         )
-        self._encoder: PCEEncoder = PCEEncoder(self.spin_model, k=k)
+        self._encoder: PCEEncoder = PCEEncoder(
+            self.spin_model,
+            correlator_order=correlator_order,
+            num_qubits=num_qubits,
+        )
 
     @property
     def encoder(self) -> PCEEncoder:
-        """The PCE encoder used by this converter."""
+        """The :class:`PCEEncoder` instance built at construction time.
+
+        Exposed so callers can inspect the raw enumeration
+        (:attr:`PCEEncoder.pauli_encoding`) or compute encoding-related
+        quantities without going through the converter.
+
+        Returns:
+            PCEEncoder: The encoder built from the SPIN-form problem and
+            the user-supplied ``correlator_order``.
+        """
         return self._encoder
 
     @property
     def num_qubits(self) -> int:
-        """Number of physical qubits required by the PCE encoding."""
+        """Number of physical qubits used by the PCE encoding.
+
+        Equal to :attr:`PCEEncoder.num_qubits`: either the
+        ``num_qubits`` argument supplied to :meth:`__init__`, or — when
+        that was left at its default — the smallest ``n >= k`` (with
+        :math:`k =` :attr:`correlator_order`) satisfying
+        :math:`\\binom{n}{k} \\cdot 3^k \\ge N`, where ``N`` is the
+        variable count of the SPIN-form problem.
+
+        Returns:
+            int: The number of qubits acted on by every observable
+            returned by :meth:`get_encoded_pauli_list`.
+        """
         return self._encoder.num_qubits
 
     @property
-    def k(self) -> int:
-        """Compression rate of the PCE encoding."""
-        return self._encoder.k
+    def correlator_order(self) -> int:
+        """Compression rate (body weight) of the PCE encoding.
+
+        Returns:
+            int: The number of non-identity Pauli factors in each
+            correlator :math:`P_i` (the :math:`k` in :math:`k`-body),
+            as supplied to :meth:`__init__`.
+        """
+        return self._encoder.correlator_order
 
     @property
     def pauli_encoding(self) -> dict[int, qm_o.Hamiltonian]:
-        """Mapping from variable index to its Pauli correlator Hamiltonian."""
+        """Mapping from variable index to its Pauli correlator Hamiltonian.
+
+        Thin pass-through to :attr:`PCEEncoder.pauli_encoding` for callers
+        that hold only the converter.
+
+        Returns:
+            dict[int, qm_o.Hamiltonian]: Dictionary keyed by variable
+            index ``i`` in ``range(spin_model.num_bits)``. Each value is a
+            single-term Hamiltonian on :attr:`num_qubits` qubits whose
+            Pauli string is the :math:`k`-body correlator
+            :math:`P_i` assigned to that variable, with coefficient
+            ``1.0``.
+        """
         return self._encoder.pauli_encoding
 
     @staticmethod
-    def min_num_qubits(num_vars: int, k: int) -> int:
+    def min_num_qubits(num_vars: int, correlator_order: int) -> int:
         """Return the smallest ``n`` with ``C(n, k) * 3**k >= num_vars``.
 
-        Thin forwarder to :meth:`PCEEncoder.min_num_qubits` so callers can
-        size a problem before constructing the converter.
+        Here ``k`` denotes ``correlator_order``. Thin forwarder to
+        :meth:`PCEEncoder.min_num_qubits` so callers can size a problem
+        before constructing the converter.
 
         Args:
             num_vars (int): Number of variables to encode. Must be
                 non-negative.
-            k (int): Compression rate. Must be a positive integer.
+            correlator_order (int): Compression rate (:math:`k` in the
+                math). Must be a positive integer.
 
         Returns:
             int: The minimum number of qubits required.
 
         Raises:
-            ValueError: If ``k`` is not a positive integer or ``num_vars``
-                is negative.
+            ValueError: If ``correlator_order`` is not a positive integer
+                or ``num_vars`` is negative.
 
         Example:
-            >>> PCEConverter.min_num_qubits(num_vars=10, k=2)
+            >>> PCEConverter.min_num_qubits(num_vars=10, correlator_order=2)
             3
         """
-        return PCEEncoder.min_num_qubits(num_vars, k)
+        return PCEEncoder.min_num_qubits(num_vars, correlator_order)
 
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]:
         """Return the per-variable Pauli correlator observables.
@@ -342,52 +473,6 @@ class PCEConverter:
         """
         encoding = self._encoder.pauli_encoding
         return [encoding[i] for i in range(self.spin_model.num_bits)]
-
-    def transpile(
-        self,
-        circuit: QKernel,
-        transpiler: Transpiler,
-        *,
-        bindings: dict[str, Any] | None = None,
-        parameters: list[str] | None = None,
-    ) -> ExecutableProgram:
-        """Transpile a user-provided ansatz ``@qkernel`` to an executable.
-
-        PCE does not prescribe a fixed ansatz; this method simply forwards
-        the user's circuit through the given backend transpiler. The
-        optional ``bindings`` and ``parameters`` arguments mirror
-        :meth:`Transpiler.transpile` so that compile-time bindings can be
-        supplied while reserving selected kernel arguments (typically the
-        variational angles) as runtime parameters.
-
-        Args:
-            circuit (QKernel): The user-supplied ``@qkernel`` ansatz to
-                compile. Any non-trivial kernel accepted by the backend
-                transpiler is valid.
-            transpiler (Transpiler): The backend transpiler to use (e.g.
-                ``QiskitTranspiler`` or ``QuriPartsTranspiler``).
-            bindings (dict[str, Any] | None): Compile-time parameter
-                bindings passed through to the transpiler. Defaults to
-                ``None``, meaning no bindings.
-            parameters (list[str] | None): Names of kernel parameters to
-                preserve as runtime backend parameters. Defaults to
-                ``None``, meaning every unbound parameter is treated as a
-                compile-time input by the transpiler.
-
-        Returns:
-            ExecutableProgram: The compiled program ready for execution
-            against the backend's estimator (to obtain the per-variable
-            Pauli expectations needed by :meth:`decode`).
-
-        Raises:
-            Any exception raised by the underlying ``transpiler.transpile``
-            call — the PCE converter adds no validation beyond delegation.
-        """
-        return transpiler.transpile(
-            circuit,
-            bindings=bindings,
-            parameters=parameters,
-        )
 
     def decode(
         self,

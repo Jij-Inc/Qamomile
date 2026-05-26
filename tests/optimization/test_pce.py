@@ -34,42 +34,46 @@ class TestPCEEncoderMinNumQubits:
     def test_k1_capacity(self):
         """k=1 → C(n, 1) * 3 = 3n; smallest n with 3n >= num_vars."""
         # num_vars = 1 → n = 1; num_vars = 3 → n = 1; num_vars = 4 → n = 2
-        assert PCEEncoder.min_num_qubits(num_vars=1, k=1) == 1
-        assert PCEEncoder.min_num_qubits(num_vars=3, k=1) == 1
-        assert PCEEncoder.min_num_qubits(num_vars=4, k=1) == 2
-        assert PCEEncoder.min_num_qubits(num_vars=6, k=1) == 2
-        assert PCEEncoder.min_num_qubits(num_vars=7, k=1) == 3
+        assert PCEEncoder.min_num_qubits(num_vars=1, correlator_order=1) == 1
+        assert PCEEncoder.min_num_qubits(num_vars=3, correlator_order=1) == 1
+        assert PCEEncoder.min_num_qubits(num_vars=4, correlator_order=1) == 2
+        assert PCEEncoder.min_num_qubits(num_vars=6, correlator_order=1) == 2
+        assert PCEEncoder.min_num_qubits(num_vars=7, correlator_order=1) == 3
 
     def test_k2_capacity(self):
         """k=2 → C(n, 2) * 9; n=2 fits 9, n=3 fits 27, n=4 fits 54."""
-        assert PCEEncoder.min_num_qubits(num_vars=1, k=2) == 2
-        assert PCEEncoder.min_num_qubits(num_vars=9, k=2) == 2
-        assert PCEEncoder.min_num_qubits(num_vars=10, k=2) == 3
-        assert PCEEncoder.min_num_qubits(num_vars=27, k=2) == 3
-        assert PCEEncoder.min_num_qubits(num_vars=28, k=2) == 4
+        assert PCEEncoder.min_num_qubits(num_vars=1, correlator_order=2) == 2
+        assert PCEEncoder.min_num_qubits(num_vars=9, correlator_order=2) == 2
+        assert PCEEncoder.min_num_qubits(num_vars=10, correlator_order=2) == 3
+        assert PCEEncoder.min_num_qubits(num_vars=27, correlator_order=2) == 3
+        assert PCEEncoder.min_num_qubits(num_vars=28, correlator_order=2) == 4
 
     def test_k3_capacity(self):
         """k=3 → C(n, 3) * 27; n=3 fits 27, n=4 fits 108."""
-        assert PCEEncoder.min_num_qubits(num_vars=27, k=3) == 3
-        assert PCEEncoder.min_num_qubits(num_vars=28, k=3) == 4
+        assert PCEEncoder.min_num_qubits(num_vars=27, correlator_order=3) == 3
+        assert PCEEncoder.min_num_qubits(num_vars=28, correlator_order=3) == 4
 
     def test_zero_vars_returns_k(self):
         """Encoding zero variables still requires ``k`` qubits."""
-        assert PCEEncoder.min_num_qubits(num_vars=0, k=1) == 1
-        assert PCEEncoder.min_num_qubits(num_vars=0, k=2) == 2
-        assert PCEEncoder.min_num_qubits(num_vars=0, k=5) == 5
+        assert PCEEncoder.min_num_qubits(num_vars=0, correlator_order=1) == 1
+        assert PCEEncoder.min_num_qubits(num_vars=0, correlator_order=2) == 2
+        assert PCEEncoder.min_num_qubits(num_vars=0, correlator_order=5) == 5
 
     def test_invalid_k(self):
         """``k < 1`` is rejected."""
-        with pytest.raises(ValueError, match="k must be a positive integer"):
-            PCEEncoder.min_num_qubits(num_vars=1, k=0)
-        with pytest.raises(ValueError, match="k must be a positive integer"):
-            PCEEncoder.min_num_qubits(num_vars=1, k=-1)
+        with pytest.raises(
+            ValueError, match="correlator_order must be a positive integer"
+        ):
+            PCEEncoder.min_num_qubits(num_vars=1, correlator_order=0)
+        with pytest.raises(
+            ValueError, match="correlator_order must be a positive integer"
+        ):
+            PCEEncoder.min_num_qubits(num_vars=1, correlator_order=-1)
 
     def test_negative_num_vars(self):
         """Negative ``num_vars`` is rejected."""
         with pytest.raises(ValueError, match="num_vars must be non-negative"):
-            PCEEncoder.min_num_qubits(num_vars=-1, k=2)
+            PCEEncoder.min_num_qubits(num_vars=-1, correlator_order=2)
 
 
 class TestPCEEncoderConstruction:
@@ -78,21 +82,75 @@ class TestPCEEncoderConstruction:
     def test_invalid_k(self):
         """``k`` must be a positive integer."""
         spin = _make_spin_model(2)
-        with pytest.raises(ValueError, match="k must be a positive integer"):
-            PCEEncoder(spin, k=0)
+        with pytest.raises(
+            ValueError, match="correlator_order must be a positive integer"
+        ):
+            PCEEncoder(spin, correlator_order=0)
 
     def test_non_spin_vartype(self):
         """``BinaryModel`` must be in SPIN vartype."""
         binary_model = BinaryModel.from_qubo({(0, 0): 1.0, (0, 1): 1.0})
         with pytest.raises(ValueError, match="SPIN"):
-            PCEEncoder(binary_model, k=2)
+            PCEEncoder(binary_model, correlator_order=2)
 
     def test_hubo_rejection(self):
         """PCE rejects higher-order (HUBO) problems."""
         hubo = BinaryModel.from_hubo({(0, 1, 2): 1.0})
         spin = hubo.change_vartype(VarType.SPIN)
         with pytest.raises(ValueError, match="higher-order"):
-            PCEEncoder(spin, k=2)
+            PCEEncoder(spin, correlator_order=2)
+
+
+class TestPCEEncoderNumQubitsOverride:
+    """Tests for the optional ``num_qubits`` override on ``PCEEncoder``."""
+
+    def test_default_uses_min_num_qubits(self):
+        """Without ``num_qubits``, the encoder picks ``min_num_qubits``."""
+        spin = _make_spin_model(num_vars=10)
+        encoder = PCEEncoder(spin, correlator_order=2)
+        assert encoder.num_qubits == PCEEncoder.min_num_qubits(10, 2)  # 3
+
+    def test_explicit_min_matches_default(self):
+        """Explicitly passing ``num_qubits == min`` matches the default behaviour."""
+        spin = _make_spin_model(num_vars=10)
+        min_n = PCEEncoder.min_num_qubits(10, 2)
+
+        default = PCEEncoder(spin, correlator_order=2)
+        explicit = PCEEncoder(spin, correlator_order=2, num_qubits=min_n)
+
+        assert explicit.num_qubits == default.num_qubits
+        # Same n → same lex enumeration → same per-variable assignment.
+        for i in range(spin.num_bits):
+            assert (
+                explicit.pauli_encoding[i].terms.keys()
+                == default.pauli_encoding[i].terms.keys()
+            )
+
+    def test_explicit_larger_num_qubits(self):
+        """``num_qubits`` above the minimum produces a wider register."""
+        spin = _make_spin_model(num_vars=10)
+        min_n = PCEEncoder.min_num_qubits(10, 2)  # 3
+        encoder = PCEEncoder(spin, correlator_order=2, num_qubits=min_n + 2)
+
+        assert encoder.num_qubits == min_n + 2
+        # Every correlator Hamiltonian lives on the wider register.
+        for ham in encoder.pauli_encoding.values():
+            assert ham.num_qubits == min_n + 2
+        # The encoding still covers every variable exactly once.
+        assert len(encoder.pauli_encoding) == spin.num_bits
+
+    def test_num_qubits_below_min_raises(self):
+        """``num_qubits`` below the minimum is rejected."""
+        spin = _make_spin_model(num_vars=10)
+        min_n = PCEEncoder.min_num_qubits(10, 2)  # 3
+        with pytest.raises(ValueError, match="too small to host"):
+            PCEEncoder(spin, correlator_order=2, num_qubits=min_n - 1)
+
+    def test_num_qubits_below_correlator_order_raises(self):
+        """A register narrower than ``correlator_order`` cannot host any correlator."""
+        spin = _make_spin_model(num_vars=3)
+        with pytest.raises(ValueError, match="too small to host"):
+            PCEEncoder(spin, correlator_order=2, num_qubits=1)
 
 
 class TestPCEEncoderEnumeration:
@@ -101,7 +159,7 @@ class TestPCEEncoderEnumeration:
     def test_pauli_encoding_structure(self):
         """Each variable maps to a single-term Hamiltonian on ``num_qubits``."""
         spin = _make_spin_model(num_vars=5)
-        encoder = PCEEncoder(spin, k=2)
+        encoder = PCEEncoder(spin, correlator_order=2)
 
         assert encoder.num_qubits == 2  # C(2, 2) * 9 = 9 ≥ 5
         assert len(encoder.pauli_encoding) == 5
@@ -121,7 +179,7 @@ class TestPCEEncoderEnumeration:
     def test_correlators_are_distinct(self):
         """No two variables share the same Pauli string."""
         spin = _make_spin_model(num_vars=12)
-        encoder = PCEEncoder(spin, k=2)
+        encoder = PCEEncoder(spin, correlator_order=2)
 
         seen = set()
         for ham in encoder.pauli_encoding.values():
@@ -133,7 +191,7 @@ class TestPCEEncoderEnumeration:
     def test_k1_enumeration_order(self):
         """k=1 enumerates X, Y, Z on qubit 0, then qubit 1, ..."""
         spin = _make_spin_model(num_vars=6)
-        encoder = PCEEncoder(spin, k=1)
+        encoder = PCEEncoder(spin, correlator_order=1)
 
         # n=2: (qubit 0, X), (qubit 0, Y), (qubit 0, Z),
         #      (qubit 1, X), (qubit 1, Y), (qubit 1, Z)
@@ -156,7 +214,7 @@ class TestPCEEncoderEnumeration:
     def test_k2_enumeration_order(self):
         """k=2 iterates (qubit pairs in lex order) × (Pauli pairs in product order)."""
         spin = _make_spin_model(num_vars=9)
-        encoder = PCEEncoder(spin, k=2)
+        encoder = PCEEncoder(spin, correlator_order=2)
 
         # n=2, qubit pair (0, 1); Pauli assignments in itertools.product order.
         assert encoder.num_qubits == 2
@@ -188,12 +246,12 @@ class TestPCEConverterInit:
         problem += y * z
 
         model = BinaryModel(problem)
-        converter = PCEConverter(model, k=2)
+        converter = PCEConverter(model, correlator_order=2)
 
         assert converter.original_vartype == VarType.BINARY
         assert converter.spin_model.vartype == VarType.SPIN
         assert converter.spin_model.num_bits == 3
-        assert converter.k == 2
+        assert converter.correlator_order == 2
         assert converter.num_qubits == PCEEncoder.min_num_qubits(3, 2)
         assert converter.instance is None
 
@@ -202,7 +260,7 @@ class TestPCEConverterInit:
         ising = BinaryModel.from_ising(
             linear={0: 1.0, 1: 0.5}, quad={(0, 1): -0.3}, constant=0.0
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
 
         assert converter.original_vartype == VarType.SPIN
         assert converter.spin_model.vartype == VarType.SPIN
@@ -230,7 +288,7 @@ class TestPCEConverterInit:
 
         instance = problem.eval({})
         snapshot = instance.to_bytes()
-        converter = PCEConverter(instance, k=2)
+        converter = PCEConverter(instance, correlator_order=2)
 
         assert converter.instance is not None
         assert converter.original_vartype == VarType.BINARY
@@ -243,19 +301,49 @@ class TestPCEConverterInit:
     def test_invalid_instance_type(self):
         """Non-Instance / non-BinaryModel inputs raise ``TypeError``."""
         with pytest.raises(TypeError, match="ommx.v1.Instance or BinaryModel"):
-            PCEConverter("not a model", k=2)  # type: ignore[arg-type]
+            PCEConverter("not a model", correlator_order=2)  # type: ignore[arg-type]
 
     def test_invalid_k_propagates(self):
         """``k < 1`` propagates from the encoder as ``ValueError``."""
         ising = BinaryModel.from_ising(linear={0: 1.0}, quad={}, constant=0.0)
-        with pytest.raises(ValueError, match="k must be a positive integer"):
-            PCEConverter(ising, k=0)
+        with pytest.raises(
+            ValueError, match="correlator_order must be a positive integer"
+        ):
+            PCEConverter(ising, correlator_order=0)
 
     def test_hubo_rejection_via_converter(self):
         """HUBO problems are rejected when constructing the converter."""
         hubo = BinaryModel.from_hubo({(0, 1, 2): 1.0})
         with pytest.raises(ValueError, match="higher-order"):
-            PCEConverter(hubo, k=2)
+            PCEConverter(hubo, correlator_order=2)
+
+    def test_num_qubits_default_matches_min(self):
+        """``PCEConverter`` defaults ``num_qubits`` to the minimum required."""
+        ising = BinaryModel.from_ising(
+            linear={i: 1.0 for i in range(10)}, quad={}, constant=0.0
+        )
+        converter = PCEConverter(ising, correlator_order=2)
+        assert converter.num_qubits == PCEEncoder.min_num_qubits(10, 2)
+
+    def test_num_qubits_override_widens_register(self):
+        """An explicit ``num_qubits`` above the minimum is forwarded to the encoder."""
+        ising = BinaryModel.from_ising(
+            linear={i: 1.0 for i in range(10)}, quad={}, constant=0.0
+        )
+        min_n = PCEEncoder.min_num_qubits(10, 2)  # 3
+        converter = PCEConverter(ising, correlator_order=2, num_qubits=min_n + 2)
+        assert converter.num_qubits == min_n + 2
+        for ham in converter.get_encoded_pauli_list():
+            assert ham.num_qubits == min_n + 2
+
+    def test_num_qubits_below_min_raises_via_converter(self):
+        """``num_qubits`` below the minimum is rejected through the converter."""
+        ising = BinaryModel.from_ising(
+            linear={i: 1.0 for i in range(10)}, quad={}, constant=0.0
+        )
+        min_n = PCEEncoder.min_num_qubits(10, 2)  # 3
+        with pytest.raises(ValueError, match="too small to host"):
+            PCEConverter(ising, correlator_order=2, num_qubits=min_n - 1)
 
 
 class TestPCEConverterAPI:
@@ -266,10 +354,10 @@ class TestPCEConverterAPI:
         ising = BinaryModel.from_ising(
             linear={0: 1.0, 1: 1.0, 2: 1.0}, quad={}, constant=0.0
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
 
         assert converter.num_qubits == converter.encoder.num_qubits
-        assert converter.k == converter.encoder.k
+        assert converter.correlator_order == converter.encoder.correlator_order
         assert converter.pauli_encoding is converter.encoder.pauli_encoding
         assert isinstance(converter.encoder, PCEEncoder)
 
@@ -280,7 +368,7 @@ class TestPCEConverterAPI:
             quad={},
             constant=0.0,
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
         pauli_list = converter.get_encoded_pauli_list()
 
         assert len(pauli_list) == ising.num_bits
@@ -310,7 +398,7 @@ class TestPCEConverterDecode:
         problem += -1.0 * y * z
 
         model = BinaryModel(problem)
-        converter = PCEConverter(model, k=2)
+        converter = PCEConverter(model, correlator_order=2)
 
         # Spins [+1, -1, +1] → binaries [0, 1, 0]
         sampleset = converter.decode([0.7, -0.3, 0.5])
@@ -328,7 +416,7 @@ class TestPCEConverterDecode:
             quad={(0, 1): 1.0, (1, 2): 1.0},
             constant=0.0,
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
 
         sampleset = converter.decode([0.9, -0.4, 0.2])
 
@@ -342,7 +430,7 @@ class TestPCEConverterDecode:
             quad={(0, 1): 1.5, (1, 2): -0.7},
             constant=3.0,
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
 
         expectations = [0.4, -0.8, 0.1]
         spins = SignRounder().round(expectations)
@@ -356,7 +444,7 @@ class TestPCEConverterDecode:
         ising = BinaryModel.from_ising(
             linear={0: 1.0, 1: 1.0, 2: 1.0}, quad={}, constant=0.0
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
 
         with pytest.raises(ValueError, match="Expected 3 expectation values"):
             converter.decode([0.5, -0.3])
@@ -371,7 +459,7 @@ class TestPCEConverterDecode:
             quad={(10, 20): 1.0},
             constant=0.0,
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
 
         # Spins: [+1, -1, +1] via sign rounding of [0.7, -0.3, 0.5]
         sampleset = converter.decode([0.7, -0.3, 0.5])
@@ -391,7 +479,7 @@ class TestPCEConverterDecode:
         problem += -1.0 * x20 * x30
 
         model = BinaryModel(problem)
-        converter = PCEConverter(model, k=2)
+        converter = PCEConverter(model, correlator_order=2)
 
         # Expectations [0.7, -0.3, 0.5] → spins [+1, -1, +1] → binaries [0, 1, 0]
         sampleset = converter.decode([0.7, -0.3, 0.5])
@@ -428,7 +516,7 @@ class TestPCEConverterDecodeOMMX:
     def test_decode_returns_ommx_sampleset_for_ommx_input(self):
         """OMMX input → ``decode`` returns ``ommx.v1.SampleSet``."""
         instance = self._build_ommx_instance()
-        converter = PCEConverter(instance, k=2)
+        converter = PCEConverter(instance, correlator_order=2)
 
         # Spins [+1, -1, +1] → bits [0, 1, 0]
         sample_set = converter.decode([0.7, -0.3, 0.5])
@@ -444,7 +532,7 @@ class TestPCEConverterDecodeOMMX:
     def test_decode_objective_matches_manual_evaluation(self):
         """OMMX-reported objective equals a manual evaluation on the bits."""
         instance = self._build_ommx_instance()
-        converter = PCEConverter(instance, k=2)
+        converter = PCEConverter(instance, correlator_order=2)
 
         # [+1, +1, -1] → bits [0, 0, 1]
         sample_set = converter.decode([0.5, 0.6, -0.7])
@@ -470,7 +558,7 @@ class TestPCEConverterDecodeOMMX:
             constraints=[constraint],
             sense=ommx.v1.Instance.MINIMIZE,
         )
-        converter = PCEConverter(instance, k=2)
+        converter = PCEConverter(instance, correlator_order=2)
 
         # [+1, -1, +1] → bits [0, 1, 0] — sum = 1, infeasible.
         infeasible_set = converter.decode([0.7, -0.3, 0.5])
@@ -498,7 +586,7 @@ class TestPCEConverterDecodeOMMX:
             constraints=[],
             sense=ommx.v1.Instance.MAXIMIZE,
         )
-        converter = PCEConverter(instance, k=2)
+        converter = PCEConverter(instance, correlator_order=2)
 
         # Use a constant +1 expectations vector — round to all-spin-up,
         # which maps to all-zero bits. The exact decoded values depend on
@@ -538,7 +626,7 @@ class TestPCEEndToEnd:
         problem += -1.0 * y * z
 
         model = BinaryModel(problem)
-        converter = PCEConverter(model, k=2)
+        converter = PCEConverter(model, correlator_order=2)
 
         observables = converter.get_encoded_pauli_list()
         assert len(observables) == 3
@@ -564,7 +652,7 @@ class TestPCEEndToEnd:
             quad={(0, 1): 1.0},
             constant=0.0,
         )
-        converter = PCEConverter(ising, k=2)
+        converter = PCEConverter(ising, correlator_order=2)
         n = converter.num_qubits  # 2
         observables = converter.get_encoded_pauli_list()
 
@@ -585,17 +673,16 @@ class TestPCEEndToEnd:
     def _check_transpile_runs(self, transpiler):
         """Transpile the PCE ansatz with ``transpiler`` and verify expval runs.
 
-        Asserts that ``PCEConverter.transpile`` returns an executable for which
+        Asserts that the backend transpiler returns an executable for which
         the expectation-value path produces a finite real number for each
         encoded observable. Common to all backends in the supported matrix.
         """
-        converter, n, observables, ansatz = self._build_pce_setup()
+        _, n, observables, ansatz = self._build_pce_setup()
 
         executor = transpiler.executor()
         for P_i in observables:
-            executable = converter.transpile(
+            executable = transpiler.transpile(
                 ansatz,
-                transpiler,
                 bindings={"n": n, "P": P_i},
                 parameters=["thetas"],
             )
@@ -606,21 +693,21 @@ class TestPCEEndToEnd:
             assert -1.0 - 1e-6 <= result <= 1.0 + 1e-6
 
     def test_transpile_with_qiskit(self):
-        """``PCEConverter.transpile`` produces a runnable executable on Qiskit."""
+        """The PCE ansatz produces a runnable executable on Qiskit."""
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
         self._check_transpile_runs(QiskitTranspiler())
 
     def test_transpile_with_quri_parts(self):
-        """``PCEConverter.transpile`` produces a runnable executable on QuriParts."""
+        """The PCE ansatz produces a runnable executable on QuriParts."""
         pytest.importorskip("quri_parts")
         from qamomile.quri_parts import QuriPartsTranspiler
 
         self._check_transpile_runs(QuriPartsTranspiler())
 
     def test_transpile_with_cudaq(self):
-        """``PCEConverter.transpile`` produces a runnable executable on CUDA-Q."""
+        """The PCE ansatz produces a runnable executable on CUDA-Q."""
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
@@ -635,7 +722,7 @@ class TestPCEEndToEnd:
         not installed are silently skipped; if fewer than two backends are
         available, the test itself is skipped.
         """
-        converter, n, observables, ansatz = self._build_pce_setup()
+        _, n, observables, ansatz = self._build_pce_setup()
 
         import importlib.util
 
@@ -673,9 +760,8 @@ class TestPCEEndToEnd:
             executor = transpiler.executor()
             results: list[float] = []
             for P_i in observables:
-                executable = converter.transpile(
+                executable = transpiler.transpile(
                     ansatz,
-                    transpiler,
                     bindings={"n": n, "P": P_i},
                     parameters=["thetas"],
                 )
@@ -708,7 +794,7 @@ class TestPCERandomGraphs:
         quad = {(u, v): float(rng.uniform(-2, 2)) for u, v in G.edges()}
         ising = BinaryModel.from_ising(linear=linear, quad=quad, constant=0.0)
 
-        converter = PCEConverter(ising, k=k)
+        converter = PCEConverter(ising, correlator_order=k)
 
         # Capacity invariant.
         assert math.comb(converter.num_qubits, k) * (3**k) >= ising.num_bits

@@ -17,24 +17,32 @@
 #
 # This skeleton demonstrates the structural shape every Qamomile algorithm
 # tutorial must follow. We solve a small MaxCut instance end-to-end using
-# `qamomile.optimization.QAOAConverter` — the high-level converter that
+# `qamomile.optimization.QAOAConverter`, the high-level converter that
 # folds QUBO → Ising conversion, `@qkernel` construction, and decode into
-# three method calls. Along the way the tutorial exercises every section
-# the section guide prescribes: Backgrounds, Algorithm, Implementation,
-# Run example, Conclusion.
-#
-# 1. Define a 4-node MaxCut instance on a triangle-plus-pendant graph.
-# 2. Derive the Ising cost Hamiltonian conceptually.
-# 3. Drive the `QAOAConverter` pipeline — transpile, optimize, sample, decode.
-# 4. Inspect the sampled distribution and the best cut against brute force.
-# 5. Recap and point to the hand-wired counterpart (`qaoa_maxcut.py`).
+# three method calls. The instance is a 4-node triangle-plus-pendant graph
+# kept deliberately small so that a brute-force enumeration in the
+# `## Result` section yields the ground-truth optimum to compare the
+# quantum result against.
 
 # %%
 # Install the latest Qamomile through pip!
 # # !pip install qamomile
 
+import itertools
+import os
+from collections import Counter
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from scipy.optimize import minimize
+
+from qamomile.optimization.binary_model import BinaryModel
+from qamomile.optimization.qaoa import QAOAConverter
+from qamomile.qiskit import QiskitTranspiler
+
 # %% [markdown]
-# ## Backgrounds
+# ## Background
 
 # %% [markdown]
 # ### What is MaxCut?
@@ -53,14 +61,12 @@
 # ### Create the Graph
 #
 # We use a 4-node triangle $\{0, 1, 2\}$ with a pendant node $3$ attached
-# to vertex $2$. The graph is small enough to brute-force, and — thanks
-# to the odd triangle — not bipartite, so the MaxCut is strictly less
-# than the edge count.
+# to vertex $2$. The graph is small enough that the `## Result` section
+# can brute-force the ground-truth optimum and — thanks to the odd
+# triangle — not bipartite, so the MaxCut is strictly less than the edge
+# count.
 
 # %%
-import matplotlib.pyplot as plt
-import networkx as nx
-
 G = nx.Graph()
 G.add_edges_from([(0, 1), (0, 2), (1, 2), (2, 3)])
 num_nodes = G.number_of_nodes()
@@ -77,29 +83,6 @@ nx.draw(
 )
 plt.title(f"Graph: {num_nodes} nodes, {G.number_of_edges()} edges")
 plt.show()
-
-# %% [markdown]
-# ### Exact Solution (Brute Force)
-#
-# Enumerating all $2^4 = 16$ assignments gives us a ground-truth value to
-# compare the quantum result against in §5.
-
-# %%
-import itertools
-
-best_cut = 0
-optimal_partitions: list[tuple[int, ...]] = []
-for bits in itertools.product([0, 1], repeat=num_nodes):
-    cut = sum(1 for i, j in G.edges() if bits[i] != bits[j])
-    if cut > best_cut:
-        best_cut = cut
-        optimal_partitions = [bits]
-    elif cut == best_cut:
-        optimal_partitions.append(bits)
-
-print(f"Optimal MaxCut value: {best_cut}")
-for part in optimal_partitions:
-    print(f"  {part}")
 
 # %% [markdown]
 # ## Algorithm
@@ -141,11 +124,6 @@ for part in optimal_partitions:
 #   in code).
 # - $\boldsymbol{\beta} \in \mathbb{R}^p$ — mixer-layer angles (`betas`
 #   in code).
-#
-# Qamomile's rotation gates include a $1/2$ factor
-# ($\text{RZ}(\theta) = e^{-i \theta Z / 2}$), but because $\gamma$ and
-# $\beta$ are free variational parameters the constant is absorbed into
-# the optimum — `QAOAConverter` handles this internally.
 
 # %% [markdown]
 # ## Implementation
@@ -154,15 +132,12 @@ for part in optimal_partitions:
 # ### Step 1: QUBO to Ising
 #
 # We build a `BinaryModel` from the MaxCut QUBO. Each edge $(i, j)$
-# contributes $-x_i - x_j + 2 x_i x_j$ (this is the MaxCut objective
-# negated so the optimiser minimises). `QAOAConverter` then converts
-# internally to the spin domain and builds the Ising cost Hamiltonian.
-# We print the Hamiltonian so the reader sees the Pauli-Z coefficients.
+# contributes $-x_i - x_j + 2 x_i x_j$ — the MaxCut objective negated so
+# the optimiser minimises. `QAOAConverter` then converts internally to
+# the spin domain and builds the Ising cost Hamiltonian. We print the
+# Hamiltonian so the reader sees the Pauli-$Z$ coefficients.
 
 # %%
-from qamomile.optimization.binary_model import BinaryModel
-from qamomile.optimization.qaoa import QAOAConverter
-
 qubo: dict[tuple[int, int], float] = {}
 for i, j in G.edges():
     qubo[(i, i)] = qubo.get((i, i), 0.0) - 1.0
@@ -183,10 +158,14 @@ print(hamiltonian)
 # `gammas` and `betas` stay as *runtime parameters* so the classical
 # optimiser can vary them each call; every other input (Ising
 # coefficients, qubit count, `p`) is bound at compile time.
+#
+# `QAOAConverter` builds the cost and mixer unitaries internally, so no
+# rotation gates are exposed by name in this skeleton. Tutorials that
+# *hand-wire* the cost or mixer layer with `qmc.rzz`, `qmc.rx`, etc.
+# must place the Qamomile-specific factor-of-2 call-out from the
+# section guide directly above the rotation cell in this step.
 
 # %%
-from qamomile.qiskit import QiskitTranspiler
-
 transpiler = QiskitTranspiler()
 p = 2  # number of QAOA layers
 executable = converter.transpile(transpiler, p=p)
@@ -200,11 +179,6 @@ executable = converter.transpile(transpiler, p=p)
 # values.
 
 # %%
-import os
-
-import numpy as np
-from scipy.optimize import minimize
-
 executor = transpiler.executor()
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 1024
@@ -242,9 +216,9 @@ plt.show()
 # %% [markdown]
 # ### Step 4: Sample with Optimized Parameters
 #
-# One final sample draw at the optimum is what §5 will analyse. The
-# earlier per-iteration samples were consumed inside `cost_fn` and
-# discarded.
+# One final sample draw at the optimum is what the `## Result` section
+# will analyse. The earlier per-iteration samples were consumed inside
+# `cost_fn` and discarded.
 
 # %%
 gammas_opt = list(res.x[:p])
@@ -268,7 +242,31 @@ print(f"Number of distinct samples: {len(decoded.samples)}")
 print(f"Mean energy: {decoded.energy_mean():.4f}")
 
 # %% [markdown]
-# ## Run example
+# ## Result
+
+# %% [markdown]
+# ### Classical Baseline (Brute Force)
+#
+# Enumerating all $2^4 = 16$ assignments gives us the ground-truth
+# MaxCut value to compare the quantum result against. We keep the
+# baseline in `## Result` (next to the comparison itself) rather than in
+# `## Background`, where it would be disconnected from the quantum
+# numbers it is being compared with.
+
+# %%
+best_cut = 0
+optimal_partitions: list[tuple[int, ...]] = []
+for bits in itertools.product([0, 1], repeat=num_nodes):
+    cut = sum(1 for i, j in G.edges() if bits[i] != bits[j])
+    if cut > best_cut:
+        best_cut = cut
+        optimal_partitions = [bits]
+    elif cut == best_cut:
+        optimal_partitions.append(bits)
+
+print(f"Optimal MaxCut value: {best_cut}")
+for part in optimal_partitions:
+    print(f"  {part}")
 
 # %% [markdown]
 # ### Decode and Analyze Results
@@ -277,7 +275,8 @@ print(f"Mean energy: {decoded.energy_mean():.4f}")
 # #### Best Cut
 #
 # We scan the decoded samples for the one with the largest MaxCut value
-# and compare it to the brute-force optimum from §2.
+# and compare it to the brute-force optimum from
+# `### Classical Baseline (Brute Force)`.
 
 # %%
 best_qaoa_cut = 0
@@ -296,8 +295,6 @@ print(f"Best partition: {best_qaoa_bits}")
 # #### Cut-Value Distribution
 
 # %%
-from collections import Counter
-
 cut_counts: Counter[int] = Counter()
 for sample, occ in zip(decoded.samples, decoded.num_occurrences):
     bits = [sample[i] for i in range(num_nodes)]
@@ -334,27 +331,20 @@ if best_qaoa_bits is not None:
     plt.show()
 
 # %% [markdown]
-# ## Conclusion
+# ## Summary
 #
-# In this skeleton we:
+# This skeleton walked through the Quantum Approximate Optimization
+# Algorithm for MaxCut on a 4-node triangle-plus-pendant graph,
+# starting from a QUBO description, training the variational angles
+# with a classical optimiser, and recovering a discrete partition
+# whose cut value can be compared against the brute-force optimum
+# computed in the `## Result` section.
 #
-# 1. Defined a small MaxCut instance on a 4-node triangle-plus-pendant
-#    graph and brute-forced the optimum.
-# 2. Stated the QAOA ansatz and its Ising cost Hamiltonian on paper,
-#    without touching any Qamomile API.
-# 3. Drove `QAOAConverter` through the full pipeline — set-up,
-#    transpile, optimise, sample, decode.
-# 4. Compared the sampled distribution to the brute-force optimum.
-#
-# **Known limitations.** QAOA at shallow depth (small $p$) is known to
-# under-perform classical heuristics on dense graphs, and the classical
-# optimiser's landscape becomes harder with growing $p$ and $n$ — the
-# mean energy plot flattening out near a local minimum is normal.
-#
-# **Next steps.**
-#
-# - For a hand-wired ansatz that exposes every QAOA gate (and recovers
-#   the same circuit via `qamomile.circuit.algorithm.qaoa_state`), see
-#   [QAOA for MaxCut](../vqa/qaoa_maxcut).
-# - For a constrained optimisation problem solved with the same
-#   converter, see [QAOA for Graph Partitioning](../optimization/qaoa_graph_partition).
+# The Qamomile machinery that did the work was a small high-level
+# surface: `BinaryModel.from_qubo` folded the QUBO into the Ising
+# domain, `QAOAConverter` built the cost and mixer `@qkernel`s and
+# managed the gate-convention factor of two internally, and the
+# `QiskitTranspiler` produced the executable that
+# `executable.sample` drove through a Qiskit estimator each
+# optimisation step. The final sample set was lifted back to the
+# problem's original vartype with `converter.decode`.
