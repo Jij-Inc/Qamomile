@@ -337,7 +337,7 @@ class TestCompositeGate:
     def test_operands_order_in_ir(self):
         """Operands are ordered: [...controls, ...targets]."""
 
-        class ControlledGate(CompositeGate):
+        class ControlGate(CompositeGate):
             custom_name = "ctrl_gate"
 
             @property
@@ -353,7 +353,7 @@ class TestCompositeGate:
                 q = qmc.h(q)
                 return (q,)
 
-        gate = ControlledGate()
+        gate = ControlGate()
 
         @qkernel
         def circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit]:

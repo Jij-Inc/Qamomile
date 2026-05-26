@@ -271,7 +271,7 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # %% [markdown]
 # ## パターン4:組み込みゲートをそのままcontrol化
 #
-# 単一のプリミティブゲート(`qmc.rx`、`qmc.h`、`qmc.cp`など)をcontrol化したいだけの場合、`qmc.controlled`は組み込みゲート関数を直接受け取れます。`@qkernel`ラッパーは不要です。古典パラメータのキーワード名は元のゲートのパラメータ名に従います(例:`qmc.rx`/`qmc.ry`なら`angle=`、`qmc.p`/`qmc.cp`なら`theta=`)。
+# 単一のプリミティブゲート(`qmc.rx`、`qmc.h`、`qmc.cp`など)をcontrol化したいだけの場合、`qmc.control`は組み込みゲート関数を直接受け取れます。`@qkernel`ラッパーは不要です。古典パラメータのキーワード名は元のゲートのパラメータ名に従います(例:`qmc.rx`/`qmc.ry`なら`angle=`、`qmc.p`/`qmc.cp`なら`theta=`)。
 
 # %% [markdown]
 # **これまで** — ボイラープレートのラッパー:
@@ -281,13 +281,13 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # def _rx_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
 #     return qmc.rx(q, theta)
 #
-# crx = qmc.controlled(_rx_gate)
+# crx = qmc.control(_rx_gate)
 # ```
 #
 # **これから** — そのまま渡せる:
 #
 # ```python
-# crx = qmc.controlled(qmc.rx)
+# crx = qmc.control(qmc.rx)
 # ```
 
 
@@ -297,7 +297,7 @@ def controlled_rx_demo() -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(2, name="q")
     # control側を|1>にしてcontrol回転を発火させる
     q[0] = qmc.x(q[0])
-    crx = qmc.controlled(qmc.rx)
+    crx = qmc.control(qmc.rx)
     q[0], q[1] = crx(q[0], q[1], angle=math.pi)
     return qmc.measure(q)
 
@@ -305,7 +305,7 @@ def controlled_rx_demo() -> qmc.Vector[qmc.Bit]:
 controlled_rx_demo.draw()
 
 # %% [markdown]
-# 多重コントロールや`power`パラメータも他の`controlled(...)`と同じく動きます。`num_controls`と`power`は`ControlledGate`側の機能でラップ対象の関数とは独立しているため、追加の作業は不要です:
+# 多重コントロールや`power`パラメータも他の`control(...)`と同じく動きます。`num_controls`と`power`は`ControlGate`側の機能でラップ対象の関数とは独立しているため、追加の作業は不要です:
 
 
 # %%
@@ -314,7 +314,7 @@ def toffoli_via_builtin() -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(3, name="q")
     q[0] = qmc.x(q[0])
     q[1] = qmc.x(q[1])
-    ccx = qmc.controlled(qmc.x, num_controls=2)
+    ccx = qmc.control(qmc.x, num_controls=2)
     q[0], q[1], q[2] = ccx(q[0], q[1], q[2])
     return qmc.measure(q)
 
@@ -337,7 +337,7 @@ def h_then_rx(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
 def controlled_pair_demo() -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(2, name="q")
     q[0] = qmc.x(q[0])
-    cg = qmc.controlled(h_then_rx)
+    cg = qmc.control(h_then_rx)
     q[0], q[1] = cg(q[0], q[1], theta=math.pi / 4)
     return qmc.measure(q)
 
@@ -351,4 +351,4 @@ controlled_pair_demo.draw()
 # - `@composite_gate`：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。`@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
 # - **スタブゲート**：`stub=True`と`ResourceMetadata`で、実装なしにトップダウン設計とリソース推定が可能です。
 # - `est.gates.oracle_calls`：オラクル内部が不明な状態でも、呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
-# - **`qmc.controlled(builtin_gate)`**:単一のプリミティブをcontrol化するときの1行`@qkernel`ラッパーは不要です。`qmc.rx`、`qmc.h`、`qmc.cp`等をそのままファクトリに渡せます。
+# - **`qmc.control(builtin_gate)`**:単一のプリミティブをcontrol化するときの1行`@qkernel`ラッパーは不要です。`qmc.rx`、`qmc.h`、`qmc.cp`等をそのままファクトリに渡せます。

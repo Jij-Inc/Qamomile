@@ -1317,7 +1317,7 @@ class TestWholeViewEmit:
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(4, "q")
-            cz = qmc.controlled(_zgate, num_controls=1)
+            cz = qmc.control(_zgate, num_controls=1)
             view = q[1::2]
             view[0], view[1] = cz(view[0], view[1])
             q[1::2] = view

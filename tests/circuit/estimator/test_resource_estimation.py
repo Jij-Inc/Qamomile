@@ -288,7 +288,7 @@ class TestBasicCircuitEstimation:
                 counting[i] = qm.h(counting[i])
 
             # Controlled-U operations
-            cp = qm.controlled(controlled_phase)
+            cp = qm.control(controlled_phase)
             for i in qm.range(m):
                 iterations = 2**i
                 for _ in qm.range(iterations):
@@ -321,7 +321,7 @@ class TestBasicCircuitEstimation:
             counting = qm.qubit_array(m, name="counting")
             target = qm.qubit(name="target")
 
-            controlled_gate = qm.controlled(repeated_gate)
+            controlled_gate = qm.control(repeated_gate)
             for i in qm.range(m):
                 iterations = 2**i
                 counting[i], target = controlled_gate(
@@ -733,7 +733,7 @@ class TestQPEResourceEstimation:
                 counting[i] = qm.h(counting[i])
 
             # Controlled-U^(2^k) operations
-            controlled_phase = qm.controlled(phase_gate)
+            controlled_phase = qm.control(phase_gate)
             for i in qm.range(m):
                 iterations = 2**i
                 counting[i], target = controlled_phase(
@@ -839,7 +839,7 @@ class TestQPEResourceEstimation:
             for i in qm.range(m):
                 counting[i] = qm.h(counting[i])
 
-            controlled_phase = qm.controlled(phase_gate)
+            controlled_phase = qm.control(phase_gate)
             for i in qm.range(m):
                 iterations = 2**i
                 counting[i], target = controlled_phase(
@@ -907,7 +907,7 @@ class TestControlledVectorViewEstimation:
         @qm.qkernel
         def circuit() -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
+            cg = qm.control(gate, num_controls=3)
             qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
@@ -927,7 +927,7 @@ class TestControlledVectorViewEstimation:
         @qm.qkernel
         def circuit() -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(2, name="qs")
-            cg = qm.controlled(gate, num_controls=1)
+            cg = qm.control(gate, num_controls=1)
             qs[0], qs[1] = cg(qs[0], qs[1])
             return qs
 
@@ -947,7 +947,7 @@ class TestControlledVectorViewEstimation:
         @qm.qkernel
         def circuit(m: qm.UInt) -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
+            cg = qm.control(gate, num_controls=3)
             for _ in qm.range(m):
                 qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
@@ -970,7 +970,7 @@ class TestControlledVectorViewEstimation:
         @qm.qkernel
         def circuit(m: qm.UInt) -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
+            cg = qm.control(gate, num_controls=3)
             for _ in qm.range(m):
                 qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs

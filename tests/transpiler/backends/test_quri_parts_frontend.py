@@ -3425,8 +3425,8 @@ class TestStdlibQPE:
         assert np.isclose(most_frequent_value, expected_value, atol=1e-10)
 
 
-class TestControlledGate:
-    """Test qmc.controlled() through the QuriParts pipeline.
+class TestControlGate:
+    """Test qmc.control() through the QuriParts pipeline.
 
     QuriParts' circuit_to_gate() returns None, but the transpiler's
     fallback path in _emit_controlled_u manually decomposes each gate
@@ -3442,7 +3442,7 @@ class TestControlledGate:
             q = qmc.h(q)
             return q
 
-        controlled_h = qmc.controlled(h_gate)
+        controlled_h = qmc.control(h_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3463,7 +3463,7 @@ class TestControlledGate:
             q = qmc.h(q)
             return q
 
-        controlled_h = qmc.controlled(h_gate)
+        controlled_h = qmc.control(h_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3488,7 +3488,7 @@ class TestControlledGate:
             q = qmc.rx(q, theta)
             return q
 
-        controlled_rx = qmc.controlled(rx_gate)
+        controlled_rx = qmc.control(rx_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3509,7 +3509,7 @@ class TestControlledGate:
             q = qmc.rx(q, theta)
             return q
 
-        controlled_rx = qmc.controlled(rx_gate)
+        controlled_rx = qmc.control(rx_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3540,7 +3540,7 @@ class TestControlledGate:
             q = qmc.h(q)
             return q
 
-        controlled_h2 = qmc.controlled(h_gate, num_controls=2)
+        controlled_h2 = qmc.control(h_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3562,7 +3562,7 @@ class TestControlledGate:
             q = qmc.rx(q, theta)
             return q
 
-        controlled_rx2 = qmc.controlled(rx_gate, num_controls=2)
+        controlled_rx2 = qmc.control(rx_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -5854,7 +5854,7 @@ class TestDeepNestedQKernelComposition:
 
 
 class TestControlledSubRoutines:
-    """Test qmc.controlled() with statevector verification and power.
+    """Test qmc.control() with statevector verification and power.
 
     All tests use single-control (num_controls=1), which is handled by
     the fallback decomposition in standard_emit._emit_controlled_u.
@@ -5869,7 +5869,7 @@ class TestControlledSubRoutines:
             q = qmc.ry(q, theta)
             return q
 
-        controlled_ry = qmc.controlled(ry_gate)
+        controlled_ry = qmc.control(ry_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -5895,7 +5895,7 @@ class TestControlledSubRoutines:
             q = qmc.ry(q, theta)
             return q
 
-        controlled_ry = qmc.controlled(ry_gate)
+        controlled_ry = qmc.control(ry_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -5916,7 +5916,7 @@ class TestControlledSubRoutines:
             q = qmc.rz(q, theta)
             return q
 
-        controlled_rz = qmc.controlled(rz_gate)
+        controlled_rz = qmc.control(rz_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -5943,7 +5943,7 @@ class TestControlledSubRoutines:
             q = qmc.x(q)
             return q
 
-        controlled_hx = qmc.controlled(hx_gate)
+        controlled_hx = qmc.control(hx_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -5964,7 +5964,7 @@ class TestControlledSubRoutines:
             q = qmc.x(q)
             return q
 
-        controlled_hx = qmc.controlled(hx_gate)
+        controlled_hx = qmc.control(hx_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -5994,7 +5994,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -6014,7 +6014,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -6034,7 +6034,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -6070,7 +6070,7 @@ class TestControlledSubRoutines:
             q = qmc.x(q)
             return q
 
-        controlled_hx2 = qmc.controlled(hx_gate, num_controls=2)
+        controlled_hx2 = qmc.control(hx_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:

@@ -55,7 +55,7 @@ class TestConstantFoldControlledUFields:
         @qm.qkernel
         def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
             qs = qm.qubit_array(n, "qs")
-            cg = qm.controlled(_zgate, num_controls=n - 1)
+            cg = qm.control(_zgate, num_controls=n - 1)
             qs[0 : n - 1], qs[n - 1] = cg(qs[0 : n - 1], qs[n - 1])
             return qm.measure(qs)
 
@@ -80,7 +80,7 @@ class TestConstantFoldControlledUFields:
         @qm.qkernel
         def kernel() -> qm.Vector[qm.Bit]:
             qs = qm.qubit_array(4, "qs")
-            cg = qm.controlled(_zgate, num_controls=3)
+            cg = qm.control(_zgate, num_controls=3)
             qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qm.measure(qs)
 
@@ -113,7 +113,7 @@ class TestConstantFoldControlledUFields:
         def kernel(n: qm.UInt, k: qm.UInt) -> qm.Vector[qm.Bit]:
             qs = qm.qubit_array(n, "qs")
             target = qm.qubit("target")
-            cg = qm.controlled(_zgate, num_controls=k)
+            cg = qm.control(_zgate, num_controls=k)
             _qs_out, _target_out = cg(qs, target, controlled_indices=[0, 1, k - 1])
             return qm.measure(_qs_out)
 
@@ -160,7 +160,7 @@ class TestConstantFoldControlledUFields:
         def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
             ctrls = qm.qubit_array(n, "ctrls")
             tgt = qm.qubit("tgt")
-            cg = qm.controlled(_zgate, num_controls=n)
+            cg = qm.control(_zgate, num_controls=n)
             ctrls, tgt = cg(ctrls, tgt)  # type: ignore
             return qm.measure(ctrls)
 
@@ -216,7 +216,7 @@ class TestConstantFoldControlledUFields:
         def kernel(m: qm.UInt, n: qm.UInt) -> qm.Vector[qm.Bit]:
             ctrls = qm.qubit_array(m, "ctrls")
             tgt = qm.qubit("tgt")
-            cg = qm.controlled(_zgate, num_controls=n)
+            cg = qm.control(_zgate, num_controls=n)
             ctrls, tgt = cg(ctrls, tgt)  # type: ignore
             return qm.measure(ctrls)
 
@@ -239,7 +239,7 @@ class TestConstantFoldControlledUFields:
         def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
             pool = qm.qubit_array(n, "pool")
             tgt = qm.qubit("tgt")
-            cg = qm.controlled(_zgate, num_controls=n - 1)
+            cg = qm.control(_zgate, num_controls=n - 1)
             _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, 2])
             return qm.measure(_pool_out)
 
@@ -269,7 +269,7 @@ class TestControlledUTranspileIntegration:
         @qm.qkernel
         def kernel() -> qm.Vector[qm.Bit]:
             qs = qm.qubit_array(4, "qs")
-            cg = qm.controlled(_zgate, num_controls=3)
+            cg = qm.control(_zgate, num_controls=3)
             qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qm.measure(qs)
 
@@ -285,7 +285,7 @@ class TestControlledUTranspileIntegration:
         @qm.qkernel
         def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
             qs = qm.qubit_array(n, "qs")
-            cg = qm.controlled(_zgate, num_controls=n - 1)
+            cg = qm.control(_zgate, num_controls=n - 1)
             qs[0 : n - 1], qs[n - 1] = cg(qs[0 : n - 1], qs[n - 1])
             return qm.measure(qs)
 
@@ -303,7 +303,7 @@ class TestControlledUTranspileIntegration:
         def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
             ctrls = qm.qubit_array(n, "ctrls")
             tgt = qm.qubit("tgt")
-            cg = qm.controlled(_zgate, num_controls=n)
+            cg = qm.control(_zgate, num_controls=n)
             ctrls, tgt = cg(ctrls, tgt)  # type: ignore
             return qm.measure(ctrls)
 
@@ -320,7 +320,7 @@ class TestControlledUTranspileIntegration:
         def kernel(n: qm.UInt, k: qm.UInt) -> qm.Vector[qm.Bit]:
             pool = qm.qubit_array(n, "pool")
             tgt = qm.qubit("tgt")
-            cg = qm.controlled(_zgate, num_controls=k)
+            cg = qm.control(_zgate, num_controls=k)
             _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, 2])
             return qm.measure(_pool_out)
 
@@ -337,7 +337,7 @@ class TestControlledUTranspileIntegration:
         def kernel(n: qm.UInt, k: qm.UInt) -> qm.Vector[qm.Bit]:
             pool = qm.qubit_array(n, "pool")
             tgt = qm.qubit("tgt")
-            cg = qm.controlled(_zgate, num_controls=k)
+            cg = qm.control(_zgate, num_controls=k)
             _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, k - 1])
             return qm.measure(_pool_out)
 

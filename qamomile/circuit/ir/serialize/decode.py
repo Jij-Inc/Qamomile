@@ -208,7 +208,7 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
             ``CompositeGateOperation.implementation_block``) may
             legitimately be ``HIERARCHICAL`` — e.g., the cached
             ``kernel.block`` form of a leaf kernel passed to
-            ``qmc.controlled``. Skip the kind check there.
+            ``qmc.control``. Skip the kind check there.
 
     Returns:
         Block: The reconstructed Block.

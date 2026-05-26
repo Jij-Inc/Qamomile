@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit
-from qamomile.circuit.frontend.operation.controlled import ControlledGate, controlled
+from qamomile.circuit.frontend.operation.control import ControlGate, control
 from qamomile.circuit.frontend.tracer import trace
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
@@ -68,58 +68,58 @@ def _mock_qkernel():
 
 
 # =============================================================================
-# Unit tests for controlled() function
+# Unit tests for control() function
 # =============================================================================
 
 
 class TestControlledFunction:
     def test_returns_controlled_gate(self):
-        cg = controlled(_mock_qkernel())
-        assert isinstance(cg, ControlledGate)
+        cg = control(_mock_qkernel())
+        assert isinstance(cg, ControlGate)
 
     def test_default_num_controls(self):
-        cg = controlled(_mock_qkernel())
+        cg = control(_mock_qkernel())
         assert cg._num_controls == 1
 
     @pytest.mark.parametrize("nc", [1, 2, 3, 5])
     def test_custom_num_controls(self, nc):
-        cg = controlled(_mock_qkernel(), num_controls=nc)
+        cg = control(_mock_qkernel(), num_controls=nc)
         assert cg._num_controls == nc
 
     def test_stores_qkernel(self):
         qk = _mock_qkernel()
-        cg = controlled(qk)
+        cg = control(qk)
         assert cg._qkernel is qk
 
 
 # =============================================================================
-# Unit tests for ControlledGate.__init__
+# Unit tests for ControlGate.__init__
 # =============================================================================
 
 
-class TestControlledGateInit:
+class TestControlGateInit:
     @pytest.mark.parametrize("nc", [1, 2, 3, 5])
     def test_stores_qkernel_and_num_controls(self, nc):
         qk = _mock_qkernel()
-        cg = ControlledGate(qk, num_controls=nc)
+        cg = ControlGate(qk, num_controls=nc)
         assert cg._qkernel is qk
         assert cg._num_controls == nc
 
     def test_default_num_controls_is_one(self):
-        cg = ControlledGate(_mock_qkernel())
+        cg = ControlGate(_mock_qkernel())
         assert cg._num_controls == 1
 
 
 # =============================================================================
-# Unit tests for ControlledGate.__call__
+# Unit tests for ControlGate.__call__
 # =============================================================================
 
 
-class TestControlledGateCall:
-    """Tests for ControlledGate.__call__ using mock QKernels and real tracer."""
+class TestControlGateCall:
+    """Tests for ControlGate.__call__ using mock QKernels and real tracer."""
 
     def test_emits_one_controlled_u_operation(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             result = cg(_make_qubit("ctrl"), _make_qubit("tgt"))
         assert len(tracer.operations) == 1
@@ -130,7 +130,7 @@ class TestControlledGateCall:
 
     @pytest.mark.parametrize("nc", [1, 2, 3])
     def test_multi_control_single_target(self, nc):
-        cg = ControlledGate(_mock_qkernel(), num_controls=nc)
+        cg = ControlGate(_mock_qkernel(), num_controls=nc)
         qs = [_make_qubit(f"q{i}") for i in range(nc + 1)]
         with trace() as tracer:
             result = cg(*qs)
@@ -139,7 +139,7 @@ class TestControlledGateCall:
         assert tracer.operations[0].num_controls == nc
 
     def test_single_control_multi_target(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         ctrl, t0, t1 = _make_qubit("ctrl"), _make_qubit("t0"), _make_qubit("t1")
         with trace() as tracer:
             result = cg(ctrl, t0, t1)
@@ -151,7 +151,7 @@ class TestControlledGateCall:
     def test_operands_structure(self):
         """operands = [ctrl_vals..., tgt_vals...] and block is stored separately."""
         qk = _mock_qkernel()
-        cg = ControlledGate(qk, num_controls=2)
+        cg = ControlGate(qk, num_controls=2)
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace() as tracer:
             cg(c0, c1, tgt)
@@ -163,7 +163,7 @@ class TestControlledGateCall:
 
     def test_results_and_output_handles(self):
         """Results are next-versioned, preserve logical_id, and are wired to output handles."""
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl", version=0)
         tgt = _make_qubit("tgt", version=0)
         with trace() as tracer:
@@ -180,7 +180,7 @@ class TestControlledGateCall:
         assert result[1].value is op.results[1]
 
     def test_output_preserves_parent_and_indices(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         mock_parent = MagicMock(name="parent_array")
         mock_idx = (MagicMock(name="idx0"),)
         ctrl = _make_qubit("ctrl", parent=mock_parent, indices=mock_idx)
@@ -193,7 +193,7 @@ class TestControlledGateCall:
         assert result[1].indices == ()
 
     def test_raw_float_param_becomes_constant_value(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=0.5)
         op = tracer.operations[0]
@@ -203,7 +203,7 @@ class TestControlledGateCall:
         assert param_val.get_const() == 0.5
 
     def test_handle_type_param_uses_value_directly(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         theta = _make_float_handle("theta")
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=theta)
@@ -211,7 +211,7 @@ class TestControlledGateCall:
         assert op.operands[2] is theta.value
 
     def test_multiple_params(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), alpha=1.0, beta=2.0)
         op = tracer.operations[0]
@@ -221,26 +221,26 @@ class TestControlledGateCall:
 
     @pytest.mark.parametrize("power", [1, 2, 3, 5])
     def test_power_parameter_forwarded(self, power):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=power)
         assert tracer.operations[0].power == power
 
     def test_default_power_is_one(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"))
         assert tracer.operations[0].power == 1
 
     def test_no_tracer_raises_runtime_error(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with pytest.raises(RuntimeError, match="No active tracer"):
             cg(_make_qubit("ctrl"), _make_qubit("tgt"))
 
     def test_operation_properties(self):
         """ControlledUOperation properties: block, control_operands, target_operands, operation_kind."""
         qk = _mock_qkernel()
-        cg = ControlledGate(qk, num_controls=2)
+        cg = ControlGate(qk, num_controls=2)
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace() as tracer:
             cg(c0, c1, tgt)
@@ -251,7 +251,7 @@ class TestControlledGateCall:
         assert op.operation_kind == OperationKind.QUANTUM
 
     def test_int_param_converted_to_float(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=3)
         param_val = tracer.operations[0].operands[2]
@@ -260,7 +260,7 @@ class TestControlledGateCall:
 
     def test_target_operands_with_params(self):
         """target_operands includes parameter Values when params are passed."""
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
         with trace() as tracer:
@@ -274,7 +274,7 @@ class TestControlledGateCall:
 
     def test_consume_prevents_reuse(self):
         """Qubit passed to controlled gate cannot be reused afterward."""
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
         with trace() as tracer:  # noqa: F841
@@ -284,7 +284,7 @@ class TestControlledGateCall:
 
     def test_consume_prevents_reuse_target(self):
         """Target qubit passed to controlled gate cannot be reused afterward."""
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
         with trace() as tracer:  # noqa: F841
@@ -301,7 +301,7 @@ class TestControlledGateCall:
         the duplicate on the second consume, so the error class is
         ``QubitConsumedError`` (not ``QubitAliasError``).
         """
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         q = _make_qubit("q")
         with trace() as tracer:  # noqa: F841
             with pytest.raises(QubitConsumedError):
@@ -313,7 +313,7 @@ class TestControlledGateCall:
         Same rationale as :meth:`test_aliasing_control_and_target_raises`
         — the linear-type layer catches the duplicate.
         """
-        cg = ControlledGate(_mock_qkernel(), num_controls=2)
+        cg = ControlGate(_mock_qkernel(), num_controls=2)
         q = _make_qubit("q")
         tgt = _make_qubit("tgt")
         with trace() as tracer:  # noqa: F841
@@ -322,22 +322,22 @@ class TestControlledGateCall:
 
 
 # =============================================================================
-# Validation tests for controlled() / ControlledGate
+# Validation tests for control() / ControlGate
 # =============================================================================
 
 
 class TestControlledValidation:
     def test_num_controls_zero_raises(self):
         with pytest.raises(ValueError):
-            controlled(_mock_qkernel(), num_controls=0)
+            control(_mock_qkernel(), num_controls=0)
 
     def test_num_controls_negative_raises(self):
         with pytest.raises(ValueError):
-            controlled(_mock_qkernel(), num_controls=-1)
+            control(_mock_qkernel(), num_controls=-1)
 
     def test_not_enough_args_raises(self):
         """Passing fewer qubits than num_controls (no targets) raises ValueError."""
-        cg = ControlledGate(_mock_qkernel(), num_controls=3)
+        cg = ControlGate(_mock_qkernel(), num_controls=3)
         qs = [_make_qubit(f"q{i}") for i in range(3)]  # 3 controls, 0 targets
         with trace() as tracer:  # noqa: F841
             with pytest.raises(ValueError):
@@ -350,7 +350,7 @@ class TestControlledValidation:
         mode (design §1.1, decision #5); concrete mode has no
         selection step.
         """
-        cg = ControlledGate(_mock_qkernel(), num_controls=2)
+        cg = ControlGate(_mock_qkernel(), num_controls=2)
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace():
             with pytest.raises(ValueError, match="only valid in symbolic mode"):
@@ -360,7 +360,7 @@ class TestControlledValidation:
 class TestNormalizeControlledIndices:
     """Compose-time validation rules for ``controlled_indices`` entries.
 
-    Drives ``ControlledGate._normalize_controlled_indices`` directly
+    Drives ``ControlGate._normalize_controlled_indices`` directly
     (rather than through the full ``__call__`` pipeline) so the test
     intent stays focused on the per-entry rules: sequence-type check,
     per-entry type check (``bool`` rejection, ``int`` / ``UInt``
@@ -372,7 +372,7 @@ class TestNormalizeControlledIndices:
 
     @staticmethod
     def _make_cg():
-        return ControlledGate(_mock_qkernel(), num_controls=1)
+        return ControlGate(_mock_qkernel(), num_controls=1)
 
     def test_non_sequence_raises_type_error(self):
         cg = self._make_cg()
@@ -422,34 +422,34 @@ class TestNormalizeControlledIndices:
 
 
 class TestControlledPowerValidation:
-    """Tests for power parameter validation in ControlledGate."""
+    """Tests for power parameter validation in ControlGate."""
 
     def test_power_zero_raises(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace():
             with pytest.raises(ValueError, match="strictly positive"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=0)
 
     def test_power_negative_raises(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace():
             with pytest.raises(ValueError, match="strictly positive"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=-3)
 
     def test_power_bool_true_raises(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace():
             with pytest.raises(TypeError, match="bool"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=True)
 
     def test_power_bool_false_raises(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace():
             with pytest.raises(TypeError, match="bool"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=False)
 
     def test_power_float_raises(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         with trace():
             with pytest.raises(TypeError, match="int or UInt"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=1.5)
@@ -458,7 +458,7 @@ class TestControlledPowerValidation:
         from qamomile.circuit.frontend.handle.primitives import UInt as UIntHandle
         from qamomile.circuit.ir.types.primitives import UIntType
 
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlGate(_mock_qkernel(), num_controls=1)
         uint_val = Value(type=UIntType(), name="power_k").with_const(4)
         uint_power = UIntHandle(value=uint_val)
         with trace() as tracer:
@@ -633,7 +633,7 @@ def _make_controlled_circuit(
         def circuit(theta: qmc.Float) -> qmc.Bit:
             qs = [qmc.qubit(name=f"q{i}") for i in range(total)]
             qs = _prep(qs)
-            cg = qmc.controlled(spec.kernel, num_controls=num_controls)
+            cg = qmc.control(spec.kernel, num_controls=num_controls)
             out = cg(*qs, theta=theta, power=power)
             return qmc.measure(out[-1])
 
@@ -643,7 +643,7 @@ def _make_controlled_circuit(
         def circuit() -> qmc.Bit:
             qs = [qmc.qubit(name=f"q{i}") for i in range(total)]
             qs = _prep(qs)
-            cg = qmc.controlled(spec.kernel, num_controls=num_controls)
+            cg = qmc.control(spec.kernel, num_controls=num_controls)
             out = cg(*qs, power=power)
             return qmc.measure(out[-1])
 
@@ -661,7 +661,7 @@ def _precise_statevector(qc: "QuantumCircuit") -> np.ndarray:
     accumulate significant error (e.g. ``CXGate().power(3).control(3)``).
 
     This helper processes each gate instruction individually.  For
-    ``ControlledGate`` instances it builds the controlled unitary from
+    ``ControlGate`` instances it builds the controlled unitary from
     the base gate's precise matrix, avoiding decomposition error entirely.
     """
     from qiskit.circuit import ControlledGate as QiskitControlledGate
@@ -747,8 +747,8 @@ def _expected_statevector(
 
 @pytest.mark.parametrize("spec", GATES)
 @pytest.mark.parametrize("num_controls", [1, 2, 3])
-class TestControlledGateIntegration:
-    """Integration test: controlled(gate, num_controls) for all gate x control combos."""
+class TestControlGateIntegration:
+    """Integration test: control(gate, num_controls) for all gate x control combos."""
 
     def test_transpiles(self, qiskit_transpiler, spec, num_controls):
         circuit = _make_controlled_circuit(spec, num_controls, activate_controls=False)
@@ -779,7 +779,7 @@ class TestControlledGateIntegration:
 @pytest.mark.parametrize("num_controls", [1, 2, 3])
 @pytest.mark.parametrize("power", [2, 3])
 class TestControlledPowerIntegration:
-    """Integration test: controlled(gate, num_controls, power) for all gate x control x power combos."""
+    """Integration test: control(gate, num_controls, power) for all gate x control x power combos."""
 
     def test_controls_zero(self, qiskit_transpiler, spec, num_controls, power):
         """Controls all |0> => gate^power does NOT fire => full state stays |00...0>."""
@@ -893,7 +893,7 @@ def transpiled_cache() -> dict[tuple, "QuantumCircuit"]:
 @pytest.mark.parametrize("num_controls", [1, 2, 3])
 @pytest.mark.parametrize("power", [1, 2])
 @pytest.mark.parametrize("seed", [901 + offset for offset in range(10)])
-class TestControlledGateRandomState:
+class TestControlGateRandomState:
     """Integration test: controlled gate with controls in superposition and random target state."""
 
     def test_random_initial_state(
@@ -916,7 +916,7 @@ class TestControlledGateRandomState:
 
 
 # =============================================================================
-# Built-in gate acceptance: controlled(qmc.rx) without an @qkernel wrapper
+# Built-in gate acceptance: control(qmc.rx) without an @qkernel wrapper
 # =============================================================================
 #
 # The factory below now auto-wraps a plain built-in gate function in a
@@ -992,32 +992,32 @@ _BUILTIN_BACKENDS = [
 ]
 
 
-# -- Acceptance: controlled() factory takes built-ins -------------------------
+# -- Acceptance: control() factory takes built-ins -------------------------
 
 
 class TestControlledAcceptsBuiltinGate:
-    """``controlled()`` accepts built-in gate functions directly."""
+    """``control()`` accepts built-in gate functions directly."""
 
     @pytest.mark.parametrize(
         "gate_fn",
         [qmc.h, qmc.x, qmc.y, qmc.z, qmc.s, qmc.t, qmc.rx, qmc.ry, qmc.rz, qmc.p],
     )
     def test_single_qubit_gates_accepted(self, gate_fn):
-        cg = qmc.controlled(gate_fn)
-        assert isinstance(cg, ControlledGate)
+        cg = qmc.control(gate_fn)
+        assert isinstance(cg, ControlGate)
 
     @pytest.mark.parametrize("gate_fn", [qmc.cx, qmc.cz, qmc.swap, qmc.cp, qmc.rzz])
     def test_two_qubit_gates_accepted(self, gate_fn):
-        cg = qmc.controlled(gate_fn)
-        assert isinstance(cg, ControlledGate)
+        cg = qmc.control(gate_fn)
+        assert isinstance(cg, ControlGate)
 
     def test_three_qubit_gate_accepted(self):
-        cg = qmc.controlled(qmc.ccx)
-        assert isinstance(cg, ControlledGate)
+        cg = qmc.control(qmc.ccx)
+        assert isinstance(cg, ControlGate)
 
     @pytest.mark.parametrize("nc", [1, 2, 3])
     def test_built_in_with_num_controls(self, nc):
-        cg = qmc.controlled(qmc.rx, num_controls=nc)
+        cg = qmc.control(qmc.rx, num_controls=nc)
         assert cg._num_controls == nc
 
     def test_qkernel_passthrough_uses_same_instance(self):
@@ -1027,7 +1027,7 @@ class TestControlledAcceptsBuiltinGate:
         def my_gate(q: qmc.Qubit) -> qmc.Qubit:
             return qmc.h(q)
 
-        cg = qmc.controlled(my_gate)
+        cg = qmc.control(my_gate)
         assert cg._qkernel is my_gate
 
 
@@ -1039,35 +1039,35 @@ class TestControlledBuiltinErrors:
 
     def test_non_callable_raises_type_error(self):
         with pytest.raises(TypeError, match="QKernel or a built-in gate"):
-            qmc.controlled(42)  # type: ignore[arg-type]
+            qmc.control(42)  # type: ignore[arg-type]
 
     def test_missing_annotation_raises_type_error(self):
         def bad(q):  # no annotation
             return qmc.h(q)
 
         with pytest.raises(TypeError, match="no type annotation"):
-            qmc.controlled(bad)
+            qmc.control(bad)
 
     def test_unsupported_annotation_raises_type_error(self):
         def bad(q: str) -> str:  # str is not Qubit/Float/UInt
             return q
 
         with pytest.raises(TypeError, match="annotation"):
-            qmc.controlled(bad)
+            qmc.control(bad)
 
     def test_no_qubit_param_raises_type_error(self):
         def classical_only(theta: float) -> float:
             return theta
 
         with pytest.raises(TypeError, match="no Qubit parameters"):
-            qmc.controlled(classical_only)
+            qmc.control(classical_only)
 
     def test_var_args_raises_type_error(self):
         def variadic(*qs: qmc.Qubit) -> qmc.Qubit:
             return qs[0]
 
         with pytest.raises(TypeError, match="\\*args/\\*\\*kwargs"):
-            qmc.controlled(variadic)
+            qmc.control(variadic)
 
     def test_positional_only_raises_type_error(self):
         """Positional-only params can't be forwarded by name; reject early."""
@@ -1076,7 +1076,7 @@ class TestControlledBuiltinErrors:
             return qmc.h(q)
 
         with pytest.raises(TypeError, match="positional-only"):
-            qmc.controlled(positional_only)
+            qmc.control(positional_only)
 
     def test_keyword_only_raises_type_error(self):
         """Keyword-only params would collapse to POSITIONAL_OR_KEYWORD; reject."""
@@ -1085,7 +1085,7 @@ class TestControlledBuiltinErrors:
             return qmc.rx(q, theta)
 
         with pytest.raises(TypeError, match="keyword-only"):
-            qmc.controlled(keyword_only)
+            qmc.control(keyword_only)
 
     def test_unknown_param_raises_type_error(self):
         """Typo'd or unrelated kwargs must be rejected, not silently dropped.
@@ -1106,7 +1106,7 @@ class TestControlledBuiltinErrors:
         def circuit() -> qmc.Bit:
             c = qmc.qubit(name="c")
             t = qmc.qubit(name="t")
-            cg = qmc.controlled(gate_with_angle)
+            cg = qmc.control(gate_with_angle)
             c, t = cg(c, t, theata=0.5)  # typo!
             return qmc.measure(t)
 
@@ -1138,7 +1138,7 @@ class TestControlledBuiltinErrors:
         def kw_natural_order() -> qmc.Vector[qmc.Bit]:
             qs = qmc.qubit_array(2, name="q")
             qs[0] = qmc.x(qs[0])
-            cg = qmc.controlled(two_param_gate)
+            cg = qmc.control(two_param_gate)
             qs[0], qs[1] = cg(qs[0], qs[1], alpha=0.7, beta=1.3)
             return qmc.measure(qs)
 
@@ -1146,7 +1146,7 @@ class TestControlledBuiltinErrors:
         def kw_reversed_order() -> qmc.Vector[qmc.Bit]:
             qs = qmc.qubit_array(2, name="q")
             qs[0] = qmc.x(qs[0])
-            cg = qmc.controlled(two_param_gate)
+            cg = qmc.control(two_param_gate)
             qs[0], qs[1] = cg(qs[0], qs[1], beta=1.3, alpha=0.7)
             return qmc.measure(qs)
 
@@ -1174,7 +1174,7 @@ class TestControlledBuiltinErrors:
         def circuit() -> qmc.Bit:
             c = qmc.qubit(name="c")
             t = qmc.qubit(name="t")
-            cg = qmc.controlled(with_uint)
+            cg = qmc.control(with_uint)
             c, t = cg(c, t, n=3.7)  # float for UInt-declared param
             return qmc.measure(t)
 
@@ -1192,7 +1192,7 @@ class TestControlledBuiltinErrors:
         def circuit() -> qmc.Bit:
             c = qmc.qubit(name="c")
             t = qmc.qubit(name="t")
-            cg = qmc.controlled(with_uint)
+            cg = qmc.control(with_uint)
             c, t = cg(c, t, n=True)
             return qmc.measure(t)
 
@@ -1206,7 +1206,7 @@ class TestControlledBuiltinErrors:
         def circuit() -> qmc.Bit:
             c = qmc.qubit(name="c")
             t = qmc.qubit(name="t")
-            cg = qmc.controlled(qmc.rx)
+            cg = qmc.control(qmc.rx)
             c, t = cg(c, t, angle=True)
             return qmc.measure(t)
 
@@ -1227,7 +1227,7 @@ class TestControlledBuiltinErrors:
             return qmc.rx(q, theta)
 
         with pytest.raises(TypeError, match="default value"):
-            qmc.controlled(has_default)
+            qmc.control(has_default)
 
     def test_param_named_qmc_target_raises_type_error(self):
         """A parameter named ``__qmc_target__`` would shadow the forwarding global.
@@ -1244,7 +1244,7 @@ class TestControlledBuiltinErrors:
             return qmc.rx(q, __qmc_target__)
 
         with pytest.raises(TypeError, match="reserved wrapper-internal"):
-            qmc.controlled(shadowing)
+            qmc.control(shadowing)
 
     def test_param_named_qubit_raises_type_error(self):
         """A parameter named ``Qubit`` collides with the injected type binding.
@@ -1259,7 +1259,7 @@ class TestControlledBuiltinErrors:
             return qmc.rx(q, Qubit)
 
         with pytest.raises(TypeError, match="reserved wrapper-internal"):
-            qmc.controlled(shadowing_type)
+            qmc.control(shadowing_type)
 
 
 # -- Wrapper synthesis: caching + interleaved signature handling ------------
@@ -1269,12 +1269,12 @@ class TestControlledBuiltinSynthesisInternals:
     """Cover the wrapper-synthesis edge cases the Copilot review flagged."""
 
     def test_recursive_controlled_inside_wrapped_fn_does_not_deadlock(self):
-        """A wrapped callable that itself calls controlled() must not deadlock.
+        """A wrapped callable that itself calls control() must not deadlock.
 
         The synthesizer holds ``_synthesized_kernel_lock`` while eagerly
         building the wrapper's ``Block`` (so ``fn`` is still strongly
         referenced when the body executes).  That build invokes the
-        wrapped callable, which may call ``controlled(...)`` again — a
+        wrapped callable, which may call ``control(...)`` again — a
         re-entry into ``_qkernel_for_callable`` from the same thread.
         ``threading.Lock`` would deadlock here; ``RLock`` lets the
         re-entry succeed.
@@ -1286,17 +1286,17 @@ class TestControlledBuiltinSynthesisInternals:
         import threading
 
         def outer_helper(q: qmc.Qubit) -> qmc.Qubit:
-            # Force a recursive controlled() call during outer_helper's
+            # Force a recursive control() call during outer_helper's
             # block construction.  The inner gate doesn't matter — what
-            # matters is that the inner controlled() re-enters the lock.
-            _ = qmc.controlled(qmc.rx)
+            # matters is that the inner control() re-enters the lock.
+            _ = qmc.control(qmc.rx)
             return qmc.h(q)
 
         result_holder: dict[str, object] = {}
 
         def worker():
             try:
-                result_holder["cg"] = qmc.controlled(outer_helper)
+                result_holder["cg"] = qmc.control(outer_helper)
             except Exception as e:  # pragma: no cover - defensive
                 result_holder["error"] = e
 
@@ -1307,11 +1307,11 @@ class TestControlledBuiltinSynthesisInternals:
         thread.start()
         thread.join(timeout=5.0)
         assert not thread.is_alive(), (
-            "controlled() hung — likely a deadlock from a non-reentrant lock "
+            "control() hung — likely a deadlock from a non-reentrant lock "
             "while re-entering _qkernel_for_callable from a wrapped callable."
         )
         assert "error" not in result_holder, result_holder.get("error")
-        assert isinstance(result_holder["cg"], ControlledGate)
+        assert isinstance(result_holder["cg"], ControlGate)
 
     def test_reserved_names_match_namespace_keys(self):
         """``_RESERVED_WRAPPER_NAMES`` is auto-derived from ``_wrapper_namespace``.
@@ -1323,7 +1323,7 @@ class TestControlledBuiltinSynthesisInternals:
         invariant so the regression is caught in CI rather than
         re-emerging as a shadow bug at runtime.
         """
-        from qamomile.circuit.frontend.operation.controlled import (
+        from qamomile.circuit.frontend.operation.control import (
             _RESERVED_WRAPPER_NAMES,
             _wrapper_namespace,
         )
@@ -1331,13 +1331,13 @@ class TestControlledBuiltinSynthesisInternals:
         assert _RESERVED_WRAPPER_NAMES == frozenset(_wrapper_namespace(None).keys())
 
     def test_repeated_calls_reuse_same_qkernel(self):
-        """Calling controlled(fn) twice on the same callable returns the same wrapper.
+        """Calling control(fn) twice on the same callable returns the same wrapper.
 
         The synthesized ``QKernel`` is cached in a ``WeakKeyDictionary`` so
         long-running processes don't grow ``linecache`` unboundedly.
         """
-        cg1 = qmc.controlled(qmc.rx)
-        cg2 = qmc.controlled(qmc.rx)
+        cg1 = qmc.control(qmc.rx)
+        cg2 = qmc.control(qmc.rx)
         assert cg1._qkernel is cg2._qkernel
 
     def test_non_weakrefable_callable_uses_strong_cache(self):
@@ -1345,14 +1345,14 @@ class TestControlledBuiltinSynthesisInternals:
 
         ``WeakKeyDictionary`` rejects callables that can't be weakly
         referenced (a small set of C-implemented builtins).  Without a
-        strong-reference fallback, repeated ``controlled(fn)`` calls on
+        strong-reference fallback, repeated ``control(fn)`` calls on
         such callables would re-synthesize the wrapper indefinitely and
         accumulate ``linecache`` entries.
 
         We simulate the non-weakrefable case with an instance of a
         ``__slots__``-only class without ``__weakref__`` — a known
         pattern that ``weakref`` rejects.  The test asserts that
-        ``controlled()`` still returns the same wrapper across calls,
+        ``control()`` still returns the same wrapper across calls,
         which proves the strong-reference cache is engaged.
         """
         import weakref as _weakref
@@ -1372,17 +1372,17 @@ class TestControlledBuiltinSynthesisInternals:
         # Decorate ``__call__`` properly: signature classification reads
         # ``__call__``'s annotations via ``inspect.signature``, which
         # follows ``__call__`` automatically for class instances.
-        cg1 = qmc.controlled(non_weakrefable)
-        cg2 = qmc.controlled(non_weakrefable)
+        cg1 = qmc.control(non_weakrefable)
+        cg2 = qmc.control(non_weakrefable)
         assert cg1._qkernel is cg2._qkernel, (
             "non-weakrefable callable should still hit the strong-ref "
-            "fallback cache on repeated controlled() calls."
+            "fallback cache on repeated control() calls."
         )
 
     def test_no_eager_synthesis_at_module_import(self):
         """Library modules must not trigger wrapper synthesis at import time.
 
-        Eager ``qmc.controlled(builtin_gate)`` calls at module level run
+        Eager ``qmc.control(builtin_gate)`` calls at module level run
         ``compile``/``exec`` + a full block trace at every ``import``,
         which can add up for users who pull in many algorithm modules.
         The current implementation moves any such call inside the
@@ -1391,7 +1391,7 @@ class TestControlledBuiltinSynthesisInternals:
 
         We currently audit ``qamomile.circuit.algorithm.fqaoa`` (the
         only in-tree module that previously did this).  When new
-        modules add their own ``qmc.controlled(...)`` callsites they
+        modules add their own ``qmc.control(...)`` callsites they
         should be added to the audit list here.
         """
         import inspect
@@ -1405,8 +1405,8 @@ class TestControlledBuiltinSynthesisInternals:
         module_level = "\n".join(
             line for line in src.splitlines() if line and not line[0].isspace()
         )
-        assert "qmc.controlled" not in module_level, (
-            "qamomile.circuit.algorithm.fqaoa calls qmc.controlled at "
+        assert "qmc.control(" not in module_level, (
+            "qamomile.circuit.algorithm.fqaoa calls qmc.control at "
             "module scope, which triggers eager wrapper synthesis at "
             "import time. Move the call inside the function that needs "
             "it (the per-callable cache will absorb the cost on first "
@@ -1415,8 +1415,8 @@ class TestControlledBuiltinSynthesisInternals:
 
     def test_distinct_callables_get_distinct_wrappers(self):
         """Different gate functions must not collide in the cache."""
-        cg_rx = qmc.controlled(qmc.rx)
-        cg_ry = qmc.controlled(qmc.ry)
+        cg_rx = qmc.control(qmc.rx)
+        cg_ry = qmc.control(qmc.ry)
         assert cg_rx._qkernel is not cg_ry._qkernel
 
     def test_interleaved_qubit_classical_signature_forwards_correctly(
@@ -1446,7 +1446,7 @@ class TestControlledBuiltinSynthesisInternals:
         def circuit(theta: qmc.Float) -> qmc.Bit:
             qs = [qmc.qubit(name=f"q{i}") for i in range(3)]
             qs = [qmc.x(qs[0]), qmc.x(qs[1]), qs[2]]  # |1,1,0>
-            cg = qmc.controlled(gate_with_interleaved_params)
+            cg = qmc.control(gate_with_interleaved_params)
             qs[0], qs[1], qs[2] = cg(qs[0], qs[1], qs[2], theta=math.pi)
             return qmc.measure(qs[2])
 
@@ -1473,8 +1473,8 @@ class TestControlledBuiltinSynthesisInternals:
         def Qubit(q: qmc.Qubit) -> qmc.Qubit:  # noqa: N802 - test the corner case
             return qmc.h(q)
 
-        cg = qmc.controlled(Qubit)
-        assert isinstance(cg, ControlledGate)
+        cg = qmc.control(Qubit)
+        assert isinstance(cg, ControlGate)
         # Implementation detail: the synthesized wrapper falls back to the
         # safe internal identifier here, NOT the original ``Qubit`` name.
         assert cg._qkernel.name.startswith("_qmc_controlled_wrapper_")
@@ -1495,8 +1495,8 @@ class TestControlledBuiltinSynthesisInternals:
 
         some_gate.__name__ = "class"
 
-        cg = qmc.controlled(some_gate)
-        assert isinstance(cg, ControlledGate)
+        cg = qmc.control(some_gate)
+        assert isinstance(cg, ControlGate)
         assert cg._qkernel.name.startswith("_qmc_controlled_wrapper_")
 
     def test_int_param_lowered_as_uint_type(self):
@@ -1522,7 +1522,7 @@ class TestControlledBuiltinSynthesisInternals:
         def circuit() -> qmc.Bit:
             c = qmc.qubit(name="c")
             t = qmc.qubit(name="t")
-            cg = qmc.controlled(gate_with_int_param)
+            cg = qmc.control(gate_with_int_param)
             c, t = cg(c, t, n=3)
             return qmc.measure(t)
 
@@ -1548,7 +1548,7 @@ class TestControlledBuiltinSynthesisInternals:
         def circuit() -> qmc.Bit:
             c = qmc.qubit(name="c")
             t = qmc.qubit(name="t")
-            cg = qmc.controlled(qmc.rx)
+            cg = qmc.control(qmc.rx)
             c, t = cg(c, t, angle=0.5)
             return qmc.measure(t)
 
@@ -1576,7 +1576,7 @@ class TestControlledBuiltinSynthesisInternals:
         import linecache as _linecache_module
         import weakref
 
-        from qamomile.circuit.frontend.operation.controlled import (
+        from qamomile.circuit.frontend.operation.control import (
             _synthesized_kernel_cache,
         )
 
@@ -1585,7 +1585,7 @@ class TestControlledBuiltinSynthesisInternals:
 
         fn_ref = weakref.ref(_ephemeral_gate)
 
-        cg = qmc.controlled(_ephemeral_gate)
+        cg = qmc.control(_ephemeral_gate)
         assert _ephemeral_gate in _synthesized_kernel_cache
         # Pin the linecache filename for the post-GC check.  The
         # AST-transformed ``self.func`` is re-compiled under the
@@ -1627,30 +1627,30 @@ class TestControlledBuiltinIRParity:
         ]
 
     def test_rx_gate_block_matches_wrapper(self):
-        """controlled(qmc.rx).block has the same gate sequence as controlled(_rx_gate).block."""
-        cg_builtin = qmc.controlled(qmc.rx)
-        cg_wrapped = qmc.controlled(_rx_gate)
+        """control(qmc.rx).block has the same gate sequence as control(_rx_gate).block."""
+        cg_builtin = qmc.control(qmc.rx)
+        cg_wrapped = qmc.control(_rx_gate)
         assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
             cg_wrapped._qkernel.block
         )
 
     def test_h_gate_block_matches_wrapper(self):
-        cg_builtin = qmc.controlled(qmc.h)
-        cg_wrapped = qmc.controlled(_h_gate)
+        cg_builtin = qmc.control(qmc.h)
+        cg_wrapped = qmc.control(_h_gate)
         assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
             cg_wrapped._qkernel.block
         )
 
     def test_cp_gate_block_matches_wrapper(self):
-        cg_builtin = qmc.controlled(qmc.cp)
-        cg_wrapped = qmc.controlled(_cp_gate)
+        cg_builtin = qmc.control(qmc.cp)
+        cg_wrapped = qmc.control(_cp_gate)
         assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
             cg_wrapped._qkernel.block
         )
 
     def test_cx_gate_block_matches_wrapper(self):
-        cg_builtin = qmc.controlled(qmc.cx)
-        cg_wrapped = qmc.controlled(_cx_gate)
+        cg_builtin = qmc.control(qmc.cx)
+        cg_wrapped = qmc.control(_cx_gate)
         assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
             cg_wrapped._qkernel.block
         )
@@ -1659,14 +1659,14 @@ class TestControlledBuiltinIRParity:
 # -- Cross-SDK builtin-vs-wrapper parity: full gate × 3 SDK × random angles --
 #
 # These tests build a controlled circuit twice — once with the built-in
-# gate function passed directly to ``qmc.controlled`` (the new path) and
+# gate function passed directly to ``qmc.control`` (the new path) and
 # once with a hand-written ``@qmc.qkernel`` wrapper (the legacy path) —
 # and assert that both forms produce the same statevector / sample
 # outcome / expectation value on every supported quantum SDK.
 
 
 @dataclasses.dataclass(frozen=True)
-class _ControlledGateSpec:
+class _ControlGateSpec:
     """Spec describing one built-in gate + its hand-written ``@qkernel`` wrapper."""
 
     label: str
@@ -1684,41 +1684,39 @@ class _ControlledGateSpec:
 
 
 _GATE_SPECS = [
-    pytest.param(_ControlledGateSpec("h", qmc.h, _h_gate, 1, None, None), id="h"),
-    pytest.param(_ControlledGateSpec("x", qmc.x, _x_gate, 1, None, None), id="x"),
-    pytest.param(_ControlledGateSpec("y", qmc.y, _y_gate, 1, None, None), id="y"),
-    pytest.param(_ControlledGateSpec("z", qmc.z, _z_gate, 1, None, None), id="z"),
-    pytest.param(_ControlledGateSpec("s", qmc.s, _s_gate, 1, None, None), id="s"),
-    pytest.param(_ControlledGateSpec("t", qmc.t, _t_gate, 1, None, None), id="t"),
+    pytest.param(_ControlGateSpec("h", qmc.h, _h_gate, 1, None, None), id="h"),
+    pytest.param(_ControlGateSpec("x", qmc.x, _x_gate, 1, None, None), id="x"),
+    pytest.param(_ControlGateSpec("y", qmc.y, _y_gate, 1, None, None), id="y"),
+    pytest.param(_ControlGateSpec("z", qmc.z, _z_gate, 1, None, None), id="z"),
+    pytest.param(_ControlGateSpec("s", qmc.s, _s_gate, 1, None, None), id="s"),
+    pytest.param(_ControlGateSpec("t", qmc.t, _t_gate, 1, None, None), id="t"),
     pytest.param(
-        _ControlledGateSpec("rx", qmc.rx, _rx_gate, 1, "angle", "theta"), id="rx"
+        _ControlGateSpec("rx", qmc.rx, _rx_gate, 1, "angle", "theta"), id="rx"
     ),
     pytest.param(
-        _ControlledGateSpec("ry", qmc.ry, _ry_gate, 1, "angle", "theta"), id="ry"
+        _ControlGateSpec("ry", qmc.ry, _ry_gate, 1, "angle", "theta"), id="ry"
     ),
     pytest.param(
-        _ControlledGateSpec("rz", qmc.rz, _rz_gate, 1, "angle", "theta"), id="rz"
+        _ControlGateSpec("rz", qmc.rz, _rz_gate, 1, "angle", "theta"), id="rz"
     ),
-    pytest.param(_ControlledGateSpec("p", qmc.p, _p_gate, 1, "theta", "theta"), id="p"),
-    pytest.param(_ControlledGateSpec("cx", qmc.cx, _cx_gate, 2, None, None), id="cx"),
-    pytest.param(_ControlledGateSpec("cz", qmc.cz, _cz_gate, 2, None, None), id="cz"),
+    pytest.param(_ControlGateSpec("p", qmc.p, _p_gate, 1, "theta", "theta"), id="p"),
+    pytest.param(_ControlGateSpec("cx", qmc.cx, _cx_gate, 2, None, None), id="cx"),
+    pytest.param(_ControlGateSpec("cz", qmc.cz, _cz_gate, 2, None, None), id="cz"),
     pytest.param(
-        _ControlledGateSpec("swap", qmc.swap, _swap_gate, 2, None, None), id="swap"
-    ),
-    pytest.param(
-        _ControlledGateSpec("cp", qmc.cp, _cp_gate, 2, "theta", "theta"), id="cp"
+        _ControlGateSpec("swap", qmc.swap, _swap_gate, 2, None, None), id="swap"
     ),
     pytest.param(
-        _ControlledGateSpec("rzz", qmc.rzz, _rzz_gate, 2, "angle", "theta"), id="rzz"
+        _ControlGateSpec("cp", qmc.cp, _cp_gate, 2, "theta", "theta"), id="cp"
     ),
     pytest.param(
-        _ControlledGateSpec("ccx", qmc.ccx, _ccx_gate, 3, None, None), id="ccx"
+        _ControlGateSpec("rzz", qmc.rzz, _rzz_gate, 2, "angle", "theta"), id="rzz"
     ),
+    pytest.param(_ControlGateSpec("ccx", qmc.ccx, _ccx_gate, 3, None, None), id="ccx"),
 ]
 
 
 def _make_controlled_circuit_for_statevector(
-    spec: _ControlledGateSpec,
+    spec: _ControlGateSpec,
     num_controls: int,
     theta_value: float | None,
     *,
@@ -1730,7 +1728,7 @@ def _make_controlled_circuit_for_statevector(
     Returns a ``@qmc.qkernel`` whose body
         1. Allocates ``num_controls + spec.num_targets`` qubits,
         2. Drives every control qubit to |1> via X,
-        3. Applies ``controlled(builtin_or_wrapper, num_controls=N)``
+        3. Applies ``control(builtin_or_wrapper, num_controls=N)``
            with the optional ``power=`` exponent,
         4. Measures the last qubit so the kernel has classical I/O
            (which top-level transpile entry-points require).
@@ -1758,7 +1756,7 @@ def _make_controlled_circuit_for_statevector(
             q0 = qmc.qubit(name="q0")
             q1 = qmc.qubit(name="q1")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1 = cg(q0, q1, **_kwargs())
             return qmc.measure(q1)
 
@@ -1772,7 +1770,7 @@ def _make_controlled_circuit_for_statevector(
             q1 = qmc.qubit(name="q1")
             q2 = qmc.qubit(name="q2")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1, q2 = cg(q0, q1, q2, **_kwargs())
             return qmc.measure(q2)
 
@@ -1787,7 +1785,7 @@ def _make_controlled_circuit_for_statevector(
             q2 = qmc.qubit(name="q2")
             q3 = qmc.qubit(name="q3")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1, q2, q3 = cg(q0, q1, q2, q3, **_kwargs())
             return qmc.measure(q3)
 
@@ -1802,7 +1800,7 @@ def _make_controlled_circuit_for_statevector(
             q2 = qmc.qubit(name="q2")
             q0 = qmc.x(q0)
             q1 = qmc.x(q1)
-            cg = qmc.controlled(fn, num_controls=2)
+            cg = qmc.control(fn, num_controls=2)
             q0, q1, q2 = cg(q0, q1, q2, **_kwargs())
             return qmc.measure(q2)
 
@@ -1818,7 +1816,7 @@ def _make_controlled_circuit_for_statevector(
             q3 = qmc.qubit(name="q3")
             q0 = qmc.x(q0)
             q1 = qmc.x(q1)
-            cg = qmc.controlled(fn, num_controls=2)
+            cg = qmc.control(fn, num_controls=2)
             q0, q1, q2, q3 = cg(q0, q1, q2, q3, **_kwargs())
             return qmc.measure(q3)
 
@@ -1834,8 +1832,8 @@ class TestControlledBuiltinStatevectorParity:
     """builtin-vs-wrapper Qiskit statevector parity, all 16 standard gates.
 
     For every (gate, seed) combination the test transpiles the same
-    controlled circuit twice — once via ``controlled(builtin_fn)`` and
-    once via ``controlled(_<gate>_gate)`` (the hand-written
+    controlled circuit twice — once via ``control(builtin_fn)`` and
+    once via ``control(_<gate>_gate)`` (the hand-written
     ``@qmc.qkernel`` wrapper) — and asserts that the resulting Qiskit
     final statevectors (with the trailing measurement removed) agree
     to ``atol=1e-8``.
@@ -1910,7 +1908,7 @@ class TestControlledBuiltinStatevectorParityNumControls2:
 class TestControlledBuiltinStatevectorParityPower:
     """builtin-vs-wrapper Qiskit statevector parity with ``power=N`` (N>1).
 
-    The ``power`` parameter on ``ControlledGate.__call__`` emits
+    The ``power`` parameter on ``ControlGate.__call__`` emits
     Controlled-(U^N) (i.e. the gate's matrix raised to the integer
     power inside the controlled box, not the controlled gate itself
     raised to the power), so the resulting unitary is gate-specific.
@@ -1946,11 +1944,11 @@ class TestControlledBuiltinSymbolicNumControls:
     controlled gate is a ``Vector[Qubit]`` of controls instead of
     individual qubits.
 
-    ``ControlledGate``'s symbolic path goes through ``_call_symbolic``
+    ``ControlGate``'s symbolic path goes through ``_call_symbolic``
     and emits a ``SymbolicControlledU`` operation, which is orthogonal
     to the wrapper-synthesis path this PR adds.  This test pins that
     the built-in form is at least *accepted* on that path: a kernel
-    using ``qmc.controlled(qmc.rx, num_controls=symbolic_n)``
+    using ``qmc.control(qmc.rx, num_controls=symbolic_n)``
     transpiles, samples, and returns shots end-to-end.  We do **not**
     assert the bit value here — verifying the controlled-rotation
     semantics under ``SymbolicControlledU`` is the responsibility of
@@ -1967,7 +1965,7 @@ class TestControlledBuiltinSymbolicNumControls:
             target = qmc.qubit(name="t")
             for i in qmc.range(n):
                 controls[i] = qmc.x(controls[i])
-            crx = qmc.controlled(qmc.rx, num_controls=n)
+            crx = qmc.control(qmc.rx, num_controls=n)
             controls, target = crx(controls, target, angle=math.pi)
             return qmc.measure(target)
 
@@ -1982,7 +1980,7 @@ class TestControlledBuiltinSymbolicNumControls:
 
 
 def _make_controlled_circuit_with_measure(
-    spec: _ControlledGateSpec, num_controls: int, theta_value: float | None
+    spec: _ControlGateSpec, num_controls: int, theta_value: float | None
 ):
     """Same as ``_make_controlled_circuit_for_statevector`` but ends with measure.
 
@@ -2003,7 +2001,7 @@ def _make_controlled_circuit_with_measure(
             q0 = qmc.qubit(name="q0")
             q1 = qmc.qubit(name="q1")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1 = cg(q0, q1, **kwargs_dict)
             return qmc.measure(q1)
 
@@ -2017,7 +2015,7 @@ def _make_controlled_circuit_with_measure(
             q1 = qmc.qubit(name="q1")
             q2 = qmc.qubit(name="q2")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1, q2 = cg(q0, q1, q2, **kwargs_dict)
             return qmc.measure(q2)
 
@@ -2032,7 +2030,7 @@ def _make_controlled_circuit_with_measure(
             q2 = qmc.qubit(name="q2")
             q3 = qmc.qubit(name="q3")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1, q2, q3 = cg(q0, q1, q2, q3, **kwargs_dict)
             return qmc.measure(q3)
 
@@ -2089,7 +2087,7 @@ class TestControlledBuiltinCrossSDKSample:
 
 
 def _make_expval_circuit(
-    spec: _ControlledGateSpec,
+    spec: _ControlGateSpec,
     num_controls: int,
     theta_value: float | None,
     *,
@@ -2117,7 +2115,7 @@ def _make_expval_circuit(
             q0 = qmc.qubit(name="q0")
             q1 = qmc.qubit(name="q1")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1 = cg(q0, q1, **_kwargs())
             return qmc.expval((q0, q1), obs)
 
@@ -2131,7 +2129,7 @@ def _make_expval_circuit(
             q1 = qmc.qubit(name="q1")
             q2 = qmc.qubit(name="q2")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1, q2 = cg(q0, q1, q2, **_kwargs())
             return qmc.expval((q0, q1, q2), obs)
 
@@ -2146,7 +2144,7 @@ def _make_expval_circuit(
             q2 = qmc.qubit(name="q2")
             q3 = qmc.qubit(name="q3")
             q0 = qmc.x(q0)
-            cg = qmc.controlled(fn, num_controls=1)
+            cg = qmc.control(fn, num_controls=1)
             q0, q1, q2, q3 = cg(q0, q1, q2, q3, **_kwargs())
             return qmc.expval((q0, q1, q2, q3), obs)
 
@@ -2211,7 +2209,7 @@ class TestControlledBuiltinCrossSDKExpval:
 # Cross-SDK execution: user @qkernel with Vector[Qubit] sub-kernel argument
 # =============================================================================
 #
-# Regression for the bug where ``controlled(inner_kernel, ...)`` would
+# Regression for the bug where ``control(inner_kernel, ...)`` would
 # trip an allocator assertion when ``inner_kernel`` took a
 # ``Vector[Qubit]`` argument: the inner block has no QInitOperation for
 # its inputs, so the per-element ``QubitAddress`` keys for ``qs[i]``
@@ -2288,7 +2286,7 @@ class TestControlledVectorInnerKernelCrossSDK:
             qs[1] = qmc.x(qs[1])
             qs[2] = qmc.x(qs[2])
             qs[3] = qmc.x(qs[3])
-            cg = qmc.controlled(_shift_first_three, num_controls=1)
+            cg = qmc.control(_shift_first_three, num_controls=1)
             qs[3], view_out = cg(qs[3], qs[0:3])
             qs[0:3] = view_out
             return qmc.measure(qs)
@@ -2325,7 +2323,7 @@ class TestControlledVectorInnerKernelCrossSDK:
             qs[0] = qmc.x(qs[0])
             qs[1] = qmc.x(qs[1])
             qs[2] = qmc.x(qs[2])
-            cg = qmc.controlled(_shift_first_three, num_controls=1)
+            cg = qmc.control(_shift_first_three, num_controls=1)
             qs[3], view_out = cg(qs[3], qs[0:3])
             qs[0:3] = view_out
             return qmc.measure(qs)
@@ -2368,7 +2366,7 @@ class TestControlledVectorInnerKernelCrossSDK:
             qs = qmc.qubit_array(3, "qs")
             qs[0] = qmc.h(qs[0])  # Put outer control in superposition.
             qs[1] = qmc.x(qs[1])  # Make inner state non-trivial.
-            cg = qmc.controlled(_rotate_first_two, num_controls=1)
+            cg = qmc.control(_rotate_first_two, num_controls=1)
             qs[0], view_out = cg(qs[0], qs[1:3], theta=theta)
             qs[1:3] = view_out
             return qmc.expval(qs, obs)
@@ -2391,7 +2389,7 @@ class TestControlledVectorInnerKernelCrossSDK:
             q2 = qmc.qubit(name="q2")
             q0 = qmc.h(q0)
             q1 = qmc.x(q1)
-            cg = qmc.controlled(_rotate_first_two_scalar, num_controls=1)
+            cg = qmc.control(_rotate_first_two_scalar, num_controls=1)
             q0, q1, q2 = cg(q0, q1, q2, theta=theta)
             return qmc.expval((q0, q1, q2), obs)
 
@@ -2489,7 +2487,7 @@ class TestControlledVectorViewControlCrossSDK:
             qs[0] = qmc.x(qs[0])
             qs[1] = qmc.x(qs[1])
             qs[2] = qmc.x(qs[2])
-            cg = qmc.controlled(_scalar_h, num_controls=3)
+            cg = qmc.control(_scalar_h, num_controls=3)
             view_out, q3_out = cg(qs[0:3], qs[3])
             qs[0:3] = view_out
             qs[3] = q3_out
@@ -2529,7 +2527,7 @@ class TestControlledVectorViewControlCrossSDK:
             qs[0] = qmc.x(qs[0])
             qs[1] = qmc.x(qs[1])
             qs[2] = qmc.x(qs[2])
-            cg = qmc.controlled(_scalar_h, num_controls=3)
+            cg = qmc.control(_scalar_h, num_controls=3)
             view_out, q3_out = cg(qs[0:3], qs[3])
             qs[0:3] = view_out
             qs[3] = q3_out
@@ -2541,7 +2539,7 @@ class TestControlledVectorViewControlCrossSDK:
             qs[0] = qmc.x(qs[0])
             qs[1] = qmc.x(qs[1])
             qs[2] = qmc.x(qs[2])
-            cg = qmc.controlled(_scalar_h, num_controls=3)
+            cg = qmc.control(_scalar_h, num_controls=3)
             qs[0], qs[1], qs[2], qs[3] = cg(qs[0], qs[1], qs[2], qs[3])
             return qmc.expval(qs, obs)
 
@@ -2594,7 +2592,7 @@ class TestControlledVectorSubArgCrossSDK:
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
             qs = qmc.qubit_array(3, "qs")
             qs[0] = qmc.x(qs[0])
-            cg = qmc.controlled(_vector_ry_pair, num_controls=1)
+            cg = qmc.control(_vector_ry_pair, num_controls=1)
             qs[0], view_out = cg(qs[0], qs[1:3], theta=theta)
             qs[1:3] = view_out
             return qmc.measure(qs)
@@ -2649,7 +2647,7 @@ class TestControlledVectorSubArgQiskitEquivalence:
         def vec_kernel(obs: qmc.Observable, theta: qmc.Float) -> qmc.Float:
             qs = qmc.qubit_array(3, "qs")
             qs[0] = qmc.x(qs[0])
-            cg = qmc.controlled(_vector_ry_pair, num_controls=1)
+            cg = qmc.control(_vector_ry_pair, num_controls=1)
             qs[0], view_out = cg(qs[0], qs[1:3], theta=theta)
             qs[1:3] = view_out
             return qmc.expval(qs, obs)
@@ -2658,7 +2656,7 @@ class TestControlledVectorSubArgQiskitEquivalence:
         def scalar_kernel(obs: qmc.Observable, theta: qmc.Float) -> qmc.Float:
             qs = qmc.qubit_array(3, "qs")
             qs[0] = qmc.x(qs[0])
-            cg_ry = qmc.controlled(_scalar_ry, num_controls=1)
+            cg_ry = qmc.control(_scalar_ry, num_controls=1)
             qs[0], qs[1] = cg_ry(qs[0], qs[1], theta=theta)
             qs[0], qs[2] = cg_ry(qs[0], qs[2], theta=theta)
             return qmc.expval(qs, obs)

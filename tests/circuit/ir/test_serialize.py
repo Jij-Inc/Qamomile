@@ -103,7 +103,7 @@ def _controlled_phase(
     ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
 ) -> tuple[qmc.Qubit, qmc.Qubit]:
     """Top-level kernel that embeds a ``ControlledUOperation``."""
-    op = qmc.controlled(_phase)
+    op = qmc.control(_phase)
     ctrl, target = op(ctrl, target, theta=theta)
     return ctrl, target
 

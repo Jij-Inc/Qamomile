@@ -43,7 +43,7 @@ ParamValue = Union[float, int, Float, UInt]
 # An ``RLock`` (rather than ``Lock``) is required because we eagerly
 # build ``qkernel_inst.block`` *inside* the lock — that build executes
 # the synthesized wrapper, which calls the user-supplied ``fn``, and
-# ``fn`` may itself call ``controlled(...)`` (e.g. a helper that
+# ``fn`` may itself call ``control(...)`` (e.g. a helper that
 # constructs another controlled gate during its body).  A non-reentrant
 # lock would deadlock the same thread on this re-entry; ``RLock`` lets
 # the recursive ``_qkernel_for_callable`` call proceed normally.
@@ -54,14 +54,14 @@ _synthesized_kernel_lock = threading.RLock()
 # A ``WeakKeyDictionary`` lets the entry vanish automatically when the
 # original callable is garbage-collected, so we never grow the
 # ``linecache`` unboundedly in long-running processes that repeatedly call
-# ``controlled(qmc.rx)`` etc.
+# ``control(qmc.rx)`` etc.
 _synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" = (
     weakref.WeakKeyDictionary()
 )
 
 # Strong-reference fallback cache for callables that do not support weak
 # references (a small set of C-implemented builtins).  Without this,
-# repeated ``controlled(fn)`` calls on the same non-weakrefable callable
+# repeated ``control(fn)`` calls on the same non-weakrefable callable
 # would re-synthesize a wrapper each time and accumulate ``linecache``
 # entries indefinitely.  Holding a strong reference is acceptable here
 # because such callables are typically module-level / immortal — the
@@ -120,7 +120,7 @@ _RESERVED_WRAPPER_NAMES: frozenset[str] = frozenset(_wrapper_namespace(None).key
 class _ControlEntry:
     """Bookkeeping for one positional control or sub-quantum handle.
 
-    The new ``ControlledGate.__call__`` concrete path consumes handles
+    The new ``ControlGate.__call__`` concrete path consumes handles
     in two stages: scalar ``Qubit`` and whole-``Vector`` arguments are
     consumed eagerly via :meth:`Handle.consume`, while ``VectorView``
     arguments defer the consume until ``_wrap_results_by_input_kind``
@@ -150,10 +150,10 @@ class _ControlEntry:
         return self.consumed is None
 
 
-class ControlledGate:
+class ControlGate:
     """Wrapper for controlled version of a QKernel.
 
-    Created by calling `controlled(qkernel)`. The resulting object
+    Created by calling `control(qkernel)`. The resulting object
     can be called like a gate function.
 
     Example:
@@ -161,11 +161,11 @@ class ControlledGate:
         def phase_gate(q: Qubit, theta: float) -> Qubit:
             return qmc.p(q, theta)
 
-        controlled_phase = qmc.controlled(phase_gate)
+        controlled_phase = qmc.control(phase_gate)
         ctrl_out, tgt_out = controlled_phase(ctrl, target, theta=0.5)
 
         # Double-controlled
-        cc_phase = qmc.controlled(phase_gate, num_controls=2)
+        cc_phase = qmc.control(phase_gate, num_controls=2)
         c0, c1, tgt = cc_phase(ctrl0, ctrl1, target, theta=0.5)
     """
 
@@ -279,7 +279,7 @@ class ControlledGate:
         extras = sorted(set(params) - classical_set)
         if extras:
             raise TypeError(
-                f"controlled(): unknown parameter(s) {extras!r}. "
+                f"control(): unknown parameter(s) {extras!r}. "
                 f"The wrapped kernel's classical parameters are "
                 f"{classical_names!r}."
             )
@@ -306,7 +306,7 @@ class ControlledGate:
                 # if truncation is genuinely intended.
                 if isinstance(param_value, bool) or not isinstance(param_value, int):
                     raise TypeError(
-                        f"controlled(): parameter {param_name!r} is "
+                        f"control(): parameter {param_name!r} is "
                         f"declared as UInt/int but received "
                         f"{type(param_value).__name__} ({param_value!r}). "
                         f"Pass a Python int (or a UInt handle) instead."
@@ -322,7 +322,7 @@ class ControlledGate:
                 # ``1.0``.
                 if isinstance(param_value, bool):
                     raise TypeError(
-                        f"controlled(): parameter {param_name!r} is "
+                        f"control(): parameter {param_name!r} is "
                         f"declared as Float/float but received bool "
                         f"({param_value!r}). Pass a numeric value instead."
                     )
@@ -414,7 +414,7 @@ class ControlledGate:
 
         Args:
             args (tuple[Any, ...]): Positional arguments handed to
-                :meth:`ControlledGate.__call__` in concrete-mode.
+                :meth:`ControlGate.__call__` in concrete-mode.
             num_controls (int): The concrete control qubit count
                 ``N`` configured on this gate.
 
@@ -594,7 +594,7 @@ class ControlledGate:
         parameter (``def sub(qa, theta=0.5)``) end up with that
         default baked into the resulting dict.
 
-        For test-mock kernels (``ControlledGate(_mock_qkernel(), ...)``)
+        For test-mock kernels (``ControlGate(_mock_qkernel(), ...)``)
         no real signature exists.  In that case we keep the historical
         "positional → quantum, kwargs → classical" behaviour by
         synthesising stable string keys (``"@pos0"``, ``"@pos1"``, ...
@@ -652,7 +652,7 @@ class ControlledGate:
                 if decl is UInt or decl is int or decl is Float or decl is float
             ]
             raise TypeError(
-                f"controlled(): unknown parameter(s) {extras!r}. "
+                f"control(): unknown parameter(s) {extras!r}. "
                 f"The wrapped kernel's classical parameters are "
                 f"{classical_names!r}."
             )
@@ -1026,7 +1026,7 @@ class ControlledGate:
         sub_kwargs: dict[str, Any],
         power: int | Value,
     ) -> tuple[Any, ...]:
-        """Concrete-``num_controls`` path for :meth:`ControlledGate.__call__`.
+        """Concrete-``num_controls`` path for :meth:`ControlGate.__call__`.
 
         Chains the helpers (split → bind → validate → consume →
         operands/results → emit → wrap) so the body of ``__call__``
@@ -1275,7 +1275,7 @@ class ControlledGate:
         sub_kwargs: dict[str, Any],
         controlled_indices: Sequence[int | UInt] | None,
     ) -> tuple[Any, ...]:
-        """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
+        """Symbolic-``num_controls`` path for :meth:`ControlGate.__call__`.
 
         Mirrors :meth:`_call_concrete`'s structure but expects a
         ``Vector[Qubit]`` / ``VectorView[Qubit]`` as ``args[0]`` —
@@ -1392,11 +1392,11 @@ class ControlledGate:
 
 
 def _classify_callable_param(annotation: Any) -> str:
-    """Classify a callable's parameter annotation for ``controlled()`` wrapping.
+    """Classify a callable's parameter annotation for ``control()`` wrapping.
 
     Built-in gate functions (``qmc.rx``, ``qmc.h``, etc.) typically annotate
     their qubit operand as ``Qubit | Vector[Qubit]`` because they support
-    both scalar and broadcast invocation.  When wrapping for ``controlled``
+    both scalar and broadcast invocation.  When wrapping for ``control``
     we always invoke them with a single ``Qubit``, so we treat any union
     that includes ``Qubit`` as a qubit parameter and likewise for
     ``Float``/``UInt``.
@@ -1433,7 +1433,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     Inspects the callable's signature to classify each parameter, then
     generates a tiny wrapper function that simply forwards the call.  The
     wrapper is decorated with ``@qkernel`` so that the rest of the
-    ``controlled`` machinery can consume it unchanged.
+    ``control`` machinery can consume it unchanged.
 
     The wrapper's source is registered with ``linecache`` so that
     ``inspect.getsource`` (used by ``transform_control_flow``) can retrieve
@@ -1488,14 +1488,14 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     # Duck-typed kernel-like objects (e.g. test mocks with a stubbed
     # ``.block``) are passed through unchanged so the existing
-    # ``ControlledGate`` consumer continues to work without coupling the
+    # ``ControlGate`` consumer continues to work without coupling the
     # synthesis path to a strict ``isinstance`` check.
     if hasattr(fn, "block"):
         return cast("QKernel", fn)
 
     if not callable(fn):
         raise TypeError(
-            f"controlled(): expected a QKernel or a built-in gate function, "
+            f"control(): expected a QKernel or a built-in gate function, "
             f"got {type(fn).__name__}."
         )
 
@@ -1505,7 +1505,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         sig = inspect.signature(fn)
     except (TypeError, ValueError) as e:
         raise TypeError(
-            f"controlled(): cannot inspect signature of {fn_name!r}: {e}. "
+            f"control(): cannot inspect signature of {fn_name!r}: {e}. "
             f"Wrap the function in @qmc.qkernel manually."
         ) from e
 
@@ -1530,7 +1530,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     # The wrapper's parameter order must be ``qubits-first`` because the
     # downstream ``ControlledUOperation`` emit pass assumes the wrapped
     # ``Block``'s ``input_values`` are laid out as ``[qubit..., param...]``
-    # (matching ``ControlledGate.__call__``'s operand convention).
+    # (matching ``ControlGate.__call__``'s operand convention).
     # Re-ordering only affects the wrapper's *declaration*; the actual
     # forwarding call below uses keyword arguments, so the original
     # callable receives each parameter at the right position even when
@@ -1548,7 +1548,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             inspect.Parameter.KEYWORD_ONLY,
         ):
             raise TypeError(
-                f"controlled(): callable {fn_name!r} uses *args/**kwargs, "
+                f"control(): callable {fn_name!r} uses *args/**kwargs, "
                 f"positional-only, or keyword-only parameters, which "
                 f"cannot be auto-wrapped (the synthesized wrapper places "
                 f"all params in the standard POSITIONAL_OR_KEYWORD slot). "
@@ -1564,7 +1564,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # ``@qmc.qkernel`` directly anyway.
         if param.default is not inspect.Parameter.empty:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} "
+                f"control(): parameter {param_name!r} of {fn_name!r} "
                 f"has a default value ({param.default!r}), which the "
                 f"wrapper synthesizer does not propagate. Wrap the "
                 f"function in @qmc.qkernel manually."
@@ -1585,7 +1585,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # symmetric with the ``__name__`` collision guard above.
         if param_name in _RESERVED_WRAPPER_NAMES:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} "
+                f"control(): parameter {param_name!r} of {fn_name!r} "
                 f"collides with a reserved wrapper-internal name "
                 f"({sorted(_RESERVED_WRAPPER_NAMES)}). Wrap the function "
                 f"in @qmc.qkernel manually or rename the parameter."
@@ -1593,7 +1593,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         annotation = type_hints.get(param_name, param.annotation)
         if annotation is inspect.Parameter.empty:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} has "
+                f"control(): parameter {param_name!r} of {fn_name!r} has "
                 f"no type annotation. Wrap the function in @qmc.qkernel "
                 f"manually."
             )
@@ -1606,7 +1606,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             classical_args.append((param_name, "UInt"))
         else:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} has "
+                f"control(): parameter {param_name!r} of {fn_name!r} has "
                 f"annotation {annotation!r}; only Qubit, Float, UInt (or "
                 f"unions including those types, e.g. "
                 f"Union[Qubit, Vector[Qubit]]) are supported. Wrap the "
@@ -1616,7 +1616,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     if not qubit_args:
         raise TypeError(
-            f"controlled(): callable {fn_name!r} has no Qubit parameters; "
+            f"control(): callable {fn_name!r} has no Qubit parameters; "
             f"a controlled gate requires at least one target qubit."
         )
 
@@ -1640,7 +1640,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     # background weakref cleanup or with another thread populating the
     # cache and produce hard-to-reproduce errors, so we deliberately
     # forgo a lock-free fast path.  The same lock also protects against
-    # concurrent ``controlled(fn)`` calls racing to (a) re-use the same
+    # concurrent ``control(fn)`` calls racing to (a) re-use the same
     # filename-counter sequence, (b) double-mutate ``linecache.cache``,
     # or (c) populate the cache with two distinct wrappers for the same
     # callable.  Cache hits are still cheap because Python locks are
@@ -1700,7 +1700,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # inspect/linecache but still pass through ``linecache.getlines``.
         # ``mtime=None`` makes ``linecache.checkcache`` skip the entry so
         # the cache survives across calls.
-        filename = f"<qamomile-controlled-wrapper-{fn_name}-{seq}>"
+        filename = f"<qamomile-control-wrapper-{fn_name}-{seq}>"
         src_lines = src.splitlines(keepends=True)
         linecache.cache[filename] = (len(src), None, src_lines, filename)
 
@@ -1739,7 +1739,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             # behind.
             linecache.cache.pop(filename, None)
             raise TypeError(
-                f"controlled(): failed to synthesize a wrapper for "
+                f"control(): failed to synthesize a wrapper for "
                 f"{fn_name!r}: {e}. Wrap the function in @qmc.qkernel "
                 f"manually."
             ) from e
@@ -1748,7 +1748,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # entry can be released when ``fn`` is GC'd.  When ``fn`` cannot
         # be weakly referenced (a small set of C-implemented builtins),
         # fall back to a strong-reference cache so repeated
-        # ``controlled(fn)`` calls still memoize the wrapper instead of
+        # ``control(fn)`` calls still memoize the wrapper instead of
         # re-synthesizing forever and leaking ``linecache`` entries.
         # Non-hashable callables fall through silently (no cache).
         try:
@@ -1775,10 +1775,10 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     return qkernel_inst
 
 
-def controlled(
+def control(
     qkernel: QKernel | Callable[..., Any],
     num_controls: int | UInt = 1,
-) -> ControlledGate:
+) -> ControlGate:
     """Create a controlled version of a quantum gate.
 
     Accepts either a ``@qmc.qkernel``-decorated function or a plain built-in
@@ -1796,7 +1796,7 @@ def controlled(
             (concrete) or ``UInt`` (symbolic).
 
     Returns:
-        A ``ControlledGate`` that can be called with
+        A ``ControlGate`` that can be called with
         ``(*controls, *targets, **params)``.
 
     Raises:
@@ -1808,10 +1808,10 @@ def controlled(
     Example:
         Built-in gates can be controlled directly, with no wrapper::
 
-            crx = qmc.controlled(qmc.rx)
+            crx = qmc.control(qmc.rx)
             ctrl_out, tgt_out = crx(ctrl, target, angle=0.5)
 
-            cch = qmc.controlled(qmc.h, num_controls=2)
+            cch = qmc.control(qmc.h, num_controls=2)
             c0, c1, tgt = cch(ctrl0, ctrl1, target)
 
         ``@qmc.qkernel`` arguments are still supported for cases that need
@@ -1823,6 +1823,6 @@ def controlled(
                 q = qmc.h(q)
                 return q
 
-            ctrl_out, tgt_out = qmc.controlled(rx_then_h)(ctrl, target, theta=0.5)
+            ctrl_out, tgt_out = qmc.control(rx_then_h)(ctrl, target, theta=0.5)
     """
-    return ControlledGate(_qkernel_for_callable(qkernel), num_controls=num_controls)
+    return ControlGate(_qkernel_for_callable(qkernel), num_controls=num_controls)

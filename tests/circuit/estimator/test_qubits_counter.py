@@ -4802,7 +4802,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target)
             return ctrl, target
 
@@ -4821,7 +4821,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target, theta=0.5)
             return ctrl, target
 
@@ -4840,7 +4840,7 @@ class TestControlledUOperation:
         def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
             counting = qmc.qubit_array(n, name="counting")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             for i in qmc.range(n):
                 counting[i], target = cgate(counting[i], target)
             return counting
@@ -4861,7 +4861,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target, power=4)
             return ctrl, target
 
@@ -4880,7 +4880,7 @@ class TestControlledUOperation:
         def circuit(m: qmc.UInt) -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             for _ in qmc.range(m):
                 ctrl, target = cgate(ctrl, target)
             return ctrl, target
@@ -4902,7 +4902,7 @@ class TestControlledUOperation:
             target1 = qmc.qubit(name="target1")
             ctrl2 = qmc.qubit(name="ctrl2")
             target2 = qmc.qubit(name="target2")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl1, target1 = cgate(ctrl1, target1)
             ctrl2, target2 = cgate(ctrl2, target2)
             return ctrl1, target1, ctrl2, target2
@@ -4924,7 +4924,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target)
             return ctrl, target
 
@@ -4944,7 +4944,7 @@ class TestControlledUOperation:
         def circuit(m: qmc.UInt) -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target, m=m)
             return ctrl, target
 
@@ -4973,7 +4973,7 @@ class TestControlledUVectorViewControl:
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate, num_controls=3)
+            cg = qmc.control(gate, num_controls=3)
             qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
@@ -4992,7 +4992,7 @@ class TestControlledUVectorViewControl:
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate_with_ancilla, num_controls=3)
+            cg = qmc.control(gate_with_ancilla, num_controls=3)
             qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
@@ -5010,7 +5010,7 @@ class TestControlledUVectorViewControl:
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(param_gate, num_controls=3)
+            cg = qmc.control(param_gate, num_controls=3)
             qs[0:3], qs[3] = cg(qs[0:3], qs[3], theta=0.5)
             return qs
 
@@ -5027,7 +5027,7 @@ class TestControlledUVectorViewControl:
         @qmc.qkernel
         def circuit(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate, num_controls=3)
+            cg = qmc.control(gate, num_controls=3)
             for _ in qmc.range(m):
                 qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs

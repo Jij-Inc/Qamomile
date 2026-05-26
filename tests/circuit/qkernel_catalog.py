@@ -613,7 +613,7 @@ def _phase(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
 def phase_gate_qpe(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Qubit]:
     qs = qmc.qubit_array(n, name="qs")
     target = qmc.qubit(name="target")
-    controlled_u = qmc.controlled(_phase)
+    controlled_u = qmc.control(_phase)
 
     qs = qmc.h(qs)
 
@@ -760,7 +760,7 @@ def network_decomposition_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 @qmc.qkernel
 def _naive_multi_controlled_z(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     n = qs.shape[0]
-    multi_controlled_z = qmc.controlled(qmc.z, num_controls=n - 1)
+    multi_controlled_z = qmc.control(qmc.z, num_controls=n - 1)
     qs[0 : n - 1], qs[n - 1] = multi_controlled_z(qs[0 : n - 1], qs[n - 1])
     return qs
 
@@ -871,7 +871,7 @@ def quantum_counting(
     qs1 = qmc.qubit_array(n, name="qs1")
     qs2 = qmc.qubit_array(m, name="qs2")
     q = qmc.qubit(name="q")
-    controlled_grover = qmc.controlled(
+    controlled_grover = qmc.control(
         _grover_operator_network_decomposition, num_controls=1
     )
 

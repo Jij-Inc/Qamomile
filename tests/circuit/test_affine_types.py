@@ -1454,8 +1454,8 @@ class TestStdlibGatesAffine:
         assert graph is not None
 
 
-class TestControlledGateAffine:
-    """qm.controlled() wrappers must enforce affine usage on both control and target."""
+class TestControlGateAffine:
+    """qm.control() wrappers must enforce affine usage on both control and target."""
 
     def _make_sub_kernel(self):
         @qkernel
@@ -1467,7 +1467,7 @@ class TestControlledGateAffine:
     def test_controlled_proper_use_works(self):
         """Controlled gate with reassignment of both outputs should succeed."""
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def good_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit]:
@@ -1480,7 +1480,7 @@ class TestControlledGateAffine:
     def test_controlled_reuse_control_raises(self):
         """Reusing control qubit after controlled gate should raise QubitConsumedError."""
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
@@ -1494,7 +1494,7 @@ class TestControlledGateAffine:
     def test_controlled_reuse_target_raises(self):
         """Reusing target qubit after controlled gate should raise QubitConsumedError."""
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
@@ -1515,7 +1515,7 @@ class TestControlledGateAffine:
         ``QubitConsumedError`` instead of ``QubitAliasError``.
         """
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
@@ -1527,7 +1527,7 @@ class TestControlledGateAffine:
     def test_double_controlled_proper_use_works(self):
         """Double-controlled gate (num_controls=2) with reassignment should succeed."""
         sub = self._make_sub_kernel()
-        cc_h = qm.controlled(sub, num_controls=2)
+        cc_h = qm.control(sub, num_controls=2)
 
         @qkernel
         def good_circuit(
@@ -1542,7 +1542,7 @@ class TestControlledGateAffine:
     def test_double_controlled_reuse_control_raises(self):
         """Reusing a control qubit after double-controlled gate should raise QubitConsumedError."""
         sub = self._make_sub_kernel()
-        cc_h = qm.controlled(sub, num_controls=2)
+        cc_h = qm.control(sub, num_controls=2)
 
         @qkernel
         def bad_circuit(c0: Qubit, c1: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
@@ -1693,7 +1693,7 @@ class TestArrayConsumeUnreturnedBorrow:
             qs = qubit_array(3, "qs")
             ctrl = qm.qubit(name="ctrl")
             _q = qs[0]  # borrow but don't return
-            cx = qm.controlled(x_gate_broadcast)
+            cx = qm.control(x_gate_broadcast)
             _ctrl_out, qs = cx(ctrl, qs)  # type: ignore
             return qs
 
@@ -1717,7 +1717,7 @@ class TestArrayConsumeUnreturnedBorrow:
             qs = qubit_array(3, "qs")
             tgt = qubit_array(1, "tgt")
             _q = qs[0]  # borrow but don't return
-            cx = qm.controlled(x_gate, num_controls=n)
+            cx = qm.control(x_gate, num_controls=n)
             qs, t = cx(qs, tgt[0])
             return qs, t
 

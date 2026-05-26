@@ -146,7 +146,7 @@ def emit_controlled_operations(
             raise EmitError(
                 f"Unsupported control flow {type(op).__name__} in controlled "
                 f"block decomposition. Only ForOperation is supported.",
-                operation="ControlledGate",
+                operation="ControlGate",
             )
 
 
@@ -197,7 +197,7 @@ def emit_controlled_gate(
             if len(target_indices) < 2:
                 raise EmitError(
                     "Controlled-SWAP requires at least 2 target qubits.",
-                    operation="ControlledGate",
+                    operation="ControlGate",
                 )
             tgt_a = target_indices[0]
             tgt_b = target_indices[1]
@@ -212,7 +212,7 @@ def emit_controlled_gate(
             raise EmitError(
                 f"Unsupported gate type {op.gate_type!r} in controlled "
                 f"block decomposition.",
-                operation="ControlledGate",
+                operation="ControlGate",
             )
 
 
