@@ -418,6 +418,232 @@ def emit_controlled_u_with_index_spec(
             qubit_map[result_addr] = qubit_map[input_addr]
 
 
+def emit_controlled_u_with_symbolic_indices(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: SymbolicControlledU,
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a ``SymbolicControlledU`` whose ``controlled_indices`` is set.
+
+    Routed from :func:`emit_controlled_u` when the constant-folding
+    pass has left the op as ``SymbolicControlledU`` because
+    ``controlled_indices`` carries pass-through semantics that the
+    ``ConcreteControlledU`` promotion cannot represent in its scalar
+    control-operand layout (see §12.5 of the design).
+
+    Compared to :func:`emit_controlled_u_with_index_spec` the operand
+    layout differs (sub-kernel operands follow the control vector
+    instead of being absent), but the index-resolution / control
+    selection / pass-through bookkeeping is the same.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass driving the
+            conversion; provides ``_resolver``, ``_emitter``,
+            ``_blockvalue_to_gate``, and ``_emit_controlled_fallback``.
+        circuit (Any): The backend circuit being built.
+        op (SymbolicControlledU): The IR op with ``controlled_indices``
+            **not** ``None``.  Callers must guarantee this; the
+            ``controlled_indices is None`` branch is handled by the
+            constant-folding promotion to ``ConcreteControlledU``.
+        qubit_map (QubitMap): The active ``QubitAddress`` -> physical
+            qubit map; mutated in place with the result-side mappings.
+        bindings (dict[str, Any]): Caller bindings used to resolve
+            ``num_controls``, ``controlled_indices`` Values, ``c_qs``
+            length, and slice bounds.
+
+    Raises:
+        EmitError: Surfaces under any of the following conditions:
+
+            * ``num_controls`` cannot be resolved or is ``<= 0``;
+            * the control-vector length cannot be resolved, is shorter
+              than ``num_controls``, or is shorter than the largest
+              listed index;
+            * a ``controlled_indices`` entry cannot be resolved, is
+              negative, or repeats;
+            * ``len(controlled_indices) != num_controls``;
+            * a sub-quantum operand cannot be expanded to physical
+              qubits (delegated to
+              :func:`_expand_quantum_operands_to_phys`).
+    """
+    assert op.controlled_indices is not None, (
+        "emit_controlled_u_with_symbolic_indices requires "
+        "controlled_indices to be set; the None branch is handled by "
+        "the constant-folding promotion to ConcreteControlledU."
+    )
+
+    resolved_nc = emit_pass._resolver.resolve_classical_value(
+        op.num_controls, bindings
+    )
+    if resolved_nc is None:
+        raise EmitError(
+            f"Cannot resolve num_controls Value "
+            f"{op.num_controls.name!r} for SymbolicControlledU emit.",
+            operation="ControlledUOperation",
+        )
+    nc = int(resolved_nc)
+    if nc <= 0:
+        raise EmitError(
+            f"SymbolicControlledU resolved num_controls={nc}; must be "
+            f"a strictly positive integer.",
+            operation="ControlledUOperation",
+        )
+
+    resolved_indices: list[int] = []
+    for v in op.controlled_indices:
+        idx = emit_pass._resolver.resolve_classical_value(v, bindings)
+        if idx is None:
+            raise EmitError(
+                f"Cannot resolve controlled_indices entry {v.name!r} "
+                f"for SymbolicControlledU emit.",
+                operation="ControlledUOperation",
+            )
+        idx_int = int(idx)
+        if idx_int < 0:
+            raise EmitError(
+                f"Negative controlled_indices entry ({idx_int}) is "
+                f"not allowed.",
+                operation="ControlledUOperation",
+            )
+        resolved_indices.append(idx_int)
+
+    if len(resolved_indices) != nc:
+        raise EmitError(
+            f"controlled_indices length ({len(resolved_indices)}) does "
+            f"not match num_controls ({nc}).",
+            operation="ControlledUOperation",
+        )
+    if len(set(resolved_indices)) != len(resolved_indices):
+        raise EmitError(
+            f"controlled_indices contains duplicate entries: "
+            f"{resolved_indices}.",
+            operation="ControlledUOperation",
+        )
+
+    from qamomile.circuit.ir.value import ArrayValue as _ArrayValue
+
+    vector_value = op.operands[0]
+    if not isinstance(vector_value, _ArrayValue):
+        raise EmitError(
+            "SymbolicControlledU expects an ArrayValue as the first "
+            "operand (the control pool).",
+            operation="ControlledUOperation",
+        )
+    size_val = vector_value.shape[0]
+    vector_size = emit_pass._resolver.resolve_int_value(size_val, bindings)
+    if vector_size is None:
+        raise EmitError(
+            "Cannot resolve control vector size for SymbolicControlledU emit.",
+            operation="ControlledUOperation",
+        )
+    if vector_size < nc:
+        raise EmitError(
+            f"SymbolicControlledU: control vector length ({vector_size}) "
+            f"is smaller than num_controls ({nc}); the pool cannot "
+            f"supply enough control qubits.",
+            operation="ControlledUOperation",
+        )
+    for idx in resolved_indices:
+        if idx >= vector_size:
+            raise EmitError(
+                f"controlled_indices entry {idx} out of bounds for "
+                f"control vector of length {vector_size}.",
+                operation="ControlledUOperation",
+            )
+
+    root_av, slice_start, slice_step = emit_pass._resolver.resolve_slice_chain(
+        vector_value, bindings, operation="ControlledUOperation"
+    )
+    pool_phys: list[int] = []
+    for i in range(vector_size):
+        addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
+        if addr not in qubit_map:
+            raise EmitError(
+                f"Expected qubit address {addr!s} for SymbolicControlledU "
+                f"control element {i} not found in qubit_map.",
+                operation="ControlledUOperation",
+            )
+        pool_phys.append(qubit_map[addr])
+    control_phys = [pool_phys[i] for i in resolved_indices]
+
+    remaining_operands = op.operands[1:]
+    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
+    param_operands = [v for v in remaining_operands if v.type.is_classical()]
+
+    target_indices: list[int] = []
+    target_index_groups: list[list[int]] = []
+    for q in target_qubit_operands:
+        indices = _expand_quantum_operands_to_phys(
+            emit_pass, q, qubit_map, bindings
+        )
+        target_index_groups.append(indices)
+        target_indices.extend(indices)
+
+    block_value = op.block
+    local_bindings = emit_pass._resolver.bind_block_params(
+        block_value, param_operands, bindings
+    )
+
+    num_targets = len(target_indices)
+    unitary_gate = emit_pass._blockvalue_to_gate(
+        block_value, num_targets, local_bindings
+    )
+
+    power_value = resolve_power(emit_pass, op, bindings)
+
+    if unitary_gate is not None:
+        if power_value > 1:
+            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
+        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
+        emit_pass._emitter.append_gate(
+            circuit, controlled_gate, control_phys + target_indices
+        )
+    else:
+        emit_pass._emit_controlled_fallback(
+            circuit,
+            block_value,
+            nc,
+            control_phys,
+            target_indices,
+            power_value,
+            local_bindings,
+        )
+
+    # Map result ArrayValue (c_qs_out) in qubit_map.  Every input
+    # element keeps its physical qubit, so per-element addresses map
+    # 1:1 — pass-through elements stay where they were and controls
+    # also occupy the same physical slot they came from (the controlled
+    # gate only adds a relative phase under the on-state of those
+    # qubits, it does not move them).
+    vector_result = op.results[0]
+    for i in range(vector_size):
+        result_addr = QubitAddress(vector_result.uuid, i)
+        input_addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
+        if input_addr in qubit_map and result_addr not in qubit_map:
+            qubit_map[result_addr] = qubit_map[input_addr]
+
+    # Sub-quantum result bookkeeping mirrors the ConcreteControlledU
+    # path so downstream lookups via ``view_out[i]`` resolve.
+    sub_quantum_results = [r for r in op.results[1:] if r.type.is_quantum()]
+    from qamomile.circuit.ir.value import ArrayValue as _ArrayValue2
+
+    for i, result in enumerate(sub_quantum_results):
+        if i >= len(target_index_groups):
+            break
+        indices = target_index_groups[i]
+        if isinstance(result, _ArrayValue2):
+            for j, phys in enumerate(indices):
+                qubit_map[QubitAddress(result.uuid, j)] = phys
+            if indices:
+                base_addr = QubitAddress(result.uuid)
+                if base_addr not in qubit_map:
+                    qubit_map[base_addr] = indices[0]
+        else:
+            if indices:
+                qubit_map[QubitAddress(result.uuid)] = indices[0]
+
+
 def emit_controlled_u(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -430,6 +656,11 @@ def emit_controlled_u(
         emit_controlled_u_with_index_spec(emit_pass, circuit, op, qubit_map, bindings)
         return
     if isinstance(op, SymbolicControlledU):
+        if op.controlled_indices is not None:
+            emit_controlled_u_with_symbolic_indices(
+                emit_pass, circuit, op, qubit_map, bindings
+            )
+            return
         raise EmitError(
             "Cannot emit ControlledUOperation with symbolic num_controls. "
             "Bind parameters to concrete values before transpilation.",
