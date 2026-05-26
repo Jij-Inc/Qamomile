@@ -10,6 +10,7 @@ from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
     QubitType,
+    UIntType,
 )
 from qamomile.circuit.ir.value import Value, ValueBase
 
@@ -283,8 +284,19 @@ class SymbolicControlledU(ControlledUOperation):
     downstream value-substitution passes see a uniform shape.
     """
 
+    # The default exists only so the dataclass field ordering works for
+    # subclasses; every production call site passes ``num_controls=`` and
+    # the IR contract is for it to be a ``UIntType`` ``Value``.  The
+    # default uses ``name=""`` (the anonymous-marker convention from
+    # ``Value`` -- see :class:`qamomile.circuit.ir.value.Value`'s docstring)
+    # so two short-form ``SymbolicControlledU(...)`` constructions never
+    # collide in the resolver's name-keyed lookup branch; ``type=UIntType()``
+    # keeps the type tag honest for any code that switches on
+    # ``num_controls.type`` (e.g. ``_fold_value_list`` materialises the
+    # folded constant with the *original* type, so a wrong-type default
+    # would propagate downstream as a ``FloatType`` UInt).
     num_controls: Value = dataclasses.field(
-        default_factory=lambda: Value(type=FloatType(), name="_placeholder")
+        default_factory=lambda: Value(type=UIntType(), name="")
     )  # type: ignore[assignment]
     controlled_indices: tuple[Value, ...] | None = None
 
