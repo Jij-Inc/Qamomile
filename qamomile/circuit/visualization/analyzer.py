@@ -35,7 +35,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
 
 from .geometry import compute_border_padding
 from .style import CircuitStyle
@@ -636,7 +636,9 @@ class CircuitAnalyzer:
                 elif isinstance(op, ForItemsOperation):
                     dict_value = op.operands[0] if op.operands else None
                     materialized = (
-                        self._materialize_dict_entries(dict_value)
+                        self._materialize_dict_entries(
+                            dict_value, param_values, logical_id_remap
+                        )
                         if dict_value is not None
                         else None
                     )
@@ -1498,7 +1500,7 @@ class CircuitAnalyzer:
 
         # Materialize entries
         materialized = (
-            self._materialize_dict_entries(dict_value)
+            self._materialize_dict_entries(dict_value, param_values, logical_id_remap)
             if dict_value is not None
             else None
         )
@@ -1836,7 +1838,7 @@ class CircuitAnalyzer:
         def add_affected(operand: Value) -> None:
             """Resolve `operand` and merge its wire indices into `affected`."""
             indices = self._resolve_operand_to_affected_qubits(
-                operand, qubit_map, logical_id_remap
+                operand, qubit_map, logical_id_remap, param_values
             )
             if indices is not None:
                 affected.update(indices)
@@ -2644,6 +2646,10 @@ class CircuitAnalyzer:
             start = s_int + st_int * start
             step = st_int * step
             cur = cur.slice_of
+            assert cur is not None, (
+                "[FOR DEVELOPER] slice_of must point at a parent ArrayValue while "
+                "walking a slice chain."
+            )
         return cur, start, step
 
     def _compute_slice_view_wires(
@@ -3116,26 +3122,33 @@ class CircuitAnalyzer:
 
     def _build_block_value_mappings(
         self,
-        block_value,
-        actual_inputs: list[Value],
+        block_value: Block,
+        actual_inputs: Sequence[ValueBase],
         logical_id_remap: dict[str, str],
-        param_values: dict,
+        param_values: dict[str, object],
         qubit_map: dict[str, int] | None = None,
-    ) -> tuple[dict[str, str], dict]:
-        """Build logical_id_remap and child_param_values for a nested Block.
+    ) -> tuple[dict[str, str], dict[str, object]]:
+        """Build value remaps and forwarded bindings for a nested block.
 
-        Maps dummy block input logical_ids to actual input logical_ids,
-        building the mappings needed for recursive processing.
+        Maps a callee block's formal inputs to the caller's actual
+        operands so inline drawing can resolve qubit wires, scalar
+        parameters, bound array data, and bound dict data recursively.
 
         Args:
-            block_value: Block whose input mappings to build.
-            actual_inputs: Actual input Values passed to the block.
-            logical_id_remap: Current logical_id remapping (copied, not mutated).
-            param_values: Current parameter values (copied, not mutated).
-            qubit_map: Qubit wire map for resolving array element indices.
+            block_value (Block): Callee block whose input mappings to build.
+            actual_inputs (Sequence[ValueBase]): Actual operands passed to
+                the callee block.
+            logical_id_remap (dict[str, str]): Current logical-id remapping.
+                Copied before child-specific entries are added.
+            param_values (dict[str, object]): Current parameter and bound-data
+                values. Copied before child-specific entries are added.
+            qubit_map (dict[str, int] | None): Qubit wire map for resolving
+                array element indices. Defaults to None when wire resolution
+                is not needed.
 
         Returns:
-            (new_logical_id_remap, child_param_values)
+            tuple[dict[str, str], dict[str, object]]: Child logical-id remap
+                and child parameter values for recursive inline processing.
         """
         new_logical_id_remap = dict(logical_id_remap)
 
@@ -3144,6 +3157,7 @@ class CircuitAnalyzer:
             # to get the canonical parent_[idx] key instead of the raw UUID
             if (
                 qubit_map is not None
+                and isinstance(actual_input, Value)
                 and hasattr(actual_input, "parent_array")
                 and actual_input.parent_array is not None
                 and isinstance(actual_input.type, QubitType)
@@ -3160,23 +3174,29 @@ class CircuitAnalyzer:
 
         child_param_values = dict(param_values)
         for dummy_input, actual_input in zip(block_value.input_values, actual_inputs):
-            # The IR guarantees that operands are always Value instances, so this assertion should always pass.
+            # The IR guarantees that operands implement ValueBase, so this assertion should always pass.
             # If it fails, there is a bug in the IR construction.
             assertion_message = (
-                "[FOR DEVELOPER] Operation.operands elements must be Value instances. "
+                "[FOR DEVELOPER] Operation.operands elements must be ValueBase instances. "
                 "If this assertion fails, there is a bug in the IR construction."
             )
-            assert isinstance(actual_input, Value), assertion_message
+            assert isinstance(actual_input, ValueBase), assertion_message
+            actual_lid = logical_id_remap.get(
+                actual_input.logical_id, actual_input.logical_id
+            )
             const = actual_input.get_const()
             if const is not None:
                 child_param_values[dummy_input.logical_id] = const
-            elif actual_input.logical_id in param_values:
-                pv = param_values[actual_input.logical_id]
+            elif actual_input.logical_id in param_values or actual_lid in param_values:
+                pv = param_values.get(
+                    actual_input.logical_id, param_values.get(actual_lid)
+                )
                 if isinstance(pv, (int, float)):
                     # Numeric value: store directly
                     child_param_values[dummy_input.logical_id] = pv
                 elif (
-                    hasattr(actual_input, "parent_array")
+                    isinstance(actual_input, Value)
+                    and hasattr(actual_input, "parent_array")
                     and actual_input.parent_array is not None
                     and not isinstance(actual_input.type, QubitType)
                 ):
@@ -3195,7 +3215,8 @@ class CircuitAnalyzer:
                 else:
                     child_param_values[dummy_input.logical_id] = pv
             elif (
-                hasattr(actual_input, "parent_array")
+                isinstance(actual_input, Value)
+                and hasattr(actual_input, "parent_array")
                 and actual_input.parent_array is not None
                 and not isinstance(actual_input.type, QubitType)
             ):
@@ -3218,7 +3239,7 @@ class CircuitAnalyzer:
                 child_param_values[dummy_input.logical_id] = (
                     actual_input.parameter_name() or actual_input.name
                 )
-            else:
+            elif isinstance(actual_input, Value):
                 # actual_input is a BinOp result (or similar unresolved
                 # non-parameter Value). Try numeric evaluation via
                 # graph.operations first — after top-level
@@ -3265,9 +3286,35 @@ class CircuitAnalyzer:
                                 actual_dim.logical_id
                             ]
                 const_array = actual_input.get_const_array()
+                if const_array is None:
+                    actual_lid = logical_id_remap.get(
+                        actual_input.logical_id, actual_input.logical_id
+                    )
+                    const_array = param_values.get(
+                        f"_array_data_{actual_input.logical_id}",
+                        param_values.get(f"_array_data_{actual_lid}"),
+                    )
                 if const_array is not None:
                     child_param_values[f"_array_data_{dummy_input.logical_id}"] = (
                         const_array
+                    )
+            elif isinstance(actual_input, DictValue) and hasattr(
+                dummy_input, "logical_id"
+            ):
+                bound_data = None
+                if actual_input.metadata.dict_runtime is not None:
+                    bound_data = list(actual_input.get_bound_data_items())
+                else:
+                    actual_lid = logical_id_remap.get(
+                        actual_input.logical_id, actual_input.logical_id
+                    )
+                    bound_data = param_values.get(
+                        f"_dict_data_{actual_input.logical_id}",
+                        param_values.get(f"_dict_data_{actual_lid}"),
+                    )
+                if bound_data is not None:
+                    child_param_values[f"_dict_data_{dummy_input.logical_id}"] = (
+                        bound_data
                     )
 
         return new_logical_id_remap, child_param_values
@@ -3375,7 +3422,9 @@ class CircuitAnalyzer:
 
     @staticmethod
     def _materialize_dict_entries(
-        dict_value: Value,
+        dict_value: ValueBase,
+        param_values: dict | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> Sequence[tuple] | None:
         """Extract entries from a DictValue from either IR or runtime metadata.
 
@@ -3413,10 +3462,18 @@ class CircuitAnalyzer:
         otherwise treating the pair as raw Python.
 
         Args:
-            dict_value (Value): The DictValue (or compatible Value)
+            dict_value (ValueBase): The DictValue (or compatible Value)
                 whose entries should be materialized. Should carry
                 IR-level ``entries`` or runtime ``dict_runtime``
                 metadata; otherwise treated as truly unbound.
+            param_values (dict | None): Optional nested visualization
+                context. Used to forward bound dict data through
+                inlined helper calls whose formal parameter does not
+                itself carry runtime metadata.
+            logical_id_remap (dict[str, str] | None): Optional remap
+                from formal logical IDs to actual logical IDs. Used
+                with ``param_values`` when resolving forwarded bound
+                dict data.
 
         Returns:
             Sequence[tuple] | None: A sequence of ``(key, value)``
@@ -3443,10 +3500,22 @@ class CircuitAnalyzer:
         # an empty bound Dict render as a folded box even when
         # fold_loops=False.
         if (
-            hasattr(dict_value, "metadata")
+            isinstance(dict_value, DictValue)
             and dict_value.metadata.dict_runtime is not None
         ):
             return list(dict_value.get_bound_data_items())
+
+        if param_values is not None:
+            logical_id_remap = logical_id_remap or {}
+            resolved_lid = logical_id_remap.get(
+                dict_value.logical_id, dict_value.logical_id
+            )
+            for key in (
+                f"_dict_data_{dict_value.logical_id}",
+                f"_dict_data_{resolved_lid}",
+            ):
+                if key in param_values:
+                    return list(param_values[key])
 
         return None
 
@@ -4102,14 +4171,14 @@ class CircuitAnalyzer:
                 hasattr(actual_input, "logical_id")
                 and actual_input.logical_id in qubit_map
             ):
-                # The IR guarantees that operands are always Value instances,
-                # so this assertion should always pass.
+                # The IR guarantees that operands implement the ValueBase
+                # protocol, so this assertion should always pass.
                 # If it fails, there is a bug in the IR construction.
                 assertion_message = (
-                    "[FOR DEVELOPER] Operation.operands elements must be Value instances. "
+                    "[FOR DEVELOPER] Operation.operands elements must be ValueBase instances. "
                     "If this assertion fails, there is a bug in the IR construction."
                 )
-                assert isinstance(actual_input, Value), assertion_message
+                assert isinstance(actual_input, ValueBase), assertion_message
                 const = actual_input.get_const()
                 if const is not None:
                     params.append(self._format_parameter(const))
