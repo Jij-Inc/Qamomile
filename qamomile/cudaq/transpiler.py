@@ -712,7 +712,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 raise EmitError(
                     "Controlled-CX requires at least 2 target qubits "
                     "(inner control + inner target).",
-                    operation="ControlGate",
+                    operation="ControlledGate",
                 )
             inner_control = target_indices[0]
             inner_target = target_indices[1]
@@ -729,7 +729,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             if len(target_indices) < 2:
                 raise EmitError(
                     "Controlled-SWAP requires at least 2 target qubits.",
-                    operation="ControlGate",
+                    operation="ControlledGate",
                 )
             tgt_a = target_indices[0]
             tgt_b = target_indices[1]
@@ -762,7 +762,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             f"Unsupported gate type {gate_type!r} in CUDA-Q multi-controlled "
             f"block decomposition. Only X and SWAP are natively supported "
             f"with multiple controls.",
-            operation="ControlGate",
+            operation="ControlledGate",
         )
 
 

@@ -3425,7 +3425,7 @@ class TestStdlibQPE:
         assert np.isclose(most_frequent_value, expected_value, atol=1e-10)
 
 
-class TestControlGate:
+class TestControlledGate:
     """Test qmc.control() through the QuriParts pipeline.
 
     QuriParts' circuit_to_gate() returns None, but the transpiler's

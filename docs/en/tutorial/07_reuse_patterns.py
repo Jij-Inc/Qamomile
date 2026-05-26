@@ -318,7 +318,7 @@ controlled_rx_demo.draw()
 # %% [markdown]
 # Multi-control and the `power` parameter work the same as for any
 # `control(...)` factory — `num_controls` and `power` are properties
-# of the `ControlGate` rather than of the wrapped function, so
+# of the `ControlledGate` rather than of the wrapped function, so
 # nothing extra is needed:
 
 

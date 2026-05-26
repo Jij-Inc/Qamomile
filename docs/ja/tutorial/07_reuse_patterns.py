@@ -305,7 +305,7 @@ def controlled_rx_demo() -> qmc.Vector[qmc.Bit]:
 controlled_rx_demo.draw()
 
 # %% [markdown]
-# 多重コントロールや`power`パラメータも他の`control(...)`と同じく動きます。`num_controls`と`power`は`ControlGate`側の機能でラップ対象の関数とは独立しているため、追加の作業は不要です:
+# 多重コントロールや`power`パラメータも他の`control(...)`と同じく動きます。`num_controls`と`power`は`ControlledGate`側の機能でラップ対象の関数とは独立しているため、追加の作業は不要です:
 
 
 # %%

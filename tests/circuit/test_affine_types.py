@@ -1454,7 +1454,7 @@ class TestStdlibGatesAffine:
         assert graph is not None
 
 
-class TestControlGateAffine:
+class TestControlledGateAffine:
     """qm.control() wrappers must enforce affine usage on both control and target."""
 
     def _make_sub_kernel(self):

@@ -4591,7 +4591,7 @@ class TestStdlibQPE:
         assert count == 256
 
 
-class TestControlGate:
+class TestControlledGate:
     """Test controlled gate through the frontend pipeline."""
 
     def test_controlled_h(self):

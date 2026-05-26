@@ -120,7 +120,7 @@ _RESERVED_WRAPPER_NAMES: frozenset[str] = frozenset(_wrapper_namespace(None).key
 class _ControlEntry:
     """Bookkeeping for one positional control or sub-quantum handle.
 
-    The new ``ControlGate.__call__`` concrete path consumes handles
+    The new ``ControlledGate.__call__`` concrete path consumes handles
     in two stages: scalar ``Qubit`` and whole-``Vector`` arguments are
     consumed eagerly via :meth:`Handle.consume`, while ``VectorView``
     arguments defer the consume until ``_wrap_results_by_input_kind``
@@ -150,7 +150,7 @@ class _ControlEntry:
         return self.consumed is None
 
 
-class ControlGate:
+class ControlledGate:
     """Wrapper for controlled version of a QKernel.
 
     Created by calling `control(qkernel)`. The resulting object
@@ -414,7 +414,7 @@ class ControlGate:
 
         Args:
             args (tuple[Any, ...]): Positional arguments handed to
-                :meth:`ControlGate.__call__` in concrete-mode.
+                :meth:`ControlledGate.__call__` in concrete-mode.
             num_controls (int): The concrete control qubit count
                 ``N`` configured on this gate.
 
@@ -594,7 +594,7 @@ class ControlGate:
         parameter (``def sub(qa, theta=0.5)``) end up with that
         default baked into the resulting dict.
 
-        For test-mock kernels (``ControlGate(_mock_qkernel(), ...)``)
+        For test-mock kernels (``ControlledGate(_mock_qkernel(), ...)``)
         no real signature exists.  In that case we keep the historical
         "positional → quantum, kwargs → classical" behaviour by
         synthesising stable string keys (``"@pos0"``, ``"@pos1"``, ...
@@ -1026,7 +1026,7 @@ class ControlGate:
         sub_kwargs: dict[str, Any],
         power: int | Value,
     ) -> tuple[Any, ...]:
-        """Concrete-``num_controls`` path for :meth:`ControlGate.__call__`.
+        """Concrete-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
         Chains the helpers (split → bind → validate → consume →
         operands/results → emit → wrap) so the body of ``__call__``
@@ -1275,7 +1275,7 @@ class ControlGate:
         sub_kwargs: dict[str, Any],
         controlled_indices: Sequence[int | UInt] | None,
     ) -> tuple[Any, ...]:
-        """Symbolic-``num_controls`` path for :meth:`ControlGate.__call__`.
+        """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
         Mirrors :meth:`_call_concrete`'s structure but expects a
         ``Vector[Qubit]`` / ``VectorView[Qubit]`` as ``args[0]`` —
@@ -1488,7 +1488,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     # Duck-typed kernel-like objects (e.g. test mocks with a stubbed
     # ``.block``) are passed through unchanged so the existing
-    # ``ControlGate`` consumer continues to work without coupling the
+    # ``ControlledGate`` consumer continues to work without coupling the
     # synthesis path to a strict ``isinstance`` check.
     if hasattr(fn, "block"):
         return cast("QKernel", fn)
@@ -1530,7 +1530,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     # The wrapper's parameter order must be ``qubits-first`` because the
     # downstream ``ControlledUOperation`` emit pass assumes the wrapped
     # ``Block``'s ``input_values`` are laid out as ``[qubit..., param...]``
-    # (matching ``ControlGate.__call__``'s operand convention).
+    # (matching ``ControlledGate.__call__``'s operand convention).
     # Re-ordering only affects the wrapper's *declaration*; the actual
     # forwarding call below uses keyword arguments, so the original
     # callable receives each parameter at the right position even when
@@ -1778,7 +1778,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 def control(
     qkernel: QKernel | Callable[..., Any],
     num_controls: int | UInt = 1,
-) -> ControlGate:
+) -> ControlledGate:
     """Create a controlled version of a quantum gate.
 
     Accepts either a ``@qmc.qkernel``-decorated function or a plain built-in
@@ -1796,7 +1796,7 @@ def control(
             (concrete) or ``UInt`` (symbolic).
 
     Returns:
-        A ``ControlGate`` that can be called with
+        A ``ControlledGate`` that can be called with
         ``(*controls, *targets, **params)``.
 
     Raises:
@@ -1825,4 +1825,4 @@ def control(
 
             ctrl_out, tgt_out = qmc.control(rx_then_h)(ctrl, target, theta=0.5)
     """
-    return ControlGate(_qkernel_for_callable(qkernel), num_controls=num_controls)
+    return ControlledGate(_qkernel_for_callable(qkernel), num_controls=num_controls)
