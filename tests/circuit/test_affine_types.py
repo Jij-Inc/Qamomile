@@ -1665,19 +1665,29 @@ class TestArrayConsumeUnreturnedBorrow:
         graph = good_outer.build()
         assert graph is not None
 
-    def test_controlled_index_spec_with_unreturned_vector_borrow_raises(self):
-        """controlled() with target_indices on a Vector with unreturned borrow should raise."""
+    def test_controlled_with_unreturned_vector_borrow_raises(self):
+        """controlled() called on a Vector with an unreturned borrow should raise.
+
+        Migrated from the old ``target_indices``-on-Vector form: the
+        regression concern (an unreturned element borrow blocks any
+        whole-Vector consume) is now exercised through the new
+        ``Vector[Qubit]`` sub-kernel argument path, which is the
+        moral equivalent — both shapes hand the whole Vector to the
+        controlled call and trip ``validate_all_returned()``.
+        """
 
         @qkernel
-        def x_gate(q: Qubit) -> Qubit:
-            return qm.x(q)
+        def x_gate_broadcast(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            qs = qm.x(qs)
+            return qs
 
         @qkernel
         def bad_controlled() -> qm.Vector[Qubit]:
             qs = qubit_array(3, "qs")
+            ctrl = qm.qubit(name="ctrl")
             _q = qs[0]  # borrow but don't return
-            cx = qm.controlled(x_gate)
-            qs = cx(qs, target_indices=[2])
+            cx = qm.controlled(x_gate_broadcast)
+            _ctrl_out, qs = cx(ctrl, qs)  # type: ignore
             return qs
 
         with pytest.raises(UnreturnedBorrowError):

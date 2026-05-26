@@ -761,7 +761,7 @@ def network_decomposition_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 def _naive_multi_controlled_z(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     n = qs.shape[0]
     multi_controlled_z = qmc.controlled(qmc.z, num_controls=n - 1)
-    qs = multi_controlled_z(qs, target_indices=[n - 1])  # type: ignore
+    qs[0 : n - 1], qs[n - 1] = multi_controlled_z(qs[0 : n - 1], qs[n - 1])
     return qs
 
 

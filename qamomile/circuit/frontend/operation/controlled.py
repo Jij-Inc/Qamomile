@@ -27,7 +27,6 @@ from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
@@ -365,24 +364,16 @@ class ControlledGate:
         results: list[Value],
         num_controls: int | Value,
         power: int | Value,
-        *,
-        target_indices: list[Value] | None = None,
-        controlled_indices: list[Value] | None = None,
     ) -> ControlledUOperation:
-        """Create the appropriate ControlledUOperation subclass and add to tracer."""
+        """Create the appropriate ControlledUOperation subclass and add to tracer.
+
+        Used by :meth:`_call_concrete`; the symbolic path constructs
+        its ``SymbolicControlledU`` inline because it needs to pass
+        the ``controlled_indices`` field directly.
+        """
         block = self._qkernel.block
         op: ControlledUOperation
-        if target_indices is not None or controlled_indices is not None:
-            op = IndexSpecControlledU(
-                operands=operands,
-                results=results,
-                num_controls=num_controls,
-                power=power,
-                target_indices=target_indices,
-                controlled_indices=controlled_indices,
-                block=block,
-            )
-        elif isinstance(num_controls, Value):
+        if isinstance(num_controls, Value):
             op = SymbolicControlledU(
                 operands=operands,
                 results=results,
@@ -1063,12 +1054,28 @@ class ControlledGate:
     ) -> Any:
         """Build a single output handle for one control or sub-quantum entry.
 
+        Two ``ArrayBase`` shapes are handled:
+
+        - Per-element scalar results (``ConcreteControlledU`` controls
+          where a ``Vector`` / ``VectorView`` was expanded to scalars
+          by :meth:`_expand_control_to_scalars`).  No single
+          ``ArrayValue`` exists in ``op.results`` for the entry, so a
+          fresh ``next_version`` of the source array is synthesised
+          and used as the wrapper handle's value.
+        - Single ``ArrayValue`` result (``SymbolicControlledU`` control
+          pool, or ``Vector`` / ``VectorView`` sub-kernel argument).
+          The IR-side ``next_version`` is already laid out for us; the
+          wrapper handle re-uses it directly so downstream lookups
+          that go via the result UUID resolve through the same value
+          the rest of the IR sees.
+
         Args:
             entry (_ControlEntry): The bookkeeping entry whose output
                 handle is being constructed.
             entry_results (list[Value]): The IR result ``Value`` s
-                belonging to *entry* — one for scalar ``Qubit`` /
-                whole ``Vector``, ``length`` for ``VectorView``.
+                belonging to *entry* — one scalar per qubit for the
+                per-element-expanded case, exactly one ``ArrayValue``
+                for the whole-array case.
             operation_name (str): Operation tag forwarded to
                 :meth:`VectorView._transfer_borrow_to` when the entry's
                 consume was deferred.
@@ -1093,10 +1100,18 @@ class ControlledGate:
             )
 
         assert isinstance(original, ArrayBase)
-        source: Any = original if entry.is_deferred_view else entry.consumed
-        assert source is not None
-        source_av = cast(ArrayValue, source.value)
-        new_av = source_av.next_version()
+        # Discriminate the two shapes by inspecting the caller-supplied
+        # result list: a single ``ArrayValue`` means the IR already
+        # carries the next-version array we should hand back; anything
+        # else is a per-element scalar list and we synthesise a fresh
+        # ``next_version`` from the source array.
+        if len(entry_results) == 1 and isinstance(entry_results[0], ArrayValue):
+            new_av = entry_results[0]
+        else:
+            source_for_av: Any = original if entry.is_deferred_view else entry.consumed
+            assert source_for_av is not None
+            source_av_for_synth = cast(ArrayValue, source_for_av.value)
+            new_av = source_av_for_synth.next_version()
 
         if isinstance(original, VectorView):
             view = cast(VectorView, original)
@@ -1110,8 +1125,10 @@ class ControlledGate:
             view._transfer_borrow_to(new_view, operation_name)
             return new_view
 
-        # Whole Vector
-        consumed_vector = cast(Vector, source)
+        # Whole Vector — recover ``_shape`` / display name from whichever
+        # side of the consume is non-``None``.
+        shape_source: Any = entry.consumed if entry.consumed is not None else original
+        consumed_vector = cast(Vector, shape_source)
         return Vector._create_from_value(
             new_av,
             consumed_vector._shape,
@@ -1201,231 +1218,289 @@ class ControlledGate:
         self,
         *args: Any,
         power: int | UInt = 1,
-        target_indices: list[int | UInt] | None = None,
-        controlled_indices: list[int | UInt] | None = None,
+        controlled_indices: Sequence[int | UInt] | None = None,
         **params: ParamValue,
-    ) -> tuple[Any, ...] | Any:
-        """Apply controlled gate.
+    ) -> tuple[Any, ...]:
+        """Apply the controlled gate.
 
-        For concrete num_controls (int):
-            *args: First num_controls qubits are controls, rest are targets.
-        For symbolic num_controls (UInt):
-            args[0]: Vector[Qubit] (controls), args[1:]: individual Qubit targets.
-        With target_indices or controlled_indices:
-            args[0]: Single Vector[Qubit], indices specify which elements are
-            targets (or controls). Returns a single Vector (not a tuple).
+        The call protocol depends on whether ``num_controls`` is
+        concrete (``int``) or symbolic (``UInt``).
+
+        Concrete mode:
+
+        - Positional args are read left-to-right; the leading
+          ``num_controls`` qubits act as controls and everything that
+          follows is bound to the sub-kernel via Python's standard
+          signature semantics (``inspect.Signature.bind +
+          apply_defaults``).
+        - Each control "slot" may be a scalar ``Qubit``, a whole
+          ``Vector[Qubit]`` (consumed entirely), or a ``VectorView``
+          slice — the qubit count of each control argument adds up to
+          ``num_controls`` and the split must fall on an argument
+          boundary.
+        - ``controlled_indices`` is **not accepted** in this mode and
+          raises :class:`ValueError` immediately.
+
+        Symbolic mode (``num_controls=UInt``):
+
+        - ``args[0]`` is the *control pool* — a ``Vector[Qubit]`` /
+          ``VectorView`` whose length need not match ``num_controls``
+          at compose time.
+        - ``args[1:]`` are passed to the sub-kernel.
+        - ``controlled_indices=(i0, i1, ...)`` selects exactly
+          ``num_controls`` slots from the pool to act as controls;
+          omitted slots pass through unchanged.  Each index entry is
+          ``int`` or :class:`UInt` (mixing allowed).  ``int``-only
+          duplicates and negatives are rejected at compose time;
+          everything else (length match, range, ``UInt`` duplicates)
+          is deferred to emit time.
 
         Args:
-            *args: Control and target qubits.
-            power: Number of times to apply U. Must be a strictly positive
-                integer. Accepts UInt handles for symbolic expressions
-                (e.g., 2**k in QPE).
-            target_indices: Indices within the Vector that are targets.
-                The remaining elements become controls.
-            controlled_indices: Indices within the Vector that are controls.
-                The remaining elements become targets.
-            **params: Parameters for the underlying gate (e.g., theta=0.5)
+            *args (Any): Control and sub-kernel arguments per the
+                mode-specific protocol described above.
+            power (int | UInt): How many times to apply ``U``.  Must
+                be a strictly positive integer (``UInt`` handles are
+                accepted for symbolic powers, e.g. ``2 ** k`` in QPE).
+                Defaults to ``1``.
+            controlled_indices (Sequence[int | UInt] | None): Symbolic
+                mode only — see above.  Defaults to ``None`` which
+                means "use the entire control pool".  Passing a
+                non-``None`` value in concrete mode raises
+                :class:`ValueError`.
+            **params (ParamValue): Sub-kernel classical parameters
+                (``theta=...``, etc.).
 
         Returns:
-            Tuple of output handles, or single Vector when using index spec.
+            tuple[Any, ...]: One output handle per input handle, in
+                the concatenation order ``(controls, sub_kernel_quantum)``.
+                Each output handle's runtime kind matches the
+                corresponding input kind (scalar ``Qubit`` →
+                ``Qubit``, ``VectorView`` → ``VectorView``,
+                ``Vector`` → ``Vector``).
+
+        Raises:
+            ValueError: ``controlled_indices`` is non-``None`` in
+                concrete mode, or the qubit-count split in concrete
+                mode falls inside an argument.
+            TypeError: ``power`` is not a positive integer / ``UInt``,
+                a ``controlled_indices`` entry is not ``int`` / ``UInt``,
+                or a sub-kernel kwarg does not match the wrapped
+                kernel's signature.
+            QubitAliasError / QubitBorrowConflictError: Duplicate
+                physical qubits across the control + sub-kernel args.
+            QubitConsumedError: A control or sub-kernel quantum arg
+                was already consumed before the call.
         """
         normalized_power = self._normalize_power(power)
-
-        if target_indices is not None and controlled_indices is not None:
-            raise ValueError(
-                "Cannot specify both target_indices and controlled_indices. "
-                "Use one or the other."
-            )
-
-        if target_indices is not None or controlled_indices is not None:
-            return self._call_with_index_spec(
-                args, normalized_power, target_indices, controlled_indices, params
-            )
-
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
-            return self._call_symbolic(args, normalized_power, params)
+            return self._call_symbolic(
+                args, normalized_power, params, controlled_indices
+            )
 
-        # Concrete path: delegate to the §10-helper-based pipeline.
+        if controlled_indices is not None:
+            raise ValueError(
+                "controlled_indices is only valid in symbolic mode "
+                "(num_controls=UInt).  Got concrete num_controls; "
+                "concrete-mode controls are positional and have no "
+                "selection step (see design §1.1)."
+            )
         return self._call_concrete(args, params, normalized_power)
 
-    def _call_with_index_spec(
+    def _normalize_controlled_indices(
         self,
-        args: tuple[Any, ...],
-        power: int | Value,
-        target_indices: list[int | UInt] | None,
-        controlled_indices: list[int | UInt] | None,
-        params: dict[str, ParamValue],
-    ) -> Any:
-        """Handle index-spec mode: single Vector with explicit target/control indices."""
-        from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
+        controlled_indices: Sequence[int | UInt],
+    ) -> tuple[Value, ...]:
+        """Lift a caller-supplied index sequence to a tuple of ``UInt`` Values.
 
-        # Validate: exactly one Vector argument
-        if len(args) != 1 or not isinstance(args[0], ArrayBase):
-            raise ValueError(
-                "When target_indices or controlled_indices is specified, "
-                "exactly one Vector[Qubit] must be provided."
-            )
+        ``int`` literals are wrapped in a constant ``Value`` of
+        ``UIntType`` so the IR carries a uniform ``tuple[Value, ...]``
+        regardless of whether the caller spelled the index with a
+        Python literal or a ``UInt`` handle.  Compose-time validation
+        catches the cheap-to-detect mistakes (sequence type, element
+        type, ``int``-only duplicates and negatives) — the
+        ``UInt``-aware checks are deferred to emit time, where the
+        bindings are available.
 
-        indices = target_indices if target_indices is not None else controlled_indices
-        assert indices is not None
+        Args:
+            controlled_indices (Sequence[int | UInt]): Caller-supplied
+                index sequence.  Lists, tuples, and any other
+                ``Sequence`` are accepted; the input is normalised to
+                a tuple of ``Value``\\ s.
 
-        # Validate: non-empty
-        if len(indices) == 0:
-            raise ValueError(
-                "At least one index must be specified in "
-                "target_indices or controlled_indices."
-            )
+        Returns:
+            tuple[Value, ...]: One ``Value`` (``UIntType``) per index
+                entry, in the same order.
 
-        # Validate: no duplicate concrete indices
-        concrete = [i for i in indices if isinstance(i, int)]
-        if len(set(concrete)) != len(concrete):
-            raise ValueError(
-                "Duplicate indices are not allowed in "
-                "target_indices/controlled_indices."
-            )
+        Raises:
+            TypeError: The sequence is not iterable or an entry is
+                not ``int`` / ``UInt``.  ``bool`` is rejected
+                explicitly because it would silently coerce through
+                ``int(...)``.
+            ValueError: Two ``int`` entries are equal (literal
+                duplicate) or any ``int`` entry is negative.  Mixed
+                ``int`` / ``UInt`` collisions and ``UInt`` /
+                ``UInt`` duplicates are deferred to emit time.
+        """
+        try:
+            entries = list(controlled_indices)
+        except TypeError as e:
+            raise TypeError(
+                f"controlled_indices must be a Sequence of int / UInt; "
+                f"got {type(controlled_indices).__name__}."
+            ) from e
 
-        # Convert indices to Value list
-        def _to_value_list(idx_list: list[int | UInt]) -> list[Value]:
-            result: list[Value] = []
-            for idx in idx_list:
-                if isinstance(idx, int):
-                    val = Value(
-                        type=UIntType(),
-                        name=f"idx_{idx}",
-                    ).with_const(idx)
-                    result.append(val)
-                elif isinstance(idx, UInt):
-                    result.append(idx.value)
-                else:
-                    raise TypeError(f"Index must be int or UInt, got {type(idx)}")
-            return result
-
-        ti_values = (
-            _to_value_list(target_indices) if target_indices is not None else None
-        )
-        ci_values = (
-            _to_value_list(controlled_indices)
-            if controlled_indices is not None
-            else None
-        )
-
-        from qamomile.circuit.frontend.handle.array import VectorView
-
-        vector = args[0]
-        # Slice-view input takes the ownership-transfer path so the
-        # caller can still slice-assign the result back to the parent
-        # under strict-return; the plain-Vector path uses the normal
-        # consume.
-        input_is_view = isinstance(vector, VectorView)
-        if input_is_view:
-            view_parent = vector._slice_parent
-            view_start = vector._slice_start
-            view_step = vector._slice_step
-            view_length = vector._shape[0]
-            input_value = vector.value
-        else:
-            consumed = vector.consume(operation_name="ControlledU[index_spec]")
-            input_value = consumed.value
-
-        # operands: [ArrayValue, params...]
-        operands: list[Any] = [input_value]
-        self._params_to_operands(params, operands)
-
-        results: list[Value[Any]] = [input_value.next_version()]
-
-        nc = self._num_controls
-        if isinstance(nc, UInt):
-            nc = nc.value
-
-        self._build_and_emit_op(
-            operands,
-            results,
-            nc,
-            power,
-            target_indices=ti_values,
-            controlled_indices=ci_values,
-        )
-
-        if input_is_view:
-            new_view = VectorView._wrap_unregistered(
-                parent=view_parent,
-                sliced_av=cast(ArrayValue[Any], results[0]),
-                length=view_length,
-                start_uint=view_start,
-                step_uint=view_step,
-            )
-            vector._transfer_borrow_to(new_view, "ControlledU[index_spec]")
-            return new_view
-
-        return Vector._create_from_value(
-            cast(ArrayValue[Any], results[0]), consumed.shape, consumed.value.name
-        )
+        seen_ints: set[int] = set()
+        normalized: list[Value] = []
+        for idx in entries:
+            if isinstance(idx, bool):
+                raise TypeError(
+                    f"controlled_indices: bool entry ({idx!r}) is not "
+                    f"allowed; cast to int explicitly if intentional."
+                )
+            if isinstance(idx, int):
+                if idx < 0:
+                    raise ValueError(
+                        f"controlled_indices: negative entry ({idx}) is not allowed."
+                    )
+                if idx in seen_ints:
+                    raise ValueError(
+                        f"controlled_indices: duplicate int entry ({idx})."
+                    )
+                seen_ints.add(idx)
+                normalized.append(
+                    Value(type=UIntType(), name=f"ctrl_idx_{idx}").with_const(idx)
+                )
+            elif isinstance(idx, UInt):
+                normalized.append(idx.value)
+            else:
+                raise TypeError(
+                    f"controlled_indices entries must be int or UInt; "
+                    f"got {type(idx).__name__}."
+                )
+        return tuple(normalized)
 
     def _call_symbolic(
         self,
         args: tuple[Any, ...],
         power: int | Value,
-        params: dict[str, ParamValue],
+        sub_kwargs: dict[str, Any],
+        controlled_indices: Sequence[int | UInt] | None,
     ) -> tuple[Any, ...]:
-        """Handle symbolic num_controls (UInt).
+        """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
-        Convention: args[0] is Vector[Qubit] (controls), args[1:] are targets.
+        Mirrors :meth:`_call_concrete`'s structure but expects a
+        ``Vector[Qubit]`` / ``VectorView[Qubit]`` as ``args[0]`` —
+        the control *pool* — and routes ``controlled_indices`` into
+        the new ``SymbolicControlledU.controlled_indices`` field.
+
+        Args:
+            args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
+            power (int | Value): Normalised power (output of
+                :meth:`_normalize_power`).
+            sub_kwargs (dict[str, Any]): Caller kwargs after stripping
+                the reserved ``power`` and ``controlled_indices`` keys.
+            controlled_indices (Sequence[int | UInt] | None): The
+                caller-supplied selection (or ``None`` to use the
+                entire pool).
+
+        Returns:
+            tuple[Any, ...]: One output handle per input handle, in
+                the concatenation order ``(c_qs_out, sub_kernel_quantum_out)``.
+
+        Raises:
+            ValueError: ``args[0]`` is not a ``Vector`` / ``VectorView``,
+                or the sub-kernel has no quantum arguments.
+            TypeError / QubitAliasError / QubitBorrowConflictError /
+            QubitConsumedError: As documented on :meth:`__call__`.
         """
-        from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
+        from qamomile.circuit.frontend.handle.array import ArrayBase
 
         num_controls = self._num_controls
         assert isinstance(num_controls, UInt)
 
         if not args or not isinstance(args[0], ArrayBase):
             raise ValueError(
-                "When num_controls is symbolic (UInt), the first argument "
-                "must be a Vector[Qubit] for control qubits."
+                "When num_controls is symbolic (UInt), the first "
+                "positional argument must be a Vector[Qubit] or "
+                "VectorView[Qubit] (the control pool)."
             )
+        c_qs = args[0]
+        sub_positional = list(args[1:])
 
-        control_vector = args[0]
-        target_args = args[1:]
-
-        if not target_args:
-            raise ValueError("ControlledU requires at least 1 target qubit.")
-
-        # Consume control vector (affine type enforcement)
-        control_vector = control_vector.consume(operation_name="ControlledU[controls]")
-
-        # Consume target qubits
-        consumed_targets = [
-            tgt.consume(operation_name="ControlledU[target]") for tgt in target_args
-        ]
-
-        # Build operands: [control_vector, target(s), param(s)]
-        operands: list[Any] = [control_vector.value] + [
-            t.value for t in consumed_targets
-        ]
-        self._params_to_operands(params, operands)
-
-        # Build results: [control_vector_out, target_out(s)]
-        results: list[Value] = [control_vector.value.next_version()] + [
-            t.value.next_version() for t in consumed_targets
-        ]
-
-        self._build_and_emit_op(
-            operands,
-            results,
-            num_controls.value,
-            power,
+        ci_values: tuple[Value, ...] | None = (
+            self._normalize_controlled_indices(controlled_indices)
+            if controlled_indices is not None
+            else None
         )
 
-        # Control vector output
-        control_out: Vector[Any] = Vector._create_from_value(
-            cast(ArrayValue[Any], results[0]),
-            control_vector.shape,
-            control_vector.value.name,
+        sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
+        if not sub_quantum_args:
+            raise ValueError(
+                "ControlledU requires at least one quantum sub-kernel "
+                "argument (target); got the control pool and no "
+                "sub-kernel quantum arg (see design decision #9)."
+            )
+        quantum_ids = {id(h) for h in sub_quantum_args}
+        sub_classical_dict = {
+            name: value
+            for name, value in sub_args_resolved.items()
+            if id(value) not in quantum_ids
+        }
+
+        self._validate_no_alias_or_overlap([c_qs] + sub_quantum_args)
+
+        consumed_pool_entry = self._consume_with_borrow_transfer(
+            [c_qs], "ControlledU[control]"
+        )[0]
+        consumed_sub_quantum = self._consume_with_borrow_transfer(
+            sub_quantum_args, "ControlledU[target]"
         )
 
-        # Target outputs
-        tgt_outs = self._wrap_qubit_outputs(consumed_targets, results, offset=1)
-        return tuple([control_out] + tgt_outs)
+        pool_source: Any = (
+            consumed_pool_entry.original
+            if consumed_pool_entry.is_deferred_view
+            else consumed_pool_entry.consumed
+        )
+        pool_av = cast(ArrayValue, pool_source.value)
+
+        operands: list[Any] = [pool_av]
+        for entry in consumed_sub_quantum:
+            operands.append(self._sub_quantum_operand_value(entry))
+        self._params_to_operands(sub_classical_dict, operands)
+
+        results: list[Value] = [pool_av.next_version()]
+        for entry in consumed_sub_quantum:
+            results.append(self._sub_quantum_operand_value(entry).next_version())
+
+        op = SymbolicControlledU(
+            operands=operands,
+            results=results,
+            num_controls=num_controls.value,
+            controlled_indices=ci_values,
+            power=power,
+            block=self._qkernel.block,
+        )
+        get_current_tracer().add_operation(op)
+
+        wrapped: list[Any] = [
+            self._wrap_entry_output(
+                consumed_pool_entry,
+                [results[0]],
+                operation_name="ControlledU[control]",
+            )
+        ]
+        for entry, result_value in zip(consumed_sub_quantum, results[1:]):
+            wrapped.append(
+                self._wrap_entry_output(
+                    entry,
+                    [result_value],
+                    operation_name="ControlledU[target]",
+                )
+            )
+        return tuple(wrapped)
 
 
 def _classify_callable_param(annotation: Any) -> str:

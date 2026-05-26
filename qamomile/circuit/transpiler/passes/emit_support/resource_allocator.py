@@ -646,13 +646,43 @@ class ResourceAllocator:
             return
 
         if isinstance(op, SymbolicControlledU):
-            from qamomile.circuit.transpiler.errors import EmitError
+            if op.controlled_indices is None:
+                # Without ``controlled_indices`` the constant-folding pass
+                # is expected to promote the op to ``ConcreteControlledU``
+                # before allocation runs.  A surviving symbolic op here
+                # means a binding was missing.
+                from qamomile.circuit.transpiler.errors import EmitError
 
-            raise EmitError(
-                "Cannot transpile ControlledUOperation with symbolic num_controls. "
-                "Bind parameters to concrete values before transpilation.",
-                operation="ControlledUOperation",
-            )
+                raise EmitError(
+                    "Cannot transpile ControlledUOperation with symbolic "
+                    "num_controls.  Bind parameters to concrete values "
+                    "before transpilation.",
+                    operation="ControlledUOperation",
+                )
+
+            # With ``controlled_indices`` set the op survives constant
+            # folding intact (the promotion path cannot represent
+            # pass-through pool slots in the ``ConcreteControlledU``
+            # operand layout).  ``emit_controlled_u_with_symbolic_indices``
+            # consumes it directly; the allocator's job is to thread the
+            # control pool's per-element addresses onto the result
+            # ``ArrayValue`` and allocate any sub-kernel quantum operands
+            # the same way the concrete path does.
+            pool_operand = op.operands[0]
+            pool_result = op.results[0]
+            for addr, idx in list(qubit_map.items()):
+                if addr.matches_array(pool_operand.uuid):
+                    result_addr = QubitAddress(pool_result.uuid, addr.element_index)
+                    if result_addr not in qubit_map:
+                        qubit_map[result_addr] = idx
+            sub_quantum_operands = [v for v in op.operands[1:] if v.type.is_quantum()]
+            sub_quantum_results = [r for r in op.results[1:] if r.type.is_quantum()]
+            if sub_quantum_operands:
+                self._allocate_qubit_list(
+                    sub_quantum_operands, sub_quantum_results, qubit_map
+                )
+            return
+
         assert isinstance(op, ConcreteControlledU)
         control_qubits = list(op.control_operands)
         target_qubits = [v for v in op.target_operands if v.type.is_quantum()]

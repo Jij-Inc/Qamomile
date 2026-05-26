@@ -2121,17 +2121,19 @@ class TestControlledBuiltinCrossSDKExpval:
 
 
 # =============================================================================
-# Cross-SDK execution: user @qkernel with Vector[Qubit] input + index-spec
+# Cross-SDK execution: user @qkernel with Vector[Qubit] sub-kernel argument
 # =============================================================================
 #
-# Regression for the bug where ``controlled(inner_kernel, ...)(qs,
-# target_indices=[...])`` tripped an allocator assertion when
-# ``inner_kernel`` took a ``Vector[Qubit]`` argument: the inner block has
-# no QInitOperation for its inputs, so the per-element ``QubitAddress``
-# keys for ``qs[i]`` references in the body were never registered before
+# Regression for the bug where ``controlled(inner_kernel, ...)`` would
+# trip an allocator assertion when ``inner_kernel`` took a
+# ``Vector[Qubit]`` argument: the inner block has no QInitOperation for
+# its inputs, so the per-element ``QubitAddress`` keys for ``qs[i]``
+# references in the body were never registered before
 # ``ResourceAllocator._allocate_gate`` ran.  These tests cover the
-# Vector[Qubit]-input + index-spec combination across every supported
-# SDK (transpile + sample + expval), with randomized parameters.
+# Vector[Qubit] sub-kernel-arg combination across every supported SDK
+# (transpile + sample + expval) under the new concrete-mode API:
+# ``cg(control_qubit, qs[a:b])`` instead of the deprecated
+# ``cg(qs, target_indices=[...])`` form.
 
 
 @qmc.qkernel
@@ -2170,28 +2172,26 @@ def _rotate_first_two(
 
 
 @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
-class TestControlledIndexSpecVectorInnerKernel:
-    """Vector[Qubit]-input inner kernels under target_indices/controlled_indices.
+class TestControlledVectorInnerKernelCrossSDK:
+    """``Vector[Qubit]``-input inner kernel + concrete-mode VectorView sub arg.
 
-    Regression coverage for the ``IndexSpecControlledU`` emit path when
-    the inner ``@qmc.qkernel``'s only quantum input is a
-    ``Vector[Qubit]``.  Each test transpiles on every supported SDK and
-    runs both the sampling and expectation-value paths so the two
-    backend primitives are independently regressed.
-
-    The sampling tests are deterministic basis-state checks and need no
-    randomization; the expval test rides a random rotation angle so it
-    carries its own seed parametrization at method scope.
+    Successor to the old ``TestControlledIndexSpecVectorInnerKernel``
+    suite: same inner-kernel shape, but the call site now uses the
+    new ``cg(scalar_control, qs[a:b])`` API instead of the deprecated
+    ``cg(qs, target_indices=[...])`` / ``cg(qs, controlled_indices=[...])``
+    forms.  Sampling and expectation-value paths are exercised
+    independently so the two backend primitives regress separately.
     """
 
-    def test_target_indices_sampling(self, transpiler_factory):
+    def test_target_partition_sampling(self, transpiler_factory):
         """Controlled cyclic shift gates a deterministic basis state when ctrl=|1>.
 
-        Initial state is |1111> after X on every qubit: q[3] is the
-        outer control (ON), q[0..2] are the targets carrying |1,1,1>.
-        The inner ``_shift_first_three`` permutes (q0,q1,q2) ->
-        (q1,q2,q0); on |1,1,1> this is a no-op, so the final
-        measurement deterministically yields ``(1, 1, 1, 1)``.
+        Initial state is ``|1111>`` after ``X`` on every qubit: ``qs[3]``
+        is the outer control (ON), ``qs[0..2]`` are the targets
+        carrying ``|1,1,1>``.  The inner ``_shift_first_three`` permutes
+        ``(q0, q1, q2)`` to ``(q1, q2, q0)``; on ``|1,1,1>`` this is a
+        no-op, so the final measurement deterministically yields
+        ``(1, 1, 1, 1)``.
         """
 
         @qmc.qkernel
@@ -2202,7 +2202,8 @@ class TestControlledIndexSpecVectorInnerKernel:
             qs[2] = qmc.x(qs[2])
             qs[3] = qmc.x(qs[3])
             cg = qmc.controlled(_shift_first_three, num_controls=1)
-            qs = cg(qs, target_indices=[0, 1, 2])
+            qs[3], view_out = cg(qs[3], qs[0:3])
+            qs[0:3] = view_out
             return qmc.measure(qs)
 
         t = transpiler_factory()
@@ -2216,22 +2217,19 @@ class TestControlledIndexSpecVectorInnerKernel:
         result = exe.sample(t.executor(), shots=128).result()
         total = sum(count for _value, count in result.results)
         assert total > 0, f"no shots returned on SDK={transpiler_factory.__name__}"
-        # ``Vector[Bit]`` sampling yields ``((b0, b1, ...), count)``
-        # tuples in element order (q[0] first).  Every shot must be
-        # the deterministic outcome ``(1, 1, 1, 1)``.
         for value, count in result.results:
             assert tuple(value) == (1, 1, 1, 1), (
                 f"expected all shots to measure (1, 1, 1, 1), got value={value} "
                 f"count={count} on SDK={transpiler_factory.__name__}"
             )
 
-    def test_controlled_indices_sampling(self, transpiler_factory):
-        """controlled_indices=[3] is equivalent to target_indices=[0,1,2].
+    def test_control_off_sampling(self, transpiler_factory):
+        """With the outer control off the gate is the identity.
 
-        With the outer control OFF (|0> on q[3]) and the three target
-        qubits prepared in |1,1,1>, the gate is the identity and the
-        measurement deterministically yields ``(1, 1, 1, 0)`` (q[0..2]
-        on, q[3] off).
+        ``qs[3]`` starts in ``|0>`` (no ``X`` applied), so the
+        controlled cyclic shift does nothing.  ``qs[0..2]`` stay in
+        ``|1,1,1>`` and ``qs[3]`` stays in ``|0>``; the measurement
+        deterministically yields ``(1, 1, 1, 0)``.
         """
 
         @qmc.qkernel
@@ -2241,7 +2239,8 @@ class TestControlledIndexSpecVectorInnerKernel:
             qs[1] = qmc.x(qs[1])
             qs[2] = qmc.x(qs[2])
             cg = qmc.controlled(_shift_first_three, num_controls=1)
-            qs = cg(qs, controlled_indices=[3])
+            qs[3], view_out = cg(qs[3], qs[0:3])
+            qs[0:3] = view_out
             return qmc.measure(qs)
 
         t = transpiler_factory()
@@ -2263,28 +2262,29 @@ class TestControlledIndexSpecVectorInnerKernel:
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_expval_matches_wrapper_form(self, transpiler_factory, seed):
-        """Vector[Qubit]-input form must agree with the individual-Qubit-arg form.
+        """Vector-arg form must agree with the individual-Qubit-arg form.
 
-        Builds two equivalent circuits: one passes ``qs`` to the
-        ``Vector[Qubit]``-input inner kernel via index-spec, the other
-        uses individual ``Qubit`` arguments (the documented workaround
-        in the bug report).  Both must produce the same expectation
-        value for ``Σ_i Z_i`` over a randomized rotation parameter.
+        Builds two equivalent circuits: one passes ``qs[1:3]`` to the
+        ``Vector[Qubit]``-input inner kernel as a single sub-arg, the
+        other passes individual ``Qubit`` arguments via a wrapper
+        kernel.  Both must produce the same expectation value for
+        ``Σ_i Z_i`` over a randomized rotation parameter.
         """
         import qamomile.observable as qm_o
 
         rng = np.random.default_rng(seed)
         theta = float(rng.uniform(-math.pi, math.pi))
 
-        # Vector[Qubit]-input form (the bug path).
+        # Vector[Qubit] sub-arg form (the bug path).
         @qmc.qkernel
         def kernel_vector(obs: qmc.Observable) -> qmc.Float:
             qs = qmc.qubit_array(3, "qs")
             qs[0] = qmc.h(qs[0])  # Put outer control in superposition.
             qs[1] = qmc.x(qs[1])  # Make inner state non-trivial.
             cg = qmc.controlled(_rotate_first_two, num_controls=1)
-            qs = cg(qs, controlled_indices=[0], theta=theta)
-            return qmc.expval((qs[0], qs[1], qs[2]), obs)
+            qs[0], view_out = cg(qs[0], qs[1:3], theta=theta)
+            qs[1:3] = view_out
+            return qmc.expval(qs, obs)
 
         # Equivalent individual-Qubit-arg form (the documented workaround).
         @qmc.qkernel

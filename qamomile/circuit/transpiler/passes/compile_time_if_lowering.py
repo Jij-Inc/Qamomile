@@ -396,6 +396,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 new_nc = substitutor.substitute_value(result_op.num_controls)
                 if new_nc is not result_op.num_controls:
                     extra_kwargs["num_controls"] = new_nc
+                if result_op.controlled_indices is not None:
+                    new_ci = self._substitute_value_list(
+                        list(result_op.controlled_indices), substitutor
+                    )
+                    if new_ci is not None:
+                        extra_kwargs["controlled_indices"] = tuple(new_ci)
             # ConcreteControlledU: num_controls is int, nothing to substitute.
             if extra_kwargs:
                 result_op = dataclasses.replace(result_op, **extra_kwargs)

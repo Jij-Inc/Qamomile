@@ -993,65 +993,70 @@ class TestCombinedArrayAndIndexSubstitution:
 
 
 # ---------------------------------------------------------------------------
-# CC3: ControlledUOperation 4-field substitution
+# CC3: SymbolicControlledU field substitution (num_controls + controlled_indices)
 # ---------------------------------------------------------------------------
 
 
-class TestControlledUOperationFieldSubstitution:
-    """Phi-substituted fields on ControlledUOperation must all resolve."""
+class TestSymbolicControlledUFieldSubstitution:
+    """Phi-substituted ``SymbolicControlledU`` fields must all resolve.
 
-    def test_four_fields_substituted(self):
-        """num_controls, power, target_indices, controlled_indices all resolve."""
+    The legacy ``IndexSpecControlledU`` version of this test covered
+    ``target_indices`` too; that field was deleted alongside the
+    index-spec API.  The redesigned ``SymbolicControlledU`` carries
+    ``num_controls``, ``power``, and ``controlled_indices``, so this
+    test pins phi resolution on the three remaining fields.
+    """
+
+    def test_three_fields_substituted(self):
+        """``num_controls``, ``power``, ``controlled_indices`` all resolve."""
         from qamomile.circuit.ir.block import Block
         from qamomile.circuit.ir.operation.gate import (
             ControlledUOperation,
-            IndexSpecControlledU,
+            SymbolicControlledU,
         )
+        from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import ArrayValue
 
         flag = _uint_val("flag", const=1)
 
         # True branch values
         nc_true = _uint_val("nc_true", const=2)
         power_true = _uint_val("power_true", const=4)
-        ti_true = _uint_val("ti_true", const=0)
         ci_true = _uint_val("ci_true", const=1)
 
         # False branch values
         nc_false = _uint_val("nc_false", const=1)
         power_false = _uint_val("power_false", const=1)
-        ti_false = _uint_val("ti_false", const=2)
         ci_false = _uint_val("ci_false", const=3)
 
         # Phis
         nc_phi = _uint_val("nc_phi")
         power_phi = _uint_val("power_phi")
-        ti_phi = _uint_val("ti_phi")
         ci_phi = _uint_val("ci_phi")
 
         phi_nc = PhiOp(operands=[flag, nc_true, nc_false], results=[nc_phi])
         phi_power = PhiOp(operands=[flag, power_true, power_false], results=[power_phi])
-        phi_ti = PhiOp(operands=[flag, ti_true, ti_false], results=[ti_phi])
         phi_ci = PhiOp(operands=[flag, ci_true, ci_false], results=[ci_phi])
 
         if_op = IfOperation(
             operands=[flag],
-            results=[nc_phi, power_phi, ti_phi, ci_phi],
+            results=[nc_phi, power_phi, ci_phi],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi_nc, phi_power, phi_ti, phi_ci],
+            phi_ops=[phi_nc, phi_power, phi_ci],
         )
 
-        # ControlledUOperation with phi fields
+        # SymbolicControlledU: operands = [pool ArrayValue, target Value]
         unitary_block = Block(name="U")
-        ctrl_q = _qubit_val("ctrl")
+        pool_shape = (_uint_val("pool_len", const=4),)
+        pool_av = ArrayValue(type=QubitType(), name="pool", shape=pool_shape)
         target_q = _qubit_val("target")
-        ctrl_u = IndexSpecControlledU(
-            operands=[ctrl_q, target_q],
-            results=[ctrl_q.next_version(), target_q.next_version()],
+        ctrl_u = SymbolicControlledU(
+            operands=[pool_av, target_q],
+            results=[pool_av.next_version(), target_q.next_version()],
             num_controls=nc_phi,
+            controlled_indices=(ci_phi,),
             power=power_phi,
-            target_indices=[ti_phi],
-            controlled_indices=[ci_phi],
             block=unitary_block,
         )
 
@@ -1069,13 +1074,12 @@ class TestControlledUOperationFieldSubstitution:
         ]
         assert len(ctrl_u_ops) == 1
         op = ctrl_u_ops[0]
+        assert isinstance(op, SymbolicControlledU)
 
         assert isinstance(op.num_controls, Value)
         assert op.num_controls.uuid == nc_true.uuid
         assert isinstance(op.power, Value)
         assert op.power.uuid == power_true.uuid
-        assert op.target_indices is not None and len(op.target_indices) == 1
-        assert op.target_indices[0].uuid == ti_true.uuid
         assert op.controlled_indices is not None and len(op.controlled_indices) == 1
         assert op.controlled_indices[0].uuid == ci_true.uuid
 
