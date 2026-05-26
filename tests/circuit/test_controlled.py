@@ -2329,3 +2329,264 @@ class TestControlledIndexSpecVectorInnerKernel:
             f"SDK={transpiler_factory.__name__}, seed={seed}, theta={theta}: "
             f"vector={val_v}, scalar={val_s}"
         )
+
+
+# =============================================================================
+# Cross-SDK execution: concrete-mode VectorView controls + Vector[Qubit] sub args
+# =============================================================================
+#
+# Coverage for Step 2.b of the controlled-API redesign: the new concrete
+# ``cg(qs[0:N], ...)`` form (where the leading control argument is a
+# ``VectorView`` rather than ``N`` separate scalar ``Qubit`` handles) and
+# the new ``cg(c, qs)`` form (where the sub-kernel takes a ``Vector[Qubit]``
+# argument that must be expanded into per-element physical targets at
+# emit time).  Neither form was reachable before Step 2.b's frontend
+# expansion and ``_expand_quantum_operands_to_phys`` emit helper.
+#
+# Each test transpiles on every supported SDK and exercises both the
+# sampling and expectation-value primitives so the sampler and
+# estimator paths regress independently.
+
+
+@qmc.qkernel
+def _scalar_h(q: qmc.Qubit) -> qmc.Qubit:
+    """Single-qubit H, used as the inner kernel for VectorView controls."""
+    return qmc.h(q)
+
+
+@qmc.qkernel
+def _scalar_ry(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Single-qubit RY(theta), used for randomized expval coverage."""
+    return qmc.ry(q, theta)
+
+
+@qmc.qkernel
+def _vector_ry_pair(
+    qs: qmc.Vector[qmc.Qubit],
+    theta: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """RY(theta) on every element of a length-2 ``Vector[Qubit]`` input.
+
+    Used as the inner kernel for the ``Vector[Qubit]`` sub-argument
+    path: the controlled call passes a ``Vector[Qubit]`` straight
+    through to ``qs`` instead of expanding it into individual
+    ``Qubit`` arguments on the caller side.
+    """
+    qs[0] = qmc.ry(qs[0], theta)
+    qs[1] = qmc.ry(qs[1], theta)
+    return qs
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledVectorViewControlCrossSDK:
+    """``cg(qs[0:N], target)`` — VectorView ``N``-control + scalar target.
+
+    Three controls in ``|111>`` (after explicit X gates) plus a scalar
+    target makes the multi-controlled H gate fire deterministically;
+    the expected post-state is a uniform superposition on the target.
+    Sampling collapses the target bit half-on / half-off, expval of
+    ``Z`` on the target therefore averages to zero modulo shot noise.
+    """
+
+    def test_sampling_runs(self, transpiler_factory):
+        """Concrete VectorView control transpiles and samples on each SDK.
+
+        Just verifies the end-to-end pipeline completes; the exact
+        post-measurement distribution depends on the controlled-H
+        broadcast and is checked qualitatively (non-empty result).
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.controlled(_scalar_h, num_controls=3)
+            view_out, q3_out = cg(qs[0:3], qs[3])
+            qs[0:3] = view_out
+            qs[3] = q3_out
+            return qmc.measure(qs[3])
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit)
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support concrete "
+                f"VectorView controls: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128, (
+            f"VectorView-control sampling produced {total} shots "
+            f"(expected 128) on SDK={transpiler_factory.__name__}"
+        )
+
+    def test_matches_scalar_form_expval(self, transpiler_factory):
+        """VectorView-control form must agree with the scalar-control form.
+
+        Builds two circuits that should be the same gate sequence:
+        one passes ``qs[0:3]`` as a single ``VectorView`` control, the
+        other passes ``qs[0], qs[1], qs[2]`` as three scalar controls.
+        Both apply controlled-H on ``qs[3]`` and measure ``Σ_i Z_i``
+        — the controlled-H makes the answer non-trivial, so a mismatch
+        would surface immediately rather than cancelling out.
+        """
+        import qamomile.observable as qm_o
+
+        @qmc.qkernel
+        def view_kernel(obs: qmc.Observable) -> qmc.Float:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.controlled(_scalar_h, num_controls=3)
+            view_out, q3_out = cg(qs[0:3], qs[3])
+            qs[0:3] = view_out
+            qs[3] = q3_out
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(obs: qmc.Observable) -> qmc.Float:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.controlled(_scalar_h, num_controls=3)
+            qs[0], qs[1], qs[2], qs[3] = cg(qs[0], qs[1], qs[2], qs[3])
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=4)
+        for i in range(4):
+            H += qm_o.Z(i)
+
+        t = transpiler_factory()
+        try:
+            exe_view = t.transpile(view_kernel, bindings={"obs": H})
+            exe_scalar = t.transpile(scalar_kernel, bindings={"obs": H})
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support concrete "
+                f"VectorView controls: {e}"
+            )
+
+        val_view = exe_view.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_view, val_scalar, atol=1e-6), (
+            f"VectorView/scalar control mismatch on "
+            f"SDK={transpiler_factory.__name__}: "
+            f"view={val_view}, scalar={val_scalar}"
+        )
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledVectorSubArgCrossSDK:
+    """``cg(c, qs)`` — scalar control + ``Vector[Qubit]`` sub-kernel argument.
+
+    The sub-kernel takes a ``Vector[Qubit]`` argument; the new emit
+    helper ``_expand_quantum_operands_to_phys`` expands that operand
+    into per-element physical targets so the underlying multi-target
+    controlled gate sees individual qubit indices.  Without the helper
+    the emit path's ``resolve_qubit_index`` would fail on the
+    whole-``ArrayValue`` operand.
+
+    Sampling is checked on every supported SDK.  Strict expval
+    equivalence against the per-Qubit form is checked separately in
+    :class:`TestControlledVectorSubArgQiskitEquivalence` — only on
+    Qiskit, because the QURI Parts emitter has a pre-existing
+    multi-target-controlled-custom-gate gap in its fallback decomposer
+    (orthogonal to Step 2.b; tracked separately).
+    """
+
+    def test_sampling_runs(self, transpiler_factory):
+        """Vector sub-arg form transpiles and samples on each SDK."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.controlled(_vector_ry_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], theta=theta)
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit, bindings={"theta": math.pi / 2})
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support Vector[Qubit] "
+                f"sub-kernel args under controlled: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128, (
+            f"Vector sub-arg sampling produced {total} shots "
+            f"(expected 128) on SDK={transpiler_factory.__name__}"
+        )
+
+
+class TestControlledVectorSubArgQiskitEquivalence:
+    """Strict expval equivalence for the new Vector sub-arg path.
+
+    Only Qiskit is exercised: its controlled-U emit path constructs
+    a native controlled custom gate, so the multi-target sub-kernel
+    Vector ``RY(theta) ⊗ RY(theta)`` ends up being applied correctly
+    when the control is on.  The QURI Parts backend currently
+    decomposes any controlled custom gate through the standard
+    single-target fallback (``emit_controlled_gate`` uses
+    ``target_indices[0]``), so a multi-target controlled custom gate
+    is silently applied only to the first target — a pre-existing
+    limitation orthogonal to Step 2.b's frontend / emit-side
+    sub_quantum-operand expansion, which is what this test
+    specifically covers.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_qiskit(self):
+        pytest.importorskip("qiskit")
+
+    @pytest.mark.parametrize("seed", [0, 1, 7])
+    def test_expval_matches_individual_qubit_form(self, seed):
+        """Vector sub-arg form must agree with the individual-Qubit-arg form."""
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+
+        @qmc.qkernel
+        def vec_kernel(obs: qmc.Observable, theta: qmc.Float) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.controlled(_vector_ry_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], theta=theta)
+            qs[1:3] = view_out
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(obs: qmc.Observable, theta: qmc.Float) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg_ry = qmc.controlled(_scalar_ry, num_controls=1)
+            qs[0], qs[1] = cg_ry(qs[0], qs[1], theta=theta)
+            qs[0], qs[2] = cg_ry(qs[0], qs[2], theta=theta)
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=3)
+        for i in range(3):
+            H += qm_o.Z(i)
+
+        t = QiskitTranspiler()
+        exe_vec = t.transpile(vec_kernel, bindings={"obs": H, "theta": theta})
+        exe_scalar = t.transpile(scalar_kernel, bindings={"obs": H, "theta": theta})
+        val_vec = exe_vec.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_vec, val_scalar, atol=1e-6), (
+            f"Vector / individual-Qubit sub-arg expval mismatch on Qiskit, "
+            f"seed={seed}, theta={theta}: "
+            f"vector={val_vec}, scalar={val_scalar}"
+        )

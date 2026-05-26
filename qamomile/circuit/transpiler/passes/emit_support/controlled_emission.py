@@ -444,11 +444,11 @@ def emit_controlled_u(
     target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
     param_operands = [v for v in remaining_operands if v.type.is_classical()]
 
-    # Resolve every control and target operand to its physical qubit
-    # index.  Any resolution failure — partial or total — is now a
-    # loud ``EmitError``.  Partial-failure would emit a wrong-arity
-    # controlled gate; total-failure would silently drop the gate
-    # entirely.  Both are silent miscompile vectors and are rejected.
+    # Resolve controls via ``resolve_qubit_index``: frontend Step 2.a
+    # normalises ``operands[:num_controls]`` to one scalar per physical
+    # control qubit, so each control operand maps to a single physical
+    # index.  ``Vector[Qubit]`` / ``VectorView`` controls are already
+    # expanded into per-element scalars upstream.
     #
     # Historical note: total-failure previously took a silent-return
     # path because the ``SymbolicControlledU`` → ``ConcreteControlledU``
@@ -465,12 +465,6 @@ def emit_controlled_u(
         if idx is not None:
             control_indices.append(idx)
 
-    target_indices: list[int] = []
-    for q in target_qubit_operands:
-        idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
-        if idx is not None:
-            target_indices.append(idx)
-
     if len(control_indices) < len(control_operands):
         raise EmitError(
             f"ControlledUOperation: only "
@@ -484,14 +478,20 @@ def emit_controlled_u(
             f"promotion in ``ConstantFoldingPass``.",
             operation="ControlledUOperation",
         )
-    if len(target_indices) < len(target_qubit_operands):
-        raise EmitError(
-            f"ControlledUOperation: only "
-            f"{len(target_indices)}/{len(target_qubit_operands)} "
-            f"target operand(s) could be resolved to physical qubits.  "
-            f"Same partial- or zero-arity hazard as above.",
-            operation="ControlledUOperation",
-        )
+
+    # Resolve sub-kernel quantum (target) operands.  Each operand may
+    # be either a scalar ``Value`` (one physical qubit) or an
+    # ``ArrayValue`` of quantum element type (a ``Vector[Qubit]`` arg
+    # that contributes ``length`` physical qubits).  The shared §12.1
+    # helper handles both cases uniformly; ``target_index_groups``
+    # records the per-operand grouping so result-side bookkeeping can
+    # re-attach the physical indices to each result UUID below.
+    target_indices: list[int] = []
+    target_index_groups: list[list[int]] = []
+    for q in target_qubit_operands:
+        indices = _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
+        target_index_groups.append(indices)
+        target_indices.extend(indices)
 
     local_bindings = emit_pass._resolver.bind_block_params(
         block_value, param_operands, bindings
@@ -522,10 +522,9 @@ def emit_controlled_u(
             local_bindings,
         )
 
-    all_input_indices = control_indices + target_indices
-    for i, result in enumerate(op.results):
-        if i < len(all_input_indices):
-            qubit_map[QubitAddress(result.uuid)] = all_input_indices[i]
+    _map_controlled_u_results(
+        op, nc, control_indices, target_qubit_operands, target_index_groups, qubit_map
+    )
 
 
 def emit_controlled_fallback(
@@ -860,3 +859,166 @@ def _resolve_vector_input_length(
     if size_val.is_constant():
         return int(size_val.get_const())
     return emit_pass._resolver.resolve_int_value(size_val, bindings)
+
+
+def _expand_quantum_operands_to_phys(
+    emit_pass: "StandardEmitPass",
+    operand: Any,
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+    *,
+    operation: str = "ControlledUOperation",
+) -> list[int]:
+    """Expand one quantum operand into its per-element physical qubit indices.
+
+    Scalar quantum ``Value`` s (the canonical ``Qubit`` operand kind)
+    return a single-element list, identical to what
+    ``_resolver.resolve_qubit_index`` produces.  ``ArrayValue`` operands
+    whose element type is quantum (``Vector[Qubit]`` arguments) are
+    expanded element-by-element: the shape is resolved against
+    ``bindings``, the ``slice_of`` chain is walked to the root
+    parent, and one physical index per covered slot is computed via
+    the affine map ``root_idx = slice_start + slice_step * i`` — the
+    same logic the index-spec emit (``emit_controlled_u_with_index_spec``)
+    has used for sliced ``Vector`` operands.
+
+    Centralising the expansion lets ``emit_controlled_u`` accept
+    ``Vector[Qubit]`` sub-kernel arguments (Step 2.b of the
+    controlled-API redesign) without copy/pasting the
+    length-resolution + slice-walk + per-element-lookup sequence into
+    every controlled emit path.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass driving the
+            conversion; consulted for its ``_resolver`` (used to
+            resolve array shapes and slice bounds).
+        operand (Any): A scalar quantum ``Value`` or an ``ArrayValue``
+            whose element type is quantum.  Other operand kinds are
+            rejected.
+        qubit_map (QubitMap): The current map from ``QubitAddress``
+            to physical qubit index.
+        bindings (dict[str, Any]): Caller bindings consulted when
+            shapes or slice bounds are symbolic.
+        operation (str): Operation name used as the ``EmitError``
+            ``operation`` tag for any raised diagnostic.  Defaults to
+            ``"ControlledUOperation"``.
+
+    Returns:
+        list[int]: One physical qubit index per covered slot, in
+            declaration order for arrays.
+
+    Raises:
+        EmitError: Surfaces under any of the following conditions:
+
+            * the operand is an ``ArrayValue`` with no shape;
+            * the operand is an ``ArrayValue`` whose length cannot be
+              resolved from ``bindings``;
+            * a slice bound (``slice_start`` / ``slice_step``) along
+              the ``slice_of`` chain cannot be resolved;
+            * a per-element ``QubitAddress`` is missing from
+              ``qubit_map``;
+            * a scalar operand cannot be resolved to a physical
+              qubit by ``resolve_qubit_index``.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    if isinstance(operand, ArrayValue):
+        if not operand.shape:
+            raise EmitError(
+                f"Cannot expand ArrayValue {operand.name!r} without a shape.",
+                operation=operation,
+            )
+        size = emit_pass._resolver.resolve_int_value(operand.shape[0], bindings)
+        if size is None:
+            raise EmitError(
+                f"Cannot resolve Vector[Qubit] length for "
+                f"{operand.name!r}; bind {operand.shape[0].name!r} "
+                f"before transpilation.",
+                operation=operation,
+            )
+        root_av, slice_start, slice_step = emit_pass._resolver.resolve_slice_chain(
+            operand, bindings, operation=operation
+        )
+        phys: list[int] = []
+        for i in range(size):
+            addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
+            if addr not in qubit_map:
+                raise EmitError(
+                    f"Expected qubit address {addr!s} for "
+                    f"Vector[Qubit] {operand.name!r} element {i} "
+                    f"not found in qubit_map.",
+                    operation=operation,
+                )
+            phys.append(qubit_map[addr])
+        return phys
+
+    idx = emit_pass._resolver.resolve_qubit_index(operand, qubit_map, bindings)
+    if idx is None:
+        raise EmitError(
+            f"Cannot resolve scalar quantum operand {operand.name!r} "
+            f"(uuid {operand.uuid[:8]}...) to a physical qubit.",
+            operation=operation,
+        )
+    return [idx]
+
+
+def _map_controlled_u_results(
+    op: ConcreteControlledU,
+    num_controls: int,
+    control_indices: list[int],
+    target_qubit_operands: list[Any],
+    target_index_groups: list[list[int]],
+    qubit_map: QubitMap,
+) -> None:
+    """Map a ``ConcreteControlledU``'s result ``Value`` UUIDs to physical qubits.
+
+    Result layout (set up by the Step 2.a frontend, mirroring the
+    operand layout):
+
+    - ``op.results[:num_controls]`` — one scalar ``Value`` per physical
+      control qubit; maps 1:1 to ``control_indices``.
+    - ``op.results[num_controls:]`` — one entry per sub-kernel quantum
+      operand, in the same order as ``target_qubit_operands``.  A
+      scalar operand contributes a scalar result; a ``Vector[Qubit]``
+      operand contributes an ``ArrayValue`` result, in which case
+      ``QubitAddress(result.uuid, i)`` is registered for every covered
+      element so downstream lookups via ``view_out[i]`` still resolve.
+
+    Args:
+        op (ConcreteControlledU): The IR operation being emitted.
+        num_controls (int): Number of physical control qubits.
+        control_indices (list[int]): Physical indices of the controls.
+        target_qubit_operands (list[Any]): Quantum sub-kernel operands
+            in declaration order (scalar ``Value`` or ``ArrayValue``).
+        target_index_groups (list[list[int]]): Per-operand physical
+            index groups returned by
+            :func:`_expand_quantum_operands_to_phys`.
+        qubit_map (QubitMap): Mutated in place with the new result
+            ``QubitAddress`` entries.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    control_results = op.results[:num_controls]
+    for i, result in enumerate(control_results):
+        if i < len(control_indices):
+            qubit_map[QubitAddress(result.uuid)] = control_indices[i]
+
+    target_results = [r for r in op.results[num_controls:] if r.type.is_quantum()]
+    for i, result in enumerate(target_results):
+        if i >= len(target_index_groups):
+            break
+        indices = target_index_groups[i]
+        if isinstance(result, ArrayValue):
+            # Per-element addresses plus the base address so callers
+            # that subscript the result via ``result[i]`` (which
+            # produces ``Value(parent_array=result, element_indices=…)``)
+            # and callers that address the whole array both resolve.
+            for j, phys in enumerate(indices):
+                qubit_map[QubitAddress(result.uuid, j)] = phys
+            if indices:
+                base_addr = QubitAddress(result.uuid)
+                if base_addr not in qubit_map:
+                    qubit_map[base_addr] = indices[0]
+        else:
+            if indices:
+                qubit_map[QubitAddress(result.uuid)] = indices[0]

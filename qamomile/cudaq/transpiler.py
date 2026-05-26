@@ -55,6 +55,8 @@ if TYPE_CHECKING:
 def _build_block_qubit_map(
     block_value: Any,
     target_indices: list[int],
+    emit_pass: Any,
+    bindings: dict[str, Any],
 ) -> dict[str, int]:
     """Build a UUID-to-physical-target map for a controlled block.
 
@@ -64,17 +66,16 @@ def _build_block_qubit_map(
     operands.
 
     Scalar ``Qubit`` inputs map one UUID -> one physical target;
-    a single ``Vector[Qubit]`` input (``ArrayValue`` carrying a quantum
-    element type) absorbs the remaining target indices, one per
-    element. Multiple ``Vector[Qubit]`` inputs cannot be resolved here
-    because the helper has no shape information to allocate them
-    individually — the only consumer today is ``IndexSpecControlledU``,
-    whose caller contract is "exactly one Vector[Qubit] operand". The
-    function therefore enforces "at most one ``Vector[Qubit]`` input"
-    and raises ``EmitError`` otherwise. The element UUIDs themselves
+    ``Vector[Qubit]`` inputs (``ArrayValue`` carrying a quantum element
+    type) each absorb their own declared length, resolved from
+    ``bindings`` via the emit pass's value resolver.  This mirrors the
+    seeding logic in the base emit pass's ``_populate_input_qubit_map``
+    so multi-vector inner blocks (Step 2.b of the controlled-API
+    redesign) work the same way as single-vector ones did under the
+    old single-``Vector`` enforcement.  The element UUIDs themselves
     are unknown at seed time — they are created during the inner
     kernel's tracing — so the body walk below also resolves any operand
-    whose ``parent_array`` matches the registered vector and seeds
+    whose ``parent_array`` matches a registered vector and seeds
     ``qubit_map`` with the per-element UUID lazily.
 
     Args:
@@ -82,10 +83,12 @@ def _build_block_qubit_map(
             ``operations`` are walked. Missing attributes are treated as
             an empty seed source.
         target_indices (list[int]): Physical target indices the inner
-            block's quantum inputs map onto, in declaration order. Each
-            scalar input consumes one index; the single ``Vector[Qubit]``
-            input (if any) consumes the remaining
-            ``len(target_indices) - scalar_count`` indices.
+            block's quantum inputs map onto, in declaration order.
+        emit_pass (Any): The emit pass driving the conversion.  Used
+            for its ``_resolver`` to resolve ``Vector[Qubit]`` shapes
+            against ``bindings`` when the shape is symbolic.
+        bindings (dict[str, Any]): Caller bindings forwarded to the
+            resolver for shape resolution.
 
     Returns:
         dict[str, int]: Mapping from operand UUID (per-element or
@@ -93,9 +96,10 @@ def _build_block_qubit_map(
             has no quantum inputs.
 
     Raises:
-        EmitError: If the inner block declares more than one
-            ``Vector[Qubit]`` input, or if the scalar inputs alone
-            already exceed ``len(target_indices)``.
+        EmitError: If a ``Vector[Qubit]`` input length cannot be
+            resolved from ``bindings``, if the resolved length is
+            negative, or if the total declared quantum input footprint
+            exceeds ``len(target_indices)``.
     """
     from qamomile.circuit.ir.value import ArrayValue
 
@@ -106,35 +110,57 @@ def _build_block_qubit_map(
     vector_inputs: dict[str, tuple[int, int]] = {}
 
     if hasattr(block_value, "input_values"):
-        qubit_idx = 0
         quantum_inputs = [
             iv
             for iv in block_value.input_values
             if hasattr(iv, "type") and iv.type.is_quantum()
         ]
-        vector_count = sum(1 for iv in quantum_inputs if isinstance(iv, ArrayValue))
-        if vector_count > 1:
-            raise EmitError(
-                f"CUDA-Q controlled helper supports at most one "
-                f"Vector[Qubit] input in the inner block, got "
-                f"{vector_count}. Wrap the helper so it takes individual "
-                f"Qubit arguments, or split the work across multiple "
-                f"controlled gates.",
-                operation="ControlledUOperation",
-            )
+
+        # Resolve every ``Vector[Qubit]`` input length up-front so we
+        # can budget the target indices per input.  Mirrors the base
+        # emit pass's ``_populate_input_qubit_map`` strategy.
+        resolved_lengths: dict[str, int] = {}
+        for iv in quantum_inputs:
+            if not isinstance(iv, ArrayValue):
+                continue
+            length: int | None = None
+            if iv.shape:
+                size_val = iv.shape[0]
+                if size_val.is_constant():
+                    length = int(size_val.get_const())
+                else:
+                    length = emit_pass._resolver.resolve_int_value(size_val, bindings)
+            if length is None:
+                shape_name = iv.shape[0].name if iv.shape else "<no shape>"
+                raise EmitError(
+                    f"CUDA-Q controlled helper: cannot resolve "
+                    f"Vector[Qubit] input length for {iv.name!r}; "
+                    f"bind {shape_name!r} before transpilation.",
+                    operation="ControlledUOperation",
+                )
+            if length < 0:
+                raise EmitError(
+                    f"CUDA-Q controlled helper: Vector[Qubit] input "
+                    f"{iv.name!r} resolved to a negative length ({length}).",
+                    operation="ControlledUOperation",
+                )
+            resolved_lengths[iv.uuid] = length
+
         scalar_count = sum(1 for iv in quantum_inputs if not isinstance(iv, ArrayValue))
-        if scalar_count > len(target_indices):
+        total = scalar_count + sum(resolved_lengths.values())
+        if total > len(target_indices):
             raise EmitError(
-                f"CUDA-Q controlled helper inner block has {scalar_count} "
-                f"scalar Qubit inputs but only {len(target_indices)} "
-                f"target indices are available.",
+                f"CUDA-Q controlled helper inner block requires {total} "
+                f"physical qubits (scalars={scalar_count}, vector lengths="
+                f"{sorted(resolved_lengths.values())}) but only "
+                f"{len(target_indices)} target indices are available.",
                 operation="ControlledUOperation",
             )
+
+        qubit_idx = 0
         for iv in quantum_inputs:
             if isinstance(iv, ArrayValue):
-                # Single-vector enforced above, so this vector takes
-                # the entire remaining target budget.
-                length = len(target_indices) - scalar_count
+                length = resolved_lengths[iv.uuid]
                 vector_inputs[iv.uuid] = (qubit_idx, length)
                 # Also store the base UUID for any downstream lookup
                 # that addresses the array as a whole.
@@ -517,7 +543,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 
         # Build operand-to-target map from block inputs, propagated
         # through SSA versions.
-        block_qubit_map = _build_block_qubit_map(block_value, target_indices)
+        block_qubit_map = _build_block_qubit_map(
+            block_value, target_indices, self, bindings
+        )
 
         emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
 
