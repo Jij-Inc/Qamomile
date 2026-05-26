@@ -1064,13 +1064,20 @@ def _encode_symbolic_controlled(
 
     Returns:
         dict[str, Any]: Base op dict plus ``num_controls_ref``
-            (symbolic Value's UUID), ``power``, and nested
-            ``unitary_block`` dict.
+            (symbolic Value's UUID), ``power``, ``controlled_index_refs``
+            (per-element ``UInt`` Value UUIDs, or ``None`` when the op
+            uses the entire pool), and nested ``unitary_block`` dict.
     """
     d = _base_op_dict("SymbolicControlledU", op)
     ctx.register_value(op.num_controls)
     d["num_controls_ref"] = op.num_controls.uuid
     d["power"] = _encode_power(op.power)
+    if op.controlled_indices is not None:
+        for v in op.controlled_indices:
+            ctx.register_value(v)
+        d["controlled_index_refs"] = [v.uuid for v in op.controlled_indices]
+    else:
+        d["controlled_index_refs"] = None
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
 

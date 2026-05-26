@@ -93,4 +93,11 @@ rejected today; a future PR may add a migration table.
 from __future__ import annotations
 
 # The current schema version. Bump on every breaking change.
-SCHEMA_VERSION: int = 1
+#
+# Version history:
+#   1 — initial wire format.
+#   2 — ``SymbolicControlledU`` gains a ``controlled_index_refs`` slot
+#       (per the controlled-API redesign, step 3).  The field is always
+#       written; a ``None`` value reproduces the v1 semantics ("use the
+#       entire control vector as the pool").
+SCHEMA_VERSION: int = 2

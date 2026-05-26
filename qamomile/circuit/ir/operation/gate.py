@@ -277,11 +277,22 @@ class SymbolicControlledU(ControlledUOperation):
 
     Operand layout: ``[ctrl_vector, tgt_0, ..., tgt_m, params...]``
     Result layout:  ``[ctrl_vector', tgt_0', ..., tgt_m']``
+
+    When ``controlled_indices`` is ``None`` the entire ``ctrl_vector`` is
+    used as the control pool (``len(ctrl_vector) == num_controls`` is
+    checked at emit time).  When non-``None``, the listed indices select
+    exactly ``num_controls`` slots from the pool to act as controls and
+    every other slot passes through unchanged (it remains in the
+    ``ctrl_vector`` output without a phase change).  Each entry is
+    stored as a ``Value`` of ``UIntType`` regardless of whether the
+    frontend passed an ``int`` literal or a ``UInt`` handle, so all
+    downstream value-substitution passes see a uniform shape.
     """
 
     num_controls: Value = dataclasses.field(
         default_factory=lambda: Value(type=FloatType(), name="_placeholder")
     )  # type: ignore[assignment]
+    controlled_indices: tuple[Value, ...] | None = None
 
     @property
     def is_symbolic_num_controls(self) -> bool:
@@ -306,15 +317,33 @@ class SymbolicControlledU(ControlledUOperation):
     def all_input_values(self) -> list[ValueBase]:
         values = super().all_input_values()
         values.append(self.num_controls)
+        if self.controlled_indices is not None:
+            values.extend(self.controlled_indices)
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
         result = super().replace_values(mapping)
         assert isinstance(result, SymbolicControlledU)
+        changed = False
+        new_nc = result.num_controls
+        new_ci = result.controlled_indices
         if result.num_controls.uuid in mapping:
             mapped = mapping[result.num_controls.uuid]
             if isinstance(mapped, Value):
-                return dataclasses.replace(result, num_controls=mapped)
+                new_nc = mapped
+                changed = True
+        if result.controlled_indices is not None:
+            substituted = tuple(
+                typing.cast(Value, mapping.get(v.uuid, v))
+                for v in result.controlled_indices
+            )
+            if substituted != result.controlled_indices:
+                new_ci = substituted
+                changed = True
+        if changed:
+            return dataclasses.replace(
+                result, num_controls=new_nc, controlled_indices=new_ci
+            )
         return result
 
 
