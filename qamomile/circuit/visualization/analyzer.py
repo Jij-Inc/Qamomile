@@ -60,31 +60,74 @@ if TYPE_CHECKING:
 _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
 
 
-# TeX labels for built-in gate names when they appear as the wrapped
-# block of a ``ControlledUOperation`` (e.g. ``qmc.control(qmc.rx)`` —
-# ``block.name`` is ``"rx"``, which is the same string the
-# ``GateOperationType.RX`` branch of ``_get_gate_label`` would
-# pretty-print as ``$R_x$``).  Keep this mapping in sync with the
-# ``tex_labels`` table inside ``CircuitAnalyzer._get_gate_label``.
+# Single source of truth for the TeX rendering of every built-in
+# gate the drawer knows how to label, keyed by ``GateOperationType``.
+# Used directly by the inline-gate label path
+# (``CircuitAnalyzer._get_gate_label``) and indirectly — via
+# ``_BUILTIN_TEX_LABELS`` below — by the controlled-U-box path,
+# which keys off ``block.name`` (the string assigned by built-in
+# factories) instead of the enum.
+_TEX_LABELS_BY_GATE_TYPE: dict[GateOperationType, str] = {
+    # Parametric gates
+    GateOperationType.RX: r"$R_x$",
+    GateOperationType.RY: r"$R_y$",
+    GateOperationType.RZ: r"$R_z$",
+    GateOperationType.RZZ: r"$R_{zz}$",
+    GateOperationType.CP: r"$CP$",
+    GateOperationType.P: r"$P$",
+    # Non-parametric gates
+    GateOperationType.H: r"$H$",
+    GateOperationType.X: r"$X$",
+    GateOperationType.Y: r"$Y$",
+    GateOperationType.Z: r"$Z$",
+    GateOperationType.T: r"$T$",
+    GateOperationType.TDG: r"$T^{\dagger}$",
+    GateOperationType.S: r"$S$",
+    GateOperationType.SDG: r"$S^{\dagger}$",
+    GateOperationType.CX: r"$CX$",
+    GateOperationType.CZ: r"$CZ$",
+    GateOperationType.SWAP: r"$SWAP$",
+    GateOperationType.TOFFOLI: r"$CCX$",
+}
+
+
+# ``block.name`` strings assigned by built-in gate factories.  For
+# most gates this is the lowercase enum name (``RX`` → ``"rx"``),
+# but a couple of factories use a different historical name
+# (``GateOperationType.TOFFOLI`` is exposed as ``qmc.ccx`` and
+# stores ``block.name = "ccx"``).  Drift risk is now limited to
+# this one mapping rather than to two parallel TeX tables.
+_GATE_TYPE_BUILTIN_NAMES: dict[GateOperationType, str] = {
+    GateOperationType.RX: "rx",
+    GateOperationType.RY: "ry",
+    GateOperationType.RZ: "rz",
+    GateOperationType.RZZ: "rzz",
+    GateOperationType.P: "p",
+    GateOperationType.CP: "cp",
+    GateOperationType.H: "h",
+    GateOperationType.X: "x",
+    GateOperationType.Y: "y",
+    GateOperationType.Z: "z",
+    GateOperationType.T: "t",
+    GateOperationType.TDG: "tdg",
+    GateOperationType.S: "s",
+    GateOperationType.SDG: "sdg",
+    GateOperationType.CX: "cx",
+    GateOperationType.CZ: "cz",
+    GateOperationType.SWAP: "swap",
+    GateOperationType.TOFFOLI: "ccx",
+}
+
+
+# Derived from the two tables above.  Used by the controlled-U-box
+# rendering path: when the wrapped block of a
+# ``ControlledUOperation`` was a built-in gate (e.g.
+# ``qmc.control(qmc.rx)`` gives ``block.name = "rx"``) this maps
+# the block name back to the same TeX label inline gates use.
 _BUILTIN_TEX_LABELS: dict[str, str] = {
-    "rx": r"$R_x$",
-    "ry": r"$R_y$",
-    "rz": r"$R_z$",
-    "rzz": r"$R_{zz}$",
-    "p": r"$P$",
-    "cp": r"$CP$",
-    "h": r"$H$",
-    "x": r"$X$",
-    "y": r"$Y$",
-    "z": r"$Z$",
-    "t": r"$T$",
-    "tdg": r"$T^{\dagger}$",
-    "s": r"$S$",
-    "sdg": r"$S^{\dagger}$",
-    "cx": r"$CX$",
-    "cz": r"$CZ$",
-    "swap": r"$SWAP$",
-    "ccx": r"$CCX$",
+    _GATE_TYPE_BUILTIN_NAMES[gate_type]: tex
+    for gate_type, tex in _TEX_LABELS_BY_GATE_TYPE.items()
+    if gate_type in _GATE_TYPE_BUILTIN_NAMES
 }
 
 
@@ -4406,32 +4449,12 @@ class CircuitAnalyzer:
         Returns:
             Tuple of (label_string, has_parameter).
         """
-        # TeX-style gate names
-        tex_labels = {
-            # Parametric gates
-            GateOperationType.RX: r"$R_x$",
-            GateOperationType.RY: r"$R_y$",
-            GateOperationType.RZ: r"$R_z$",
-            GateOperationType.RZZ: r"$R_{zz}$",
-            GateOperationType.CP: r"$CP$",
-            GateOperationType.P: r"$P$",
-            # Non-parametric gates
-            GateOperationType.H: r"$H$",
-            GateOperationType.X: r"$X$",
-            GateOperationType.Y: r"$Y$",
-            GateOperationType.Z: r"$Z$",
-            GateOperationType.T: r"$T$",
-            GateOperationType.TDG: r"$T^{\dagger}$",
-            GateOperationType.S: r"$S$",
-            GateOperationType.SDG: r"$S^{\dagger}$",
-            GateOperationType.CX: r"$CX$",
-            GateOperationType.CZ: r"$CZ$",
-            GateOperationType.SWAP: r"$SWAP$",
-            GateOperationType.TOFFOLI: r"$CCX$",
-        }
-
+        # TeX-style gate names — sourced from the module-level
+        # ``_TEX_LABELS_BY_GATE_TYPE`` so the controlled-U-box
+        # rendering path (``_BUILTIN_TEX_LABELS``) and this inline
+        # path stay in sync.
         base_label = (
-            tex_labels.get(op.gate_type, str(op.gate_type))
+            _TEX_LABELS_BY_GATE_TYPE.get(op.gate_type, str(op.gate_type))
             if op.gate_type is not None
             else "?"
         )
