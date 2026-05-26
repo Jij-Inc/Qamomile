@@ -686,7 +686,11 @@ def _classify_callable_param(annotation: Any) -> str:
     return "unknown"
 
 
-def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
+def _qkernel_for_callable(
+    fn: Callable[..., Any],
+    *,
+    caller: str = "controlled",
+) -> QKernel:
     """Synthesize a ``@qkernel`` wrapper around a built-in gate callable.
 
     Inspects the callable's signature to classify each parameter, then
@@ -721,6 +725,8 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             ``UInt``/``int`` — possibly inside a ``Union`` (e.g., the
             ``Union[Qubit, Vector[Qubit]]`` used by broadcast gate
             functions).
+        caller: User-facing API name used in synthesized TypeError
+            messages.
 
     Returns:
         A ``QKernel`` whose body forwards every argument by keyword to
@@ -742,6 +748,8 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     """
     from qamomile.circuit.frontend.qkernel import QKernel, qkernel as _qkernel_decorator
 
+    caller_label = f"{caller}()"
+
     if isinstance(fn, QKernel):
         return fn
 
@@ -754,7 +762,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     if not callable(fn):
         raise TypeError(
-            f"controlled(): expected a QKernel or a built-in gate function, "
+            f"{caller_label}: expected a QKernel or a built-in gate function, "
             f"got {type(fn).__name__}."
         )
 
@@ -764,7 +772,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         sig = inspect.signature(fn)
     except (TypeError, ValueError) as e:
         raise TypeError(
-            f"controlled(): cannot inspect signature of {fn_name!r}: {e}. "
+            f"{caller_label}: cannot inspect signature of {fn_name!r}: {e}. "
             f"Wrap the function in @qmc.qkernel manually."
         ) from e
 
@@ -807,7 +815,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             inspect.Parameter.KEYWORD_ONLY,
         ):
             raise TypeError(
-                f"controlled(): callable {fn_name!r} uses *args/**kwargs, "
+                f"{caller_label}: callable {fn_name!r} uses *args/**kwargs, "
                 f"positional-only, or keyword-only parameters, which "
                 f"cannot be auto-wrapped (the synthesized wrapper places "
                 f"all params in the standard POSITIONAL_OR_KEYWORD slot). "
@@ -823,7 +831,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # ``@qmc.qkernel`` directly anyway.
         if param.default is not inspect.Parameter.empty:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} "
+                f"{caller_label}: parameter {param_name!r} of {fn_name!r} "
                 f"has a default value ({param.default!r}), which the "
                 f"wrapper synthesizer does not propagate. Wrap the "
                 f"function in @qmc.qkernel manually."
@@ -844,7 +852,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # symmetric with the ``__name__`` collision guard above.
         if param_name in _RESERVED_WRAPPER_NAMES:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} "
+                f"{caller_label}: parameter {param_name!r} of {fn_name!r} "
                 f"collides with a reserved wrapper-internal name "
                 f"({sorted(_RESERVED_WRAPPER_NAMES)}). Wrap the function "
                 f"in @qmc.qkernel manually or rename the parameter."
@@ -852,7 +860,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         annotation = type_hints.get(param_name, param.annotation)
         if annotation is inspect.Parameter.empty:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} has "
+                f"{caller_label}: parameter {param_name!r} of {fn_name!r} has "
                 f"no type annotation. Wrap the function in @qmc.qkernel "
                 f"manually."
             )
@@ -865,7 +873,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             classical_args.append((param_name, "UInt"))
         else:
             raise TypeError(
-                f"controlled(): parameter {param_name!r} of {fn_name!r} has "
+                f"{caller_label}: parameter {param_name!r} of {fn_name!r} has "
                 f"annotation {annotation!r}; only Qubit, Float, UInt (or "
                 f"unions including those types, e.g. "
                 f"Union[Qubit, Vector[Qubit]]) are supported. Wrap the "
@@ -875,7 +883,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     if not qubit_args:
         raise TypeError(
-            f"controlled(): callable {fn_name!r} has no Qubit parameters; "
+            f"{caller_label}: callable {fn_name!r} has no Qubit parameters; "
             f"a controlled gate requires at least one target qubit."
         )
 
@@ -959,7 +967,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # inspect/linecache but still pass through ``linecache.getlines``.
         # ``mtime=None`` makes ``linecache.checkcache`` skip the entry so
         # the cache survives across calls.
-        filename = f"<qamomile-controlled-wrapper-{fn_name}-{seq}>"
+        filename = f"<qamomile-{caller}-wrapper-{fn_name}-{seq}>"
         src_lines = src.splitlines(keepends=True)
         linecache.cache[filename] = (len(src), None, src_lines, filename)
 
@@ -998,7 +1006,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             # behind.
             linecache.cache.pop(filename, None)
             raise TypeError(
-                f"controlled(): failed to synthesize a wrapper for "
+                f"{caller_label}: failed to synthesize a wrapper for "
                 f"{fn_name!r}: {e}. Wrap the function in @qmc.qkernel "
                 f"manually."
             ) from e
