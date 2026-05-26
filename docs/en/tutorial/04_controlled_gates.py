@@ -25,10 +25,48 @@
 # Install the latest Qamomile from pip.
 # # !pip install qamomile
 
+# %%
+import math
+
+import qamomile.circuit as qmc
+
 # %% [markdown]
 # ## 1. The minimal example: controlled-RX
 #
-# *(to be written)*
+# The smallest useful application of `qmc.control` is wrapping a
+# single built-in rotation. `qmc.rx(q, angle)` is a one-qubit
+# gate; passing it to `qmc.control` produces a two-qubit
+# controlled-RX.
+
+
+# %%
+@qmc.qkernel
+def crx_demo() -> qmc.Bit:
+    c = qmc.qubit(name="c")
+    t = qmc.qubit(name="t")
+    # Drive the control to |1> so the controlled rotation fires.
+    c = qmc.x(c)
+    crx = qmc.control(qmc.rx)
+    c, t = crx(c, t, angle=math.pi)
+    return qmc.measure(t)
+
+
+crx_demo.draw()
+
+# %% [markdown]
+# Three things to notice at the call site:
+#
+# - `qmc.control(qmc.rx)` is evaluated at *decoration time*. The
+#   returned `ControlledGate` (here bound to `crx`) is a reusable
+#   value; you can stash it in a variable and call it multiple
+#   times.
+# - When you call `crx(c, t, angle=...)`, the control qubits come
+#   first as positional arguments, then the targets, then any
+#   classical keyword arguments. The order mirrors the wrapped
+#   `qmc.rx(q, angle)` signature with one extra control prefixed.
+# - The keyword name for the classical parameter is whatever the
+#   wrapped function uses (`angle` for `qmc.rx`, `theta` for
+#   `qmc.p`, etc.) — `qmc.control` does not rename it.
 
 # %% [markdown]
 # ## 2. Two modes at a glance
