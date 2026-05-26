@@ -178,10 +178,8 @@ def _wrap_aoa_state_dicke(
     betas: qmc.Vector[qmc.Float],
     pair_indices_mixer: qmc.Matrix[qmc.UInt],
     initial_ones: qmc.Vector[qmc.UInt],
-    pair_indices_dicke: qmc.Matrix[qmc.UInt],
-    triplets_indices_dicke: qmc.Matrix[qmc.UInt],
-    pair_angles_dicke: qmc.Vector[qmc.Float],
-    triplets_angles_dicke: qmc.Vector[qmc.Float],
+    pairs_dicke: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    triplets_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
     q = aoa_state_dicke(
         p=p,
@@ -192,10 +190,8 @@ def _wrap_aoa_state_dicke(
         betas=betas,
         pair_indices_mixer=pair_indices_mixer,
         initial_ones=initial_ones,
-        pair_indices_dicke=pair_indices_dicke,
-        triplets_indices_dicke=triplets_indices_dicke,
-        pair_angles_dicke=pair_angles_dicke,
-        triplets_angles_dicke=triplets_angles_dicke,
+        pairs_dicke=pairs_dicke,
+        triplets_dicke=triplets_dicke,
     )
     return qmc.measure(q)
 
@@ -233,10 +229,8 @@ def _wrap_aoa_state_dicke_expval(
     betas: qmc.Vector[qmc.Float],
     pair_indices_mixer: qmc.Matrix[qmc.UInt],
     initial_ones: qmc.Vector[qmc.UInt],
-    pair_indices_dicke: qmc.Matrix[qmc.UInt],
-    triplets_indices_dicke: qmc.Matrix[qmc.UInt],
-    pair_angles_dicke: qmc.Vector[qmc.Float],
-    triplets_angles_dicke: qmc.Vector[qmc.Float],
+    pairs_dicke: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    triplets_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
     hamiltonian: qmc.Observable,
 ) -> qmc.Float:
     q = aoa_state_dicke(
@@ -248,10 +242,8 @@ def _wrap_aoa_state_dicke_expval(
         betas=betas,
         pair_indices_mixer=pair_indices_mixer,
         initial_ones=initial_ones,
-        pair_indices_dicke=pair_indices_dicke,
-        triplets_indices_dicke=triplets_indices_dicke,
-        pair_angles_dicke=pair_angles_dicke,
-        triplets_angles_dicke=triplets_angles_dicke,
+        pairs_dicke=pairs_dicke,
+        triplets_dicke=triplets_dicke,
     )
     return qmc.expval(q, hamiltonian)
 
@@ -400,10 +392,8 @@ def test_aoa_state_dicke_expval_z_sum_is_zero(name, TranspilerCls):
 
     (
         initial_ones,
-        pair_indices_dicke,
-        triplets_indices_dicke,
-        pair_angles_dicke,
-        triplets_angles_dicke,
+        pairs_dicke,
+        triplets_dicke,
     ) = dicke_state_composition_schedule(n_qubits=2, block_size=2, hamming_weight=1)
 
     H = qm_o.Z(0) + qm_o.Z(1)
@@ -420,10 +410,8 @@ def test_aoa_state_dicke_expval_z_sum_is_zero(name, TranspilerCls):
             "betas": [0.0],
             "pair_indices_mixer": np.asarray([(0, 1)], dtype=np.uint64),
             "initial_ones": initial_ones,
-            "pair_indices_dicke": pair_indices_dicke,
-            "triplets_indices_dicke": triplets_indices_dicke,
-            "pair_angles_dicke": pair_angles_dicke,
-            "triplets_angles_dicke": triplets_angles_dicke,
+            "pairs_dicke": pairs_dicke,
+            "triplets_dicke": triplets_dicke,
             "hamiltonian": H,
         },
     )
@@ -527,10 +515,8 @@ def _wrap_hubo_aoa_state_dicke(
     betas: qmc.Vector[qmc.Float],
     pair_indices_mixer: qmc.Matrix[qmc.UInt],
     initial_ones: qmc.Vector[qmc.UInt],
-    pair_indices_dicke: qmc.Matrix[qmc.UInt],
-    triplets_indices_dicke: qmc.Matrix[qmc.UInt],
-    pair_angles_dicke: qmc.Vector[qmc.Float],
-    triplets_angles_dicke: qmc.Vector[qmc.Float],
+    pairs_dicke: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    triplets_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
     q = hubo_aoa_state_dicke(
         p=p,
@@ -542,10 +528,8 @@ def _wrap_hubo_aoa_state_dicke(
         betas=betas,
         pair_indices_mixer=pair_indices_mixer,
         initial_ones=initial_ones,
-        pair_indices_dicke=pair_indices_dicke,
-        triplets_indices_dicke=triplets_indices_dicke,
-        pair_angles_dicke=pair_angles_dicke,
-        triplets_angles_dicke=triplets_angles_dicke,
+        pairs_dicke=pairs_dicke,
+        triplets_dicke=triplets_dicke,
     )
     return qmc.measure(q)
 
@@ -618,10 +602,8 @@ def test_aoa_state_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n,
 
     (
         initial_ones,
-        pair_indices_dicke,
-        triplets_indices_dicke,
-        pair_angles_dicke,
-        triplets_angles_dicke,
+        pairs_dicke,
+        triplets_dicke,
     ) = dicke_state_composition_schedule(n_qubits=n, block_size=n, hamming_weight=k)
 
     transpiler = TranspilerCls()
@@ -636,10 +618,8 @@ def test_aoa_state_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n,
             "betas": [0.0],
             "pair_indices_mixer": np.asarray([(0, 1)], dtype=np.uint64),
             "initial_ones": initial_ones,
-            "pair_indices_dicke": pair_indices_dicke,
-            "triplets_indices_dicke": triplets_indices_dicke,
-            "pair_angles_dicke": pair_angles_dicke,
-            "triplets_angles_dicke": triplets_angles_dicke,
+            "pairs_dicke": pairs_dicke,
+            "triplets_dicke": triplets_dicke,
         },
     )
     job = exe.sample(transpiler.executor(), shots=32)
@@ -721,10 +701,8 @@ def test_hubo_aoa_state_dicke_sample_preserves_hamming_weight(name, TranspilerCl
 
     (
         initial_ones,
-        pair_indices_dicke,
-        triplets_indices_dicke,
-        pair_angles_dicke,
-        triplets_angles_dicke,
+        pairs_dicke,
+        triplets_dicke,
     ) = dicke_state_composition_schedule(n_qubits=n, block_size=n, hamming_weight=k)
 
     transpiler = TranspilerCls()
@@ -740,10 +718,8 @@ def test_hubo_aoa_state_dicke_sample_preserves_hamming_weight(name, TranspilerCl
             "betas": [0.0],
             "pair_indices_mixer": np.asarray([(0, 1)], dtype=np.uint64),
             "initial_ones": initial_ones,
-            "pair_indices_dicke": pair_indices_dicke,
-            "triplets_indices_dicke": triplets_indices_dicke,
-            "pair_angles_dicke": pair_angles_dicke,
-            "triplets_angles_dicke": triplets_angles_dicke,
+            "pairs_dicke": pairs_dicke,
+            "triplets_dicke": triplets_dicke,
         },
     )
     job = exe.sample(transpiler.executor(), shots=32)

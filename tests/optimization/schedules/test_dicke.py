@@ -10,57 +10,57 @@ from qamomile.optimization.schedules.dicke import (
 def test_bartschi_eidenbenz_schedule_first_column_matches_scs_formula():
     """Tests that the first column of bartschi_eidenbenz_schedule(4,2) matches the SCS angle formula.
 
-    The topmost column (n=4, k_sub=2) yields pair index [2,3], triplet index [1,2,3],
-    pair angle 2*arccos(1/sqrt(4)), and triplet angle 2*arccos(sqrt(2/4)). These
-    values are derived from the Bartschi-Eidenbenz SCS formula.
+    The topmost column (n=4, k_sub=2) yields pair (2,3) with angle 2*arccos(1/sqrt(4)),
+    and triplet (1,2,3) with angle 2*arccos(sqrt(2/4)). These values are derived from
+    the Bartschi-Eidenbenz SCS formula.
     """
-    pair_indices, triplets_indices, pair_angles, triplets_angles = (
-        bartschi_eidenbenz_schedule(4, 2)
-    )
+    pairs, triplets = bartschi_eidenbenz_schedule(4, 2)
 
-    np.testing.assert_array_equal(pair_indices[0], [2, 3])
-    np.testing.assert_array_equal(triplets_indices[0], [1, 2, 3])
-    np.testing.assert_allclose(pair_angles[0], 2 * np.arccos(1 / np.sqrt(4)))
-    np.testing.assert_allclose(triplets_angles[0], 2 * np.arccos(np.sqrt(2 / 4)))
+    assert (2, 3) in pairs
+    np.testing.assert_allclose(pairs[(2, 3)], 2 * np.arccos(1 / np.sqrt(4)))
+
+    assert (1, 2, 3) in triplets
+    np.testing.assert_allclose(triplets[(1, 2, 3)], 2 * np.arccos(np.sqrt(2 / 4)))
 
 
 def test_bartschi_eidenbenz_schedule_stacks_columns_in_descending_size_order():
     """Tests that bartschi_eidenbenz_schedule concatenates SCS columns in descending qubit-register order."""
-    pair_indices, triplets_indices, pair_angles, triplets_angles = (
-        bartschi_eidenbenz_schedule(4, 2)
-    )
+    pairs, triplets = bartschi_eidenbenz_schedule(4, 2)
 
-    expected_pairs = np.asarray([[2, 3], [1, 2], [0, 1]], dtype=np.uint32)
-    expected_triplets = np.asarray([[1, 2, 3], [0, 1, 2]], dtype=np.uint32)
+    expected_pair_keys = {(2, 3), (1, 2), (0, 1)}
+    expected_triplet_keys = {(1, 2, 3), (0, 1, 2)}
 
-    np.testing.assert_array_equal(pair_indices, expected_pairs)
-    np.testing.assert_array_equal(triplets_indices, expected_triplets)
-    assert pair_angles.shape == (3,)
-    assert triplets_angles.shape == (2,)
+    assert set(pairs.keys()) == expected_pair_keys
+    assert set(triplets.keys()) == expected_triplet_keys
+    assert len(pairs) == 3
+    assert len(triplets) == 2
 
 
 def test_dicke_state_composition_schedule_repeats_local_schedule_per_block():
     """Tests that dicke_state_composition_schedule tiles the local BE schedule across blocks with correct index offsets."""
-    initial_ones, pair_indices, triplets_indices, pair_angles, triplets_angles = (
-        dicke_state_composition_schedule(n_qubits=6, block_size=3, hamming_weight=2)
+    initial_ones, pairs, triplets = dicke_state_composition_schedule(
+        n_qubits=6, block_size=3, hamming_weight=2
     )
-    local_pairs, local_triplets, local_pair_angles, local_triplets_angles = (
-        bartschi_eidenbenz_schedule(3, 2)
-    )
+    local_pairs, local_triplets = bartschi_eidenbenz_schedule(3, 2)
 
     expected_initial_ones = np.asarray([1, 2, 4, 5], dtype=np.uint32)
-    expected_pair_indices = np.vstack([local_pairs, local_pairs + 3]).astype(np.uint32)
-    expected_triplets_indices = np.vstack([local_triplets, local_triplets + 3]).astype(
-        np.uint32
-    )
-    expected_pair_angles = np.tile(local_pair_angles, 2)
-    expected_triplets_angles = np.tile(local_triplets_angles, 2)
-
     np.testing.assert_array_equal(initial_ones, expected_initial_ones)
-    np.testing.assert_array_equal(pair_indices, expected_pair_indices)
-    np.testing.assert_array_equal(triplets_indices, expected_triplets_indices)
-    np.testing.assert_allclose(pair_angles, expected_pair_angles)
-    np.testing.assert_allclose(triplets_angles, expected_triplets_angles)
+
+    # Both blocks should appear: block 0 (offset 0) and block 1 (offset 3).
+    for (t, c), angle in local_pairs.items():
+        assert (t, c) in pairs
+        np.testing.assert_allclose(pairs[(t, c)], angle)
+        assert (t + 3, c + 3) in pairs
+        np.testing.assert_allclose(pairs[(t + 3, c + 3)], angle)
+
+    for (t, c1, c2), angle in local_triplets.items():
+        assert (t, c1, c2) in triplets
+        np.testing.assert_allclose(triplets[(t, c1, c2)], angle)
+        assert (t + 3, c1 + 3, c2 + 3) in triplets
+        np.testing.assert_allclose(triplets[(t + 3, c1 + 3, c2 + 3)], angle)
+
+    assert len(pairs) == 2 * len(local_pairs)
+    assert len(triplets) == 2 * len(local_triplets)
 
 
 @pytest.mark.parametrize(
@@ -68,15 +68,11 @@ def test_dicke_state_composition_schedule_repeats_local_schedule_per_block():
     [(1, 0), (4, 0), (4, 4), (6, 6)],
 )
 def test_bartschi_eidenbenz_schedule_early_return_for_trivial_weights(n_dicke, k_dicke):
-    """Tests that k=0 and k=n_dicke return empty arrays (Dicke state is already a basis state)."""
-    pair_indices, triplets_indices, pair_angles, triplets_angles = bartschi_eidenbenz_schedule(
-        n_dicke, k_dicke
-    )
+    """Tests that k=0 and k=n_dicke return empty dicts (Dicke state is already a basis state)."""
+    pairs, triplets = bartschi_eidenbenz_schedule(n_dicke, k_dicke)
 
-    assert pair_indices.size == 0
-    assert triplets_indices.size == 0
-    assert pair_angles.size == 0
-    assert triplets_angles.size == 0
+    assert len(pairs) == 0
+    assert len(triplets) == 0
 
 
 @pytest.mark.parametrize(

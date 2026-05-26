@@ -238,7 +238,7 @@ from qamomile.circuit.visualization import MatplotlibDrawer
 
 #We can access the internal logic of the convertor to get the indices for dicke state preparation and mixer construction.
 #This is useful for visualizing but not part of the normal user workflow.
-initial_ones,pair_indices_dicke,triplets_indices_dicke,pair_angles_dicke,triplets_angles_dicke=converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
+initial_ones, pairs_dicke, triplets_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
 resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
 
 block = transpiler.to_block(
@@ -250,10 +250,8 @@ block = transpiler.to_block(
         "p": 1,
         "pair_indices_mixer": resolved_pair,
         "initial_ones": initial_ones,
-        "pair_indices_dicke": pair_indices_dicke,
-        "triplets_indices_dicke": triplets_indices_dicke,
-        "pair_angles_dicke": pair_angles_dicke,
-        "triplets_angles_dicke": triplets_angles_dicke,
+        "pairs_dicke": pairs_dicke,
+        "triplets_dicke": triplets_dicke,
     },
     parameters=["gammas", "betas"],
 )
@@ -294,10 +292,8 @@ block = transpiler.to_block(
     bindings={
         "n": converter.spin_model.num_bits,
         "initial_ones": initial_ones,
-        "pair_indices": pair_indices_dicke,
-        "triplets_indices": triplets_indices_dicke,
-        "pair_angles": pair_angles_dicke,
-        "triplets_angles": triplets_angles_dicke,
+        "pairs": pairs_dicke,
+        "triplets": triplets_dicke,
     },
     parameters=[],
 )

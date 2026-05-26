@@ -142,18 +142,14 @@ def _wrap_scs_gate_3q(
 def _wrap_prepare_dicke(
     n: qmc.UInt,
     initial_ones: qmc.Vector[qmc.UInt],
-    pair_indices: qmc.Matrix[qmc.UInt],
-    triplets_indices: qmc.Matrix[qmc.UInt],
-    pair_angles: qmc.Vector[qmc.Float],
-    triplets_angles: qmc.Vector[qmc.Float],
+    pairs: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    triplets: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
     q = prepare_dicke(
         n,
         initial_ones,
-        pair_indices,
-        triplets_indices,
-        pair_angles,
-        triplets_angles,
+        pairs,
+        triplets,
     )
     return qmc.measure(q)
 
@@ -162,19 +158,15 @@ def _wrap_prepare_dicke(
 def _wrap_prepare_dicke_expval(
     n: qmc.UInt,
     initial_ones: qmc.Vector[qmc.UInt],
-    pair_indices: qmc.Matrix[qmc.UInt],
-    triplets_indices: qmc.Matrix[qmc.UInt],
-    pair_angles: qmc.Vector[qmc.Float],
-    triplets_angles: qmc.Vector[qmc.Float],
+    pairs: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    triplets: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
     hamiltonian: qmc.Observable,
 ) -> qmc.Float:
     q = prepare_dicke(
         n,
         initial_ones,
-        pair_indices,
-        triplets_indices,
-        pair_angles,
-        triplets_angles,
+        pairs,
+        triplets,
     )
     return qmc.expval(q, hamiltonian)
 
@@ -239,10 +231,8 @@ def test_prepare_dicke_applies_basis_initialization_and_scs_rotations(
     """Tests that prepare_dicke applies X gates for initial Hamming weight and the correct number of SCS rotation gates."""
     (
         initial_ones,
-        pair_indices,
-        triplets_indices,
-        pair_angles,
-        triplets_angles,
+        pairs,
+        triplets,
     ) = dicke_state_composition_schedule(n_qubits=3, block_size=3, hamming_weight=2)
 
     transpiler = TranspilerCls()
@@ -251,16 +241,14 @@ def test_prepare_dicke_applies_basis_initialization_and_scs_rotations(
         bindings={
             "n": 3,
             "initial_ones": initial_ones,
-            "pair_indices": pair_indices,
-            "triplets_indices": triplets_indices,
-            "pair_angles": pair_angles,
-            "triplets_angles": triplets_angles,
+            "pairs": pairs,
+            "triplets": triplets,
         },
     )
 
     expected_x = len(initial_ones)
-    expected_ry = 2 * len(pair_indices) + 4 * len(triplets_indices)
-    expected_cx = 4 * len(pair_indices) + 6 * len(triplets_indices)
+    expected_ry = 2 * len(pairs) + 4 * len(triplets)
+    expected_cx = 4 * len(pairs) + 6 * len(triplets)
 
     match name:
         case "qiskit":
@@ -291,10 +279,8 @@ def test_prepare_dicke_expval_z_sum_is_zero(name, TranspilerCls):
     """
     (
         initial_ones,
-        pair_indices,
-        triplets_indices,
-        pair_angles,
-        triplets_angles,
+        pairs,
+        triplets,
     ) = dicke_state_composition_schedule(n_qubits=2, block_size=2, hamming_weight=1)
 
     H = qm_o.Z(0) + qm_o.Z(1)
@@ -305,10 +291,8 @@ def test_prepare_dicke_expval_z_sum_is_zero(name, TranspilerCls):
         bindings={
             "n": 2,
             "initial_ones": initial_ones,
-            "pair_indices": pair_indices,
-            "triplets_indices": triplets_indices,
-            "pair_angles": pair_angles,
-            "triplets_angles": triplets_angles,
+            "pairs": pairs,
+            "triplets": triplets,
             "hamiltonian": H,
         },
     )
@@ -339,7 +323,7 @@ def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
     contributes (n-k) qubits in |0> (+1 eigenvalue) and k qubits in |1>
     (-1 eigenvalue), giving <sum Z_i> = (n-k) - k = n - 2k.
     """
-    initial_ones, pair_indices, triplets_indices, pair_angles, triplets_angles = (
+    initial_ones, pairs, triplets = (
         dicke_state_composition_schedule(n_qubits=n, block_size=n, hamming_weight=k)
     )
 
@@ -353,10 +337,8 @@ def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
         bindings={
             "n": n,
             "initial_ones": initial_ones,
-            "pair_indices": pair_indices,
-            "triplets_indices": triplets_indices,
-            "pair_angles": pair_angles,
-            "triplets_angles": triplets_angles,
+            "pairs": pairs,
+            "triplets": triplets,
             "hamiltonian": H,
         },
     )
@@ -382,7 +364,7 @@ def test_prepare_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n, k
     For |D^n_k>, every bitstring in the equal superposition has exactly k set bits,
     so all measurement outcomes must have Hamming weight k.
     """
-    initial_ones, pair_indices, triplets_indices, pair_angles, triplets_angles = (
+    initial_ones, pairs, triplets = (
         dicke_state_composition_schedule(n_qubits=n, block_size=n, hamming_weight=k)
     )
 
@@ -392,10 +374,8 @@ def test_prepare_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n, k
         bindings={
             "n": n,
             "initial_ones": initial_ones,
-            "pair_indices": pair_indices,
-            "triplets_indices": triplets_indices,
-            "pair_angles": pair_angles,
-            "triplets_angles": triplets_angles,
+            "pairs": pairs,
+            "triplets": triplets,
         },
     )
 

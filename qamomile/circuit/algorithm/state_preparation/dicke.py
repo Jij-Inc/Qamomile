@@ -90,17 +90,44 @@ def scs_gate_3q(
 
 
 @qmc.qkernel
+def _apply_triplet_if_stage_matches(
+    q: qmc.Vector[qmc.Qubit],
+    indices: qmc.Vector[qmc.UInt],
+    angle3: qmc.Float,
+    stage_c: qmc.UInt,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a 3-qubit SCS gate only when the triplet belongs to the current stage.
+
+    A triplet with key ``[t, c1, c2]`` belongs to the stage whose pair gate has
+    control qubit ``c``. The match condition is ``c2 == c``. This helper exists
+    as a separate qkernel so that the conditional is compiled in an isolated
+    scope that contains no Dict handles — avoiding a phi-merge failure that
+    would occur if the ``if`` were placed directly inside ``qmc.items(triplets)``.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Qubit register.
+        indices (qmc.Vector[qmc.UInt]): Length-3 index vector ``[t, c1, c2]``.
+        angle3 (qmc.Float): Rotation angle for the 3-qubit SCS gate.
+        stage_c (qmc.UInt): Control qubit index of the current pair stage.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated qubit register (unchanged when ``indices[2] != stage_c``).
+    """
+    if indices[2] == stage_c:
+        q = scs_gate_3q(q, indices[0], indices[1], indices[2], angle3)
+    return q
+
+
+@qmc.qkernel
 def prepare_dicke(
     n: qmc.UInt,
     initial_ones: qmc.Vector[qmc.UInt],
-    pair_indices: qmc.Matrix[qmc.UInt],
-    triplets_indices: qmc.Matrix[qmc.UInt],
-    pair_angles: qmc.Vector[qmc.Float],
-    triplets_angles: qmc.Vector[qmc.Float],
+    pairs: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    triplets: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Qubit]:
     """Prepare a Dicke state using the Bartschi-Eidenbenz SCS construction.
 
-    The schedule arrays must be precomputed with
+    The schedule dicts must be precomputed with
     :func:`~qamomile.optimization.schedules.dicke.bartschi_eidenbenz_schedule`
     (single block) or
     :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`
@@ -110,20 +137,22 @@ def prepare_dicke(
         n (qmc.UInt): Number of qubits in the register.
         initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are
             initially in the ``|1>`` state.
-        pair_indices (qmc.Matrix[qmc.UInt]): Precomputed indices for the 2-qubit SCS blocks.
-        triplets_indices (qmc.Matrix[qmc.UInt]): Precomputed indices for the 3-qubit SCS blocks.
-        pair_angles (qmc.Vector[qmc.Float]): Precomputed angles for the 2-qubit SCS blocks.
-        triplets_angles (qmc.Vector[qmc.Float]): Precomputed angles for the 3-qubit SCS blocks.
+        pairs (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Precomputed
+            mapping from ``(t, c)`` qubit index pairs to rotation angles for the
+            2-qubit SCS blocks.
+        triplets (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Precomputed mapping
+            from ``(t, c1, c2)`` qubit index triples to rotation angles for the
+            3-qubit SCS blocks. Keys are length-3 index vectors.
 
     Returns:
         qmc.Vector[qmc.Qubit]: Qubit register prepared in the Dicke state.
 
     Example:
         >>> from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
-        >>> initial_ones, pi, ti, pa, ta = dicke_state_composition_schedule(
+        >>> initial_ones, pairs, triplets = dicke_state_composition_schedule(
         ...     n_qubits=4, block_size=4, hamming_weight=1
         ... )
-        >>> q = prepare_dicke(4, initial_ones, pi, ti, pa, ta)
+        >>> q = prepare_dicke(4, initial_ones, pairs, triplets)
     """
     q = qmc.qubit_array(n, name="q")
 
@@ -133,26 +162,13 @@ def prepare_dicke(
         q[qubit_index] = qmc.x(q[qubit_index])
 
     # Apply SCS stages in the same order as bartschi_eidenbenz_schedule.
-    # Each stage consists of one 2-qubit SCS gate and (k-1) 3-qubit SCS gates.
-    # Schedule invariant: triplets belonging to one stage share
-    # triplets_indices[row, 2] == pair_indices[stage, 1] (same c2 wire).
-    for stage_idx in qmc.range(pair_indices.shape[0]):
-        q = scs_gate_2q(
-            q,
-            pair_indices[stage_idx, 0],
-            pair_indices[stage_idx, 1],
-            pair_angles[stage_idx],
-        )
-
-        stage_c2 = pair_indices[stage_idx, 1]
-        for triplet_row in qmc.range(triplets_indices.shape[0]):
-            if triplets_indices[triplet_row, 2] == stage_c2:
-                q = scs_gate_3q(
-                    q,
-                    triplets_indices[triplet_row, 0],  # t (target)
-                    triplets_indices[triplet_row, 1],  # c1 (first control)
-                    triplets_indices[triplet_row, 2],  # c2 (second control)
-                    triplets_angles[triplet_row],
-                )
+    # Each pair (t, c) defines one stage; triplets with matching c2 == c
+    # belong to that stage and are applied immediately after the pair gate.
+    # The conditional is isolated in _apply_triplet_if_stage_matches so that
+    # the Dict handle for triplets never enters the phi-variable list of an if.
+    for (t, c), angle in pairs.items():
+        q = scs_gate_2q(q, t, c, angle)
+        for indices, angle3 in qmc.items(triplets):
+            q = _apply_triplet_if_stage_matches(q, indices, angle3, c)
 
     return q
