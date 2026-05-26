@@ -744,11 +744,13 @@ class MatplotlibRenderer:
             )
 
             # When the wrapped unitary is raised to a power, draw an
-            # outer dashed wrapper that encloses both the control dots
-            # and the target box, with a ``pow=N`` annotation top-right.
-            # This mirrors the rendering of an expanded controlled-U
-            # block by ``_draw_block_border`` so the collapsed and
-            # inline views stay visually consistent.
+            # outer dashed wrapper that hugs the *target* box (not the
+            # controls), with a ``pow=N`` annotation in the top-right
+            # corner of that wrapper.  The vertical line and control
+            # dots stay outside, exactly the way an inline-expanded
+            # controlled-U (``VInlineBlock``) renders the same op, so
+            # the collapsed and inline views look like the same shape
+            # at two different zoom levels.
             if getattr(node, "power", 1) > 1:
                 margin = self.style.power_wrapper_margin
                 lp = self.style.label_padding
@@ -760,9 +762,9 @@ class MatplotlibRenderer:
 
                 outer_left = x_pos - width / 2 - margin
                 outer_right = x_pos + width / 2 + margin
-                outer_bottom = min(all_y) - self.style.gate_height / 2 - margin
+                outer_bottom = min_target_y - self.style.gate_height / 2 - margin
                 outer_top = (
-                    max(max(all_y), max_target_y)
+                    max_target_y
                     + self.style.gate_height / 2
                     + margin
                     + pow_label_height
