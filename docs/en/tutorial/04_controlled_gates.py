@@ -19,7 +19,38 @@
 #
 # # Controlling Gates and Sub-Kernels with `qmc.control`
 #
-# *(intro paragraph — to be written)*
+# [Tutorial 03](03_vector_slicing.ipynb) showed how `VectorView`
+# slices let one helper kernel operate on a contiguous chunk of a
+# larger register. This chapter is about a related but distinct
+# building block: turning *any* gate — a built-in like `qmc.rx`,
+# or a user-defined `@qmc.qkernel` — into a *controlled* version
+# of itself with `qmc.control`.
+#
+# `qmc.control(fn)` returns a reusable `ControlledGate` wrapper.
+# When you call the wrapper inside a `@qmc.qkernel`, it emits a
+# controlled-U whose target body is `fn`. The wrapper has two
+# modes: *concrete* (the number of control qubits is a Python
+# `int`) and *symbolic* (the number is a `qmc.UInt` kernel
+# parameter, resolved at transpile time). Most features —
+# `power=`, default args, sub-kernels that take `Vector[Qubit]`,
+# reordering classical kwargs — work the same way in both
+# modes. A handful of features are specific to one mode or the
+# other.
+#
+# The chapter is organised around exactly that split:
+#
+# - **Sections 1 and 2** introduce the minimal example and the
+#   concrete-vs-symbolic distinction.
+# - **Section 3** collects the patterns that work in *both* modes.
+# - **Section 4** covers the patterns that work only in
+#   *concrete* mode.
+# - **Section 5** covers the patterns that work only in
+#   *symbolic* mode.
+# - **Section 6** catalogues the call shapes the API *rejects*,
+#   each cell asserting the exact exception type. This doubles as
+#   a regression test: if a future change loses or alters one of
+#   these checks, the docs build fails.
+# - **Section 7** is a short decision-rule summary.
 
 # %%
 # Install the latest Qamomile from pip.
@@ -752,4 +783,32 @@ expect_error(
 # %% [markdown]
 # ## 7. Summary
 #
-# *(to be written)*
+# `qmc.control(fn, num_controls=...)` returns a reusable
+# `ControlledGate`. The right mental model is a two-axis matrix
+# rather than two separate APIs:
+#
+# - **Mode is the type of `num_controls`.** Python `int` puts
+#   you in *concrete* mode; a `qmc.UInt` handle (or any `UInt`
+#   expression like `n - 1`) puts you in *symbolic* mode.
+# - **Most features are mode-agnostic.** Wrapping any callable
+#   (built-in or `@qmc.qkernel`), sub-kernels that take
+#   `Vector[Qubit]`, defaults from the wrapped signature,
+#   classical-kwarg reordering, and `power=` all work the same
+#   way in either mode (Section 3).
+# - **A few features are mode-specific.** Multiple separate
+#   positional control arguments and scalar-plus-`VectorView`
+#   mixing are concrete-only (Section 4). The single-pool call
+#   shape, `num_controls = <UInt expression>`, and the subset
+#   selector `controlled_indices=` are symbolic-only (Section 5).
+#
+# Practical decision rule: reach for *symbolic* mode whenever
+# the control count is a kernel parameter or an expression over
+# one — including the very common "all but one" form
+# `num_controls=n - 1`. Reach for *concrete* mode when the count
+# is a literal and the controls live on specific qubits you can
+# name.
+#
+# Section 6 doubles as a regression test for the validation
+# rules of both modes: every rejected shape asserts the
+# expected exception type, so a change that loses (or alters) a
+# check would surface immediately in the docs build.
