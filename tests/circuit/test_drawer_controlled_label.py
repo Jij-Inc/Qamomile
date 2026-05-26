@@ -160,3 +160,76 @@ def test_controlled_box_power_defaults_to_one() -> None:
 
     box = _controlled_u_box(kernel)
     assert box.power == 1, box.power
+
+
+def _controlled_u_box_with_bindings(kernel, **bindings) -> VGate:
+    """Same as ``_controlled_u_box`` but threads concrete bindings through.
+
+    Args:
+        kernel: A ``@qmc.qkernel`` whose top-level Block contains
+            exactly one ``ControlledUOperation``.
+        **bindings: Concrete values for kernel parameters, used so
+            symbolic ``UInt`` indices can be resolved.
+
+    Returns:
+        VGate: The CONTROLLED_U_BOX node produced for the kernel.
+    """
+    graph = kernel._build_graph_for_visualization(**bindings)
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    vc = analyzer.build_visual_ir(graph, qubit_map, qubit_names, num_qubits)
+    boxes = [
+        n
+        for n in vc.children
+        if isinstance(n, VGate) and n.kind is VGateKind.CONTROLLED_U_BOX
+    ]
+    assert len(boxes) == 1, (
+        f"expected exactly one CONTROLLED_U_BOX VGate, found {len(boxes)}"
+    )
+    return boxes[0]
+
+
+def test_controlled_box_subset_indices_filter_inactive_pool_slots() -> None:
+    """``controlled_indices`` drops inactive pool slots from VGate.
+
+    The diagram for a ``SymbolicControlledU`` with
+    ``controlled_indices=[0, 1, 2]`` over a 4-qubit pool should
+    show three control dots (the active slots) and skip the fourth
+    one entirely.  ``control_count`` is the active count, not the
+    full pool size, and ``qubit_indices`` no longer includes the
+    inactive pool slot.
+    """
+
+    @qmc.qkernel
+    def kernel(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        pool = qmc.qubit_array(n, "pool")
+        tgt = qmc.qubit(name="tgt")
+        cg = qmc.control(qmc.x, num_controls=k_ctrls)
+        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 2])
+        return qmc.measure(pool)
+
+    box = _controlled_u_box_with_bindings(kernel, n=4, k_ctrls=3)
+    assert box.control_count == 3, box.control_count
+    # qubit_indices = active controls + targets; pool[3] (an inactive
+    # slot) must NOT appear in the control prefix.
+    controls = box.qubit_indices[: box.control_count]
+    assert len(controls) == 3, controls
+
+
+def test_controlled_box_subset_indices_with_uint_entry_resolves_via_bindings() -> None:
+    """``controlled_indices`` entries that involve ``UInt`` arithmetic resolve from bindings."""
+
+    @qmc.qkernel
+    def kernel(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        pool = qmc.qubit_array(n, "pool")
+        tgt = qmc.qubit(name="tgt")
+        cg = qmc.control(qmc.x, num_controls=k_ctrls)
+        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, k_ctrls - 1])
+        return qmc.measure(pool)
+
+    box = _controlled_u_box_with_bindings(kernel, n=4, k_ctrls=3)
+    # k_ctrls=3 so the last index resolves to 2 — the same active
+    # set as the literal case above; pool[3] is still inactive.
+    assert box.control_count == 3, box.control_count
+    controls = box.qubit_indices[: box.control_count]
+    assert len(controls) == 3, controls
