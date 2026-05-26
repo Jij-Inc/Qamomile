@@ -71,7 +71,32 @@ crx_demo.draw()
 # %% [markdown]
 # ## 2. Two modes at a glance
 #
-# *(to be written)*
+# `qmc.control` has two modes. Which one you are in is decided
+# entirely by the type you pass for `num_controls`: a Python
+# `int` puts you in *concrete* mode, a `qmc.UInt` handle (or any
+# `UInt` expression like `n - 1`) puts you in *symbolic* mode.
+# Everything else about the call follows from that choice.
+#
+# | Aspect | Concrete | Symbolic |
+# | --- | --- | --- |
+# | `num_controls=` | Python `int` (default `1`) | `qmc.UInt` handle, or any `UInt` expression |
+# | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | exactly one `Vector[Qubit]` or `VectorView` *pool* |
+# | `controlled_indices=` | not accepted | optional — picks which slots of the pool are active |
+# | Control count resolved at | decoration time | transpile time (from `bindings`) |
+#
+# A short decision rule: reach for *concrete* mode when the
+# control count is a literal you know while writing the qkernel
+# and you want to name each control qubit individually. Reach for
+# *symbolic* mode when the count is a kernel parameter (or an
+# expression over one — `num_controls=n - 1` is the textbook
+# multi-controlled form).
+#
+# Most of `qmc.control`'s features (`power=`, default values,
+# classical-kwarg reordering, sub-kernels that take
+# `Vector[Qubit]`, ...) behave identically in both modes; Section
+# 3 collects those. The handful of features that are mode-specific
+# are split between Section 4 (concrete only) and Section 5
+# (symbolic only).
 
 # %% [markdown]
 # ## 3. Patterns that work in BOTH modes
