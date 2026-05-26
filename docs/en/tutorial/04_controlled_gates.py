@@ -29,10 +29,7 @@
 import math
 
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.errors import (
-    QubitConsumedError,
-    UnreturnedBorrowError,
-)
+from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -186,7 +183,7 @@ vec_target_demo.draw()
 # fills the missing value in via `inspect.Signature.bind +
 # apply_defaults`, so the default reaches the controlled-U just
 # like a normal direct call. (Only `@qmc.qkernel`-wrapped
-# callables can carry defaults — see Section 6.9 for what happens
+# callables can carry defaults — see Section 6.7 for what happens
 # if you try to do the same with a plain Python function.)
 
 
@@ -499,14 +496,12 @@ subset_pool_with_uint.draw(n=4, k_ctrls=3)
 # | --- | --- | --- |
 # | 6.1 control qubit count mismatch | concrete | `ValueError` |
 # | 6.2 `controlled_indices=` in concrete mode | concrete | `ValueError` |
-# | 6.3 same qubit used twice | both | `QubitConsumedError` |
-# | 6.4 symbolic-length `VectorView` in concrete | concrete | `NotImplementedError` |
-# | 6.5 typo in classical kwarg | both | `TypeError` |
-# | 6.6 `bool` / negative / duplicate in `controlled_indices` | symbolic | `TypeError` / `ValueError` |
-# | 6.7 invalid `power` (zero or `bool`) | both | `ValueError` / `TypeError` |
-# | 6.8 `num_controls=0` | both | `ValueError` |
-# | 6.9 plain function with a Python default | both | `TypeError` |
-# | 6.10 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
+# | 6.3 symbolic-length `VectorView` in concrete | concrete | `NotImplementedError` |
+# | 6.4 typo in classical kwarg | both | `TypeError` |
+# | 6.5 invalid `power` (zero or `bool`) | both | `ValueError` / `TypeError` |
+# | 6.6 `num_controls=0` | both | `ValueError` |
+# | 6.7 plain function with a Python default | both | `TypeError` |
+# | 6.8 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
 
 
 # %%
@@ -581,31 +576,7 @@ expect_error(
 )
 
 # %% [markdown]
-# ### 6.3 Using the same qubit twice (both modes)
-#
-# Each `Qubit` handle can be consumed once. Passing the same
-# scalar `Qubit` to both a control and the target — or to two
-# control positions — is caught by the linear-type machinery as a
-# `QubitConsumedError`. The same restriction applies in symbolic
-# mode if the pool argument and another argument share a slot.
-
-
-# %%
-def case_alias() -> None:
-    @qmc.qkernel
-    def kernel() -> qmc.Bit:
-        q = qmc.qubit(name="q")
-        cg = qmc.control(qmc.x)
-        a, b = cg(q, q)  # control and target both reference q
-        return qmc.measure(b)
-
-    _ = kernel.block
-
-
-expect_error("alias (q used twice)", QubitConsumedError, case_alias)
-
-# %% [markdown]
-# ### 6.4 Symbolic-length `VectorView` in concrete mode (concrete)
+# ### 6.3 Symbolic-length `VectorView` in concrete mode (concrete)
 #
 # Concrete mode must compute the qubit count of every control
 # argument at compile time. A slice whose length depends on a
@@ -636,7 +607,7 @@ expect_error(
 )
 
 # %% [markdown]
-# ### 6.5 Typo in a classical keyword argument (both modes)
+# ### 6.4 Typo in a classical keyword argument (both modes)
 #
 # `qmc.control` inspects the wrapped kernel's signature, so an
 # unknown keyword name is caught at compose time. The error
@@ -663,63 +634,7 @@ def case_kwarg_typo() -> None:
 expect_error("classical kwarg typo", TypeError, case_kwarg_typo)
 
 # %% [markdown]
-# ### 6.6 Invalid entries in `controlled_indices` (symbolic)
-#
-# `controlled_indices` is symbolic-mode-only (see 6.2), and its
-# literal entries are validated at compose time:
-#
-# - `bool` values (`True` / `False`) are rejected even though
-#   Python treats them as ints, to prevent the silent
-#   ``True == 1`` / ``False == 0`` confusion. Cast explicitly
-#   to `int(...)` if you really mean that.
-# - Negative literals are rejected — pool indices are unsigned.
-# - Duplicate literals are rejected because each pool slot wires
-#   in at most one active control.
-
-
-# %%
-def case_bool_entry() -> None:
-    @qmc.qkernel
-    def kernel(k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-        pool = qmc.qubit_array(3, "pool")
-        tgt = qmc.qubit(name="tgt")
-        cg = qmc.control(qmc.z, num_controls=k_ctrls)
-        pool, tgt = cg(pool, tgt, controlled_indices=[True, 1])
-        return qmc.measure(pool)
-
-    _ = kernel.block
-
-
-def case_negative_entry() -> None:
-    @qmc.qkernel
-    def kernel(k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-        pool = qmc.qubit_array(3, "pool")
-        tgt = qmc.qubit(name="tgt")
-        cg = qmc.control(qmc.z, num_controls=k_ctrls)
-        pool, tgt = cg(pool, tgt, controlled_indices=[-1, 0, 1])
-        return qmc.measure(pool)
-
-    _ = kernel.block
-
-
-def case_duplicate_entry() -> None:
-    @qmc.qkernel
-    def kernel(k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-        pool = qmc.qubit_array(3, "pool")
-        tgt = qmc.qubit(name="tgt")
-        cg = qmc.control(qmc.z, num_controls=k_ctrls)
-        pool, tgt = cg(pool, tgt, controlled_indices=[0, 0, 1])
-        return qmc.measure(pool)
-
-    _ = kernel.block
-
-
-expect_error("controlled_indices: bool entry", TypeError, case_bool_entry)
-expect_error("controlled_indices: negative entry", ValueError, case_negative_entry)
-expect_error("controlled_indices: duplicate entry", ValueError, case_duplicate_entry)
-
-# %% [markdown]
-# ### 6.7 Invalid `power` (both modes)
+# ### 6.5 Invalid `power` (both modes)
 #
 # `power` must be a strictly positive integer (`int` or
 # `qmc.UInt`). Zero and negative values raise `ValueError`. A
@@ -757,7 +672,7 @@ expect_error("power=0", ValueError, case_power_zero)
 expect_error("power=True (bool)", TypeError, case_power_bool)
 
 # %% [markdown]
-# ### 6.8 `num_controls=0` (both modes)
+# ### 6.6 `num_controls=0` (both modes)
 #
 # A controlled gate with zero controls would just be the
 # underlying gate, which makes the wrapper meaningless.
@@ -773,7 +688,7 @@ def case_num_controls_zero() -> None:
 expect_error("num_controls=0", ValueError, case_num_controls_zero)
 
 # %% [markdown]
-# ### 6.9 Plain function with a Python default (both modes)
+# ### 6.7 Plain function with a Python default (both modes)
 #
 # When the callable passed to `qmc.control` is not a `@qmc.qkernel`
 # (just a plain Python function), the wrapper auto-synthesises a
@@ -796,7 +711,7 @@ def case_plain_fn_with_default() -> None:
 expect_error("plain function with default value", TypeError, case_plain_fn_with_default)
 
 # %% [markdown]
-# ### 6.10 Same-pool slot reused as target (symbolic)
+# ### 6.8 Same-pool slot reused as target (symbolic)
 #
 # In symbolic mode the control argument is the *whole* pool, and
 # inactive slots (those not in `controlled_indices`) sit on the
