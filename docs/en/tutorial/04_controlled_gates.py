@@ -354,27 +354,122 @@ mixed_controls_demo.draw()
 # %% [markdown]
 # ## 5. Symbolic-mode-only patterns
 #
-# *(to be written)*
+# These shapes require `num_controls` to be a `qmc.UInt` handle
+# (or any `UInt` expression like `n - 1`). They share two
+# defining properties:
+#
+# - The control argument at the call site is a single pool — a
+#   `Vector[Qubit]` or `VectorView` — not several positional
+#   `Qubit` arguments.
+# - The number of *active* controls is decided at transpile time
+#   from `bindings`, not at decoration time.
+#
+# A `controlled_indices=` keyword is available in symbolic mode
+# only; it picks which slots of the pool actually wire in as
+# active controls (the rest pass through untouched).
 
 # %% [markdown]
 # ### 5.1 `num_controls = n` over a whole pool
 #
-# *(to be written)*
+# The simplest symbolic shape: `num_controls=n` with the entire
+# pool (length `n`) used as the active controls. The kernel
+# parameter `n` is concretised at transpile time via `bindings`,
+# so the same `@qmc.qkernel` source supports any pool size.
+
+
+# %%
+@qmc.qkernel
+def symbolic_pool(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    ctrls = qmc.qubit_array(n, "ctrls")
+    tgt = qmc.qubit(name="tgt")
+    ctrls[0] = qmc.x(ctrls[0])
+    ctrls[1] = qmc.x(ctrls[1])
+    ctrls[2] = qmc.x(ctrls[2])
+    cg = qmc.control(qmc.x, num_controls=n)
+    ctrls, tgt = cg(ctrls, tgt)
+    return qmc.measure(ctrls)
+
+
+symbolic_pool.draw(n=3)
 
 # %% [markdown]
 # ### 5.2 Canonical `n - 1` multi-controlled form
 #
-# *(to be written)*
+# A frequent shape in multi-controlled-X designs: the first
+# `n - 1` qubits of a register become controls, the last one
+# becomes the target. The bound on `num_controls` is the
+# symbolic expression `n - 1`, and the control argument is the
+# slice `qs[0:n - 1]`.
+
+
+# %%
+@qmc.qkernel
+def mcx_demo(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    qs = qmc.qubit_array(n, "qs")
+    qs[0] = qmc.x(qs[0])
+    qs[1] = qmc.x(qs[1])
+    qs[2] = qmc.x(qs[2])
+    mcx = qmc.control(qmc.x, num_controls=n - 1)
+    qs[0 : n - 1], qs[n - 1] = mcx(qs[0 : n - 1], qs[n - 1])
+    return qmc.measure(qs)
+
+
+mcx_demo.draw(n=4)
 
 # %% [markdown]
 # ### 5.3 Selecting a subset with `controlled_indices=`
 #
-# *(to be written)*
+# When the control pool is wider than the number of active
+# controls you want, the `controlled_indices=` keyword (symbolic
+# mode only) picks exactly which pool slots are wired in. The
+# remaining slots are passed through untouched — they sit on the
+# wires but emit no extra gate of their own.
+#
+# In the example the pool `pool` has 4 qubits but only the first
+# three (`controlled_indices=[0, 1, 2]`) act as active controls;
+# `pool[3]` is along for the ride.
+
+
+# %%
+@qmc.qkernel
+def subset_pool(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    pool = qmc.qubit_array(n, "pool")
+    tgt = qmc.qubit(name="tgt")
+    pool[0] = qmc.x(pool[0])
+    pool[1] = qmc.x(pool[1])
+    pool[2] = qmc.x(pool[2])
+    cg = qmc.control(qmc.x, num_controls=k_ctrls)
+    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 2])
+    return qmc.measure(pool)
+
+
+subset_pool.draw(n=4, k_ctrls=3)
 
 # %% [markdown]
 # ### 5.4 `controlled_indices` with `UInt` entries
 #
-# *(to be written)*
+# Each entry inside `controlled_indices` may be a Python `int`
+# literal, a `qmc.UInt` handle, or any arithmetic expression
+# over `UInt` values (such as `k - 1`). Literal-`int` entries
+# are validated at compose time; entries that involve `UInt`
+# handles are validated at transpile time once `bindings` make
+# them concrete.
+
+
+# %%
+@qmc.qkernel
+def subset_pool_with_uint(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    pool = qmc.qubit_array(n, "pool")
+    tgt = qmc.qubit(name="tgt")
+    pool[0] = qmc.x(pool[0])
+    pool[1] = qmc.x(pool[1])
+    pool[2] = qmc.x(pool[2])
+    cg = qmc.control(qmc.x, num_controls=k_ctrls)
+    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, k_ctrls - 1])
+    return qmc.measure(pool)
+
+
+subset_pool_with_uint.draw(n=4, k_ctrls=3)
 
 # %% [markdown]
 # ## 6. Patterns that don't work
