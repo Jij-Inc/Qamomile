@@ -17,7 +17,6 @@ from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
     GateOperation,
-    IndexSpecControlledU,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -633,18 +632,6 @@ class ResourceAllocator:
         qubit_map: QubitMap,
     ) -> None:
         """Allocate resources for a ControlledUOperation."""
-        if isinstance(op, IndexSpecControlledU):
-            # Vector already allocated by QInitOperation.
-            # Map result ArrayValue to same physical qubits.
-            vector_operand = op.operands[0]
-            vector_result = op.results[0]
-            for addr, idx in list(qubit_map.items()):
-                if addr.matches_array(vector_operand.uuid):
-                    result_addr = QubitAddress(vector_result.uuid, addr.element_index)
-                    if result_addr not in qubit_map:
-                        qubit_map[result_addr] = idx
-            return
-
         if isinstance(op, SymbolicControlledU):
             if op.controlled_indices is None:
                 # Without ``controlled_indices`` the constant-folding pass

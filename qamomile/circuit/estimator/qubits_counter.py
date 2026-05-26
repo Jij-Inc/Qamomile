@@ -121,10 +121,13 @@ def _build_controlled_u_child_resolver(
     op: ControlledUOperation,
     resolver: ExprResolver,
 ) -> tuple[Block | None, ExprResolver | None]:
-    """Build child resolver for ControlledUOperation's inner block.
+    """Build a child resolver for the inner block of a ``ControlledUOperation``.
 
-    Handles both index_spec mode (qubit operands identified by index)
-    and the default mode (target_operands mapping).
+    Walks the inner block's input signature against the op's
+    ``target_operands`` so any ``ArrayValue`` size that the caller
+    bound by passing a sized argument is added to the resolver
+    context.  This lets downstream qubit-counting resolve the inner
+    block's symbolic ``Vector[Qubit]`` sizes from the call site.
 
     Returns:
         (controlled_block, child_resolver) or (None, None).
@@ -135,29 +138,15 @@ def _build_controlled_u_child_resolver(
         return None, None
 
     extra: dict[str, sp.Expr] = {}
-    if op.has_index_spec:
-        param_operands = op.operands[1:]
-        param_idx = 0
-        for formal_input in controlled_block.input_values:
-            if not formal_input.type.is_quantum():
-                if param_idx < len(param_operands):
-                    actual_arg = param_operands[param_idx]
-                    if isinstance(actual_arg, ArrayValue) and isinstance(
-                        formal_input, ArrayValue
-                    ):
-                        for df, da in zip(formal_input.shape, actual_arg.shape):
-                            extra[df.uuid] = resolver.resolve(da)
-                    param_idx += 1
-    else:
-        target_operands = op.target_operands
-        for formal_idx, formal_input in enumerate(controlled_block.input_values):
-            if formal_idx < len(target_operands):
-                actual_arg = target_operands[formal_idx]
-                if isinstance(actual_arg, ArrayValue) and isinstance(
-                    formal_input, ArrayValue
-                ):
-                    for df, da in zip(formal_input.shape, actual_arg.shape):
-                        extra[df.uuid] = resolver.resolve(da)
+    target_operands = op.target_operands
+    for formal_idx, formal_input in enumerate(controlled_block.input_values):
+        if formal_idx < len(target_operands):
+            actual_arg = target_operands[formal_idx]
+            if isinstance(actual_arg, ArrayValue) and isinstance(
+                formal_input, ArrayValue
+            ):
+                for df, da in zip(formal_input.shape, actual_arg.shape):
+                    extra[df.uuid] = resolver.resolve(da)
 
     ctx = resolver.context
     ctx.update(extra)

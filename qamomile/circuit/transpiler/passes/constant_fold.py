@@ -15,7 +15,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.value import Value, ValueBase
@@ -409,8 +408,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
         operands (recursively, so nested array accesses like
         ``q[indices[uint_tmp]]`` are fully resolved).
 
-        For ``ControlledUOperation``, also folds ``num_controls``,
-        ``target_indices``, and ``controlled_indices`` fields.
+        For ``ControlledUOperation``, also folds ``num_controls`` and
+        ``controlled_indices`` fields.
         """
         new_operands: list[Any] = []
         changed = False
@@ -444,36 +443,10 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     extra_kwargs["power"] = new_power
                     changed = True
 
-            if isinstance(result_op, IndexSpecControlledU):
-                # Fold num_controls if symbolic.
-                if isinstance(result_op.num_controls, Value):
-                    new_nc = self._resolve_field_value(
-                        result_op.num_controls, folded_values
-                    )
-                    if new_nc is not result_op.num_controls:
-                        extra_kwargs["num_controls"] = new_nc
-                        changed = True
-                # Fold target_indices list.
-                if result_op.target_indices is not None:
-                    new_ti = self._fold_value_list(
-                        result_op.target_indices, folded_values
-                    )
-                    if new_ti is not None:
-                        extra_kwargs["target_indices"] = new_ti
-                        changed = True
-                # Fold controlled_indices list.
-                if result_op.controlled_indices is not None:
-                    new_ci = self._fold_value_list(
-                        result_op.controlled_indices, folded_values
-                    )
-                    if new_ci is not None:
-                        extra_kwargs["controlled_indices"] = new_ci
-                        changed = True
-            elif isinstance(result_op, SymbolicControlledU):
+            if isinstance(result_op, SymbolicControlledU):
                 # Always fold the ``controlled_indices`` Value list first
                 # so the IR carries constant ints when the bindings
-                # supply them (matches the IndexSpecControlledU branch
-                # above).
+                # supply them.
                 if result_op.controlled_indices is not None:
                     new_ci = self._fold_value_list(
                         list(result_op.controlled_indices), folded_values

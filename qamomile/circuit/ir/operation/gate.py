@@ -150,14 +150,13 @@ class MeasureOperation(Operation):
 class ControlledUOperation(Operation):
     """Base class for controlled-U operations.
 
-    Three concrete subclasses handle distinct operand layouts:
+    Two concrete subclasses handle distinct operand layouts:
 
     - ``ConcreteControlledU``: Fixed ``num_controls: int``, individual qubit
       operands.
     - ``SymbolicControlledU``: Symbolic ``num_controls: Value``, vector-based
-      control operands.
-    - ``IndexSpecControlledU``: Single vector with explicit index lists
-      selecting which elements are controls/targets.
+      control operands; optional ``controlled_indices`` selects a subset of
+      the control vector to act as controls (the rest pass through).
 
     All ``isinstance(op, ControlledUOperation)`` checks match every subclass.
 
@@ -169,11 +168,6 @@ class ControlledUOperation(Operation):
 
     power: int | Value = 1
     block: Block | None = None
-
-    @property
-    def has_index_spec(self) -> bool:
-        """Whether target/control positions are specified via index lists."""
-        return False
 
     @property
     def is_symbolic_num_controls(self) -> bool:
@@ -343,94 +337,6 @@ class SymbolicControlledU(ControlledUOperation):
         if changed:
             return dataclasses.replace(
                 result, num_controls=new_nc, controlled_indices=new_ci
-            )
-        return result
-
-
-@dataclasses.dataclass
-class IndexSpecControlledU(ControlledUOperation):
-    """Controlled-U with explicit target/control index specification.
-
-    A single vector covers both controls and targets; the partition is
-    determined by ``target_indices`` or ``controlled_indices``.
-
-    Operand layout: ``[vector, params...]``
-    Result layout:  ``[vector']``
-    """
-
-    num_controls: int | Value = 1
-    target_indices: list[Value] | None = None
-    controlled_indices: list[Value] | None = None
-
-    @property
-    def has_index_spec(self) -> bool:
-        return True
-
-    @property
-    def is_symbolic_num_controls(self) -> bool:
-        return isinstance(self.num_controls, Value)
-
-    @property
-    def control_operands(self) -> list[Value]:
-        return [self.operands[0]]
-
-    @property
-    def target_operands(self) -> list[Value]:
-        return []
-
-    @property
-    def param_operands(self) -> list[Value]:
-        return [op for op in self.operands[1:] if op.type.is_classical()]
-
-    @property
-    def signature(self) -> Signature:
-        raise NotImplementedError("Cannot compute signature for IndexSpecControlledU.")
-
-    def all_input_values(self) -> list[ValueBase]:
-        values = super().all_input_values()
-        if isinstance(self.num_controls, Value):
-            values.append(self.num_controls)
-        if self.target_indices:
-            values.extend(self.target_indices)
-        if self.controlled_indices:
-            values.extend(self.controlled_indices)
-        return values
-
-    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
-        result = super().replace_values(mapping)
-        assert isinstance(result, IndexSpecControlledU)
-        changed = False
-        new_nc: int | Value = result.num_controls
-        new_ti = result.target_indices
-        new_ci = result.controlled_indices
-        if (
-            isinstance(result.num_controls, Value)
-            and result.num_controls.uuid in mapping
-        ):
-            mapped = mapping[result.num_controls.uuid]
-            if isinstance(mapped, Value):
-                new_nc = mapped
-                changed = True
-        if result.target_indices is not None:
-            new_ti = [
-                typing.cast(Value, mapping.get(v.uuid, v))
-                for v in result.target_indices
-            ]
-            if new_ti != result.target_indices:
-                changed = True
-        if result.controlled_indices is not None:
-            new_ci = [
-                typing.cast(Value, mapping.get(v.uuid, v))
-                for v in result.controlled_indices
-            ]
-            if new_ci != result.controlled_indices:
-                changed = True
-        if changed:
-            return dataclasses.replace(
-                result,
-                num_controls=new_nc,
-                target_indices=new_ti,
-                controlled_indices=new_ci,
             )
         return result
 

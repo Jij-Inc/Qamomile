@@ -23,7 +23,6 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
     GateOperationType,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.value import Value
@@ -245,179 +244,6 @@ def resolve_power(
     )
 
 
-def emit_controlled_u_with_index_spec(
-    emit_pass: "StandardEmitPass",
-    circuit: Any,
-    op: ControlledUOperation,
-    qubit_map: QubitMap,
-    bindings: dict[str, Any],
-) -> None:
-    """Emit a ControlledUOperation with target_indices/controlled_indices."""
-    # 1. Resolve num_controls
-    nc: int
-    if op.is_symbolic_num_controls:
-        resolved_nc = emit_pass._resolver.resolve_classical_value(
-            op.num_controls,
-            bindings,  # type: ignore[arg-type]
-        )
-        if resolved_nc is None:
-            raise EmitError(
-                "Cannot resolve symbolic num_controls for index_spec emit.",
-                operation="ControlledUOperation",
-            )
-        nc = int(resolved_nc)
-    else:
-        nc = int(op.num_controls)
-
-    # 2. Resolve index lists
-    resolved_ti: list[int] | None = None
-    resolved_ci: list[int] | None = None
-    if op.target_indices is not None:
-        resolved_ti = []
-        for v in op.target_indices:
-            val = emit_pass._resolver.resolve_classical_value(v, bindings)
-            if val is None:
-                raise EmitError(
-                    "Cannot resolve target index.",
-                    operation="ControlledUOperation",
-                )
-            resolved_ti.append(int(val))
-    elif op.controlled_indices is not None:
-        resolved_ci = []
-        for v in op.controlled_indices:
-            val = emit_pass._resolver.resolve_classical_value(v, bindings)
-            if val is None:
-                raise EmitError(
-                    "Cannot resolve controlled index.",
-                    operation="ControlledUOperation",
-                )
-            resolved_ci.append(int(val))
-    else:
-        raise EmitError(
-            "ControlledUOperation with index_spec must have "
-            "target_indices or controlled_indices.",
-            operation="ControlledUOperation",
-        )
-
-    # 3. Get Vector's physical qubit indices
-    from qamomile.circuit.ir.value import ArrayValue as _ArrayValue
-
-    vector_value = op.operands[0]
-    if not isinstance(vector_value, _ArrayValue):
-        raise EmitError(
-            "ControlledUOperation with index_spec expects ArrayValue operand.",
-            operation="ControlledUOperation",
-        )
-    size_val = vector_value.shape[0]
-    vector_size = emit_pass._resolver.resolve_int_value(size_val, bindings)
-    if vector_size is None:
-        raise EmitError(
-            "Cannot resolve Vector size for index_spec emit.",
-            operation="ControlledUOperation",
-        )
-
-    # Walk any ``slice_of`` chain on the operand so that a view
-    # (``controlled(x_gate)(q[1::2], target_indices=[1])``) resolves
-    # to the root parent's physical qubits via the composed affine
-    # map ``root_idx = start + step * view_local_idx``.  For a
-    # non-view ArrayValue the helper returns ``(vector_value, 0, 1)``
-    # and the loop body is identical to the pre-view code path.
-    root_av, slice_start, slice_step = emit_pass._resolver.resolve_slice_chain(
-        vector_value, bindings, operation="ControlledUOperation"
-    )
-    all_phys_indices = []
-    for i in range(vector_size):
-        qubit_addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
-        if qubit_addr in qubit_map:
-            all_phys_indices.append(qubit_map[qubit_addr])
-        else:
-            raise EmitError(
-                f"Qubit {str(qubit_addr)} not found in qubit_map.",
-                operation="ControlledUOperation",
-            )
-
-    # 4. Validate resolved indices
-    # One of resolved_ti or resolved_ci is guaranteed non-None by the branch above
-    resolved_indices: list[int] = (
-        resolved_ti if resolved_ti is not None else resolved_ci
-    )  # type: ignore[assignment]
-    for idx in resolved_indices:
-        if not (0 <= idx < vector_size):
-            raise EmitError(
-                f"Index {idx} out of bounds [0, {vector_size}) for ControlledU vector.",
-                operation="ControlledUOperation",
-            )
-    if len(set(resolved_indices)) != len(resolved_indices):
-        raise EmitError(
-            f"Duplicate indices in ControlledU index spec: {resolved_indices}.",
-            operation="ControlledUOperation",
-        )
-
-    # 5. Partition into control and target physical indices
-    if resolved_ti is not None:
-        target_set = set(resolved_ti)
-        target_phys = [all_phys_indices[i] for i in resolved_ti]
-        control_phys = [
-            all_phys_indices[i] for i in range(vector_size) if i not in target_set
-        ]
-    else:
-        assert resolved_ci is not None
-        control_set = set(resolved_ci)
-        control_phys = [all_phys_indices[i] for i in resolved_ci]
-        target_phys = [
-            all_phys_indices[i] for i in range(vector_size) if i not in control_set
-        ]
-
-    # 6. Validate num_controls consistency
-    if len(control_phys) != nc:
-        raise EmitError(
-            f"num_controls ({nc}) does not match actual control count "
-            f"({len(control_phys)}).",
-            operation="ControlledUOperation",
-        )
-
-    # 7. Bind classical parameters
-    block_value = op.block
-    param_operands = [v for v in op.operands[1:] if v.type.is_classical()]
-    local_bindings = emit_pass._resolver.bind_block_params(
-        block_value, param_operands, bindings
-    )
-
-    # 8. Build and emit gate
-    num_targets = len(target_phys)
-    unitary_gate = emit_pass._blockvalue_to_gate(
-        block_value, num_targets, local_bindings
-    )
-
-    power_value = resolve_power(emit_pass, op, bindings)
-
-    if unitary_gate is not None:
-        if power_value > 1:
-            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
-        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
-        emit_pass._emitter.append_gate(
-            circuit, controlled_gate, control_phys + target_phys
-        )
-    else:
-        emit_pass._emit_controlled_fallback(
-            circuit,
-            block_value,
-            nc,
-            control_phys,
-            target_phys,
-            power_value,
-            local_bindings,
-        )
-
-    # 9. Map result ArrayValue in qubit_map
-    vector_result = op.results[0]
-    for i in range(vector_size):
-        result_addr = QubitAddress(vector_result.uuid, i)
-        input_addr = QubitAddress(vector_value.uuid, i)
-        if input_addr in qubit_map and result_addr not in qubit_map:
-            qubit_map[result_addr] = qubit_map[input_addr]
-
-
 def emit_controlled_u_with_symbolic_indices(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -433,10 +259,15 @@ def emit_controlled_u_with_symbolic_indices(
     ``ConcreteControlledU`` promotion cannot represent in its scalar
     control-operand layout (see §12.5 of the design).
 
-    Compared to :func:`emit_controlled_u_with_index_spec` the operand
-    layout differs (sub-kernel operands follow the control vector
-    instead of being absent), but the index-resolution / control
-    selection / pass-through bookkeeping is the same.
+    The function resolves the symbolic ``num_controls`` and every
+    ``controlled_indices`` entry to concrete ints, walks the control
+    pool's ``slice_of`` chain to look up physical qubits per element,
+    builds ``control_phys`` from the selected pool slots, expands the
+    sub-kernel quantum operands via the §12.1 helper
+    ``_expand_quantum_operands_to_phys`` for the target side, and
+    threads the rest through the standard ``gate_controlled`` +
+    ``append_gate`` pipeline (with the per-gate fallback for backends
+    whose ``circuit_to_gate`` returns ``None``).
 
     Args:
         emit_pass (StandardEmitPass): The emit pass driving the
@@ -473,9 +304,7 @@ def emit_controlled_u_with_symbolic_indices(
         "the constant-folding promotion to ConcreteControlledU."
     )
 
-    resolved_nc = emit_pass._resolver.resolve_classical_value(
-        op.num_controls, bindings
-    )
+    resolved_nc = emit_pass._resolver.resolve_classical_value(op.num_controls, bindings)
     if resolved_nc is None:
         raise EmitError(
             f"Cannot resolve num_controls Value "
@@ -502,8 +331,7 @@ def emit_controlled_u_with_symbolic_indices(
         idx_int = int(idx)
         if idx_int < 0:
             raise EmitError(
-                f"Negative controlled_indices entry ({idx_int}) is "
-                f"not allowed.",
+                f"Negative controlled_indices entry ({idx_int}) is not allowed.",
                 operation="ControlledUOperation",
             )
         resolved_indices.append(idx_int)
@@ -516,8 +344,7 @@ def emit_controlled_u_with_symbolic_indices(
         )
     if len(set(resolved_indices)) != len(resolved_indices):
         raise EmitError(
-            f"controlled_indices contains duplicate entries: "
-            f"{resolved_indices}.",
+            f"controlled_indices contains duplicate entries: {resolved_indices}.",
             operation="ControlledUOperation",
         )
 
@@ -574,9 +401,7 @@ def emit_controlled_u_with_symbolic_indices(
     target_indices: list[int] = []
     target_index_groups: list[list[int]] = []
     for q in target_qubit_operands:
-        indices = _expand_quantum_operands_to_phys(
-            emit_pass, q, qubit_map, bindings
-        )
+        indices = _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
         target_index_groups.append(indices)
         target_indices.extend(indices)
 
@@ -652,9 +477,6 @@ def emit_controlled_u(
     bindings: dict[str, Any],
 ) -> None:
     """Emit a ControlledUOperation."""
-    if isinstance(op, IndexSpecControlledU):
-        emit_controlled_u_with_index_spec(emit_pass, circuit, op, qubit_map, bindings)
-        return
     if isinstance(op, SymbolicControlledU):
         if op.controlled_indices is not None:
             emit_controlled_u_with_symbolic_indices(
@@ -1109,9 +931,7 @@ def _expand_quantum_operands_to_phys(
     expanded element-by-element: the shape is resolved against
     ``bindings``, the ``slice_of`` chain is walked to the root
     parent, and one physical index per covered slot is computed via
-    the affine map ``root_idx = slice_start + slice_step * i`` — the
-    same logic the index-spec emit (``emit_controlled_u_with_index_spec``)
-    has used for sliced ``Vector`` operands.
+    the affine map ``root_idx = slice_start + slice_step * i``.
 
     Centralising the expansion lets ``emit_controlled_u`` accept
     ``Vector[Qubit]`` sub-kernel arguments (Step 2.b of the

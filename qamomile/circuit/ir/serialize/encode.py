@@ -48,7 +48,6 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
@@ -1082,39 +1081,6 @@ def _encode_symbolic_controlled(
     return d
 
 
-def _encode_index_spec_controlled(
-    op: IndexSpecControlledU, ctx: _EncodeContext
-) -> dict[str, Any]:
-    """Encode :class:`IndexSpecControlledU`.
-
-    Args:
-        op (IndexSpecControlledU): The op.
-        ctx (_EncodeContext): The active encoding context.
-
-    Returns:
-        dict[str, Any]: Base op dict plus ``num_controls`` (int or
-            value-ref), index lists (UUIDs), ``power``, and nested
-            ``unitary_block`` dict.
-    """
-    d = _base_op_dict("IndexSpecControlledU", op)
-    if isinstance(op.num_controls, Value):
-        ctx.register_value(op.num_controls)
-        d["num_controls"] = {"$value_ref": op.num_controls.uuid}
-    else:
-        d["num_controls"] = op.num_controls
-    d["power"] = _encode_power(op.power)
-    d["target_index_refs"] = (
-        [v.uuid for v in op.target_indices] if op.target_indices is not None else None
-    )
-    d["controlled_index_refs"] = (
-        [v.uuid for v in op.controlled_indices]
-        if op.controlled_indices is not None
-        else None
-    )
-    d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
-    return d
-
-
 def _encode_power(power: Any) -> Any:
     """Encode ControlledU's ``power`` field.
 
@@ -1223,6 +1189,5 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     IfOperation: _encode_if,
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
-    IndexSpecControlledU: _encode_index_spec_controlled,
     CompositeGateOperation: _encode_composite_gate,
 }

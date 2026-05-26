@@ -53,7 +53,6 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
@@ -1245,52 +1244,6 @@ def _decode_symbolic_controlled(
     )
 
 
-def _decode_index_spec_controlled(
-    d: dict[str, Any], ctx: _DecodeContext
-) -> IndexSpecControlledU:
-    """Decode :class:`IndexSpecControlledU`.
-
-    Args:
-        d (dict[str, Any]): The op dict.
-        ctx (_DecodeContext): The active decode context.
-
-    Returns:
-        IndexSpecControlledU: The reconstructed op.
-    """
-    operands, results = _operands_results(d, ctx)
-    block = (
-        _decode_block(d["unitary_block"])
-        if d.get("unitary_block") is not None
-        else None
-    )
-    raw_nc = d.get("num_controls", 1)
-    if isinstance(raw_nc, dict) and "$value_ref" in raw_nc:
-        num_controls = _materialize_as_value(ctx, raw_nc["$value_ref"])
-    elif isinstance(raw_nc, int):
-        num_controls = raw_nc
-    else:
-        raise ValueError(f"unrecognized num_controls payload: {raw_nc!r}")
-    target_refs = d.get("target_index_refs")
-    controlled_refs = d.get("controlled_index_refs")
-    return IndexSpecControlledU(
-        operands=operands,
-        results=results,
-        num_controls=num_controls,
-        target_indices=(
-            [_materialize_as_value(ctx, ref) for ref in target_refs]
-            if target_refs is not None
-            else None
-        ),
-        controlled_indices=(
-            [_materialize_as_value(ctx, ref) for ref in controlled_refs]
-            if controlled_refs is not None
-            else None
-        ),
-        power=_decode_power(d.get("power", 1), ctx),
-        block=block,
-    )
-
-
 def _decode_power(value: Any, ctx: _DecodeContext) -> Any:
     """Decode ControlledU's ``power`` field.
 
@@ -1406,6 +1359,5 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "IfOperation": _decode_if,
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
-    "IndexSpecControlledU": _decode_index_spec_controlled,
     "CompositeGateOperation": _decode_composite_gate,
 }
