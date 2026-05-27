@@ -467,6 +467,167 @@ def emit_controlled_u_with_symbolic_indices(
                 qubit_map[QubitAddress(result.uuid)] = indices[0]
 
 
+def emit_controlled_u_multi_arg(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: SymbolicControlledU,
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a ``SymbolicControlledU`` whose control prefix is multi-arg.
+
+    The multi-arg form (``num_control_args > 1``) carries a
+    heterogeneous control prefix: a mix of scalar ``Value``
+    (single-qubit) and ``ArrayValue`` (whole ``Vector`` / slice
+    ``VectorView``) operands whose qubit-count sum equals
+    ``num_controls`` once ``bindings`` resolves the lengths.
+    ``ConstantFoldingPass`` cannot promote this shape to
+    ``ConcreteControlledU`` (the per-control-qubit operand layout
+    would lose the array-grouping the resource allocator needs), so
+    it survives intact and lands here.
+
+    The function expands every control operand into physical qubit
+    indices via the §12.1 helper, asserts the resulting count
+    matches the resolved ``num_controls``, expands the target side
+    the same way, and threads the rest through the standard
+    ``gate_controlled`` + ``append_gate`` pipeline (with the
+    per-gate fallback for backends whose ``circuit_to_gate`` returns
+    ``None``).
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass driving the
+            conversion.
+        circuit (Any): The backend circuit being built.
+        op (SymbolicControlledU): The IR op with
+            ``num_control_args > 1`` and ``controlled_indices is
+            None``.
+        qubit_map (QubitMap): The active ``QubitAddress`` ->
+            physical qubit map; mutated in place with the
+            result-side mappings.
+        bindings (dict[str, Any]): Caller bindings used to resolve
+            ``num_controls`` and any symbolic-length control / target
+            operand.
+
+    Raises:
+        EmitError: ``num_controls`` cannot be resolved, is non-
+            positive, or does not match the sum of expanded control
+            operand sizes.
+    """
+    resolved_nc = emit_pass._resolver.resolve_classical_value(op.num_controls, bindings)
+    if resolved_nc is None:
+        raise EmitError(
+            f"Cannot resolve num_controls Value "
+            f"{op.num_controls.name!r} for multi-arg SymbolicControlledU emit.",
+            operation="ControlledUOperation",
+        )
+    nc = int(resolved_nc)
+    if nc <= 0:
+        raise EmitError(
+            f"SymbolicControlledU resolved num_controls={nc}; must be "
+            f"a strictly positive integer.",
+            operation="ControlledUOperation",
+        )
+
+    # Expand the control prefix one operand at a time.  Each operand
+    # may be a scalar Value (one physical qubit) or an ArrayValue
+    # (one physical qubit per element).
+    control_operands = op.operands[: op.num_control_args]
+    control_phys: list[int] = []
+    for q in control_operands:
+        indices = _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
+        control_phys.extend(indices)
+
+    if len(control_phys) != nc:
+        raise EmitError(
+            f"Multi-arg SymbolicControlledU: control operands expanded "
+            f"to {len(control_phys)} qubit(s), but num_controls "
+            f"resolves to {nc}.  The sum of qubit counts across the "
+            f"control prefix args must equal num_controls.",
+            operation="ControlledUOperation",
+        )
+
+    remaining_operands = op.operands[op.num_control_args :]
+    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
+    param_operands = [v for v in remaining_operands if v.type.is_classical()]
+
+    target_indices: list[int] = []
+    target_index_groups: list[list[int]] = []
+    for q in target_qubit_operands:
+        indices = _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
+        target_index_groups.append(indices)
+        target_indices.extend(indices)
+
+    block_value = op.block
+    local_bindings = emit_pass._resolver.bind_block_params(
+        block_value, param_operands, bindings
+    )
+
+    num_targets = len(target_indices)
+    unitary_gate = emit_pass._blockvalue_to_gate(
+        block_value, num_targets, local_bindings
+    )
+
+    power_value = resolve_power(emit_pass, op, bindings)
+
+    if unitary_gate is not None:
+        if power_value > 1:
+            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
+        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
+        emit_pass._emitter.append_gate(
+            circuit, controlled_gate, control_phys + target_indices
+        )
+    else:
+        emit_pass._emit_controlled_fallback(
+            circuit,
+            block_value,
+            nc,
+            control_phys,
+            target_indices,
+            power_value,
+            local_bindings,
+        )
+
+    # Result-side bookkeeping: every control operand keeps its
+    # physical qubits onto the corresponding result operand
+    # (controlled gates only add a relative phase, they do not move
+    # qubits).  Targets get their per-operand index groupings copied
+    # to the result so downstream ``view_out[i]`` lookups resolve.
+    from qamomile.circuit.ir.value import ArrayValue as _ArrayValue
+
+    control_results = op.results[: op.num_control_args]
+    for src, dst in zip(control_operands, control_results):
+        if isinstance(src, _ArrayValue):
+            for addr, idx in list(qubit_map.items()):
+                if addr.matches_array(src.uuid):
+                    result_addr = QubitAddress(dst.uuid, addr.element_index)
+                    if result_addr not in qubit_map:
+                        qubit_map[result_addr] = idx
+        else:
+            src_addr = QubitAddress(src.uuid)
+            if src_addr in qubit_map:
+                dst_addr = QubitAddress(dst.uuid)
+                if dst_addr not in qubit_map:
+                    qubit_map[dst_addr] = qubit_map[src_addr]
+
+    sub_quantum_results = [
+        r for r in op.results[op.num_control_args :] if r.type.is_quantum()
+    ]
+    for i, result in enumerate(sub_quantum_results):
+        if i >= len(target_index_groups):
+            break
+        indices = target_index_groups[i]
+        if isinstance(result, _ArrayValue):
+            for j, phys in enumerate(indices):
+                qubit_map[QubitAddress(result.uuid, j)] = phys
+            if indices:
+                base_addr = QubitAddress(result.uuid)
+                if base_addr not in qubit_map:
+                    qubit_map[base_addr] = indices[0]
+        else:
+            if indices:
+                qubit_map[QubitAddress(result.uuid)] = indices[0]
+
+
 def emit_controlled_u(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -480,6 +641,9 @@ def emit_controlled_u(
             emit_controlled_u_with_symbolic_indices(
                 emit_pass, circuit, op, qubit_map, bindings
             )
+            return
+        if op.num_control_args > 1:
+            emit_controlled_u_multi_arg(emit_pass, circuit, op, qubit_map, bindings)
             return
         raise EmitError(
             "Cannot emit ControlledUOperation with symbolic num_controls. "

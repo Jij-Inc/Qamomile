@@ -460,7 +460,11 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     result_op.num_controls, folded_values
                 )
                 if new_nc is not result_op.num_controls:
-                    if isinstance(new_nc, int) and result_op.controlled_indices is None:
+                    if (
+                        isinstance(new_nc, int)
+                        and result_op.controlled_indices is None
+                        and result_op.num_control_args == 1
+                    ):
                         # Promote to ConcreteControlledU.
                         #
                         # ``SymbolicControlledU`` carries the controls as a

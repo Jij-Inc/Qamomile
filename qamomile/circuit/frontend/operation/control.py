@@ -1307,14 +1307,46 @@ class ControlledGate:
         num_controls = self._num_controls
         assert isinstance(num_controls, UInt)
 
-        if not args or not isinstance(args[0], ArrayBase):
+        if not args:
             raise ValueError(
-                "When num_controls is symbolic (UInt), the first "
-                "positional argument must be a Vector[Qubit] or "
-                "VectorView[Qubit] (the control pool)."
+                "When num_controls is symbolic (UInt), at least one "
+                "positional control argument is required."
             )
-        c_qs = args[0]
-        sub_positional = list(args[1:])
+
+        # Split args into (control prefix, sub-kernel positional).
+        # The boundary is derived from the wrapped kernel's signature:
+        # everything the sub-kernel still expects positionally (after
+        # accounting for kwargs) is the trailing chunk; the rest is
+        # the control prefix.  The legacy single-pool form (one
+        # ``ArrayBase`` control arg) and the new multi-arg form
+        # (scalar ``Qubit`` and/or ``ArrayBase`` in sequence, qubit-
+        # count sum equals ``num_controls`` at transpile time) both
+        # flow through this split.
+        sub_positional_count = self._sub_positional_count_for_symbolic(sub_kwargs)
+        if sub_positional_count > len(args):
+            raise ValueError(
+                f"ControlledU: not enough positional args.  The wrapped "
+                f"sub-kernel expects {sub_positional_count} positional "
+                f"arg(s) after kwargs, got {len(args)} total."
+            )
+        control_args = list(args[: len(args) - sub_positional_count])
+        sub_positional = list(args[len(args) - sub_positional_count :])
+        if not control_args:
+            raise ValueError(
+                "When num_controls is symbolic (UInt), at least one "
+                "positional control argument is required."
+            )
+
+        is_legacy_pool_form = len(control_args) == 1 and isinstance(
+            control_args[0], ArrayBase
+        )
+        if not is_legacy_pool_form and controlled_indices is not None:
+            raise ValueError(
+                "controlled_indices is only supported with a single "
+                "Vector[Qubit] / VectorView[Qubit] control argument "
+                "(the pool form).  Combining controlled_indices with "
+                "multiple positional control args is not supported."
+            )
 
         ci_values: tuple[Value, ...] | None = (
             self._normalize_controlled_indices(controlled_indices)
@@ -1327,7 +1359,7 @@ class ControlledGate:
         if not sub_quantum_args:
             raise ValueError(
                 "ControlledU requires at least one quantum sub-kernel "
-                "argument (target); got the control pool and no "
+                "argument (target); got the control prefix and no "
                 "sub-kernel quantum arg (see design decision #9)."
             )
         quantum_ids = {id(h) for h in sub_quantum_args}
@@ -1340,28 +1372,36 @@ class ControlledGate:
         # Alias / overlap checking is delegated to the
         # ``Handle.consume()`` / array borrow-tracker layer below
         # (same rationale as in ``_call_concrete``).
-        consumed_pool_entry = self._consume_with_borrow_transfer(
-            [c_qs], "ControlledU[control]"
-        )[0]
+        consumed_controls = self._consume_with_borrow_transfer(
+            control_args, "ControlledU[control]"
+        )
         consumed_sub_quantum = self._consume_with_borrow_transfer(
             sub_quantum_args, "ControlledU[target]"
         )
 
-        pool_source: Any = (
-            consumed_pool_entry.original
-            if consumed_pool_entry.is_deferred_view
-            else consumed_pool_entry.consumed
-        )
-        pool_av = cast(ArrayValue, pool_source.value)
+        # Build per-control-arg operand + result.  For the legacy
+        # single-pool form (one ``ArrayBase``) this lands the pool
+        # ``ArrayValue`` at ``operands[0]``; for the multi-arg form
+        # each control arg becomes its own operand (scalar ``Value``
+        # for a ``Qubit`` handle, ``ArrayValue`` for a
+        # ``Vector``/``VectorView``).  The downstream emit pass walks
+        # ``operands[:num_control_args]`` to recover the per-physical
+        # qubit control set.
+        operands: list[Any] = []
+        control_results: list[Value] = []
+        for entry in consumed_controls:
+            op_value = self._sub_quantum_operand_value(entry)
+            operands.append(op_value)
+            control_results.append(op_value.next_version())
 
-        operands: list[Any] = [pool_av]
+        sub_quantum_results: list[Value] = []
         for entry in consumed_sub_quantum:
-            operands.append(self._sub_quantum_operand_value(entry))
+            op_value = self._sub_quantum_operand_value(entry)
+            operands.append(op_value)
+            sub_quantum_results.append(op_value.next_version())
         self._params_to_operands(sub_classical_dict, operands)
 
-        results: list[Value] = [pool_av.next_version()]
-        for entry in consumed_sub_quantum:
-            results.append(self._sub_quantum_operand_value(entry).next_version())
+        results: list[Value] = control_results + sub_quantum_results
 
         op = SymbolicControlledU(
             operands=operands,
@@ -1370,17 +1410,20 @@ class ControlledGate:
             controlled_indices=ci_values,
             power=power,
             block=self._qkernel.block,
+            num_control_args=len(consumed_controls),
         )
         get_current_tracer().add_operation(op)
 
-        wrapped: list[Any] = [
-            self._wrap_entry_output(
-                consumed_pool_entry,
-                [results[0]],
-                operation_name="ControlledU[control]",
+        wrapped: list[Any] = []
+        for entry, result_value in zip(consumed_controls, control_results):
+            wrapped.append(
+                self._wrap_entry_output(
+                    entry,
+                    [result_value],
+                    operation_name="ControlledU[control]",
+                )
             )
-        ]
-        for entry, result_value in zip(consumed_sub_quantum, results[1:]):
+        for entry, result_value in zip(consumed_sub_quantum, sub_quantum_results):
             wrapped.append(
                 self._wrap_entry_output(
                     entry,
@@ -1389,6 +1432,37 @@ class ControlledGate:
                 )
             )
         return tuple(wrapped)
+
+    def _sub_positional_count_for_symbolic(self, sub_kwargs: dict[str, Any]) -> int:
+        """How many trailing positional args belong to the sub-kernel.
+
+        Used by :meth:`_call_symbolic` to split the call-site args
+        into the control prefix and the sub-kernel positional region.
+        The wrapped kernel's declared signature is the source of
+        truth: every parameter that is not satisfied via ``sub_kwargs``
+        must arrive positionally.  Mock test kernels (no
+        ``input_types`` dict) fall back to the historical "first arg
+        is the pool, rest goes to the sub-kernel" interpretation by
+        returning ``len(args) - 1`` via a sentinel — handled at the
+        caller by treating a single ``ArrayBase`` arg as the legacy
+        pool form.
+
+        Args:
+            sub_kwargs (dict[str, Any]): Caller kwargs after stripping
+                the reserved ``power`` and ``controlled_indices`` keys.
+
+        Returns:
+            int: Number of trailing positional args expected by the
+                sub-kernel.  Mock-kernel fallback returns ``1`` so
+                the legacy single-pool form keeps working.
+        """
+        input_types = getattr(self._qkernel, "input_types", None)
+        if not isinstance(input_types, dict):
+            # Mock kernels: assume the historical single-pool form
+            # (one control pool + one trailing positional arg).
+            return 1
+        positional_names = [n for n in input_types.keys() if n not in sub_kwargs]
+        return len(positional_names)
 
 
 def _classify_callable_param(annotation: Any) -> str:

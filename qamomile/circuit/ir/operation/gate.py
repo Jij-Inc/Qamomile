@@ -270,18 +270,32 @@ class ConcreteControlledU(ControlledUOperation):
 class SymbolicControlledU(ControlledUOperation):
     """Controlled-U with symbolic (Value) number of controls.
 
-    Operand layout: ``[ctrl_vector, tgt_0, ..., tgt_m, params...]``
-    Result layout:  ``[ctrl_vector', tgt_0', ..., tgt_m']``
+    Operand layout: ``[ctrl_arg_0, ..., ctrl_arg_{k-1}, tgt_0, ..., tgt_m, params...]``
+    Result layout:  ``[ctrl_arg_0', ..., ctrl_arg_{k-1}', tgt_0', ..., tgt_m']``
 
-    When ``controlled_indices`` is ``None`` the entire ``ctrl_vector`` is
-    used as the control pool (``len(ctrl_vector) == num_controls`` is
-    checked at emit time).  When non-``None``, the listed indices select
-    exactly ``num_controls`` slots from the pool to act as controls and
-    every other slot passes through unchanged (it remains in the
-    ``ctrl_vector`` output without a phase change).  Each entry is
-    stored as a ``Value`` of ``UIntType`` regardless of whether the
-    frontend passed an ``int`` literal or a ``UInt`` handle, so all
-    downstream value-substitution passes see a uniform shape.
+    The number of control arguments ``k`` is recorded in
+    ``num_control_args``; the default ``k = 1`` corresponds to the
+    historical single-pool form (``operands[0]`` is a
+    ``Vector[Qubit]`` / ``VectorView`` whose length equals
+    ``num_controls``, or whose ``controlled_indices``-selected subset
+    does).  When ``k > 1`` the control prefix is a heterogeneous
+    sequence of scalar ``Qubit`` values and ``ArrayValue``s whose
+    *total* qubit count is ``num_controls``; the emit pass walks them
+    in order to recover the per-physical-qubit control set.
+
+    When ``controlled_indices`` is ``None`` the entire control prefix
+    is used as active controls (one-arg form: ``len(ctrl_vector) ==
+    num_controls``; multi-arg form: the qubit-count sum of the
+    prefix args equals ``num_controls``).  When non-``None``, the
+    listed indices select exactly ``num_controls`` slots from a
+    single-arg pool to act as controls; combining
+    ``controlled_indices`` with the multi-arg control prefix is
+    rejected at frontend time.
+
+    Each ``controlled_indices`` entry is stored as a ``Value`` of
+    ``UIntType`` regardless of whether the frontend passed an
+    ``int`` literal or a ``UInt`` handle, so all downstream
+    value-substitution passes see a uniform shape.
     """
 
     # The default exists only so the dataclass field ordering works for
@@ -299,6 +313,11 @@ class SymbolicControlledU(ControlledUOperation):
         default_factory=lambda: Value(type=UIntType(), name="")
     )  # type: ignore[assignment]
     controlled_indices: tuple[Value, ...] | None = None
+    # Number of operand slots that hold the control prefix.  Default
+    # ``1`` preserves the single-pool layout used by serialised v1
+    # payloads and by every call site that pre-dates the
+    # multi-control-arg extension.
+    num_control_args: int = 1
 
     @property
     def is_symbolic_num_controls(self) -> bool:
@@ -306,15 +325,19 @@ class SymbolicControlledU(ControlledUOperation):
 
     @property
     def control_operands(self) -> list[Value]:
-        return [self.operands[0]]
+        return list(self.operands[: self.num_control_args])
 
     @property
     def target_operands(self) -> list[Value]:
-        return self.operands[1:]
+        return list(self.operands[self.num_control_args :])
 
     @property
     def param_operands(self) -> list[Value]:
-        return [op for op in self.operands[1:] if op.type.is_classical()]
+        return [
+            op
+            for op in self.operands[self.num_control_args :]
+            if op.type.is_classical()
+        ]
 
     @property
     def signature(self) -> Signature:

@@ -633,11 +633,16 @@ class ResourceAllocator:
     ) -> None:
         """Allocate resources for a ControlledUOperation."""
         if isinstance(op, SymbolicControlledU):
-            if op.controlled_indices is None:
-                # Without ``controlled_indices`` the constant-folding pass
-                # is expected to promote the op to ``ConcreteControlledU``
-                # before allocation runs.  A surviving symbolic op here
-                # means a binding was missing.
+            from qamomile.circuit.ir.value import ArrayValue
+
+            survives_promotion = (
+                op.controlled_indices is not None or op.num_control_args > 1
+            )
+            if not survives_promotion:
+                # Single-pool form without ``controlled_indices``: the
+                # constant-folding pass is expected to promote the op to
+                # ``ConcreteControlledU`` before allocation runs.  A
+                # surviving symbolic op here means a binding was missing.
                 from qamomile.circuit.transpiler.errors import EmitError
 
                 raise EmitError(
@@ -647,23 +652,38 @@ class ResourceAllocator:
                     operation="ControlledUOperation",
                 )
 
-            # With ``controlled_indices`` set the op survives constant
-            # folding intact (the promotion path cannot represent
-            # pass-through pool slots in the ``ConcreteControlledU``
-            # operand layout).  ``emit_controlled_u_with_symbolic_indices``
-            # consumes it directly; the allocator's job is to thread the
-            # control pool's per-element addresses onto the result
-            # ``ArrayValue`` and allocate any sub-kernel quantum operands
-            # the same way the concrete path does.
-            pool_operand = op.operands[0]
-            pool_result = op.results[0]
-            for addr, idx in list(qubit_map.items()):
-                if addr.matches_array(pool_operand.uuid):
-                    result_addr = QubitAddress(pool_result.uuid, addr.element_index)
-                    if result_addr not in qubit_map:
-                        qubit_map[result_addr] = idx
-            sub_quantum_operands = [v for v in op.operands[1:] if v.type.is_quantum()]
-            sub_quantum_results = [r for r in op.results[1:] if r.type.is_quantum()]
+            # Two shapes survive promotion intact:
+            #   * single-pool + ``controlled_indices``: one ``ArrayValue``
+            #     control operand whose pass-through slots cannot be
+            #     represented in ``ConcreteControlledU``'s scalar layout.
+            #   * multi-arg control prefix (``num_control_args > 1``):
+            #     a heterogeneous mix of scalar ``Value`` and
+            #     ``ArrayValue`` operands whose qubit-count sum equals
+            #     ``num_controls``.
+            # Both flow through the same per-operand allocation: each
+            # input operand keeps its physical mapping onto the
+            # corresponding result operand.
+            for i in range(op.num_control_args):
+                src = op.operands[i]
+                dst = op.results[i]
+                if isinstance(src, ArrayValue):
+                    for addr, idx in list(qubit_map.items()):
+                        if addr.matches_array(src.uuid):
+                            result_addr = QubitAddress(dst.uuid, addr.element_index)
+                            if result_addr not in qubit_map:
+                                qubit_map[result_addr] = idx
+                else:
+                    src_addr = QubitAddress(src.uuid)
+                    if src_addr in qubit_map:
+                        dst_addr = QubitAddress(dst.uuid)
+                        if dst_addr not in qubit_map:
+                            qubit_map[dst_addr] = qubit_map[src_addr]
+            sub_quantum_operands = [
+                v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
+            ]
+            sub_quantum_results = [
+                r for r in op.results[op.num_control_args :] if r.type.is_quantum()
+            ]
             if sub_quantum_operands:
                 self._allocate_qubit_list(
                     sub_quantum_operands, sub_quantum_results, qubit_map
