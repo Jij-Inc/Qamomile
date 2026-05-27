@@ -105,7 +105,7 @@ hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
 # %% [markdown]
 # ## Creating the VQE Ansatz
 #
-# In this section, we create an EfficientSU2 ansatz for the VQE algorithm using the `@qkernel` decorator. An ansatz is a parametrized quantum circuit that prepares a trial wavefunction. We build it by combining `ry_layer`, `rz_layer`, and a linear CX entangling layer, and finally compute the expectation value of the Hamiltonian using `expval`.
+# In this section, we create a Hardware Efficient SU(2) ansatz for the VQE algorithm using the `@qkernel` decorator. An ansatz is a parametrized quantum circuit that prepares a trial wavefunction. We build it by combining `ry_layer`, `rz_layer`, and a linear CX entangling layer, and finally compute the expectation value of the Hamiltonian using `expval`.
 
 
 # %%
