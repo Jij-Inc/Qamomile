@@ -230,26 +230,45 @@ class MatplotlibRenderer:
                     )
                     block_center_x = (bl + br) / 2
                     ctrl_y_list = [self.qubit_y[q] for q in ctrl_indices]
-
-                    border_endpoints: list[float] = []
                     min_ctrl = min(ctrl_y_list)
                     max_ctrl = max(ctrl_y_list)
-                    if max_ctrl > box_top:
-                        border_endpoints.append(box_top)
-                    if min_ctrl < box_bottom:
-                        border_endpoints.append(box_bottom)
-                    all_y_endpoints = ctrl_y_list + border_endpoints
-                    line_min_y = min(all_y_endpoints)
-                    line_max_y = max(all_y_endpoints)
-                    ax.add_line(
-                        mlines.Line2D(
-                            [block_center_x, block_center_x],
-                            [line_min_y, line_max_y],
-                            color=self.style.wire_color,
-                            linewidth=1.5,
-                            zorder=PORDER_LINE,
+
+                    # The connection line must stop at the target box's
+                    # outer border so the box visually contains the
+                    # whole wrapped gate, and so the line never appears
+                    # to bleed through the box.  When controls live on
+                    # only one side of the box (top *or* bottom) a
+                    # single segment from the far control to the
+                    # nearest box edge does this directly.  When
+                    # controls sit on *both* sides, draw two segments
+                    # so the box's interior region (between
+                    # ``box_top`` and ``box_bottom``) stays empty.
+                    crosses_above = max_ctrl > box_top
+                    crosses_below = min_ctrl < box_bottom
+                    line_segments: list[tuple[float, float]] = []
+                    if crosses_above and crosses_below:
+                        line_segments.append((box_top, max_ctrl))
+                        line_segments.append((min_ctrl, box_bottom))
+                    elif crosses_above:
+                        line_segments.append((box_top, max_ctrl))
+                    elif crosses_below:
+                        line_segments.append((min_ctrl, box_bottom))
+                    else:
+                        # All controls lie inside the box's vertical
+                        # span (degenerate; only happens for malformed
+                        # IR).  Fall back to spanning the controls
+                        # themselves so something is drawn.
+                        line_segments.append((min_ctrl, max_ctrl))
+                    for y_lo, y_hi in line_segments:
+                        ax.add_line(
+                            mlines.Line2D(
+                                [block_center_x, block_center_x],
+                                [y_lo, y_hi],
+                                color=self.style.wire_color,
+                                linewidth=1.5,
+                                zorder=PORDER_LINE,
+                            )
                         )
-                    )
 
                     for ctrl_idx in ctrl_indices:
                         ctrl_y = self.qubit_y[ctrl_idx]
