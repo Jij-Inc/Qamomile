@@ -54,6 +54,11 @@ ising_quad: dict[tuple[int, int], float] = {
 }
 ising_linear: dict[int, float] = {}
 spin_model = BinaryModel.from_ising(linear=ising_linear, quad=ising_quad)
+# The problem structure is fully determined by the graph: one quad term per edge
+# and no linear terms for unweighted MaxCut. Assert so a regression in
+# `BinaryModel.from_ising` is caught when this notebook runs in CI.
+assert len(spin_model.quad) == G.number_of_edges()
+assert len(spin_model.linear) == 0
 
 pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
@@ -182,6 +187,11 @@ from quri_parts.circuit.utils.circuit_drawer import draw_circuit
 
 quri_circuit = executable.get_first_circuit()
 assert quri_circuit is not None  # transpile() always emits one quantum segment here
+# `qubit_count` and `parameter_count` are fully determined by the problem setting:
+# one qubit per graph node, and one runtime parameter per (gamma | beta) per layer.
+# Assert them so docs tests catch a regression in the QuriParts emit pass.
+assert quri_circuit.qubit_count == num_nodes
+assert quri_circuit.parameter_count == 2 * p
 print(type(quri_circuit).__name__)
 print("qubit_count    :", quri_circuit.qubit_count)
 print("parameter_count:", quri_circuit.parameter_count)
@@ -321,6 +331,10 @@ print(f"unbound parameter_count: {unbound_circuit.parameter_count}")
 named_values = {f"gammas[{i}]": opt_gammas[i] for i in range(p)}
 named_values.update({f"betas[{i}]": opt_betas[i] for i in range(p)})
 flat_params = [named_values[name] for name in executable.parameter_names]
+# The runtime parameter set is the 2p QAOA angles; assert this so a future
+# change to how QuriPartsTranspiler registers parameters is caught here.
+assert len(executable.parameter_names) == 2 * p
+assert len(flat_params) == 2 * p
 print(f"circuit parameter order: {executable.parameter_names}")
 
 # Manually bind the same numeric values using QURI Parts' native binding operation.

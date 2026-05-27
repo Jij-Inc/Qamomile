@@ -54,6 +54,11 @@ ising_quad: dict[tuple[int, int], float] = {
 }
 ising_linear: dict[int, float] = {}
 spin_model = BinaryModel.from_ising(linear=ising_linear, quad=ising_quad)
+# 問題の構造はグラフから一意に決まります。重みなし MaxCut では、quad 項は辺と
+# 1 対 1 に対応し、linear 項は存在しません。`BinaryModel.from_ising` が将来
+# 壊れた場合に docs テストで検知できるよう、ここで assert で確認しておきます。
+assert len(spin_model.quad) == G.number_of_edges()
+assert len(spin_model.linear) == 0
 
 pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
@@ -182,6 +187,12 @@ from quri_parts.circuit.utils.circuit_drawer import draw_circuit
 
 quri_circuit = executable.get_first_circuit()
 assert quri_circuit is not None  # transpile() はここで必ず 1 つの量子セグメントを生成する
+# `qubit_count` と `parameter_count` は問題設定から一意に決まります。
+# 量子ビット数はグラフのノード数と一致し、ランタイムパラメータ数は層ごとに
+# (gamma | beta) の組が 1 つずつ、合計 2p になります。QuriParts の emit
+# パスに回帰が起きた場合に docs テストで検知できるよう assert します。
+assert quri_circuit.qubit_count == num_nodes
+assert quri_circuit.parameter_count == 2 * p
 print(type(quri_circuit).__name__)
 print("qubit_count    :", quri_circuit.qubit_count)
 print("parameter_count:", quri_circuit.parameter_count)
@@ -321,6 +332,10 @@ print(f"unbound parameter_count: {unbound_circuit.parameter_count}")
 named_values = {f"gammas[{i}]": opt_gammas[i] for i in range(p)}
 named_values.update({f"betas[{i}]": opt_betas[i] for i in range(p)})
 flat_params = [named_values[name] for name in executable.parameter_names]
+# ランタイムパラメータは 2p 個の QAOA 角度のみ。QuriPartsTranspiler の
+# パラメータ登録方法が将来変わった場合に検知できるよう assert します。
+assert len(executable.parameter_names) == 2 * p
+assert len(flat_params) == 2 * p
 print(f"circuit parameter order: {executable.parameter_names}")
 
 # QURI Parts 標準のバインド処理で、同じ数値を手動で束縛します。
