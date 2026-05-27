@@ -8,4 +8,5 @@ Qamomileを外部ライブラリや量子プラットフォームと組み合わ
 
 ## すべての記事
 
+- [OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク](ommx_quantum_benchmarks_qaoa) — OMMX Quantum Benchmarksから取得したLABSインスタンス上でQAOAを動かし、SCIPと比較する
 - [qBraid Executor](qbraid_executor) — qBraid対応デバイスでのQiskit回路実行

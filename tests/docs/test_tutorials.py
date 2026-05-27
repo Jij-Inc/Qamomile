@@ -47,7 +47,6 @@ TUTORIAL_PATTERNS = [
 OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
     "qsci": "quri_parts",
-    "ommx_quantum_benchmarks_qaoa": "ommx_quantum_benchmarks",
     "hybrid_qnn": "torch",
 }
 
