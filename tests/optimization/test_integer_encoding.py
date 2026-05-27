@@ -11,7 +11,6 @@ from qamomile.optimization.integer_encoding import (
     IntegerEncodingMethod,
 )
 
-
 # =====================================================================
 # Helpers
 # =====================================================================

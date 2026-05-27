@@ -113,9 +113,7 @@ class FQAOAConverter(MathematicalProblemConverter):
                 orbital[0, i] = np.sqrt(1.0 / self.num_qubits)
                 for k in range(int(self.num_fermions / 2)):
                     angle = 2.0 * np.pi * (k + 1) * (i + 1) / self.num_qubits
-                    orbital[k + 1, i] = np.sqrt(2.0 / self.num_qubits) * np.sin(
-                        angle
-                    )
+                    orbital[k + 1, i] = np.sqrt(2.0 / self.num_qubits) * np.sin(angle)
                     orbital[int(self.num_fermions - 1 - k), i] = np.sqrt(
                         2.0 / self.num_qubits
                     ) * np.cos(angle)

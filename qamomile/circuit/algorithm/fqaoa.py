@@ -17,7 +17,6 @@ import qamomile.circuit as qmc
 
 from . import basic as _basic
 
-
 # ------------------------------------------------------------------
 # Initial state preparation
 # ------------------------------------------------------------------

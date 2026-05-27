@@ -190,6 +190,8 @@ class BinaryIntegerEncoder:
         match self._encoding:
             case IntegerEncodingMethod.UNARY:
                 return self._encode_unary()
+            case _:
+                raise ValueError(f"Unsupported encoding: {self._encoding}")
 
     # ------------------------------------------------------------------
     # Unary encoding
@@ -306,7 +308,9 @@ class BinaryIntegerEncoder:
             new_expr = self._substitute_expression(
                 c.function, binary_vars_for, id_to_dv
             )
-            new_c = (new_expr == 0).set_id(c_idx)
+            if isinstance(new_expr, float):
+                new_expr = ommx.v1.Linear(terms={}, constant=new_expr)
+            new_c = (new_expr == 0).set_id(c_idx)  # type: ignore[union-attr]
             if c.name:
                 new_c = new_c.add_name(c.name)
             new_constraints.append(new_c)
@@ -423,14 +427,17 @@ class BinaryIntegerEncoder:
             float | ommx.v1.Linear | ommx.v1.Quadratic | ommx.v1.Polynomial:
                 The built expression.
         """
-        constant = expanded.pop((), 0.0)
-        if not expanded:
+        constant = expanded.get((), 0.0)
+        has_variable_terms = any(k for k in expanded if k)
+        if not has_variable_terms:
             return constant
 
         expr: float | ommx.v1.Linear | ommx.v1.Quadratic | ommx.v1.Polynomial
         expr = constant
 
         for var_ids, coeff in expanded.items():
+            if not var_ids:
+                continue
             term = coeff
             for vid in var_ids:
                 term = term * id_to_dv[vid]
