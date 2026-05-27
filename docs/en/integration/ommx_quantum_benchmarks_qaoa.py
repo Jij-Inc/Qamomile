@@ -36,6 +36,31 @@
 # Install the additional packages used in this tutorial.
 # # !pip install qamomile ommx-quantum-benchmarks ommx-pyscipopt-adapter
 
+# %%
+import os
+import time
+
+# `ommx-quantum-benchmarks` uses `minto` internally and, by default,
+# `minto` prints a host-environment dump (Python version, virtualenv
+# path, etc.) at experiment start. Suppress it so the rendered
+# notebook outputs do not leak local-machine details.
+os.environ["MINTO_TESTING"] = "true"
+
+import matplotlib.pyplot as plt
+import numpy as np
+import ommx.v1
+import ommx_pyscipopt_adapter
+from ommx_quantum_benchmarks.qoblib import Labs
+from qiskit_aer import AerSimulator
+from qiskit_aer.primitives import EstimatorV2
+from scipy.optimize import minimize
+
+import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+from qamomile.optimization.binary_model import BinaryModel, VarType
+from qamomile.qiskit import QiskitTranspiler
+from qamomile.qiskit.transpiler import QiskitExecutor
+
 # %% [markdown]
 # ## What is OMMX Quantum Benchmarks?
 #
@@ -91,8 +116,6 @@
 # target for QAOA, so we use it here.
 
 # %%
-from ommx_quantum_benchmarks.qoblib import Labs
-
 dataset = Labs()
 print(f"Dataset:           {dataset.name}")
 print(f"Available models:  {dataset.model_names}")
@@ -141,10 +164,6 @@ print(f"Reference feasible: {reference_solution.feasible}")
 # runs.
 
 # %%
-import ommx.v1
-
-from qamomile.optimization.binary_model import BinaryModel, VarType
-
 # `Instance.to_qubo()` mutates the instance (it absorbs constraints into
 # the objective via the penalty method). Round-trip through bytes to keep
 # the caller's instance untouched.
@@ -166,8 +185,6 @@ print(f"QAOA qubits: {spin_model.num_bits}")
 # $Z_i Z_j$ terms for the quadratic part.
 
 # %%
-import qamomile.observable as qm_o
-
 cost_hamiltonian = qm_o.Hamiltonian()
 for i, hi in spin_model.linear.items():
     if abs(hi) > 1e-12:
@@ -190,9 +207,6 @@ cost_hamiltonian.constant = spin_model.constant
 # `qmc.measure` to get a sampling qkernel for the final shot histogram.
 
 # %%
-import qamomile.circuit as qmc
-
-
 @qmc.qkernel
 def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(n, name="q")
@@ -281,17 +295,6 @@ def qaoa_sampling(
 # trajectory is reproducible.
 
 # %%
-import os
-import time
-
-import numpy as np
-from qiskit_aer import AerSimulator
-from qiskit_aer.primitives import EstimatorV2
-from scipy.optimize import minimize
-
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.qiskit.transpiler import QiskitExecutor
-
 p = 3
 transpiler = QiskitTranspiler()
 expval_executable = transpiler.transpile(
@@ -358,8 +361,6 @@ print(f"Function evaluations:                     {res.nfev}")
 print(f"Wall time:                                {qaoa_optimize_time:.2f} s")
 
 # %%
-import matplotlib.pyplot as plt
-
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
 plt.xlabel("Iteration")
@@ -462,8 +463,6 @@ plt.show()
 # therefore directly comparable to QAOA's.
 
 # %%
-import ommx_pyscipopt_adapter
-
 t0 = time.perf_counter()
 scip_solution = ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve(instance)
 scip_solve_time = time.perf_counter() - t0

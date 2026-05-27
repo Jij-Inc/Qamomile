@@ -27,6 +27,31 @@
 # 本チュートリアルで追加で必要なパッケージのインストール
 # # !pip install qamomile ommx-quantum-benchmarks ommx-pyscipopt-adapter
 
+# %%
+import os
+import time
+
+# `ommx-quantum-benchmarks`は内部で`minto`を使用しており、`minto`は
+# 既定で実験開始時にホスト環境の情報(Pythonバージョン、仮想環境のパスなど)を
+# 標準出力に書き出します。レンダリングされたノートブック出力にローカル環境の
+# 情報が漏れないよう、ここで抑制しておきます。
+os.environ["MINTO_TESTING"] = "true"
+
+import matplotlib.pyplot as plt
+import numpy as np
+import ommx.v1
+import ommx_pyscipopt_adapter
+from ommx_quantum_benchmarks.qoblib import Labs
+from qiskit_aer import AerSimulator
+from qiskit_aer.primitives import EstimatorV2
+from scipy.optimize import minimize
+
+import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+from qamomile.optimization.binary_model import BinaryModel, VarType
+from qamomile.qiskit import QiskitTranspiler
+from qamomile.qiskit.transpiler import QiskitExecutor
+
 # %% [markdown]
 # ## OMMX Quantum Benchmarksとは?
 #
@@ -59,8 +84,6 @@
 # `Labs`は2つのモデルを公開しています。一つは`"integer"`($c_k$を整数決定変数として導入し、それらを$\boldsymbol{s}$と結びつける制約を加える形式)、もう一つは`"quadratic_unconstrained"`(積$x_i x_{i+k+1}$を表す補助バイナリ変数$z_{i,k}$を2次のペナルティで導入したQUBO定式化)です。QAOAにはQUBO形式が自然に対応するため、本チュートリアルでは後者を使用します。
 
 # %%
-from ommx_quantum_benchmarks.qoblib import Labs
-
 dataset = Labs()
 print(f"Dataset:           {dataset.name}")
 print(f"Available models:  {dataset.model_names}")
@@ -93,10 +116,6 @@ print(f"Reference feasible: {reference_solution.feasible}")
 # `Instance.to_qubo()`はペナルティ形式の`ommx.v1.Instance`をQUBOに変換します。続いて`BinaryModel`にラップし、QAOAのコストレイヤーが想定するスピン(-1/+1)領域に変換します。また、エネルギースケールを実行間で揃えるため、係数を正規化します。
 
 # %%
-import ommx.v1
-
-from qamomile.optimization.binary_model import BinaryModel, VarType
-
 # `Instance.to_qubo()`はインスタンスをmutateする(ペナルティ法で制約を目的関数に畳み込む)。
 # 呼び出し元のインスタンスを保つために、bytes経由でラウンドトリップさせる。
 instance_for_qubo = ommx.v1.Instance.from_bytes(instance.to_bytes())
@@ -114,8 +133,6 @@ print(f"QAOA qubits: {spin_model.num_bits}")
 # 最適化を「ショット推定」ではなく「厳密な期待値」で駆動するため、スピンモデルの係数からIsing型のコストハミルトニアンを直接構築します。線形項は$Z_i$、2次項は$Z_i Z_j$に対応します。
 
 # %%
-import qamomile.observable as qm_o
-
 cost_hamiltonian = qm_o.Hamiltonian()
 for i, hi in spin_model.linear.items():
     if abs(hi) > 1e-12:
@@ -134,9 +151,6 @@ cost_hamiltonian.constant = spin_model.constant
 # ansatzには、一様重ね合わせ、コストレイヤー、ミキサーレイヤーの3つの小さなqkernelを使います。これらを組み合わせて状態準備qkernel`qaoa_state`を作り、さらに2通りにラップします。1つは`qmc.expval`で包んで最適化用の期待値qkernel`qaoa_expval`、もう1つは`qmc.measure`で包んで最終ヒストグラム用のサンプリングqkernel`qaoa_sampling`です。
 
 # %%
-import qamomile.circuit as qmc
-
-
 @qmc.qkernel
 def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(n, name="q")
@@ -219,17 +233,6 @@ def qaoa_sampling(
 # 両方のqkernelを$p = 3$レイヤーでトランスパイルします。期待値用の`expval_executable`は最適化を駆動し、サンプリング用の`sampling_executable`は最後にショット分布を取るために使います。最適化器にはコストハミルトニアンの*厳密な*期待値をAerの`EstimatorV2`プリミティブ経由で渡すので、BFGSの有限差分勾配がサンプリングノイズに乱されません。パラメータ軌跡を再現できるよう、NumPyにシードを設定します。
 
 # %%
-import os
-import time
-
-import numpy as np
-from qiskit_aer import AerSimulator
-from qiskit_aer.primitives import EstimatorV2
-from scipy.optimize import minimize
-
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.qiskit.transpiler import QiskitExecutor
-
 p = 3
 transpiler = QiskitTranspiler()
 expval_executable = transpiler.transpile(
@@ -296,8 +299,6 @@ print(f"Function evaluations:                     {res.nfev}")
 print(f"Wall time:                                {qaoa_optimize_time:.2f} s")
 
 # %%
-import matplotlib.pyplot as plt
-
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
 plt.xlabel("Iteration")
@@ -380,8 +381,6 @@ plt.show()
 # **SCIP**は分枝限定法ベースのMILP/QUBOソルバーで、求解が完了すれば最適性を証明できます。同じ`ommx.v1.Instance`を`ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve`に渡すと、PySCIPOpt経由で問題がSCIPに渡され、*元の*インスタンスに対して評価された`ommx.v1.Solution`が返ります。そのため、`.objective`はQAOA側と直接比較できます。
 
 # %%
-import ommx_pyscipopt_adapter
-
 t0 = time.perf_counter()
 scip_solution = ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve(instance)
 scip_solve_time = time.perf_counter() - t0
