@@ -6,9 +6,42 @@ import numpy as np
 import ommx.v1
 import pytest
 
+import qamomile.circuit as qmc
+from qamomile.circuit.algorithm.fqaoa import fqaoa_state
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.qiskit import QiskitTranspiler
+
+
+@qmc.qkernel
+def _fqaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    num_fermions: qmc.UInt,
+    givens_ij: qmc.Matrix[qmc.UInt],
+    givens_theta: qmc.Vector[qmc.Float],
+    hopping: qmc.Float,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """FQAOA state followed by expectation value measurement."""
+    q = fqaoa_state(
+        p=p,
+        quad=quad,
+        linear=linear,
+        n=n,
+        num_fermions=num_fermions,
+        givens_ij=givens_ij,
+        givens_theta=givens_theta,
+        hopping=hopping,
+        gammas=gammas,
+        betas=betas,
+    )
+    return qmc.expval(q, obs)
+
 
 # =====================================================================
 # Helpers / fixtures
@@ -295,7 +328,183 @@ class TestRandomizedQubo:
 
 
 # =====================================================================
-# 9. Validation (rejection)
+# 9. Cross-backend execution tests
+# =====================================================================
+
+
+def _make_small_fqaoa_instance():
+    """Build a small instance for execution tests (2 vars in [0,2], sum=2)."""
+    z0 = ommx.v1.DecisionVariable.integer(0, lower=0, upper=2, name="z0")
+    z1 = ommx.v1.DecisionVariable.integer(1, lower=0, upper=2, name="z1")
+    return _make_instance(
+        [z0, z1],
+        0.5 * z0 * z1 + z0 + z1,
+        [(z0 + z1 == 2).set_id(0).add_name("sum")],
+    )
+
+
+class TestCrossBackendSampling:
+    """Cross-backend sampling execution tests."""
+
+    @pytest.mark.parametrize("seed", [0, 42])
+    def test_sampling_produces_valid_bitstrings(self, seed):
+        """Sampled bitstrings must have the correct length on all backends."""
+        instance = _make_small_fqaoa_instance()
+        converter = FQAOAConverter(instance)
+        p = 1
+        gammas = [0.5]
+        betas = [0.3]
+        n_qubits = converter.num_qubits
+
+        results: dict[str, list[tuple]] = {}
+
+        # Qiskit
+        pytest.importorskip("qiskit")
+        from qiskit.providers.basic_provider import BasicSimulator
+
+        qiskit_tr = QiskitTranspiler()
+        backend = BasicSimulator()
+        backend.set_options(seed_simulator=seed)
+        exe = converter.transpile(qiskit_tr, p=p)
+        job = exe.sample(
+            qiskit_tr.executor(backend=backend),
+            shots=256,
+            bindings={"gammas": gammas, "betas": betas},
+        )
+        results["qiskit"] = [bits for bits, _ in job.result().results]
+
+        # QuriParts
+        try:
+            pytest.importorskip("quri_parts")
+            from qamomile.quri_parts import QuriPartsTranspiler
+
+            qp_tr = QuriPartsTranspiler()
+            exe = converter.transpile(qp_tr, p=p)
+            job = exe.sample(
+                qp_tr.executor(),
+                shots=256,
+                bindings={"gammas": gammas, "betas": betas},
+            )
+            results["quri_parts"] = [bits for bits, _ in job.result().results]
+        except pytest.skip.Exception:
+            pass
+
+        # CUDA-Q
+        try:
+            pytest.importorskip("cudaq")
+            from qamomile.cudaq import CudaqTranspiler
+
+            cudaq_tr = CudaqTranspiler()
+            exe = converter.transpile(cudaq_tr, p=p)
+            job = exe.sample(
+                cudaq_tr.executor(),
+                shots=256,
+                bindings={"gammas": gammas, "betas": betas},
+            )
+            results["cudaq"] = [bits for bits, _ in job.result().results]
+        except (pytest.skip.Exception, ImportError, RuntimeError):
+            pass
+
+        for backend_name, bitstrings in results.items():
+            assert len(bitstrings) > 0, f"{backend_name}: no results"
+            for bits in bitstrings:
+                assert len(bits) == n_qubits, (
+                    f"{backend_name}: expected {n_qubits} bits, got {len(bits)}"
+                )
+
+
+class TestCrossBackendExpval:
+    """Cross-backend expectation value execution tests."""
+
+    @pytest.mark.parametrize("seed", [0, 42])
+    def test_expval_cross_backend_agreement(self, seed):
+        """Expectation values must agree across backends within tolerance."""
+        from qamomile._utils import is_close_zero
+
+        instance = _make_small_fqaoa_instance()
+        converter = FQAOAConverter(instance)
+        hamiltonian = converter.get_cost_hamiltonian()
+
+        rng = np.random.default_rng(seed)
+        gammas_val = rng.uniform(-np.pi, np.pi, size=1).tolist()
+        betas_val = rng.uniform(-np.pi, np.pi, size=1).tolist()
+
+        unitary_rows = converter.get_fermi_orbital()
+        givens_data = converter._givens_decomposition(unitary_rows)
+        givens_ij, gtheta = converter._flatten_givens_data(givens_data)
+
+        linear = {
+            i: hi
+            for i, hi in converter.spin_model.linear.items()
+            if not is_close_zero(hi)
+        }
+        quad = {
+            ij: Jij
+            for ij, Jij in converter.spin_model.quad.items()
+            if not is_close_zero(Jij)
+        }
+
+        bindings = {
+            "p": 1,
+            "quad": quad,
+            "linear": linear,
+            "n": converter.num_qubits,
+            "num_fermions": converter.num_fermions,
+            "givens_ij": givens_ij,
+            "givens_theta": gtheta,
+            "hopping": 1.0,
+            "gammas": gammas_val,
+            "betas": betas_val,
+            "obs": hamiltonian,
+        }
+
+        expvals: dict[str, float] = {}
+
+        # Qiskit
+        pytest.importorskip("qiskit")
+        qiskit_tr = QiskitTranspiler()
+        exe = qiskit_tr.transpile(_fqaoa_expval, bindings=bindings)
+        val = exe.run(qiskit_tr.executor()).result()
+        expvals["qiskit"] = float(val)
+
+        # QuriParts
+        try:
+            pytest.importorskip("quri_parts")
+            from qamomile.quri_parts import QuriPartsTranspiler
+
+            qp_tr = QuriPartsTranspiler()
+            exe = qp_tr.transpile(_fqaoa_expval, bindings=bindings)
+            val = exe.run(qp_tr.executor()).result()
+            expvals["quri_parts"] = float(val)
+        except pytest.skip.Exception:
+            pass
+
+        # CUDA-Q
+        try:
+            pytest.importorskip("cudaq")
+            from qamomile.cudaq import CudaqTranspiler
+
+            cudaq_tr = CudaqTranspiler()
+            exe = cudaq_tr.transpile(_fqaoa_expval, bindings=bindings)
+            val = exe.run(cudaq_tr.executor()).result()
+            expvals["cudaq"] = float(val)
+        except (pytest.skip.Exception, ImportError, RuntimeError):
+            pass
+
+        # All backends must agree
+        vals = list(expvals.values())
+        assert len(vals) >= 1
+        for backend_name, v in expvals.items():
+            np.testing.assert_allclose(
+                v,
+                vals[0],
+                atol=1e-6,
+                err_msg=f"{backend_name} disagrees with {list(expvals.keys())[0]}",
+            )
+
+
+# =====================================================================
+# 10. Validation (rejection)
 # =====================================================================
 
 
