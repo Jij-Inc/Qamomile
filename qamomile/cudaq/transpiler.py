@@ -175,8 +175,20 @@ def _build_block_qubit_map(
     # Walk all operations once to:
     #   (a) seed each per-element operand UUID of a Vector[Qubit] input,
     #   (b) propagate SSA so result versions inherit operand targets.
-    if hasattr(block_value, "operations"):
-        for op in block_value.operations:
+    #
+    # Descend into every nested op list a control-flow op exposes
+    # through the :class:`HasNestedOps` protocol (``ForOperation`` /
+    # ``IfOperation`` / ``WhileOperation`` / ``ForItemsOperation``) so
+    # gates inside a loop or branch are visited too.  Without the
+    # recursion a non-constant element index inside a ``for`` body
+    # would silently bypass :func:`_seed_vector_element_uuid` and
+    # bubble up as a downstream "Missing qubit mapping ..." assertion
+    # instead of the :class:`EmitError` that helper is supposed to
+    # raise.
+    from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+
+    def _walk(ops: Any) -> None:
+        for op in ops:
             if isinstance(op, GateOperation):
                 for operand in op.qubit_operands:
                     _seed_vector_element_uuid(
@@ -188,6 +200,12 @@ def _build_block_qubit_map(
                             operand = op.qubit_operands[i]
                             if operand.uuid in qubit_map:
                                 qubit_map[result.uuid] = qubit_map[operand.uuid]
+            if isinstance(op, HasNestedOps):
+                for nested in op.nested_op_lists():
+                    _walk(nested)
+
+    if hasattr(block_value, "operations"):
+        _walk(block_value.operations)
 
     return qubit_map
 
