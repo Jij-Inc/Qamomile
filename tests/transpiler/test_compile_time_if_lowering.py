@@ -1019,8 +1019,15 @@ class TestSymbolicControlledUFieldSubstitution:
 
         flag = _uint_val("flag", const=1)
 
-        # True branch values
-        nc_true = _uint_val("nc_true", const=2)
+        # True branch values.  Both branches use ``num_controls=1`` to
+        # keep the constructed ``SymbolicControlledU`` well-formed
+        # against its ``controlled_indices=(ci_phi,)`` (length 1)
+        # field — the API contract is
+        # ``len(controlled_indices) == num_controls`` and the emit
+        # pass enforces it.  The two branches are still
+        # distinguishable via their UUIDs (which is what the phi
+        # substitution assertions below check).
+        nc_true = _uint_val("nc_true", const=1)
         power_true = _uint_val("power_true", const=4)
         ci_true = _uint_val("ci_true", const=1)
 

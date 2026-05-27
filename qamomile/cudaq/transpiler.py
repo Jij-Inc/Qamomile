@@ -239,7 +239,25 @@ def _seed_vector_element_uuid(
         return
     idx_val = indices[0]
     if not idx_val.is_constant():
-        return
+        # Silently skipping leaves the element's UUID unmapped in
+        # ``qubit_map``, which later trips a hard ``AssertionError``
+        # in ``_emit_cudaq_controlled_ops`` ("Missing qubit mapping
+        # ...") when the inner block addresses the element with a
+        # symbolic loop variable.  Fail loudly here with the actual
+        # limitation instead so the user can act on it.
+        raise EmitError(
+            f"CUDA-Q controlled helper: a ``Vector[Qubit]`` element "
+            f"of {parent.uuid!r} is indexed by a non-constant value "
+            f"(e.g. a loop variable) inside the wrapped block.  The "
+            f"per-gate fallback used by the CUDA-Q controlled-U "
+            f"emit path needs a compile-time-constant element index "
+            f"to seed the per-element qubit map.  Either bind the "
+            f"surrounding loop bounds so the index folds to a "
+            f"constant, or transpile this kernel on a backend that "
+            f"emits the controlled block as a single native gate "
+            f"(Qiskit does so via ``circuit_to_gate``).",
+            operation="ControlledUOperation",
+        )
     elem_idx = int(idx_val.get_const())
     start, length = vector_inputs[parent.uuid]
     if elem_idx < 0 or elem_idx >= length:

@@ -1295,7 +1295,7 @@ class TestWholeViewEmit:
         )
 
     def test_controlled_u_on_view_elements(self):
-        """``controlled(_zgate)(q[1], q[3])`` runs on the view's elements.
+        """``control(_zgate)(q[1], q[3])`` runs on the view's elements.
 
         Migrated from the old ``index_spec``-on-view test: the new
         concrete-mode API does not accept ``target_indices`` /
