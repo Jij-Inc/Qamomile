@@ -1065,7 +1065,10 @@ def _encode_symbolic_controlled(
         dict[str, Any]: Base op dict plus ``num_controls_ref``
             (symbolic Value's UUID), ``power``, ``controlled_index_refs``
             (per-element ``UInt`` Value UUIDs, or ``None`` when the op
-            uses the entire pool), and nested ``unitary_block`` dict.
+            uses the entire pool), ``num_control_args`` (count of
+            positional control arguments at the call site -- the legacy
+            single-pool form is ``1``, the multi-arg control prefix
+            stores the actual N), and nested ``unitary_block`` dict.
     """
     d = _base_op_dict("SymbolicControlledU", op)
     ctx.register_value(op.num_controls)
@@ -1077,6 +1080,16 @@ def _encode_symbolic_controlled(
         d["controlled_index_refs"] = [v.uuid for v in op.controlled_indices]
     else:
         d["controlled_index_refs"] = None
+    # ``num_control_args`` tracks how many positional control arguments
+    # the call site supplied (one ArrayBase pool in the legacy form;
+    # any sequence of scalar Qubits and / or ArrayBases in the multi-
+    # arg form).  The emit pass uses it to split ``operands`` into the
+    # control prefix vs the sub-kernel quantum tail, so a wrong default
+    # at decode time shifts the boundary and corrupts the operand
+    # layout.  Persist the field whenever it differs from the legacy
+    # default of 1 so existing v1 payloads stay readable.
+    if op.num_control_args != 1:
+        d["num_control_args"] = op.num_control_args
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
 

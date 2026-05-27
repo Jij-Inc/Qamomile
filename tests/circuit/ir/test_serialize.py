@@ -108,6 +108,29 @@ def _controlled_phase(
     return ctrl, target
 
 
+@qmc.qkernel
+def _symbolic_multi_arg_controlled(
+    ctrl_main: qmc.Qubit,
+    prefix: qmc.Vector[qmc.Qubit],
+    target: qmc.Qubit,
+    nc: qmc.UInt,
+) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    """Top-level kernel that embeds a multi-arg ``SymbolicControlledU``.
+
+    The call site supplies two positional control arguments
+    (``ctrl_main`` scalar Qubit + ``prefix`` Vector) ahead of the
+    sub-kernel's positional ``target``.  This forces
+    ``num_control_args == 2`` on the emitted ``SymbolicControlledU``,
+    which the serializer must round-trip; without persisting the
+    field, the decoded op would re-split ``operands`` at the default
+    boundary of ``num_control_args == 1`` and route ``prefix`` into
+    the sub-kernel's target slot.
+    """
+    op = qmc.control(qmc.x, num_controls=nc)
+    ctrl_main, prefix, target = op(ctrl_main, prefix, target)
+    return ctrl_main, prefix, target
+
+
 # ---------------------------------------------------------------------------
 # Smoke + structure preservation
 # ---------------------------------------------------------------------------
@@ -182,6 +205,57 @@ class TestRoundTripIRFeatures:
         restored = load_json(dump_json(block))
         op_names = [type(op).__name__ for op in restored.operations]
         assert any(name.endswith("ControlledU") for name in op_names), op_names
+
+    def test_symbolic_controlled_u_preserves_num_control_args(self):
+        """Multi-arg ``SymbolicControlledU`` keeps its operand layout across encode/decode.
+
+        Without persisting ``num_control_args``, the decoder defaults
+        the field to ``1`` -- correct for the legacy single-pool form
+        but wrong whenever the call site supplied a multi-arg control
+        prefix.  The downstream emit pass then splits ``operands`` at
+        the wrong boundary, so the regression must catch the field on
+        both wire formats and on a non-trivial source op (here,
+        ``num_control_args == 2`` for a scalar + Vector prefix).
+        """
+        from qamomile.circuit.ir.operation.gate import SymbolicControlledU
+
+        block = _to_affine(_symbolic_multi_arg_controlled)
+        sym_ops = [op for op in block.operations if isinstance(op, SymbolicControlledU)]
+        assert sym_ops, [type(op).__name__ for op in block.operations]
+        original_args = [op.num_control_args for op in sym_ops]
+        assert all(n > 1 for n in original_args), original_args
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            restored_sym = [
+                op for op in restored.operations if isinstance(op, SymbolicControlledU)
+            ]
+            assert [op.num_control_args for op in restored_sym] == original_args
+
+    def test_symbolic_controlled_u_legacy_payload_decodes_as_single_pool(self):
+        """A payload missing ``num_control_args`` decodes as the legacy form.
+
+        Pre-existing v1 payloads (and any single-pool op the encoder
+        omits the field for, for compactness) must keep working: the
+        decoder defaults ``num_control_args = 1`` so the operand split
+        matches the legacy single-pool form's expectations.
+        """
+        from qamomile.circuit.ir.operation.gate import SymbolicControlledU
+
+        block = _to_affine(_symbolic_multi_arg_controlled)
+        payload = to_dict(block)
+        # Strip the field everywhere the encoder wrote it; the legacy
+        # contract is "absent field <=> single-pool form".
+        for op_dict in payload["block"]["operations"]:
+            op_dict.pop("num_control_args", None)
+        restored = from_dict(payload)
+        restored_sym = [
+            op for op in restored.operations if isinstance(op, SymbolicControlledU)
+        ]
+        assert restored_sym, [type(op).__name__ for op in restored.operations]
+        assert all(op.num_control_args == 1 for op in restored_sym)
 
     def test_msgpack_smaller_than_json_for_loop_kernel(self):
         """msgpack should produce at least as compact bytes as JSON.

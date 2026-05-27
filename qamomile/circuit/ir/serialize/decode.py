@@ -1213,6 +1213,14 @@ def _decode_symbolic_controlled(
 ) -> SymbolicControlledU:
     """Decode :class:`SymbolicControlledU`.
 
+    The ``num_control_args`` field is treated as additive: payloads
+    that omit it (either pre-multi-arg encoders or the legacy single-
+    pool form, which the encoder skips for compactness) decode with
+    the dataclass default ``1``.  Newer payloads carry the actual
+    count so the emit pass can split ``operands`` at the correct
+    boundary between the control prefix and the sub-kernel quantum
+    tail.
+
     Args:
         d (dict[str, Any]): The op dict.
         ctx (_DecodeContext): The active decode context.
@@ -1241,6 +1249,7 @@ def _decode_symbolic_controlled(
         controlled_indices=controlled_indices,
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
+        num_control_args=int(d.get("num_control_args", 1)),
     )
 
 
