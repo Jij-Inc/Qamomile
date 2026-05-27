@@ -12,9 +12,10 @@ single-qubit rotation, so the results are checked against the analytic
 (Qiskit, QURI Parts, CUDA-Q); the latter two are guarded by
 ``importorskip`` and the ``quri_parts`` / ``cudaq`` pytest markers.
 
-QURI Parts cannot emit the multi-controlled custom-block gate that the
-n-controlled ``Ry`` lowers to for ``n >= 2``; the tests skip those
-backend/size combinations and document the constraint.
+Neither QURI Parts nor CUDA-Q can emit the multi-controlled
+custom-block gate that the n-controlled ``Ry`` lowers to for
+``n >= 2``; the tests skip those backend/size combinations and
+document the constraint.
 """
 
 import math
@@ -83,18 +84,25 @@ def backend(request):
     raise AssertionError(f"unknown backend {name}")
 
 
-def _skip_if_quri_parts_multi_control(backend_name: str, n: int) -> None:
-    """Skip the test on QURI Parts when ``n >= 2``.
+def _skip_if_multi_control_unsupported(backend_name: str, n: int) -> None:
+    """Skip the test on backends that cannot emit a multi-controlled ``Ry``.
 
-    QURI Parts' emit pass cannot lower the multi-controlled custom-block
-    gate emitted by ``qmc.controlled(qmc.ry, num_controls=n)`` for
-    ``n >= 2`` (``EmitError: Cannot decompose multi-controlled
-    operation...``).  Single control (``n == 1``) is supported.
+    Neither QURI Parts nor CUDA-Q can lower the multi-controlled
+    custom-block gate emitted by ``qmc.controlled(qmc.ry, num_controls=n)``
+    when ``n >= 2``:
+
+    * QURI Parts: ``EmitError: Cannot decompose multi-controlled
+      operation...`` (its fallback only supports a single control).
+    * CUDA-Q: ``EmitError: Unsupported gate type ... Only X and SWAP
+      are natively supported with multiple controls.``
+
+    Single control (``n == 1``) is supported on both.  Qiskit handles
+    multi-controlled rotations natively at every ``n``.
     """
-    if backend_name == "quri_parts" and n >= 2:
+    if n >= 2 and backend_name in ("quri_parts", "cudaq"):
         pytest.skip(
-            "QURI Parts cannot lower multi-controlled custom-block gates "
-            "(num_controls >= 2); see review thread of PR #400."
+            f"{backend_name} cannot lower a multi-controlled custom-block "
+            f"Ry (num_controls={n}); see review thread of PR #400."
         )
 
 
@@ -230,7 +238,7 @@ class TestReciprocalRotation:
     def test_sampling_matches_analytic(self, backend, seed, n):
         """Sampled ``P(anc=1)`` matches ``(c/raw)^2`` across every clock bin."""
         name, transpiler, executor = backend
-        _skip_if_quri_parts_multi_control(name, n)
+        _skip_if_multi_control_unsupported(name, n)
 
         rng = np.random.default_rng(seed)
         c = float(rng.uniform(0.5, 1.0))
@@ -249,7 +257,7 @@ class TestReciprocalRotation:
     def test_expval_matches_analytic(self, backend, seed, n):
         """Estimated ``<Z_anc>`` matches ``1 - 2 * (c/raw)^2`` across clock bins."""
         name, transpiler, executor = backend
-        _skip_if_quri_parts_multi_control(name, n)
+        _skip_if_multi_control_unsupported(name, n)
 
         rng = np.random.default_rng(seed)
         c = float(rng.uniform(0.5, 1.0))
@@ -270,7 +278,7 @@ class TestReciprocalRotation:
     def test_zero_bin_leaves_ancilla_untouched(self, backend, n):
         """Clock ``|raw=0>`` is the zero-eigenvalue bin: ancilla stays ``|0>``."""
         name, transpiler, executor = backend
-        _skip_if_quri_parts_multi_control(name, n)
+        _skip_if_multi_control_unsupported(name, n)
 
         kernel = _build_recip_expval(n, c=0.7)
         exe = transpiler.transpile(
