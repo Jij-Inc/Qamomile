@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
@@ -3162,10 +3162,8 @@ quri-parts = [
 [package.dev-dependencies]
 dev = [
     { name = "griffe" },
-    { name = "ipykernel" },
     { name = "jupyter" },
     { name = "jupyter-book" },
-    { name = "jupyterlab" },
     { name = "jupytext" },
     { name = "matplotlib" },
     { name = "networkx" },
@@ -3201,10 +3199,8 @@ provides-extras = ["cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid"]
 [package.metadata.requires-dev]
 dev = [
     { name = "griffe", specifier = ">=1.0.0" },
-    { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "jupyter-book", specifier = ">=2.1.0" },
-    { name = "jupyterlab", specifier = ">=4.5.6" },
     { name = "jupytext", specifier = ">=1.18.1" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "networkx", specifier = ">=3.0" },

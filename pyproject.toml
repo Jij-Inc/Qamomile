@@ -63,8 +63,6 @@ dev = [
     "openfermion>=1.6.0",
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",
-    "jupyterlab>=4.5.6",
-    "ipykernel>=7.2.0",
 ]
 
 [tool.pytest.ini_options]
