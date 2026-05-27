@@ -635,24 +635,9 @@ class ResourceAllocator:
         if isinstance(op, SymbolicControlledU):
             from qamomile.circuit.ir.value import ArrayValue
 
-            survives_promotion = (
-                op.controlled_indices is not None or op.num_control_args > 1
-            )
-            if not survives_promotion:
-                # Single-pool form without ``controlled_indices``: the
-                # constant-folding pass is expected to promote the op to
-                # ``ConcreteControlledU`` before allocation runs.  A
-                # surviving symbolic op here means a binding was missing.
-                from qamomile.circuit.transpiler.errors import EmitError
-
-                raise EmitError(
-                    "Cannot transpile ControlledUOperation with symbolic "
-                    "num_controls.  Bind parameters to concrete values "
-                    "before transpilation.",
-                    operation="ControlledUOperation",
-                )
-
-            # Two shapes survive promotion intact:
+            # Three shapes can land here without having been promoted to
+            # ``ConcreteControlledU`` by ``ConstantFoldingPass``:
+            #
             #   * single-pool + ``controlled_indices``: one ``ArrayValue``
             #     control operand whose pass-through slots cannot be
             #     represented in ``ConcreteControlledU``'s scalar layout.
@@ -660,9 +645,20 @@ class ResourceAllocator:
             #     a heterogeneous mix of scalar ``Value`` and
             #     ``ArrayValue`` operands whose qubit-count sum equals
             #     ``num_controls``.
-            # Both flow through the same per-operand allocation: each
-            # input operand keeps its physical mapping onto the
-            # corresponding result operand.
+            #   * single-pool with no ``controlled_indices`` but a
+            #     ``num_controls`` that depends on a loop variable
+            #     (``num_controls = n - 1 - k`` inside a ``qmc.range``):
+            #     constant folding cannot resolve the loop variable so
+            #     the promotion never fires; each unrolled iteration
+            #     instead arrives at the emit pass with a fully
+            #     resolvable ``num_controls``.
+            #
+            # All three flow through the same per-operand allocation:
+            # each input operand keeps its physical mapping onto the
+            # corresponding result operand.  Whether ``num_controls``
+            # ultimately resolves is the emit pass's responsibility;
+            # the allocator only needs to thread per-element addresses
+            # through.
             for i in range(op.num_control_args):
                 src = op.operands[i]
                 dst = op.results[i]

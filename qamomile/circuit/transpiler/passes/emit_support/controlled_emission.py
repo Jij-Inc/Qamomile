@@ -642,14 +642,20 @@ def emit_controlled_u(
                 emit_pass, circuit, op, qubit_map, bindings
             )
             return
-        if op.num_control_args > 1:
-            emit_controlled_u_multi_arg(emit_pass, circuit, op, qubit_map, bindings)
-            return
-        raise EmitError(
-            "Cannot emit ControlledUOperation with symbolic num_controls. "
-            "Bind parameters to concrete values before transpilation.",
-            operation="ControlledUOperation",
-        )
+        # Every other symbolic shape — both the legacy single-pool
+        # form (``num_control_args == 1``) and the new multi-arg
+        # form (``num_control_args > 1``) — routes through the
+        # multi-arg emit helper, which expands each control operand
+        # to its physical qubits via ``_expand_quantum_operands_to_phys``
+        # and matches the total against ``num_controls`` resolved
+        # from ``bindings``.  This catches the loop-unrolling case
+        # too (``num_controls = n - 1 - k`` inside ``qmc.range``):
+        # ``ConstantFoldingPass`` cannot promote that op because the
+        # loop variable is not bound yet, but each unrolled iteration
+        # arrives at ``emit_controlled_u`` with a fully-resolvable
+        # ``num_controls`` and the multi-arg helper handles it.
+        emit_controlled_u_multi_arg(emit_pass, circuit, op, qubit_map, bindings)
+        return
     assert isinstance(op, ConcreteControlledU)
     nc: int = op.num_controls
     block_value = op.block

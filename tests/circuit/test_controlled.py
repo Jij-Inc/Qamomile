@@ -2768,6 +2768,39 @@ class TestSymbolicMultiArgControl:
         # concrete mode), so we test the symbolic-mode multi-arg case
         # explicitly with a UInt num_controls below.
 
+    def test_loop_unrolled_symbolic_num_controls(self):
+        """``num_controls`` that depends on a loop variable emits cleanly.
+
+        ``ConstantFoldingPass`` cannot promote the
+        ``SymbolicControlledU`` here because the loop variable ``k``
+        is not bound when fold runs.  Each unrolled iteration arrives
+        at ``emit_controlled_u`` with a fully-resolvable
+        ``num_controls`` (one of ``n-1, n-2, ..., 1``), and the
+        unified symbolic emit path must accept the single-pool form
+        in addition to the multi-arg form.  This kernel used to fail
+        with ``EmitError: Cannot transpile ControlledUOperation with
+        symbolic num_controls``.
+        """
+
+        @qmc.qkernel
+        def test(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for k in qmc.range(n - 1):
+                target_index = n - 1 - k
+                mcx = qmc.control(qmc.x, num_controls=target_index)
+                q[0:target_index], q[target_index] = mcx(
+                    q[0:target_index],
+                    q[target_index],
+                )
+            return qmc.measure(q)
+
+        from qamomile.qiskit import QiskitTranspiler
+
+        t = QiskitTranspiler()
+        qc = t.to_circuit(test, bindings={"n": 5})
+        # n=5 → 4 unrolled MCX iterations + 5 measurements.
+        assert qc.num_qubits == 5
+
     def test_multi_arg_symbolic_with_controlled_indices_rejected(self):
         """Symbolic multi-arg + ``controlled_indices`` raises ValueError."""
 
