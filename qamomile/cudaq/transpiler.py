@@ -204,9 +204,13 @@ def _seed_vector_element_uuid(
     input (i.e., ``operand.parent_array`` matches a registered vector
     and ``operand.element_indices[0]`` is a constant) to its physical
     target via ``vector_inputs`` and stores it under ``operand.uuid``.
-    Non-element operands and elements with non-constant indices are
-    ignored — they either belong to a scalar input (already seeded) or
-    fall outside the controlled helper's current resolution capability.
+    Non-element operands (scalar ``Qubit`` inputs already seeded by
+    ``_build_block_qubit_map``) are skipped silently.  Elements whose
+    index is **not** a compile-time constant raise ``EmitError``:
+    the CUDA-Q per-gate fallback this helper feeds cannot synthesise
+    a per-element qubit map without a constant index, so the
+    limitation is surfaced loudly here instead of degenerating into
+    a downstream "Missing qubit mapping ..." assertion.
 
     Args:
         operand (Any): A gate operand to seed.
@@ -220,10 +224,15 @@ def _seed_vector_element_uuid(
             element.
 
     Raises:
-        EmitError: If the resolved physical slot ``start + elem_idx``
-            falls outside ``target_indices``. ``_build_block_qubit_map``
-            already constrains ``start + length`` to fit, so this only
-            triggers on a corrupted ``vector_inputs`` table or an
+        EmitError: Raised in two situations.  (1) A Vector[Qubit]
+            element addressed by the inner block uses a non-constant
+            element index (e.g. a loop variable that was not folded by
+            the surrounding ``bindings``); the CUDA-Q controlled-U
+            fallback needs a constant slot here.  (2) The resolved
+            physical slot ``start + elem_idx`` falls outside
+            ``target_indices``.  ``_build_block_qubit_map`` already
+            constrains ``start + length`` to fit, so this second case
+            only triggers on a corrupted ``vector_inputs`` table or an
             unexpected mismatch between ``target_indices`` and the
             inner block's declared inputs — both internal-invariant
             violations rather than user-facing miscompiles, but
