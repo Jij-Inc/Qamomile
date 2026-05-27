@@ -224,15 +224,21 @@ def _seed_vector_element_uuid(
             element.
 
     Raises:
-        EmitError: Raised in two situations.  (1) A Vector[Qubit]
-            element addressed by the inner block uses a non-constant
-            element index (e.g. a loop variable that was not folded by
-            the surrounding ``bindings``); the CUDA-Q controlled-U
-            fallback needs a constant slot here.  (2) The resolved
-            physical slot ``start + elem_idx`` falls outside
-            ``target_indices``.  ``_build_block_qubit_map`` already
-            constrains ``start + length`` to fit, so this second case
-            only triggers on a corrupted ``vector_inputs`` table or an
+        EmitError: Raised in three situations, all of which would
+            otherwise degenerate into a downstream "Missing qubit
+            mapping ..." assertion in ``_emit_cudaq_controlled_ops``.
+            (1) A Vector[Qubit] element addressed by the inner block
+            uses a non-constant element index (e.g. a loop variable
+            that was not folded by the surrounding ``bindings``); the
+            CUDA-Q controlled-U fallback needs a constant slot here.
+            (2) The element index is outside the declared Vector
+            length (``elem_idx < 0`` or ``elem_idx >= length``); the
+            inner block addresses a slot past what the controlled-U
+            was wired up with.  (3) The resolved physical slot
+            ``start + elem_idx`` falls outside ``target_indices``.
+            ``_build_block_qubit_map`` already constrains
+            ``start + length`` to fit, so this third case only
+            triggers on a corrupted ``vector_inputs`` table or an
             unexpected mismatch between ``target_indices`` and the
             inner block's declared inputs — both internal-invariant
             violations rather than user-facing miscompiles, but
@@ -270,7 +276,21 @@ def _seed_vector_element_uuid(
     elem_idx = int(idx_val.get_const())
     start, length = vector_inputs[parent.uuid]
     if elem_idx < 0 or elem_idx >= length:
-        return
+        # Same fail-loudly rationale as the non-constant-index branch
+        # above: silently returning leaves ``operand.uuid`` unseeded
+        # and the inner block's gate addressing this element later
+        # trips ``_emit_cudaq_controlled_ops``'s "Missing qubit
+        # mapping ..." assertion with no clue about the root cause.
+        raise EmitError(
+            f"CUDA-Q controlled helper: Vector[Qubit] element index "
+            f"{elem_idx} is outside the declared length of "
+            f"{parent.uuid!r} ([0, {length})).  This usually means "
+            f"the inner controlled block addresses an element past the "
+            f"slice the controlled-U was wired up with.  Check that "
+            f"the wrapped block's ``Vector[Qubit]`` inputs are sized "
+            f"to match the actual targets you pass at the call site.",
+            operation="ControlledUOperation",
+        )
     slot = start + elem_idx
     if slot < 0 or slot >= len(target_indices):
         raise EmitError(

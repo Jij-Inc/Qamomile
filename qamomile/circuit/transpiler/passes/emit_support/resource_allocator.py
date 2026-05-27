@@ -670,10 +670,22 @@ class ResourceAllocator:
                                 qubit_map[result_addr] = idx
                 else:
                     src_addr = QubitAddress(src.uuid)
-                    if src_addr in qubit_map:
-                        dst_addr = QubitAddress(dst.uuid)
-                        if dst_addr not in qubit_map:
-                            qubit_map[dst_addr] = qubit_map[src_addr]
+                    if src_addr not in qubit_map:
+                        # Scalar control whose UUID is first introduced
+                        # at this ``SymbolicControlledU`` -- typically a
+                        # top-level ``@qkernel`` ``Qubit`` input
+                        # (``emit_init=False``, so no ``QInitOperation``
+                        # pre-registers it).  ``_allocate_qubit_list``
+                        # already handles the same edge case for the
+                        # concrete-controlled-U path (line ~527); mirror
+                        # the fresh-slot allocation here so emit does
+                        # not later trip on a missing scalar mapping
+                        # for the control prefix.
+                        qubit_map[src_addr] = self._next_qubit_index
+                        self._next_qubit_index += 1
+                    dst_addr = QubitAddress(dst.uuid)
+                    if dst_addr not in qubit_map:
+                        qubit_map[dst_addr] = qubit_map[src_addr]
             sub_quantum_operands = [
                 v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
             ]
