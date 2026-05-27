@@ -2639,7 +2639,7 @@ class CircuitAnalyzer:
             isinstance(value, ArrayValue)
             and getattr(value, "slice_of", None) is not None
         ):
-            resolved = self._resolve_view_chain_to_root(value)
+            resolved = self._resolve_view_chain_to_root(value, param_values)
             if resolved is not None:
                 root_av, start, _step = resolved
                 root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
@@ -2661,7 +2661,7 @@ class CircuitAnalyzer:
             chain_step = 1
             chain_failed = False
             if getattr(parent_array, "slice_of", None) is not None:
-                resolved = self._resolve_view_chain_to_root(parent_array)
+                resolved = self._resolve_view_chain_to_root(parent_array, param_values)
                 if resolved is None:
                     # Symbolic ``slice_start`` / ``slice_step`` along the
                     # chain — fall back to the original ``parent_lid``
@@ -2804,6 +2804,7 @@ class CircuitAnalyzer:
     def _resolve_view_chain_to_root(
         self,
         array_value: "ArrayValue",
+        param_values: dict | None = None,
     ) -> tuple["ArrayValue", int, int] | None:
         """Walk the ``slice_of`` chain to the root array, composing the affine map.
 
@@ -2820,10 +2821,27 @@ class CircuitAnalyzer:
         ``(start, step) -> (cur.slice_start + cur.slice_step * start,
         cur.slice_step * step)`` until ``cur.slice_of is None`` (root).
 
+        When ``param_values`` is supplied, a non-constant ``slice_start``
+        or ``slice_step`` is still resolvable as long as
+        :meth:`_evaluate_value` can fold it (e.g. the frontend's
+        ``_uint_min(0, stop)`` clamp returns a symbolic ``BinOp`` even
+        when the user wrote ``q[0:stop]``; under a loop unrolling where
+        ``stop`` is bound to a concrete integer, the BinOp folds to ``0``
+        and the chain walk succeeds).
+
         Args:
             array_value (ArrayValue): A possibly-sliced ArrayValue.  When
                 ``slice_of is None`` the function returns the identity
                 transform ``(array_value, 0, 1)``.
+            param_values (dict | None): Optional mapping consulted by
+                :meth:`_evaluate_value` when ``slice_start`` /
+                ``slice_step`` is not directly constant.  Pass the
+                per-iteration ``child_param_values`` from
+                :meth:`_build_vfor` (or any caller-side
+                ``param_values``) to enable this fallback.  Defaults to
+                ``None``, which preserves the strict ``is_constant()``
+                behaviour for callers that do not have a parameter
+                context.
 
         Returns:
             tuple[ArrayValue, int, int] | None: ``(root_av, start, step)``
@@ -2838,18 +2856,11 @@ class CircuitAnalyzer:
         while getattr(cur, "slice_of", None) is not None:
             slice_start = cur.slice_start
             slice_step = cur.slice_step
-            if slice_start is None or not slice_start.is_constant():
+            if slice_start is None or slice_step is None:
                 return None
-            if slice_step is None or not slice_step.is_constant():
-                return None
-            s = slice_start.get_const()
-            st = slice_step.get_const()
-            if s is None or st is None:
-                return None
-            try:
-                s_int = int(s)
-                st_int = int(st)
-            except (TypeError, ValueError):
+            s_int = self._resolve_slice_bound(slice_start, param_values)
+            st_int = self._resolve_slice_bound(slice_step, param_values)
+            if s_int is None or st_int is None:
                 return None
             start = s_int + st_int * start
             step = st_int * step
@@ -2859,6 +2870,47 @@ class CircuitAnalyzer:
                 "walking a slice chain."
             )
         return cur, start, step
+
+    def _resolve_slice_bound(
+        self,
+        bound: Value,
+        param_values: dict | None,
+    ) -> int | None:
+        """Resolve a ``slice_start`` / ``slice_step`` ``Value`` to ``int``.
+
+        Tries ``is_constant()`` first (the historical path), and falls
+        back to :meth:`_evaluate_value` against ``param_values`` so
+        clamps emitted by the frontend's ``_uint_min`` helper still
+        resolve under a loop unrolling that fixes the symbolic operands.
+
+        Args:
+            bound (Value): The slice bound Value to resolve.
+            param_values (dict | None): Parameter values for the
+                fallback ``_evaluate_value`` lookup; ``None`` disables
+                the fallback and keeps the legacy ``is_constant()``-only
+                behaviour.
+
+        Returns:
+            int | None: The resolved integer, or ``None`` when neither
+                path produces a usable value.
+        """
+        if bound.is_constant():
+            c = bound.get_const()
+            if c is None:
+                return None
+            try:
+                return int(c)
+            except (TypeError, ValueError):
+                return None
+        if param_values is None:
+            return None
+        ev = self._evaluate_value(bound, param_values)
+        if ev is None:
+            return None
+        try:
+            return int(ev)
+        except (TypeError, ValueError):
+            return None
 
     def _compute_slice_view_wires(
         self,
@@ -2917,7 +2969,7 @@ class CircuitAnalyzer:
 
         # Case A: actual_input is itself a slice view (``slice_of`` set).
         if getattr(actual_input, "slice_of", None) is not None:
-            resolved = self._resolve_view_chain_to_root(actual_input)
+            resolved = self._resolve_view_chain_to_root(actual_input, param_values)
             if resolved is None:
                 return None
             root_av, start, step = resolved
@@ -3009,7 +3061,7 @@ class CircuitAnalyzer:
         # key first and fall back to the formula only when no
         # per-element entry exists.
         if getattr(parent_array, "slice_of", None) is not None:
-            resolved = self._resolve_view_chain_to_root(parent_array)
+            resolved = self._resolve_view_chain_to_root(parent_array, param_values)
             if resolved is None:
                 return None
             root_av, start, step = resolved
@@ -3080,7 +3132,7 @@ class CircuitAnalyzer:
             isinstance(operand, ArrayValue)
             and getattr(operand, "slice_of", None) is not None
         ):
-            chain = self._resolve_view_chain_to_root(operand)
+            chain = self._resolve_view_chain_to_root(operand, param_values)
             if chain is not None:
                 root_av, start, step = chain
                 root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
