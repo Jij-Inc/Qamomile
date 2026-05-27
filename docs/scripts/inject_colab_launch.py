@@ -2,11 +2,11 @@
 """Post-build HTML patches for the Qamomile docs.
 
 Originally just a colab-launch script-tag injector; the script has
-since absorbed four more passes that all run against the same set of
+since absorbed five more passes that all run against the same set of
 ``docs/<lang>/_build/html/*.html`` (and ``*.json``) files, so they live
 together for a single rglob walk.
 
-The five passes:
+The six passes:
 
 1. Rewrite build-dir paths in GitHub URLs (HTML + JSON). ``./build.sh
    build`` runs mystmd from ``docs/_build_src/<lang>/`` so the
@@ -56,6 +56,14 @@ The five passes:
    native Ctrl/Cmd + scroll to zoom further. SPA-aware via a
    MutationObserver so client-side navigations also pick up freshly
    hydrated outputs.
+
+6. Sanitize bibliography ``<li id="cite-…">`` ids so the SSR ``id``
+   matches what React computes on the client. mystmd renders
+   DOI-resolved citations with HTML ids containing ``/`` / ``:`` /
+   ``.``, which makes SSR disagree with the client computation and
+   cascades into ~150 React #418 hydration-mismatch errors and a
+   visible flicker around the bibliography. Replacing the unsafe
+   chars with ``-`` aligns the two sides.
 """
 
 from __future__ import annotations
@@ -65,6 +73,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 SCRIPT_TAG_ID = "qamomile-colab-launch-script"
@@ -127,11 +136,20 @@ META_CHARSET_RE = re.compile(
 #     ``preload-class`` pattern: add ``html.qamomile-preloading`` at
 #     the very start of head, the inline <style> below contains a
 #     blanket ``transition: none !important`` rule scoped to that
-#     class, and a ``window.load`` handler removes the class two
-#     ``requestAnimationFrame`` ticks later (= guaranteed past the
-#     first paint AND past hydration's mount-time reflows). After
-#     that, all transitions work normally for actual user
-#     interactions (theme toggle, hover, etc.).
+#     class, and once the page has settled the class is removed.
+#     "Settled" is detected by observing DOM mutations from script
+#     init onward and revealing once BOTH (a) ``DOMContentLoaded``
+#     has fired (so deferred / module scripts have executed and
+#     hydration has had a chance to start) AND (b) 250 ms has
+#     elapsed since the last observed mutation (so React's hydration
+#     and any mismatch recovery have quiesced). Bounded by an
+#     8-second hard-cap from observer start and a 10-second wall-
+#     clock safety net so a runaway page can never stay hidden
+#     forever. We deliberately do NOT wait for ``window.load`` (slow
+#     image / CDN resources can push it well past hydration end and
+#     turn the guard into a multi-second blank screen). See the
+#     comment on the reveal logic inside ``THEME_INIT_SCRIPT`` below
+#     for the trade-offs that led to this idle-detection scheme.
 THEME_INIT_SCRIPT_ID = "qamomile-theme-init"
 THEME_INIT_SCRIPT = (
     "(function(){"
@@ -159,31 +177,133 @@ THEME_INIT_SCRIPT = (
     '!window.matchMedia("(prefers-color-scheme: light)").matches);'
     'if(dark)d.classList.add("dark");'
     "}catch(e){}"
-    # Reveal: lift the preloading class once everything's settled.
-    # Three triggers race; first one wins:
-    #   1. window.load + 2 RAF — hydration is normally complete by
-    #      then on a typical machine.
-    #   2. 2-second safety timeout — guarantees the page never stays
-    #      hidden longer than that even if `load` is unusually
-    #      delayed (slow CDN, large image, etc.).
-    #   3. First user-driven event — if the user is already
-    #      interacting (mousemove, click, keydown, touch), they've
-    #      seen enough that further hiding is hostile UX.
+    # Reveal: lift the preloading class once hydration has settled.
+    #
+    # The reveal is gated on TWO conditions:
+    #
+    #  (a) ``DOMContentLoaded`` has fired. Per the HTML spec, this
+    #      means parsing finished AND every deferred / module
+    #      ``<script>`` in the document has executed. Since mystmd
+    #      ships its React entry as ``type="module"`` (deferred by
+    #      default), hydration has had a chance to start before
+    #      ``DOMContentLoaded`` fires. Gating on ``DOMContentLoaded``
+    #      avoids the "JS bundle still downloading" race where the
+    #      ``MutationObserver`` would otherwise see no mutations for
+    #      the download window and reveal pre-hydration.
+    #
+    #  (b) The DOM has been quiet for 250 ms — that is, the
+    #      ``MutationObserver`` registered at script init hasn't
+    #      observed a mutation in 250 ms. This is the "hydration
+    #      finished and React isn't recovering anymore" detector. The
+    #      observer is installed BEFORE ``DOMContentLoaded`` so we
+    #      catch the head→body parse mutations and the entire
+    #      hydration burst, not just the tail.
+    #
+    # Earlier iterations gated the reveal on ``window.load`` (raced
+    # against a few additional triggers). That turned out to be wrong
+    # on every axis:
+    #   - ``load`` on heavy mystmd pages can fire well past hydration
+    #     end (the mottonen page measures ``loadEventEnd`` near 8s in
+    #     production thanks to lazy-loaded images and external CDN
+    #     assets). Waiting for ``load`` turns the guard into a multi-
+    #     second blank screen even after React has already settled.
+    #   - The user-driven-event fallback (``mousemove`` / ``click`` /
+    #     etc.) was hostile by design: any mouse movement during the
+    #     hidden phase raced the guard down and exposed the in-
+    #     progress hydration. That's the ちらつき regression we keep
+    #     getting reported.
+    #   - A 2-second safety timeout measured from script start always
+    #     fired before ``load`` did, defeating its own purpose.
+    #
+    # Two safety nets bound the worst case so a runaway page never
+    # stays blank forever:
+    #   1. ``hardCap``: 8 seconds from observer start. A page still
+    #      mutating past 8 s is in a runaway state and the user is
+    #      better served by seeing it than by an indefinitely hidden
+    #      body.
+    #   2. ``wallClock``: 10 seconds from script start. Covers the
+    #      degenerate case where the observer never installs at all
+    #      (older browsers without ``MutationObserver`` /
+    #      ``requestAnimationFrame`` / ``performance.now``).
+    #
+    # Feature detection: if any of the three APIs is missing, fall
+    # back to a 1-second blanket reveal. Better than waiting for the
+    # 10 s wall clock and far better than crashing in flight.
+    #
+    # ``reveal`` does the full cleanup so that EVERY trigger path
+    # (idle-detection, ``hardCap``, ``wallClock``, 1 s fallback)
+    # disconnects the observer and cancels both timers the moment it
+    # runs. This matters most for the ``hardCap`` / ``wallClock``
+    # paths: if the tab is backgrounded, ``requestAnimationFrame`` is
+    # throttled and ``checkIdle`` may not get a chance to run for
+    # many seconds after the timeout fired, so deferring cleanup to
+    # ``checkIdle`` would leave the ``MutationObserver`` attached
+    # well past the user-visible reveal. Storing the wall-clock
+    # ``setTimeout`` handle (``wallClock``) and cancelling it from
+    # ``reveal`` also avoids the no-op wakeup that would otherwise
+    # fire 10 s after every page load. The ``obs`` / ``hardCap`` /
+    # ``wallClock`` vars are declared up front and assigned later;
+    # ``reveal`` guards all three with null checks so the early-
+    # return fallback path works without ever assigning ``obs`` /
+    # ``hardCap``.
     "var revealed=false;"
+    "var obs=null;"
+    "var hardCap=null;"
+    "var wallClock=null;"
     "function reveal(){"
     "if(revealed)return;"
     "revealed=true;"
+    "if(obs){obs.disconnect();obs=null;}"
+    "if(hardCap){clearTimeout(hardCap);hardCap=null;}"
+    "if(wallClock){clearTimeout(wallClock);wallClock=null;}"
     'd.classList.remove("qamomile-preloading");'
     "}"
-    'window.addEventListener("load",function(){'
-    "requestAnimationFrame(function(){"
-    "requestAnimationFrame(reveal);"
+    "wallClock=setTimeout(reveal,10000);"
+    "if(typeof MutationObserver!=='function'"
+    "||typeof requestAnimationFrame!=='function'"
+    "||typeof performance==='undefined'"
+    "||typeof performance.now!=='function'){"
+    "setTimeout(reveal,1000);"
+    "return;"
+    "}"
+    # Track whether DOMContentLoaded has fired. The flag is set
+    # synchronously by an event listener registered before observer
+    # start, so the very first ``checkIdle`` tick after DCL sees
+    # ``dclFired === true`` without races.
+    "var dclFired=document.readyState!=='loading';"
+    "if(!dclFired){"
+    "document.addEventListener('DOMContentLoaded',function(){"
+    "dclFired=true;"
+    "},{once:true});"
+    "}"
+    "var lastMut=performance.now();"
+    "hardCap=setTimeout(reveal,8000);"
+    "obs=new MutationObserver(function(){"
+    "lastMut=performance.now();"
     "});"
+    "obs.observe(d,{"
+    "childList:true,"
+    "subtree:true,"
+    "attributes:true,"
+    "characterData:true"
     "});"
-    "setTimeout(reveal,2000);"
-    '["mousemove","keydown","click","touchstart"].forEach(function(e){'
-    "window.addEventListener(e,reveal,{once:true,passive:true});"
-    "});"
+    "function checkIdle(){"
+    # ``reveal`` already disconnected the observer and cleared the
+    # hard cap by the time it set ``revealed=true``; we only need to
+    # bail out of the rAF loop here.
+    "if(revealed)return;"
+    # Both gates must be satisfied: DOMContentLoaded fired AND 250 ms
+    # since the last mutation. The DCL gate prevents an early reveal
+    # while deferred / module scripts are still loading their bundles
+    # (and the MutationObserver therefore sees a quiet DOM that does
+    # NOT mean hydration is done).
+    "if(dclFired&&performance.now()-lastMut>=250){"
+    "reveal();"
+    "}else{"
+    "requestAnimationFrame(checkIdle);"
+    "}"
+    "}"
+    "requestAnimationFrame(checkIdle);"
     "})();"
 )
 
@@ -192,10 +312,12 @@ THEME_INIT_SCRIPT = (
 # style-pass that interprets the rest of the theme overrides. The
 # ``html.qamomile-preloading`` class is set by THEME_INIT_SCRIPT a
 # moment earlier (inline <script> at the start of <head>), so the
-# first paint already has these rules in effect. Once
-# ``qamomile-preloading`` is removed (post-load + 2 RAF, or a 2-second
-# safety timeout, whichever comes first), the rules stop matching and
-# normal styling / transitions resume.
+# first paint already has these rules in effect. The class is later
+# removed by THEME_INIT_SCRIPT itself — once both
+# ``DOMContentLoaded`` has fired AND the DOM has been quiet for
+# 250 ms, or, as safety nets, after 8 s from observer start or
+# 10 s wall-clock from script start. Once removed, these rules stop
+# matching and normal styling / transitions resume.
 #
 # Two layers of suppression:
 #
@@ -443,6 +565,597 @@ def inject_lightbox_script_tag(html_path: Path, script_src: str) -> bool:
     return True
 
 
+# mystmd's SSR bibliography lives in ``<section ... class="…myst-
+# bibliography…">``. The pair below is the most general "find every
+# section" / "extract its class attribute" regex; the actual CSS-
+# class-token check happens in Python so we don't false-match
+# ``not-myst-bibliography`` (a regex ``\bmyst-bibliography\b`` would,
+# since ``\b`` only checks the word/non-word boundary and ``-`` is a
+# non-word character).
+#
+# Known limitation: lazy ``.*?`` matching means a nested ``<section>``
+# inside the bibliography would close the regex at the inner
+# ``</section>`` instead of the outer one. mystmd's current output
+# never nests sections inside ``<section class="myst-bibliography">``
+# (the body is a flat ``<header>`` + ``<ol><li>…</li></ol>``), so
+# this is theoretical, but if upstream ever changes we'll need to
+# switch to a proper HTML parser. The regression is **silent**: any
+# cite-id beyond the inner ``</section>`` falls out of our scope
+# scan and is left in its DOI-URL form, so the React hydration
+# cascade returns for whichever citations sit past the boundary
+# (the collision detection only runs on ids we did capture, so it
+# does not catch this case). Treat the parser switch as a hard
+# requirement if upstream ever nests sections inside the
+# bibliography.
+_SECTION_RE = re.compile(
+    r"<section\b(?P<attrs>[^>]*)>(?P<body>.*?)</section>",
+    re.IGNORECASE | re.DOTALL,
+)
+# Match an opening / self-closing HTML tag and the attribute span
+# between the tag name and ``>``. Used to scope ``href`` / ``id``
+# rewrites to ACTUAL tag content (so a substring like
+# ``href="#cite-..."`` sitting inside a ``<script>`` body or a text
+# node never gets rewritten). The ``[^>]*`` works for mystmd's
+# output, which never embeds ``>`` inside attribute values.
+# Known limitation: if upstream ever does embed a ``>`` inside an
+# attribute value (HTML5 lets you do this — ``<div title="a>b">``
+# is legal but rare in machine-generated HTML), the regex closes
+# the tag at the embedded ``>``, leaves the trailing characters
+# unparsed, and may parse them as if they were a fresh tag. In the
+# worst case that means a follow-on ``<section ...>`` substring
+# inside an attribute value could be misread as a real section.
+# mystmd doesn't emit such markup today; the safe escalation is a
+# proper HTML parser.
+_TAG_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9-]*(?P<attrs>[^>]*)>", re.DOTALL)
+# HTML5 raw-text / escapable-raw-text elements whose contents are
+# parsed as character data, NOT as nested tags. A literal ``<a
+# href="...">`` substring sitting inside any of these is just text
+# from the rewriter's perspective and must NOT be treated as a tag.
+# The ``body`` named group captures only the CONTENT between the
+# opening and closing tags so the skip range covers exactly the
+# character-data portion — the opening tag itself stays visible to
+# the tag walker, which matters when it carries an
+# ``id="cite-..."`` attribute the collision scan needs to see (e.g.
+# ``<script id="cite-https-doi-org-a">…</script>`` colliding with
+# a sanitized bibliography id of the same form).
+_RAW_TEXT_RE = re.compile(
+    r"<(?P<tag>script|style|textarea|title)\b[^>]*>"
+    r"(?P<body>.*?)"
+    r"</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+# HTML comments: ``<!-- ... -->``. Same reasoning — the comment body
+# is character data; substrings shaped like tags inside the comment
+# must be skipped.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# Walk a single tag's attribute span attribute-by-attribute. The
+# leading ``(?:^|\s)`` is the attribute-name boundary: an
+# attribute starts either at the beginning of the attrs span or
+# after whitespace. Without it, a namespaced spelling like
+# ``.class="..."`` or ``data-class="..."`` would be picked up at
+# the inner ``class`` substring.
+#
+# The value is split into two alternatives by quote style — one
+# for double-quoted (``[^"]*``) and one for single-quoted
+# (``[^']*``). A naive single arm with ``[^"\']*`` would close
+# the value at the FIRST quote of either style, so a single-
+# quoted value containing a literal ``"`` (e.g.
+# ``data-note='foo class="bar"'``) would terminate prematurely,
+# fail the closing-quote check, then the regex engine would
+# advance and re-match the inner ``class="bar"`` substring as a
+# second attribute. With per-quote alternatives that confusion
+# is impossible: the value scans only chars that aren't the
+# opening quote.
+#
+# ``re.IGNORECASE`` because HTML attribute names are case-
+# insensitive in spec.
+_ATTR_RE = re.compile(
+    r"""(?:^|\s)
+        (?P<name>[a-zA-Z_:][a-zA-Z0-9_.:\-]*)
+        \s*=\s*
+        (?:
+            "(?P<value_dq>[^"]*)"
+            |
+            '(?P<value_sq>[^']*)'
+        )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# Chars HTML5 + CSS-selector + React all accept in id values without
+# special encoding; everything else gets collapsed to a single ``-``.
+# Underscore is included because it is HTML5-id-safe and appears in
+# some upstream citation labels.
+_UNSAFE_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+# Marker that scopes citation ids in the bibliography.
+_CITE_PREFIX = "cite-"
+# Marker that scopes the fragment cross-references we follow.
+_CITE_HREF_PREFIX = "#cite-"
+
+
+def _parse_attrs(attrs: str) -> dict[str, tuple[str, int, int]]:
+    """Parse an HTML attribute span into ``{name → (value, span_start, span_end)}``.
+
+    The span coordinates are absolute offsets into the input
+    ``attrs`` string and point at the attribute VALUE (not including
+    the surrounding quotes), so callers can do in-place rewrites
+    with ``attrs[:start] + new_value + attrs[end:]``.
+
+    Walks the attribute list attribute-by-attribute so a substring
+    of one attribute's value cannot be mistaken for another
+    attribute. mystmd doesn't emit attribute values containing the
+    HTML chars our rewriter cares about (``class="…"``,
+    ``href="#cite-…"``), but a robust parse keeps the contract
+    consistent with the function's docstring claim that the
+    rewriter only touches real attributes.
+
+    Names are lower-cased so callers can look up by canonical
+    spelling. If a name appears more than once (invalid HTML), the
+    first occurrence wins.
+
+    Args:
+        attrs (str): The attribute span between the tag-name and
+            the closing ``>`` of an opening tag.
+
+    Returns:
+        dict[str, tuple[str, int, int]]: ``{lowercase_name →
+            (value, value_start, value_end)}``. Empty if the span
+            has no parseable attributes.
+    """
+    out: dict[str, tuple[str, int, int]] = {}
+    for match in _ATTR_RE.finditer(attrs):
+        name = match.group("name").lower()
+        if name in out:
+            continue
+        # Pick whichever alternative captured a value.
+        if match.group("value_dq") is not None:
+            value = match.group("value_dq")
+            start = match.start("value_dq")
+            end = match.end("value_dq")
+        else:
+            value = match.group("value_sq")
+            start = match.start("value_sq")
+            end = match.end("value_sq")
+        out[name] = (value, start, end)
+    return out
+
+
+def _has_class_token(class_value: str, token: str) -> bool:
+    """Return True iff ``token`` appears as a CSS class in ``class_value``.
+
+    Splits on whitespace so ``"foo myst-bibliography bar"`` matches
+    ``myst-bibliography`` but ``"not-myst-bibliography"`` does not.
+
+    Args:
+        class_value (str): The raw value of an HTML ``class``
+            attribute (the content between the surrounding quotes).
+        token (str): The exact class token to look for. Compared
+            case-sensitively because mystmd's emitted classes are
+            stable case-wise.
+
+    Returns:
+        bool: True if ``token`` is one of the whitespace-separated
+            tokens in ``class_value``.
+    """
+    return token in class_value.split()
+
+
+def _sanitize_cite_id(raw: str) -> str:
+    """Collapse non-safe chars in a cite ID to ``-``, stripping edges.
+
+    The caller is responsible for HTML-entity-decoding ``raw`` first
+    so that ``cite-a&amp;b`` and the equivalent literal ``cite-a&b``
+    produce the same sanitized form. Without that step the SSR side
+    would sanitize to ``a-amp-b`` while React's client side — which
+    builds the id from the decoded label string — would sanitize to
+    ``a-b``, reintroducing the very mismatch this pass is meant to
+    eliminate.
+
+    Args:
+        raw (str): The original suffix after ``cite-``, already
+            HTML-entity-decoded (e.g. the URL
+            ``https://doi.org/10.48550/arxiv.quant-ph/0407010``).
+
+    Returns:
+        str: An id-safe suffix using only ``[A-Za-z0-9_-]`` with no
+            leading or trailing ``-``. Always non-empty for non-empty
+            input.
+    """
+    safe = _UNSAFE_ID_CHARS.sub("-", raw).strip("-")
+    return safe or "id"
+
+
+def _decode_id_raw(raw: str) -> str:
+    """HTML-entity-decode a raw id suffix.
+
+    React computes the bibliography ``<li>`` id from the citation's
+    decoded label, not from the SSR-encoded form, so we have to
+    normalize entities before sanitizing. ``cite-a&amp;b`` and
+    ``cite-a&b`` must therefore collapse to the same sanitized id.
+
+    Args:
+        raw (str): Raw id suffix as captured by the regex (may
+            contain HTML entities such as ``&amp;``).
+
+    Returns:
+        str: The same suffix with HTML entities decoded.
+    """
+    import html
+
+    return html.unescape(raw)
+
+
+def _decode_href_raw(raw: str) -> str:
+    """Percent-decode then HTML-entity-decode a fragment label.
+
+    A ``href="#cite-…"`` value can carry both ``%xx`` percent-encoding
+    (browser-level URL escaping) and HTML entities (HTML-level
+    escaping), in either order. Decode both so the resulting key
+    matches the ``_decode_id_raw`` output of the corresponding ``<li>``
+    id and the cross-reference can be rewritten consistently.
+
+    Args:
+        raw (str): Raw fragment suffix as captured by the regex.
+
+    Returns:
+        str: ``raw`` after URL percent-decoding followed by HTML-
+            entity decoding.
+    """
+    import html
+    from urllib.parse import unquote
+
+    return html.unescape(unquote(raw))
+
+
+def sanitize_cite_ids(html_path: Path) -> bool:
+    """Rewrite mystmd's ``<li id="cite-…">`` ids to match React's client compute.
+
+    Background: mystmd renders bibliography entries with HTML ids of
+    the form ``id="cite-<label>"``. For citations resolved by DOI, the
+    ``<label>`` is the full URL — containing ``/``, ``:``, and ``.``,
+    none of which the SSR'd HTML and React's client computation agree
+    on during hydration. The result on every page that ships a
+    DOI-style citation (mottonen, qsci, …) is a cascade of ~150 React
+    #418 hydration-mismatch errors, each of which recovers by re-
+    rendering its enclosing subtree client-side, which manifests to
+    the user as a multi-second flicker of the cell outputs sitting
+    near the bibliography. Removing it at the source is the
+    structural fix.
+
+    Strategy: only touch the SSR ``<section class="…myst-bibliography
+    …">`` block, scoped by a proper CSS-class-token check (so
+    ``class="not-myst-bibliography"`` does NOT match). Within that
+    scope, collect every ``id="cite-<raw>"``, HTML-entity-decode the
+    raw label, compute its sanitized form, and build a one-pass
+    ``{decoded → sanitized}`` map. Then:
+
+    1. Rewrite the ``id`` attributes inside the bibliography section
+       using the map (matched by decoded label, not the SSR raw, so
+       both ``cite-a&amp;b`` and the equivalent ``cite-a&b`` collapse
+       to one entry).
+    2. Rewrite any matching ``href="#cite-…"`` fragment cross-
+       references anywhere in the document using the same map. A
+       fragment whose decoded label is not in the map is left alone
+       — it points at something that isn't a bibliography ``<li>``
+       and isn't ours to rewrite. Percent-encoded and HTML-entity-
+       encoded forms are both decoded before lookup, so
+       ``#cite-https%3A%2F%2F…`` or ``#cite-a&amp;b`` still match the
+       original ``<li>`` label.
+
+    Collisions: any path that would produce two elements sharing the
+    same ``id`` value on the rendered page fails loudly because the
+    resulting HTML would be invalid and fragment navigation would
+    pick one of the duplicates arbitrarily. Three such paths are
+    detected and all raise ``RuntimeError``:
+
+    1. **Distinct decoded labels** that happen to collapse to the
+       same sanitized form (e.g. ``cite-a/b`` and ``cite-a:b`` both
+       become ``cite-a-b``).
+    2. **Repeated decoded occurrences** — the same decoded label
+       appearing as multiple SSR ``id`` attributes. E.g.
+       ``cite-a&amp;b`` and ``cite-a&b`` are two ``<li>`` items
+       whose ``id`` values decode to the same string (``a&b``), so
+       both would rewrite to ``cite-a-b``. The SSR is already
+       broken in that case (duplicate ids at the DOM level) but
+       otherwise our pass would silently fan the encoded forms into
+       the canonical one and hide the upstream issue.
+    3. **Out-of-scope ``id="cite-…"`` collision** — an existing
+       ``id="cite-…"`` outside the bibliography (e.g. a hand-rolled
+       HTML cell, a code example, a custom anchor) that already
+       holds the sanitized form of one of our bibliography ids.
+       We don't rewrite the out-of-scope id (scoped pass), but
+       once the bibliography id is sanitized, both elements would
+       carry the same ``id`` value on the rendered page.
+
+    Idempotent: re-running on a sanitized HTML is a no-op — the
+    sanitized labels match the unchanged sanitized form, and no
+    ``id`` / ``href`` ends up actually rewritten.
+
+    Args:
+        html_path (Path): The HTML file to patch in place.
+
+    Returns:
+        bool: True if at least one ``id`` or ``href`` was rewritten,
+            False otherwise (page carries no bibliography section,
+            no citation ids inside it, or the ids were already
+            sanitized).
+
+    Raises:
+        RuntimeError: If two distinct decoded citation labels collapse
+            to the same sanitized form, if the same decoded label
+            appears as multiple SSR ``id`` occurrences, or if an
+            existing out-of-scope ``id="cite-…"`` already holds the
+            sanitized form of a bibliography id. All three would
+            create duplicate ``id`` attributes on the rendered page.
+    """
+    content = html_path.read_text(encoding="utf-8")
+
+    # Cheap substring guard so the full regex scan only runs on
+    # pages that can possibly carry a sanitizable bibliography id.
+    # Most build outputs (tutorial pages, landing pages, API
+    # reference pages) ship neither a ``<section
+    # class="myst-bibliography">`` nor a ``cite-`` id, so the early
+    # return turns the per-file cost into a single substring search.
+    # We require BOTH markers: the section anchor (so we don't try
+    # to sanitize stray ``cite-`` ids the regex would scope out
+    # anyway) and the ``cite-`` prefix (so an empty bibliography
+    # section doesn't trigger the full scan either).
+    if "myst-bibliography" not in content or "cite-" not in content:
+        return False
+
+    # Find raw-text and comment spans up front so the tag walker
+    # can ignore tag-shaped substrings sitting inside them. Without
+    # this step, a line like ``<script>const html='<a
+    # href="#cite-…">';</script>`` would have its ``<a>`` substring
+    # treated as a real tag and the ``href`` rewritten — exactly
+    # the scope leak we just patched on the attribute side. The
+    # spans are non-overlapping by construction (HTML5 parses
+    # raw-text and comment contents as character data; the regex
+    # matches their closing tokens directly).
+    skip_ranges: list[tuple[int, int]] = []
+    for raw_text_match in _RAW_TEXT_RE.finditer(content):
+        # Skip only the CONTENT (``body`` group), not the opening
+        # tag. The opening tag stays visible to the walker so its
+        # ``id="cite-..."`` attribute, if any, can participate in
+        # the out-of-scope collision check.
+        skip_ranges.append((raw_text_match.start("body"), raw_text_match.end("body")))
+    for comment_match in _HTML_COMMENT_RE.finditer(content):
+        # Comments have no opening / closing "tag" the walker would
+        # match (``<!--`` doesn't satisfy ``_TAG_RE``'s ``[a-zA-Z]``
+        # head), so it's safe to cover the entire comment span.
+        skip_ranges.append((comment_match.start(), comment_match.end()))
+    skip_ranges.sort()
+
+    def _is_in_skip_range(pos: int) -> bool:
+        """Return True if ``pos`` falls inside any raw-text / comment span.
+
+        Linear scan is fine — typical pages have at most a handful of
+        such spans, so a binary search wouldn't repay its complexity.
+        """
+        return any(start <= pos < end for start, end in skip_ranges)
+
+    # Iterating helper for tags inside a fragment of HTML. Walks
+    # opening / self-closing tags via ``_TAG_RE``, drops anything
+    # falling inside a raw-text / comment span, and yields
+    # ``(tag_match, parsed_attrs)`` pairs so callers don't repeat
+    # the parse work for the collision scan and the rewrite scan.
+    # Yields lazily so a caller that ``break``s early (the
+    # bibliography section walk does, once ``section_end`` is past)
+    # actually short-circuits the regex scan and the per-tag
+    # ``_parse_attrs`` work — eager list construction would parse
+    # every tag in the document on every section-iter call,
+    # turning N bibliography sections into O(N · tags) work.
+    def _iter_tags_with_attrs(
+        haystack: str,
+        offset: int,
+    ) -> Iterator[tuple[re.Match[str], dict[str, tuple[str, int, int]]]]:
+        for tag_match in _TAG_RE.finditer(haystack, offset):
+            if _is_in_skip_range(tag_match.start()):
+                continue
+            yield tag_match, _parse_attrs(tag_match.group("attrs"))
+
+    # Walk every ``<section>``, keep only those whose ``class``
+    # attribute (looked up via a proper attribute-by-attribute parse,
+    # so a substring of another attribute's quoted value cannot
+    # masquerade as ``class``) actually contains
+    # ``myst-bibliography`` as a CSS token. Track both the unique
+    # decoded labels (for the ``decoded → sanitized`` rewrite map)
+    # and every per-id-attribute occurrence (so the second collision
+    # mode below can detect duplicate-id outputs).
+    decoded_to_sanitized: dict[str, str] = {}
+    sanitized_origins: dict[str, list[str]] = {}
+    sanitized_occurrences: dict[str, list[str]] = {}  # sanitized -> raw[]
+    # Absolute offsets (into ``content``) of every cite-id attribute
+    # value that lives inside a bibliography section. The out-of-
+    # scope collision pass and the rewrite pass both key off this
+    # set rather than the section spans, because cite ids may sit
+    # at any tag inside the section and the only thing that matters
+    # for those passes is "is THIS id attribute inside scope".
+    in_scope_id_positions: set[int] = set()
+    for section_match in _SECTION_RE.finditer(content):
+        # A literal ``<section class="myst-bibliography">…</section>``
+        # substring sitting inside a ``<script>`` body or HTML comment
+        # is not a real section. Skip it.
+        if _is_in_skip_range(section_match.start()):
+            continue
+        section_attrs = _parse_attrs(section_match.group("attrs"))
+        class_entry = section_attrs.get("class")
+        if class_entry is None:
+            continue
+        class_value, _, _ = class_entry
+        if not _has_class_token(class_value, "myst-bibliography"):
+            continue
+        section_start, section_end = section_match.start(), section_match.end()
+        # Walk every tag inside this bibliography section and pull the
+        # ``id`` attribute when its value starts with ``cite-``.
+        # ``_parse_attrs`` is what makes the scope correct: a
+        # ``data-foo="something id='cite-x'"`` substring won't be
+        # mistaken for a real ``id`` attribute.
+        for tag_match, tag_attrs in _iter_tags_with_attrs(content, section_start):
+            if tag_match.start() >= section_end:
+                break
+            id_entry = tag_attrs.get("id")
+            if id_entry is None:
+                continue
+            id_value, id_value_start_in_attrs, _id_value_end_in_attrs = id_entry
+            if not id_value.startswith(_CITE_PREFIX):
+                continue
+            raw = id_value[len(_CITE_PREFIX) :]
+            # Track the absolute start of the value span so the
+            # rewrite pass below can do an in-place substitution
+            # without re-parsing. ``tag_match.start("attrs")`` is
+            # already absolute in ``content``, so adding the
+            # parser-relative offset gives the absolute position of
+            # the value's first character.
+            value_abs_start = tag_match.start("attrs") + id_value_start_in_attrs
+            in_scope_id_positions.add(value_abs_start)
+            decoded = _decode_id_raw(raw)
+            sanitized = _sanitize_cite_id(decoded)
+            sanitized_occurrences.setdefault(sanitized, []).append(raw)
+            if decoded in decoded_to_sanitized:
+                continue
+            decoded_to_sanitized[decoded] = sanitized
+            sanitized_origins.setdefault(sanitized, []).append(decoded)
+
+    if not decoded_to_sanitized:
+        return False  # no bibliography or no cite ids inside one
+
+    # Collision check before we mutate anything. Two failure modes:
+    #   1. Two *distinct* decoded labels collapse to the same
+    #      sanitized form (e.g. ``cite-a/b`` and ``cite-a:b`` both
+    #      become ``cite-a-b``).
+    #   2. The *same* decoded label appears as multiple SSR ``id``
+    #      occurrences (e.g. ``cite-a&amp;b`` and ``cite-a&b`` are two
+    #      `<li>` items in the source that both decode to ``a&b`` and
+    #      would both rewrite to ``cite-a-b``). The SSR is already
+    #      broken in that case — duplicate ids at the DOM level — but
+    #      our sanitizer otherwise silently fans them into the
+    #      canonical form and hides the upstream issue. Fail loud
+    #      either way so the build never ships a page with duplicate
+    #      bibliography ids.
+    distinct_collisions = {s: rs for s, rs in sanitized_origins.items() if len(rs) > 1}
+    occurrence_collisions = {
+        s: rs for s, rs in sanitized_occurrences.items() if len(rs) > 1
+    }
+    # Third failure mode: an out-of-scope ``id="cite-…"`` already in
+    # the page (e.g. a hand-rolled HTML cell or a code example) that
+    # happens to match the sanitized form of one of our bibliography
+    # ids. We don't rewrite that out-of-scope id (different scope),
+    # but the post-sanitize page would still ship two elements with
+    # the same ``id``. Walk every tag in the document via
+    # ``_TAG_RE`` + ``_parse_attrs`` (a substring of another
+    # attribute's value cannot reach this loop) and check the ones
+    # whose id starts with ``cite-`` and whose absolute value-start
+    # is NOT in ``in_scope_id_positions`` — i.e. ids we already
+    # captured as part of a bibliography section above are skipped,
+    # everything else gets the collision check.
+    sanitized_values = set(decoded_to_sanitized.values())
+    out_of_scope_collisions: dict[str, str] = {}
+    for tag_match, tag_attrs in _iter_tags_with_attrs(content, 0):
+        id_entry = tag_attrs.get("id")
+        if id_entry is None:
+            continue
+        id_value, id_value_start_in_attrs, _id_value_end_in_attrs = id_entry
+        if not id_value.startswith(_CITE_PREFIX):
+            continue
+        value_abs_start = tag_match.start("attrs") + id_value_start_in_attrs
+        if value_abs_start in in_scope_id_positions:
+            continue
+        raw_existing = id_value[len(_CITE_PREFIX) :]
+        decoded_existing = _decode_id_raw(raw_existing)
+        if decoded_existing in sanitized_values:
+            out_of_scope_collisions[decoded_existing] = raw_existing
+    if distinct_collisions or occurrence_collisions or out_of_scope_collisions:
+        parts: list[str] = []
+        for sanitized, decoded_raws in sorted(distinct_collisions.items()):
+            parts.append(f"{sanitized!r} <- distinct labels {sorted(decoded_raws)!r}")
+        for sanitized, raw_occurrences in sorted(occurrence_collisions.items()):
+            if sanitized in distinct_collisions:
+                continue  # already reported with richer detail
+            parts.append(
+                f"{sanitized!r} <- repeated occurrences {sorted(raw_occurrences)!r}"
+            )
+        for sanitized, raw_existing in sorted(out_of_scope_collisions.items()):
+            parts.append(
+                f"{sanitized!r} <- already used by out-of-scope id {raw_existing!r}"
+            )
+        details = "; ".join(parts)
+        raise RuntimeError(
+            f"{html_path}: bibliography citation ids would collapse to "
+            f"duplicate sanitized values, which would produce duplicate "
+            f"id attributes on the page: {details}"
+        )
+
+    # If every decoded label is already its own sanitized form, no
+    # rewriting is needed — early-exit to keep idempotency cheap.
+    if all(decoded == sanitized for decoded, sanitized in decoded_to_sanitized.items()):
+        return False
+
+    # Single rewrite pass. Walk every tag in the document and, for
+    # each tag, look up its parsed attributes. Two kinds of edits:
+    #
+    # 1. If the tag sits inside a bibliography section AND has an
+    #    ``id`` attribute that starts with ``cite-``, rewrite the
+    #    suffix to its sanitized form. Captured ``in_scope_id_positions``
+    #    from the first walk lets us skip out-of-scope ids without
+    #    re-checking the section regex.
+    # 2. If the tag has an ``href`` attribute that starts with
+    #    ``#cite-`` AND the decoded label is in our rewrite map,
+    #    rewrite the suffix. Unknown fragments are passed through
+    #    untouched.
+    #
+    # All edits are in-place attribute-value substitutions using the
+    # absolute spans returned by ``_parse_attrs``, so we never touch
+    # characters outside an actual quoted attribute value (so a
+    # ``href="#cite-…"`` substring inside a ``<script>`` body or a
+    # text node is impossible to rewrite by construction).
+    edits: list[tuple[int, int, str]] = []  # (start, end, replacement)
+    for tag_match, tag_attrs in _iter_tags_with_attrs(content, 0):
+        attrs_abs_start = tag_match.start("attrs")
+
+        # (1) Bibliography-scoped id rewrite.
+        id_entry = tag_attrs.get("id")
+        if id_entry is not None:
+            id_value, id_value_start_in_attrs, id_value_end_in_attrs = id_entry
+            if id_value.startswith(_CITE_PREFIX):
+                abs_start = attrs_abs_start + id_value_start_in_attrs
+                abs_end = attrs_abs_start + id_value_end_in_attrs
+                if abs_start in in_scope_id_positions:
+                    raw = id_value[len(_CITE_PREFIX) :]
+                    decoded = _decode_id_raw(raw)
+                    sanitized = decoded_to_sanitized.get(decoded, raw)
+                    if sanitized != raw:
+                        edits.append((abs_start, abs_end, f"{_CITE_PREFIX}{sanitized}"))
+
+        # (2) Fragment cross-reference rewrite (anywhere in the doc).
+        href_entry = tag_attrs.get("href")
+        if href_entry is None:
+            continue
+        href_value, href_value_start_in_attrs, href_value_end_in_attrs = href_entry
+        if not href_value.startswith(_CITE_HREF_PREFIX):
+            continue
+        raw_href = href_value[len(_CITE_HREF_PREFIX) :]
+        decoded_href = _decode_href_raw(raw_href)
+        sanitized_href = decoded_to_sanitized.get(decoded_href)
+        if sanitized_href is None or sanitized_href == raw_href:
+            continue
+        abs_start = attrs_abs_start + href_value_start_in_attrs
+        abs_end = attrs_abs_start + href_value_end_in_attrs
+        edits.append((abs_start, abs_end, f"{_CITE_HREF_PREFIX}{sanitized_href}"))
+
+    if not edits:
+        return False
+
+    # Apply edits right-to-left so earlier indices stay valid.
+    edits.sort(key=lambda e: e[0], reverse=True)
+    new_content = content
+    for start, end, replacement in edits:
+        new_content = new_content[:start] + replacement + new_content[end:]
+
+    if new_content == content:
+        return False
+    html_path.write_text(new_content, encoding="utf-8")
+    return True
+
+
 def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
     """Rewrite ``docs/_build_src/<lang>/`` → ``docs/<lang>/`` in ``target_path``.
 
@@ -475,7 +1188,7 @@ def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
 
 def patch_language_build(
     docs_root: Path, language: str
-) -> tuple[int, int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int, int, int]:
     """Run all post-build patches for one language's build output.
 
     Patches applied:
@@ -496,10 +1209,35 @@ def patch_language_build(
        on every ``*.html`` (see :func:`inject_lightbox_script_tag`)
        so wide cell-output images become click-to-zoom modals on the
        rendered page.
+    6. Sanitize bibliography ``<li id="cite-…">`` ids to
+       ``[A-Za-z0-9_-]`` (see :func:`sanitize_cite_ids`). DOI-resolved
+       citations otherwise carry ids whose ``/`` / ``:`` chars cause
+       React hydration to fail-and-recover in a cascade visible as a
+       multi-second flicker around the bibliography.
+
+    Args:
+        docs_root (Path): Repository ``docs/`` directory. The function
+            reads its source assets from ``docs/assets/`` and writes
+            into ``docs/<language>/_build/html/``.
+        language (str): Language slug — ``"en"`` or ``"ja"``. Drives
+            both the build-output directory and the source-path
+            rewrite needle.
 
     Returns:
-        ``(injected_count, rewritten_count, css_inlined_count,
-        theme_init_count, lightbox_count, total_html, total_json)``.
+        tuple[int, int, int, int, int, int, int, int]: An 8-tuple of
+            counters in the form ``(injected_count, rewritten_count,
+            css_inlined_count, theme_init_count, lightbox_count,
+            cite_sanitized_count, total_html, total_json)``. The
+            first six are how many files each pass actually rewrote;
+            the last two are the universe sizes the passes iterated
+            over (every ``*.html`` / ``*.json`` under the build
+            output) and are reported alongside so the audit print in
+            ``main`` can render ``X/Y`` ratios.
+
+    Raises:
+        RuntimeError: If the language's build directory or one of the
+            source asset scripts (``colab-launch.js`` /
+            ``lightbox.js``) is missing.
     """
     html_root = docs_root / language / "_build" / "html"
     if not html_root.exists():
@@ -528,6 +1266,7 @@ def patch_language_build(
     css_inlined_count = 0
     theme_init_count = 0
     lightbox_count = 0
+    cite_sanitized_count = 0
 
     # Rewrite build-dir paths across HTML + JSON. JSON is the SPA's data
     # layer; without rewriting it, post-navigation re-hydration puts the
@@ -560,6 +1299,8 @@ def patch_language_build(
         relative_lightbox = Path(relative_lightbox).as_posix()
         if inject_lightbox_script_tag(html_file, relative_lightbox):
             lightbox_count += 1
+        if sanitize_cite_ids(html_file):
+            cite_sanitized_count += 1
 
     return (
         injected_count,
@@ -567,6 +1308,7 @@ def patch_language_build(
         css_inlined_count,
         theme_init_count,
         lightbox_count,
+        cite_sanitized_count,
         len(html_files),
         len(json_files),
     )
@@ -584,6 +1326,7 @@ def main() -> int:
             css_inlined_count,
             theme_init_count,
             lightbox_count,
+            cite_sanitized_count,
             total_html,
             total_json,
         ) = patch_language_build(docs_root, language)
@@ -592,6 +1335,7 @@ def main() -> int:
             f"injected lightbox script into {lightbox_count}/{total_html} HTML, "
             f"inlined theme CSS into {css_inlined_count}/{total_html} HTML, "
             f"injected theme-init script into {theme_init_count}/{total_html} HTML, "
+            f"sanitized cite ids in {cite_sanitized_count}/{total_html} HTML, "
             f"rewrote build-dir paths in {rewritten_count}/{total_html + total_json} "
             f"({total_html} HTML + {total_json} JSON)"
         )

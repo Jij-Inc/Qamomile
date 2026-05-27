@@ -29,11 +29,13 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
     MeasureOperation,
+    MeasureQFixedOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
 
 from .geometry import compute_border_padding
 from .style import CircuitStyle
@@ -121,6 +123,14 @@ class CircuitAnalyzer:
         qubit_map: dict[str, int] = {}
         qubit_names: dict[int, str] = {}
         next_idx = 0
+        # Per-element wire indices for callee parameters whose actual
+        # argument was a slice view of a root register.  A slice view
+        # owns a non-contiguous subset of the root's wires, so the
+        # callee's parameter cannot be registered as a single fresh
+        # wire — see ``_compute_slice_view_wires`` for details.  Each
+        # entry maps a callee parameter's ``logical_id`` to the list
+        # of root-space wire indices it aliases, in element order.
+        slice_view_wires: dict[str, list[int]] = {}
 
         def map_block_results(
             operands: list[Value],
@@ -277,6 +287,57 @@ class CircuitAnalyzer:
                         ):
                             if not isinstance(dummy_input.type, QubitType):
                                 continue
+
+                            # Slice-view actual argument special case:
+                            # pre-populate the callee parameter's
+                            # per-element entries so ``v[i]`` inside the
+                            # callee resolves to the right root-space
+                            # wires (non-contiguous in general).  See
+                            # :meth:`_compute_slice_view_wires`.
+                            slice_wires = self._compute_slice_view_wires(
+                                actual_input,
+                                qubit_map,
+                                logical_id_remap,
+                                param_values,
+                                slice_view_wires,
+                            )
+                            if slice_wires is not None:
+                                # Populate per-element entries under
+                                # both the callee parameter's lid (for
+                                # ``build_qubit_map``'s own recursion
+                                # into the inlined body, which keeps
+                                # the lid unremapped) and the actual
+                                # argument's lid (for the visual IR
+                                # build, which remaps the parameter to
+                                # the argument's lid through
+                                # ``_build_block_value_mappings``).
+                                # Either lookup path then finds the
+                                # right root-space wire without
+                                # falling back to fresh-wire allocation
+                                # in ``map_block_results``.
+                                actual_input_lid = logical_id_remap.get(
+                                    actual_input.logical_id,
+                                    actual_input.logical_id,
+                                )
+                                for i, wire_idx in enumerate(slice_wires):
+                                    qubit_map[f"{dummy_input.logical_id}_[{i}]"] = (
+                                        wire_idx
+                                    )
+                                    qubit_map[f"{actual_input_lid}_[{i}]"] = wire_idx
+                                if slice_wires:
+                                    qubit_map[dummy_input.logical_id] = slice_wires[0]
+                                    qubit_map[actual_input_lid] = slice_wires[0]
+                                slice_view_wires[dummy_input.logical_id] = list(
+                                    slice_wires
+                                )
+                                slice_view_wires[actual_input_lid] = list(slice_wires)
+                                # The parameter aliases existing root
+                                # wires — no fresh wire allocation, no
+                                # logical-id remap (each ``v[i]`` lookup
+                                # builds its own canonical key against
+                                # ``dummy_input.logical_id``).
+                                continue
+
                             actual_lid = self._resolve_array_element_lid(
                                 actual_input,
                                 qubit_map,
@@ -575,7 +636,9 @@ class CircuitAnalyzer:
                 elif isinstance(op, ForItemsOperation):
                     dict_value = op.operands[0] if op.operands else None
                     materialized = (
-                        self._materialize_dict_entries(dict_value)
+                        self._materialize_dict_entries(
+                            dict_value, param_values, logical_id_remap
+                        )
                         if dict_value is not None
                         else None
                     )
@@ -776,7 +839,7 @@ class CircuitAnalyzer:
                 continue
 
             # Generic: GateOperation, CallBlock/ControlledU/CompositeGate (box mode),
-            # MeasureOperation, MeasureVectorOperation
+            # MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation
             if isinstance(
                 op,
                 (
@@ -784,6 +847,7 @@ class CircuitAnalyzer:
                     CallBlockOperation,
                     MeasureOperation,
                     MeasureVectorOperation,
+                    MeasureQFixedOperation,
                     CompositeGateOperation,
                     ControlledUOperation,
                 ),
@@ -858,6 +922,36 @@ class CircuitAnalyzer:
                 kind=VGateKind.MEASURE_VECTOR,
             )
 
+        if isinstance(op, MeasureQFixedOperation):
+            # ``MeasureQFixedOperation`` is the HYBRID measurement that
+            # ``plan`` later splits into ``MeasureVectorOperation +
+            # DecodeQFixedOperation``.  The visualizer works on the
+            # pre-plan IR so it sees the unsplit form and must resolve
+            # the carrier qubits itself.  The operand is the QFixed
+            # ``Value`` produced by the upstream ``CastOperation``,
+            # which attaches a ``CastMetadata`` whose
+            # ``qubit_logical_ids`` field enumerates the source qubits
+            # in carrier order.  Each entry is of the form
+            # ``f"{root_logical_id}_{idx}"`` (without brackets);
+            # ``QInitOperation`` registers root qubits in
+            # ``qubit_map`` under ``f"{root_logical_id}_[{idx}]"``
+            # (with brackets).  We bridge the two encodings here so
+            # the carrier wires resolve precisely — including the
+            # non-contiguous indices a slice-source cast produces
+            # (e.g. ``cast(q[1::2], QFixed)`` covers root ``{1, 3}``).
+            qubit_indices = []
+            if op.operands:
+                qubit_indices = self._resolve_qfixed_carrier_indices(
+                    op.operands[0], qubit_map, logical_id_remap
+                )
+            return VGate(
+                node_key=node_key,
+                label="M",
+                qubit_indices=qubit_indices,
+                estimated_width=self.style.gate_width,
+                kind=VGateKind.MEASURE_VECTOR,
+            )
+
         if isinstance(op, CallBlockOperation):
             label = self._get_block_label(op, qubit_map, param_values=param_values)
             box_width = self._estimate_block_label_box_width(label)
@@ -909,7 +1003,12 @@ class CircuitAnalyzer:
             u_name = getattr(op.block, "name", "U") or "U"
             power_val = self._resolve_controlled_u_power(op, param_values)
             label = f"{u_name}^{power_val}" if power_val > 1 else u_name
-            box_width = self._estimate_label_box_width(label)
+            controlled_gate_type = self._controlled_u_single_gate_type(op, power_val)
+            box_width = (
+                self.style.gate_width
+                if controlled_gate_type is not None
+                else self._estimate_label_box_width(label)
+            )
             # Control qubits first, then target qubits
             control_indices: list[int] = []
             for qval in op.control_operands:
@@ -931,6 +1030,7 @@ class CircuitAnalyzer:
                 qubit_indices=control_indices + target_indices,
                 estimated_width=box_width,
                 kind=VGateKind.CONTROLLED_U_BOX,
+                gate_type=controlled_gate_type,
                 box_width=box_width,
                 control_count=len(control_indices),
             )
@@ -938,6 +1038,46 @@ class CircuitAnalyzer:
         raise TypeError(
             f"Unsupported operation type for _build_vgate: {type(op).__name__}"
         )
+
+    def _controlled_u_single_gate_type(
+        self, op: ControlledUOperation, power: int
+    ) -> GateOperationType | None:
+        """Return the wrapped gate type when controlled-U is a single gate.
+
+        Args:
+            op (ControlledUOperation): Controlled operation whose wrapped
+                block may contain one concrete `GateOperation`.
+            power (int): Resolved controlled-U power. Values greater than one
+                are left in box form so the exponent remains visible.
+
+        Returns:
+            GateOperationType | None: Wrapped gate type when the controlled
+                block is exactly one gate plus an optional return operation;
+                otherwise None.
+        """
+        if power != 1:
+            return None
+        block = op.block
+        if block is None:
+            return None
+        body_ops = [
+            body_op
+            for body_op in block.operations
+            if not isinstance(body_op, ReturnOperation)
+        ]
+        if len(body_ops) != 1 or not isinstance(body_ops[0], GateOperation):
+            return None
+        gate_type = body_ops[0].gate_type
+        if gate_type not in {
+            GateOperationType.X,
+            GateOperationType.Z,
+            GateOperationType.CX,
+            GateOperationType.CZ,
+            GateOperationType.SWAP,
+            GateOperationType.TOFFOLI,
+        }:
+            return None
+        return gate_type
 
     def _build_vexpval(
         self,
@@ -1360,7 +1500,7 @@ class CircuitAnalyzer:
 
         # Materialize entries
         materialized = (
-            self._materialize_dict_entries(dict_value)
+            self._materialize_dict_entries(dict_value, param_values, logical_id_remap)
             if dict_value is not None
             else None
         )
@@ -1698,7 +1838,7 @@ class CircuitAnalyzer:
         def add_affected(operand: Value) -> None:
             """Resolve `operand` and merge its wire indices into `affected`."""
             indices = self._resolve_operand_to_affected_qubits(
-                operand, qubit_map, logical_id_remap
+                operand, qubit_map, logical_id_remap, param_values
             )
             if indices is not None:
                 affected.update(indices)
@@ -1913,6 +2053,8 @@ class CircuitAnalyzer:
                         if isinstance(rhs_val, (int, float)) and rhs_val < 0:
                             return result
                         return int(result)
+                    elif op.kind == BinOpKind.MIN:
+                        return lhs_val if lhs_val <= rhs_val else rhs_val
                 return None
 
         return None
@@ -2162,6 +2304,8 @@ class CircuitAnalyzer:
             if rhs_str == "1":
                 return lhs_str
             return f"{lhs_str}/{rhs_str}"
+        elif binop.kind == BinOpKind.MIN:
+            return f"min({lhs_str},{rhs_str})"
         else:
             _extra_ops: dict[BinOpKind, str] = {
                 BinOpKind.FLOORDIV: "//",
@@ -2242,6 +2386,17 @@ class CircuitAnalyzer:
         ``f"{parent_lid}_[{idx}]"`` and register an alias if found.
         When param_values is provided, symbolic indices (e.g. loop variables)
         can be resolved via _evaluate_value.
+
+        For *view* elements (``value.parent_array.slice_of is not None``)
+        the ``parent_array`` is the view's own ``ArrayValue`` and is **not**
+        registered in ``qubit_map`` — only the root register is.  In that
+        case the chain is walked via :meth:`_resolve_view_chain_to_root`
+        so the view-local ``element_indices[0]`` is composed with the
+        chain's affine map to a root-space index, and the canonical key
+        is built against the root register.  Without this, inlined
+        sub-kernels called with ``view[i]`` would allocate a fresh wire
+        instead of mapping to the root register's wire (mirrors the same
+        composition done by :meth:`_resolve_parent_array_element`).
         """
         lid = logical_id_remap.get(value.logical_id, value.logical_id)
         # For symbolic array elements, skip cached UUID lookup —
@@ -2257,23 +2412,82 @@ class CircuitAnalyzer:
         )
         if lid in qubit_map and not is_symbolic_array_element:
             return lid
+
+        # Whole slice view (``ArrayValue`` with ``slice_of``, no
+        # ``parent_array``): callers like ``map_block_results`` need a
+        # canonical key that resolves to an existing root-space wire.
+        # Without this branch the lid falls through and the caller
+        # allocates a phantom wire for a value that actually aliases
+        # root slots (visible as ghost wires past ``num_qubits`` in
+        # rendered circuits).  Alias ``lid`` to the root's first
+        # slice-covered element's wire and return the *array* lid
+        # itself (NOT the element key) — callers (e.g. inline-block
+        # remap consumers, ControlledU / CompositeGate paths) keep
+        # using the returned string as a logical-id key for further
+        # ``f"{lid}_[{i}]"`` element-key construction; returning an
+        # element key here would yield malformed keys like
+        # ``f"q.lid_[0]_[{i}]"``.
+        if (
+            isinstance(value, ArrayValue)
+            and getattr(value, "slice_of", None) is not None
+        ):
+            resolved = self._resolve_view_chain_to_root(value)
+            if resolved is not None:
+                root_av, start, _step = resolved
+                root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+                root_elem_key = f"{root_lid}_[{start}]"
+                if root_elem_key in qubit_map:
+                    qubit_map[lid] = qubit_map[root_elem_key]
+                    return lid
+                if root_lid in qubit_map:
+                    qubit_map[lid] = qubit_map[root_lid] + start
+                    return lid
+
         if hasattr(value, "parent_array") and value.parent_array is not None:
-            parent_lid = logical_id_remap.get(
-                value.parent_array.logical_id, value.parent_array.logical_id
-            )
+            parent_array = value.parent_array
+            # When the parent is a slice view, compose back to the root
+            # register so the canonical key references the wire that
+            # actually lives in ``qubit_map``.  The view itself was
+            # never registered as a wire owner.
+            chain_start = 0
+            chain_step = 1
+            chain_failed = False
+            if getattr(parent_array, "slice_of", None) is not None:
+                resolved = self._resolve_view_chain_to_root(parent_array)
+                if resolved is None:
+                    # Symbolic ``slice_start`` / ``slice_step`` along the
+                    # chain — fall back to the original ``parent_lid``
+                    # path; the caller's broader resolution may still
+                    # find a match through a different alias.
+                    chain_failed = True
+                else:
+                    root_av, chain_start, chain_step = resolved
+                    parent_array = root_av
+
+            if chain_failed:
+                parent_lid = logical_id_remap.get(
+                    value.parent_array.logical_id, value.parent_array.logical_id
+                )
+            else:
+                parent_lid = logical_id_remap.get(
+                    parent_array.logical_id, parent_array.logical_id
+                )
+
             if hasattr(value, "element_indices") and value.element_indices:
                 idx_value = value.element_indices[0]
                 if idx_value.is_constant():
                     idx = idx_value.get_const()
                     if idx is not None:
-                        element_key = f"{parent_lid}_[{int(idx)}]"
+                        root_idx = chain_start + chain_step * int(idx)
+                        element_key = f"{parent_lid}_[{root_idx}]"
                         if element_key in qubit_map:
                             qubit_map[lid] = qubit_map[element_key]
                             return element_key
                 elif param_values:
                     idx = self._evaluate_value(idx_value, param_values)
                     if idx is not None:
-                        element_key = f"{parent_lid}_[{int(idx)}]"
+                        root_idx = chain_start + chain_step * int(idx)
+                        element_key = f"{parent_lid}_[{root_idx}]"
                         if element_key in qubit_map:
                             # Don't cache — symbolic index may resolve
                             # differently across loop iterations
@@ -2324,6 +2538,213 @@ class CircuitAnalyzer:
             return count
         return None
 
+    def _resolve_qfixed_carrier_indices(
+        self,
+        operand: Value,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+    ) -> list[int]:
+        """Resolve a QFixed measurement operand to its carrier wire indices.
+
+        The operand is the QFixed ``Value`` produced by ``CastOperation``;
+        its ``metadata.cast.qubit_logical_ids`` carries one entry per
+        carrier qubit in measurement order, formatted as
+        ``f"{root_logical_id}_{idx}"``.  ``QInitOperation`` registers
+        each root element in ``qubit_map`` as ``f"{root_logical_id}_[{idx}]"``.
+        This helper bridges the two encodings: it parses each cast
+        carrier string, applies ``logical_id_remap`` to the root prefix
+        (in case the cast lives in an inlined block), reformats with
+        brackets, and looks up the result in ``qubit_map``.
+
+        Args:
+            operand (Value): The QFixed-typed operand of a
+                ``MeasureQFixedOperation`` (i.e. the result of a prior
+                ``CastOperation``).
+            qubit_map (dict[str, int]): Mapping from logical_id-derived
+                keys to qubit wire indices.
+            logical_id_remap (dict[str, str]): Mapping from formal-
+                parameter logical_ids to actual-argument logical_ids,
+                used when the cast occurs inside an inlined block.
+
+        Returns:
+            list[int]: The wire indices the QFixed measurement targets,
+                in carrier (most-significant-bit-first) order.  Empty
+                when the operand carries no cast metadata or when no
+                carrier entry resolves to a known wire.
+        """
+        cast_meta = getattr(operand.metadata, "cast", None)
+        if cast_meta is None or not cast_meta.qubit_logical_ids:
+            return []
+        indices: list[int] = []
+        for carrier_key in cast_meta.qubit_logical_ids:
+            # Carrier key format: ``f"{root_logical_id}_{idx}"`` (no
+            # brackets).  Split on the *last* ``_`` to recover the root
+            # prefix and idx; the root logical_id itself may contain
+            # underscores (UUIDs use them), so split from the right.
+            try:
+                root_lid, idx_str = carrier_key.rsplit("_", 1)
+                idx_int = int(idx_str)
+            except (ValueError, AttributeError):
+                continue
+            remapped_lid = logical_id_remap.get(root_lid, root_lid)
+            bracket_key = f"{remapped_lid}_[{idx_int}]"
+            wire = qubit_map.get(bracket_key)
+            if wire is not None:
+                indices.append(wire)
+        return indices
+
+    def _resolve_view_chain_to_root(
+        self,
+        array_value: "ArrayValue",
+    ) -> tuple["ArrayValue", int, int] | None:
+        """Walk the ``slice_of`` chain to the root array, composing the affine map.
+
+        For a sliced ``ArrayValue`` (i.e. one with ``slice_of is not None``),
+        the element-index in operand metadata is *view-local*: ``view[i]``
+        on ``q[0::2]`` records ``element_indices[0] = i`` against
+        ``parent_array = view_av``, not against ``q``.  Translating to a
+        physical wire index requires walking the ``slice_of`` chain to
+        the root and composing the start / step pairs of every hop.
+
+        At each hop ``cur = slice_of(child)`` the parent-space index of
+        ``child[i]`` is ``cur.slice_start + cur.slice_step * i``.
+        Composing through a chain accumulates as
+        ``(start, step) -> (cur.slice_start + cur.slice_step * start,
+        cur.slice_step * step)`` until ``cur.slice_of is None`` (root).
+
+        Args:
+            array_value (ArrayValue): A possibly-sliced ArrayValue.  When
+                ``slice_of is None`` the function returns the identity
+                transform ``(array_value, 0, 1)``.
+
+        Returns:
+            tuple[ArrayValue, int, int] | None: ``(root_av, start, step)``
+                so that the root-space index of a view-local ``idx`` is
+                ``start + step * idx``.  ``None`` when any
+                ``slice_start`` / ``slice_step`` along the chain is
+                symbolic (cannot compose the affine map at draw time).
+        """
+        cur = array_value
+        start = 0
+        step = 1
+        while getattr(cur, "slice_of", None) is not None:
+            slice_start = cur.slice_start
+            slice_step = cur.slice_step
+            if slice_start is None or not slice_start.is_constant():
+                return None
+            if slice_step is None or not slice_step.is_constant():
+                return None
+            s = slice_start.get_const()
+            st = slice_step.get_const()
+            if s is None or st is None:
+                return None
+            try:
+                s_int = int(s)
+                st_int = int(st)
+            except (TypeError, ValueError):
+                return None
+            start = s_int + st_int * start
+            step = st_int * step
+            cur = cur.slice_of
+            assert cur is not None, (
+                "[FOR DEVELOPER] slice_of must point at a parent ArrayValue while "
+                "walking a slice chain."
+            )
+        return cur, start, step
+
+    def _compute_slice_view_wires(
+        self,
+        actual_input: Value,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        slice_view_wires: dict[str, list[int]],
+    ) -> list[int] | None:
+        """Per-element wires for a slice-view sub-kernel argument.
+
+        When a ``@qkernel`` is called with a slice view (or with a
+        parameter that was itself slice-aliased one call up), the
+        callee's qubit parameter must alias the *same* root-register
+        wires the caller's slice covers — not a fresh contiguous wire
+        block.  This routine produces the wire indices to record under
+        the callee parameter's ``logical_id`` so the renderer's qubit
+        lookup ends up at the right physical wires.
+
+        Two cases are handled:
+
+        - ``actual_input`` is itself an ``ArrayValue`` with a
+          ``slice_of`` chain (the caller wrote ``q[a:b:c]``): walk the
+          chain to the root, then map each element of the view to the
+          root's wire via ``start + step * i``.  If the root is itself
+          slice-aliased (a previously-pre-populated parameter), the
+          chain's start/step composes with that root's alias wires.
+        - ``actual_input`` resolves (via ``logical_id_remap``) to a
+          ``logical_id`` already registered in ``slice_view_wires``:
+          the alias is forwarded one call deeper.
+
+        Args:
+            actual_input (Value): The IR value being passed into the
+                ``CallBlockOperation``.
+            qubit_map (dict[str, int]): Current wire mapping.  Used to
+                look up the root's per-element entries.
+            logical_id_remap (dict[str, str]): Logical-id remap from
+                enclosing inlined blocks.
+            param_values (dict): Parameter values, used for resolving a
+                symbolic view shape.
+            slice_view_wires (dict[str, list[int]]): Existing
+                parameter-to-wires aliases from outer enclosing calls.
+
+        Returns:
+            list[int] | None: One wire index per element of the
+                callee's parameter when ``actual_input`` resolves to a
+                slice view, ``None`` otherwise (the caller falls back
+                to the default fresh-wire registration path).
+        """
+        if not isinstance(actual_input, ArrayValue):
+            return None
+
+        actual_lid_resolved = logical_id_remap.get(
+            actual_input.logical_id, actual_input.logical_id
+        )
+
+        # Case A: actual_input is itself a slice view (``slice_of`` set).
+        if getattr(actual_input, "slice_of", None) is not None:
+            resolved = self._resolve_view_chain_to_root(actual_input)
+            if resolved is None:
+                return None
+            root_av, start, step = resolved
+            root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+            size = self._resolve_array_size(
+                actual_input, actual_lid_resolved, qubit_map, param_values
+            )
+            if size is None:
+                return None
+            root_alias = slice_view_wires.get(root_lid)
+            wires: list[int] = []
+            for i in range(size):
+                root_idx = start + step * i
+                if root_alias is not None:
+                    if 0 <= root_idx < len(root_alias):
+                        wires.append(root_alias[root_idx])
+                    else:
+                        return None
+                else:
+                    root_elem_key = f"{root_lid}_[{root_idx}]"
+                    if root_elem_key in qubit_map:
+                        wires.append(qubit_map[root_elem_key])
+                    elif root_lid in qubit_map:
+                        wires.append(qubit_map[root_lid] + root_idx)
+                    else:
+                        return None
+            return wires
+
+        # Case B: actual_input is a previously slice-aliased parameter
+        # being forwarded to a deeper call.
+        if actual_lid_resolved in slice_view_wires:
+            return list(slice_view_wires[actual_lid_resolved])
+
+        return None
+
     def _resolve_parent_array_element(
         self,
         operand: Value,
@@ -2332,6 +2753,12 @@ class CircuitAnalyzer:
         param_values: dict,
     ) -> int | None:
         """Resolve a `q[i]` operand to its wire index when `i` is concrete.
+
+        Handles both direct ``q[i]`` and ``view[i]`` where ``view`` is a
+        slice of ``q``: when ``parent_array.slice_of`` is non-None, the
+        chain is walked via :meth:`_resolve_view_chain_to_root` so that
+        view-local ``i`` is composed with the chain's affine map to a
+        root-space index.
 
         Args:
             operand: IR Value expected to have `parent_array` and
@@ -2344,19 +2771,16 @@ class CircuitAnalyzer:
                 `element_indices[0]`.
 
         Returns:
-            The wire index `qubit_map[parent_lid] + int(i)` when the
-            operand is a parent-array element access with a resolvable
-            index. None if the operand is not a parent-array element
-            access, the parent is not in `qubit_map`, `element_indices`
-            is absent, or the index is symbolic and cannot be evaluated.
+            The wire index for the resolved element.  When the parent
+            is a slice view, the view-local index is composed with the
+            ``slice_of`` chain back to the root register.  ``None`` when
+            the parent / root is not in ``qubit_map``,
+            ``element_indices`` is absent, or any index / slice
+            metadata in the chain is symbolic and cannot be evaluated.
         """
         if not (hasattr(operand, "parent_array") and operand.parent_array is not None):
             return None
-        parent_lid = logical_id_remap.get(
-            operand.parent_array.logical_id, operand.parent_array.logical_id
-        )
-        if parent_lid not in qubit_map:
-            return None
+        parent_array = operand.parent_array
         if not (hasattr(operand, "element_indices") and operand.element_indices):
             return None
         idx_value = operand.element_indices[0]
@@ -2366,7 +2790,45 @@ class CircuitAnalyzer:
             idx = self._evaluate_value(idx_value, param_values)
         if idx is None:
             return None
-        return qubit_map[parent_lid] + int(idx)
+        idx_int = int(idx)
+        # Slice view → walk to root, compose affine map.  Mirror the
+        # direct-element branch's ``element_key`` preference: when the
+        # root has per-element entries (an ordinary register, or a
+        # callee parameter slice-aliased to non-contiguous root wires
+        # by ``build_qubit_map``'s sub-kernel handling), the formula
+        # ``base + start + step * idx`` is only correct for contiguous
+        # wires.  Look up the canonical ``f"{root_lid}_[{root_idx}]"``
+        # key first and fall back to the formula only when no
+        # per-element entry exists.
+        if getattr(parent_array, "slice_of", None) is not None:
+            resolved = self._resolve_view_chain_to_root(parent_array)
+            if resolved is None:
+                return None
+            root_av, start, step = resolved
+            root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+            root_idx = start + step * idx_int
+            root_elem_key = f"{root_lid}_[{root_idx}]"
+            if root_elem_key in qubit_map:
+                return qubit_map[root_elem_key]
+            if root_lid not in qubit_map:
+                return None
+            return qubit_map[root_lid] + root_idx
+        # Direct array element.  Prefer the canonical per-element key
+        # (``f"{parent_lid}_[{idx}]"``) which is populated both by
+        # ``QInitOperation`` for ordinary registers and by the slice-
+        # view sub-kernel-argument handling in ``build_qubit_map``.
+        # The formula fallback (``base + idx``) only fires for arrays
+        # without per-element entries, where wires are contiguous by
+        # construction.
+        parent_lid = logical_id_remap.get(
+            parent_array.logical_id, parent_array.logical_id
+        )
+        element_key = f"{parent_lid}_[{idx_int}]"
+        if element_key in qubit_map:
+            return qubit_map[element_key]
+        if parent_lid not in qubit_map:
+            return None
+        return qubit_map[parent_lid] + idx_int
 
     def _resolve_non_element_operand(
         self,
@@ -2400,17 +2862,76 @@ class CircuitAnalyzer:
         """
         resolved_lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
 
+        # Slice view operand → walk the ``slice_of`` chain to the root
+        # register and translate each element to a root-space wire via
+        # ``start + step * i``.  Without this, the broadcast gate /
+        # call-block / measure paths would treat a slice view as a
+        # contiguous fresh-wire block (the formula ``base + k``), which
+        # is correct only for an ordinary register.
+        if (
+            isinstance(operand, ArrayValue)
+            and getattr(operand, "slice_of", None) is not None
+        ):
+            chain = self._resolve_view_chain_to_root(operand)
+            if chain is not None:
+                root_av, start, step = chain
+                root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+                size = self._resolve_array_size(
+                    operand, resolved_lid, qubit_map, param_values
+                )
+                if size is not None:
+                    # Loop-with-``else``: the ``else`` block runs only
+                    # when the loop completes without a break.  A
+                    # successful resolution (including an empty slice
+                    # where ``size == 0``) returns the accumulated
+                    # ``wires`` deterministically — matching the
+                    # function contract that documents ``[]`` as the
+                    # "zero qubits" outcome.  A missing-key break
+                    # falls through to the other resolution branches.
+                    wires: list[int] = []
+                    for i in range(size):
+                        root_idx = start + step * i
+                        root_elem_key = f"{root_lid}_[{root_idx}]"
+                        if root_elem_key in qubit_map:
+                            wires.append(qubit_map[root_elem_key])
+                        elif root_lid in qubit_map:
+                            wires.append(qubit_map[root_lid] + root_idx)
+                        else:
+                            break
+                    else:
+                        return wires
+
         if (
             isinstance(operand, ArrayValue)
             and hasattr(operand, "shape")
             and operand.shape
             and resolved_lid in qubit_map
         ):
-            base_idx = qubit_map[resolved_lid]
             size = self._resolve_array_size(
                 operand, resolved_lid, qubit_map, param_values
             )
             if size is not None:
+                # Prefer per-element keys (``f"{resolved_lid}_[{k}]"``)
+                # when present.  ``QInitOperation`` populates them for
+                # ordinary registers and ``build_qubit_map``'s slice-
+                # view sub-kernel-argument handling populates them
+                # with non-contiguous wires when a slice view is
+                # passed as a helper qkernel argument.  The ``base +
+                # k`` formula is only correct for genuinely contiguous
+                # arrays where every wire is consecutive, so use the
+                # element-key lookup first and fall back to the
+                # formula only when no per-element entry exists.
+                element_keyed_wires: list[int] = []
+                for k in range(size):
+                    elem_key = f"{resolved_lid}_[{k}]"
+                    if elem_key in qubit_map:
+                        element_keyed_wires.append(qubit_map[elem_key])
+                    else:
+                        element_keyed_wires = []
+                        break
+                if element_keyed_wires:
+                    return element_keyed_wires
+                base_idx = qubit_map[resolved_lid]
                 return [base_idx + k for k in range(size)]
             return None
 
@@ -2601,26 +3122,33 @@ class CircuitAnalyzer:
 
     def _build_block_value_mappings(
         self,
-        block_value,
-        actual_inputs: list[Value],
+        block_value: Block,
+        actual_inputs: Sequence[ValueBase],
         logical_id_remap: dict[str, str],
-        param_values: dict,
+        param_values: dict[str, object],
         qubit_map: dict[str, int] | None = None,
-    ) -> tuple[dict[str, str], dict]:
-        """Build logical_id_remap and child_param_values for a nested Block.
+    ) -> tuple[dict[str, str], dict[str, object]]:
+        """Build value remaps and forwarded bindings for a nested block.
 
-        Maps dummy block input logical_ids to actual input logical_ids,
-        building the mappings needed for recursive processing.
+        Maps a callee block's formal inputs to the caller's actual
+        operands so inline drawing can resolve qubit wires, scalar
+        parameters, bound array data, and bound dict data recursively.
 
         Args:
-            block_value: Block whose input mappings to build.
-            actual_inputs: Actual input Values passed to the block.
-            logical_id_remap: Current logical_id remapping (copied, not mutated).
-            param_values: Current parameter values (copied, not mutated).
-            qubit_map: Qubit wire map for resolving array element indices.
+            block_value (Block): Callee block whose input mappings to build.
+            actual_inputs (Sequence[ValueBase]): Actual operands passed to
+                the callee block.
+            logical_id_remap (dict[str, str]): Current logical-id remapping.
+                Copied before child-specific entries are added.
+            param_values (dict[str, object]): Current parameter and bound-data
+                values. Copied before child-specific entries are added.
+            qubit_map (dict[str, int] | None): Qubit wire map for resolving
+                array element indices. Defaults to None when wire resolution
+                is not needed.
 
         Returns:
-            (new_logical_id_remap, child_param_values)
+            tuple[dict[str, str], dict[str, object]]: Child logical-id remap
+                and child parameter values for recursive inline processing.
         """
         new_logical_id_remap = dict(logical_id_remap)
 
@@ -2629,6 +3157,7 @@ class CircuitAnalyzer:
             # to get the canonical parent_[idx] key instead of the raw UUID
             if (
                 qubit_map is not None
+                and isinstance(actual_input, Value)
                 and hasattr(actual_input, "parent_array")
                 and actual_input.parent_array is not None
                 and isinstance(actual_input.type, QubitType)
@@ -2645,23 +3174,29 @@ class CircuitAnalyzer:
 
         child_param_values = dict(param_values)
         for dummy_input, actual_input in zip(block_value.input_values, actual_inputs):
-            # The IR guarantees that operands are always Value instances, so this assertion should always pass.
+            # The IR guarantees that operands implement ValueBase, so this assertion should always pass.
             # If it fails, there is a bug in the IR construction.
             assertion_message = (
-                "[FOR DEVELOPER] Operation.operands elements must be Value instances. "
+                "[FOR DEVELOPER] Operation.operands elements must be ValueBase instances. "
                 "If this assertion fails, there is a bug in the IR construction."
             )
-            assert isinstance(actual_input, Value), assertion_message
+            assert isinstance(actual_input, ValueBase), assertion_message
+            actual_lid = logical_id_remap.get(
+                actual_input.logical_id, actual_input.logical_id
+            )
             const = actual_input.get_const()
             if const is not None:
                 child_param_values[dummy_input.logical_id] = const
-            elif actual_input.logical_id in param_values:
-                pv = param_values[actual_input.logical_id]
+            elif actual_input.logical_id in param_values or actual_lid in param_values:
+                pv = param_values.get(
+                    actual_input.logical_id, param_values.get(actual_lid)
+                )
                 if isinstance(pv, (int, float)):
                     # Numeric value: store directly
                     child_param_values[dummy_input.logical_id] = pv
                 elif (
-                    hasattr(actual_input, "parent_array")
+                    isinstance(actual_input, Value)
+                    and hasattr(actual_input, "parent_array")
                     and actual_input.parent_array is not None
                     and not isinstance(actual_input.type, QubitType)
                 ):
@@ -2680,7 +3215,8 @@ class CircuitAnalyzer:
                 else:
                     child_param_values[dummy_input.logical_id] = pv
             elif (
-                hasattr(actual_input, "parent_array")
+                isinstance(actual_input, Value)
+                and hasattr(actual_input, "parent_array")
                 and actual_input.parent_array is not None
                 and not isinstance(actual_input.type, QubitType)
             ):
@@ -2703,7 +3239,7 @@ class CircuitAnalyzer:
                 child_param_values[dummy_input.logical_id] = (
                     actual_input.parameter_name() or actual_input.name
                 )
-            else:
+            elif isinstance(actual_input, Value):
                 # actual_input is a BinOp result (or similar unresolved
                 # non-parameter Value). Try numeric evaluation via
                 # graph.operations first — after top-level
@@ -2750,9 +3286,35 @@ class CircuitAnalyzer:
                                 actual_dim.logical_id
                             ]
                 const_array = actual_input.get_const_array()
+                if const_array is None:
+                    actual_lid = logical_id_remap.get(
+                        actual_input.logical_id, actual_input.logical_id
+                    )
+                    const_array = param_values.get(
+                        f"_array_data_{actual_input.logical_id}",
+                        param_values.get(f"_array_data_{actual_lid}"),
+                    )
                 if const_array is not None:
                     child_param_values[f"_array_data_{dummy_input.logical_id}"] = (
                         const_array
+                    )
+            elif isinstance(actual_input, DictValue) and hasattr(
+                dummy_input, "logical_id"
+            ):
+                bound_data = None
+                if actual_input.metadata.dict_runtime is not None:
+                    bound_data = list(actual_input.get_bound_data_items())
+                else:
+                    actual_lid = logical_id_remap.get(
+                        actual_input.logical_id, actual_input.logical_id
+                    )
+                    bound_data = param_values.get(
+                        f"_dict_data_{actual_input.logical_id}",
+                        param_values.get(f"_dict_data_{actual_lid}"),
+                    )
+                if bound_data is not None:
+                    child_param_values[f"_dict_data_{dummy_input.logical_id}"] = (
+                        bound_data
                     )
 
         return new_logical_id_remap, child_param_values
@@ -2860,7 +3422,9 @@ class CircuitAnalyzer:
 
     @staticmethod
     def _materialize_dict_entries(
-        dict_value: Value,
+        dict_value: ValueBase,
+        param_values: dict | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> Sequence[tuple] | None:
         """Extract entries from a DictValue from either IR or runtime metadata.
 
@@ -2898,10 +3462,18 @@ class CircuitAnalyzer:
         otherwise treating the pair as raw Python.
 
         Args:
-            dict_value (Value): The DictValue (or compatible Value)
+            dict_value (ValueBase): The DictValue (or compatible Value)
                 whose entries should be materialized. Should carry
                 IR-level ``entries`` or runtime ``dict_runtime``
                 metadata; otherwise treated as truly unbound.
+            param_values (dict | None): Optional nested visualization
+                context. Used to forward bound dict data through
+                inlined helper calls whose formal parameter does not
+                itself carry runtime metadata.
+            logical_id_remap (dict[str, str] | None): Optional remap
+                from formal logical IDs to actual logical IDs. Used
+                with ``param_values`` when resolving forwarded bound
+                dict data.
 
         Returns:
             Sequence[tuple] | None: A sequence of ``(key, value)``
@@ -2928,10 +3500,22 @@ class CircuitAnalyzer:
         # an empty bound Dict render as a folded box even when
         # fold_loops=False.
         if (
-            hasattr(dict_value, "metadata")
+            isinstance(dict_value, DictValue)
             and dict_value.metadata.dict_runtime is not None
         ):
             return list(dict_value.get_bound_data_items())
+
+        if param_values is not None:
+            logical_id_remap = logical_id_remap or {}
+            resolved_lid = logical_id_remap.get(
+                dict_value.logical_id, dict_value.logical_id
+            )
+            for key in (
+                f"_dict_data_{dict_value.logical_id}",
+                f"_dict_data_{resolved_lid}",
+            ):
+                if key in param_values:
+                    return list(param_values[key])
 
         return None
 
@@ -3390,6 +3974,8 @@ class CircuitAnalyzer:
                 rhs_str = self._format_value_as_expression(
                     op.rhs, loop_vars, operations
                 )
+                if op.kind == BinOpKind.MIN:
+                    return f"min({lhs_str},{rhs_str})"
                 _binop_symbols: dict[BinOpKind, str] = {
                     BinOpKind.ADD: "+",
                     BinOpKind.SUB: "-",
@@ -3585,14 +4171,14 @@ class CircuitAnalyzer:
                 hasattr(actual_input, "logical_id")
                 and actual_input.logical_id in qubit_map
             ):
-                # The IR guarantees that operands are always Value instances,
-                # so this assertion should always pass.
+                # The IR guarantees that operands implement the ValueBase
+                # protocol, so this assertion should always pass.
                 # If it fails, there is a bug in the IR construction.
                 assertion_message = (
-                    "[FOR DEVELOPER] Operation.operands elements must be Value instances. "
+                    "[FOR DEVELOPER] Operation.operands elements must be ValueBase instances. "
                     "If this assertion fails, there is a bug in the IR construction."
                 )
-                assert isinstance(actual_input, Value), assertion_message
+                assert isinstance(actual_input, ValueBase), assertion_message
                 const = actual_input.get_const()
                 if const is not None:
                     params.append(self._format_parameter(const))

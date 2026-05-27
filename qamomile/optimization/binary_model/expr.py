@@ -29,18 +29,40 @@ class BinaryExpr(Generic[VT]):
             coefficients=self.coefficients.copy(),
         )
 
-    def _reduce_indices(self, inds: tuple[int, ...]) -> tuple[int, ...]:
-        """Apply idempotency rules to reduce repeated indices.
+    @staticmethod
+    def reduce_indices(vartype: VarType, inds: tuple[int, ...]) -> tuple[int, ...]:
+        """Apply vartype-specific idempotency rules to a term's index tuple.
 
-        For SPIN: z_i^2 = 1, so pairs of identical indices cancel.
-        For BINARY: x_i^2 = x_i, so duplicates reduce to single.
+        Encodes the algebraic identity for each variable type so that
+        repeated indices within a single product collapse to a canonical
+        sorted tuple. Shared between in-place multiplication of
+        :class:`BinaryExpr` and the higher-order factory constructors on
+        :class:`BinaryModel` so the reduction semantics stay consistent.
+
+        Args:
+            vartype: The variable type whose idempotency rule applies.
+                ``SPIN`` uses ``s_i**2 = 1`` (pairs of identical indices
+                cancel); ``BINARY`` uses ``x_i**2 = x_i`` (duplicates
+                collapse to a single occurrence).
+            inds: Index tuple to reduce. Order is irrelevant — the
+                returned tuple is always sorted ascending.
+
+        Returns:
+            tuple[int, ...]: The reduced, sorted index tuple. Can be
+            empty if every index in ``inds`` cancels (SPIN, even counts
+            for all indices).
+
+        Raises:
+            ValueError: If ``vartype`` is not a recognized
+                :class:`VarType` member.
         """
-        if self.vartype == VarType.SPIN:
+        if vartype == VarType.SPIN:
             counts = Counter(inds)
             return tuple(idx for idx, count in sorted(counts.items()) if count % 2 == 1)
-        elif self.vartype == VarType.BINARY:
+        elif vartype == VarType.BINARY:
             return tuple(sorted(set(inds)))
-        return inds
+        else:
+            raise ValueError(f"Unknown vartype: {vartype!r}")
 
     # Support *= operation
     def __imul__(self, other: int | float | BinaryExpr[VT]) -> BinaryExpr[VT]:
@@ -55,7 +77,9 @@ class BinaryExpr(Generic[VT]):
             constant_delta = 0.0
             for inds1, coeff1 in self.coefficients.items():
                 for inds2, coeff2 in other.coefficients.items():
-                    new_inds = self._reduce_indices(tuple(sorted(inds1 + inds2)))
+                    new_inds = BinaryExpr.reduce_indices(
+                        self.vartype, tuple(sorted(inds1 + inds2))
+                    )
                     product = coeff1 * coeff2
                     if len(new_inds) == 0:
                         constant_delta += product
