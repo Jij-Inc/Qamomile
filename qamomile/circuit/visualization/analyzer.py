@@ -679,6 +679,18 @@ class CircuitAnalyzer:
                         for iter_value in range(start, stop, step):
                             child_pv = dict(param_values)
                             child_pv[f"_loop_{op.loop_var}"] = iter_value
+                            # Pre-evaluate body BinOps for this iteration
+                            # so resolvers that consult ``param_values``
+                            # (notably ``_resolve_view_chain_to_root``
+                            # for slice bounds emitted via ``_uint_min``)
+                            # find a concrete answer instead of bailing
+                            # and falling through to fresh-wire allocation
+                            # in ``map_block_results``.  Mirrors what
+                            # ``_build_vfor`` already does for the visual
+                            # IR build.
+                            self._evaluate_loop_body_intermediates(
+                                op.operations, child_pv
+                            )
                             build_chains(
                                 op.operations,
                                 logical_id_remap,
