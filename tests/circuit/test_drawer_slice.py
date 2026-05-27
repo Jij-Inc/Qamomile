@@ -467,7 +467,6 @@ class TestSliceSubKernelArgumentDraw:
             assert fig.get_size_inches()[1] > 0
             assert len(fig.axes) > 0
 
-
     def test_disjoint_slice_helper_calls_have_no_phantom_wires(self):
         """Two disjoint slice views passed to different sub-kernels must
         not allocate phantom wires past the root register.
@@ -633,10 +632,7 @@ class TestSymbolicSliceBoundsInLoopUnfold:
         control_counts: list[int] = []
         for iteration in unfolded[0].iterations:
             for node in iteration:
-                if (
-                    isinstance(node, VGate)
-                    and node.kind == VGateKind.CONTROLLED_U_BOX
-                ):
+                if isinstance(node, VGate) and node.kind == VGateKind.CONTROLLED_U_BOX:
                     control_counts.append(node.control_count)
         assert control_counts == [4, 3, 2, 1], control_counts
 
@@ -663,9 +659,6 @@ class TestSymbolicSliceBoundsInLoopUnfold:
         observed: list[list[int]] = []
         for iteration in unfolded.iterations:
             for node in iteration:
-                if (
-                    isinstance(node, VGate)
-                    and node.kind == VGateKind.CONTROLLED_U_BOX
-                ):
+                if isinstance(node, VGate) and node.kind == VGateKind.CONTROLLED_U_BOX:
                     observed.append(list(node.qubit_indices))
         assert observed == expected, observed
