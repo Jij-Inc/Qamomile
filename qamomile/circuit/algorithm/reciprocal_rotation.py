@@ -1,33 +1,25 @@
-"""HHL eigenvalue-inversion building blocks for an n-qubit clock register.
+"""HHL reciprocal rotation building block for an n-qubit clock register.
 
 The Harrow-Hassidim-Lloyd (HHL) algorithm inverts a Hermitian matrix by
 extracting its eigenvalues onto a *clock* register via quantum phase
 estimation (QPE), rotating an ancilla qubit by an angle proportional to
 ``1 / lambda``, and uncomputing the clock with inverse QPE.  This module
-provides the building blocks for the eigenvalue-inversion step, for an
-arbitrary-size clock:
+provides :func:`reciprocal_rotation`, the bare eigenvalue-inversion
+primitive: for each non-zero clock basis state ``|raw>`` it applies
+``Ry(2 * arcsin(c / raw))`` to the ancilla, controlled on the clock
+being in ``|raw>``.  This implements the canonical HHL transform
 
-* :func:`reciprocal_rotation` -- the bare reciprocal rotation.  For each
-  non-zero clock basis state ``|raw>`` it applies ``Ry(2 * arcsin(c /
-  raw))`` to the ancilla, controlled on the clock being in ``|raw>``.
-  This implements the canonical HHL transform
+    |raw>_C |0>_S
+        -> |raw>_C (sqrt(1 - (c/raw)^2) |0>_S + (c/raw) |1>_S).
 
-      |raw>_C |0>_S
-          -> |raw>_C (sqrt(1 - (c/raw)^2) |0>_S + (c/raw) |1>_S).
-
-* :func:`hhl_middle_block` -- the full middle stage of HHL,
-  ``IQFT -> reciprocal_rotation -> QFT``, consuming a phase-encoded
-  clock register (a QPE output) and re-encoding it for the inverse-QPE
-  uncompute.
-
-Both are **plain Python functions** that compose Qamomile operations
-when called from inside a ``@qmc.qkernel`` body.  They are *not*
-``@qmc.qkernel``-decorated themselves: the per-``raw`` enumeration with
-classically-precomputed ``2 * arcsin(c / raw)`` angles relies on
-trace-time Python iteration that a ``@qmc.qkernel`` body cannot
-currently express (Qamomile's symbolic ``UInt`` lacks the bitwise
-operators and ``arcsin`` math that the alternative qkernel form would
-require).  The same plain-function pattern is used by
+``reciprocal_rotation`` is a **plain Python function** that composes
+Qamomile operations when called from inside a ``@qmc.qkernel`` body.
+It is *not* ``@qmc.qkernel``-decorated itself: the per-``raw``
+enumeration with classically-precomputed ``2 * arcsin(c / raw)`` angles
+relies on trace-time Python iteration that a ``@qmc.qkernel`` body
+cannot currently express (Qamomile's symbolic ``UInt`` lacks the
+bitwise operators and ``arcsin`` math that the alternative qkernel
+form would require).  The same plain-function pattern is used by
 ``qamomile.circuit.algorithm.hhl.reciprocal_rotation``.
 
 The clock is **little-endian**: ``qubits[0]`` is the least-significant
@@ -41,7 +33,6 @@ import math
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle.utils import get_size
-from qamomile.circuit.stdlib.qft import iqft, qft
 
 
 def reciprocal_rotation(
@@ -160,92 +151,4 @@ def reciprocal_rotation(
             if not ((raw >> i) & 1):
                 qubits[i] = qmc.x(qubits[i])
 
-    return qubits, ancilla
-
-
-def hhl_middle_block(
-    qubits: qmc.Vector[qmc.Qubit],
-    ancilla: qmc.Qubit,
-    c: float,
-) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
-    """Apply the HHL middle block (IQFT -> reciprocal rotation -> QFT).
-
-    Composes the eigenvalue-inversion stage of HHL on an n-qubit clock
-    register.  The block:
-
-    1. applies the inverse QFT, mapping a phase-encoded clock state to
-       the computational-basis eigenvalue bin ``|raw>``;
-    2. applies :func:`reciprocal_rotation`, embedding the reciprocal
-       ``1 / raw`` (scaled by ``c``) into the ancilla amplitude;
-    3. applies the QFT, re-encoding the clock so the caller can run
-       inverse-QPE-style uncompute.
-
-    Input state contract: the clock is expected to be in a
-    *phase-encoded* state -- equivalently, ``qft(|raw>)`` for some
-    integer ``raw``, or the QPE intermediate before its final inverse-QFT.
-    **Do not** call this on a clock that is already in the computational
-    basis ``|raw>`` (e.g. the output of a standard QPE that ends with
-    its own IQFT): ``hhl_middle_block`` would then add an unintended
-    IQFT (its step 1) that no later step cancels.  Use the table below.
-
-    +----------------------------------------+--------------------------+
-    | Clock state at the call site           | Function to call         |
-    +========================================+==========================+
-    | Computational ``|raw>``                | ``reciprocal_rotation``  |
-    | (standard QPE, IQFT already applied)   |                          |
-    +----------------------------------------+--------------------------+
-    | Phase-encoded ``qft(|raw>)``           | ``hhl_middle_block``     |
-    | (QPE intermediate, before final IQFT)  |                          |
-    +----------------------------------------+--------------------------+
-
-    The clock is little-endian (``qubits[0]`` is the least-significant
-    bit).  Like :func:`reciprocal_rotation`, this is a plain Python
-    function; call it from inside a ``@qmc.qkernel`` body with a
-    concrete-shape ``qubits`` register.  The eigenvalue convention
-    (``raw`` vs. physical ``lambda``) is identical to
-    :func:`reciprocal_rotation` -- see its docstring.
-
-    Args:
-        qubits (qmc.Vector[qmc.Qubit]): Clock register of size n,
-            expected to hold a phase-encoded eigenvalue.  The size must
-            be concrete (non-symbolic) at trace time.
-        ancilla (qmc.Qubit): Ancilla qubit, expected to start in
-            ``|0>``.
-        c (float): Scaling constant; same constraint as
-            :func:`reciprocal_rotation`.
-
-    Returns:
-        tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]: The phase-re-encoded
-            clock register and the rotated ancilla.
-
-    Raises:
-        ValueError: Propagated from :func:`reciprocal_rotation` when
-            ``c`` is non-finite, non-positive, or ``c > 1``, or when
-            the clock register has size zero.
-
-    Note:
-        The ``iqft`` / ``qft`` round trip uses
-        :mod:`qamomile.circuit.stdlib.qft`, whose stdlib implementation
-        preserves bit order (its internal swaps undo QFT's inherent
-        reversal).  This matches the little-endian convention assumed
-        throughout this module and is verified by the round-trip tests
-        in ``tests/circuit/algorithm/test_reciprocal_rotation.py``.
-
-    Example:
-        >>> import qamomile.circuit as qmc
-        >>> from qamomile.circuit.algorithm import hhl_middle_block
-        >>> from qamomile.circuit.stdlib.qft import qft
-        >>>
-        >>> @qmc.qkernel
-        ... def invert_phase_basis_1() -> qmc.Bit:
-        ...     clock = qmc.qubit_array(2, name="clock")
-        ...     clock[0] = qmc.x(clock[0])     # computational |raw=1>
-        ...     clock = qft(clock)             # phase-encode it
-        ...     anc = qmc.qubit("anc")
-        ...     clock, anc = hhl_middle_block(clock, anc, c=0.5)
-        ...     return qmc.measure(anc)        # P(anc=1) = 0.25
-    """
-    qubits = iqft(qubits)
-    qubits, ancilla = reciprocal_rotation(qubits, ancilla, c)
-    qubits = qft(qubits)
     return qubits, ancilla

@@ -3,8 +3,7 @@
 ``reciprocal_rotation`` applies the HHL eigenvalue-inversion transform
 on an n-qubit little-endian clock register: for each non-zero clock
 basis state ``|raw>`` it rotates the ancilla into
-``sqrt(1 - (c/raw)^2) |0> + (c/raw) |1>``.  ``hhl_middle_block`` wraps
-the same rotation in ``IQFT`` / ``QFT``.
+``sqrt(1 - (c/raw)^2) |0> + (c/raw) |1>``.
 
 For a clock basis state ``|raw>`` the ancilla ends in an unentangled
 single-qubit rotation, so the results are checked against the analytic
@@ -29,10 +28,8 @@ import qamomile.circuit as qmc  # noqa: E402
 import qamomile.observable as qm_o  # noqa: E402
 from qamomile.circuit.algorithm import (  # noqa: E402
     computational_basis_state,
-    hhl_middle_block,
     reciprocal_rotation,
 )
-from qamomile.circuit.stdlib.qft import qft  # noqa: E402
 from qamomile.circuit.transpiler.job import SampleResult  # noqa: E402
 
 # ----------------------------------------------------------------------
@@ -159,10 +156,9 @@ def _sampled_p1(result: SampleResult) -> float:
 # Kernel factories
 #
 # Built per ``(n, c)`` because both are Python values consumed by
-# ``reciprocal_rotation`` / ``hhl_middle_block`` at trace time -- the
-# plain-Python functions need a concrete ``n`` (from
-# ``get_size(qubits)``) and a Python ``float`` ``c`` (for the classical
-# ``math.asin`` precompute).
+# ``reciprocal_rotation`` at trace time -- the plain-Python function
+# needs a concrete ``n`` (from ``get_size(qubits)``) and a Python
+# ``float`` ``c`` (for the classical ``math.asin`` precompute).
 # ----------------------------------------------------------------------
 
 
@@ -194,41 +190,6 @@ def _build_recip_expval(n: int, c: float):
         clock = computational_basis_state(clock, bits)
         anc = qmc.qubit("anc")
         clock, anc = reciprocal_rotation(clock, anc, c)
-        return qmc.expval((anc,), obs)
-
-    return kernel
-
-
-def _build_block_sample(n: int, c: float):
-    """Return a sample-path entry-point kernel for ``hhl_middle_block``."""
-
-    @qmc.qkernel
-    def kernel(bits: qmc.Vector[qmc.UInt]) -> qmc.Bit:
-        """Phase-encode clock ``|bits>``, apply the middle block, measure anc."""
-        clock = qmc.qubit_array(n, name="clock")
-        clock = computational_basis_state(clock, bits)
-        clock = qft(clock)
-        anc = qmc.qubit("anc")
-        clock, anc = hhl_middle_block(clock, anc, c)
-        return qmc.measure(anc)
-
-    return kernel
-
-
-def _build_block_expval(n: int, c: float):
-    """Return an expval-path entry-point kernel for ``hhl_middle_block``."""
-
-    @qmc.qkernel
-    def kernel(
-        bits: qmc.Vector[qmc.UInt],
-        obs: qmc.Observable,
-    ) -> qmc.Float:
-        """Phase-encode clock ``|bits>``, apply the middle block, estimate ``obs``."""
-        clock = qmc.qubit_array(n, name="clock")
-        clock = computational_basis_state(clock, bits)
-        clock = qft(clock)
-        anc = qmc.qubit("anc")
-        clock, anc = hhl_middle_block(clock, anc, c)
         return qmc.expval((anc,), obs)
 
     return kernel
@@ -369,58 +330,3 @@ class TestReciprocalRotation:
         kernel = _build_recip_sample(0, c=0.5)
         with pytest.raises(ValueError, match="at least one qubit"):
             QiskitTranspiler().transpile(kernel, bindings={"bits": []})
-
-
-# ----------------------------------------------------------------------
-# hhl_middle_block
-# ----------------------------------------------------------------------
-
-
-class TestHhlMiddleBlock:
-    """``hhl_middle_block`` = IQFT -> reciprocal rotation -> QFT.
-
-    Fed a phase-encoded clock ``qft(|raw>)``, the leading IQFT recovers
-    the computational basis state ``|raw>``, so the ancilla outcome is
-    identical to the bare reciprocal rotation.
-    """
-
-    @pytest.mark.parametrize("seed", _SEEDS)
-    @pytest.mark.parametrize("n", _N_VALUES)
-    def test_sampling_matches_analytic(self, backend, seed, n):
-        """Sampled ``P(anc=1)`` matches ``(c/raw)^2`` across every clock bin."""
-        name, transpiler, executor = backend
-        _skip_if_quri_parts_multi_control(name, n)
-
-        rng = np.random.default_rng(seed)
-        c = float(rng.uniform(0.5, 1.0))
-        kernel = _build_block_sample(n, c)
-
-        for raw in range(2**n):
-            exe = transpiler.transpile(kernel, bindings={"bits": _raw_to_bits(raw, n)})
-            result = exe.sample(executor, shots=_SHOTS).result()
-            expected_p1, _ = _expected(raw, c)
-            assert math.isclose(
-                _sampled_p1(result), expected_p1, abs_tol=_SAMPLING_ATOL
-            ), f"n={n} raw={raw} c={c:.6f}"
-
-    @pytest.mark.parametrize("seed", _SEEDS)
-    @pytest.mark.parametrize("n", _N_VALUES)
-    def test_expval_matches_analytic(self, backend, seed, n):
-        """Estimated ``<Z_anc>`` matches ``1 - 2 * (c/raw)^2`` across clock bins."""
-        name, transpiler, executor = backend
-        _skip_if_quri_parts_multi_control(name, n)
-
-        rng = np.random.default_rng(seed)
-        c = float(rng.uniform(0.5, 1.0))
-        kernel = _build_block_expval(n, c)
-
-        for raw in range(2**n):
-            exe = transpiler.transpile(
-                kernel,
-                bindings={"bits": _raw_to_bits(raw, n), "obs": _ANCILLA_OBSERVABLE},
-            )
-            got = exe.run(executor).result()
-            _, expected_z = _expected(raw, c)
-            assert math.isclose(float(got), expected_z, abs_tol=_EXPVAL_ATOL), (
-                f"n={n} raw={raw} c={c:.6f}"
-            )

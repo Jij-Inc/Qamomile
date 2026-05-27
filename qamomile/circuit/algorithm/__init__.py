@@ -27,10 +27,7 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
-from .reciprocal_rotation import (
-    hhl_middle_block,
-    reciprocal_rotation,
-)
+from .reciprocal_rotation import reciprocal_rotation
 from .state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
@@ -66,7 +63,6 @@ __all__ = [
     "fqaoa_state",
     # HHL
     "reciprocal_rotation",
-    "hhl_middle_block",
     # State preparation
     "computational_basis_state",
     "MottonenAmplitudeEncoding",
