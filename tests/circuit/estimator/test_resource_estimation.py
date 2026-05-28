@@ -892,7 +892,7 @@ class TestControlledVectorViewEstimation:
 
     Successor to the deleted ``TestControlledIndicesEstimation`` suite:
     the redesign removed the concrete-mode ``target_indices`` /
-    ``controlled_indices`` parameters in favour of positional
+    ``control_indices`` parameters in favour of positional
     ``VectorView`` controls.  These tests pin the gate count for the
     equivalent ``cg(qs[0:N], qs[N])`` shape.
     """

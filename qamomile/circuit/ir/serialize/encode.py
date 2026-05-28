@@ -1063,7 +1063,7 @@ def _encode_symbolic_controlled(
 
     Returns:
         dict[str, Any]: Base op dict plus ``num_controls_ref``
-            (symbolic Value's UUID), ``power``, ``controlled_index_refs``
+            (symbolic Value's UUID), ``power``, ``control_index_refs``
             (per-element ``UInt`` Value UUIDs, or ``None`` when the op
             uses the entire pool), ``num_control_args`` (count of
             positional control arguments at the call site -- the legacy
@@ -1074,12 +1074,12 @@ def _encode_symbolic_controlled(
     ctx.register_value(op.num_controls)
     d["num_controls_ref"] = op.num_controls.uuid
     d["power"] = _encode_power(op.power)
-    if op.controlled_indices is not None:
-        for v in op.controlled_indices:
+    if op.control_indices is not None:
+        for v in op.control_indices:
             ctx.register_value(v)
-        d["controlled_index_refs"] = [v.uuid for v in op.controlled_indices]
+        d["control_index_refs"] = [v.uuid for v in op.control_indices]
     else:
-        d["controlled_index_refs"] = None
+        d["control_index_refs"] = None
     # ``num_control_args`` tracks how many positional control arguments
     # the call site supplied (one ArrayBase pool in the legacy form;
     # any sequence of scalar Qubits and / or ArrayBases in the multi-

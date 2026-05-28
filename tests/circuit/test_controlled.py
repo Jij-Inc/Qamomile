@@ -343,10 +343,10 @@ class TestControlledValidation:
             with pytest.raises(ValueError):
                 cg(*qs)
 
-    def test_controlled_indices_in_concrete_mode_raises(self):
-        """Concrete-``num_controls`` rejects ``controlled_indices`` at compose time.
+    def test_control_indices_in_concrete_mode_raises(self):
+        """Concrete-``num_controls`` rejects ``control_indices`` at compose time.
 
-        The redesign restricted ``controlled_indices`` to symbolic
+        The redesign restricted ``control_indices`` to symbolic
         mode (design §1.1, decision #5); concrete mode has no
         selection step.
         """
@@ -354,13 +354,13 @@ class TestControlledValidation:
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace():
             with pytest.raises(ValueError, match="only valid in symbolic mode"):
-                cg(c0, c1, tgt, controlled_indices=[0])
+                cg(c0, c1, tgt, control_indices=[0])
 
 
 class TestNormalizeControlledIndices:
-    """Compose-time validation rules for ``controlled_indices`` entries.
+    """Compose-time validation rules for ``control_indices`` entries.
 
-    Drives ``ControlledGate._normalize_controlled_indices`` directly
+    Drives ``ControlledGate._normalize_control_indices`` directly
     (rather than through the full ``__call__`` pipeline) so the test
     intent stays focused on the per-entry rules: sequence-type check,
     per-entry type check (``bool`` rejection, ``int`` / ``UInt``
@@ -377,31 +377,31 @@ class TestNormalizeControlledIndices:
     def test_non_sequence_raises_type_error(self):
         cg = self._make_cg()
         with pytest.raises(TypeError, match="must be a Sequence"):
-            cg._normalize_controlled_indices(42)  # type: ignore[arg-type]
+            cg._normalize_control_indices(42)  # type: ignore[arg-type]
 
     def test_bool_entry_raises_type_error(self):
         cg = self._make_cg()
         with pytest.raises(TypeError, match="bool entry"):
-            cg._normalize_controlled_indices([True, 1])
+            cg._normalize_control_indices([True, 1])
 
     def test_string_entry_raises_type_error(self):
         cg = self._make_cg()
         with pytest.raises(TypeError, match="must be int or UInt"):
-            cg._normalize_controlled_indices(["0", 1])  # type: ignore[list-item]
+            cg._normalize_control_indices(["0", 1])  # type: ignore[list-item]
 
     def test_duplicate_literal_int_raises_value_error(self):
         cg = self._make_cg()
         with pytest.raises(ValueError, match="duplicate int entry"):
-            cg._normalize_controlled_indices([0, 0])
+            cg._normalize_control_indices([0, 0])
 
     def test_negative_literal_int_raises_value_error(self):
         cg = self._make_cg()
         with pytest.raises(ValueError, match="negative entry"):
-            cg._normalize_controlled_indices([-1, 0])
+            cg._normalize_control_indices([-1, 0])
 
     def test_accepts_literal_ints(self):
         cg = self._make_cg()
-        result = cg._normalize_controlled_indices([0, 1, 2])
+        result = cg._normalize_control_indices([0, 1, 2])
         assert len(result) == 3
         for i, v in enumerate(result):
             assert v.get_const() == i
@@ -413,7 +413,7 @@ class TestNormalizeControlledIndices:
         cg = self._make_cg()
         v0 = Value(type=UIntType(), name="i0").with_const(0)
         v1 = Value(type=UIntType(), name="i1").with_const(1)
-        result = cg._normalize_controlled_indices(
+        result = cg._normalize_control_indices(
             [UIntHandle(value=v0), UIntHandle(value=v1)]
         )
         assert len(result) == 2
@@ -2265,7 +2265,7 @@ class TestControlledVectorInnerKernelCrossSDK:
     Successor to the old ``TestControlledIndexSpecVectorInnerKernel``
     suite: same inner-kernel shape, but the call site now uses the
     new ``cg(scalar_control, qs[a:b])`` API instead of the deprecated
-    ``cg(qs, target_indices=[...])`` / ``cg(qs, controlled_indices=[...])``
+    ``cg(qs, target_indices=[...])`` / ``cg(qs, control_indices=[...])``
     forms.  Sampling and expectation-value paths are exercised
     independently so the two backend primitives regress separately.
     """
@@ -2876,10 +2876,10 @@ class TestSymbolicMultiArgControl:
         # Expect deterministic |1001> (q_0=1, q_1=0, q_2=0, q_3=1).
         assert counts == {(1, 0, 0, 1): 256}, counts
 
-    def test_multi_arg_with_controlled_indices_rejected(self):
-        """Multi-arg control prefix + ``controlled_indices=`` is rejected.
+    def test_multi_arg_with_control_indices_rejected(self):
+        """Multi-arg control prefix + ``control_indices=`` is rejected.
 
-        The two features are mutually exclusive: ``controlled_indices``
+        The two features are mutually exclusive: ``control_indices``
         only makes sense over a single control pool (one ``Vector``
         argument), and combining it with multiple positional control
         args raises ``ValueError`` at compose time with an explicit
@@ -2895,7 +2895,7 @@ class TestSymbolicMultiArgControl:
                 tgt = q[3]
                 cg = qmc.control(qmc.x, num_controls=4)
                 ctrl_main, prefix, tgt = cg(
-                    ctrl_main, prefix, tgt, controlled_indices=[0, 1, 2, 3]
+                    ctrl_main, prefix, tgt, control_indices=[0, 1, 2, 3]
                 )
                 q[control_index] = ctrl_main
                 q[0:3] = prefix
@@ -2904,7 +2904,7 @@ class TestSymbolicMultiArgControl:
 
             _ = kernel.block
 
-        # Concrete-mode rejection comes first (controlled_indices in
+        # Concrete-mode rejection comes first (control_indices in
         # concrete mode), so we test the symbolic-mode multi-arg case
         # explicitly with a UInt num_controls below.
 
@@ -2941,8 +2941,8 @@ class TestSymbolicMultiArgControl:
         # n=5 → 4 unrolled MCX iterations + 5 measurements.
         assert qc.num_qubits == 5
 
-    def test_multi_arg_symbolic_with_controlled_indices_rejected(self):
-        """Symbolic multi-arg + ``controlled_indices`` raises ValueError."""
+    def test_multi_arg_symbolic_with_control_indices_rejected(self):
+        """Symbolic multi-arg + ``control_indices`` raises ValueError."""
 
         @qmc.qkernel
         def kernel(
@@ -2954,7 +2954,7 @@ class TestSymbolicMultiArgControl:
             tgt = q[k]
             cg = qmc.control(qmc.x, num_controls=k + 1)
             ctrl_main, prefix, tgt = cg(
-                ctrl_main, prefix, tgt, controlled_indices=[0, 1, 2]
+                ctrl_main, prefix, tgt, control_indices=[0, 1, 2]
             )
             q[control_index] = ctrl_main
             q[0:k] = prefix
@@ -2964,9 +2964,9 @@ class TestSymbolicMultiArgControl:
         try:
             _ = kernel.block
         except ValueError as exc:
-            assert "controlled_indices" in str(exc)
+            assert "control_indices" in str(exc)
             assert "single" in str(exc).lower() or "pool" in str(exc).lower()
         else:
             raise AssertionError(
-                "expected ValueError for multi-arg + controlled_indices"
+                "expected ValueError for multi-arg + control_indices"
             )

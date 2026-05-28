@@ -365,7 +365,7 @@ class ControlledGate:
 
         Used by :meth:`_call_concrete`; the symbolic path constructs
         its ``SymbolicControlledU`` inline because it needs to pass
-        the ``controlled_indices`` field directly.
+        the ``control_indices`` field directly.
         """
         block = self._qkernel.block
         op: ControlledUOperation
@@ -608,7 +608,7 @@ class ControlledGate:
                 that follow the control prefix.
             sub_kwargs (dict[str, Any]): Keyword arguments passed to
                 ``cg(...)`` after stripping the reserved ``power`` and
-                ``controlled_indices`` kwargs.
+                ``control_indices`` kwargs.
 
         Returns:
             dict[str, Any]: An ordered dict mapping parameter name
@@ -1037,7 +1037,7 @@ class ControlledGate:
             args (tuple[Any, ...]): Positional arguments to ``cg(...)``
                 including the leading control qubits.
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power`` and ``controlled_indices`` keys.
+                the reserved ``power`` and ``control_indices`` keys.
             power (int | Value): Normalised power (output of
                 :meth:`_normalize_power`).
 
@@ -1104,7 +1104,7 @@ class ControlledGate:
         self,
         *args: Any,
         power: int | UInt = 1,
-        controlled_indices: Sequence[int | UInt] | None = None,
+        control_indices: Sequence[int | UInt] | None = None,
         **params: ParamValue,
     ) -> tuple[Any, ...]:
         """Apply the controlled gate.
@@ -1124,7 +1124,7 @@ class ControlledGate:
           slice — the qubit count of each control argument adds up to
           ``num_controls`` and the split must fall on an argument
           boundary.
-        - ``controlled_indices`` is **not accepted** in this mode and
+        - ``control_indices`` is **not accepted** in this mode and
           raises :class:`ValueError` immediately.
 
         Symbolic mode (``num_controls=UInt``):
@@ -1133,7 +1133,7 @@ class ControlledGate:
           ``VectorView`` whose length need not match ``num_controls``
           at compose time.
         - ``args[1:]`` are passed to the sub-kernel.
-        - ``controlled_indices=(i0, i1, ...)`` selects exactly
+        - ``control_indices=(i0, i1, ...)`` selects exactly
           ``num_controls`` slots from the pool to act as controls;
           omitted slots pass through unchanged.  Each index entry is
           ``int`` or :class:`UInt` (mixing allowed).  ``int``-only
@@ -1148,7 +1148,7 @@ class ControlledGate:
                 be a strictly positive integer (``UInt`` handles are
                 accepted for symbolic powers, e.g. ``2 ** k`` in QPE).
                 Defaults to ``1``.
-            controlled_indices (Sequence[int | UInt] | None): Symbolic
+            control_indices (Sequence[int | UInt] | None): Symbolic
                 mode only — see above.  Defaults to ``None`` which
                 means "use the entire control pool".  Passing a
                 non-``None`` value in concrete mode raises
@@ -1165,11 +1165,11 @@ class ControlledGate:
                 ``Vector`` → ``Vector``).
 
         Raises:
-            ValueError: ``controlled_indices`` is non-``None`` in
+            ValueError: ``control_indices`` is non-``None`` in
                 concrete mode, or the qubit-count split in concrete
                 mode falls inside an argument.
             TypeError: ``power`` is not a positive integer / ``UInt``,
-                a ``controlled_indices`` entry is not ``int`` / ``UInt``,
+                a ``control_indices`` entry is not ``int`` / ``UInt``,
                 or a sub-kernel kwarg does not match the wrapped
                 kernel's signature.
             QubitConsumedError / QubitBorrowConflictError: Duplicate
@@ -1183,21 +1183,21 @@ class ControlledGate:
 
         if isinstance(num_controls, UInt):
             return self._call_symbolic(
-                args, normalized_power, params, controlled_indices
+                args, normalized_power, params, control_indices
             )
 
-        if controlled_indices is not None:
+        if control_indices is not None:
             raise ValueError(
-                "controlled_indices is only valid in symbolic mode "
+                "control_indices is only valid in symbolic mode "
                 "(num_controls=UInt).  Got concrete num_controls; "
                 "concrete-mode controls are positional and have no "
                 "selection step (see design §1.1)."
             )
         return self._call_concrete(args, params, normalized_power)
 
-    def _normalize_controlled_indices(
+    def _normalize_control_indices(
         self,
-        controlled_indices: Sequence[int | UInt],
+        control_indices: Sequence[int | UInt],
     ) -> tuple[Value, ...]:
         """Lift a caller-supplied index sequence to a tuple of ``UInt`` Values.
 
@@ -1211,7 +1211,7 @@ class ControlledGate:
         bindings are available.
 
         Args:
-            controlled_indices (Sequence[int | UInt]): Caller-supplied
+            control_indices (Sequence[int | UInt]): Caller-supplied
                 index sequence.  Lists, tuples, and any other
                 ``Sequence`` are accepted; the input is normalised to
                 a tuple of ``Value``\\ s.
@@ -1231,11 +1231,11 @@ class ControlledGate:
                 ``UInt`` duplicates are deferred to emit time.
         """
         try:
-            entries = list(controlled_indices)
+            entries = list(control_indices)
         except TypeError as e:
             raise TypeError(
-                f"controlled_indices must be a Sequence of int / UInt; "
-                f"got {type(controlled_indices).__name__}."
+                f"control_indices must be a Sequence of int / UInt; "
+                f"got {type(control_indices).__name__}."
             ) from e
 
         seen_ints: set[int] = set()
@@ -1243,17 +1243,17 @@ class ControlledGate:
         for idx in entries:
             if isinstance(idx, bool):
                 raise TypeError(
-                    f"controlled_indices: bool entry ({idx!r}) is not "
+                    f"control_indices: bool entry ({idx!r}) is not "
                     f"allowed; cast to int explicitly if intentional."
                 )
             if isinstance(idx, int):
                 if idx < 0:
                     raise ValueError(
-                        f"controlled_indices: negative entry ({idx}) is not allowed."
+                        f"control_indices: negative entry ({idx}) is not allowed."
                     )
                 if idx in seen_ints:
                     raise ValueError(
-                        f"controlled_indices: duplicate int entry ({idx})."
+                        f"control_indices: duplicate int entry ({idx})."
                     )
                 seen_ints.add(idx)
                 normalized.append(
@@ -1263,7 +1263,7 @@ class ControlledGate:
                 normalized.append(idx.value)
             else:
                 raise TypeError(
-                    f"controlled_indices entries must be int or UInt; "
+                    f"control_indices entries must be int or UInt; "
                     f"got {type(idx).__name__}."
                 )
         return tuple(normalized)
@@ -1273,22 +1273,22 @@ class ControlledGate:
         args: tuple[Any, ...],
         power: int | Value,
         sub_kwargs: dict[str, Any],
-        controlled_indices: Sequence[int | UInt] | None,
+        control_indices: Sequence[int | UInt] | None,
     ) -> tuple[Any, ...]:
         """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
         Mirrors :meth:`_call_concrete`'s structure but expects a
         ``Vector[Qubit]`` / ``VectorView[Qubit]`` as ``args[0]`` —
-        the control *pool* — and routes ``controlled_indices`` into
-        the new ``SymbolicControlledU.controlled_indices`` field.
+        the control *pool* — and routes ``control_indices`` into
+        the new ``SymbolicControlledU.control_indices`` field.
 
         Args:
             args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
             power (int | Value): Normalised power (output of
                 :meth:`_normalize_power`).
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power`` and ``controlled_indices`` keys.
-            controlled_indices (Sequence[int | UInt] | None): The
+                the reserved ``power`` and ``control_indices`` keys.
+            control_indices (Sequence[int | UInt] | None): The
                 caller-supplied selection (or ``None`` to use the
                 entire pool).
 
@@ -1340,17 +1340,17 @@ class ControlledGate:
         is_legacy_pool_form = len(control_args) == 1 and isinstance(
             control_args[0], ArrayBase
         )
-        if not is_legacy_pool_form and controlled_indices is not None:
+        if not is_legacy_pool_form and control_indices is not None:
             raise ValueError(
-                "controlled_indices is only supported with a single "
+                "control_indices is only supported with a single "
                 "Vector[Qubit] / VectorView[Qubit] control argument "
-                "(the pool form).  Combining controlled_indices with "
+                "(the pool form).  Combining control_indices with "
                 "multiple positional control args is not supported."
             )
 
         ci_values: tuple[Value, ...] | None = (
-            self._normalize_controlled_indices(controlled_indices)
-            if controlled_indices is not None
+            self._normalize_control_indices(control_indices)
+            if control_indices is not None
             else None
         )
 
@@ -1407,7 +1407,7 @@ class ControlledGate:
             operands=operands,
             results=results,
             num_controls=num_controls.value,
-            controlled_indices=ci_values,
+            control_indices=ci_values,
             power=power,
             block=self._qkernel.block,
             num_control_args=len(consumed_controls),
@@ -1449,7 +1449,7 @@ class ControlledGate:
 
         Args:
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power`` and ``controlled_indices`` keys.
+                the reserved ``power`` and ``control_indices`` keys.
 
         Returns:
             int: Number of trailing positional args expected by the

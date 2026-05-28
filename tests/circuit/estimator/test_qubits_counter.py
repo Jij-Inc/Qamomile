@@ -4957,7 +4957,7 @@ class TestControlledUVectorViewControl:
     """Qubit counting for ``ControlledUOperation`` with ``VectorView`` controls.
 
     Successor to the deleted ``TestControlledUIndexSpec`` suite: the
-    old ``target_indices`` / ``controlled_indices`` concrete-mode
+    old ``target_indices`` / ``control_indices`` concrete-mode
     forms were removed when the API redesign collapsed everything
     onto positional controls.  These tests cover the equivalent
     ``cg(qs[0:N], qs[N])`` shape with a ``VectorView`` control prefix.

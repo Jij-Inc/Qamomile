@@ -1170,7 +1170,7 @@ class CircuitAnalyzer:
                 if indices is not None:
                     control_indices.extend(indices)
             # Symbolic-mode subset selection: when the operation
-            # carries a ``controlled_indices`` list, only those pool
+            # carries a ``control_indices`` list, only those pool
             # slots are wired in as active controls.  The remaining
             # slots are pass-through wires and must not appear as
             # control dots in the diagram.  When every index resolves
@@ -1179,7 +1179,7 @@ class CircuitAnalyzer:
             # ``UInt`` expression without a binding) we leave the
             # full list as a safe fallback so the picture still
             # reads sensibly.
-            ctrl_idx_values = getattr(op, "controlled_indices", None)
+            ctrl_idx_values = getattr(op, "control_indices", None)
             if ctrl_idx_values is not None and control_indices:
                 resolved_positions: list[int] = []
                 all_resolved = True

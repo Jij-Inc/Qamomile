@@ -156,7 +156,7 @@ class ControlledUOperation(Operation):
     - ``ConcreteControlledU``: Fixed ``num_controls: int``, individual qubit
       operands.
     - ``SymbolicControlledU``: Symbolic ``num_controls: Value``, vector-based
-      control operands; optional ``controlled_indices`` selects a subset of
+      control operands; optional ``control_indices`` selects a subset of
       the control vector to act as controls (the rest pass through).
 
     All ``isinstance(op, ControlledUOperation)`` checks match every subclass.
@@ -277,22 +277,22 @@ class SymbolicControlledU(ControlledUOperation):
     ``num_control_args``; the default ``k = 1`` corresponds to the
     historical single-pool form (``operands[0]`` is a
     ``Vector[Qubit]`` / ``VectorView`` whose length equals
-    ``num_controls``, or whose ``controlled_indices``-selected subset
+    ``num_controls``, or whose ``control_indices``-selected subset
     does).  When ``k > 1`` the control prefix is a heterogeneous
     sequence of scalar ``Qubit`` values and ``ArrayValue``s whose
     *total* qubit count is ``num_controls``; the emit pass walks them
     in order to recover the per-physical-qubit control set.
 
-    When ``controlled_indices`` is ``None`` the entire control prefix
+    When ``control_indices`` is ``None`` the entire control prefix
     is used as active controls (one-arg form: ``len(ctrl_vector) ==
     num_controls``; multi-arg form: the qubit-count sum of the
     prefix args equals ``num_controls``).  When non-``None``, the
     listed indices select exactly ``num_controls`` slots from a
     single-arg pool to act as controls; combining
-    ``controlled_indices`` with the multi-arg control prefix is
+    ``control_indices`` with the multi-arg control prefix is
     rejected at frontend time.
 
-    Each ``controlled_indices`` entry is stored as a ``Value`` of
+    Each ``control_indices`` entry is stored as a ``Value`` of
     ``UIntType`` regardless of whether the frontend passed an
     ``int`` literal or a ``UInt`` handle, so all downstream
     value-substitution passes see a uniform shape.
@@ -312,7 +312,7 @@ class SymbolicControlledU(ControlledUOperation):
     num_controls: Value = dataclasses.field(
         default_factory=lambda: Value(type=UIntType(), name="")
     )  # type: ignore[assignment]
-    controlled_indices: tuple[Value, ...] | None = None
+    control_indices: tuple[Value, ...] | None = None
     # Number of operand slots that hold the control prefix.  Default
     # ``1`` preserves the single-pool layout used by serialised v1
     # payloads and by every call site that pre-dates the
@@ -346,8 +346,8 @@ class SymbolicControlledU(ControlledUOperation):
     def all_input_values(self) -> list[ValueBase]:
         values = super().all_input_values()
         values.append(self.num_controls)
-        if self.controlled_indices is not None:
-            values.extend(self.controlled_indices)
+        if self.control_indices is not None:
+            values.extend(self.control_indices)
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -355,23 +355,23 @@ class SymbolicControlledU(ControlledUOperation):
         assert isinstance(result, SymbolicControlledU)
         changed = False
         new_nc = result.num_controls
-        new_ci = result.controlled_indices
+        new_ci = result.control_indices
         if result.num_controls.uuid in mapping:
             mapped = mapping[result.num_controls.uuid]
             if isinstance(mapped, Value):
                 new_nc = mapped
                 changed = True
-        if result.controlled_indices is not None:
+        if result.control_indices is not None:
             substituted = tuple(
                 typing.cast(Value, mapping.get(v.uuid, v))
-                for v in result.controlled_indices
+                for v in result.control_indices
             )
-            if substituted != result.controlled_indices:
+            if substituted != result.control_indices:
                 new_ci = substituted
                 changed = True
         if changed:
             return dataclasses.replace(
-                result, num_controls=new_nc, controlled_indices=new_ci
+                result, num_controls=new_nc, control_indices=new_ci
             )
         return result
 
