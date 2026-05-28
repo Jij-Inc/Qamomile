@@ -530,6 +530,7 @@ class TestPostInlineVectorAliasing:
         operands then reference via ``parent_array``.
         """
         import math
+
         from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
         from qamomile.circuit.visualization.style import DEFAULT_STYLE
         from qamomile.qiskit import QiskitTranspiler
@@ -598,6 +599,7 @@ class TestPostInlineVectorAliasing:
         aliasing path.
         """
         import math
+
         from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
         from qamomile.circuit.visualization.style import DEFAULT_STYLE
         from qamomile.circuit.visualization.visual_ir import (
