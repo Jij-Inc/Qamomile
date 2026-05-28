@@ -24,7 +24,7 @@ def first_degree_qft_encoding(
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
     """Apply a phase gate controlled by a single control qubit."""
     m = q_output.shape[0]
-    mcp_phase = qmc.controlled(qmc.p, num_controls=1)
+    mcp_phase = qmc.control(qmc.p, num_controls=1)
     for i in range(m):
         mcp_phase(q_input[control_idx], q_output[i], theta= (2 ** i) * 2*np.pi*coef/(2**m) )
     return q_output, q_input
@@ -39,7 +39,7 @@ def second_degree_qft_encoding(
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
     """Apply a phase gate controlled by two control qubits."""
     m = q_output.shape[0]
-    mcp_phase = qmc.controlled(qmc.p, num_controls=2)
+    mcp_phase = qmc.control(qmc.p, num_controls=2)
     for i in range(m):
         mcp_phase(q_input[control_idx0], q_input[control_idx1], q_output[i], theta= (2 ** i) * 2*np.pi*coef/(2**m) )
     return q_output, q_input
@@ -148,7 +148,7 @@ def diffusion_op(
     """Apply a diffusion operator on the input register."""
     
     n = q_input.shape[0]
-    controlled_z = qmc.controlled(qmc.z, num_controls=n-1)
+    controlled_z = qmc.control(qmc.z, num_controls=n-1)
 
     for i in range(n):
         q_input[i] = qmc.x(q_input[i])
