@@ -3526,11 +3526,15 @@ class CircuitAnalyzer:
         Returns:
             list[ValueBase]: One actual per formal, in the formals'
                 declared order.  Surplus actuals in either pool are
-                appended after the formal-aligned region so the
-                downstream ``zip`` ignores them, and a shortfall
-                simply yields a shorter list (``zip`` truncates,
-                matching the existing behaviour of an unaligned
-                actual list that was too short).
+                intentionally dropped (never appended after the
+                formal-aligned region) -- appending them would
+                silently mis-pair them with later formals downstream.
+                A shortfall (running out of actuals in either pool
+                before consuming every formal) returns a list
+                shorter than ``formals``; the caller's downstream
+                ``zip`` then truncates, matching the existing
+                behaviour for an unaligned actual list that was
+                already too short.
         """
         q_iter = iter(quantum_actuals)
         c_iter = iter(classical_actuals)
