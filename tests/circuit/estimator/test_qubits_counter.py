@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import sympy as sp
 
@@ -5034,6 +5036,51 @@ class TestControlledUVectorViewControl:
 
         resource = qubits_counter(circuit.block)
         assert resource == 4
+
+    def test_classical_first_signature_shape_propagation(self):
+        """Vector[Qubit] shape resolves even when classical comes first.
+
+        ``_build_controlled_u_child_resolver`` filters both the inner
+        block's formal inputs and the call site's actuals to their
+        quantum subsets before zipping for shape propagation.  The
+        previous unfiltered zip paired the leading classical formal
+        (``theta``) with the leading quantum actual (the
+        ``Vector[Qubit]`` operand), so the Vector formal's symbolic
+        ``shape[0]`` never received the actual size mapping.  The
+        bug only surfaces in the estimate when the inner block
+        *uses* ``q.shape[0]`` to allocate something whose count
+        contributes to the total -- here, a per-call ancilla register
+        sized to match the input.  Without the fix the estimate
+        carries an unresolved ``q_dim0`` symbol; with the fix it
+        folds to the resolved 4 + 3 + 3 = 10.
+        """
+
+        @qmc.qkernel
+        def sub_classical_first(
+            theta: qmc.Float, q: qmc.Vector[qmc.Qubit]
+        ) -> qmc.Vector[qmc.Qubit]:
+            n = q.shape[0]
+            _anc = qmc.qubit_array(n, name="anc")
+            for i in qmc.range(n):
+                q[i] = qmc.rx(q[i], theta)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            ctrl = qmc.qubit_array(4, name="ctrl")
+            qs = qmc.qubit_array(3, name="qs")
+            cg = qmc.control(sub_classical_first, num_controls=4)
+            # Pass ``theta`` positionally so the classical-first
+            # signature binds cleanly through
+            # :meth:`inspect.Signature.bind` (passing it as kwarg
+            # would conflict with the positional ``qs`` that the
+            # control-prefix split has already advanced past).
+            ctrl, qs = cg(ctrl, math.pi / 2, qs)
+            return ctrl
+
+        # 4 (ctrl) + 3 (qs) + 3 (ancilla sized from q.shape[0]) = 10.
+        resource = qubits_counter(circuit.block)
+        assert resource == 10, resource
 
 
 class TestInputQubits:

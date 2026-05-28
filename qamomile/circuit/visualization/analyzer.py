@@ -596,11 +596,40 @@ class CircuitAnalyzer:
                     block_value = op.block
                     if isinstance(block_value, Block):
                         new_remap = dict(logical_id_remap)
+                        # ``op.target_operands`` lays out quantum sub-args
+                        # first then classical (frontend ``_build_operands``
+                        # builds them in that order), while
+                        # ``block_value.input_values`` is in the wrapped
+                        # kernel's signature-declared order (qubit and
+                        # classical possibly interleaved).  Filter both
+                        # to their quantum / classical halves before
+                        # zipping so a signature like
+                        # ``def sub(theta, q: Vector[Qubit])`` does not
+                        # mis-pair the ``theta`` formal with the ``q``
+                        # actual.
+                        quantum_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if isinstance(iv.type, QubitType)
+                        ]
+                        classical_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if not isinstance(iv.type, QubitType)
+                        ]
+                        quantum_actuals = [
+                            v
+                            for v in op.target_operands
+                            if isinstance(v.type, QubitType)
+                        ]
+                        classical_actuals = [
+                            v
+                            for v in op.target_operands
+                            if not isinstance(v.type, QubitType)
+                        ]
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_operands
+                            quantum_formals, quantum_actuals
                         ):
-                            if not isinstance(dummy_input.type, QubitType):
-                                continue
                             actual_lid = self._resolve_array_element_lid(
                                 actual_input,
                                 qubit_map,
@@ -611,13 +640,11 @@ class CircuitAnalyzer:
                             if actual_lid not in qubit_map:
                                 qubit_map[actual_lid] = next_idx
                                 next_idx += 1
-                        # Build child_param_values for non-qubit inputs
+                        # Build child_param_values for non-qubit inputs.
                         child_param_values = dict(param_values) if param_values else {}
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_operands
+                            classical_formals, classical_actuals
                         ):
-                            if isinstance(dummy_input.type, QubitType):
-                                continue
                             c = actual_input.get_const()
                             if c is not None:
                                 child_param_values[dummy_input.logical_id] = c
@@ -653,11 +680,29 @@ class CircuitAnalyzer:
                     block_value = op.implementation
                     if isinstance(block_value, Block):
                         new_remap = dict(logical_id_remap)
+                        # Same formal/actual quantum-vs-classical
+                        # partitioning as the ``ControlledUOperation``
+                        # branch above: pair quantum formals with
+                        # ``op.target_qubits`` (already quantum-only)
+                        # and classical formals with
+                        # ``op.parameters``, so an implementation
+                        # signature that interleaves classical and
+                        # quantum (e.g. ``def impl(theta, q)``) does
+                        # not have its formals slide off the wrong
+                        # side of the unfiltered zip.
+                        quantum_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if isinstance(iv.type, QubitType)
+                        ]
+                        classical_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if not isinstance(iv.type, QubitType)
+                        ]
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_qubits
+                            quantum_formals, op.target_qubits
                         ):
-                            if not isinstance(dummy_input.type, QubitType):
-                                continue
                             actual_lid = self._resolve_array_element_lid(
                                 actual_input,
                                 qubit_map,
@@ -668,13 +713,11 @@ class CircuitAnalyzer:
                             if actual_lid not in qubit_map:
                                 qubit_map[actual_lid] = next_idx
                                 next_idx += 1
-                        # Build child_param_values for non-qubit inputs
+                        # Build child_param_values for non-qubit inputs.
                         child_param_values = dict(param_values) if param_values else {}
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_qubits
+                            classical_formals, op.parameters
                         ):
-                            if isinstance(dummy_input.type, QubitType):
-                                continue
                             c = actual_input.get_const()
                             if c is not None:
                                 child_param_values[dummy_input.logical_id] = c
