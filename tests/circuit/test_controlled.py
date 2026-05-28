@@ -357,7 +357,7 @@ class TestControlledValidation:
                 cg(c0, c1, tgt, control_indices=[0])
 
 
-class TestNormalizeControlledIndices:
+class TestNormalizeControlIndices:
     """Compose-time validation rules for ``control_indices`` entries.
 
     Drives ``ControlledGate._normalize_control_indices`` directly
