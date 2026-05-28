@@ -484,3 +484,212 @@ class TestPhantomWireSuppression:
             "q[3]",
             "q[4]",
         ], qubit_names
+
+
+class TestPostInlineVectorAliasing:
+    """``MapBlockResults`` aliases per-element keys across SSA versions.
+
+    When a sub-kernel returns a ``Vector[Qubit]`` after mutating it
+    (e.g. ``qft_encoding``) or a controlled-U produces a next-version
+    ``Vector[Qubit]`` result, the inlined-IR path used by the
+    ``transpiler.to_block + transpiler.inline -> MatplotlibDrawer``
+    workflow ends up with a downstream op whose ``parent_array``
+    points at the *new* ArrayValue ``logical_id``.  The drawer's
+    ``build_qubit_map`` only aliased the scalar lid -> wire pairing
+    via :meth:`map_block_results`, not the per-element keys
+    (``{new_lid}_[i]``).  A subsequent op (``qmc.iqft`` expanded
+    inline to per-element CP/H gates, a per-element ``q[i] = ...``
+    follow-up loop, ...) then fell through the element-key lookup
+    and the CompositeGate / ControlledU dispatch fresh-allocated a
+    phantom wire per element.
+
+    The fix in :func:`map_block_results` copies the operand's
+    ``{operand_lid}_[i]`` keys to ``{result.logical_id}_[i]``
+    whenever both operand and result are ``ArrayValue``.  This test
+    pins it by exercising the user-reported ``transpiler.inline +
+    MatplotlibDrawer`` flow on a kernel that goes through
+    ``qft_encoding -> controlled(qft_encoding) -> iqft``: the
+    qubit count must equal the QInit'd register count, not the
+    register count plus phantom iqft wires.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_qiskit(self):
+        pytest.importorskip("qiskit")
+
+    def test_inline_then_draw_does_not_grow_qubit_count(self):
+        """to_block + inline + drawer keeps num_qubits at the QInit count.
+
+        The bug only triggers when the controlled-U lives *inside* a
+        sub-kernel whose return is a ``Vector[Qubit]`` (here:
+        ``first_degree``), because InlinePass preserves logical ids
+        through plain helper calls and through top-level controlled-U
+        results.  Wrapping the controlled-U in a sub-kernel that
+        returns the modified Vector forces the post-inline IR to
+        carry a new-lid ``ArrayValue`` that the iqft's per-element
+        operands then reference via ``parent_array``.
+        """
+        import math
+        from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+        from qamomile.circuit.visualization.style import DEFAULT_STYLE
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def qft_encoding(
+            q: qmc.Vector[qmc.Qubit], coef: qmc.Float
+        ) -> qmc.Vector[qmc.Qubit]:
+            m = q.shape[0]
+            for i in qmc.range(m):
+                q[i] = qmc.p(q[i], 2 * math.pi * coef / (2**m) * (2**i))
+            return q
+
+        @qmc.qkernel
+        def first_degree(
+            q_out: qmc.Vector[qmc.Qubit],
+            q_in: qmc.Vector[qmc.Qubit],
+            control_idx: qmc.UInt,
+            coef: qmc.Float,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            ctrl_qft = qmc.control(qft_encoding)
+            c = q_in[control_idx]
+            c, q_out = ctrl_qft(c, q_out, coef)
+            q_in[control_idx] = c
+            return q_out, q_in
+
+        @qmc.qkernel
+        def main_kernel() -> qmc.Vector[qmc.Bit]:
+            q_out = qmc.qubit_array(4, "q_out")
+            q_in = qmc.qubit_array(2, "q_in")
+            q_out, q_in = first_degree(q_out, q_in, 0, 0.5)
+            q_out = qmc.iqft(q_out)
+            qmc.measure(q_in)
+            return qmc.measure(q_out)
+
+        t = QiskitTranspiler()
+        block = t.to_block(main_kernel)
+        block = t.inline(block)
+
+        analyzer = CircuitAnalyzer(
+            block,
+            DEFAULT_STYLE,
+            inline=True,
+            fold_loops=False,
+            expand_composite=True,
+        )
+        _, qubit_names, num_qubits = analyzer.build_qubit_map(block)
+        assert num_qubits == 6, (num_qubits, qubit_names)
+        assert sorted(qubit_names.values()) == [
+            "q_in[0]",
+            "q_in[1]",
+            "q_out[0]",
+            "q_out[1]",
+            "q_out[2]",
+            "q_out[3]",
+        ], qubit_names
+
+    def test_inline_then_draw_iqft_targets_q_out(self):
+        """The inline-expanded iqft children live on the q_out wires.
+
+        Pins the visual outcome (no phantom wires under iqft) by
+        walking the VisualCircuit children and asserting every
+        VGate emitted by the expanded iqft addresses wires the
+        ``q_out`` register actually owns.  Same wrapping pattern as
+        the qubit-count test above to actually trip the per-element
+        aliasing path.
+        """
+        import math
+        from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+        from qamomile.circuit.visualization.style import DEFAULT_STYLE
+        from qamomile.circuit.visualization.visual_ir import (
+            VFoldedBlock,
+            VGate,
+            VInlineBlock,
+            VUnfoldedSequence,
+        )
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def qft_encoding(
+            q: qmc.Vector[qmc.Qubit], coef: qmc.Float
+        ) -> qmc.Vector[qmc.Qubit]:
+            m = q.shape[0]
+            for i in qmc.range(m):
+                q[i] = qmc.p(q[i], 2 * math.pi * coef / (2**m) * (2**i))
+            return q
+
+        @qmc.qkernel
+        def first_degree(
+            q_out: qmc.Vector[qmc.Qubit],
+            q_in: qmc.Vector[qmc.Qubit],
+            control_idx: qmc.UInt,
+            coef: qmc.Float,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            ctrl_qft = qmc.control(qft_encoding)
+            c = q_in[control_idx]
+            c, q_out = ctrl_qft(c, q_out, coef)
+            q_in[control_idx] = c
+            return q_out, q_in
+
+        @qmc.qkernel
+        def main_kernel() -> qmc.Vector[qmc.Bit]:
+            q_out = qmc.qubit_array(4, "q_out")
+            q_in = qmc.qubit_array(2, "q_in")
+            q_out, q_in = first_degree(q_out, q_in, 0, 0.5)
+            q_out = qmc.iqft(q_out)
+            qmc.measure(q_in)
+            return qmc.measure(q_out)
+
+        t = QiskitTranspiler()
+        block = t.to_block(main_kernel)
+        block = t.inline(block)
+
+        analyzer = CircuitAnalyzer(
+            block,
+            DEFAULT_STYLE,
+            inline=True,
+            fold_loops=False,
+            expand_composite=True,
+        )
+        qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(block)
+        vc = analyzer.build_visual_ir(block, qubit_map, qubit_names, num_qubits)
+
+        q_out_wires = {0, 1, 2, 3}
+
+        def collect_iqft_wires(node):
+            """Return all qubit wires used by the iqft inline block."""
+            if isinstance(node, VInlineBlock) and (
+                "iqft" in (node.label or "").lower()
+            ):
+                wires: set[int] = set()
+                stack = list(node.children)
+                while stack:
+                    child = stack.pop()
+                    if isinstance(child, VGate):
+                        wires.update(child.qubit_indices)
+                    elif isinstance(child, (VInlineBlock, VFoldedBlock)):
+                        stack.extend(getattr(child, "children", []))
+                    elif isinstance(child, VUnfoldedSequence):
+                        for iter_children in child.iterations:
+                            stack.extend(iter_children)
+                return wires
+            for child in getattr(node, "children", []) or []:
+                hit = collect_iqft_wires(child)
+                if hit is not None:
+                    return hit
+            if isinstance(node, VUnfoldedSequence):
+                for iter_children in node.iterations:
+                    for child in iter_children:
+                        hit = collect_iqft_wires(child)
+                        if hit is not None:
+                            return hit
+            return None
+
+        iqft_wires = None
+        for top in vc.children:
+            iqft_wires = collect_iqft_wires(top)
+            if iqft_wires is not None:
+                break
+
+        assert iqft_wires is not None, "expected the iqft inline block in the tree"
+        assert iqft_wires, "expected the iqft block to emit at least one gate"
+        assert iqft_wires.issubset(q_out_wires), (iqft_wires, q_out_wires)

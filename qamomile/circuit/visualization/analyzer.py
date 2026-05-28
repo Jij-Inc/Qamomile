@@ -241,6 +241,35 @@ class CircuitAnalyzer:
                 qubit_idx = qubit_map.get(lid)
                 if qubit_idx is not None:
                     qubit_map[result.logical_id] = qubit_idx
+                    # When both operand and result are Vector[Qubit]
+                    # ArrayValues (e.g. a controlled-U whose
+                    # sub-kernel target is a whole ``Vector[Qubit]``,
+                    # or a sub-kernel call that returns ``q`` after
+                    # mutating it), copy every per-element key from
+                    # the operand's lid to the result's lid.  Without
+                    # this, downstream ops that walk
+                    # ``parent_array.logical_id -> {lid}_[i]`` (most
+                    # visibly: ``qmc.iqft`` expanded inline to
+                    # per-element CP / H gates whose ``parent_array``
+                    # is the post-controlled-U next-version
+                    # ``ArrayValue``) fall through the resolver's
+                    # element-key lookup and the CompositeGate /
+                    # ControlledU dispatch fresh-allocates a phantom
+                    # wire per element.
+                    if isinstance(operand, ArrayValue) and isinstance(
+                        result, ArrayValue
+                    ):
+                        operand_lid = logical_id_remap.get(
+                            operand.logical_id, operand.logical_id
+                        )
+                        prefix = f"{operand_lid}_["
+                        prefix_len = len(prefix)
+                        for key, idx in list(qubit_map.items()):
+                            if key.startswith(prefix) and key.endswith("]"):
+                                suffix = key[prefix_len:]
+                                new_key = f"{result.logical_id}_[{suffix}"
+                                if new_key not in qubit_map:
+                                    qubit_map[new_key] = idx
                 else:
                     # Guard: symbolic array element whose parent is known
                     # → don't create a new wire; let layout resolve dynamically
