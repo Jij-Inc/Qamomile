@@ -9,14 +9,16 @@ Why this exists:
 
 1. **Backward-compat regression guard**: if a future change to the
    encoder / decoder accidentally drops a field, renames a tag,
-   reorders a structural slot, or otherwise breaks the v1 schema, the
-   load step will raise — or the asserted shape will fail — and the
-   test surfaces the regression before the change lands.
+   reorders a structural slot, or otherwise breaks the current
+   schema, the load step will raise — or the asserted shape will
+   fail — and the test surfaces the regression before the change
+   lands.
 2. **Intentional schema-bump latch**: when ``SCHEMA_VERSION`` is
-   bumped on purpose, ``from_dict`` rejects the v1 fixtures and this
-   test fails. The fix is to introduce a migrator from v1 to the new
-   version (or to drop the fixtures and acknowledge the break). The
-   test will refuse to silently pass in either direction.
+   bumped on purpose, ``from_dict`` rejects the old-version fixtures
+   and this test fails.  The fix is to introduce a migrator from the
+   prior version to the new one (or to regenerate the fixtures and
+   acknowledge the break).  The test will refuse to silently pass in
+   either direction.
 
 The fixture files are produced by :func:`_regenerate_fixtures` at the
 bottom of this module. Run
@@ -330,8 +332,8 @@ def _assert_shape(block: Block, expected: dict) -> None:
     [(n, b, e) for n, b, e in FIXTURE_KERNELS],
     ids=[n for n, _, _ in FIXTURE_KERNELS],
 )
-def test_v1_json_fixture_still_loads(name, _builder, expected):
-    """The v1 JSON fixture for ``name`` deserializes under the current loader.
+def test_json_fixture_still_loads(name, _builder, expected):
+    """The current JSON fixture for ``name`` deserializes under the current loader.
 
     Catches accidental backward-compat regressions and intentional
     schema bumps that lack a migrator.
@@ -351,8 +353,8 @@ def test_v1_json_fixture_still_loads(name, _builder, expected):
     [(n, b, e) for n, b, e in FIXTURE_KERNELS],
     ids=[n for n, _, _ in FIXTURE_KERNELS],
 )
-def test_v1_msgpack_fixture_still_loads(name, _builder, expected):
-    """The v1 msgpack fixture for ``name`` deserializes under the current loader.
+def test_msgpack_fixture_still_loads(name, _builder, expected):
+    """The current msgpack fixture for ``name`` deserializes under the current loader.
 
     Same intent as the JSON counterpart, but exercises the binary
     pipeline so a regression in either path is caught.
@@ -371,8 +373,8 @@ def test_fixtures_directory_matches_schema_version():
     """The fixture directory name reflects the current ``SCHEMA_VERSION``.
 
     If this fails after a schema bump, the version directory must be
-    rolled (and a migrator added, or the v1 fixtures dropped along
-    with explicit acknowledgement of the break).
+    rolled (and a migrator added, or the prior fixtures dropped
+    along with explicit acknowledgement of the break).
     """
     assert _FIXTURES_DIR.name == f"serialize_v{SCHEMA_VERSION}"
     assert _FIXTURES_DIR.is_dir(), f"Fixture directory {_FIXTURES_DIR} is missing"

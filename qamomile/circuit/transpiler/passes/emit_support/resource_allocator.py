@@ -17,7 +17,6 @@ from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
     GateOperation,
-    IndexSpecControlledU,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -67,21 +66,44 @@ class ResourceAllocator:
         self,
         operations: list[Operation],
         bindings: dict[str, Any] | None = None,
+        initial_qubit_map: QubitMap | None = None,
+        initial_clbit_map: ClbitMap | None = None,
     ) -> tuple[QubitMap, ClbitMap]:
         """Allocate qubit and clbit indices for all operations.
 
         Args:
-            operations: List of operations to allocate resources for
-            bindings: Optional variable bindings for resolving dynamic sizes
+            operations (list[Operation]): Operations to allocate resources
+                for.
+            bindings (dict[str, Any] | None): Optional variable bindings
+                for resolving dynamic sizes. Defaults to None (treated as
+                an empty mapping).
+            initial_qubit_map (QubitMap | None): Optional pre-populated
+                qubit address mapping. Used by callers that need to seed
+                the allocator with bindings established outside the
+                operation list — for instance, the inner-block emitter
+                in ``blockvalue_to_gate`` pre-allocates ``Vector[Qubit]``
+                input elements (the inner block has no ``QInitOperation``
+                for inputs, so per-element entries must be supplied here
+                or the assertion in ``_allocate_gate`` fires). The map is
+                copied; allocation continues from
+                ``max(values) + 1`` so new ``QInitOperation`` allocations
+                inside ``operations`` do not collide. Defaults to None
+                (treated as empty).
+            initial_clbit_map (ClbitMap | None): Optional pre-populated
+                clbit address mapping. Same semantics as
+                ``initial_qubit_map`` but for classical bits. Defaults to
+                None.
 
         Returns:
-            Tuple of (qubit_map, clbit_map) where each maps
-            QubitAddress to physical index
+            tuple[QubitMap, ClbitMap]: ``(qubit_map, clbit_map)`` where
+                each maps ``QubitAddress`` to a physical index. If an
+                initial map was supplied, its entries are preserved
+                verbatim in the returned map.
         """
-        qubit_map: QubitMap = {}
-        clbit_map: ClbitMap = {}
-        self._next_qubit_index = 0
-        self._next_clbit_index = 0
+        qubit_map: QubitMap = dict(initial_qubit_map) if initial_qubit_map else {}
+        clbit_map: ClbitMap = dict(initial_clbit_map) if initial_clbit_map else {}
+        self._next_qubit_index = max(qubit_map.values(), default=-1) + 1
+        self._next_clbit_index = max(clbit_map.values(), default=-1) + 1
         self._allocate_recursive(operations, qubit_map, clbit_map, bindings or {})
         return qubit_map, clbit_map
 
@@ -610,26 +632,72 @@ class ResourceAllocator:
         qubit_map: QubitMap,
     ) -> None:
         """Allocate resources for a ControlledUOperation."""
-        if isinstance(op, IndexSpecControlledU):
-            # Vector already allocated by QInitOperation.
-            # Map result ArrayValue to same physical qubits.
-            vector_operand = op.operands[0]
-            vector_result = op.results[0]
-            for addr, idx in list(qubit_map.items()):
-                if addr.matches_array(vector_operand.uuid):
-                    result_addr = QubitAddress(vector_result.uuid, addr.element_index)
-                    if result_addr not in qubit_map:
-                        qubit_map[result_addr] = idx
+        if isinstance(op, SymbolicControlledU):
+            from qamomile.circuit.ir.value import ArrayValue
+
+            # Three shapes can land here without having been promoted to
+            # ``ConcreteControlledU`` by ``ConstantFoldingPass``:
+            #
+            #   * single-pool + ``controlled_indices``: one ``ArrayValue``
+            #     control operand whose pass-through slots cannot be
+            #     represented in ``ConcreteControlledU``'s scalar layout.
+            #   * multi-arg control prefix (``num_control_args > 1``):
+            #     a heterogeneous mix of scalar ``Value`` and
+            #     ``ArrayValue`` operands whose qubit-count sum equals
+            #     ``num_controls``.
+            #   * single-pool with no ``controlled_indices`` but a
+            #     ``num_controls`` that depends on a loop variable
+            #     (``num_controls = n - 1 - k`` inside a ``qmc.range``):
+            #     constant folding cannot resolve the loop variable so
+            #     the promotion never fires; each unrolled iteration
+            #     instead arrives at the emit pass with a fully
+            #     resolvable ``num_controls``.
+            #
+            # All three flow through the same per-operand allocation:
+            # each input operand keeps its physical mapping onto the
+            # corresponding result operand.  Whether ``num_controls``
+            # ultimately resolves is the emit pass's responsibility;
+            # the allocator only needs to thread per-element addresses
+            # through.
+            for i in range(op.num_control_args):
+                src = op.operands[i]
+                dst = op.results[i]
+                if isinstance(src, ArrayValue):
+                    for addr, idx in list(qubit_map.items()):
+                        if addr.matches_array(src.uuid):
+                            result_addr = QubitAddress(dst.uuid, addr.element_index)
+                            if result_addr not in qubit_map:
+                                qubit_map[result_addr] = idx
+                else:
+                    src_addr = QubitAddress(src.uuid)
+                    if src_addr not in qubit_map:
+                        # Scalar control whose UUID is first introduced
+                        # at this ``SymbolicControlledU`` -- typically a
+                        # top-level ``@qkernel`` ``Qubit`` input
+                        # (``emit_init=False``, so no ``QInitOperation``
+                        # pre-registers it).  ``_allocate_qubit_list``
+                        # already handles the same edge case for the
+                        # concrete-controlled-U path (line ~527); mirror
+                        # the fresh-slot allocation here so emit does
+                        # not later trip on a missing scalar mapping
+                        # for the control prefix.
+                        qubit_map[src_addr] = self._next_qubit_index
+                        self._next_qubit_index += 1
+                    dst_addr = QubitAddress(dst.uuid)
+                    if dst_addr not in qubit_map:
+                        qubit_map[dst_addr] = qubit_map[src_addr]
+            sub_quantum_operands = [
+                v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
+            ]
+            sub_quantum_results = [
+                r for r in op.results[op.num_control_args :] if r.type.is_quantum()
+            ]
+            if sub_quantum_operands:
+                self._allocate_qubit_list(
+                    sub_quantum_operands, sub_quantum_results, qubit_map
+                )
             return
 
-        if isinstance(op, SymbolicControlledU):
-            from qamomile.circuit.transpiler.errors import EmitError
-
-            raise EmitError(
-                "Cannot transpile ControlledUOperation with symbolic num_controls. "
-                "Bind parameters to concrete values before transpilation.",
-                operation="ControlledUOperation",
-            )
         assert isinstance(op, ConcreteControlledU)
         control_qubits = list(op.control_operands)
         target_qubits = [v for v in op.target_operands if v.type.is_quantum()]

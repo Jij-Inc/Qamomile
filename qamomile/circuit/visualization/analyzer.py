@@ -60,6 +60,85 @@ if TYPE_CHECKING:
 _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
 
 
+# Single source of truth for the TeX rendering of every built-in
+# gate the drawer knows how to label, keyed by ``GateOperationType``.
+# Used directly by the inline-gate label path
+# (``CircuitAnalyzer._get_gate_label``) and indirectly — via
+# ``_BUILTIN_TEX_LABELS`` below — by the controlled-U-box path,
+# which keys off ``block.name`` (the string assigned by built-in
+# factories) instead of the enum.
+_TEX_LABELS_BY_GATE_TYPE: dict[GateOperationType, str] = {
+    # Parametric gates
+    GateOperationType.RX: r"$R_x$",
+    GateOperationType.RY: r"$R_y$",
+    GateOperationType.RZ: r"$R_z$",
+    GateOperationType.RZZ: r"$R_{zz}$",
+    GateOperationType.CP: r"$CP$",
+    GateOperationType.P: r"$P$",
+    # Non-parametric gates
+    GateOperationType.H: r"$H$",
+    GateOperationType.X: r"$X$",
+    GateOperationType.Y: r"$Y$",
+    GateOperationType.Z: r"$Z$",
+    GateOperationType.T: r"$T$",
+    GateOperationType.TDG: r"$T^{\dagger}$",
+    GateOperationType.S: r"$S$",
+    GateOperationType.SDG: r"$S^{\dagger}$",
+    GateOperationType.CX: r"$CX$",
+    GateOperationType.CZ: r"$CZ$",
+    GateOperationType.SWAP: r"$SWAP$",
+    GateOperationType.TOFFOLI: r"$CCX$",
+}
+
+
+# ``block.name`` strings assigned by built-in gate factories.  For
+# most gates this is the lowercase enum name (``RX`` → ``"rx"``),
+# but a couple of factories use a different historical name
+# (``GateOperationType.TOFFOLI`` is exposed as ``qmc.ccx`` and
+# stores ``block.name = "ccx"``).  Drift risk is now limited to
+# this one mapping rather than to two parallel TeX tables.
+_GATE_TYPE_BUILTIN_NAMES: dict[GateOperationType, str] = {
+    GateOperationType.RX: "rx",
+    GateOperationType.RY: "ry",
+    GateOperationType.RZ: "rz",
+    GateOperationType.RZZ: "rzz",
+    GateOperationType.P: "p",
+    GateOperationType.CP: "cp",
+    GateOperationType.H: "h",
+    GateOperationType.X: "x",
+    GateOperationType.Y: "y",
+    GateOperationType.Z: "z",
+    GateOperationType.T: "t",
+    GateOperationType.TDG: "tdg",
+    GateOperationType.S: "s",
+    GateOperationType.SDG: "sdg",
+    GateOperationType.CX: "cx",
+    GateOperationType.CZ: "cz",
+    GateOperationType.SWAP: "swap",
+    GateOperationType.TOFFOLI: "ccx",
+}
+
+
+# Derived from the two tables above.  Used by the controlled-U-box
+# rendering path: when the wrapped block of a
+# ``ControlledUOperation`` was a built-in gate (e.g.
+# ``qmc.control(qmc.rx)`` gives ``block.name = "rx"``) this maps
+# the block name back to the same TeX label inline gates use.
+_BUILTIN_TEX_LABELS: dict[str, str] = {
+    _GATE_TYPE_BUILTIN_NAMES[gate_type]: tex
+    for gate_type, tex in _TEX_LABELS_BY_GATE_TYPE.items()
+    if gate_type in _GATE_TYPE_BUILTIN_NAMES
+}
+
+
+# Prefix that ``ControlledGate.__call__`` attaches to a wrapped
+# kernel's classical-parameter Value names (e.g. ``ctrl_param_theta``
+# for an inner ``theta`` parameter).  The drawer strips it so the
+# rendered label reads ``_phase(theta=π/2)`` rather than
+# ``_phase(ctrl_param_theta=π/2)``.
+_CTRL_PARAM_PREFIX: str = "ctrl_param_"
+
+
 class CircuitAnalyzer:
     """Analyzes IR blocks for circuit visualization.
 
@@ -600,6 +679,18 @@ class CircuitAnalyzer:
                         for iter_value in range(start, stop, step):
                             child_pv = dict(param_values)
                             child_pv[f"_loop_{op.loop_var}"] = iter_value
+                            # Pre-evaluate body BinOps for this iteration
+                            # so resolvers that consult ``param_values``
+                            # (notably ``_resolve_view_chain_to_root``
+                            # for slice bounds emitted via ``_uint_min``)
+                            # find a concrete answer instead of bailing
+                            # and falling through to fresh-wire allocation
+                            # in ``map_block_results``.  Mirrors what
+                            # ``_build_vfor`` already does for the visual
+                            # IR build.
+                            self._evaluate_loop_body_intermediates(
+                                op.operations, child_pv
+                            )
                             build_chains(
                                 op.operations,
                                 logical_id_remap,
@@ -1000,15 +1091,47 @@ class CircuitAnalyzer:
             )
 
         if isinstance(op, ControlledUOperation):
-            u_name = getattr(op.block, "name", "U") or "U"
+            raw_name = getattr(op.block, "name", "U") or "U"
+            # Built-in gates wrapped via ``qmc.control(qmc.rx)`` etc.
+            # carry their lowercase gate name on ``block.name``; render
+            # them with the same TeX label the inline-gate path uses
+            # (``$R_x$`` instead of ``rx``).  User kernels fall through
+            # unchanged so ``_phase`` stays ``_phase``.
+            u_name = _BUILTIN_TEX_LABELS.get(raw_name, raw_name)
             power_val = self._resolve_controlled_u_power(op, param_values)
-            label = f"{u_name}^{power_val}" if power_val > 1 else u_name
+            # Combine the two recent improvements to the controlled-U box:
+            # main (PR #409) now recognises a small set of wrapped gates
+            # (X/Z/CX/CZ/SWAP/TOFFOLI with power=1) and renders them with
+            # a dedicated native symbol instead of a labelled box; this
+            # branch added a parameter-suffix label (``_phase($\theta$=...)``,
+            # ``$R_x$(angle=...)``) and a separate ``VGate.power`` field
+            # so the renderer can draw an outer ``pow=N`` wrapper box for
+            # ``power > 1``.  Both behaviours coexist: when the dedicated
+            # symbol applies the label is unused (the wrapped primitives
+            # have no classical parameters so ``param_suffix`` is empty
+            # anyway), and otherwise the label keeps its full callable
+            # name + bound classical parameters.
             controlled_gate_type = self._controlled_u_single_gate_type(op, power_val)
-            box_width = (
-                self.style.gate_width
-                if controlled_gate_type is not None
-                else self._estimate_label_box_width(label)
-            )
+            # Append a parameter suffix when the wrapped block has
+            # classical parameters bound at the call site.  Each entry
+            # is ``name=value`` where ``name`` is the wrapped kernel's
+            # own parameter name (the leading ``ctrl_param_`` Value
+            # prefix is stripped) and ``value`` is either the resolved
+            # numeric constant or the symbolic name (Greek letters get
+            # TeX rendering via ``_format_symbolic_param``).  When
+            # ``power_val > 1`` the renderer draws an outer ``pow=N``
+            # wrapper box around the inner controlled-U rectangle.
+            param_suffix = self._format_controlled_param_suffix(op, param_values)
+            label = f"{u_name}{param_suffix}"
+            if controlled_gate_type is not None:
+                box_width = self.style.gate_width
+            else:
+                box_width = self._estimate_label_box_width(label)
+                if power_val > 1:
+                    # Reserve a little extra horizontal space so the
+                    # outer wrapper box does not clip into adjacent
+                    # gates.
+                    box_width += 2 * self.style.power_wrapper_margin
             # Control qubits first, then target qubits
             control_indices: list[int] = []
             for qval in op.control_operands:
@@ -1017,6 +1140,31 @@ class CircuitAnalyzer:
                 )
                 if indices is not None:
                     control_indices.extend(indices)
+            # Symbolic-mode subset selection: when the operation
+            # carries a ``controlled_indices`` list, only those pool
+            # slots are wired in as active controls.  The remaining
+            # slots are pass-through wires and must not appear as
+            # control dots in the diagram.  When every index resolves
+            # to a concrete integer (literal or via ``bindings``) we
+            # filter the flat control-qubit list; otherwise (e.g. a
+            # ``UInt`` expression without a binding) we leave the
+            # full list as a safe fallback so the picture still
+            # reads sensibly.
+            ctrl_idx_values = getattr(op, "controlled_indices", None)
+            if ctrl_idx_values is not None and control_indices:
+                resolved_positions: list[int] = []
+                all_resolved = True
+                for idx_v in ctrl_idx_values:
+                    ev = self._evaluate_value(idx_v, param_values)
+                    if isinstance(ev, (int, float)):
+                        resolved_positions.append(int(ev))
+                    else:
+                        all_resolved = False
+                        break
+                if all_resolved and all(
+                    0 <= p < len(control_indices) for p in resolved_positions
+                ):
+                    control_indices = [control_indices[p] for p in resolved_positions]
             target_indices: list[int] = []
             for qval in op.target_operands:
                 indices = self._resolve_operand_to_qubit_indices(
@@ -1033,6 +1181,7 @@ class CircuitAnalyzer:
                 gate_type=controlled_gate_type,
                 box_width=box_width,
                 control_count=len(control_indices),
+                power=power_val,
             )
 
         raise TypeError(
@@ -1926,6 +2075,77 @@ class CircuitAnalyzer:
         collect_qubits(op.false_operations)
         return list(affected), is_precise
 
+    def _format_controlled_param_suffix(
+        self,
+        op: ControlledUOperation,
+        param_values: dict,
+    ) -> str:
+        """Render the ``(p1=v1, p2=v2, ...)`` suffix for a controlled-U box.
+
+        Walks ``op.param_operands`` (the classical parameters bound to
+        the wrapped block at the call site) and returns the formatted
+        suffix that follows the wrapped-callable name on the box label.
+        The leading ``ctrl_param_`` prefix that
+        ``ControlledGate.__call__`` attaches to each Value name is
+        stripped so the rendered label uses the wrapped kernel's own
+        parameter name.  Bound numeric constants are formatted via
+        :meth:`_format_parameter`; unresolved symbolic parameters fall
+        back to :meth:`_format_symbolic_param` so Greek-letter names
+        like ``theta`` render in TeX.
+
+        Args:
+            op (ControlledUOperation): The controlled-U op whose
+                classical parameters should be rendered.
+            param_values (dict): The same ``param_values`` mapping the
+                surrounding ``_build_vgate`` call uses to resolve
+                Values inside inline blocks.
+
+        Returns:
+            str: A string of the form ``"(name=value, ...)"`` when
+            ``op.param_operands`` is non-empty, or ``""`` when the
+            wrapped block takes no classical parameters.
+        """
+        params = list(getattr(op, "param_operands", ()) or ())
+        if not params:
+            return ""
+        parts: list[str] = []
+        for v in params:
+            # Drop the ctrl_param_ prefix to recover the wrapped
+            # kernel's own parameter name.
+            raw = v.name or ""
+            if raw.startswith(_CTRL_PARAM_PREFIX):
+                raw = raw[len(_CTRL_PARAM_PREFIX) :]
+            pname_raw = raw or "?"
+            # Route the parameter name through the same symbolic
+            # formatter used by inline gates so Greek-letter names
+            # (``theta``, ``alpha``, ``beta``, ...) render in TeX
+            # rather than as ASCII text.
+            pname_disp = self._format_symbolic_param(pname_raw)
+
+            # Resolve the value: bound constant first, then logical_id
+            # remap, then a generic _evaluate_value, then the symbolic
+            # name as a final fallback.
+            const_val = v.get_const() if hasattr(v, "get_const") else None
+            if isinstance(const_val, (int, float)):
+                pval = self._format_parameter(const_val)
+            elif param_values and v.logical_id in param_values:
+                resolved = param_values[v.logical_id]
+                if isinstance(resolved, (int, float)):
+                    pval = self._format_parameter(resolved)
+                elif isinstance(resolved, str):
+                    pval = self._format_symbolic_param(resolved)
+                else:
+                    pval = pname_disp
+            else:
+                evaluated = self._evaluate_value(v, param_values or {})
+                if isinstance(evaluated, (int, float)):
+                    pval = self._format_parameter(evaluated)
+                else:
+                    pval = pname_disp
+
+            parts.append(f"{pname_disp}={pval}")
+        return f"({', '.join(parts)})"
+
     def _resolve_controlled_u_power(
         self,
         op: ControlledUOperation,
@@ -2431,7 +2651,7 @@ class CircuitAnalyzer:
             isinstance(value, ArrayValue)
             and getattr(value, "slice_of", None) is not None
         ):
-            resolved = self._resolve_view_chain_to_root(value)
+            resolved = self._resolve_view_chain_to_root(value, param_values)
             if resolved is not None:
                 root_av, start, _step = resolved
                 root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
@@ -2453,7 +2673,7 @@ class CircuitAnalyzer:
             chain_step = 1
             chain_failed = False
             if getattr(parent_array, "slice_of", None) is not None:
-                resolved = self._resolve_view_chain_to_root(parent_array)
+                resolved = self._resolve_view_chain_to_root(parent_array, param_values)
                 if resolved is None:
                     # Symbolic ``slice_start`` / ``slice_step`` along the
                     # chain — fall back to the original ``parent_lid``
@@ -2596,6 +2816,7 @@ class CircuitAnalyzer:
     def _resolve_view_chain_to_root(
         self,
         array_value: "ArrayValue",
+        param_values: dict | None = None,
     ) -> tuple["ArrayValue", int, int] | None:
         """Walk the ``slice_of`` chain to the root array, composing the affine map.
 
@@ -2612,10 +2833,27 @@ class CircuitAnalyzer:
         ``(start, step) -> (cur.slice_start + cur.slice_step * start,
         cur.slice_step * step)`` until ``cur.slice_of is None`` (root).
 
+        When ``param_values`` is supplied, a non-constant ``slice_start``
+        or ``slice_step`` is still resolvable as long as
+        :meth:`_evaluate_value` can fold it (e.g. the frontend's
+        ``_uint_min(0, stop)`` clamp returns a symbolic ``BinOp`` even
+        when the user wrote ``q[0:stop]``; under a loop unrolling where
+        ``stop`` is bound to a concrete integer, the BinOp folds to ``0``
+        and the chain walk succeeds).
+
         Args:
             array_value (ArrayValue): A possibly-sliced ArrayValue.  When
                 ``slice_of is None`` the function returns the identity
                 transform ``(array_value, 0, 1)``.
+            param_values (dict | None): Optional mapping consulted by
+                :meth:`_evaluate_value` when ``slice_start`` /
+                ``slice_step`` is not directly constant.  Pass the
+                per-iteration ``child_param_values`` from
+                :meth:`_build_vfor` (or any caller-side
+                ``param_values``) to enable this fallback.  Defaults to
+                ``None``, which preserves the strict ``is_constant()``
+                behaviour for callers that do not have a parameter
+                context.
 
         Returns:
             tuple[ArrayValue, int, int] | None: ``(root_av, start, step)``
@@ -2630,18 +2868,11 @@ class CircuitAnalyzer:
         while getattr(cur, "slice_of", None) is not None:
             slice_start = cur.slice_start
             slice_step = cur.slice_step
-            if slice_start is None or not slice_start.is_constant():
+            if slice_start is None or slice_step is None:
                 return None
-            if slice_step is None or not slice_step.is_constant():
-                return None
-            s = slice_start.get_const()
-            st = slice_step.get_const()
-            if s is None or st is None:
-                return None
-            try:
-                s_int = int(s)
-                st_int = int(st)
-            except (TypeError, ValueError):
+            s_int = self._resolve_slice_bound(slice_start, param_values)
+            st_int = self._resolve_slice_bound(slice_step, param_values)
+            if s_int is None or st_int is None:
                 return None
             start = s_int + st_int * start
             step = st_int * step
@@ -2651,6 +2882,47 @@ class CircuitAnalyzer:
                 "walking a slice chain."
             )
         return cur, start, step
+
+    def _resolve_slice_bound(
+        self,
+        bound: Value,
+        param_values: dict | None,
+    ) -> int | None:
+        """Resolve a ``slice_start`` / ``slice_step`` ``Value`` to ``int``.
+
+        Tries ``is_constant()`` first (the historical path), and falls
+        back to :meth:`_evaluate_value` against ``param_values`` so
+        clamps emitted by the frontend's ``_uint_min`` helper still
+        resolve under a loop unrolling that fixes the symbolic operands.
+
+        Args:
+            bound (Value): The slice bound Value to resolve.
+            param_values (dict | None): Parameter values for the
+                fallback ``_evaluate_value`` lookup; ``None`` disables
+                the fallback and keeps the legacy ``is_constant()``-only
+                behaviour.
+
+        Returns:
+            int | None: The resolved integer, or ``None`` when neither
+                path produces a usable value.
+        """
+        if bound.is_constant():
+            c = bound.get_const()
+            if c is None:
+                return None
+            try:
+                return int(c)
+            except (TypeError, ValueError):
+                return None
+        if param_values is None:
+            return None
+        ev = self._evaluate_value(bound, param_values)
+        if ev is None:
+            return None
+        try:
+            return int(ev)
+        except (TypeError, ValueError):
+            return None
 
     def _compute_slice_view_wires(
         self,
@@ -2709,7 +2981,7 @@ class CircuitAnalyzer:
 
         # Case A: actual_input is itself a slice view (``slice_of`` set).
         if getattr(actual_input, "slice_of", None) is not None:
-            resolved = self._resolve_view_chain_to_root(actual_input)
+            resolved = self._resolve_view_chain_to_root(actual_input, param_values)
             if resolved is None:
                 return None
             root_av, start, step = resolved
@@ -2801,7 +3073,7 @@ class CircuitAnalyzer:
         # key first and fall back to the formula only when no
         # per-element entry exists.
         if getattr(parent_array, "slice_of", None) is not None:
-            resolved = self._resolve_view_chain_to_root(parent_array)
+            resolved = self._resolve_view_chain_to_root(parent_array, param_values)
             if resolved is None:
                 return None
             root_av, start, step = resolved
@@ -2872,7 +3144,7 @@ class CircuitAnalyzer:
             isinstance(operand, ArrayValue)
             and getattr(operand, "slice_of", None) is not None
         ):
-            chain = self._resolve_view_chain_to_root(operand)
+            chain = self._resolve_view_chain_to_root(operand, param_values)
             if chain is not None:
                 root_av, start, step = chain
                 root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
@@ -4241,32 +4513,12 @@ class CircuitAnalyzer:
         Returns:
             Tuple of (label_string, has_parameter).
         """
-        # TeX-style gate names
-        tex_labels = {
-            # Parametric gates
-            GateOperationType.RX: r"$R_x$",
-            GateOperationType.RY: r"$R_y$",
-            GateOperationType.RZ: r"$R_z$",
-            GateOperationType.RZZ: r"$R_{zz}$",
-            GateOperationType.CP: r"$CP$",
-            GateOperationType.P: r"$P$",
-            # Non-parametric gates
-            GateOperationType.H: r"$H$",
-            GateOperationType.X: r"$X$",
-            GateOperationType.Y: r"$Y$",
-            GateOperationType.Z: r"$Z$",
-            GateOperationType.T: r"$T$",
-            GateOperationType.TDG: r"$T^{\dagger}$",
-            GateOperationType.S: r"$S$",
-            GateOperationType.SDG: r"$S^{\dagger}$",
-            GateOperationType.CX: r"$CX$",
-            GateOperationType.CZ: r"$CZ$",
-            GateOperationType.SWAP: r"$SWAP$",
-            GateOperationType.TOFFOLI: r"$CCX$",
-        }
-
+        # TeX-style gate names — sourced from the module-level
+        # ``_TEX_LABELS_BY_GATE_TYPE`` so the controlled-U-box
+        # rendering path (``_BUILTIN_TEX_LABELS``) and this inline
+        # path stay in sync.
         base_label = (
-            tex_labels.get(op.gate_type, str(op.gate_type))
+            _TEX_LABELS_BY_GATE_TYPE.get(op.gate_type, str(op.gate_type))
             if op.gate_type is not None
             else "?"
         )

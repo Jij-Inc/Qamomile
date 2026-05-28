@@ -10,6 +10,7 @@ from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
     QubitType,
+    UIntType,
 )
 from qamomile.circuit.ir.value import Value, ValueBase
 
@@ -150,14 +151,13 @@ class MeasureOperation(Operation):
 class ControlledUOperation(Operation):
     """Base class for controlled-U operations.
 
-    Three concrete subclasses handle distinct operand layouts:
+    Two concrete subclasses handle distinct operand layouts:
 
     - ``ConcreteControlledU``: Fixed ``num_controls: int``, individual qubit
       operands.
     - ``SymbolicControlledU``: Symbolic ``num_controls: Value``, vector-based
-      control operands.
-    - ``IndexSpecControlledU``: Single vector with explicit index lists
-      selecting which elements are controls/targets.
+      control operands; optional ``controlled_indices`` selects a subset of
+      the control vector to act as controls (the rest pass through).
 
     All ``isinstance(op, ControlledUOperation)`` checks match every subclass.
 
@@ -169,11 +169,6 @@ class ControlledUOperation(Operation):
 
     power: int | Value = 1
     block: Block | None = None
-
-    @property
-    def has_index_spec(self) -> bool:
-        """Whether target/control positions are specified via index lists."""
-        return False
 
     @property
     def is_symbolic_num_controls(self) -> bool:
@@ -275,13 +270,54 @@ class ConcreteControlledU(ControlledUOperation):
 class SymbolicControlledU(ControlledUOperation):
     """Controlled-U with symbolic (Value) number of controls.
 
-    Operand layout: ``[ctrl_vector, tgt_0, ..., tgt_m, params...]``
-    Result layout:  ``[ctrl_vector', tgt_0', ..., tgt_m']``
+    Operand layout: ``[ctrl_arg_0, ..., ctrl_arg_{k-1}, tgt_0, ..., tgt_m, params...]``
+    Result layout:  ``[ctrl_arg_0', ..., ctrl_arg_{k-1}', tgt_0', ..., tgt_m']``
+
+    The number of control arguments ``k`` is recorded in
+    ``num_control_args``; the default ``k = 1`` corresponds to the
+    historical single-pool form (``operands[0]`` is a
+    ``Vector[Qubit]`` / ``VectorView`` whose length equals
+    ``num_controls``, or whose ``controlled_indices``-selected subset
+    does).  When ``k > 1`` the control prefix is a heterogeneous
+    sequence of scalar ``Qubit`` values and ``ArrayValue``s whose
+    *total* qubit count is ``num_controls``; the emit pass walks them
+    in order to recover the per-physical-qubit control set.
+
+    When ``controlled_indices`` is ``None`` the entire control prefix
+    is used as active controls (one-arg form: ``len(ctrl_vector) ==
+    num_controls``; multi-arg form: the qubit-count sum of the
+    prefix args equals ``num_controls``).  When non-``None``, the
+    listed indices select exactly ``num_controls`` slots from a
+    single-arg pool to act as controls; combining
+    ``controlled_indices`` with the multi-arg control prefix is
+    rejected at frontend time.
+
+    Each ``controlled_indices`` entry is stored as a ``Value`` of
+    ``UIntType`` regardless of whether the frontend passed an
+    ``int`` literal or a ``UInt`` handle, so all downstream
+    value-substitution passes see a uniform shape.
     """
 
+    # The default exists only so the dataclass field ordering works for
+    # subclasses; every production call site passes ``num_controls=`` and
+    # the IR contract is for it to be a ``UIntType`` ``Value``.  The
+    # default uses ``name=""`` (the anonymous-marker convention from
+    # ``Value`` -- see :class:`qamomile.circuit.ir.value.Value`'s docstring)
+    # so two short-form ``SymbolicControlledU(...)`` constructions never
+    # collide in the resolver's name-keyed lookup branch; ``type=UIntType()``
+    # keeps the type tag honest for any code that switches on
+    # ``num_controls.type`` (e.g. ``_fold_value_list`` materialises the
+    # folded constant with the *original* type, so a wrong-type default
+    # would propagate downstream as a ``FloatType`` UInt).
     num_controls: Value = dataclasses.field(
-        default_factory=lambda: Value(type=FloatType(), name="_placeholder")
+        default_factory=lambda: Value(type=UIntType(), name="")
     )  # type: ignore[assignment]
+    controlled_indices: tuple[Value, ...] | None = None
+    # Number of operand slots that hold the control prefix.  Default
+    # ``1`` preserves the single-pool layout used by serialised v1
+    # payloads and by every call site that pre-dates the
+    # multi-control-arg extension.
+    num_control_args: int = 1
 
     @property
     def is_symbolic_num_controls(self) -> bool:
@@ -289,15 +325,19 @@ class SymbolicControlledU(ControlledUOperation):
 
     @property
     def control_operands(self) -> list[Value]:
-        return [self.operands[0]]
+        return list(self.operands[: self.num_control_args])
 
     @property
     def target_operands(self) -> list[Value]:
-        return self.operands[1:]
+        return list(self.operands[self.num_control_args :])
 
     @property
     def param_operands(self) -> list[Value]:
-        return [op for op in self.operands[1:] if op.type.is_classical()]
+        return [
+            op
+            for op in self.operands[self.num_control_args :]
+            if op.type.is_classical()
+        ]
 
     @property
     def signature(self) -> Signature:
@@ -306,102 +346,32 @@ class SymbolicControlledU(ControlledUOperation):
     def all_input_values(self) -> list[ValueBase]:
         values = super().all_input_values()
         values.append(self.num_controls)
-        return values
-
-    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
-        result = super().replace_values(mapping)
-        assert isinstance(result, SymbolicControlledU)
-        if result.num_controls.uuid in mapping:
-            mapped = mapping[result.num_controls.uuid]
-            if isinstance(mapped, Value):
-                return dataclasses.replace(result, num_controls=mapped)
-        return result
-
-
-@dataclasses.dataclass
-class IndexSpecControlledU(ControlledUOperation):
-    """Controlled-U with explicit target/control index specification.
-
-    A single vector covers both controls and targets; the partition is
-    determined by ``target_indices`` or ``controlled_indices``.
-
-    Operand layout: ``[vector, params...]``
-    Result layout:  ``[vector']``
-    """
-
-    num_controls: int | Value = 1
-    target_indices: list[Value] | None = None
-    controlled_indices: list[Value] | None = None
-
-    @property
-    def has_index_spec(self) -> bool:
-        return True
-
-    @property
-    def is_symbolic_num_controls(self) -> bool:
-        return isinstance(self.num_controls, Value)
-
-    @property
-    def control_operands(self) -> list[Value]:
-        return [self.operands[0]]
-
-    @property
-    def target_operands(self) -> list[Value]:
-        return []
-
-    @property
-    def param_operands(self) -> list[Value]:
-        return [op for op in self.operands[1:] if op.type.is_classical()]
-
-    @property
-    def signature(self) -> Signature:
-        raise NotImplementedError("Cannot compute signature for IndexSpecControlledU.")
-
-    def all_input_values(self) -> list[ValueBase]:
-        values = super().all_input_values()
-        if isinstance(self.num_controls, Value):
-            values.append(self.num_controls)
-        if self.target_indices:
-            values.extend(self.target_indices)
-        if self.controlled_indices:
+        if self.controlled_indices is not None:
             values.extend(self.controlled_indices)
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
         result = super().replace_values(mapping)
-        assert isinstance(result, IndexSpecControlledU)
+        assert isinstance(result, SymbolicControlledU)
         changed = False
-        new_nc: int | Value = result.num_controls
-        new_ti = result.target_indices
+        new_nc = result.num_controls
         new_ci = result.controlled_indices
-        if (
-            isinstance(result.num_controls, Value)
-            and result.num_controls.uuid in mapping
-        ):
+        if result.num_controls.uuid in mapping:
             mapped = mapping[result.num_controls.uuid]
             if isinstance(mapped, Value):
                 new_nc = mapped
                 changed = True
-        if result.target_indices is not None:
-            new_ti = [
-                typing.cast(Value, mapping.get(v.uuid, v))
-                for v in result.target_indices
-            ]
-            if new_ti != result.target_indices:
-                changed = True
         if result.controlled_indices is not None:
-            new_ci = [
+            substituted = tuple(
                 typing.cast(Value, mapping.get(v.uuid, v))
                 for v in result.controlled_indices
-            ]
-            if new_ci != result.controlled_indices:
+            )
+            if substituted != result.controlled_indices:
+                new_ci = substituted
                 changed = True
         if changed:
             return dataclasses.replace(
-                result,
-                num_controls=new_nc,
-                target_indices=new_ti,
-                controlled_indices=new_ci,
+                result, num_controls=new_nc, controlled_indices=new_ci
             )
         return result
 
