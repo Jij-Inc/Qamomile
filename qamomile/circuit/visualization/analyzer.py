@@ -1368,7 +1368,24 @@ class CircuitAnalyzer:
                 )
                 if indices is not None:
                     affected_qubits.extend(indices)
-            actual_inputs = list(op.target_operands)
+            # ``op.target_operands`` lays out quantum sub-args first
+            # then classical (frontend ``_build_operands`` order),
+            # while ``block_value.input_values`` is in the wrapped
+            # kernel's signature-declared order (quantum and
+            # classical possibly interleaved).  Reorder the actuals
+            # to match the formal order before
+            # :meth:`_build_block_value_mappings` zips them, so a
+            # sub-signature like ``def sub(theta, q: Vector[Qubit])``
+            # does not mis-pair ``theta`` with the ``q`` actual.
+            actual_inputs = self._align_actuals_to_formals(
+                block_value.input_values,
+                quantum_actuals=[
+                    v for v in op.target_operands if isinstance(v.type, QubitType)
+                ],
+                classical_actuals=[
+                    v for v in op.target_operands if not isinstance(v.type, QubitType)
+                ],
+            )
             u_name = getattr(block_value, "name", "U") or "U"
             block_name = u_name
         elif isinstance(op, CompositeGateOperation):
@@ -1381,7 +1398,15 @@ class CircuitAnalyzer:
                 )
                 if indices is not None:
                     affected_qubits.extend(indices)
-            actual_inputs = list(op.target_qubits)
+            # Same alignment as the ``ControlledUOperation`` branch.
+            # ``op.target_qubits`` is already quantum-only and
+            # ``op.parameters`` is classical-only, so we feed them
+            # directly into the formal-order interleaver.
+            actual_inputs = self._align_actuals_to_formals(
+                block_value.input_values,
+                quantum_actuals=list(op.target_qubits),
+                classical_actuals=list(op.parameters),
+            )
             block_name = op.name
         else:
             raise TypeError(f"Unsupported inline block type: {type(op).__name__}")
@@ -3463,6 +3488,65 @@ class CircuitAnalyzer:
         if step_val > 0:
             return (stop_val - start_val + step_val - 1) // step_val
         return (start_val - stop_val - step_val - 1) // (-step_val)
+
+    def _align_actuals_to_formals(
+        self,
+        formals: Sequence[ValueBase],
+        *,
+        quantum_actuals: Sequence[ValueBase],
+        classical_actuals: Sequence[ValueBase],
+    ) -> list[ValueBase]:
+        """Reorder split actual operands to match formal signature order.
+
+        :meth:`_build_block_value_mappings` zips a callee block's
+        ``input_values`` against the caller's ``actual_inputs``
+        positionally three times.  Callers that already have their
+        actuals split into quantum and classical pools (typically
+        ``ControlledUOperation.target_operands`` partitioned by
+        ``QubitType`` or ``CompositeGateOperation.target_qubits`` +
+        ``parameters``) must therefore weave them back into the
+        formals' declared order before handing them off, otherwise
+        a sub-signature like ``def sub(theta, q: Vector[Qubit])``
+        ends up with the ``theta`` formal paired with the ``q``
+        actual (and vice versa) and the inner block's symbolic
+        ``q.shape[0]`` is never bound to the caller's actual
+        ``Vector`` shape.
+
+        Args:
+            formals (Sequence[ValueBase]): The callee block's formal
+                ``input_values``, in signature-declared order.
+            quantum_actuals (Sequence[ValueBase]): Quantum actuals
+                in their original order (e.g. quantum-typed entries
+                of ``op.target_operands``).
+            classical_actuals (Sequence[ValueBase]): Classical
+                actuals in their original order (e.g. classical-
+                typed entries of ``op.target_operands``, or
+                ``op.parameters`` for composites).
+
+        Returns:
+            list[ValueBase]: One actual per formal, in the formals'
+                declared order.  Surplus actuals in either pool are
+                appended after the formal-aligned region so the
+                downstream ``zip`` ignores them, and a shortfall
+                simply yields a shorter list (``zip`` truncates,
+                matching the existing behaviour of an unaligned
+                actual list that was too short).
+        """
+        q_iter = iter(quantum_actuals)
+        c_iter = iter(classical_actuals)
+        aligned: list[ValueBase] = []
+        for formal in formals:
+            pool = q_iter if isinstance(formal.type, QubitType) else c_iter
+            try:
+                aligned.append(next(pool))
+            except StopIteration:
+                # Out of actuals for this kind -- stop early so the
+                # downstream ``zip`` sees a truncated list.  Surplus
+                # entries in the other pool are intentionally
+                # dropped: appending them would silently mis-pair
+                # them with later formals.
+                return aligned
+        return aligned
 
     def _build_block_value_mappings(
         self,
