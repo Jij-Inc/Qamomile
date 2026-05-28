@@ -25,9 +25,9 @@
 #
 # **Goal.** Build a QAOA solver in Qamomile, run it on a
 # **Low Autocorrelation Binary Sequences (LABS)** instance loaded from the
-# [OMMX Quantum Benchmarks](https://github.com/Jij-Inc/OmmxQuantumBenchmarks)
+# [OMMX Quantum Benchmarks](https://jij-inc.github.io/OmmxQuantumBenchmarks/en/)
 # dataset, and compare the result with the classical SCIP solver
-# accessed through the [`ommx-pyscipopt-adapter`](https://github.com/Jij-Inc/ommx-pyscipopt-adapter).
+# accessed through the [`ommx-pyscipopt-adapter`](https://ommx-en-book.readthedocs.io/en/latest/user_guide/supported_ommx_adapters.html).
 # Because both the QAOA path and the SCIP path consume the *same*
 # `ommx.v1.Instance`, the main difference is the algorithm itself. This
 # makes the comparison direct.
@@ -66,8 +66,8 @@ from qamomile.qiskit.transpiler import QiskitExecutor
 #
 # **OMMX** ([Open Mathematical prograMming eXchange](https://jij-inc.github.io/ommx/en/introduction.html))
 # is a data format for exchanging mathematical optimization problems across
-# tools. Its `ommx.v1.Instance` stores the objective, constraints,
-# decision-variable metadata, and optional reference solution.
+# tools. Its `ommx.v1.Instance` stores the objective, constraints, and
+# decision-variable metadata.
 #
 # **OMMX Quantum Benchmarks** is a curated collection of optimization
 # benchmark instances distributed in this `ommx.v1.Instance` format. The
@@ -79,7 +79,9 @@ from qamomile.qiskit.transpiler import QiskitExecutor
 #
 # Because each benchmark instance is represented as an `ommx.v1.Instance`,
 # any Qamomile workflow that accepts `ommx.v1.Instance`, including
-# `QAOAConverter`, can consume these problems without extra adapter code.
+# `QAOAConverter`, can consume these problems without writing any extra code.
+# In addition, a reference solution is provided in the `ommx.v1.Solution`
+# format and can be used to evaluate benchmark results.
 # The same `Instance` can also be passed to classical OMMX adapters such
 # as `ommx-pyscipopt-adapter`, so one problem definition can support both
 # quantum and classical workflows.
@@ -289,7 +291,7 @@ def qaoa_sampling(
 # Transpile both kernels with $p = 3$ layers. The expectation-value
 # executable drives the optimizer; the sampling executable is used
 # later for the final shot histogram. We feed the optimizer the
-# *exact* expectation value of the cost Hamiltonian via Aer's
+# exact expectation value of the cost Hamiltonian via Aer's
 # `EstimatorV2` primitive, which keeps the BFGS finite-difference
 # gradient free of sampling noise. We seed NumPy so the parameter
 # trajectory is reproducible.
@@ -378,8 +380,7 @@ plt.show()
 # variables correctly encode the products $x_i x_{i+k+1}$ incur no
 # penalty, and the objective equals the LABS energy
 # $E(\boldsymbol{s}) = \sum_k c_k^2$. Samples that violate the
-# implicit $z = x_i x_{i+k+1}$ relation pay an additive penalty
-# proportional to the placeholder $P$ built into the instance.
+# implicit $z = x_i x_{i+k+1}$ relation incur an additive penalty.
 
 # %%
 def evaluate_with_ommx(
@@ -454,12 +455,12 @@ plt.show()
 # %% [markdown]
 # ## Classical baseline: SCIP via the OMMX adapter
 #
-# **SCIP** is a branch-and-bound-based MILP/QUBO solver that can certify
-# an optimum when the solve completes. The same `ommx.v1.Instance`
+# **SCIP** is a branch-and-bound-based MILP/QUBO solver that can find the
+# exact optimal solution. The same `ommx.v1.Instance`
 # is consumed by
 # `ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve`, which hands the
 # problem to SCIP via PySCIPOpt and returns an `ommx.v1.Solution`
-# evaluated against the *original* instance. Its `.objective` is
+# evaluated against the original instance. Its `.objective` is
 # therefore directly comparable to QAOA's.
 
 # %%
@@ -476,7 +477,7 @@ print(f"Wall time:    {scip_solve_time:.3f} s")
 # ## Results comparison
 #
 # SCIP returns a single optimum deterministically, while QAOA returns a
-# *distribution* over bitstrings. We report QAOA's **best shot**
+# distribution over bitstrings. We report QAOA's **best shot**
 # (the lowest-objective bitstring seen across all samples) and its
 # **hit rate** on the reference optimum (the fraction of shots that
 # achieved $E^\star$).
@@ -497,27 +498,28 @@ print(f"QAOA hit rate on E* = {ref_E}: {hit_rate:.1%}  ({final_shots} shots)")
 # Two observations make this benchmark meaningful:
 #
 # 1. **Optimum.** Both SCIP and the best QAOA shot reach the reference
-#    optimum $E^\star = 2$, so QAOA is *capable* of finding the optimal
+#    optimum $E^\star = 2$, so QAOA is capable of finding the optimal
 #    sequence at $n = 5$ with only $p = 3$ layers.
 # 2. **Concentration.** QAOA's value lies in concentrating sampling
 #    probability on low-energy bitstrings. The hit rate above, together
 #    with the left tail of the histogram, is the quantitative version of
 #    that statement.
 #
-# The wall-time column shows the *shape* of the comparison, not a
-# head-to-head verdict. SCIP runs directly against the QUBO on the CPU,
-# while the QAOA timing covers the full classical-quantum
-# optimization loop on a state-vector simulator. As $n$ grows, the
-# *qualitative* trade-off between exact branch-and-bound and
-# polynomial-depth heuristic circuits is what makes benchmark datasets
-# like OMMX Quantum Benchmarks useful for evaluating both sides.
+# Note that the wall-time figures are only indicative. SCIP's timing is
+# just the solver's runtime on the CPU, while the QAOA timing covers the
+# full classical-quantum optimization loop on a state-vector simulator;
+# both depend on the execution environment. A genuinely fair comparison
+# would therefore require a more careful methodology. Either way, combining
+# Qamomile with datasets like OMMX Quantum Benchmarks makes it easy to
+# compare quantum algorithms and classical solvers across a variety of
+# metrics.
 
 # %% [markdown]
 # ## Summary
 #
 # In this tutorial we:
 #
-# 1. Loaded a LABS instance straight from the **OMMX Quantum Benchmarks**
+# 1. Loaded a LABS instance straight from the OMMX Quantum Benchmarks
 #    dataset as an `ommx.v1.Instance`.
 # 2. Extracted the QUBO with `Instance.to_qubo()`, wrapped it in a
 #    `BinaryModel`, switched to the spin domain, and ran a hand-written
@@ -525,7 +527,7 @@ print(f"QAOA hit rate on E* = {ref_E}: {hit_rate:.1%}  ({final_shots} shots)")
 #    `QiskitTranspiler` + `AerSimulator`.
 # 3. Compared the QAOA output (best shot, hit rate, sampling
 #    distribution) against SCIP via
-#    `ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve` on the *same*
+#    `ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve` on the same
 #    instance, plus the reference optimum bundled with the benchmark.
 #
 # The pattern generalizes: any other QOBLIB dataset
