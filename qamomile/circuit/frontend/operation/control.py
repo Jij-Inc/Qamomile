@@ -1182,9 +1182,7 @@ class ControlledGate:
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
-            return self._call_symbolic(
-                args, normalized_power, params, control_indices
-            )
+            return self._call_symbolic(args, normalized_power, params, control_indices)
 
         if control_indices is not None:
             raise ValueError(
@@ -1252,9 +1250,7 @@ class ControlledGate:
                         f"control_indices: negative entry ({idx}) is not allowed."
                     )
                 if idx in seen_ints:
-                    raise ValueError(
-                        f"control_indices: duplicate int entry ({idx})."
-                    )
+                    raise ValueError(f"control_indices: duplicate int entry ({idx}).")
                 seen_ints.add(idx)
                 normalized.append(
                     Value(type=UIntType(), name=f"ctrl_idx_{idx}").with_const(idx)

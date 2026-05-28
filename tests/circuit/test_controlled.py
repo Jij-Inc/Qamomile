@@ -2967,6 +2967,4 @@ class TestSymbolicMultiArgControl:
             assert "control_indices" in str(exc)
             assert "single" in str(exc).lower() or "pool" in str(exc).lower()
         else:
-            raise AssertionError(
-                "expected ValueError for multi-arg + control_indices"
-            )
+            raise AssertionError("expected ValueError for multi-arg + control_indices")
