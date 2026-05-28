@@ -783,8 +783,21 @@ def emit_controlled_fallback(
         bindings: Parameter bindings.
 
     Raises:
-        EmitError: When num_controls > 1 (multi-control not supported
-            in the default gate-by-gate decomposition).
+        EmitError: When ``num_controls > 1`` (multi-control not
+            supported in the default gate-by-gate decomposition), or
+            when the inner block addresses more than a single target
+            and is not the narrowly-supported "exactly one SWAP op"
+            case.  ``emit_controlled_gate`` only carries a single
+            ``target_idx = target_indices[0]`` mapping, so any inner
+            gate that should land on ``target_indices[i > 0]`` would
+            silently route to slot 0 instead.  SWAP is the lone
+            exception because the SWAP branch in
+            ``emit_controlled_gate`` explicitly reads
+            ``target_indices[0]`` *and* ``target_indices[1]``.
+            Subclasses that carry a proper operand-to-target mapping
+            (the CUDA-Q transpiler's
+            ``_build_block_qubit_map`` override) bypass this check by
+            replacing the method outright.
     """
     if num_controls > 1:
         raise EmitError(
@@ -794,6 +807,33 @@ def emit_controlled_fallback(
             f"fallback decomposition only supports single control.",
             operation="ControlledUOperation",
         )
+    if len(target_indices) > 1:
+        # Walk the inner block's top-level gate operations.  Per-gate
+        # decomposition only routes correctly to ``target_indices[0]``,
+        # except for the SWAP branch which special-cases
+        # ``target_indices[1]``.  Any other shape is a silent
+        # miscompile waiting to fire.
+        inner_gates = [
+            o for o in block_value.operations if isinstance(o, GateOperation)
+        ]
+        is_single_swap = (
+            len(inner_gates) == 1 and inner_gates[0].gate_type == GateOperationType.SWAP
+        )
+        if not is_single_swap:
+            raise EmitError(
+                f"Cannot decompose controlled-U with multi-target inner block "
+                f"(target_indices={target_indices}, block has "
+                f"{len(inner_gates)} gate op(s)) on this backend: the "
+                f"per-gate fallback only routes each inner op to "
+                f"``target_indices[0]``, so any gate intended for "
+                f"``target_indices[i > 0]`` would silently miscompile to "
+                f"slot 0.  Either run this kernel on a backend whose "
+                f"``circuit_to_gate`` succeeds (Qiskit produces a native "
+                f"controlled custom gate), or rewrite the wrapped sub-kernel "
+                f"to take individual ``Qubit`` arguments and apply the "
+                f"control element-by-element at the call site.",
+                operation="ControlledUOperation",
+            )
     for _ in range(power):
         for ctrl_idx in control_indices:
             emit_controlled_block(
