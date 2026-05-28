@@ -1,9 +1,6 @@
 # Quantum-computing phrasing reference
 
-Read this before drafting or copy-editing a Qamomile tutorial. The
-audience already knows quantum computing's vocabulary, and
-AI-generated prose tends to drift into phrasings that read as
-unnatural or wrong to that audience.
+Read this before drafting or copy-editing a Qamomile tutorial. The audience already knows quantum computing's vocabulary, and AI-generated prose tends to drift into phrasings that read as unnatural or wrong to that audience.
 
 ## Table of contents
 
