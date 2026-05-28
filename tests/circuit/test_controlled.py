@@ -2679,6 +2679,146 @@ class TestControlledVectorSubArgQiskitEquivalence:
         )
 
 
+class TestControlledVectorSubArgFollowUpOps:
+    """Per-element follow-up ops after ``controlled(sub)(c, vec_arg)``.
+
+    Regression for two coupled drops in the resource allocator and the
+    controlled-U emit path that surfaced when the user's
+    ``apply_function_preparation_qubo`` kernel ran ``controlled(qft_encoding)``
+    on a ``Vector[Qubit]`` sub-kernel argument and then handed the
+    result vector to ``qmc.iqft`` (and ultimately to
+    ``qmc.measure``).  Each iqft expansion addresses elements of the
+    result vector by ``(parent_array.uuid, i)``; both pieces below
+    have to be correct for the assertion-free transpile path to work.
+
+    1. **``_allocate_qubit_list`` ArrayValue aliasing**:
+       ``ConcreteControlledU`` whose sub-kernel target is a whole
+       ``Vector[Qubit]`` produces a next-version ``ArrayValue`` result.
+       The allocator must alias each per-element address from the
+       operand's UUID to the result's UUID, mirroring
+       :meth:`_allocate_pauli_evolve` and the
+       ``SymbolicControlledU`` control-prefix branch.  Without this
+       copy, the result vector's element keys never reach
+       ``qubit_map`` and a downstream ``iqft`` (or any op that walks
+       per-element) trips
+       :meth:`_resolve_root_qubit_address`'s "Root qubit address ...
+       not found" assertion.
+
+    2. **``_bind_quantum_input_shapes`` for inner-block shapes**:
+       ``bind_block_params`` only binds the inner block's classical
+       params, so a formal ``Vector[Qubit]`` parameter's ``shape[0]``
+       Value stays symbolic when the inner block emits.  Inner-block
+       ``for i in qmc.range(m)`` loops written against that formal
+       (``m = q.shape[0]``) then fail to fold their bounds and the
+       fallback emit path raises ``EmitError: Cannot resolve
+       ForOperation bounds in controlled block``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_qiskit(self):
+        pytest.importorskip("qiskit")
+
+    @pytest.fixture
+    def _qft_encoding_kernel(self):
+        """Inner kernel that depends on ``q.shape[0]`` for its loop bound."""
+
+        @qmc.qkernel
+        def qft_encoding(
+            q: qmc.Vector[qmc.Qubit],
+            coef: qmc.Float,
+        ) -> qmc.Vector[qmc.Qubit]:
+            m = q.shape[0]
+            for i in qmc.range(m):
+                q[i] = qmc.p(q[i], 2 * math.pi * coef / (2**m) * (2**i))
+            return q
+
+        return qft_encoding
+
+    def test_controlled_then_iqft_transpiles(self, _qft_encoding_kernel):
+        """Vector sub-arg through controlled-U then iqft survives allocation + emit.
+
+        The Vector result of ``controlled(qft_encoding)(c, q_out, coef)``
+        is handed to ``qmc.iqft``, which expands inline to per-element
+        CP / H gates that address ``q_out[0..3]``.  Both pieces of the
+        fix have to be present: aliasing covers allocation,
+        shape-propagation covers the inner-block for-loop bound.
+        """
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kernel() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+            q_out = qmc.qubit_array(4, "q_out")
+            q_in = qmc.qubit_array(2, "q_in")
+            ctrl_qft = qmc.control(_qft_encoding_kernel)
+            ctrl_qubit = q_in[0]
+            ctrl_qubit, q_out = ctrl_qft(ctrl_qubit, q_out, 0.5)
+            q_in[0] = ctrl_qubit
+            q_out = qmc.iqft(q_out)
+            return qmc.measure(q_out), qmc.measure(q_in)
+
+        t = QiskitTranspiler()
+        exe = t.transpile(kernel)
+        assert exe.get_first_circuit().num_qubits == 6
+        res = exe.sample(t.executor(), shots=64).result()
+        total = sum(count for _value, count in res.results)
+        assert total == 64
+
+    def test_controlled_then_per_element_gate_transpiles(self, _qft_encoding_kernel):
+        """Vector result of a controlled-U accepts per-element ops downstream.
+
+        Pins the allocator aliasing in isolation from the composite
+        ``iqft`` machinery: after ``controlled(qft_encoding)`` produces
+        a new-UUID ``ArrayValue``, an ordinary ``q_out[i] = qmc.h(...)``
+        loop must find ``(new_uuid, i)`` in qubit_map.  Before the
+        ArrayValue-aliasing fix this asserts identically to the
+        ``iqft`` case but without involving the composite-gate machinery.
+        """
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kernel() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+            q_out = qmc.qubit_array(3, "q_out")
+            q_in = qmc.qubit_array(2, "q_in")
+            ctrl_qft = qmc.control(_qft_encoding_kernel)
+            ctrl_qubit = q_in[0]
+            ctrl_qubit, q_out = ctrl_qft(ctrl_qubit, q_out, 0.25)
+            q_in[0] = ctrl_qubit
+            for i in qmc.range(3):
+                q_out[i] = qmc.h(q_out[i])
+            return qmc.measure(q_out), qmc.measure(q_in)
+
+        t = QiskitTranspiler()
+        exe = t.transpile(kernel)
+        assert exe.get_first_circuit().num_qubits == 5
+
+    def test_double_control_with_inner_symbolic_loop_bound(self, _qft_encoding_kernel):
+        """Multi-control ``controlled(sub, num_controls=2)`` with a Vector sub-arg.
+
+        Combines (a) two scalar Qubit controls + Vector[Qubit]
+        sub-arg, (b) inner-block for-loop bound derived from the
+        sub-arg's symbolic shape.  Mirrors
+        ``second_degree_qft_encoding`` in the user's chain.
+        """
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kernel() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+            q_out = qmc.qubit_array(4, "q_out")
+            q_in = qmc.qubit_array(2, "q_in")
+            ctrl_qft = qmc.control(_qft_encoding_kernel, num_controls=2)
+            c0 = q_in[0]
+            c1 = q_in[1]
+            c0, c1, q_out = ctrl_qft(c0, c1, q_out, 0.5)
+            q_in[0] = c0
+            q_in[1] = c1
+            q_out = qmc.iqft(q_out)
+            return qmc.measure(q_out), qmc.measure(q_in)
+
+        t = QiskitTranspiler()
+        exe = t.transpile(kernel)
+        assert exe.get_first_circuit().num_qubits == 6
+
+
 class TestSymbolicMultiArgControl:
     """Tests for the multi-arg symbolic control prefix.
 

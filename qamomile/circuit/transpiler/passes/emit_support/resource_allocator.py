@@ -515,26 +515,68 @@ class ResourceAllocator:
                         f"when allocating for element '{qubit.uuid}'. "
                         "The root array's QInitOperation must be allocated first."
                     )
+            elif isinstance(qubit, ArrayValue):
+                # Whole ``Vector[Qubit]`` operand (not a per-element
+                # access): its per-element addresses are already in
+                # ``qubit_map`` (placed there by the upstream
+                # ``QInitOperation`` or by a prior allocator that
+                # produced this array as its result, see the
+                # ArrayValue→ArrayValue copy in the result loop
+                # below).  Do **not** fall through to the scalar
+                # fresh-allocate branch -- doing so would allocate a
+                # single wire for the whole vector and leave the
+                # element keys missing, which then trips
+                # ``_resolve_root_qubit_address`` on a downstream op
+                # that addresses elements of this vector (e.g.
+                # ``qmc.iqft`` after ``ctrl_qft(c, q_out, coef)``).
+                qubit_addr = None
             else:
                 qubit_addr, is_array = resolve_qubit_key(qubit)
                 if qubit_addr is None:
                     continue
                 if qubit_addr not in qubit_map:
                     # Scalar qubit or symbolic-index element: fall back
-                    # to the legacy allocation behaviour so @qkernel
+                    # to the legacy allocation behaviour so qkernel
                     # input parameters (emit_init=False) and symbolic
                     # loop-var indices keep working.
                     qubit_map[qubit_addr] = self._next_qubit_index
                     self._next_qubit_index += 1
 
-            scalar_addr = QubitAddress(qubit.uuid)
-            if scalar_addr not in qubit_map:
-                qubit_map[scalar_addr] = qubit_map[qubit_addr]
+            if qubit_addr is not None:
+                scalar_addr = QubitAddress(qubit.uuid)
+                if scalar_addr not in qubit_map:
+                    qubit_map[scalar_addr] = qubit_map[qubit_addr]
 
         for i, result in enumerate(results):
             result_addr = QubitAddress(result.uuid)
             if i < len(all_qubits):
                 operand = all_qubits[i]
+                # ArrayValue input → ArrayValue result: alias every
+                # per-element address from the input's UUID to the
+                # result's UUID.  Mirrors :meth:`_allocate_pauli_evolve`
+                # and the ``SymbolicControlledU`` control-prefix branch
+                # in :meth:`_allocate_controlled_u`.  Without this copy,
+                # a ``ConcreteControlledU`` with a ``Vector[Qubit]``
+                # sub-kernel argument leaves the next-version vector's
+                # element keys unmapped, and any downstream op that
+                # walks ``parent_array.uuid -> (uuid, i)`` (e.g.
+                # ``qmc.iqft`` expanded into per-element CP / H gates,
+                # or a ``MeasureVectorOperation`` on the result)
+                # trips the ``_resolve_root_qubit_address`` assertion.
+                if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
+                    copied = False
+                    for addr, idx in list(qubit_map.items()):
+                        if addr.matches_array(operand.uuid):
+                            new_addr = QubitAddress(result.uuid, addr.element_index)
+                            if new_addr not in qubit_map:
+                                qubit_map[new_addr] = idx
+                                copied = True
+                    if copied and result_addr not in qubit_map:
+                        first_elem = QubitAddress(result.uuid, 0)
+                        if first_elem in qubit_map:
+                            qubit_map[result_addr] = qubit_map[first_elem]
+                    continue
+
                 chain_addr = self._resolve_root_qubit_address(operand)
                 if chain_addr is not None:
                     qubit_addr = chain_addr

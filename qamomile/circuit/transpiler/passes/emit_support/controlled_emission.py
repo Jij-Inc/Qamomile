@@ -409,6 +409,9 @@ def emit_controlled_u_with_symbolic_indices(
     local_bindings = emit_pass._resolver.bind_block_params(
         block_value, param_operands, bindings
     )
+    _bind_quantum_input_shapes(
+        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
+    )
 
     num_targets = len(target_indices)
     unitary_gate = emit_pass._blockvalue_to_gate(
@@ -560,6 +563,9 @@ def emit_controlled_u_multi_arg(
     block_value = op.block
     local_bindings = emit_pass._resolver.bind_block_params(
         block_value, param_operands, bindings
+    )
+    _bind_quantum_input_shapes(
+        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
 
     num_targets = len(target_indices)
@@ -716,6 +722,9 @@ def emit_controlled_u(
 
     local_bindings = emit_pass._resolver.bind_block_params(
         block_value, param_operands, bindings
+    )
+    _bind_quantum_input_shapes(
+        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
 
     num_targets = len(target_indices)
@@ -1179,6 +1188,67 @@ def _expand_quantum_operands_to_phys(
             operation=operation,
         )
     return [idx]
+
+
+def _bind_quantum_input_shapes(
+    emit_pass: "StandardEmitPass",
+    block_value: Any,
+    actual_target_operands: list[Any],
+    bindings: dict[str, Any],
+    local_bindings: dict[str, Any],
+) -> None:
+    """Propagate ``Vector[Qubit]`` actual-arg lengths into the inner block's shape Values.
+
+    ``bind_block_params`` only walks the inner block's classical input
+    parameters, so the quantum side (``Vector[Qubit]`` sub-kernel args)
+    contributes nothing to ``local_bindings``.  The inner block's body,
+    however, may compute ``m = q.shape[0]`` against a *formal*
+    ``Vector[Qubit]`` parameter and then use ``m`` as a loop bound,
+    a slice length, etc.  Without seeding the formal shape Value's
+    UUID (and name, for parity with the resolver's name-keyed fallback)
+    to the actual operand's resolved length, ``resolve_int_value``
+    cannot fold the formal ``shape[0]`` and downstream pieces like
+    ``emit_controlled_operations``'s for-loop bounds resolution raise
+    "Cannot resolve ForOperation bounds in controlled block".
+
+    Args:
+        emit_pass (StandardEmitPass): Driving emit pass; consulted for
+            its ``_resolver`` to resolve actual operand sizes.
+        block_value (Any): The inner block whose ``input_values`` we
+            walk to find the quantum formal parameters.  Objects with
+            no ``input_values`` attribute are silently skipped.
+        actual_target_operands (list[Any]): The actual quantum
+            operands (scalar ``Qubit`` ``Value`` s and / or
+            ``ArrayValue`` s) supplied at the controlled-U call site,
+            in declaration order matching the formal quantum inputs.
+        bindings (dict[str, Any]): Caller bindings consulted when the
+            actual operand's shape is itself symbolic.
+        local_bindings (dict[str, Any]): The inner-block-local
+            bindings dict to extend in place with the propagated
+            shape entries (UUID-keyed and name-keyed).
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    if not hasattr(block_value, "input_values"):
+        return
+    quantum_inputs = [
+        iv
+        for iv in block_value.input_values
+        if hasattr(iv, "type") and iv.type.is_quantum()
+    ]
+    for actual, formal in zip(actual_target_operands, quantum_inputs):
+        if not (isinstance(actual, ArrayValue) and isinstance(formal, ArrayValue)):
+            continue
+        if not (actual.shape and formal.shape):
+            continue
+        actual_size = emit_pass._resolver.resolve_int_value(actual.shape[0], bindings)
+        if actual_size is None:
+            continue
+        formal_dim = formal.shape[0]
+        local_bindings[formal_dim.uuid] = actual_size
+        formal_dim_name = getattr(formal_dim, "name", "")
+        if formal_dim_name:
+            local_bindings[formal_dim_name] = actual_size
 
 
 def _map_controlled_u_results(
