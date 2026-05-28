@@ -1,6 +1,7 @@
 """Tests for controlled gate API with all gate types x num_controls."""
 
 import dataclasses
+import inspect
 import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -60,10 +61,57 @@ def _make_float_handle(name: str = "theta"):
     return Float(value=val)
 
 
-def _mock_qkernel():
-    """Create a mock QKernel with a block property."""
+def _mock_qkernel(
+    *,
+    qubit_params: tuple[str, ...] = ("q",),
+    classical_params: tuple[tuple[str, Any], ...] = (),
+):
+    """Create a mock QKernel that satisfies ``ControlledGate``'s compose-time invariants.
+
+    ``ControlledGate.__init__`` validates that the wrapped object exposes
+    a dict ``input_types`` and an ``inspect.Signature`` ``signature``; the
+    bare-``MagicMock`` shape used to slip through via the now-removed
+    ``not isinstance(input_types, dict)`` fallback path.  This helper
+    synthesizes both attributes so the mock looks like a real qkernel to
+    the validator while letting the test still drive the controlled-gate
+    machinery directly.
+
+    Args:
+        qubit_params: Names of qubit-typed input parameters, in
+            declaration order.  Defaults to ``("q",)`` so a bare
+            ``_mock_qkernel()`` matches a single-qubit sub-kernel like
+            ``qmc.x``.
+        classical_params: Sequence of ``(name, type)`` tuples for
+            classical parameters.  ``type`` must be one of ``Float`` /
+            ``UInt`` / ``float`` / ``int`` (the set
+            ``_params_to_operands`` recognises).
+
+    Returns:
+        A ``MagicMock`` with ``.block`` stubbed, ``.input_types`` set to
+        a real ``dict`` matching the declared shape, and ``.signature``
+        set to a real ``inspect.Signature``.  All three of those
+        attributes are what the validator + downstream helpers
+        (``_sub_positional_count_for_symbolic``,
+        ``_bind_to_sub_signature``, ``_params_to_operands``) consume.
+    """
     qk = MagicMock()
     qk.block = MagicMock(name="block_value")
+
+    input_types: dict[str, Any] = {}
+    sig_params: list[inspect.Parameter] = []
+    for name in qubit_params:
+        input_types[name] = qmc.Qubit
+        sig_params.append(
+            inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+    for name, typ in classical_params:
+        input_types[name] = typ
+        sig_params.append(
+            inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+
+    qk.input_types = input_types
+    qk.signature = inspect.Signature(parameters=sig_params)
     return qk
 
 
@@ -139,7 +187,7 @@ class TestControlledGateCall:
         assert tracer.operations[0].num_controls == nc
 
     def test_single_control_multi_target(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(_mock_qkernel(qubit_params=("q0", "q1")), num_controls=1)
         ctrl, t0, t1 = _make_qubit("ctrl"), _make_qubit("t0"), _make_qubit("t1")
         with trace() as tracer:
             result = cg(ctrl, t0, t1)
@@ -193,7 +241,9 @@ class TestControlledGateCall:
         assert result[1].indices == ()
 
     def test_raw_float_param_becomes_constant_value(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=0.5)
         op = tracer.operations[0]
@@ -203,7 +253,9 @@ class TestControlledGateCall:
         assert param_val.get_const() == 0.5
 
     def test_handle_type_param_uses_value_directly(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         theta = _make_float_handle("theta")
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=theta)
@@ -211,7 +263,10 @@ class TestControlledGateCall:
         assert op.operands[2] is theta.value
 
     def test_multiple_params(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("alpha", Float), ("beta", Float))),
+            num_controls=1,
+        )
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), alpha=1.0, beta=2.0)
         op = tracer.operations[0]
@@ -251,7 +306,9 @@ class TestControlledGateCall:
         assert op.operation_kind == OperationKind.QUANTUM
 
     def test_int_param_converted_to_float(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=3)
         param_val = tracer.operations[0].operands[2]
@@ -260,7 +317,9 @@ class TestControlledGateCall:
 
     def test_target_operands_with_params(self):
         """target_operands includes parameter Values when params are passed."""
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
         with trace() as tracer:
@@ -336,11 +395,19 @@ class TestControlledValidation:
             control(_mock_qkernel(), num_controls=-1)
 
     def test_not_enough_args_raises(self):
-        """Passing fewer qubits than num_controls (no targets) raises ValueError."""
+        """Passing fewer qubits than num_controls (no targets) raises.
+
+        Either ``ValueError`` (from :meth:`_call_concrete`'s
+        "no sub-kernel quantum arg" check when the sub-kernel takes
+        no required positional args) or ``TypeError`` (from
+        :meth:`inspect.Signature.bind`'s "missing a required
+        argument" when the sub-kernel does require one) is an
+        acceptable failure mode -- both signal the same thing.
+        """
         cg = ControlledGate(_mock_qkernel(), num_controls=3)
         qs = [_make_qubit(f"q{i}") for i in range(3)]  # 3 controls, 0 targets
         with trace() as tracer:  # noqa: F841
-            with pytest.raises(ValueError):
+            with pytest.raises((ValueError, TypeError)):
                 cg(*qs)
 
     def test_control_indices_in_concrete_mode_raises(self):
@@ -2968,3 +3035,37 @@ class TestSymbolicMultiArgControl:
             assert "single" in str(exc).lower() or "pool" in str(exc).lower()
         else:
             raise AssertionError("expected ValueError for multi-arg + control_indices")
+
+    def test_rejects_non_qkernel_wrapped_callable(self):
+        """``qmc.control`` rejects objects that don't expose the required attrs.
+
+        ``ControlledGate.__init__`` validates compose-time that the
+        wrapped object exposes both ``input_types: dict`` and
+        ``signature: inspect.Signature``.  Without those, downstream
+        helpers (``_sub_positional_count_for_symbolic``,
+        ``_bind_to_sub_signature``, ``_params_to_operands``) used to
+        silently fall back to a "legacy single-pool" /
+        caller-order-keyed interpretation, producing silent
+        miscompiles when a user accidentally wrapped a plain object
+        (or a kernel-like that happened to satisfy the duck-typed
+        ``.block`` check in :func:`_qkernel_for_callable`).  This
+        test pins both halves of the validate: missing
+        ``input_types`` and missing ``signature``.
+        """
+
+        class _BareDuckTyped:
+            """Has ``.block`` (so :func:`_qkernel_for_callable` passes it
+            through unchanged) but lacks the validator's required attrs."""
+
+            block = "anything"  # bypasses the synthesize-from-callable path
+
+        with pytest.raises(TypeError, match=r"input_types"):
+            qmc.control(_BareDuckTyped())
+
+        class _NoSignature:
+            block = "anything"
+            input_types: dict = {}
+            # ``signature`` is missing
+
+        with pytest.raises(TypeError, match=r"signature"):
+            qmc.control(_NoSignature())

@@ -173,6 +173,42 @@ class ControlledGate:
         if isinstance(num_controls, int) and num_controls < 1:
             raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
         # For UInt (symbolic), validation is deferred to emit time
+
+        # Compose-time validation of the wrapped object's shape.
+        # Downstream helpers (``_sub_positional_count_for_symbolic``,
+        # ``_bind_to_sub_signature``, ``_params_to_operands``) all
+        # require ``input_types`` to be a real ``dict`` and ``signature``
+        # to be an ``inspect.Signature`` so the operand split and
+        # signature-driven kwarg binding produce a sane result.  Before
+        # this check, each of those helpers silently fell back to a
+        # "legacy single-pool" / caller-order interpretation whenever
+        # the attribute was missing or wrong-typed.  In production that
+        # is a silent miscompile (multi-arg control prefix collapses to
+        # one pool, kwargs land at the wrong operand index, etc.); fail
+        # loudly here so the error points back at the ``qmc.control``
+        # call site.  The builtin-callable path goes through
+        # :func:`_qkernel_for_callable` which synthesizes a proper
+        # ``QKernel`` first, so anything legitimately wrapped by
+        # ``qmc.control`` arrives here with both attributes populated.
+        input_types = getattr(qkernel, "input_types", None)
+        if not isinstance(input_types, dict):
+            raise TypeError(
+                f"qmc.control(): wrapped object {qkernel!r} does not expose "
+                f"a dict ``input_types`` attribute (got "
+                f"{type(input_types).__name__}).  Pass a "
+                f"``@qmc.qkernel``-decorated function or a built-in gate "
+                f"callable; arbitrary objects are not supported."
+            )
+        signature = getattr(qkernel, "signature", None)
+        if not isinstance(signature, inspect.Signature):
+            raise TypeError(
+                f"qmc.control(): wrapped object {qkernel!r} does not expose "
+                f"an ``inspect.Signature`` ``signature`` attribute (got "
+                f"{type(signature).__name__}).  Pass a "
+                f"``@qmc.qkernel``-decorated function or a built-in gate "
+                f"callable; arbitrary objects are not supported."
+            )
+
         self._qkernel = qkernel
         self._num_controls = num_controls
 
@@ -227,8 +263,9 @@ class ControlledGate:
         (e.g. ``ForOperation`` requires ``UIntType`` operands at
         expand-controlled-U time).
 
-        Two extra invariants are also enforced when the wrapped object
-        exposes ``input_types`` (i.e. anywhere outside test mocks):
+        Two extra invariants are enforced (the validate in
+        :meth:`ControlledGate.__init__` guarantees the wrapped object
+        exposes a dict ``input_types``, so these always apply):
 
         * **Operand order follows the wrapped kernel's signature**, not
           the caller's kwarg insertion order.  ``ValueResolver``
@@ -240,28 +277,8 @@ class ControlledGate:
           previously these were silently dropped by the same positional
           binding, producing a controlled gate with the default
           (unbound) parameter values and no warning.
-
-        For test mocks (``isinstance(input_types, dict)`` is False) we
-        fall back to the prior caller-order behaviour without
-        validation, since those test fixtures intentionally synthesize
-        ad-hoc parameter dicts.
         """
-        raw = getattr(self._qkernel, "input_types", {})
-        if not isinstance(raw, dict):
-            # Test-mock path: keep prior caller-order, no validation.
-            for param_name, param_value in params.items():
-                if isinstance(param_value, Handle):
-                    operands.append(param_value.value)
-                    continue
-                operands.append(
-                    Value(
-                        type=FloatType(),
-                        name=f"ctrl_param_{param_name}",
-                    ).with_const(float(param_value))
-                )
-            return
-
-        kernel_input_types: dict[str, Any] = raw
+        kernel_input_types: dict[str, Any] = self._qkernel.input_types
         # Classical-parameter names in the wrapped kernel's signature
         # order.  Python ``dict`` preserves insertion order (since 3.7),
         # so iterating ``input_types`` matches the declared signature.
@@ -496,9 +513,8 @@ class ControlledGate:
 
         Args:
             sub_args_resolved (dict[str, Any]): The sub-kernel argument
-                dict returned by :meth:`_bind_to_sub_signature` (already
-                in signature order or, for mock kernels, in
-                caller-positional + caller-kwarg order).
+                dict returned by :meth:`_bind_to_sub_signature`,
+                already in signature order.
 
         Returns:
             list[Any]: The quantum handles from *sub_args_resolved* in
@@ -586,22 +602,17 @@ class ControlledGate:
     ) -> dict[str, Any]:
         """Bind sub-kernel arguments to the wrapped kernel's signature.
 
-        For genuine ``@qmc.qkernel`` wrappers (and the auto-synthesised
-        built-in wrappers) the binding is delegated to
+        The wrapped object always carries a real ``inspect.Signature``
+        (qkernel-decorated functions populate it directly; built-in
+        gate callables go through :func:`_qkernel_for_callable`'s
+        synthesized wrapper; the compose-time validate in
+        :meth:`ControlledGate.__init__` rejects anything else).  The
+        binding is therefore always delegated to
         :meth:`inspect.Signature.bind` so positional / keyword mixing
         and Python defaults work out of the box.  ``apply_defaults`` is
         then called so kernels with a default-valued classical
         parameter (``def sub(qa, theta=0.5)``) end up with that
         default baked into the resulting dict.
-
-        For test-mock kernels (``ControlledGate(_mock_qkernel(), ...)``)
-        no real signature exists.  In that case we keep the historical
-        "positional → quantum, kwargs → classical" behaviour by
-        synthesising stable string keys (``"@pos0"``, ``"@pos1"``, ...
-        for positional args; the original kwarg names for kwargs) so
-        downstream helpers can iterate uniformly.  The keys are
-        opaque — only :meth:`_collect_sub_quantum_args` and
-        :meth:`_build_operands` consume them.
 
         Args:
             sub_positional_args (Sequence[Any]): Positional arguments
@@ -611,9 +622,9 @@ class ControlledGate:
                 ``control_indices`` kwargs.
 
         Returns:
-            dict[str, Any]: An ordered dict mapping parameter name
-                (real qkernel path) or synthesised positional key
-                (mock path) to its bound argument.
+            dict[str, Any]: An ordered dict mapping parameter name to
+                its bound argument, in the wrapped kernel's signature
+                order.
 
         Raises:
             TypeError: If :meth:`inspect.Signature.bind` reports a
@@ -623,20 +634,11 @@ class ControlledGate:
                 ``_params_to_operands`` enforced so existing callers'
                 error-message expectations remain stable.
         """
-        input_types = getattr(self._qkernel, "input_types", None)
-        signature = getattr(self._qkernel, "signature", None)
-
-        if not isinstance(input_types, dict) or not isinstance(
-            signature, inspect.Signature
-        ):
-            # Mock path: no real signature, so just key positional args
-            # by index and pass kwargs through untouched.
-            bound: dict[str, Any] = {}
-            for idx, value in enumerate(sub_positional_args):
-                bound[f"@pos{idx}"] = value
-            for name, value in sub_kwargs.items():
-                bound[name] = value
-            return bound
+        # ``ControlledGate.__init__`` validates that ``input_types`` is a
+        # dict and ``signature`` is an ``inspect.Signature``, so both
+        # accesses are safe to use directly here.
+        input_types = self._qkernel.input_types
+        signature = self._qkernel.signature
 
         # Check for unknown kwargs up-front so the legacy "unknown
         # parameter(s)" message wins over ``inspect.Signature.bind``'s
@@ -1436,12 +1438,7 @@ class ControlledGate:
         into the control prefix and the sub-kernel positional region.
         The wrapped kernel's declared signature is the source of
         truth: every parameter that is not satisfied via ``sub_kwargs``
-        must arrive positionally.  Mock test kernels (no
-        ``input_types`` dict) fall back to the historical "first arg
-        is the pool, rest goes to the sub-kernel" interpretation by
-        returning ``len(args) - 1`` via a sentinel — handled at the
-        caller by treating a single ``ArrayBase`` arg as the legacy
-        pool form.
+        must arrive positionally.
 
         Args:
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
@@ -1449,14 +1446,11 @@ class ControlledGate:
 
         Returns:
             int: Number of trailing positional args expected by the
-                sub-kernel.  Mock-kernel fallback returns ``1`` so
-                the legacy single-pool form keeps working.
+                sub-kernel.
         """
-        input_types = getattr(self._qkernel, "input_types", None)
-        if not isinstance(input_types, dict):
-            # Mock kernels: assume the historical single-pool form
-            # (one control pool + one trailing positional arg).
-            return 1
+        # ``ControlledGate.__init__`` validates that ``input_types`` is a
+        # dict, so the access is safe to use directly here.
+        input_types = self._qkernel.input_types
         positional_names = [n for n in input_types.keys() if n not in sub_kwargs]
         return len(positional_names)
 
