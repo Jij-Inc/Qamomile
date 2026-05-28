@@ -55,8 +55,8 @@ class TestFQAOAStateIntegration:
         ) -> qmc.Vector[qmc.Bit]:
             q = fqaoa_state(
                 p,
-                linear,
                 quad,
+                linear,
                 n,
                 n_f,
                 givens_ij,

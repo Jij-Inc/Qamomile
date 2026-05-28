@@ -6477,7 +6477,7 @@ class TestFQAOAIntegration:
             quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = cost_layer(q, gamma, linear, quad)
+            q = cost_layer(quad, linear, q, gamma)
             return qmc.measure(q)
 
         linear = {0: 0.5, 1: -0.3}
@@ -6487,18 +6487,18 @@ class TestFQAOAIntegration:
             circuit,
             bindings={"n": 3, "gamma": gamma, "linear": linear, "quad": quad},
         )
-        # Structure: 2 RZ(linear) + 2 RZZ(quad) + 3 Measure = 7
+        # Structure: 2 RZZ(quad) + 2 RZ(linear) + 3 Measure = 7
         assert len(qc.data) == 7
-        # RZ for linear terms (note: cost_layer emits linear first, then quad)
-        assert isinstance(qc.data[0].operation, RZGate)
-        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
-        assert isinstance(qc.data[1].operation, RZGate)
-        assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1]
-        # RZZ for quadratic terms
-        assert isinstance(qc.data[2].operation, RZZGate)
-        assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0, 1]
-        assert isinstance(qc.data[3].operation, RZZGate)
-        assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [1, 2]
+        # RZZ for quadratic terms (note: cost_layer emits quad first, then linear)
+        assert isinstance(qc.data[0].operation, RZZGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
+        assert isinstance(qc.data[1].operation, RZZGate)
+        assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1, 2]
+        # RZ for linear terms
+        assert isinstance(qc.data[2].operation, RZGate)
+        assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0]
+        assert isinstance(qc.data[3].operation, RZGate)
+        assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [1]
         for i in range(3):
             assert isinstance(qc.data[4 + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[4 + i].qubits] == [i]
@@ -6512,7 +6512,7 @@ class TestFQAOAIntegration:
             n: qmc.UInt, beta: qmc.Float, hopping_val: qmc.Float
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = mixer_layer(q, beta, hopping_val, n)
+            q = mixer_layer(q, beta, hopping_val)
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(
@@ -6565,8 +6565,8 @@ class TestFQAOAIntegration:
         ) -> qmc.Vector[qmc.Bit]:
             q = fqaoa_state(
                 p,
-                linear,
                 quad,
+                linear,
                 n,
                 n_f,
                 givens_ij,
