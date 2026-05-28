@@ -181,8 +181,8 @@ print(f"QAOA qubits: {spin_model.num_bits}")
 # %% [markdown]
 # ### Cost Hamiltonian
 #
-# To drive the optimizer with the exact expectation value rather than a
-# shot estimate, we build the Ising cost Hamiltonian directly from the
+# To use the exact expectation value rather than a shot estimate for the
+# optimization, we build the Ising cost Hamiltonian directly from the
 # spin-model coefficients: $Z_i$ terms for the linear part and
 # $Z_i Z_j$ terms for the quadratic part.
 
@@ -288,9 +288,9 @@ def qaoa_sampling(
 # %% [markdown]
 # ### Transpile and optimize
 #
-# Transpile both kernels with $p = 3$ layers. The expectation-value
-# executable drives the optimizer; the sampling executable is used
-# later for the final shot histogram. We feed the optimizer the
+# Transpile both kernels with $p = 3$. The expectation-value
+# executable is used for the optimization; the sampling executable is
+# used later for the final shot histogram. We feed the optimizer the
 # exact expectation value of the cost Hamiltonian via Aer's
 # `EstimatorV2` primitive, which keeps the BFGS finite-difference
 # gradient free of sampling noise. We seed NumPy so the parameter
@@ -499,7 +499,7 @@ print(f"QAOA hit rate on E* = {ref_E}: {hit_rate:.1%}  ({final_shots} shots)")
 #
 # 1. **Optimum.** Both SCIP and the best QAOA shot reach the reference
 #    optimum $E^\star = 2$, so QAOA is capable of finding the optimal
-#    sequence at $n = 5$ with only $p = 3$ layers.
+#    sequence at $n = 5$ with only $p = 3$.
 # 2. **Concentration.** QAOA's value lies in concentrating sampling
 #    probability on low-energy bitstrings. The hit rate above, together
 #    with the left tail of the histogram, is the quantitative version of
