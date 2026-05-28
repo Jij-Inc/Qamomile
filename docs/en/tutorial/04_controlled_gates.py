@@ -200,12 +200,19 @@ vec_target_demo.draw()
 # ### 3.3 Default values from the wrapped kernel's signature
 #
 # When the wrapped `@qmc.qkernel` declares a Python default for a
-# classical parameter, callers may omit that keyword. The wrapper
-# fills the missing value in via `inspect.Signature.bind +
-# apply_defaults`, so the default reaches the controlled-U just
-# like a normal direct call. (Only `@qmc.qkernel`-wrapped
-# callables can carry defaults — see Section 6.7 for what happens
-# if you try to do the same with a plain Python function.)
+# classical parameter, callers may either omit that keyword
+# (letting the default flow through) or override it positionally
+# at the call site. The wrapper fills the missing value in via
+# `inspect.Signature.bind + apply_defaults`, so the resolved value
+# reaches the controlled-U just like a normal direct call. (Only
+# `@qmc.qkernel`-wrapped callables can carry defaults — see
+# Section 6.7 for what happens if you try to do the same with a
+# plain Python function.)
+#
+# Both forms work in either mode. The cells below show the omit
+# form first in concrete mode, then the same omit form repeated in
+# symbolic mode to make explicit that "default in both modes" is
+# real and not a concrete-only convenience.
 
 
 # %%
@@ -225,6 +232,26 @@ def default_arg_demo() -> qmc.Bit:
 
 
 default_arg_demo.draw()
+
+
+# %%
+# Same `_phase` kernel, this time wrapped with a symbolic
+# `num_controls=n - 1`.  The `theta=math.pi / 2` default still
+# applies even though the caller never names it.  Replace the
+# omitted `theta` with a positional override at the call site
+# (`cg(q[0 : n - 1], q[n - 1], math.pi / 4)`) when you want a
+# different angle without switching to a kwarg.
+@qmc.qkernel
+def default_arg_demo_symbolic(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, "q")
+    for i in qmc.range(n - 1):
+        q[i] = qmc.x(q[i])  # drive every control slot to |1>
+    cg = qmc.control(_phase, num_controls=n - 1)
+    q[0 : n - 1], q[n - 1] = cg(q[0 : n - 1], q[n - 1])
+    return qmc.measure(q)
+
+
+default_arg_demo_symbolic.draw(n=3)
 
 # %% [markdown]
 # ### 3.4 Classical keyword arguments in any order

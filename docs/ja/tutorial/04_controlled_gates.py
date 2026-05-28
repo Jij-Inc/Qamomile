@@ -140,7 +140,9 @@ vec_target_demo.draw()
 # %% [markdown]
 # ### 3.3 ラップ対象カーネルのシグネチャ由来のデフォルト値
 #
-# ラップ対象の`@qmc.qkernel`が古典パラメータにPythonのデフォルト値を宣言している場合、呼び出し側ではそのkeywordを省略できます。ラッパーは欠けた値を`inspect.Signature.bind + apply_defaults`で補完するので、デフォルト値は通常の直接呼び出しと同じようにcontrolled-Uまで届きます(デフォルト値を持てるのは`@qmc.qkernel`でラップされたcallableだけです。plain Python関数で同じことを試した場合の挙動はSection 6.7を参照してください)。
+# ラップ対象の`@qmc.qkernel`が古典パラメータにPythonのデフォルト値を宣言している場合、呼び出し側ではそのkeywordを省略するか、callsiteでpositionalに上書きするかのどちらでもよいです。ラッパーは欠けた値を`inspect.Signature.bind + apply_defaults`で補完するので、解決後の値は通常の直接呼び出しと同じようにcontrolled-Uまで届きます(デフォルト値を持てるのは`@qmc.qkernel`でラップされたcallableだけです。plain Python関数で同じことを試した場合の挙動はSection 6.7を参照してください)。
+#
+# どちらの形もどちらのモードでも使えます。以下のセルはまずconcrete modeで省略形を示し、続いて同じ省略形をsymbolic modeで繰り返して「両モードでデフォルトが効く」がconcrete専用の便宜ではなく実際に動くことを明示します。
 
 
 # %%
@@ -160,6 +162,25 @@ def default_arg_demo() -> qmc.Bit:
 
 
 default_arg_demo.draw()
+
+
+# %%
+# 同じ`_phase`カーネルを、今度はsymbolicな`num_controls=n - 1`でラップ
+# します。呼び出し側が`theta`を名指ししなくても`theta=math.pi / 2`の
+# デフォルトはそのまま適用されます。別の角度を使いたいがkwargには
+# 切り替えたくない場合は、省略した`theta`をcallsiteのpositional上書き
+# (`cg(q[0 : n - 1], q[n - 1], math.pi / 4)`)に置き換えます。
+@qmc.qkernel
+def default_arg_demo_symbolic(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, "q")
+    for i in qmc.range(n - 1):
+        q[i] = qmc.x(q[i])  # 全ての制御slotを|1>にする
+    cg = qmc.control(_phase, num_controls=n - 1)
+    q[0 : n - 1], q[n - 1] = cg(q[0 : n - 1], q[n - 1])
+    return qmc.measure(q)
+
+
+default_arg_demo_symbolic.draw(n=3)
 
 # %% [markdown]
 # ### 3.4 古典keyword引数を任意の順序で
