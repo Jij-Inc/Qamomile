@@ -2683,20 +2683,58 @@ class TestControlledVectorSubArgCrossSDK:
         )
 
 
+class TestControlledVectorSubArgQuriPartsLoudError:
+    """QURI Parts raises ``EmitError`` instead of silently miscompiling.
+
+    The base ``emit_controlled_fallback`` per-gate decomposer used by
+    QURI Parts only routes each inner-block gate to
+    ``target_indices[0]``, so a multi-target controlled custom gate
+    (e.g. ``controlled`` around a sub-kernel that takes a
+    ``Vector[Qubit]`` and touches multiple slots) would have all
+    inner gates land on slot 0 -- a silent miscompile.  After the
+    loud-error guard in :func:`emit_controlled_fallback`, that shape
+    raises ``EmitError`` at transpile time instead.  ``SWAP``-only
+    inner blocks stay supported because the SWAP branch in
+    ``emit_controlled_gate`` explicitly reads both
+    ``target_indices[0]`` and ``target_indices[1]``.
+    """
+
+    def test_quri_parts_rejects_multi_target_custom_gate(self):
+        """``controlled(vector_sub)`` on QURI Parts raises ``EmitError``."""
+        pytest.importorskip("quri_parts")
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def _vec_h(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.h(qs[1])
+            return qs
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vec_h, num_controls=1)
+            qs[0], qs[1:3] = cg(qs[0], qs[1:3])
+            return qmc.measure(qs)
+
+        t = QuriPartsTranspiler()
+        with pytest.raises(EmitError, match=r"multi-target inner block"):
+            t.transpile(kernel)
+
+
 class TestControlledVectorSubArgQiskitEquivalence:
     """Strict expval equivalence for the new Vector sub-arg path.
 
     Only Qiskit is exercised: its controlled-U emit path constructs
     a native controlled custom gate, so the multi-target sub-kernel
     Vector ``RY(theta) ⊗ RY(theta)`` ends up being applied correctly
-    when the control is on.  The QURI Parts backend currently
-    decomposes any controlled custom gate through the standard
-    single-target fallback (``emit_controlled_gate`` uses
-    ``target_indices[0]``), so a multi-target controlled custom gate
-    is silently applied only to the first target — a pre-existing
-    limitation orthogonal to Step 2.b's frontend / emit-side
-    sub_quantum-operand expansion, which is what this test
-    specifically covers.
+    when the control is on.  QURI Parts now raises ``EmitError`` on
+    the same shape (see :class:`TestControlledVectorSubArgQuriPartsLoudError`
+    above), where it used to silently miscompile -- so on that
+    backend the user gets a clear failure at transpile time instead
+    of an incorrect circuit at sample time.
     """
 
     @pytest.fixture(autouse=True)
@@ -3069,3 +3107,71 @@ class TestSymbolicMultiArgControl:
 
         with pytest.raises(TypeError, match=r"signature"):
             qmc.control(_NoSignature())
+
+    def test_symbolic_mode_default_classical_arg_can_be_omitted(self):
+        """``cg(pool, target)`` works when the sub-kernel has a defaulted classical arg.
+
+        ``_sub_positional_count_for_symbolic`` excludes parameters
+        with Python defaults from the required-positional count, so
+        a sub-kernel like ``def sub(q, theta=math.pi / 2)`` only
+        contributes ``q`` to the boundary algorithm.  Before the
+        fix, both ``q`` and ``theta`` were counted as required
+        positional, so the entire 2-arg call ``cg(pool, target)``
+        was treated as the sub-kernel slot with no control prefix
+        and the call site raised ``ValueError`` complaining about
+        the missing control argument.
+        """
+
+        @qmc.qkernel
+        def _sub_with_default(
+            q: qmc.Qubit, theta: qmc.Float = math.pi / 2
+        ) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            cg = qmc.control(_sub_with_default, num_controls=n - 1)
+            q[0 : n - 1], q[n - 1] = cg(q[0 : n - 1], q[n - 1])
+            return qmc.measure(q)
+
+        # Compose-time succeeds (no ValueError about missing
+        # control args).  Tracing the block exercises the boundary
+        # algorithm with a symbolic ``num_controls`` and a default-
+        # valued classical sub-kernel arg.
+        _ = kernel.block
+
+    def test_symbolic_mode_default_classical_arg_can_be_positional_override(self):
+        """``cg(pool, target, theta_val)`` positionally overrides the default.
+
+        Companion to
+        :meth:`test_symbolic_mode_default_classical_arg_can_be_omitted`:
+        the omit case checks that ``theta`` can be left out; this
+        test pins the symmetric promise that ``theta`` can also be
+        supplied positionally to override the default.  Before the
+        fix the boundary algorithm counted only required-positional
+        parameters and so misclassified the trailing ``theta_val``
+        as part of the control prefix, leaving zero quantum
+        sub-kernel args and raising ``ValueError`` ("no sub-kernel
+        quantum arg, see design decision #9").  After the fix the
+        boundary algorithm peels trailing classical-looking caller
+        args (one per unbound default-valued sub-kernel parameter),
+        so ``cg(pool, target, math.pi / 4)`` resolves to
+        ``control_args=(pool,)``, ``sub_positional=(target,
+        math.pi/4)`` and binds ``q=target, theta=math.pi/4``.
+        """
+
+        @qmc.qkernel
+        def _sub_with_default(
+            q: qmc.Qubit, theta: qmc.Float = math.pi / 2
+        ) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            cg = qmc.control(_sub_with_default, num_controls=n - 1)
+            q[0 : n - 1], q[n - 1] = cg(q[0 : n - 1], q[n - 1], math.pi / 4)
+            return qmc.measure(q)
+
+        _ = kernel.block

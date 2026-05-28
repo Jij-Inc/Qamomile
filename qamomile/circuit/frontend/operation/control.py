@@ -1320,7 +1320,7 @@ class ControlledGate:
         # (scalar ``Qubit`` and/or ``ArrayBase`` in sequence, qubit-
         # count sum equals ``num_controls`` at transpile time) both
         # flow through this split.
-        sub_positional_count = self._sub_positional_count_for_symbolic(sub_kwargs)
+        sub_positional_count = self._sub_positional_count_for_symbolic(args, sub_kwargs)
         if sub_positional_count > len(args):
             raise ValueError(
                 f"ControlledU: not enough positional args.  The wrapped "
@@ -1431,28 +1431,75 @@ class ControlledGate:
             )
         return tuple(wrapped)
 
-    def _sub_positional_count_for_symbolic(self, sub_kwargs: dict[str, Any]) -> int:
+    def _sub_positional_count_for_symbolic(
+        self, args: tuple[Any, ...], sub_kwargs: dict[str, Any]
+    ) -> int:
         """How many trailing positional args belong to the sub-kernel.
 
         Used by :meth:`_call_symbolic` to split the call-site args
         into the control prefix and the sub-kernel positional region.
         The wrapped kernel's declared signature is the source of
-        truth: every parameter that is not satisfied via ``sub_kwargs``
-        must arrive positionally.
+        truth: every parameter that is **required** to arrive
+        positionally (not satisfied via ``sub_kwargs``, and without
+        a Python default) contributes to the base count.  Each
+        default-valued classical parameter that the caller chose to
+        override positionally adds one to the count -- we detect
+        the override by walking ``args`` from the right and peeling
+        trailing classical-looking handles (anything that is not a
+        ``Qubit`` or ``ArrayBase``), up to one peeled arg per
+        unbound default-valued sub-kernel parameter and never deep
+        enough to leave the control prefix empty.  This keeps both
+        ``cg(pool, target)`` and ``cg(pool, target, theta_val)``
+        well-defined against a sub-kernel like
+        ``def sub(q, theta=0.5)``: the omit form fills ``theta``
+        from the default, and the positional form overrides it.
 
         Args:
+            args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
+                Used to count how many trailing default-valued
+                sub-kernel parameters the caller overrode positionally.
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
                 the reserved ``power`` and ``control_indices`` keys.
 
         Returns:
-            int: Number of trailing positional args expected by the
-                sub-kernel.
+            int: Number of trailing positional args the sub-kernel
+                consumes at this boundary (required-positional plus
+                any positionally-overridden default-valued params).
         """
-        # ``ControlledGate.__init__`` validates that ``input_types`` is a
-        # dict, so the access is safe to use directly here.
+        from qamomile.circuit.frontend.handle.array import ArrayBase
+
+        # ``ControlledGate.__init__`` validates that ``input_types`` is
+        # a dict and ``signature`` is an ``inspect.Signature``, so both
+        # accesses are safe to use directly.
         input_types = self._qkernel.input_types
-        positional_names = [n for n in input_types.keys() if n not in sub_kwargs]
-        return len(positional_names)
+        signature = self._qkernel.signature
+
+        required_count = 0
+        unbound_default_count = 0
+        for name in input_types.keys():
+            if name in sub_kwargs:
+                continue
+            if signature.parameters[name].default is inspect.Parameter.empty:
+                required_count += 1
+            else:
+                unbound_default_count += 1
+
+        # Peel from the right of ``args`` to detect positional defaults.
+        # Each peeled arg must be classical-looking (not a quantum
+        # handle), and we must leave at least one arg in the control
+        # prefix for the symbolic-mode invariant.
+        max_peel = min(
+            unbound_default_count,
+            len(args) - required_count - 1,
+        )
+        extra_for_defaults = 0
+        for i in range(max(max_peel, 0)):
+            candidate = args[-(i + 1)]
+            if isinstance(candidate, (Qubit, ArrayBase)):
+                break
+            extra_for_defaults += 1
+
+        return required_count + extra_for_defaults
 
 
 def _classify_callable_param(annotation: Any) -> str:
