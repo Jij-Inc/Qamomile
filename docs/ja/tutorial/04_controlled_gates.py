@@ -19,18 +19,9 @@
 #
 # # `qmc.control`によるゲートとサブカーネルの制御
 #
-# [チュートリアル03](03_vector_slicing.ipynb)では、`VectorView`スライスを使って、ヘルパーカーネルが大きなレジスタの連続した一部だけに作用できることを示しました。本章では、関連はしているが別の構成要素を扱います。`qmc.control`を使って、任意のゲート、すなわち`qmc.rx`のようなビルトインゲートやユーザ定義の`@qmc.qkernel`を、それ自体の*制御版*に変換する方法です。
+# [チュートリアル03](03_vector_slicing.ipynb)では、`VectorView`スライスを使って、ヘルパーカーネルが大きなレジスタの連続した一部だけに作用できることを示しました。本章では`qmc.control`を扱います。`qmc.control`を使うと、Qamomileの任意のゲート(`qmc.rx`のようなビルトイン関数や、ユーザが書いた`@qmc.qkernel`)の制御版を作れます。
 #
-# `qmc.control(fn)`は再利用可能な`ControlledGate`ラッパーを返します。`@qmc.qkernel`の内部でラッパーを呼び出すと、`fn`を対象本体とするcontrolled-Uがemitされます。ラッパーには2つのモードがあります。*concrete mode*は制御qubitの数をPythonの`int`で与え、*symbolic mode*は`qmc.UInt`のカーネルパラメータで与えてtranspile時に解決します。ほとんどの機能、すなわち`power=`、デフォルト引数、`Vector[Qubit]`を受け取るサブカーネル、古典kwargの順序入れ替えなどは両モードで同じように動作します。一部の機能のみが片方のモード専用です。
-#
-# 本章はその区分に沿って構成しています。
-#
-# - **Section 1と2**は最小例とconcrete/symbolicの区別を導入します。
-# - **Section 3**は*両モード*で動作するパターンをまとめます。
-# - **Section 4**は*concrete mode*でのみ動作するパターンを扱います。
-# - **Section 5**は*symbolic mode*でのみ動作するパターンを扱います。
-# - **Section 6**はAPIが*reject*する呼び出し形を整理し、各セルで想定例外型をassertします。これはregression testも兼ねており、将来の変更でいずれかのチェックが失われたり変わったりすると、docs buildで失敗します。
-# - **Section 7**は判断ルールの短いまとめです。
+# `qmc.control`には2つのモードがあります。*concrete mode*は制御qubitの数をPythonの`int`で与え、*symbolic mode*は`qmc.UInt`のカーネルパラメータ(あるいはそれを含む式)で与えてtranspile時に解決します。`power=`、デフォルト引数、`Vector[Qubit]`を取るサブカーネル、古典kwargの並び替えなど大半の機能は両モードで同じ挙動です。モードによって違うのは制御引数の渡し方と一部の追加機能だけで、後ろのSectionで分けて扱います。
 
 # %%
 # Install the latest Qamomile from pip.
@@ -68,7 +59,7 @@ crx_demo.draw()
 # %% [markdown]
 # 呼び出し側で押さえておきたいポイントは3つです。
 #
-# - `qmc.control(qmc.rx)`は通常のPython式として、その行が実行された瞬間に評価されます。ラッパーをqkernelの外で定義した場合はmodule load時、qkernel本体内(この例のように)で束縛した場合はtracing時になります。どちらの場合でも、返ってきた`ControlledGate`(ここでは`crx`に束縛)は再利用可能な値で、変数に置いて何度でも呼び出せます。
+# - `crx = qmc.control(qmc.rx)`はqkernelの中でも外でもどちらに書いてもかまいません。返ってきたものは再利用可能な値なので、変数に置いて何度でも呼び出せます。
 # - `crx(c, t, angle=...)`を呼ぶと、まず制御qubitがpositional引数として並び、次にtarget、最後に古典keyword引数が続きます。順序はラップ対象の`qmc.rx(q, angle)`シグネチャを踏襲しつつ、先頭に制御を1つ加えた形です。
 # - 古典パラメータのkeyword名はラップした関数の名前をそのまま使います(`qmc.rx`なら`angle`、`qmc.p`なら`theta`など)。`qmc.control`が改名することはありません。
 
@@ -81,7 +72,7 @@ crx_demo.draw()
 # | --- | --- | --- |
 # | `num_controls=` | Pythonの`int`(デフォルト`1`) | `qmc.UInt`ハンドル、または`UInt`式 |
 # | 制御引数 | `num_controls`に合計qubit数が一致する複数のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | `Vector[Qubit]`または`VectorView`の*pool*を1つだけ |
-# | `controlled_indices=` | 受け付けない | 任意。poolのどのスロットがactiveかを指定 |
+# | `control_indices=` | 受け付けない | 任意。poolのどのスロットがactiveかを指定 |
 # | 制御数が解決される時点 | `qmc.control(...)`が評価された時(module load時かtracing時) | transpile時(`bindings`から) |
 #
 # 判断ルールはシンプルです。qkernelを書く時点で制御数がリテラルとしてわかっており、各制御qubitを個別に名指ししたい場合は*concrete mode*を使います。制御数がカーネルパラメータ(またはそれを含む式、`num_controls=n - 1`は典型的なmulti-controlledの形)の場合は*symbolic mode*を使います。
@@ -296,10 +287,10 @@ mixed_controls_demo.draw()
 #
 # 制御側のcall-site形は2種類サポートされます。
 #
-# - **Single-poolの形**(5.1 – 5.4): 制御引数として`Vector[Qubit]`または`VectorView`を1つ渡し、pool全体、もしくは`controlled_indices=`で選んだsubsetがactiveな制御として配線されます。
+# - **Single-poolの形**(5.1 – 5.4): 制御引数として`Vector[Qubit]`または`VectorView`を1つ渡し、pool全体、もしくは`control_indices=`で選んだsubsetがactiveな制御として配線されます。
 # - **Multi-argの形**(5.5): 制御prefixが複数のpositional引数(scalar`Qubit`、`VectorView`スライス、`Vector[Qubit]`全体、またはこれらの組み合わせ)で、qubit数の合計が`num_controls`と一致します。concrete modeで既に出ていた形(Section 4.1 / 4.2)を、symbolicな`num_controls`に持ち上げたものです。
 #
-# `controlled_indices=`keywordはsymbolic mode専用で、single-poolの引数のどのスロットがactiveな制御として実際に配線されるかを指定します(残りはそのまま素通りします)。`controlled_indices=`はsingle-poolの形でのみ有効で、multi-argの形と組み合わせるとcompose時にrejectされます。
+# `control_indices=`keywordはsymbolic mode専用で、single-poolの引数のどのスロットがactiveな制御として実際に配線されるかを指定します(残りはそのまま素通りします)。`control_indices=`はsingle-poolの形でのみ有効で、multi-argの形と組み合わせるとcompose時にrejectされます。
 
 # %% [markdown]
 # ### 5.1 `num_controls = n`でpool全体を制御に
@@ -343,11 +334,11 @@ def mcx_demo(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 mcx_demo.draw(n=4)
 
 # %% [markdown]
-# ### 5.3 `controlled_indices=`でsubsetを選ぶ
+# ### 5.3 `control_indices=`でsubsetを選ぶ
 #
-# 制御poolがactiveな制御数より広い場合、`controlled_indices=`keyword(symbolic mode専用)でpoolのどのスロットを配線するかを指定します。残りのスロットはそのまま素通りで、wire上には残りますが追加のゲートはemitされません。indexは連続である必要はありません。
+# 制御poolがactiveな制御数より広い場合、`control_indices=`keyword(symbolic mode専用)でpoolのどのスロットを配線するかを指定します。残りのスロットはそのまま素通りで、wire上には残りますが追加のゲートはemitされません。indexは連続である必要はありません。
 #
-# 以下の例では、poolは4qubitですが、3つのactiveな制御は`pool[0]`、`pool[1]`、`pool[3]`(`controlled_indices=[0, 1, 3]`)です。`pool[2]`は同行しているだけで、controlのdotは描かれず、MCXの縦の接続線も`pool[2]`をスキップして描かれます。
+# 以下の例では、poolは4qubitですが、3つのactiveな制御は`pool[0]`、`pool[1]`、`pool[3]`(`control_indices=[0, 1, 3]`)です。`pool[2]`は同行しているだけで、controlのdotは描かれず、MCXの縦の接続線も`pool[2]`をスキップして描かれます。
 
 
 # %%
@@ -359,16 +350,16 @@ def subset_pool(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     pool[1] = qmc.x(pool[1])
     pool[3] = qmc.x(pool[3])  # pool[2]は|0>のまま。これがinactiveなスロット。
     cg = qmc.control(qmc.x, num_controls=k_ctrls)
-    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 3])
+    pool, tgt = cg(pool, tgt, control_indices=[0, 1, 3])
     return qmc.measure(pool)
 
 
 subset_pool.draw(n=4, k_ctrls=3)
 
 # %% [markdown]
-# ### 5.4 `controlled_indices`に`UInt`式を含める
+# ### 5.4 `control_indices`に`UInt`式を含める
 #
-# `controlled_indices`の各エントリはPythonの`int`リテラル、`qmc.UInt`ハンドル、または`UInt`値による算術式のいずれでも構いません。リテラル`int`エントリに対する軽い構造チェック(`bool`、負値、リテラル`int`同士の重複の拒否)はcompose時に行われますが、それ以外、すなわち`num_controls`との長さ整合、pool sizeに対する範囲、`UInt`の値解決を必要とするチェックはtranspile時、`bindings`からパラメータが具体化されてからに先送りされます。
+# `control_indices`の各エントリはPythonの`int`リテラル、`qmc.UInt`ハンドル、または`UInt`値による算術式のいずれでも構いません。リテラル`int`エントリに対する軽い構造チェック(`bool`、負値、リテラル`int`同士の重複の拒否)はcompose時に行われますが、それ以外、すなわち`num_controls`との長さ整合、pool sizeに対する範囲、`UInt`の値解決を必要とするチェックはtranspile時、`bindings`からパラメータが具体化されてからに先送りされます。
 #
 # 以下では3つ目のactiveな制御を`pool[n - 1]`、つまり「poolの最後のスロット」を`UInt`算術で表現しています。`n = 4`ではスロット3に解決され、`pool[2]`はinactiveのまま残ります。コンパイル後の回路は5.3と同じで、indexの書き方だけが違います。
 
@@ -382,7 +373,7 @@ def subset_pool_with_uint(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]
     pool[1] = qmc.x(pool[1])
     pool[3] = qmc.x(pool[3])
     cg = qmc.control(qmc.x, num_controls=k_ctrls)
-    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, n - 1])
+    pool, tgt = cg(pool, tgt, control_indices=[0, 1, n - 1])
     return qmc.measure(pool)
 
 
@@ -391,9 +382,7 @@ subset_pool_with_uint.draw(n=4, k_ctrls=3)
 # %% [markdown]
 # ### 5.5 Multi-argの制御prefix
 #
-# 制御を複数のpositional引数に分けたい場合、典型的には「同じ`Vector`のいくつかのスロットをactiveな制御に、別のスロットをtargetに」したいときに、symbolic modeでもconcrete modeと同じmulti-argの形(Section 4.1 / 4.2)が使えます。制御prefixの各引数のqubit数の合計が、transpile時に`num_controls`と照合されます。
-#
-# 以下のkernelはcontrolled-incrementで、`q[control_index]`が`|1>`のとき`q`の残りbitを`q -> q + 1 (mod 2**(n-1))`で更新します。各iterationで`q`からscalar1つ(gating control)、`VectorView`スライス`q[0:target_idx]`(inner controls)、`q[target_idx]`(target)を取り出します。すべて同じ`q`からの取り出しで、互いにdisjointなスロットで、`num_controls = target_idx + 1`(loop変数を含むsymbolic式)です。この形が使えるようになる前は、symbolic modeが`Vector`引数1つを要求していたため、このkernelはcompose不能でした。
+# 制御を複数のpositional引数に分けたい場合、典型的には「同じ`Vector`のいくつかのスロットをactiveな制御に、別のスロットをtargetに」したいときに、symbolic modeでもconcrete modeと同じmulti-argの形(Section 4.1 / 4.2)が使えます。同じ`Vector[Qubit]`から複数のスロットを取り出しても、互いにdisjoint(重ならない)なスロットであれば制御prefixに並べられます。制御prefixの各引数のqubit数の合計が、transpile時に`num_controls`と照合されます。
 
 
 # %%
@@ -432,7 +421,7 @@ controlled_increment_demo.draw(n=4, control_index=3)
 #
 # - Call-siteの引数は、ラップ対象のkernelのシグネチャから「制御prefix」と「sub-kernel positional」に分割されます。kwargsで指定されていないpositionalパラメータはすべてpositionalで届く必要があり、その末尾のブロックより*前*が制御prefixです。上記の例では`qmc.x`が1つの`Qubit` positionalを取るので、最後の引数(`tgt`)がtarget、最初の2つ(`ctrl_main`、`prefix`)が制御になります。
 # - Borrow trackerは、別々の引数が触るスロットが互いにdisjointである限り満たされます。静的なdisjointnessは境界がリテラルなときにcheckされ、symbolic境界(`q[0:target_idx]`と`q[target_idx]`と`q[control_index]`)はtrackerがregister partition向けにすでにサポートしているbound predicatesに任せます。
-# - `controlled_indices=`はmulti-argの形ではrejectされます(Section 6のreject caseを参照)。subset選択が必要ならsingle-poolの形(5.3 / 5.4)、 multi-argの自由度が必要ならprefix全体をactiveとして使うか、 のどちらかを選んでください。
+# - `control_indices=`はmulti-argの形ではrejectされます(Section 6のreject caseを参照)。subset選択が必要ならsingle-poolの形(5.3 / 5.4)、 multi-argの自由度が必要ならprefix全体をactiveとして使うか、 のどちらかを選んでください。
 
 # %% [markdown]
 # ## 6. 動かないパターン
@@ -442,14 +431,14 @@ controlled_increment_demo.draw(n=4, control_index=3)
 # | ケース | モード | 例外 |
 # | --- | --- | --- |
 # | 6.1 制御qubit数が引数境界をまたぐ | concrete | `ValueError` |
-# | 6.2 concrete modeで`controlled_indices=` | concrete | `ValueError` |
+# | 6.2 concrete modeで`control_indices=` | concrete | `ValueError` |
 # | 6.3 concrete modeでsymbolic長の`VectorView` | concrete | `NotImplementedError` |
 # | 6.4 古典kwargのtypo | 両方 | `TypeError` |
 # | 6.5 不正な`power`(0または`bool`) | 両方 | `ValueError` / `TypeError` |
 # | 6.6 `num_controls=0`のリテラル | concrete | `ValueError` |
 # | 6.7 plain関数にPythonのデフォルト値 | 両方 | `TypeError` |
 # | 6.8 同じpoolスロットをtargetに再利用 | symbolic | `UnreturnedBorrowError` |
-# | 6.9 multi-arg制御prefix + `controlled_indices=` | symbolic | `ValueError` |
+# | 6.9 multi-arg制御prefix + `control_indices=` | symbolic | `ValueError` |
 
 
 # %%
@@ -495,28 +484,28 @@ def case_count_mismatch() -> None:
 expect_error("control count mismatch", ValueError, case_count_mismatch)
 
 # %% [markdown]
-# ### 6.2 concrete modeで`controlled_indices=` (concrete)
+# ### 6.2 concrete modeで`control_indices=` (concrete)
 #
-# `controlled_indices`は選択元となる制御*pool*がある時にだけ意味を持つ、symbolic modeの概念です。concreteな`num_controls`と一緒に渡すと、compose時に`ValueError`になります。
+# `control_indices`は選択元となる制御*pool*がある時にだけ意味を持つ、symbolic modeの概念です。concreteな`num_controls`と一緒に渡すと、compose時に`ValueError`になります。
 
 
 # %%
-def case_controlled_indices_in_concrete() -> None:
+def case_control_indices_in_concrete() -> None:
     @qmc.qkernel
     def kernel() -> qmc.Bit:
         c = qmc.qubit(name="c")
         t = qmc.qubit(name="t")
         cg = qmc.control(qmc.x)  # num_controlsはデフォルトの1 (concrete)
-        c, t = cg(c, t, controlled_indices=[0])
+        c, t = cg(c, t, control_indices=[0])
         return qmc.measure(t)
 
     _ = kernel.block
 
 
 expect_error(
-    "controlled_indices in concrete mode",
+    "control_indices in concrete mode",
     ValueError,
-    case_controlled_indices_in_concrete,
+    case_control_indices_in_concrete,
 )
 
 # %% [markdown]
@@ -636,7 +625,7 @@ expect_error("plain function with default value", TypeError, case_plain_fn_with_
 # %% [markdown]
 # ### 6.8 同じpoolスロットをtargetに再利用 — single-poolの形 (symbolic)
 #
-# single-poolの形(`cg(pool, ...)`に`controlled_indices=`を組み合わせる場合)で、pool内のinactiveなスロットを取り出してtargetとして渡したくなることがあります。例えば`cg(pool, pool[2], controlled_indices=[0, 1, 3])`として`pool[2]`をcontrolled-Uのtargetにする、といった形です。この呼び出しはlinear typeのborrow trackerによってrejectされます。poolが1引数として消費されている最中に`pool[2]`が別引数として借り出されるため、compose時に`UnreturnedBorrowError`として表面化します。
+# single-poolの形(`cg(pool, ...)`に`control_indices=`を組み合わせる場合)で、pool内のinactiveなスロットを取り出してtargetとして渡したくなることがあります。例えば`cg(pool, pool[2], control_indices=[0, 1, 3])`として`pool[2]`をcontrolled-Uのtargetにする、といった形です。この呼び出しはlinear typeのborrow trackerによってrejectされます。poolが1引数として消費されている最中に`pool[2]`が別引数として借り出されるため、compose時に`UnreturnedBorrowError`として表面化します。
 #
 # Workaround(推奨順):
 #
@@ -650,7 +639,7 @@ def case_pool_slot_as_target() -> None:
     def kernel(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
         pool = qmc.qubit_array(n, "pool")
         cg = qmc.control(qmc.x, num_controls=k_ctrls)
-        pool, q = cg(pool, pool[2], controlled_indices=[0, 1, 3])
+        pool, q = cg(pool, pool[2], control_indices=[0, 1, 3])
         pool[2] = q
         return qmc.measure(pool)
 
@@ -664,13 +653,13 @@ expect_error(
 )
 
 # %% [markdown]
-# ### 6.9 Multi-arg制御prefix + `controlled_indices=` (symbolic)
+# ### 6.9 Multi-arg制御prefix + `control_indices=` (symbolic)
 #
-# symbolic modeの2つの機能は相互排他です。`controlled_indices=`は単一の制御pool(`Vector`引数1つ)に対してのみ意味を持ち、複数のpositional制御引数と組み合わせるとcompose時に`ValueError`がraiseされます。subset選択とper-slot routingの両方が必要な場合、subset選択ならsingle-poolの形(5.3 / 5.4)、per-slot routingならmulti-argの形(5.5)のどちらかを選んでください(両方は使えません)。
+# symbolic modeの2つの機能は相互排他です。`control_indices=`は単一の制御pool(`Vector`引数1つ)に対してのみ意味を持ち、複数のpositional制御引数と組み合わせるとcompose時に`ValueError`がraiseされます。subset選択とper-slot routingの両方が必要な場合、subset選択ならsingle-poolの形(5.3 / 5.4)、per-slot routingならmulti-argの形(5.5)のどちらかを選んでください(両方は使えません)。
 
 
 # %%
-def case_multi_arg_with_controlled_indices() -> None:
+def case_multi_arg_with_control_indices() -> None:
     @qmc.qkernel
     def kernel(n: qmc.UInt, k: qmc.UInt) -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n, "q")
@@ -678,9 +667,7 @@ def case_multi_arg_with_controlled_indices() -> None:
         prefix = q[1:k]
         tgt = q[k]
         cg = qmc.control(qmc.x, num_controls=k + 1)
-        ctrl_main, prefix, tgt = cg(
-            ctrl_main, prefix, tgt, controlled_indices=[0, 1, 2]
-        )
+        ctrl_main, prefix, tgt = cg(ctrl_main, prefix, tgt, control_indices=[0, 1, 2])
         q[0] = ctrl_main
         q[1:k] = prefix
         q[k] = tgt
@@ -690,9 +677,9 @@ def case_multi_arg_with_controlled_indices() -> None:
 
 
 expect_error(
-    "multi-arg + controlled_indices",
+    "multi-arg + control_indices",
     ValueError,
-    case_multi_arg_with_controlled_indices,
+    case_multi_arg_with_control_indices,
 )
 
 # %% [markdown]
@@ -702,7 +689,7 @@ expect_error(
 #
 # - **モードは`num_controls`の型で決まります。** Pythonの`int`なら*concrete mode*、`qmc.UInt`ハンドル(または`n - 1`のような`UInt`式)なら*symbolic mode*です。
 # - **ほとんどの機能はモードに依存しません。** 任意のcallable(ビルトインまたは`@qmc.qkernel`)のラップ、`Vector[Qubit]`を受け取るサブカーネル、ラップ対象シグネチャ由来のデフォルト、古典kwargの並び替え、`power=`はすべて両モードで同じ挙動です(Section 3)。
-# - **一部の機能はモード固有です。** 複数の独立したpositional制御引数とscalar + `VectorView`混合はconcrete専用(Section 4)、single-poolの呼び出し形 + `controlled_indices=`によるsubset選択、およびmulti-argの形(Section 5.5)はsymbolic専用(Section 5)です。
+# - **一部の機能はモード固有です。** 複数の独立したpositional制御引数とscalar + `VectorView`混合はconcrete専用(Section 4)、single-poolの呼び出し形 + `control_indices=`によるsubset選択、およびmulti-argの形(Section 5.5)はsymbolic専用(Section 5)です。
 #
 # 実用的な判断ルールとしては、制御数がカーネルパラメータやそれを含む式の場合、特に「最後の1つ以外全部」の典型形`num_controls=n - 1`を含む場合は、迷わず*symbolic mode*を使ってください。制御数がリテラルで、制御対象として個別に名指ししたい特定のqubitがある場合は*concrete mode*を使います。同じ`Vector`内のスロットをcontrolとtargetで分けたい場合はsymbolic mode + multi-arg(5.5)が一番自然です。
 #

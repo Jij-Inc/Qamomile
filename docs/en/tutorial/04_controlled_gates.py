@@ -21,36 +21,18 @@
 #
 # [Tutorial 03](03_vector_slicing.ipynb) showed how `VectorView`
 # slices let one helper kernel operate on a contiguous chunk of a
-# larger register. This chapter is about a related but distinct
-# building block: turning *any* gate — a built-in like `qmc.rx`,
-# or a user-defined `@qmc.qkernel` — into a *controlled* version
-# of itself with `qmc.control`.
+# larger register. This chapter covers `qmc.control`, which turns
+# any Qamomile gate — a built-in like `qmc.rx`, or a user-defined
+# `@qmc.qkernel` — into its *controlled* version.
 #
-# `qmc.control(fn)` returns a reusable `ControlledGate` wrapper.
-# When you call the wrapper inside a `@qmc.qkernel`, it emits a
-# controlled-U whose target body is `fn`. The wrapper has two
-# modes: *concrete* (the number of control qubits is a Python
-# `int`) and *symbolic* (the number is a `qmc.UInt` kernel
-# parameter, resolved at transpile time). Most features —
-# `power=`, default args, sub-kernels that take `Vector[Qubit]`,
-# reordering classical kwargs — work the same way in both
-# modes. A handful of features are specific to one mode or the
-# other.
-#
-# The chapter is organised around exactly that split:
-#
-# - **Sections 1 and 2** introduce the minimal example and the
-#   concrete-vs-symbolic distinction.
-# - **Section 3** collects the patterns that work in *both* modes.
-# - **Section 4** covers the patterns that work only in
-#   *concrete* mode.
-# - **Section 5** covers the patterns that work only in
-#   *symbolic* mode.
-# - **Section 6** catalogues the call shapes the API *rejects*,
-#   each cell asserting the exact exception type. This doubles as
-#   a regression test: if a future change loses or alters one of
-#   these checks, the docs build fails.
-# - **Section 7** is a short decision-rule summary.
+# `qmc.control` has two modes: *concrete* (the number of control
+# qubits is a Python `int`) and *symbolic* (the number is a
+# `qmc.UInt` kernel parameter, or an expression that contains one,
+# resolved at transpile time). Most features — `power=`, default
+# args, sub-kernels that take `Vector[Qubit]`, reordering classical
+# kwargs — work the same way in both modes. What differs between
+# the modes is how the control arguments are passed and a small
+# set of mode-specific extras, handled in later sections.
 
 # %%
 # Install the latest Qamomile from pip.
@@ -91,12 +73,9 @@ crx_demo.draw()
 # %% [markdown]
 # Three things to notice at the call site:
 #
-# - `qmc.control(qmc.rx)` runs as a normal Python expression at
-#   the moment that line is executed — module-load time when the
-#   wrapper is defined outside a qkernel, or tracing time when
-#   (as here) the wrapper is bound inside the body. Either way
-#   the returned `ControlledGate` (here bound to `crx`) is a
-#   reusable value; you can stash it and call it multiple times.
+# - You can write `crx = qmc.control(qmc.rx)` either inside or
+#   outside a qkernel. Either way the returned value is reusable;
+#   bind it to a name and call it as many times as you like.
 # - When you call `crx(c, t, angle=...)`, the control qubits come
 #   first as positional arguments, then the targets, then any
 #   classical keyword arguments. The order mirrors the wrapped
@@ -117,8 +96,8 @@ crx_demo.draw()
 # | Aspect | Concrete | Symbolic |
 # | --- | --- | --- |
 # | `num_controls=` | Python `int` (default `1`) | `qmc.UInt` handle, or any `UInt` expression |
-# | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `controlled_indices=`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` (multi-arg form, §5.5) |
-# | `controlled_indices=` | not accepted | optional — picks which slots of the pool are active |
+# | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `control_indices=`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` (multi-arg form, §5.5) |
+# | `control_indices=` | not accepted | optional — picks which slots of the pool are active |
 # | Control count resolved at | when `qmc.control(...)` is evaluated (module-load or tracing time) | transpile time (from `bindings`) |
 #
 # A short decision rule: reach for *concrete* mode when the
@@ -407,7 +386,7 @@ mixed_controls_demo.draw()
 #
 # - **Single-pool form** (5.1 – 5.4): one `Vector[Qubit]` or
 #   `VectorView` is passed as the control argument and the entire
-#   pool — or the subset chosen by `controlled_indices=` — acts
+#   pool — or the subset chosen by `control_indices=` — acts
 #   as the active controls.
 # - **Multi-arg form** (5.5): the control prefix is several
 #   positional arguments (scalar `Qubit`, `VectorView` slices,
@@ -416,10 +395,10 @@ mixed_controls_demo.draw()
 #   already does (Section 4.1 / 4.2), now lifted to symbolic
 #   `num_controls`.
 #
-# A `controlled_indices=` keyword is available in symbolic mode
+# A `control_indices=` keyword is available in symbolic mode
 # only; it picks which slots of a single-pool argument actually
 # wire in as active controls (the rest pass through untouched).
-# `controlled_indices=` is only valid with the single-pool form;
+# `control_indices=` is only valid with the single-pool form;
 # combining it with the multi-arg form is rejected at compose
 # time.
 
@@ -480,10 +459,10 @@ def mcx_demo(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 mcx_demo.draw(n=4)
 
 # %% [markdown]
-# ### 5.3 Selecting a subset with `controlled_indices=`
+# ### 5.3 Selecting a subset with `control_indices=`
 #
 # When the control pool is wider than the number of active
-# controls you want, the `controlled_indices=` keyword (symbolic
+# controls you want, the `control_indices=` keyword (symbolic
 # mode only) picks exactly which pool slots are wired in. The
 # remaining slots are passed through untouched — they sit on the
 # wires but emit no extra gate of their own. The indices do not
@@ -491,7 +470,7 @@ mcx_demo.draw(n=4)
 #
 # In the example below the pool has 4 qubits but the three
 # active controls are `pool[0]`, `pool[1]`, `pool[3]`
-# (`controlled_indices=[0, 1, 3]`). `pool[2]` is along for the
+# (`control_indices=[0, 1, 3]`). `pool[2]` is along for the
 # ride: no control dot is drawn on it, and the vertical
 # connection line of the MCX skips over it.
 
@@ -505,16 +484,16 @@ def subset_pool(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     pool[1] = qmc.x(pool[1])
     pool[3] = qmc.x(pool[3])  # pool[2] left at |0> — it is the inactive slot
     cg = qmc.control(qmc.x, num_controls=k_ctrls)
-    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 3])
+    pool, tgt = cg(pool, tgt, control_indices=[0, 1, 3])
     return qmc.measure(pool)
 
 
 subset_pool.draw(n=4, k_ctrls=3)
 
 # %% [markdown]
-# ### 5.4 `controlled_indices` with `UInt` entries
+# ### 5.4 `control_indices` with `UInt` entries
 #
-# Each entry inside `controlled_indices` may be a Python `int`
+# Each entry inside `control_indices` may be a Python `int`
 # literal, a `qmc.UInt` handle, or any arithmetic expression
 # over `UInt` values. Cheap structural checks on literal `int`
 # entries (rejecting `bool`, negative values, and entries that
@@ -541,7 +520,7 @@ def subset_pool_with_uint(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]
     pool[1] = qmc.x(pool[1])
     pool[3] = qmc.x(pool[3])
     cg = qmc.control(qmc.x, num_controls=k_ctrls)
-    pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, n - 1])
+    pool, tgt = cg(pool, tgt, control_indices=[0, 1, n - 1])
     return qmc.measure(pool)
 
 
@@ -617,7 +596,7 @@ controlled_increment_demo.draw(n=4, control_index=3)
 #   (`q[0:target_idx]` versus `q[target_idx]` versus
 #   `q[control_index]`) lean on the bound predicates the tracker
 #   already supports for register partitioning.
-# - `controlled_indices=` is rejected in the multi-arg form (see
+# - `control_indices=` is rejected in the multi-arg form (see
 #   Section 6 for the reject case): if you need subset
 #   selection, use the single-pool form (5.3 / 5.4); if you need
 #   multi-arg flexibility, accept the entire prefix as active.
@@ -637,14 +616,14 @@ controlled_increment_demo.draw(n=4, control_index=3)
 # | Case | Mode | Exception |
 # | --- | --- | --- |
 # | 6.1 control qubit count crosses an argument boundary | concrete | `ValueError` |
-# | 6.2 `controlled_indices=` in concrete mode | concrete | `ValueError` |
+# | 6.2 `control_indices=` in concrete mode | concrete | `ValueError` |
 # | 6.3 symbolic-length `VectorView` in concrete | concrete | `NotImplementedError` |
 # | 6.4 typo in classical kwarg | both | `TypeError` |
 # | 6.5 invalid `power` (zero or `bool`) | both | `ValueError` / `TypeError` |
 # | 6.6 `num_controls=0` literal | concrete | `ValueError` |
 # | 6.7 plain function with a Python default | both | `TypeError` |
 # | 6.8 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
-# | 6.9 multi-arg control prefix + `controlled_indices=` | symbolic | `ValueError` |
+# | 6.9 multi-arg control prefix + `control_indices=` | symbolic | `ValueError` |
 
 
 # %%
@@ -703,31 +682,31 @@ def case_count_mismatch() -> None:
 expect_error("control count mismatch", ValueError, case_count_mismatch)
 
 # %% [markdown]
-# ### 6.2 `controlled_indices=` in concrete mode (concrete)
+# ### 6.2 `control_indices=` in concrete mode (concrete)
 #
-# `controlled_indices` makes sense only when there is a control
+# `control_indices` makes sense only when there is a control
 # *pool* to select from, which is a symbolic-mode concept.
 # Supplying it alongside a concrete `num_controls` raises
 # `ValueError` at compose time.
 
 
 # %%
-def case_controlled_indices_in_concrete() -> None:
+def case_control_indices_in_concrete() -> None:
     @qmc.qkernel
     def kernel() -> qmc.Bit:
         c = qmc.qubit(name="c")
         t = qmc.qubit(name="t")
         cg = qmc.control(qmc.x)  # num_controls defaults to 1 (concrete)
-        c, t = cg(c, t, controlled_indices=[0])
+        c, t = cg(c, t, control_indices=[0])
         return qmc.measure(t)
 
     _ = kernel.block
 
 
 expect_error(
-    "controlled_indices in concrete mode",
+    "control_indices in concrete mode",
     ValueError,
-    case_controlled_indices_in_concrete,
+    case_control_indices_in_concrete,
 )
 
 # %% [markdown]
@@ -876,9 +855,9 @@ expect_error("plain function with default value", TypeError, case_plain_fn_with_
 # ### 6.8 Same-pool slot reused as target — single-pool form (symbolic)
 #
 # When using the single-pool form (`cg(pool, ...)` with
-# `controlled_indices=`), it is tempting to also pass one of the
+# `control_indices=`), it is tempting to also pass one of the
 # pool's inactive slots as the target — e.g.
-# `cg(pool, pool[2], controlled_indices=[0, 1, 3])` so that
+# `cg(pool, pool[2], control_indices=[0, 1, 3])` so that
 # `pool[2]` becomes the target of the controlled-U. The call
 # site is rejected by the linear-type borrow tracker because the
 # pool is already being consumed as one argument while `pool[2]`
@@ -905,7 +884,7 @@ def case_pool_slot_as_target() -> None:
     def kernel(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
         pool = qmc.qubit_array(n, "pool")
         cg = qmc.control(qmc.x, num_controls=k_ctrls)
-        pool, q = cg(pool, pool[2], controlled_indices=[0, 1, 3])
+        pool, q = cg(pool, pool[2], control_indices=[0, 1, 3])
         pool[2] = q
         return qmc.measure(pool)
 
@@ -919,10 +898,10 @@ expect_error(
 )
 
 # %% [markdown]
-# ### 6.9 Multi-arg control prefix + `controlled_indices=` (symbolic)
+# ### 6.9 Multi-arg control prefix + `control_indices=` (symbolic)
 #
 # The two symbolic-mode features are mutually exclusive.
-# `controlled_indices=` only makes sense over a single control
+# `control_indices=` only makes sense over a single control
 # pool (one `Vector` argument), and combining it with multiple
 # positional control args raises `ValueError` at compose time
 # with an explicit message.  If you need both subset selection
@@ -932,7 +911,7 @@ expect_error(
 
 
 # %%
-def case_multi_arg_with_controlled_indices() -> None:
+def case_multi_arg_with_control_indices() -> None:
     @qmc.qkernel
     def kernel(n: qmc.UInt, k: qmc.UInt) -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n, "q")
@@ -940,9 +919,7 @@ def case_multi_arg_with_controlled_indices() -> None:
         prefix = q[1:k]
         tgt = q[k]
         cg = qmc.control(qmc.x, num_controls=k + 1)
-        ctrl_main, prefix, tgt = cg(
-            ctrl_main, prefix, tgt, controlled_indices=[0, 1, 2]
-        )
+        ctrl_main, prefix, tgt = cg(ctrl_main, prefix, tgt, control_indices=[0, 1, 2])
         q[0] = ctrl_main
         q[1:k] = prefix
         q[k] = tgt
@@ -952,9 +929,9 @@ def case_multi_arg_with_controlled_indices() -> None:
 
 
 expect_error(
-    "multi-arg + controlled_indices",
+    "multi-arg + control_indices",
     ValueError,
-    case_multi_arg_with_controlled_indices,
+    case_multi_arg_with_control_indices,
 )
 
 # %% [markdown]
@@ -976,7 +953,7 @@ expect_error(
 #   positional control arguments and scalar-plus-`VectorView`
 #   mixing are concrete-only (Section 4). The single-pool call
 #   shape, `num_controls = <UInt expression>`, and the subset
-#   selector `controlled_indices=` are symbolic-only (Section 5).
+#   selector `control_indices=` are symbolic-only (Section 5).
 #
 # Practical decision rule: reach for *symbolic* mode whenever
 # the control count is a kernel parameter or an expression over
