@@ -112,7 +112,9 @@ biased_coin.draw(theta=0.6)
 # %%
 est = biased_coin.estimate_resources()
 print("qubits:", est.qubits)
+assert est.qubits == 1
 print("total gates:", est.gates.total)
+assert est.gates.total == 1
 
 # %% [markdown]
 # For this simple qkernel the numbers are concrete, but for parameterized qkernels they become symbolic SymPy expressions — we will explore this in detail in [Tutorial 02](02_parameterized_kernels.ipynb).
@@ -150,6 +152,8 @@ job = exe.sample(
 result = job.result()
 
 print("sample results:", result.results)
+assert result.shots == 256
+assert sum(count for _, count in result.results) == 256
 
 # %% [markdown]
 # Let's unpack the three concepts:
@@ -203,6 +207,8 @@ qiskit_circuit = transpiler.to_circuit(
     bindings={"theta": math.pi / 4},
 )
 print(qiskit_circuit)
+assert qiskit_circuit.num_qubits == 1
+assert qiskit_circuit.num_clbits == 1
 
 # %% [markdown]
 # ## Multi-Qubit Example
@@ -239,6 +245,10 @@ demo_result = (
 
 for outcome, count in demo_result.results:
     print(f"  outcome={outcome}, count={count}")
+assert demo_result.shots == 256
+assert sum(count for _, count in demo_result.results) == 256
+# Bell state |Phi+>: only (0,0) and (1,1) outcomes appear.
+assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
 
 # %% [markdown]
 # Notice two patterns here:
@@ -283,6 +293,7 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "QubitConsumedError"
 
 # %% [markdown]
 # The fix is simple: always write `q = qmc.h(q)`, not just `qmc.h(q)`.
@@ -329,7 +340,8 @@ except Exception as e:
 #
 # 1. [Parameterized QKernels](02_parameterized_kernels.ipynb) — structure vs runtime parameters, the bind/sweep pattern
 # 2. [Vector Slicing](03_vector_slicing.ipynb) — `VectorView`, slice assignment, nested slices, passing views to helper kernels
-# 3. [Resource Estimation](04_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, comparing designs
-# 4. [Execution Models](05_execution_models.ipynb) — `sample()` vs `run()`, observables, bit ordering
-# 5. [Classical Flow Patterns](06_classical_flow_patterns.ipynb) — loops, sparse data, branching
-# 6. [Reuse Patterns](07_reuse_patterns.ipynb) — helper qkernels, composite gates, stubs
+# 3. [Controlled Gates](04_controlled_gates.ipynb) — `qmc.control` for built-in gates and sub-kernels, concrete vs symbolic control counts
+# 4. [Resource Estimation](05_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, comparing designs
+# 5. [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, bit ordering
+# 6. [Classical Flow Patterns](07_classical_flow_patterns.ipynb) — loops, sparse data, branching
+# 7. [Reuse Patterns](08_reuse_patterns.ipynb) — helper qkernels, composite gates, stubs

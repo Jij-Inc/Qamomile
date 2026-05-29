@@ -68,9 +68,7 @@ def _convert_block_directives(text: str) -> str:
             continue
 
         # .. code:: or .. code-block:: -> ```python block
-        if stripped.startswith(".. code::") or stripped.startswith(
-            ".. code-block::"
-        ):
+        if stripped.startswith(".. code::") or stripped.startswith(".. code-block::"):
             indent = _get_indent(line)
             i += 1
             # Skip blank line after directive
@@ -149,9 +147,10 @@ def _collect_indented_block(
             lookahead = i + 1
             while lookahead < len(lines) and lines[lookahead].strip() == "":
                 lookahead += 1
-            if lookahead < len(lines) and _get_indent(
-                lines[lookahead]
-            ) > directive_indent:
+            if (
+                lookahead < len(lines)
+                and _get_indent(lines[lookahead]) > directive_indent
+            ):
                 block.append(line)
                 i += 1
                 continue

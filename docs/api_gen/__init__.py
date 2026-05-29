@@ -38,32 +38,22 @@ def _build_registry(
             continue
 
         if name in split_packages:
-            _register_module_symbols(
-                registry, pkg, full_name, f"api/{name}/index.md"
-            )
+            _register_module_symbols(registry, pkg, full_name, f"api/{name}/index.md")
             immediate_subs = get_immediate_submodules(pkg, package_dir)
             for sub_name, sub_module in immediate_subs:
                 sub_full = f"{full_name}.{sub_name}"
                 page = f"api/{name}/{sub_name}.md"
                 _register_module_symbols(registry, sub_module, sub_full, page)
                 sub_dir = package_dir / sub_name
-                deeper = collect_submodules_recursive(
-                    sub_module, sub_full, sub_dir
-                )
+                deeper = collect_submodules_recursive(sub_module, sub_full, sub_dir)
                 for deep_path, deep_module in deeper:
-                    _register_module_symbols(
-                        registry, deep_module, deep_path, page
-                    )
+                    _register_module_symbols(registry, deep_module, deep_path, page)
         else:
             page = f"api/{name}.md"
             _register_module_symbols(registry, pkg, full_name, page)
-            deeper = collect_submodules_recursive(
-                pkg, full_name, package_dir
-            )
+            deeper = collect_submodules_recursive(pkg, full_name, package_dir)
             for deep_path, deep_module in deeper:
-                _register_module_symbols(
-                    registry, deep_module, deep_path, page
-                )
+                _register_module_symbols(registry, deep_module, deep_path, page)
 
     return registry
 

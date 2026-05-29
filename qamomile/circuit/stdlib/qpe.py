@@ -54,7 +54,7 @@ def qpe(
         QFixed: Phase register as quantum fixed-point number
     """
     n = counting.shape[0]  # UInt handle (symbolic or concrete)
-    controlled_u = qmc.controlled(unitary)
+    controlled_u = qmc.control(unitary)
 
     # 1. Hadamard gates on counting qubits
     with for_loop(0, n, var_name="i") as i:

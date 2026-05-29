@@ -288,7 +288,7 @@ class TestBasicCircuitEstimation:
                 counting[i] = qm.h(counting[i])
 
             # Controlled-U operations
-            cp = qm.controlled(controlled_phase)
+            cp = qm.control(controlled_phase)
             for i in qm.range(m):
                 iterations = 2**i
                 for _ in qm.range(iterations):
@@ -321,7 +321,7 @@ class TestBasicCircuitEstimation:
             counting = qm.qubit_array(m, name="counting")
             target = qm.qubit(name="target")
 
-            controlled_gate = qm.controlled(repeated_gate)
+            controlled_gate = qm.control(repeated_gate)
             for i in qm.range(m):
                 iterations = 2**i
                 counting[i], target = controlled_gate(
@@ -733,7 +733,7 @@ class TestQPEResourceEstimation:
                 counting[i] = qm.h(counting[i])
 
             # Controlled-U^(2^k) operations
-            controlled_phase = qm.controlled(phase_gate)
+            controlled_phase = qm.control(phase_gate)
             for i in qm.range(m):
                 iterations = 2**i
                 counting[i], target = controlled_phase(
@@ -839,7 +839,7 @@ class TestQPEResourceEstimation:
             for i in qm.range(m):
                 counting[i] = qm.h(counting[i])
 
-            controlled_phase = qm.controlled(phase_gate)
+            controlled_phase = qm.control(phase_gate)
             for i in qm.range(m):
                 iterations = 2**i
                 counting[i], target = controlled_phase(
@@ -887,11 +887,18 @@ class TestQPEResourceEstimation:
         )
 
 
-class TestControlledIndicesEstimation:
-    """Test resource estimation for circuits using controlled_indices."""
+class TestControlledVectorViewEstimation:
+    """Resource estimation for the new ``cg(qs[0:N], qs[N])`` call form.
 
-    def test_controlled_indices_concrete_gate_count(self):
-        """4-qubit array, 3 controls via controlled_indices → total=1, multi_qubit=1."""
+    Successor to the deleted ``TestControlledIndicesEstimation`` suite:
+    the redesign removed the concrete-mode ``target_indices`` /
+    ``control_indices`` parameters in favour of positional
+    ``VectorView`` controls.  These tests pin the gate count for the
+    equivalent ``cg(qs[0:N], qs[N])`` shape.
+    """
+
+    def test_view_control_multi_qubit_gate_count(self):
+        """``cg(qs[0:3], qs[3])`` produces a single multi-qubit controlled gate."""
 
         @qm.qkernel
         def gate(q: qm.Qubit) -> qm.Qubit:
@@ -900,8 +907,8 @@ class TestControlledIndicesEstimation:
         @qm.qkernel
         def circuit() -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
-            qs = cg(qs, controlled_indices=[0, 1, 2])
+            cg = qm.control(gate, num_controls=3)
+            qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
         est = estimate_resources(circuit.block)
@@ -910,8 +917,8 @@ class TestControlledIndicesEstimation:
         assert est.gates.multi_qubit == 1
         assert est.gates.two_qubit == 0
 
-    def test_controlled_indices_two_qubit(self):
-        """2-qubit array, 1 control via controlled_indices → total=1, two_qubit=1."""
+    def test_view_control_two_qubit_gate_count(self):
+        """``cg(qs[0:1], qs[1])`` with num_controls=1 produces a single two-qubit gate."""
 
         @qm.qkernel
         def gate(q: qm.Qubit) -> qm.Qubit:
@@ -920,8 +927,8 @@ class TestControlledIndicesEstimation:
         @qm.qkernel
         def circuit() -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(2, name="qs")
-            cg = qm.controlled(gate, num_controls=1)
-            qs = cg(qs, controlled_indices=[0])
+            cg = qm.control(gate, num_controls=1)
+            qs[0], qs[1] = cg(qs[0], qs[1])
             return qs
 
         est = estimate_resources(circuit.block)
@@ -930,8 +937,8 @@ class TestControlledIndicesEstimation:
         assert est.gates.two_qubit == 1
         assert est.gates.multi_qubit == 0
 
-    def test_controlled_indices_in_loop(self):
-        """controlled_indices in loop of m iterations → total=m, multi_qubit=m."""
+    def test_view_control_in_loop(self):
+        """A loop of ``m`` iterations multiplies the gate count by ``m``."""
 
         @qm.qkernel
         def gate(q: qm.Qubit) -> qm.Qubit:
@@ -940,9 +947,9 @@ class TestControlledIndicesEstimation:
         @qm.qkernel
         def circuit(m: qm.UInt) -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
+            cg = qm.control(gate, num_controls=3)
             for _ in qm.range(m):
-                qs = cg(qs, controlled_indices=[0, 1, 2])
+                qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
         est = estimate_resources(circuit.block)
@@ -953,41 +960,8 @@ class TestControlledIndicesEstimation:
         concrete = est.substitute(m=5)
         assert concrete.gates.total == 5
 
-    def test_controlled_vs_target_indices_same_resources(self):
-        """controlled_indices=[0,1,2] vs target_indices=[3] → identical ResourceEstimate."""
-
-        @qm.qkernel
-        def gate(q: qm.Qubit) -> qm.Qubit:
-            return qm.z(q)
-
-        @qm.qkernel
-        def circuit_ci() -> qm.Vector[qm.Qubit]:
-            qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
-            qs = cg(qs, controlled_indices=[0, 1, 2])
-            return qs
-
-        @qm.qkernel
-        def circuit_ti() -> qm.Vector[qm.Qubit]:
-            qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
-            qs = cg(qs, target_indices=[3])
-            return qs
-
-        est_ci = estimate_resources(circuit_ci.block)
-        est_ti = estimate_resources(circuit_ti.block)
-
-        assert est_ci.qubits == est_ti.qubits
-        assert est_ci.gates.total == est_ti.gates.total
-        assert est_ci.gates.single_qubit == est_ti.gates.single_qubit
-        assert est_ci.gates.two_qubit == est_ti.gates.two_qubit
-        assert est_ci.gates.multi_qubit == est_ti.gates.multi_qubit
-        assert est_ci.gates.t_gates == est_ti.gates.t_gates
-        assert est_ci.gates.clifford_gates == est_ti.gates.clifford_gates
-        assert est_ci.gates.rotation_gates == est_ti.gates.rotation_gates
-
-    def test_controlled_indices_no_uint_tmp(self):
-        """No uint_tmp symbol should leak into resource estimates."""
+    def test_view_control_no_uint_tmp(self):
+        """No ``uint_tmp`` symbol leaks into the resource estimates."""
 
         @qm.qkernel
         def gate(q: qm.Qubit) -> qm.Qubit:
@@ -996,9 +970,9 @@ class TestControlledIndicesEstimation:
         @qm.qkernel
         def circuit(m: qm.UInt) -> qm.Vector[qm.Qubit]:
             qs = qm.qubit_array(4, name="qs")
-            cg = qm.controlled(gate, num_controls=3)
+            cg = qm.control(gate, num_controls=3)
             for _ in qm.range(m):
-                qs = cg(qs, controlled_indices=[0, 1, 2])
+                qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
         est = estimate_resources(circuit.block)

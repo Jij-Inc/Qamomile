@@ -145,7 +145,7 @@ def _controlled_phase_a(
     ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
 ) -> tuple[qmc.Qubit, qmc.Qubit]:
     """Top-level kernel that embeds ``ControlledUOperation`` via controlled(_phase_a)."""
-    op = qmc.controlled(_phase_a)
+    op = qmc.control(_phase_a)
     ctrl, target = op(ctrl, target, theta=theta)
     return ctrl, target
 
@@ -155,7 +155,7 @@ def _controlled_phase_b(
     ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
 ) -> tuple[qmc.Qubit, qmc.Qubit]:
     """Twin of ``_controlled_phase_a`` for cross-build ControlledU determinism."""
-    op = qmc.controlled(_phase_b)
+    op = qmc.control(_phase_b)
     ctrl, target = op(ctrl, target, theta=theta)
     return ctrl, target
 

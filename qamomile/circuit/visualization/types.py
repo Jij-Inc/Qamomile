@@ -14,10 +14,20 @@ __all__ = [
     "LayoutState",
 ]
 
-# Z-order for drawing priority (inspired by Qiskit)
-PORDER_WIRE = 1  # Wire lines (lowest priority)
-PORDER_GATE = 10  # Gate boxes
-PORDER_LINE = 11  # Connection lines for multi-qubit gates
+# Z-order for drawing priority (inspired by Qiskit).
+#
+# The two non-trivial slots are ``PORDER_LINE`` (vertical connection
+# wires between control dots and the target qubit of a multi-qubit
+# gate) and ``PORDER_GATE`` (gate boxes, control dots, target X glyphs).
+# ``PORDER_LINE`` sits *below* ``PORDER_GATE`` so a target gate whose
+# qubit happens to lie *between* two control qubits visually occludes
+# the connecting line passing through it.  When the constants were
+# inverted the connection line painted on top of the target's gate
+# box, producing a visible artifact where the line appeared to bleed
+# through the gate.
+PORDER_WIRE = 1  # Qubit horizontal wire lines (lowest priority)
+PORDER_LINE = 9  # Multi-qubit gate connection lines (below gates)
+PORDER_GATE = 10  # Gate boxes, control dots, target glyphs
 PORDER_TEXT = 13  # Text labels (highest priority)
 
 # Known TeX symbol names (Greek letters)

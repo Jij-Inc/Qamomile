@@ -108,7 +108,9 @@ biased_coin.draw(theta=0.6)
 # %%
 est = biased_coin.estimate_resources()
 print("qubits:", est.qubits)
+assert est.qubits == 1
 print("total gates:", est.gates.total)
+assert est.gates.total == 1
 
 # %% [markdown]
 # この量子カーネルでは具体的な数値が返りますが、パラメータ付き量子カーネルではSymPyを用いた代数的なリソース推定も可能です —[チュートリアル02](02_parameterized_kernels.ipynb)で詳しく扱います。
@@ -146,6 +148,8 @@ job = exe.sample(
 result = job.result()
 
 print("sample results:", result.results)
+assert result.shots == 256
+assert sum(count for _, count in result.results) == 256
 
 # %% [markdown]
 # 3つの概念を押さえておきましょう：
@@ -191,6 +195,8 @@ qiskit_circuit = transpiler.to_circuit(
     bindings={"theta": math.pi / 4},
 )
 print(qiskit_circuit)
+assert qiskit_circuit.num_qubits == 1
+assert qiskit_circuit.num_clbits == 1
 
 # %% [markdown]
 # ## 複数量子ビットの例
@@ -227,6 +233,10 @@ demo_result = (
 
 for outcome, count in demo_result.results:
     print(f"  outcome={outcome}, count={count}")
+assert demo_result.shots == 256
+assert sum(count for _, count in demo_result.results) == 256
+# Bell 状態 |Phi+>: (0,0) と (1,1) のみが出現する。
+assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
 
 # %% [markdown]
 # 2つのパターンに注目してください：
@@ -266,6 +276,7 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "QubitConsumedError"
 
 # %% [markdown]
 # 修正は簡単です：`qmc.h(q)`ではなく、常に`q = qmc.h(q)`と書いてください。
@@ -311,7 +322,8 @@ except Exception as e:
 #
 # 1. [パラメータ付き量子カーネル](02_parameterized_kernels.ipynb) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン
 # 2. [Vectorのスライシング](03_vector_slicing.ipynb) — `VectorView`、スライス代入、ネストしたスライス、ヘルパーカーネルへの引き渡し
-# 3. [リソース推定](04_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
-# 4. [実行モデル](05_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
-# 5. [古典フローパターン](06_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
-# 6. [再利用パターン](07_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ
+# 3. [制御ゲート](04_controlled_gates.ipynb) — `qmc.control`によるビルトインゲートやサブカーネルの制御、concrete/symbolicの制御数指定
+# 4. [リソース推定](05_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
+# 5. [実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
+# 6. [古典フローパターン](07_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
+# 7. [再利用パターン](08_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ
