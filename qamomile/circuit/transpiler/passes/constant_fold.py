@@ -15,7 +15,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.value import Value, ValueBase
@@ -409,8 +408,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
         operands (recursively, so nested array accesses like
         ``q[indices[uint_tmp]]`` are fully resolved).
 
-        For ``ControlledUOperation``, also folds ``num_controls``,
-        ``target_indices``, and ``controlled_indices`` fields.
+        For ``ControlledUOperation``, also folds ``num_controls`` and
+        ``control_indices`` fields.
         """
         new_operands: list[Any] = []
         changed = False
@@ -444,39 +443,28 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     extra_kwargs["power"] = new_power
                     changed = True
 
-            if isinstance(result_op, IndexSpecControlledU):
-                # Fold num_controls if symbolic.
-                if isinstance(result_op.num_controls, Value):
-                    new_nc = self._resolve_field_value(
-                        result_op.num_controls, folded_values
-                    )
-                    if new_nc is not result_op.num_controls:
-                        extra_kwargs["num_controls"] = new_nc
-                        changed = True
-                # Fold target_indices list.
-                if result_op.target_indices is not None:
-                    new_ti = self._fold_value_list(
-                        result_op.target_indices, folded_values
-                    )
-                    if new_ti is not None:
-                        extra_kwargs["target_indices"] = new_ti
-                        changed = True
-                # Fold controlled_indices list.
-                if result_op.controlled_indices is not None:
+            if isinstance(result_op, SymbolicControlledU):
+                # Always fold the ``control_indices`` Value list first
+                # so the IR carries constant ints when the bindings
+                # supply them.
+                if result_op.control_indices is not None:
                     new_ci = self._fold_value_list(
-                        result_op.controlled_indices, folded_values
+                        list(result_op.control_indices), folded_values
                     )
                     if new_ci is not None:
-                        extra_kwargs["controlled_indices"] = new_ci
+                        extra_kwargs["control_indices"] = tuple(new_ci)
                         changed = True
-            elif isinstance(result_op, SymbolicControlledU):
                 # Fold num_controls: Value -> int.  If resolved to int,
-                # promote to ConcreteControlledU.
+                # consider promoting to ConcreteControlledU.
                 new_nc = self._resolve_field_value(
                     result_op.num_controls, folded_values
                 )
                 if new_nc is not result_op.num_controls:
-                    if isinstance(new_nc, int):
+                    if (
+                        isinstance(new_nc, int)
+                        and result_op.control_indices is None
+                        and result_op.num_control_args == 1
+                    ):
                         # Promote to ConcreteControlledU.
                         #
                         # ``SymbolicControlledU`` carries the controls as a
@@ -490,6 +478,16 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         # this step ``control_operands`` aliases the first
                         # target into the control slice and the emit path
                         # produces a partial-arity controlled gate.
+                        #
+                        # Skipped when ``control_indices`` is non-``None``
+                        # because the pass-through semantics of non-selected
+                        # pool elements cannot be represented in the
+                        # promoted ``ConcreteControlledU`` operand layout
+                        # (no scalar slot stands for "this slot is part of
+                        # the control register but is not actually a
+                        # control on this op"); the
+                        # ``emit_controlled_u_with_symbolic_indices`` emit
+                        # path consumes the un-promoted form directly.
                         current_operands = (
                             new_operands if changed else list(result_op.operands)
                         )
@@ -510,6 +508,20 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         )
                         extra_kwargs = {}  # Already applied
                     else:
+                        if isinstance(new_nc, int):
+                            # ``SymbolicControlledU.num_controls`` is
+                            # contractually a ``Value`` with a UUID
+                            # (serialize, if-lowering, and the IR
+                            # walkers depend on it).  When the
+                            # constant fold resolves it to an ``int``
+                            # but promotion to ``ConcreteControlledU``
+                            # is blocked (e.g. ``control_indices``
+                            # is set), bind the constant onto a fresh
+                            # copy of the original ``UInt`` ``Value``
+                            # so the IR shape stays
+                            # ``Value(..., const_value=<int>)`` rather
+                            # than a bare ``int``.
+                            new_nc = result_op.num_controls.with_const(new_nc)
                         extra_kwargs["num_controls"] = new_nc
                         changed = True
             # ConcreteControlledU: num_controls is already int, nothing to fold.

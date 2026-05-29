@@ -428,7 +428,7 @@ print(executable.quantum_circuit)
 #   `bindings` provides a concrete `Vector` or `Matrix` value, so that
 #   `arr.shape[0]` resolves to a concrete `UInt` downstream.
 # - **`unroll_recursion`** — fixed-point loop of `inline ↔ partial_eval` for
-#   self-recursive `@qkernel`s (e.g. Suzuki–Trotter — see Tutorial 07).
+#   self-recursive `@qkernel`s (e.g. Suzuki–Trotter — see Tutorial 08).
 #   Terminates when the recursion bottoms out or raises if the bindings do
 #   not make the base case reachable.
 # - **`affine_validate`** — safety net that catches affine-type violations
@@ -472,7 +472,7 @@ print(executable.quantum_circuit)
 # How the pipeline handles control flow spans several layers — what the
 # frontend accepts, how each pass transforms it, and whether the backend
 # supports runtime branching. This section ties those layers together. See
-# [tutorial 06](06_classical_flow_patterns) for the user-facing patterns;
+# [tutorial 07](07_classical_flow_patterns) for the user-facing patterns;
 # here we focus on the compiler's view.
 #
 # ### 5.1 What the Frontend Accepts

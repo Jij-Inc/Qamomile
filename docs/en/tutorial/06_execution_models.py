@@ -203,4 +203,4 @@ assert math.isclose(run_result, math.cos(0.7), abs_tol=1e-10)
 #   the concrete values. Bind observables at transpile time.
 # - Bit ordering is big-endian: position in the return tuple matches qubit order.
 #
-# **Next**: [Classical Flow Patterns](06_classical_flow_patterns.ipynb) — loops with `qmc.range`, sparse data with `qmc.items`, and conditional branching.
+# **Next**: [Classical Flow Patterns](07_classical_flow_patterns.ipynb) — loops with `qmc.range`, sparse data with `qmc.items`, and conditional branching.

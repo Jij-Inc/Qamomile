@@ -560,3 +560,105 @@ class TestSliceSubKernelArgumentDraw:
         ]
         assert len(boxes) == 1, vc.children
         assert sorted(boxes[0].qubit_indices) == [0, 2, 4], boxes[0].qubit_indices
+
+
+class TestSymbolicSliceBoundsInLoopUnfold:
+    """Slices whose bounds clamp through ``_uint_min`` must still
+    resolve to root wires once the surrounding loop is unrolled.
+
+    Writing ``q[0:target_index]`` with a symbolic ``target_index``
+    runs the frontend's ``_uint_min(0, min(target_index, parent_len))``
+    clamp; the slice's ``slice_start`` becomes a symbolic ``BinOp``
+    result rather than a constant ``0``.  Before
+    ``_resolve_view_chain_to_root`` learned to fall back to
+    ``_evaluate_value`` for non-constant slice bounds, the analyzer
+    silently dropped every control qubit of a ``SymbolicControlledU``
+    whose pool was such a slice — the rendered figure showed a bare
+    target X gate (``control_count == 0``) on each unrolled iteration
+    instead of the MCX ladder the IR actually expresses.  These
+    tests pin both the per-iteration ``control_count`` and the
+    expected control + target wire mapping.
+    """
+
+    @staticmethod
+    def _multi_arg_mcx_ladder():
+        """Return a kernel that drives the MCX ladder this regression
+        guards: each iteration's pool is ``q[0:target_index]`` with a
+        symbolic, loop-variable-dependent ``target_index``."""
+
+        @qmc.qkernel
+        def kern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for k in qmc.range(n - 1):
+                target_index = n - 1 - k
+                mcx = qmc.control(qmc.x, num_controls=target_index)
+                q[0:target_index], q[target_index] = mcx(
+                    q[0:target_index],
+                    q[target_index],
+                )
+            return qmc.measure(q)
+
+        return kern
+
+    @staticmethod
+    def _build_with_kwargs(kernel, **build_kwargs):
+        """Build a VisualCircuit, forwarding kernel-side kwargs through
+        ``_build_graph_for_visualization``.
+
+        The shared :func:`_build_visual_circuit` helper threads its
+        kwargs into :class:`CircuitAnalyzer` instead of the kernel,
+        which is the right surface for analyzer flags but cannot
+        carry ``n=5`` to the kernel's Vector-size parameter.  This
+        helper does both: passes ``n=5`` to the kernel and sets
+        ``fold_loops=False`` on the analyzer so the loop unrolls.
+        """
+        graph = kernel._build_graph_for_visualization(**build_kwargs)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, fold_loops=False)
+        qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+        return analyzer.build_visual_ir(graph, qubit_map, qubit_names, num_qubits)
+
+    def test_unrolled_ladder_emits_descending_control_counts(self):
+        """Each unrolled iteration must expose the MCX size for that step.
+
+        With ``n=5`` the loop body runs four times and the wrapped X
+        gains one control fewer per iteration: 4, 3, 2, 1.  The
+        analyzer's slice-aware chain walk produces the same ladder
+        the full transpile pipeline emits.
+        """
+        kern = self._multi_arg_mcx_ladder()
+        vc = self._build_with_kwargs(kern, n=5)
+        unfolded = [c for c in vc.children if isinstance(c, VUnfoldedSequence)]
+        assert len(unfolded) == 1, vc.children
+        control_counts: list[int] = []
+        for iteration in unfolded[0].iterations:
+            for node in iteration:
+                if isinstance(node, VGate) and node.kind == VGateKind.CONTROLLED_U_BOX:
+                    control_counts.append(node.control_count)
+        assert control_counts == [4, 3, 2, 1], control_counts
+
+    def test_unrolled_ladder_targets_one_wire_per_iteration(self):
+        """Each unrolled iteration places the X on the iteration's
+        target wire while the prefix wires appear as controls.
+
+        For ``n=5`` and ``target_index = n - 1 - k``, iteration ``k``
+        targets ``q[target_index]`` with prefix controls
+        ``q[0:target_index]``.  After resolution the
+        ``qubit_indices`` list is ``controls + [target]``: e.g. for
+        ``k=0`` it is ``[0, 1, 2, 3, 4]``, for ``k=1`` it is
+        ``[0, 1, 2, 3]``.
+        """
+        kern = self._multi_arg_mcx_ladder()
+        vc = self._build_with_kwargs(kern, n=5)
+        unfolded = next(c for c in vc.children if isinstance(c, VUnfoldedSequence))
+        expected = [
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3],
+            [0, 1, 2],
+            [0, 1],
+        ]
+        observed: list[list[int]] = []
+        for iteration in unfolded.iterations:
+            for node in iteration:
+                if isinstance(node, VGate) and node.kind == VGateKind.CONTROLLED_U_BOX:
+                    observed.append(list(node.qubit_indices))
+        assert observed == expected, observed

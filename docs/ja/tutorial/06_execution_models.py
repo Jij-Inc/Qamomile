@@ -198,4 +198,4 @@ assert math.isclose(run_result, math.cos(0.7), abs_tol=1e-10)
 # - `qmc.Observable`はハンドル型、`qamomile.observable.Z(0)`等が具体的な値です。オブザーバブルはトランスパイル時にバインドします。
 # - ビット順序はビッグエンディアン：戻り値タプルの位置が量子ビットの順序に対応します。
 #
-# **次へ**：[古典フローパターン](06_classical_flow_patterns.ipynb) — `qmc.range`によるループ、`qmc.items`によるスパースデータ、条件分岐。
+# **次へ**：[古典フローパターン](07_classical_flow_patterns.ipynb) — `qmc.range`によるループ、`qmc.items`によるスパースデータ、条件分岐。
