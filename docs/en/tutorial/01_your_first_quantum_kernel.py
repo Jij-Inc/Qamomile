@@ -166,7 +166,9 @@ biased_coin.draw(theta=0.6)
 # %%
 est = biased_coin.estimate_resources()
 print("qubits:", est.qubits)
+assert est.qubits == 1
 print("total gates:", est.gates.total)
+assert est.gates.total == 1
 
 # %% [markdown]
 # For this simple qkernel the numbers are concrete, but for parameterized qkernels they become symbolic SymPy expressions — we will explore this in detail in [Tutorial 02](02_parameterized_kernels.ipynb).
@@ -204,6 +206,8 @@ job = exe.sample(
 result = job.result()
 
 print("sample results:", result.results)
+assert result.shots == 256
+assert sum(count for _, count in result.results) == 256
 
 # %% [markdown]
 # Let's unpack the three concepts:
@@ -293,6 +297,10 @@ demo_result = (
 
 for outcome, count in demo_result.results:
     print(f"  outcome={outcome}, count={count}")
+assert demo_result.shots == 256
+assert sum(count for _, count in demo_result.results) == 256
+# Bell state |Phi+>: only (0,0) and (1,1) outcomes appear.
+assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
 
 # %% [markdown]
 # Notice two patterns here:
@@ -337,6 +345,7 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "QubitConsumedError"
 else:
     # The ``else`` branch runs only if neither the decorator nor
     # ``.draw()`` raised. Surfacing that as an AssertionError turns

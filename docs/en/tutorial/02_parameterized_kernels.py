@@ -152,6 +152,7 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "SyntaxError"
 else:
     # The ``else`` branch runs only if neither the decorator nor
     # ``.draw()`` raised. Surfacing that as an AssertionError turns
@@ -221,6 +222,10 @@ for theta in [0.1, 0.5, 1.0]:
         bindings={"theta": theta},
     ).result()
     print(f"theta={theta:.1f} -> {result.results}")
+    assert result.shots == 128
+    assert sum(count for _, count in result.results) == 128
+    # Measuring n=4 qubits -> each outcome is a 4-element bit tuple.
+    assert all(len(outcome) == 4 for outcome, _ in result.results)
 
 # %% [markdown]
 # The transpiled executable is reused across all three runs — only the runtime binding `{"theta": theta}` changes.
