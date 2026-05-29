@@ -166,11 +166,23 @@ Snippet execution only catches "works / doesn't work". The **factual claims in t
 - Counts like "N raise sites" or "three new passes" may also be stale relative to the merged code.
 - Treat PR prose as draft text. Before it lands in a release note, `grep` for the corresponding code (class definition / `__all__` / `__init__.py` / actual `raise` line) and confirm.
 
+**Verify novelty, not just existence**:
+
+A feature being *present in the code* does not make it *new in this release*. Before calling anything "new", "now possible", or the headline, confirm it did not already ship in an earlier version:
+
+- Read the previous release note (`docs/en/release_notes/v<prev>.md`) **and** the one-line entries in `docs/en/release_notes/index.md` — the capability may already be announced there.
+- When in doubt, diff against the previous tag: `git show v<prev>:<path>` or `git log v<prev>..HEAD -- <path>` to confirm whether the API / behaviour predates this release.
+- This is especially important for claims sourced from sub-agents or PR prose, which routinely re-describe a long-standing capability as if it were introduced now.
+- Real example (v0.12.4): "controlling built-in gates without a wrapper" reads like a headline feature, but `index.md` already credited it to **v0.12.2** ("`qmc.controlled` accepts built-in gates"). The genuinely new part was the *symbolic-mode expansion* (multi-arg control prefix + `control_indices`), not the built-in wrapping. Anchor every "new" on what actually changed since `v<prev>`, and say plainly when the core already existed ("X has been possible since v<prev>; this release adds Y").
+
 **What to cross-check against what**:
 
 | Claim type | Cross-check against |
 |---|---|
 | Class / function / module names | `grep`/`rg` for the same-named definition under `qamomile/` |
+| Function signature (when quoted in prose) | Copy the **full** parameter list from the `def`, including every keyword arg and its default — do not truncate (e.g. `from_higher_ising(higher_ising, constant=0.0)` dropped the real `simplify=False`) |
+| Whether a feature is *new* this release | The previous release note + `index.md`, or `git show v<prev>:<path>` — see "Verify novelty" above |
+| Where/how something is represented (IR op vs. cost Hamiltonian vs. emitted circuit) | Trace the actual code path; do not conflate an operator with its circuit realization (e.g. a higher-order term is a `Z...Z` term *in the cost Hamiltonian*, realized as a *phase gadget* in the circuit — two different files) |
 | Public API path (`qamomile.foo.bar`) | `__all__` / re-export in `qamomile/foo/__init__.py` |
 | Subclass relationship (`X is a subclass of Y`) | Read `class X(Y):` directly |
 | Raised exception type | `grep` `raise <ExceptionName>` near the claim site |
@@ -243,6 +255,7 @@ Follow the rules in the `/translate` skill (`.claude/skills/translate/SKILL.md`)
 - **In-code comments** are translated to Japanese. **The code itself does not change.**
 - **No space between Japanese characters and digits / ASCII** (translate-skill rule 2).
 - **Widely-known technical terms stay in English** (`@qkernel`, `Hamiltonian`, `Vector[Observable]`, `pauli_evolve`, `Suzuki–Trotter`, etc.).
+- **Mode names and feature adjectives stay in English and consistent** (translate-skill rule 3): `concrete` / `symbolic` (mode), `active`, `target`, `pool`, `prefix`. Do not katakana-ize them ("シンボリック" / "アクティブ"), and do not mix an English form in one place with a katakana form in another within the same note. When unsure, match the corresponding `docs/ja/` tutorial's spelling.
 
 #### JA file updates
 
