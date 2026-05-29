@@ -123,6 +123,12 @@ circuit = transpiler.to_circuit(
     bindings={"n": 3, "edges": edge_data, "gamma": 0.4},
 )
 print(circuit)
+assert circuit.num_qubits == 3
+# n=3 -> 3 initial H + 3 measurements; len(edge_data)=3 -> exactly 3 RZZ.
+_ops = {}
+for _instr in circuit.data:
+    _ops[_instr.operation.name] = _ops.get(_instr.operation.name, 0) + 1
+assert _ops == {"h": 3, "rzz": 3, "measure": 3}
 
 # %% [markdown]
 # Only the three edges in `edge_data` produce RZZ gates — no wasted operations.
@@ -171,6 +177,9 @@ else:
     result = job.result()
     for value, count in result.results:
         print(f"  bit={value}: {count} shots")
+    # q0 prepared as |1>; the if-branch flips q1 to |1> on every shot.
+    assert result.shots == 100
+    assert result.results == [(1, 100)]
 
 # %% [markdown]
 # Since `q0` is prepared as |1⟩, the measurement always yields 1, so `q1` always gets flipped — every shot should return 1.
@@ -204,6 +213,9 @@ def repeat_until_zero() -> qmc.Bit:
 exe_while = transpiler.transpile(repeat_until_zero)
 qc_while = exe_while.compiled_quantum[0].circuit
 print(qc_while)
+assert qc_while.num_qubits == 2
+# The `while bit:` lowers to a Qiskit `while_loop` instruction.
+assert "while_loop" in {instr.operation.name for instr in qc_while.data}
 
 # %% [markdown]
 # ### Combining `if` and `while`
@@ -238,6 +250,8 @@ def measure_and_correct() -> qmc.Bit:
 exe_combined = transpiler.transpile(measure_and_correct)
 qc_combined = exe_combined.compiled_quantum[0].circuit
 print(qc_combined)
+assert qc_combined.num_qubits == 3
+assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 
 # %% [markdown]
 # ## Summary
