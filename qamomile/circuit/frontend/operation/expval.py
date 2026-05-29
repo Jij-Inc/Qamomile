@@ -12,7 +12,7 @@ from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
 
 if TYPE_CHECKING:
     pass
@@ -93,6 +93,15 @@ def expval(
         # unpacking is unaffected.
         consumed_qubits = tuple(q.consume(operation_name="expval") for q in qubits)
         qubit_values = [q.value for q in consumed_qubits]
+        # Snapshot each element's root ``(array_uuid, index)`` so emit can map
+        # the observable's Pauli index to the physical qubit registered under
+        # the root array's QInit key, even for a Vector element whose own UUID
+        # was never registered in the quantum segment (e.g. an ungated ancilla,
+        # or an element produced as a gate/composite result).  A standalone
+        # qubit has no ``parent_array`` and resolves to ``None``; it is recorded
+        # with the ``("", -1)`` sentinel so emit falls back to the flat UUID
+        # lookup that already resolves standalone qubits.
+        parent_addrs = [resolve_root_qubit_address(v) for v in qubit_values]
         qubits_value = ArrayValue(
             type=qubit_values[0].type,
             name="expval_qubits",
@@ -100,6 +109,12 @@ def expval(
         ).with_array_runtime_metadata(
             element_uuids=tuple(q.uuid for q in qubit_values),
             element_logical_ids=tuple(q.logical_id for q in qubit_values),
+            element_parent_uuids=tuple(
+                addr[0] if addr is not None else "" for addr in parent_addrs
+            ),
+            element_parent_indices=tuple(
+                addr[1] if addr is not None else -1 for addr in parent_addrs
+            ),
         )
     else:
         # Guard for Vector[Qubit] operands: if any slot of the array was

@@ -25,7 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, resolve_root_qubit_address
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
@@ -548,34 +548,26 @@ class ResourceAllocator:
     ) -> QubitAddress | None:
         """Walk the slice_of chain and return the root-space QubitAddress.
 
-        Composes the nested affine maps so ``view[i]`` resolves to
-        ``QubitAddress(root_uuid, start + step * i)`` for the
-        composed ``(start, step)``.  Returns ``None`` when the operand
-        is not an array element, when its index is non-constant, or
-        when the chain contains any non-constant ``slice_start`` /
-        ``slice_step`` value (the latter case is deferred to the
-        emit-time resolver, which has bindings available).
+        Thin wrapper over :func:`resolve_root_qubit_address` (shared with the
+        frontend's ``expval`` lowering) that wraps the resolved
+        ``(root_uuid, index)`` pair in a ``QubitAddress``.
+
+        Args:
+            operand (Value): The qubit operand to resolve; expected to be an
+                array element with a constant index.
+
+        Returns:
+            QubitAddress | None: ``QubitAddress(root_uuid, index)`` for a
+                resolvable array element, or ``None`` when the operand is not an
+                array element, its index is non-constant, or the slice chain has
+                a non-constant ``slice_start`` / ``slice_step`` (deferred to the
+                emit-time resolver, which has bindings available).
         """
-        if operand.parent_array is None or not operand.element_indices:
+        resolved = resolve_root_qubit_address(operand)
+        if resolved is None:
             return None
-        idx_value = operand.element_indices[0]
-        if not idx_value.is_constant():
-            return None
-        idx = int(idx_value.get_const())
-        parent = operand.parent_array
-        while parent.slice_of is not None:
-            if (
-                parent.slice_start is None
-                or parent.slice_step is None
-                or not parent.slice_start.is_constant()
-                or not parent.slice_step.is_constant()
-            ):
-                return None
-            start = int(parent.slice_start.get_const())
-            step = int(parent.slice_step.get_const())
-            idx = start + step * idx
-            parent = parent.slice_of
-        return QubitAddress(parent.uuid, idx)
+        root_uuid, idx = resolved
+        return QubitAddress(root_uuid, idx)
 
     def _allocate_pauli_evolve(
         self,

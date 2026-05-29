@@ -374,10 +374,27 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                 # Non-view case: match legacy direct element_uuid lookup
                 # so arrays whose elements were registered under explicit
                 # UUIDs (e.g. tuple-packed expval qubits) still resolve.
+                #
+                # On a miss, fall back to the element's root
+                # ``(root_uuid, index)`` address captured at trace time: the
+                # root array's QInitOperation always registers that composite
+                # key, so this resolves a Vector element whose own (per-version)
+                # UUID was never registered in the quantum segment -- e.g. an
+                # ungated ancilla, or an element that is a gate/composite
+                # result.  Standalone qubits carry the ``("", -1)`` sentinel
+                # (``None`` here) and stay on the flat-lookup path above.
+                parent_addrs = qubits_value.get_element_parent_addresses()
                 for i, qubit_uuid in enumerate(qubits_value.get_element_uuids()):
                     addr = QubitAddress(qubit_uuid)
                     if addr in uuid_to_physical:
                         qubit_map[i] = uuid_to_physical[addr]
+                        continue
+                    root_addr_pair = parent_addrs[i] if i < len(parent_addrs) else None
+                    if root_addr_pair is not None:
+                        root_uuid, root_idx = root_addr_pair
+                        root_addr = QubitAddress(root_uuid, root_idx)
+                        if root_addr in uuid_to_physical:
+                            qubit_map[i] = uuid_to_physical[root_addr]
             else:
                 # View case: enumerate by view length (via element_uuids
                 # or shape) and look up each position in the root's
