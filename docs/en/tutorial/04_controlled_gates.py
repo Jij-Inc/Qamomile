@@ -19,11 +19,8 @@
 #
 # # Controlling Gates and Sub-Kernels with `qmc.control`
 #
-# [Tutorial 03](03_vector_slicing.ipynb) showed how `VectorView`
-# slices let one helper kernel operate on a contiguous chunk of a
-# larger register. This chapter covers `qmc.control`, which turns
-# any Qamomile gate — a built-in like `qmc.rx`, or a user-defined
-# `@qmc.qkernel` — into its *controlled* version.
+# `qmc.control` turns any Qamomile gate (a built-in like `qmc.rx`,
+# or a user-defined `@qmc.qkernel`) into its *controlled* version.
 #
 # `qmc.control` has two modes: *concrete* (the number of control
 # qubits is a Python `int`) and *symbolic* (the number is a
@@ -114,6 +111,8 @@ print("control |1> ->", on_counts)
 assert on_counts == {1: 256}
 
 # %% [markdown]
+# A few points to note:
+#
 # - You can write `crx = qmc.control(qmc.rx)` either inside or
 #   outside a qkernel. Either way the returned value is reusable;
 #   bind it to a name and call it as many times as you like.
@@ -139,16 +138,9 @@ assert on_counts == {1: 256}
 # | Aspect | Concrete | Symbolic |
 # | --- | --- | --- |
 # | `num_controls=` | Python `int` (default `1`) | `qmc.UInt` handle, or any `UInt` expression |
-# | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `control_indices=`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` |
-# | `control_indices=` | not accepted | optional — picks which slots of the pool are active |
+# | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `control_indices`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` |
+# | `control_indices` | not accepted | optional — picks which slots of the pool are active |
 # | Control count resolved at | when `qmc.control(...)` is evaluated (module-load or tracing time) | transpile time (from `bindings`) |
-#
-# A short decision rule: reach for *concrete* mode when the
-# control count is a literal you know while writing the qkernel
-# and you want to name each control qubit individually. Reach for
-# *symbolic* mode when the count is a kernel parameter (or an
-# expression over one — `num_controls=n - 1` is the textbook
-# multi-controlled form).
 #
 # Most of `qmc.control`'s features (`power=`, default values,
 # classical-kwarg reordering, sub-kernels that take
@@ -161,30 +153,22 @@ assert on_counts == {1: 256}
 # (cg-3)=
 # ## 3. Patterns that work in BOTH modes
 #
-# Each feature in this section behaves the same way under either
-# mode, including the multi-argument control shapes (3.6 / 3.7).
-# The cells below use concrete mode (because the code is shorter
-# without a `UInt` kernel parameter in the picture), but the same
-# feature is available in symbolic mode too. Symbolic mode accepts
-# both the single-pool control argument shape ([](#cg-5-1) –
-# [](#cg-5-4)) and the multi-arg form ([](#cg-5-5)) — the only
-# thing that changes from concrete is that `num_controls` is a
-# `UInt` expression and the qubit-count match is checked at
-# transpile time. [](#cg-5) spells out the symbolic-only argument
-# shapes; this section is about features whose *behaviour* is
-# mode-agnostic.
+# Each feature in this section behaves the same way in either mode.
+# The cells below use concrete mode for brevity, but the same
+# feature is available in symbolic mode too — the only differences
+# are that `num_controls` is a `UInt` expression and the
+# qubit-count match is checked at transpile time. [](#cg-5) covers
+# the symbolic-only argument shapes.
 
 # %% [markdown]
 # (cg-3-1)=
 # ### 3.1 Controlling any callable
 #
 # `qmc.control` accepts either a built-in gate function (`qmc.rx`,
-# `qmc.h`, `qmc.p`, ...) or any user-defined `@qmc.qkernel`.
-# `qmc.control` does not care which: it looks at the callable's
-# signature, extracts the quantum operands and the classical
-# parameters, and emits a controlled-U around the rest. In the
-# example below, `ch` controls a single primitive and `cg`
-# controls a user-defined kernel body with two gates inside.
+# `qmc.h`, `qmc.p`, ...) or any user-defined `@qmc.qkernel`. The
+# example below uses two controlled operations in one kernel: `ch`
+# (the controlled `qmc.h`) and `cg` (the controlled user-defined
+# `_h_then_rx`).
 
 
 # %%
@@ -195,14 +179,17 @@ def _h_then_rx(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     return q
 
 
+ch = qmc.control(qmc.h)
+cg = qmc.control(_h_then_rx)
+
+
+# %%
 @qmc.qkernel
 def control_any_callable_demo() -> qmc.Vector[qmc.Bit]:
     # q[0] is the shared control; q[1] / q[2] are the two targets.
     q = qmc.qubit_array(3, "q")
     q[0] = qmc.x(q[0])
-    ch = qmc.control(qmc.h)  # built-in gate function
     q[0], q[1] = ch(q[0], q[1])
-    cg = qmc.control(_h_then_rx)  # user @qmc.qkernel
     q[0], q[2] = cg(q[0], q[2], theta=math.pi / 4)
     return qmc.measure(q)
 
@@ -215,15 +202,7 @@ control_any_callable_demo.draw()
 #
 # A controlled kernel may take a `Vector[Qubit]` argument. The
 # caller passes a `Vector` or a `VectorView` of the matching
-# length; the controlled-U emit pass resolves the vector operand
-# to its physical target qubits and hands the inner block to the
-# backend. Qiskit emits the whole controlled block as a single
-# native gate, while CUDA-Q controls each gate of the block
-# individually. Not every backend can control a multi-qubit inner
-# block this way — QuriParts rejects the multi-target case above
-# with a clear `EmitError`, so run such kernels on Qiskit or
-# CUDA-Q. Either way the call site stays the same — you do not
-# have to spell out one operand per qubit.
+# length.
 
 
 # %%
@@ -234,11 +213,14 @@ def _vec_h(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     return qs
 
 
+cg = qmc.control(_vec_h, num_controls=1)
+
+
+# %%
 @qmc.qkernel
 def vec_target_demo() -> qmc.Vector[qmc.Bit]:
     qs = qmc.qubit_array(3, "qs")
     qs[0] = qmc.x(qs[0])
-    cg = qmc.control(_vec_h, num_controls=1)
     qs[0], qs[1:3] = cg(qs[0], qs[1:3])
     return qmc.measure(qs)
 
@@ -249,20 +231,8 @@ vec_target_demo.draw()
 # (cg-3-3)=
 # ### 3.3 Default values from the controlled kernel's signature
 #
-# When the controlled `@qmc.qkernel` declares a Python default for
-# a classical parameter, callers may either omit that keyword
-# (letting the default flow through) or override it positionally
-# at the call site. `qmc.control` fills the missing value in via
-# `inspect.Signature.bind + apply_defaults`, so the resolved value
-# reaches the controlled-U just like a normal direct call. (Only
-# `@qmc.qkernel` callables can carry defaults — see [](#cg-6-7)
-# for what happens if you try to do the same with a plain Python
-# function.)
-#
-# Both forms work in either mode. The cells below show the omit
-# form first in concrete mode, then the same omit form repeated in
-# symbolic mode to make explicit that "default in both modes" is
-# real and not a concrete-only convenience.
+# When the controlled kernel declares a Python default for a
+# classical parameter, the caller may omit that keyword.
 
 
 # %%
@@ -271,12 +241,15 @@ def _phase(q: qmc.Qubit, theta: qmc.Float = math.pi / 2) -> qmc.Qubit:
     return qmc.rx(q, theta)
 
 
+cg = qmc.control(_phase)
+
+
+# %%
 @qmc.qkernel
 def default_arg_demo() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
     c = qmc.x(c)
-    cg = qmc.control(_phase)
     c, t = cg(c, t)  # theta defaults to math.pi / 2
     return qmc.measure(t)
 
@@ -294,72 +267,27 @@ default_arg_demo.draw()
 @qmc.qkernel
 def default_arg_demo_symbolic(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, "q")
-    for i in qmc.range(n - 1):
-        q[i] = qmc.x(q[i])  # drive every control slot to |1>
-    cg = qmc.control(_phase, num_controls=n - 1)
+    q[0 : n - 1] = qmc.x(q[0 : n - 1])  # drive every control slot to |1>
+    cg = qmc.control(_phase, num_controls=n - 1)  # symbolic num_controls
     q[0 : n - 1], q[n - 1] = cg(q[0 : n - 1], q[n - 1])
     return qmc.measure(q)
 
 
-default_arg_demo_symbolic.draw(n=3)
+default_arg_demo_symbolic.draw(n=3, fold_loops=False)
 
 # %% [markdown]
 # (cg-3-4)=
-# ### 3.4 Classical keyword arguments in any order
+# ### 3.4 Controlling `U^k` with `power=`
 #
-# Classical kwargs at the call site are matched by name and
-# reordered to follow the controlled kernel's declared signature,
-# so the same call compiled with the kwargs in either order
-# produces the same circuit. The assertion at the end of the cell
-# verifies that explicitly by comparing the transpiled Qiskit
-# circuits character-for-character.
+# Passing `power=k` controls the *k-th power* `U^k` instead of `U`
+# itself. `power` accepts a Python `int` (resolved at compile
+# time) or a `qmc.UInt` handle (resolved at transpile time from
+# `bindings`), and works regardless of whether `num_controls` is
+# concrete or symbolic.
 
 
 # %%
-@qmc.qkernel
-def _two_param(q: qmc.Qubit, alpha: qmc.Float, beta: qmc.Float) -> qmc.Qubit:
-    q = qmc.rx(q, alpha)
-    q = qmc.rz(q, beta)
-    return q
-
-
-@qmc.qkernel
-def kwargs_in_order() -> qmc.Bit:
-    c = qmc.qubit(name="c")
-    t = qmc.qubit(name="t")
-    c = qmc.x(c)
-    cg = qmc.control(_two_param)
-    c, t = cg(c, t, alpha=0.7, beta=1.3)
-    return qmc.measure(t)
-
-
-@qmc.qkernel
-def kwargs_reversed() -> qmc.Bit:
-    c = qmc.qubit(name="c")
-    t = qmc.qubit(name="t")
-    c = qmc.x(c)
-    cg = qmc.control(_two_param)
-    c, t = cg(c, t, beta=1.3, alpha=0.7)
-    return qmc.measure(t)
-
-
-exe_a = transpiler.transpile(kwargs_in_order)
-exe_b = transpiler.transpile(kwargs_reversed)
-assert str(exe_a.compiled_quantum[0].circuit) == str(exe_b.compiled_quantum[0].circuit)
-
-kwargs_in_order.draw()
-
-# %% [markdown]
-# (cg-3-5)=
-# ### 3.5 Controlling `U^k` with `power=`
-#
-# Passing `power=k` controls the *k-th power* of the underlying
-# unitary instead of `U` itself — the standard pattern in QPE,
-# where the j-th register applies a controlled-`U^(2**j)`.
-# `power` accepts a Python `int` (resolved at compile time) **or**
-# a `qmc.UInt` handle (resolved at transpile time from
-# `bindings`), and this works regardless of whether `num_controls`
-# is concrete or symbolic. Both shapes are shown side by side.
+cg = qmc.control(qmc.rx)  # num_controls = 1 (concrete)
 
 
 # %%
@@ -368,39 +296,26 @@ def power_demo_concrete() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
     c = qmc.x(c)
-    cg = qmc.control(qmc.rx)  # num_controls = 1 (concrete)
     c, t = cg(c, t, angle=math.pi / 4, power=3)  # power is a Python int
-    return qmc.measure(t)
-
-
-@qmc.qkernel
-def power_demo_symbolic(k: qmc.UInt) -> qmc.Bit:
-    c = qmc.qubit(name="c")
-    t = qmc.qubit(name="t")
-    c = qmc.x(c)
-    cg = qmc.control(qmc.rx)
-    c, t = cg(c, t, angle=math.pi / 4, power=k)  # power is a UInt handle
     return qmc.measure(t)
 
 
 power_demo_concrete.draw()
 
-# %%
-# Symbolic-power example needs a binding for `k` before draw / transpile.
-power_demo_symbolic.draw(k=3)
-
 # %% [markdown]
-# (cg-3-6)=
-# ### 3.6 Multiple separate positional control args (CCX style)
+# (cg-3-5)=
+# ### 3.5 Multiple separate positional control args (CCX style)
 #
 # With `num_controls=2`, the call site lists each control qubit
 # as its own positional argument before the target. The example
 # below is the canonical CCX (Toffoli): two controls `c0`, `c1`
 # and a target `t`. The same pattern extends to `num_controls=3`
 # (CCCX), `num_controls=4`, etc., as long as you have that many
-# distinct `Qubit` handles to pass in. The same call shape works
-# unchanged in symbolic mode ([](#cg-5-5)); it is shown here in
-# concrete mode because the count is a literal.
+# distinct `Qubit` handles to pass in.
+
+
+# %%
+ccx = qmc.control(qmc.x, num_controls=2)
 
 
 # %%
@@ -411,7 +326,6 @@ def toffoli_demo() -> qmc.Bit:
     t = qmc.qubit(name="t")
     c0 = qmc.x(c0)
     c1 = qmc.x(c1)
-    ccx = qmc.control(qmc.x, num_controls=2)
     c0, c1, t = ccx(c0, c1, t)
     return qmc.measure(t)
 
@@ -419,16 +333,19 @@ def toffoli_demo() -> qmc.Bit:
 toffoli_demo.draw()
 
 # %% [markdown]
-# (cg-3-7)=
-# ### 3.7 Mixing scalar Qubit and `VectorView` controls
+# (cg-3-6)=
+# ### 3.6 Mixing scalar Qubit and `VectorView` controls
 #
 # The positional control prefix may freely mix scalar `Qubit`
 # handles, `VectorView` slices, and whole `Vector[Qubit]`s, as
 # long as the total qubit count adds up to `num_controls`. Here
 # the three controls for a `num_controls=3` controlled-H come from
 # `qs[0]` (a scalar `Qubit`, 1 qubit) plus `qs[1:3]` (a
-# `VectorView`, 2 qubits). This mix works in both modes; symbolic
-# mode reaches it through the multi-arg form ([](#cg-5-5)).
+# `VectorView`, 2 qubits).
+
+
+# %%
+cg = qmc.control(qmc.h, num_controls=3)
 
 
 # %%
@@ -438,7 +355,6 @@ def mixed_controls_demo() -> qmc.Vector[qmc.Bit]:
     qs[0] = qmc.x(qs[0])
     qs[1] = qmc.x(qs[1])
     qs[2] = qmc.x(qs[2])
-    cg = qmc.control(qmc.h, num_controls=3)
     qs[0], qs[1:3], qs[3] = cg(qs[0], qs[1:3], qs[3])
     return qmc.measure(qs)
 
@@ -452,14 +368,16 @@ mixed_controls_demo.draw()
 # Almost every control-argument shape works in both modes
 # ([](#cg-3)), and symbolic mode adds its own features
 # ([](#cg-5)). The one shape that genuinely *requires* concrete
-# mode is the most basic one: a single scalar `Qubit` as the lone
-# control. In symbolic mode a single control argument is read as
-# the pool form and must be a `Vector` / `VectorView`, so a bare
-# scalar has nowhere to go — and a control whose count is fixed at
+# mode is a single scalar `Qubit` as the lone control. In symbolic
+# mode a single control argument is read as the pool form and must
+# be a `Vector` / `VectorView`; a control whose count is fixed at
 # one has no reason to be symbolic anyway. This is exactly the
 # minimal controlled-RX of [](#cg-1); the controlled-X (CNOT)
-# below is the same single-scalar-control shape. Passing a lone
-# scalar in symbolic mode raises a clear error ([](#cg-6-10)).
+# below is the same single-scalar-control shape.
+
+
+# %%
+cx = qmc.control(qmc.x)  # num_controls defaults to 1 (concrete)
 
 
 # %%
@@ -468,7 +386,6 @@ def cnot_demo() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
     c = qmc.x(c)  # drive the control to |1> so the X fires
-    cx = qmc.control(qmc.x)  # num_controls defaults to 1 (concrete)
     c, t = cx(c, t)
     return qmc.measure(t)
 
@@ -482,49 +399,36 @@ cnot_demo.draw()
 # This section covers what you get when `num_controls` is a
 # `qmc.UInt` handle (or any `UInt` expression like `n - 1`): the
 # number of *active* controls is decided at transpile time from
-# `bindings`, rather than at the moment
-# `qmc.control(..., num_controls=...)` is evaluated. Some of what
-# follows is genuinely symbolic-only (a pool with a symbolic
-# length, and `control_indices=`); the multi-arg shape in
-# [](#cg-5-5) is simply the symbolic counterpart of the concrete
-# demos in [](#cg-3-6) / [](#cg-3-7).
+# `bindings`, not at the moment `qmc.control(..., num_controls=...)`
+# is evaluated. [](#cg-5-5) also shows the symbolic counterpart of
+# [](#cg-3-5) / [](#cg-3-6).
 #
 # Two call-site shapes are supported for the control side:
 #
-# - **Single-pool form** ([](#cg-5-1) – [](#cg-5-4)): one `Vector[Qubit]` or
-#   `VectorView` is passed as the control argument and the entire
-#   pool — or the subset chosen by `control_indices=` — acts
-#   as the active controls.
+# - **Single-pool form** ([](#cg-5-1) – [](#cg-5-4)): one
+#   `Vector[Qubit]` or `VectorView` is passed as the control
+#   argument, and the entire pool — or the subset chosen by
+#   `control_indices` — acts as the active controls.
 # - **Multi-arg form** ([](#cg-5-5)): the control prefix is several
-#   positional arguments (scalar `Qubit`, `VectorView` slices,
-#   whole `Vector`s, or a mix) whose total qubit count equals
-#   `num_controls` at transpile time.  This is what concrete mode
-#   already does ([](#cg-3-6) / [](#cg-3-7)), now lifted to symbolic
+#   positional arguments (scalar `Qubit`, `VectorView`,
+#   `Vector[Qubit]`, or a mix) whose qubit counts sum to
+#   `num_controls`. This is what concrete mode already does
+#   ([](#cg-3-5) / [](#cg-3-6)), lifted to a symbolic
 #   `num_controls`.
 #
-# A `control_indices=` keyword is available in symbolic mode
-# only; it picks which slots of a single-pool argument actually
-# wire in as active controls (the rest pass through untouched).
-# `control_indices=` is only valid with the single-pool form;
-# combining it with the multi-arg form is rejected at compose
-# time.
+# The `control_indices` keyword is symbolic-mode only; it picks
+# which slots of a single-pool argument wire in as active controls
+# (the rest pass through untouched). `control_indices` is valid
+# only with the single-pool form; combining it with the multi-arg
+# form is rejected.
 
 # %% [markdown]
 # (cg-5-1)=
 # ### 5.1 `num_controls = n` over a whole pool
 #
 # The simplest symbolic shape: `num_controls=n` with the entire
-# pool (length `n`) used as the active controls. The kernel
-# parameter `n` is concretised at transpile time via `bindings`.
-# The controlled-gate shape itself adapts once `n` is bound; in
-# this demo we bind `n=3` because the surrounding body literally
-# initializes `ctrls[0]`, `ctrls[1]`, `ctrls[2]` with `qmc.x`,
-# so binding `n < 3` would index out of range and binding
-# `n > 3` would leave some pool slots in `|0>` (transpilation
-# would still succeed, but the prepared state would not match
-# the "all controls active" intent of the demo). Replace the
-# fixed initializations with a loop if you want a body that
-# scales with `n`.
+# pool (length `n`) used as the active controls. The parameter `n`
+# is made concrete at transpile time via `bindings`.
 
 
 # %%
@@ -532,15 +436,13 @@ cnot_demo.draw()
 def symbolic_pool(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     ctrls = qmc.qubit_array(n, "ctrls")
     tgt = qmc.qubit(name="tgt")
-    ctrls[0] = qmc.x(ctrls[0])
-    ctrls[1] = qmc.x(ctrls[1])
-    ctrls[2] = qmc.x(ctrls[2])
-    cg = qmc.control(qmc.x, num_controls=n)
+    ctrls = qmc.x(ctrls)  # drive all controls to |1>
+    cg = qmc.control(qmc.x, num_controls=n)  # symbolic n as the control count
     ctrls, tgt = cg(ctrls, tgt)
     return qmc.measure(ctrls)
 
 
-symbolic_pool.draw(n=3)
+symbolic_pool.draw(n=3, fold_loops=False)
 
 # %% [markdown]
 # (cg-5-2)=
@@ -548,41 +450,31 @@ symbolic_pool.draw(n=3)
 #
 # A frequent shape in multi-controlled-X designs: the first
 # `n - 1` qubits of a register become controls, the last one
-# becomes the target. The bound on `num_controls` is the
-# symbolic expression `n - 1`, and the control argument is the
-# slice `qs[0:n - 1]`.
+# becomes the target. The bound on `num_controls` is the symbolic
+# expression `n - 1`, and the control argument is the slice
+# `qs[0:n - 1]`.
 
 
 # %%
 @qmc.qkernel
 def mcx_demo(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     qs = qmc.qubit_array(n, "qs")
-    qs[0] = qmc.x(qs[0])
-    qs[1] = qmc.x(qs[1])
-    qs[2] = qmc.x(qs[2])
+    qs[0 : n - 1] = qmc.x(qs[0 : n - 1])  # drive the control part to |1>
     mcx = qmc.control(qmc.x, num_controls=n - 1)
     qs[0 : n - 1], qs[n - 1] = mcx(qs[0 : n - 1], qs[n - 1])
     return qmc.measure(qs)
 
 
-mcx_demo.draw(n=4)
+mcx_demo.draw(n=4, fold_loops=False)
 
 # %% [markdown]
 # (cg-5-3)=
-# ### 5.3 Selecting a subset with `control_indices=`
+# ### 5.3 Selecting a subset with `control_indices`
 #
 # When the control pool is wider than the number of active
-# controls you want, the `control_indices=` keyword (symbolic
-# mode only) picks exactly which pool slots are wired in. The
-# remaining slots are passed through untouched — they sit on the
-# wires but emit no extra gate of their own. The indices do not
-# have to be contiguous.
-#
-# In the example below the pool has 4 qubits but the three
-# active controls are `pool[0]`, `pool[1]`, `pool[3]`
-# (`control_indices=[0, 1, 3]`). `pool[2]` is along for the
-# ride: no control dot is drawn on it, and the vertical
-# connection line of the MCX skips over it.
+# controls you want, the `control_indices` keyword (symbolic mode
+# only) picks which pool slots are wired in. The remaining slots
+# are left untouched. The indices do not have to be contiguous.
 
 
 # %%
@@ -605,21 +497,14 @@ subset_pool.draw(n=4, k_ctrls=3)
 # ### 5.4 `control_indices` with `UInt` entries
 #
 # Each entry inside `control_indices` may be a Python `int`
-# literal, a `qmc.UInt` handle, or any arithmetic expression
-# over `UInt` values. Cheap structural checks on literal `int`
-# entries (rejecting `bool`, negative values, and entries that
-# duplicate another literal `int` in the list) are done at
-# compose time; everything else — length agreement with
-# `num_controls`, range against the pool size, and any check
-# that depends on a `UInt` resolving to a concrete value — is
-# deferred until transpile time once `bindings` make the
-# parameters concrete.
-#
-# Here the third active control is `pool[n - 1]` — "the last
-# pool slot" expressed as `UInt` arithmetic. At `n = 4` it still
-# resolves to slot 3, which leaves `pool[2]` inactive; the
-# compiled circuit is the same as in [](#cg-5-3) and only the way
-# the index is spelled differs.
+# literal, a `qmc.UInt` handle, or any arithmetic expression over
+# `UInt` values. Cheap structural checks on literal `int` entries
+# (rejecting `bool`, negative values, and entries that duplicate
+# another literal `int` in the list) are done at compose time;
+# everything else — length agreement with `num_controls`, range
+# against the pool size, and any check that depends on a `UInt`
+# resolving to a concrete value — is deferred to transpile time
+# once `bindings` make the parameters concrete.
 
 
 # %%
@@ -641,31 +526,30 @@ subset_pool_with_uint.draw(n=4, k_ctrls=3)
 # (cg-5-5)=
 # ### 5.5 Multi-arg control prefix
 #
-# When the controls are spread across several positional
+# When you want to split the controls across several positional
 # arguments — typically because you want some slots of a single
-# `Vector` to be active controls and another slot of the *same*
-# `Vector` to be the target — symbolic mode accepts the same
-# multi-arg call shape concrete mode does ([](#cg-3-6) / [](#cg-3-7)).
-# The qubit-count sum of the control prefix args is matched
-# against `num_controls` at transpile time.
+# `Vector` to be active controls and another slot to be the
+# target — symbolic mode accepts the same multi-arg shape concrete
+# mode does ([](#cg-3-5) / [](#cg-3-6)). Several slots taken from
+# the same `Vector[Qubit]` may sit in the control prefix as long
+# as they are disjoint (non-overlapping). The qubit counts of the
+# control-prefix args are matched against `num_controls` at
+# transpile time.
 #
-# The kernel below is a "controlled increment": when
-# `q[control_index]` is `|1>` it applies `q -> q + 1 (mod
-# 2**(n-1))` to the other bits of `q`.  Each iteration takes one
-# scalar from `q` as the gating control, a `VectorView` slice
-# `q[0:target_idx]` as the inner controls, and `q[target_idx]`
-# as the target — all from the same `q`, in disjoint slots, and
-# all with `num_controls = target_idx + 1` (a symbolic expression
-# in the loop variable).  Before this form was supported the
-# kernel was uncomposable because symbolic mode required a single
-# `Vector` argument.
+# Note that `control_indices` cannot be used with the multi-arg
+# form (see the reject case in [](#cg-6)). If you need subset
+# selection, use the single-pool form ([](#cg-5-3) / [](#cg-5-4));
+# if you need the multi-arg flexibility, treat the whole prefix as
+# active.
 
 
 # %%
 @qmc.qkernel
-def apply_controlled_shift_plus_one(
-    q: qmc.Vector[qmc.Qubit], control_index: qmc.UInt
-) -> qmc.Vector[qmc.Qubit]:
+def controlled_increment_demo(
+    n: qmc.UInt, control_index: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, "q")
+    q[control_index] = qmc.x(q[control_index])
     n = q.shape[0]
     for k in qmc.range(n - 1):
         target_idx = n - 2 - k
@@ -677,67 +561,27 @@ def apply_controlled_shift_plus_one(
         q[control_index] = ctrl_main
         q[0:target_idx] = prefix
         q[target_idx] = tgt
-    return q
-
-
-@qmc.qkernel
-def controlled_increment_demo(
-    n: qmc.UInt, control_index: qmc.UInt
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, "q")
-    q[control_index] = qmc.x(q[control_index])  # drive the gating bit to |1>
-    q = apply_controlled_shift_plus_one(q, control_index)
     return qmc.measure(q)
 
 
-controlled_increment_demo.draw(n=4, control_index=3)
-
-# %% [markdown]
-# A few notes on the multi-arg form:
-#
-# - The call-site args are split into "control prefix" and
-#   "sub-kernel positional" by the controlled kernel's signature:
-#   any positional parameter not provided via kwargs must arrive
-#   positionally, and everything *before* that trailing block is
-#   the control prefix.  In the example, `qmc.x` takes one
-#   `Qubit` positional, so the last arg (`tgt`) is the target
-#   and the first two (`ctrl_main`, `prefix`) are the controls.
-# - The borrow tracker is satisfied as long as the slots the
-#   different args reach are disjoint.  Static disjointness is
-#   checked when the index bounds are literal; symbolic bounds
-#   (`q[0:target_idx]` versus `q[target_idx]` versus
-#   `q[control_index]`) lean on the bound predicates the tracker
-#   already supports for register partitioning.
-# - `control_indices=` is rejected in the multi-arg form (see
-#   [](#cg-6) for the reject case): if you need subset
-#   selection, use the single-pool form ([](#cg-5-3) / [](#cg-5-4)); if you need
-#   multi-arg flexibility, accept the entire prefix as active.
+controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 
 # %% [markdown]
 # (cg-6)=
 # ## 6. Patterns that don't work
 #
-# Each cell below tries one rejected call shape and asserts the
-# expected exception type with a small `expect_error` helper.
-# The helper only catches the *expected* exception class; any
-# other exception propagates as a normal cell error so a
-# regression that changes which exception fires surfaces with a
-# traceback in the notebook. Missing the exception entirely
-# raises an `AssertionError`. The "Mode" column tells you which
-# mode of `qmc.control` each rejection applies to.
+# This section walks through the rejected call shapes one at a
+# time, asserting the expected exception with a small
+# `expect_error` helper.
 #
 # | Case | Mode | Exception |
 # | --- | --- | --- |
 # | 6.1 control qubit count crosses an argument boundary | concrete | `ValueError` |
-# | 6.2 `control_indices=` in concrete mode | concrete | `ValueError` |
+# | 6.2 `control_indices` in concrete mode | concrete | `ValueError` |
 # | 6.3 symbolic-length `VectorView` in concrete | concrete | `NotImplementedError` |
-# | 6.4 typo in classical kwarg | both | `TypeError` |
-# | 6.5 invalid `power` (zero or `bool`) | both | `ValueError` / `TypeError` |
-# | 6.6 `num_controls=0` literal | concrete | `ValueError` |
-# | 6.7 plain function with a Python default | both | `TypeError` |
-# | 6.8 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
-# | 6.9 multi-arg control prefix + `control_indices=` | symbolic | `ValueError` |
-# | 6.10 single scalar control in symbolic mode | symbolic | `ValueError` |
+# | 6.4 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
+# | 6.5 multi-arg control prefix + `control_indices` | symbolic | `ValueError` |
+# | 6.6 single scalar control in symbolic mode | symbolic | `ValueError` |
 
 
 # %%
@@ -764,21 +608,10 @@ def expect_error(label: str, exc_type: type, body) -> None:
 # (cg-6-1)=
 # ### 6.1 Control qubit count crosses an argument boundary (concrete)
 #
-# Concrete mode walks the positional arguments left-to-right,
-# folding each one into the control list until the running total
-# reaches `num_controls`. If one of those positional arguments
-# would push the count *past* `num_controls` mid-argument — the
-# example below passes a 5-qubit slice when only 3 controls are
-# expected — the call is rejected at compose time with
-# `ValueError` so you can split the offending argument cleanly
-# at the boundary.
-#
-# (A *too-narrow* version of the same mistake — passing fewer
-# control qubits than `num_controls` — looks different: extra
-# positional arguments that you meant as targets get folded into
-# the control list, and `qmc.control` then complains it has no
-# target left. That surface is Python's own `TypeError: missing
-# a required argument`, not a controlled-U `ValueError`.)
+# Concrete mode walks the positional arguments in order, folding
+# each one into the control list until the running total reaches
+# `num_controls`. If a `VectorView` or `Vector` pushes the running
+# total past `num_controls`, the call is rejected.
 
 
 # %%
@@ -798,9 +631,9 @@ expect_error("control count mismatch", ValueError, case_count_mismatch)
 
 # %% [markdown]
 # (cg-6-2)=
-# ### 6.2 `control_indices=` in concrete mode (concrete)
+# ### 6.2 `control_indices` in concrete mode (concrete)
 #
-# `control_indices` makes sense only when there is a control
+# `control_indices` only makes sense when there is a control
 # *pool* to select from, which is a symbolic-mode concept.
 # Supplying it alongside a concrete `num_controls` raises
 # `ValueError` at compose time.
@@ -829,12 +662,9 @@ expect_error(
 # (cg-6-3)=
 # ### 6.3 Symbolic-length `VectorView` in concrete mode (concrete)
 #
-# Concrete mode must compute the qubit count of every control
-# argument at compile time. A slice whose length depends on a
-# `UInt` (here `qs[0:m]` for symbolic `m`) is not yet supported
-# in concrete mode and raises `NotImplementedError`. The
-# workaround is to switch to symbolic mode — `num_controls=m`
-# with `cg(qs, t)` accepts exactly this shape (see [](#cg-5-1)).
+# Concrete mode must determine each control argument's qubit count
+# at compile time. A slice whose length depends on a `UInt` is not
+# supported in concrete mode and raises `NotImplementedError`.
 
 
 # %%
@@ -859,146 +689,29 @@ expect_error(
 
 # %% [markdown]
 # (cg-6-4)=
-# ### 6.4 Typo in a classical keyword argument (both modes)
+# ### 6.4 Same-pool slot reused as target — single-pool form (symbolic)
 #
-# `qmc.control` inspects the controlled kernel's signature, so an
-# unknown keyword name is caught at compose time. The error
-# message lists the parameters `qmc.control` actually understands.
-
-
-# %%
-def case_kwarg_typo() -> None:
-    @qmc.qkernel
-    def _gate(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-        return qmc.rx(q, angle)
-
-    @qmc.qkernel
-    def kernel() -> qmc.Bit:
-        c = qmc.qubit(name="c")
-        t = qmc.qubit(name="t")
-        cg = qmc.control(_gate)
-        c, t = cg(c, t, agnle=0.5)  # typo: agnle -> angle
-        return qmc.measure(t)
-
-    _ = kernel.block
-
-
-expect_error("classical kwarg typo", TypeError, case_kwarg_typo)
-
-# %% [markdown]
-# (cg-6-5)=
-# ### 6.5 Invalid `power` (both modes)
-#
-# `power` must be a strictly positive integer (`int` or
-# `qmc.UInt`). Zero and negative values raise `ValueError`. A
-# Python `bool` is rejected as `TypeError` so that `power=True`
-# does not silently mean `power=1`. The same restriction applies
-# in both concrete and symbolic mode.
-
-
-# %%
-def case_power_zero() -> None:
-    @qmc.qkernel
-    def kernel() -> qmc.Bit:
-        c = qmc.qubit(name="c")
-        t = qmc.qubit(name="t")
-        cg = qmc.control(qmc.x)
-        c, t = cg(c, t, power=0)
-        return qmc.measure(t)
-
-    _ = kernel.block
-
-
-def case_power_bool() -> None:
-    @qmc.qkernel
-    def kernel() -> qmc.Bit:
-        c = qmc.qubit(name="c")
-        t = qmc.qubit(name="t")
-        cg = qmc.control(qmc.x)
-        c, t = cg(c, t, power=True)
-        return qmc.measure(t)
-
-    _ = kernel.block
-
-
-expect_error("power=0", ValueError, case_power_zero)
-expect_error("power=True (bool)", TypeError, case_power_bool)
-
-# %% [markdown]
-# (cg-6-6)=
-# ### 6.6 `num_controls=0` literal (concrete)
-#
-# A controlled gate with zero controls would just be the
-# underlying gate, which makes controlling it meaningless. When
-# the argument is a Python `int < 1`, `qmc.control` rejects this at
-# the moment it is evaluated, with `ValueError` (negative `int`
-# is rejected the same way). A `qmc.UInt` handle that *resolves*
-# to zero is a different story: `qmc.control` does not see the
-# value at evaluation time. Whether the zero is caught later
-# depends on the control-argument shape and the backend — Qiskit
-# surfaces it as a validation or backend-side error, but some
-# backends (QuriParts) instead emit a degenerate circuit without
-# complaining. The safe rule is to bind any symbolic
-# `num_controls` to a strictly positive value yourself.
-
-
-# %%
-def case_num_controls_zero() -> None:
-    qmc.control(qmc.x, num_controls=0)
-
-
-expect_error("num_controls=0", ValueError, case_num_controls_zero)
-
-# %% [markdown]
-# (cg-6-7)=
-# ### 6.7 Plain function with a Python default (both modes)
-#
-# When the callable passed to `qmc.control` is not a `@qmc.qkernel`
-# (just a plain Python function), `qmc.control` auto-synthesises a
-# kernel around it. The synthesiser cannot turn Python-side
-# default values into IR-level defaults, so plain functions with
-# defaults are rejected at the moment `qmc.control(...)` is
-# called. The fix is to mark the function as a `@qmc.qkernel`
-# (where defaults are tracked end-to-end) or to drop the default
-# and pass the value explicitly at the call site.
-
-
-# %%
-def case_plain_fn_with_default() -> None:
-    def _bad_sub(q: qmc.Qubit, theta: qmc.Float = 0.5) -> qmc.Qubit:
-        return qmc.rx(q, theta)
-
-    qmc.control(_bad_sub)
-
-
-expect_error("plain function with default value", TypeError, case_plain_fn_with_default)
-
-# %% [markdown]
-# (cg-6-8)=
-# ### 6.8 Same-pool slot reused as target — single-pool form (symbolic)
-#
-# When using the single-pool form (`cg(pool, ...)` with
-# `control_indices=`), it is tempting to also pass one of the
-# pool's inactive slots as the target — e.g.
-# `cg(pool, pool[2], control_indices=[0, 1, 3])` so that
-# `pool[2]` becomes the target of the controlled-U. The call
-# site is rejected by the linear-type borrow tracker because the
-# pool is already being consumed as one argument while `pool[2]`
-# is being borrowed for another, which surfaces as
-# `UnreturnedBorrowError` at compose time.
+# With the single-pool form (`cg(pool, ...)` combined with
+# `control_indices`), it is tempting to take one of the pool's
+# inactive slots and pass it as the target — e.g.
+# `cg(pool, pool[2], control_indices=[0, 1, 3])` so that `pool[2]`
+# becomes the target of the controlled-U. The call is rejected by
+# the linear-type borrow tracker: the pool is already consumed as
+# one argument while `pool[2]` is borrowed for another, which
+# surfaces as `UnreturnedBorrowError` at compose time.
 #
 # Workarounds (preferred order):
 #
 # 1. **Multi-arg symbolic form ([](#cg-5-5)).** Pass each slot or
 #    sub-view as its own positional argument:
-#    `cg(pool[0], pool[1], pool[3], pool[2])` (or the
-#    slice/scalar mix the controlled-increment example uses).
-#    Each argument is a separate borrow from `pool`, the borrow
-#    tracker checks disjointness, and `num_controls` matches the
-#    qubit-count sum at transpile time.
-# 2. **Concrete mode ([](#cg-3-7)).** If `num_controls` is a
-#    Python `int`, the same multi-arg shape works in concrete
-#    mode without any symbolic plumbing.
+#    `cg(pool[0], pool[1], pool[3], pool[2])` (or the slice/scalar
+#    mix the controlled-increment example uses). Each argument is a
+#    separate borrow from `pool`, the borrow tracker checks
+#    disjointness, and `num_controls` matches the qubit-count sum
+#    at transpile time.
+# 2. **Concrete mode ([](#cg-3-6)).** If `num_controls` is a Python
+#    `int`, the same multi-arg shape works without any symbolic
+#    plumbing.
 
 
 # %%
@@ -1021,17 +734,13 @@ expect_error(
 )
 
 # %% [markdown]
-# (cg-6-9)=
-# ### 6.9 Multi-arg control prefix + `control_indices=` (symbolic)
+# (cg-6-5)=
+# ### 6.5 Multi-arg control prefix + `control_indices` (symbolic)
 #
 # The two symbolic-mode features are mutually exclusive.
-# `control_indices=` only makes sense over a single control
-# pool (one `Vector` argument), and combining it with multiple
-# positional control args raises `ValueError` at compose time
-# with an explicit message.  If you need both subset selection
-# and per-slot routing, choose: the single-pool form ([](#cg-5-3) / [](#cg-5-4))
-# for subset selection, or the multi-arg form ([](#cg-5-5)) for per-slot
-# routing — not both.
+# `control_indices` only makes sense over a single control pool
+# (one `Vector` argument); combining it with multiple positional
+# control args raises `ValueError` at compose time.
 
 
 # %%
@@ -1059,17 +768,13 @@ expect_error(
 )
 
 # %% [markdown]
-# (cg-6-10)=
-# ### 6.10 Single scalar control in symbolic mode (symbolic)
+# (cg-6-6)=
+# ### 6.6 Single scalar control in symbolic mode (symbolic)
 #
 # A single scalar `Qubit` control is the one shape that needs
-# concrete mode. In symbolic mode a lone control argument is the
-# single-pool form, which requires a `Vector` / `VectorView`; a
-# bare scalar has no symbolic meaning because the control count is
-# fixed at one. Passing one is rejected at compose time with a
-# `ValueError` that points you back to concrete mode (or to adding
-# a second control argument). The minimal controlled-RX in [](#cg-1) is
-# exactly this shape written the right way — in concrete mode.
+# concrete mode. In symbolic mode a lone control argument is read
+# as the single-pool form, which requires a `Vector` /
+# `VectorView`.
 
 
 # %%
@@ -1095,37 +800,8 @@ expect_error(
 # (cg-7)=
 # ## 7. Summary
 #
-# `qmc.control(fn, num_controls=...)` returns a reusable
-# `ControlledGate`. The right mental model is a two-axis matrix
-# rather than two separate APIs:
-#
-# - **Mode is the type of `num_controls`.** Python `int` puts
-#   you in *concrete* mode; a `qmc.UInt` handle (or any `UInt`
-#   expression like `n - 1`) puts you in *symbolic* mode.
-# - **Most features are mode-agnostic.** Controlling any callable
-#   (built-in or `@qmc.qkernel`), sub-kernels that take
-#   `Vector[Qubit]`, defaults from the controlled signature,
-#   classical-kwarg reordering, `power=`, and the multi-argument
-#   control shapes (a single pool, or several positional args
-#   mixing scalar `Qubit` / `VectorView` / `Vector`) all work the
-#   same way in either mode ([](#cg-3); [](#cg-3-6) / [](#cg-3-7)
-#   show the multi-arg shapes concretely, [](#cg-5-5) symbolically).
-# - **A few features are symbolic-only.** Control pools whose
-#   length is symbolic and the subset selector `control_indices=`
-#   exist only in symbolic mode ([](#cg-5)).
-# - **One shape is concrete-only.** A single scalar `Qubit` as the
-#   lone control belongs in concrete mode ([](#cg-4)); symbolic
-#   mode reads a single control argument as a pool and needs a
-#   `Vector` / `VectorView` (or two-or-more control args).
-#
-# Practical decision rule: reach for *symbolic* mode whenever
-# the control count is a kernel parameter or an expression over
-# one — including the very common "all but one" form
-# `num_controls=n - 1`. Reach for *concrete* mode when the count
-# is a literal and the controls live on specific qubits you can
-# name.
-#
-# [](#cg-6) doubles as a regression test for the validation
-# rules of both modes: every rejected shape asserts the
-# expected exception type, so a change that loses (or alters) a
-# check would surface immediately in the docs build.
+# `qmc.control(fn, num_controls=...)` makes a controlled version
+# of any Qamomile built-in gate or user-defined kernel. It has two
+# modes, decided by the type of `num_controls`: a Python `int`
+# gives *concrete* mode, and a `qmc.UInt` (or a `UInt` expression
+# like `n - 1`) gives *symbolic* mode.
