@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import overload
 
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOpKind,
@@ -149,8 +150,29 @@ class UInt(ArithmeticMixin, Handle):
         _emit_binop(coerced.value, self.value, result, BinOpKind.SUB)
         return result
 
-    # UInt-specific multiplication (handles float case differently)
+    # UInt-specific multiplication (handles float case differently).
+    # The result type is fully determined by the operand at runtime, so
+    # @overload narrows it: integral operands keep the result a UInt
+    # (valid as a Vector index), only a Python float widens it to Float.
+    @overload
+    def __mul__(self, other: "int | UInt") -> "UInt": ...
+
+    @overload
+    def __mul__(self, other: float) -> "Float": ...
+
     def __mul__(self, other) -> "UInt | Float":
+        """Multiply this UInt by an integer-like or float operand.
+
+        Args:
+            other (int | UInt | float): The right-hand operand. An ``int``
+                or ``UInt`` keeps the product unsigned-integral; a Python
+                ``float`` promotes the product to a floating-point result.
+
+        Returns:
+            UInt | Float: A ``UInt`` when ``other`` is ``int``/``UInt``,
+                or a ``Float`` when ``other`` is a Python ``float``. The
+                two cases are distinguished statically via ``@overload``.
+        """
         if isinstance(other, float):
             other_value = Value(type=FloatType(), name="").with_const(other)
             result = self._make_float_result()
@@ -160,7 +182,24 @@ class UInt(ArithmeticMixin, Handle):
         # Use mixin's default implementation for int/UInt
         return super().__mul__(other)  # type: ignore
 
+    @overload
+    def __rmul__(self, other: "int | UInt") -> "UInt": ...
+
+    @overload
+    def __rmul__(self, other: float) -> "Float": ...
+
     def __rmul__(self, other) -> "UInt | Float":
+        """Multiply an integer-like or float operand by this UInt.
+
+        Multiplication is commutative, so this delegates to ``__mul__``.
+
+        Args:
+            other (int | UInt | float): The left-hand operand.
+
+        Returns:
+            UInt | Float: A ``UInt`` for ``int``/``UInt`` operands, a
+                ``Float`` for a Python ``float`` operand.
+        """
         return self.__mul__(other)
 
     # UInt-specific true division (always returns Float)
@@ -250,6 +289,33 @@ class Float(ArithmeticMixin, Handle):
         other = self._coerce(other)
         result = self._make_result()
         _emit_binop(other.value, self.value, result, BinOpKind.SUB)
+        return result
+
+    def __neg__(self) -> "Float":
+        """Negate this Float handle, returning the unary-minus result.
+
+        Lets users write the natural ``-x`` inside a ``@qkernel`` instead
+        of the awkward ``0 - x`` idiom (GitHub issue #329). The negation
+        is lowered to the existing ``MUL`` IR op as ``self * -1.0`` —
+        multiplication by ``-1`` is the direct expression of unary minus
+        — so it carries no new IR node and every backend that already
+        supports multiplication emits it unchanged. When ``self`` is a
+        compile-time constant the result is folded eagerly by
+        ``_emit_binop``.
+
+        Returns:
+            Float: A new Float handle holding the negated value.
+
+        Example:
+            >>> import qamomile.circuit as qmc
+            >>> @qmc.qkernel
+            ... def circuit(theta: qmc.Float) -> qmc.Qubit:
+            ...     q = qmc.qubit("q")
+            ...     return qmc.rz(q, -theta)
+        """
+        neg_one = self._make_float(-1.0)
+        result = self._make_result()
+        _emit_binop(self.value, neg_one.value, result, BinOpKind.MUL)
         return result
 
     def __mul__(self, other: "int | float | Float") -> "Float":

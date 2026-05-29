@@ -1,4 +1,5 @@
 import ast
+import enum
 import inspect
 import textwrap
 import types
@@ -1335,31 +1336,152 @@ def transform_control_flow(func: Callable):
 # ---------------------------------------------------------------------------
 
 
+class RebindSourceKind(enum.StrEnum):
+    """Discriminator for the source of a detected rebind violation.
+
+    Each value classifies *why* the analyzer believes an existing
+    quantum binding is being silently discarded, and lets downstream
+    error-message formatting render a domain-appropriate explanation
+    instead of forcing a generic "different quantum variable" sentence
+    onto, e.g., a fresh allocation.
+
+    Members:
+        DIRECT_ALIAS: ``q = other_q`` or ``q = qs[i]``.
+        QUANTUM_ARG: ``q = f(other_q, ...)`` where ``other_q`` has a
+            different origin than ``q``.
+        FRESH_ALLOCATION: ``q = qm.qubit(...)`` /
+            ``qm.qubit_array(...)`` — the original quantum state is
+            silently discarded in favor of a freshly allocated one.
+        UNKNOWN_CALL: ``q = some_func(...)`` where the call references
+            no known quantum variable and is not a recognized quantum
+            constructor; conservatively treated as a rebind because
+            the original ``q`` is not threaded through the RHS.
+        CHAINED_ASSIGNMENT: ``q1 = q2 = expr`` where at least one
+            target is an existing quantum variable; chained binding
+            semantics are too ambiguous to verify self-update.
+    """
+
+    DIRECT_ALIAS = "direct_alias"
+    QUANTUM_ARG = "quantum_arg"
+    FRESH_ALLOCATION = "fresh_allocation"
+    UNKNOWN_CALL = "unknown_call"
+    CHAINED_ASSIGNMENT = "chained_assignment"
+
+
 @dataclass
 class RebindViolation:
-    """A detected forbidden quantum variable rebinding."""
+    """A detected forbidden quantum variable rebinding.
+
+    Attributes:
+        target_name (str): Name of the LHS variable being overwritten.
+        source_name (str | None): Name of the underlying quantum
+            variable the new value is derived from — for a
+            ``Subscript`` source like ``a = qs[i]`` this is the base
+            array name ``qs`` (the quantum binding being aliased
+            from), not the full subscript expression. ``None`` when
+            the source has no statically-known quantum name — e.g. a
+            fresh allocation via ``qm.qubit(...)`` or an opaque call
+            whose return type cannot be inferred.
+        source_expr (str | None): Full RHS source string, used in the
+            rendered error pattern when it differs from ``source_name``.
+            Set via ``ast.unparse(value)`` for ``Subscript`` sources
+            (``"qs[i]"``) so the message shows the actual code shape;
+            ``None`` for plain ``Name`` sources where ``source_name``
+            already matches the RHS text, and for kinds without a
+            single-name source (fresh allocations, opaque calls,
+            chained assignments).
+        source_kind (RebindSourceKind): Discriminator for downstream
+            error message formatting. See :class:`RebindSourceKind` for
+            the meaning of each member.
+        func_name (str | None): Name of the function/method invoked on
+            the RHS, when the RHS is a ``Call``. ``None`` for direct
+            aliases.
+        lineno (int): 1-based source line of the offending assignment,
+            counted from the first statement of the function body
+            (i.e., the first body statement is line 1, regardless of
+            blank lines or comments between the ``def`` line and that
+            first statement). The analyzer walks
+            ``ast.parse(textwrap.dedent(inspect.getsource(func)))`` so
+            raw ``ast`` line numbers include the decorator / ``def``
+            lines; ``collect_quantum_rebind_violations`` subtracts
+            ``node.body[0].lineno - 1`` from every violation to produce
+            this body-relative form.
+    """
 
     target_name: str
-    source_name: str
+    source_name: str | None
+    source_kind: RebindSourceKind
     func_name: str | None
     lineno: int
+    source_expr: str | None = None
+
+
+# Recognized quantum-handle constructors. The analyzer treats the LHS of
+# ``q = qubit(...)`` / ``q = qubit_array(...)`` (or their attribute
+# forms ``qm.qubit(...)`` etc.) as a freshly-allocated quantum value:
+# overwriting an existing quantum binding is a rebind violation, and a
+# new binding starts a fresh origin so subsequent aliases can be tracked.
+# Alias-imported constructors (``from ... import qubit as factory``) are
+# out of scope for now — see ``_is_quantum_constructor_call`` for the
+# four syntactic forms recognized.
+_QUANTUM_CONSTRUCTOR_NAMES: frozenset[str] = frozenset({"qubit", "qubit_array"})
+
+# Classical-returning frontend primitives. The analyzer models these as
+# consuming their quantum arguments: every name in ``quantum_vars`` that
+# shares an origin with one of the quantum args is removed after the
+# call. This avoids false-positive rebind violations on subsequent
+# fresh-allocation rebinds of a post-measurement variable.
+_CLASSICAL_RETURNING_CALL_NAMES: frozenset[str] = frozenset({"measure", "expval"})
 
 
 class QuantumRebindAnalyzer(ast.NodeVisitor):
     """Detects forbidden quantum variable reassignment at the AST level.
 
     Forbidden patterns (target is an *existing* quantum variable):
-      - ``a = b``        where b is quantum with a different origin
-      - ``a = f(b, ...)`` where b is quantum with a different origin
+
+      - ``a = b``                 where ``b`` is quantum with a different origin
+      - ``a = f(b, ...)``         where ``b`` is quantum with a different origin
+      - ``a = qm.qubit("...")``   silently discarding ``a``
+      - ``a = some_opaque_call()`` where the call has no known quantum source
+      - ``a = b = expr``          chained assignment touching a quantum name
+      - ``a: qm.Qubit = ...``     (annotated form of the above)
 
     Allowed patterns:
-      - ``a = f(a, ...)``  (self-update)
-      - ``new = f(b, ...)`` (new binding – target was not quantum before)
-      - ``alias = q``      (new alias – target was not quantum before)
+
+      - ``a = f(a, ...)``         (self-update)
+      - ``new = f(b, ...)``       (new binding — target was not quantum before)
+      - ``alias = q``             (new alias — target was not quantum before)
+      - ``a, b = f(a, b)``        / ``a, b = (g(b), h(a))`` (1-to-1 quantum permutation)
+
+    The analyzer is a single-pass ``ast.NodeVisitor`` and does not
+    model Python control flow precisely. To keep compile-time-if
+    dead-branch rebinds — which the IR's ``CompileTimeIfLoweringPass``
+    will later resolve by selecting one branch and discarding the
+    other — from being rejected at decoration time, ``visit_If`` /
+    ``visit_For`` / ``visit_While`` route every branch through
+    :meth:`_visit_branch_scope`, which snapshots ``quantum_vars``
+    before and restores it after each ``body`` / ``orelse``, AND
+    truncates any violations recorded inside the branch back to the
+    pre-branch length. Top-level (non-branch-internal) rebinds are
+    flagged as usual; branch-internal rebinds are deliberately not
+    reported at decoration time. The companion gap on the IR side
+    (``AffineValidationPass`` does not detect silent-discard
+    patterns) is tracked in ``LIMITATIONS.md``.
     """
 
     def __init__(self, quantum_param_names: set[str]) -> None:
-        # name → origin (the parameter name it traces back to)
+        """Initialize the analyzer with the kernel's quantum parameter names.
+
+        Args:
+            quantum_param_names (set[str]): Names of kernel parameters
+                whose annotated type is a quantum handle (``Qubit`` /
+                ``Vector[Qubit]``). Each is seeded into ``quantum_vars``
+                as its own origin.
+        """
+        # name → origin (the parameter or fresh-allocation name it
+        # traces back to). All aliases of the same physical quantum
+        # value share an origin, which lets the analyzer recognize
+        # self-update versus rebind across alias chains.
         self.quantum_vars: dict[str, str] = {n: n for n in quantum_param_names}
         self.violations: list[RebindViolation] = []
 
@@ -1368,12 +1490,166 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
     # ------------------------------------------------------------------
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        """Dispatch ``a = expr`` / ``a, b = expr`` / ``a = b = expr``.
+
+        Args:
+            node (ast.Assign): The assignment statement.
+        """
         if len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Name):
                 self._check_single_assign(target.id, node.value, node.lineno)
             elif isinstance(target, ast.Tuple):
                 self._check_tuple_assign(target, node.value, node.lineno)
+        else:
+            # Chained ``a = b = ...``. Conservative: flag if any target
+            # is an existing quantum variable. A future PR can model
+            # the chained semantics precisely.
+            self._check_chained_assign(node.targets, node.value, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Dispatch ``q: qm.Qubit = expr`` through the single-assign path.
+
+        Args:
+            node (ast.AnnAssign): The annotated assignment statement.
+                Annotation-only forms (``q: qm.Qubit`` with no RHS) are
+                ignored — there is nothing to rebind.
+        """
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            self._check_single_assign(node.target.id, node.value, node.lineno)
+        self.generic_visit(node)
+
+    def _visit_branch_scope(
+        self,
+        node: ast.If | ast.For | ast.While,
+    ) -> None:
+        """Visit a control-flow node's body / orelse with branch-local scope.
+
+        Used by :meth:`visit_If`, :meth:`visit_For`, and
+        :meth:`visit_While`. The analyzer is flow-insensitive: it walks
+        the AST in source order without modeling branching. To prevent
+        branch-local effects from leaking out, each branch is analyzed
+        against a snapshot of both ``quantum_vars`` and the current
+        ``violations`` length:
+
+          - ``quantum_vars`` is restored after every branch body so a
+            branch-local binding (e.g. ``q = qm.qubit("inner")`` inside
+            an ``if``) does not leak into post-branch analysis and
+            spuriously flag a later store-only rebind of the same name.
+          - ``violations`` are truncated to their pre-branch length so
+            that legitimate compile-time-if dead-branch patterns
+            (``if flag: ... ; else: alt = qubit_array(...); q = alt``)
+            are not rejected at decoration time. These patterns rely on
+            the compile-time-if lowering pass selecting one branch and
+            discarding the other; the AST analyzer cannot tell
+            compile-time-if from runtime-if, so it conservatively
+            allows branch-internal rebinds to keep the user's
+            compile-time-if usage working.
+
+        **Known limitation.** Suppressing branch-internal violations
+        means a kernel that genuinely discards an outer quantum binding
+        inside a runtime ``if`` / ``for`` / ``while`` branch (e.g. a
+        runtime ``if cond: q = qm.qubit("fresh")``) is NOT reported by
+        ``collect_quantum_rebind_violations``. The IR-level
+        ``AffineValidationPass`` does NOT close this gap either — it
+        only enforces "consumed at most once" and does not detect
+        "never consumed" / "silent discard" patterns. A dedicated
+        IR-level silent-discard pass (or a flow-sensitive frontend
+        analyzer) would be needed to catch these; this is tracked as a
+        follow-up. Top-level (non-branch-internal) bypasses continue
+        to be caught at decoration time.
+
+        Args:
+            node (ast.If | ast.For | ast.While): The control-flow node.
+                ``body`` and ``orelse`` are each visited with the
+                snapshot-restore protocol.
+        """
+        snapshot_vars = self.quantum_vars.copy()
+        snapshot_violations = len(self.violations)
+        for stmt in node.body:
+            self.visit(stmt)
+        self.quantum_vars = snapshot_vars.copy()
+        del self.violations[snapshot_violations:]
+        for stmt in node.orelse:
+            self.visit(stmt)
+        self.quantum_vars = snapshot_vars
+        del self.violations[snapshot_violations:]
+        # We intentionally do NOT call ``generic_visit`` here: the
+        # children have already been visited in the per-branch loops
+        # above, and falling through would re-visit them and
+        # double-count branch state changes.
+
+    def visit_If(self, node: ast.If) -> None:
+        """Visit ``if``/``else`` body with branch-local scope.
+
+        ``node.test`` is walked first (before the branch-scope
+        snapshot) so that any consume effect inside the condition
+        (e.g. ``if qm.measure(q):``) is reflected in the outer
+        analyzer state, not silently rolled back when the branch
+        scope restores. See :meth:`_visit_branch_scope` for the
+        snapshot-restore protocol applied to ``body`` and ``orelse``.
+
+        Args:
+            node (ast.If): The ``if`` statement.
+        """
+        self.visit(node.test)
+        self._visit_branch_scope(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        """Visit a ``for`` loop's body and ``else`` with branch-local scope.
+
+        ``node.iter`` is walked first (before the branch-scope
+        snapshot) so that any consume effect inside the iterable
+        expression is reflected in the outer analyzer state. The
+        loop target itself is not modeled — Qamomile's frontend
+        rewrites ``qmc.range(...)`` loops via the control-flow
+        transformer, so the iterator variable is a classical index
+        and never quantum.
+
+        Args:
+            node (ast.For): The ``for`` statement.
+        """
+        self.visit(node.iter)
+        self._visit_branch_scope(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        """Visit a ``while`` loop's body and ``else`` with branch-local scope.
+
+        Same protocol as :meth:`visit_If`. ``node.test`` is walked
+        before the branch-scope snapshot.
+
+        Args:
+            node (ast.While): The ``while`` statement.
+        """
+        self.visit(node.test)
+        self._visit_branch_scope(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Apply consume effects when a classical-returning call is seen.
+
+        ``_check_single_assign`` / ``_check_tuple_assign`` already
+        invoke :meth:`_consume_quantum_args` when a classical-returning
+        call appears on the RHS of an assignment. This visitor handles
+        the cases where the same call appears *outside* an assignment:
+        as a bare expression statement (``qm.measure(q)``), inside an
+        ``if`` / ``while`` condition, inside a ``for`` iterable, or
+        nested inside any other expression visited via
+        ``generic_visit``. Without this hook, those forms would leave
+        ``q`` in ``quantum_vars`` and trip a false-positive
+        ``FRESH_ALLOCATION`` violation on a later rebind of ``q``.
+
+        Re-visiting from inside a covered assignment path is benign:
+        ``_consume_quantum_args`` is idempotent — by the time
+        ``visit_Call`` runs as part of ``generic_visit`` after the
+        assignment dispatch, the relevant origins are already gone
+        from ``quantum_vars`` and the second call is a no-op.
+
+        Args:
+            node (ast.Call): The call expression.
+        """
+        if self._is_classical_returning_call(node):
+            self._consume_quantum_args(node)
         self.generic_visit(node)
 
     # ------------------------------------------------------------------
@@ -1381,17 +1657,42 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
     # ------------------------------------------------------------------
 
     def _check_single_assign(self, target: str, value: ast.expr, lineno: int) -> None:
+        """Apply rebind rules to a single-name assignment.
+
+        Args:
+            target (str): Name being assigned to.
+            value (ast.expr): RHS expression.
+            lineno (int): Source line for diagnostic reporting.
+        """
+        # Python "throwaway" convention. ``_`` is the universally
+        # recognized name for a binding the user intentionally does not
+        # care about (``_ = qmc.qubit("ancilla")`` to allocate a qubit
+        # without naming it). We do not register ``_`` into
+        # ``quantum_vars`` and do not flag rebinds on it, so back-to-back
+        # ``_ = ...`` assignments are not surfaced as fresh-allocation
+        # violations. RHS consume effects are still propagated for
+        # classical-returning calls so downstream analysis stays
+        # consistent (e.g. ``_ = qm.measure(q)`` still consumes ``q``).
+        if target == "_":
+            if isinstance(value, ast.Call) and self._is_classical_returning_call(value):
+                self._consume_quantum_args(value)
+            return
+
         # Case 1: Name = Name  (direct alias / overwrite)
         if isinstance(value, ast.Name):
             source = value.id
             if source in self.quantum_vars:
                 if target in self.quantum_vars:
-                    # existing quantum target – check origin
                     if self.quantum_vars[target] != self.quantum_vars[source]:
                         self.violations.append(
-                            RebindViolation(target, source, None, lineno)
+                            RebindViolation(
+                                target,
+                                source,
+                                RebindSourceKind.DIRECT_ALIAS,
+                                None,
+                                lineno,
+                            )
                         )
-                    # update origin regardless (may be same origin)
                     self.quantum_vars[target] = self.quantum_vars[source]
                 else:
                     # new alias binding – allowed, propagate origin
@@ -1399,35 +1700,40 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             return
 
         # Case 2: Name = Subscript(...)  (array element alias / overwrite)
-        # Example: a = qs[i]
         if isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name):
             source = value.value.id
             if source in self.quantum_vars:
                 if target in self.quantum_vars:
-                    # existing quantum target – check origin
                     if self.quantum_vars[target] != self.quantum_vars[source]:
                         self.violations.append(
-                            RebindViolation(target, source, None, lineno)
+                            RebindViolation(
+                                target,
+                                source,
+                                RebindSourceKind.DIRECT_ALIAS,
+                                None,
+                                lineno,
+                                source_expr=ast.unparse(value),
+                            )
                         )
-                    # update origin regardless (may be same origin)
                     self.quantum_vars[target] = self.quantum_vars[source]
                 else:
-                    # new alias binding – allowed, propagate origin
                     self.quantum_vars[target] = self.quantum_vars[source]
             return
 
         # Case 3: Name = Call(...)
         if isinstance(value, ast.Call):
-            # Calls like measure/expval return classical values.
-            # If the target was tracked as quantum, clear it here so we don't
-            # produce false-positive rebind violations across branches.
+            # Classical-returning frontend ops (measure / expval). The
+            # call consumes its quantum args, so every alias of those
+            # args' origins is removed from quantum_vars to model the
+            # post-call state correctly. The target name is also dropped
+            # if it was quantum, because the call's result is classical.
             if self._is_classical_returning_call(value):
                 self.quantum_vars.pop(target, None)
+                self._consume_quantum_args(value)
                 return
 
             quantum_args = self._extract_quantum_args(value)
-            if not quantum_args:
-                return
+            is_constructor = self._is_quantum_constructor_call(value)
 
             if target in self.quantum_vars:
                 target_origin = self.quantum_vars[target]
@@ -1435,43 +1741,136 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     self.quantum_vars.get(a) == target_origin for a in quantum_args
                 )
                 if not has_self:
-                    violating = quantum_args[0]
                     func_name = self._get_func_name(value)
-                    self.violations.append(
-                        RebindViolation(target, violating, func_name, lineno)
-                    )
+                    if is_constructor:
+                        self.violations.append(
+                            RebindViolation(
+                                target,
+                                None,
+                                RebindSourceKind.FRESH_ALLOCATION,
+                                func_name,
+                                lineno,
+                            )
+                        )
+                    elif quantum_args:
+                        self.violations.append(
+                            RebindViolation(
+                                target,
+                                quantum_args[0],
+                                RebindSourceKind.QUANTUM_ARG,
+                                func_name,
+                                lineno,
+                            )
+                        )
+                    else:
+                        self.violations.append(
+                            RebindViolation(
+                                target,
+                                None,
+                                RebindSourceKind.UNKNOWN_CALL,
+                                func_name,
+                                lineno,
+                            )
+                        )
 
-            # propagate quantum status from first quantum arg
-            first_q = quantum_args[0]
-            self.quantum_vars[target] = self.quantum_vars.get(first_q, first_q)
+            # Update tracking. A single-quantum-arg call produces a
+            # value that physically corresponds to the consumed input,
+            # so the target inherits its origin. A multi-quantum-arg
+            # call (e.g. ``result = gate(q1, q2, q3)``) produces a
+            # structured / tuple-like value where each component would
+            # correspond to a different input — there is no single
+            # origin to propagate, so we leave the target untracked
+            # to avoid spurious aliasing claims on later
+            # ``result[i]`` extractions. Fresh constructor allocations
+            # seed a new origin so subsequent aliases of the freshly
+            # allocated value can be detected.
+            if len(quantum_args) == 1:
+                first_q = quantum_args[0]
+                self.quantum_vars[target] = self.quantum_vars.get(first_q, first_q)
+            elif is_constructor:
+                self.quantum_vars[target] = target
             return
 
     # ------------------------------------------------------------------
-    # tuple assignment:  a, b = f(a, b)
+    # tuple assignment:  a, b = expr
     # ------------------------------------------------------------------
 
     def _check_tuple_assign(
         self, targets: ast.Tuple, value: ast.expr, lineno: int
     ) -> None:
-        if not isinstance(value, ast.Call):
-            return
+        """Apply rebind rules to a tuple-unpacking assignment.
 
+        Args:
+            targets (ast.Tuple): The LHS tuple expression.
+            value (ast.expr): RHS expression. Supports ``ast.Call`` (the
+                existing permissive logic preserves swap-via-call) and
+                ``ast.Tuple`` (element-wise with pure-quantum permutation
+                special case).
+            lineno (int): Source line for diagnostic reporting.
+        """
         target_names = [elt.id for elt in targets.elts if isinstance(elt, ast.Name)]
         if not target_names:
+            return
+
+        # Tuple-literal RHS: pair each target with the same-position RHS
+        # element. Only take this path when every LHS target is a plain
+        # ``Name``; if any LHS element is a ``Subscript`` / ``Starred`` /
+        # nested ``Tuple``, ``target_names`` is shorter than
+        # ``targets.elts`` and ``zip(target_names, value.elts)`` would
+        # mis-associate Name targets with RHS positions belonging to the
+        # non-Name targets. Defer mixed shapes to the call path (which
+        # leaves them alone) until a proper target-tree walker is added.
+        if (
+            isinstance(value, ast.Tuple)
+            and len(targets.elts) == len(value.elts)
+            and len(target_names) == len(targets.elts)
+        ):
+            self._check_tuple_literal_rhs(target_names, value.elts, lineno)
+            return
+
+        if not isinstance(value, ast.Call):
             return
 
         if self._is_classical_returning_call(value):
             for tgt in target_names:
                 self.quantum_vars.pop(tgt, None)
+            self._consume_quantum_args(value)
             return
 
         quantum_args = self._extract_quantum_args(value)
+        is_constructor = self._is_quantum_constructor_call(value)
+
         if not quantum_args:
+            # RHS call has no known quantum input. Every existing
+            # quantum target is being silently discarded.
+            func_name = self._get_func_name(value)
+            kind = (
+                RebindSourceKind.FRESH_ALLOCATION
+                if is_constructor
+                else RebindSourceKind.UNKNOWN_CALL
+            )
+            for tgt in target_names:
+                if tgt in self.quantum_vars:
+                    self.violations.append(
+                        RebindViolation(tgt, None, kind, func_name, lineno)
+                    )
+            if is_constructor:
+                for tgt in target_names:
+                    if tgt == "_":
+                        continue
+                    self.quantum_vars[tgt] = tgt
             return
 
         arg_origins = [self.quantum_vars.get(a, a) for a in quantum_args]
 
         for i, tgt in enumerate(target_names):
+            # Python "throwaway" convention. ``_`` positions are
+            # ignored — we do not track them and do not flag rebinds on
+            # them. See the matching skip at the head of
+            # ``_check_single_assign`` for the rationale.
+            if tgt == "_":
+                continue
+
             mapped_source = (
                 quantum_args[i] if i < len(quantum_args) else quantum_args[-1]
             )
@@ -1486,21 +1885,123 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     continue
                 func_name = self._get_func_name(value)
                 self.violations.append(
-                    RebindViolation(tgt, mapped_source, func_name, lineno)
+                    RebindViolation(
+                        tgt,
+                        mapped_source,
+                        RebindSourceKind.QUANTUM_ARG,
+                        func_name,
+                        lineno,
+                    )
                 )
 
             # For new targets (or mismatched existing ones), track mapped origin.
             self.quantum_vars[tgt] = mapped_origin
+
+    def _check_tuple_literal_rhs(
+        self, target_names: list[str], value_elts: list[ast.expr], lineno: int
+    ) -> None:
+        """Validate ``a, b = (e1, e2)`` element-wise with a permutation escape.
+
+        The pure-quantum permutation special case allows ``q1, q2 =
+        (q2, q1)`` and ``q1, q2 = (h(q2), h(q1))`` while still rejecting
+        ``q1, q2 = (qm.qubit("fresh"), h(q1))`` (which a naive flatten
+        approach would mis-accept by finding ``q1`` somewhere on the RHS).
+
+        Args:
+            target_names (list[str]): Flat list of target ``Name`` ids
+                (non-``Name`` targets in the LHS tuple are skipped).
+            value_elts (list[ast.expr]): RHS tuple elements; same length
+                as ``targets.elts`` by precondition of the caller.
+            lineno (int): Source line for diagnostic reporting.
+        """
+        elt_origins: list[str | None] = [
+            self._single_quantum_origin(e) for e in value_elts
+        ]
+        target_origins: list[str | None] = [
+            self.quantum_vars.get(t) for t in target_names
+        ]
+
+        # Permutation special case: every element contributes exactly
+        # one quantum origin, every target is already quantum, and the
+        # multisets match. Swap the origins.
+        if (
+            all(o is not None for o in elt_origins)
+            and all(o is not None for o in target_origins)
+            and sorted(t for t in elt_origins if t is not None)
+            == sorted(t for t in target_origins if t is not None)
+        ):
+            for tgt, origin in zip(target_names, elt_origins):
+                if origin is None:
+                    # The all-not-None preconditions above guarantee
+                    # this is unreachable; ``raise AssertionError``
+                    # (not ``assert``) so the invariant holds under
+                    # ``python -O``.
+                    raise AssertionError(
+                        f"permutation fast-path reached with None origin "
+                        f"for target '{tgt}'"
+                    )
+                self.quantum_vars[tgt] = origin
+            return
+
+        # Element-wise fallback: dispatch each pair to the single-assign
+        # path. This catches ``q1, q2 = (qm.qubit("a"), qm.qubit("b"))``
+        # (fresh_allocation on existing quantum targets) and the mixed
+        # case where one element is a swap-like self-update but another
+        # is a fresh allocation.
+        for tgt, elt in zip(target_names, value_elts):
+            self._check_single_assign(tgt, elt, lineno)
+
+    # ------------------------------------------------------------------
+    # chained assignment:  a = b = expr
+    # ------------------------------------------------------------------
+
+    def _check_chained_assign(
+        self, targets: list[ast.expr], value: ast.expr, lineno: int
+    ) -> None:
+        """Conservatively flag chained binding of an existing quantum name.
+
+        Chained ``a = b = expr`` shares one RHS value across every
+        target. Verifying self-update against a multi-target chain
+        requires multi-name origin tracking that the single-pass
+        analyzer does not currently model, so each existing quantum
+        target is reported as a ``chained_assignment`` rebind. Targets
+        that are not yet tracked as quantum are left alone — the
+        chained form is rare enough that the resulting (mild) loss of
+        alias tracking is acceptable.
+
+        Args:
+            targets (list[ast.expr]): The chain's target expressions.
+            value (ast.expr): Shared RHS expression.
+            lineno (int): Source line for diagnostic reporting.
+        """
+        func_name = self._get_func_name(value) if isinstance(value, ast.Call) else None
+        for tgt in targets:
+            if isinstance(tgt, ast.Name) and tgt.id in self.quantum_vars:
+                self.violations.append(
+                    RebindViolation(
+                        tgt.id,
+                        None,
+                        RebindSourceKind.CHAINED_ASSIGNMENT,
+                        func_name,
+                        lineno,
+                    )
+                )
 
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
 
     def _extract_quantum_args(self, call: ast.Call) -> list[str]:
-        """Recursively collect quantum variable names from args and kwargs.
+        """Collect quantum variable names referenced in a call's arguments.
 
-        Uses a dict to preserve insertion (AST traversal) order while
-        deduplicating, so that ``quantum_args[0]`` is deterministic.
+        Args:
+            call (ast.Call): The call expression.
+
+        Returns:
+            list[str]: Quantum names appearing in positional or keyword
+                arguments, in AST-traversal order and deduplicated.
+                ``Tuple`` / ``List`` / ``Set`` / ``Starred`` arguments
+                are walked recursively.
         """
         seen: dict[str, None] = {}
 
@@ -1527,8 +2028,104 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
 
         return list(seen)
 
+    def _consume_quantum_args(self, call: ast.Call) -> None:
+        """Drop every name that shares an origin with the call's quantum args.
+
+        Used after a classical-returning call (``measure`` / ``expval``)
+        to model that the consumed quantum values are no longer
+        available. Dropping by *origin* (not by name) covers the alias
+        case: if ``alias = q`` and the call is ``bit = measure(alias)``,
+        both ``alias`` and ``q`` are removed.
+
+        Subscript-form arguments (``measure(qs[0])``) are intentionally
+        NOT treated as a whole-array consume: a per-element measurement
+        only consumes that element, and the array name ``qs`` must stay
+        in ``quantum_vars`` so a subsequent rebind like
+        ``qs = qm.qubit_array(...)`` is still flagged as silently
+        discarding the unmeasured remaining elements. Only ``Name``-form
+        arguments (and ``Name``s nested in ``Tuple`` / ``List`` / ``Set``
+        / ``Starred``) drop the array origin.
+
+        Args:
+            call (ast.Call): The classical-returning call whose quantum
+                arguments are being consumed.
+        """
+        whole_consumed: set[str] = set()
+
+        def _collect_whole(expr: ast.expr) -> None:
+            """Collect Name-form quantum args; deliberately skip Subscript."""
+            if isinstance(expr, ast.Name) and expr.id in self.quantum_vars:
+                whole_consumed.add(expr.id)
+            elif isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+                for elt in expr.elts:
+                    _collect_whole(elt)
+            elif isinstance(expr, ast.Starred):
+                _collect_whole(expr.value)
+            # Intentionally skip ast.Subscript: per-element consumption
+            # does not invalidate the parent array's binding.
+
+        for arg in call.args:
+            _collect_whole(arg)
+        for kw in call.keywords:
+            if kw.value is not None:
+                _collect_whole(kw.value)
+
+        consumed_origins = {self.quantum_vars[n] for n in whole_consumed}
+        if not consumed_origins:
+            return
+        self.quantum_vars = {
+            name: origin
+            for name, origin in self.quantum_vars.items()
+            if origin not in consumed_origins
+        }
+
+    def _single_quantum_origin(self, expr: ast.expr) -> str | None:
+        """Return the single quantum origin contributed by ``expr``.
+
+        Used by the tuple-literal RHS permutation special case to decide
+        whether each RHS element passes through exactly one existing
+        quantum value.
+
+        Args:
+            expr (ast.expr): RHS element expression.
+
+        Returns:
+            str | None: The single origin name when ``expr`` is a
+                quantum-tracked ``Name``, ``Subscript`` of a quantum
+                ``Name``, or ``Call`` with exactly one quantum argument.
+                ``None`` for fresh allocations, classical-returning
+                calls, multi-quantum-arg calls, or any other form.
+        """
+        if isinstance(expr, ast.Name) and expr.id in self.quantum_vars:
+            return self.quantum_vars[expr.id]
+        if (
+            isinstance(expr, ast.Subscript)
+            and isinstance(expr.value, ast.Name)
+            and expr.value.id in self.quantum_vars
+        ):
+            return self.quantum_vars[expr.value.id]
+        if isinstance(expr, ast.Call):
+            if self._is_quantum_constructor_call(expr):
+                return None
+            if self._is_classical_returning_call(expr):
+                return None
+            quantum_args = self._extract_quantum_args(expr)
+            if len(quantum_args) == 1:
+                return self.quantum_vars.get(quantum_args[0])
+        return None
+
     @staticmethod
     def _get_func_name(call: ast.Call) -> str | None:
+        """Return the syntactic function name from a call's ``func`` node.
+
+        Args:
+            call (ast.Call): The call expression.
+
+        Returns:
+            str | None: The bare name for ``Name`` callees, the
+                attribute name for ``Attribute`` callees, or ``None``
+                otherwise.
+        """
         if isinstance(call.func, ast.Name):
             return call.func.id
         if isinstance(call.func, ast.Attribute):
@@ -1537,11 +2134,44 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
 
     @staticmethod
     def _is_classical_returning_call(call: ast.Call) -> bool:
-        """Return True when the call is a known classical-returning frontend op."""
+        """Return True when the call is a known classical-returning frontend op.
+
+        Recognizes ``measure(...)``, ``expval(...)`` and their attribute
+        forms (e.g. ``qm.measure(q)``). Alias-imported forms are out of
+        scope; matching is purely syntactic.
+
+        Args:
+            call (ast.Call): The call expression.
+
+        Returns:
+            bool: True for recognized classical-returning primitives.
+        """
         if isinstance(call.func, ast.Name):
-            return call.func.id in {"measure", "expval"}
+            return call.func.id in _CLASSICAL_RETURNING_CALL_NAMES
         if isinstance(call.func, ast.Attribute):
-            return call.func.attr in {"measure", "expval"}
+            return call.func.attr in _CLASSICAL_RETURNING_CALL_NAMES
+        return False
+
+    @staticmethod
+    def _is_quantum_constructor_call(call: ast.Call) -> bool:
+        """Return True when the call is a recognized fresh-qubit allocator.
+
+        Matches the four syntactic forms ``qubit(...)``,
+        ``qubit_array(...)``, ``<expr>.qubit(...)``, and
+        ``<expr>.qubit_array(...)``. Alias imports (``from ... import
+        qubit as factory``) are NOT recognized — that is tracked as a
+        separate name-resolution improvement.
+
+        Args:
+            call (ast.Call): The call expression.
+
+        Returns:
+            bool: True for recognized fresh-quantum-handle constructors.
+        """
+        if isinstance(call.func, ast.Name):
+            return call.func.id in _QUANTUM_CONSTRUCTOR_NAMES
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr in _QUANTUM_CONSTRUCTOR_NAMES
         return False
 
 
@@ -1571,6 +2201,18 @@ def collect_quantum_rebind_violations(
             analyzer = QuantumRebindAnalyzer(quantum_param_names)
             for stmt in node.body:
                 analyzer.visit(stmt)
+            # Normalize each violation's lineno so the FIRST body
+            # statement becomes line 1, independent of any blank
+            # lines / comments / multi-line signatures between the
+            # ``def`` line and that first statement. Subtracting
+            # ``node.body[0].lineno - 1`` achieves this; subtracting
+            # ``node.lineno`` (the ``def`` line) would leave the
+            # offset off by one or more whenever there are leading
+            # blank lines in the body source.
+            if node.body:
+                body_offset = node.body[0].lineno - 1
+                for v in analyzer.violations:
+                    v.lineno -= body_offset
             return analyzer.violations
 
     return []
