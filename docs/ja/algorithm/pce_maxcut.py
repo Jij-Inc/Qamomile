@@ -46,8 +46,8 @@ from qamomile.optimization.pce import PCEConverter
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
-# (pce-background)=
-# ## 背景
+# (problem-settings)=
+# ## 問題設定
 
 # %% [markdown]
 # ### MaxCut問題とは？
@@ -160,7 +160,7 @@ plt.show()
 # %% [markdown]
 # ### Step 1: `BinaryModel`と`PCEConverter`の構築
 #
-# [](#pce-background)で導出したIsing形式を`BinaryModel.from_ising`で構築します。係数は$h_i = 0$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$です。得られたスピンモデルと相関演算子の次数$k = 2$を`PCEConverter`に渡すと、コンバータが`PCEEncoder`と必要な量子ビット数を決めます。このスケーリングではスピンモデルのエネルギーがカット値の符号反転に等しくなります。カットが大きいほどエネルギーが低くなります。
+# [](#problem-settings)で導出したIsing形式を`BinaryModel.from_ising`で構築します。係数は$h_i = 0$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$です。得られたスピンモデルと相関演算子の次数$k = 2$を`PCEConverter`に渡すと、コンバータが必要な量子ビット数を決めます。このスケーリングではスピンモデルのエネルギーがカット値の符号反転に等しくなります。カットが大きいほどエネルギーが低くなります。
 
 # %%
 quad = {(i, j): 0.5 for i, j in G.edges()}
@@ -202,7 +202,7 @@ for P_i in observables:
 # %% [markdown]
 # ### Step 3: アンザッツの定義
 #
-# PCEでは回路を自由に選べます。原論文では**Hardware-efficient ansatz**を使います。これは単一量子ビット回転と2量子ビットのエンタングリングゲートを交互に積み重ねる構成です。本チュートリアルでは`qamomile.circuit.algorithm.basic`が提供する事前定義のレイヤ（`ry_layer`、`rz_layer`、`cx_entangling_layer`）を`depth`回スタックして使い、合計で$2 \cdot n \cdot \text{depth}$個の変分角度を持たせます。量子カーネルは$\langle P \rangle$を返します。`P`はコンパイル時のbindingsで固定されるオブザーバブルなので、同じ量子カーネルを$P_i$ごとに1回ずつトランスパイルします。
+# PCEでは回路を自由に選べます。原論文では**Hardware-efficient ansatz**を使います。これは単一量子ビット回転と2量子ビットのエンタングリングゲートを交互に積み重ねる構成です。本チュートリアルでは`qamomile.circuit.algorithm.basic`が提供する事前定義のレイヤ（`ry_layer`、`rz_layer`、`cx_entangling_layer`）を`depth`回スタックして使い、合計で$2 \cdot n \cdot \text{depth}$個の変分角度を持たせます。量子カーネルは$\langle P \rangle$を返します。`P`はトランスパイル時のbindingsで固定されるオブザーバブルなので、同じ量子カーネルを$P_i$ごとに1回ずつトランスパイルします。
 #
 # :::{note}
 # **ゲート規約：** Qamomileの回転ゲートは標準的な$1/2$係数を持ちます: $\text{RY}(\theta) = e^{-i \theta Y / 2}$、$\text{RZ}(\theta) = e^{-i \theta Z / 2}$。`thetas`ベクトルの各要素は変分パラメータです。オプティマイザがスケールできるため、この定数倍は最適な`thetas`値に吸収されます。したがって明示的に$2$を掛けず、`thetas[i]`をそのまま渡しています。
@@ -229,15 +229,15 @@ def pce_ansatz(
 
 
 # %% [markdown]
-# アンザッツの構造を具体的に示すため、$n = 3$量子ビット、`depth = 1`（レイヤー数1）の回路図を示します。`P`は最初の符号化オブザーバブルに固定し、`thetas`は記号のまま残します。
+# アンザッツの構造を具体的に示すため、$n = 3$量子ビット、`depth = 1`（レイヤー数1）の回路図を示します。`P`は最初の符号化オブザーバブルに固定し、`thetas`はランタイムパラメータとして残します。
 
 # %%
 pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 
 # %% [markdown]
-# ### Step 4: オブザーバブルごとに1つの`ExecutableProgram`をトランスパイルする
+# ### Step 4: オブザーバブルごとに1つの`ExecutableProgram`へとトランスパイルする
 #
-# 各$P_i$はコンパイル時に固定されるため、オブザーバブルごとに1回トランスパイルし、得られた`ExecutableProgram`をリストに保存します。各`transpiler.transpile(...)`は、コンパイル済みのバックエンド回路とランタイムパラメータの再バインドに必要なメタデータをまとめた`ExecutableProgram`を返します。コンパイル時の`bindings`は構造的な入力（`n`、`depth`、`P`）を固定し、`parameters=["thetas"]`は変分角度をオプティマイザが呼び出しのたびに変更できるランタイムパラメータとして残します。
+# 各$P_i$はトランスパイル時に固定する必要があるため、オブザーバブルごとに1回トランスパイルし、得られた`ExecutableProgram`をリストに保存します。各`transpiler.transpile(...)`は、トランスパイル済みのバックエンド回路とランタイムパラメータの再バインドに必要なメタデータをまとめた`ExecutableProgram`を返します。トランスパイル時の`bindings`は構造的な入力（`n`、`depth`、`P`）を固定し、`parameters=["thetas"]`は変分角度をオプティマイザが呼び出しのたびに変更できるランタイムパラメータとして残します。
 
 # %%
 transpiler = QiskitTranspiler()
@@ -338,7 +338,7 @@ plt.show()
 # (pce-step6)=
 # ### Step 6: 最適化済みの期待値をデコードする
 #
-# `PCEConverter.decode(expectations)`は変数ごとの期待値を受け取り、それぞれを符号丸めしてスピンに変換し、入力モデルと同じvartypeで1サンプルの`BinarySampleSet`を返します。ここでは`ising_model`を`BinaryModel.from_ising`で構築したため、vartypeはSPINです。出力されるエネルギーは[](#pce-background)で設定した規約（エネルギー＝$-\,\text{cut}$）に従うので、デコード後のエネルギーはカット値の負の値です。
+# `PCEConverter.decode(expectations)`は変数ごとの期待値を受け取り、それぞれを符号丸めしてスピンに変換し、入力モデルと同じvartypeで1サンプルの`BinarySampleSet`を返します。ここでは`ising_model`を`BinaryModel.from_ising`で構築したため、vartypeはSPINです。出力されるエネルギーは[](#problem-settings)で設定した規約（エネルギー＝$-\,\text{cut}$）に従うので、デコード後のエネルギーはカット値の負の値です。
 
 # %%
 final_expectations = measure_expectations(list(res.x))
@@ -419,8 +419,8 @@ plt.show()
 #
 # 本チュートリアルでは、20ノードの3-正則グラフ上のMaxCut問題をPauli Correlation Encoding（PCE）でエンコードし、相関演算子の符号化からデコードによるスピン割り当ての復元までを行う、Qamomileのワークフロー全体を扱いました。
 #
-# - **サブ量子ビットのリソース効率:** PCEは20個のスピン変数を、2体のPauli相関演算子によってわずか3量子ビットで表現しました。変数あたり1量子ビットを使うQAOA符号化と比べて約7倍の削減です。
+# - **量子ビットのリソース効率:** PCEは20個のスピン変数を、2体のPauli相関演算子によってわずか3量子ビットで表現しました。変数あたり1量子ビットを使うQAOA符号化と比べて約7倍の削減です。
 # - **代理損失関数による最適化:** 変分ループでは、エネルギーを直接最小化するのではなく、tanh緩和による代理損失関数を最小化しました。デコードした割り当ては全探索の最適値と一致しました。
-# - **Qamomileによるエンドツーエンドの流れ:** `PCEConverter`（内部で`PCEEncoder`を利用）が符号化を構築し、変数ごとのオブザーバブルを`get_encoded_pauli_list`から公開しました。`@qkernel`で実装されたHardware-efficient ansatzと`qmc.expval`を利用して各相関演算子の期待値を推定し、`QiskitTranspiler`がオブザーバブルごとに1つのexecutableを生成して、オプティマイザがそれを`executable.run`で評価しました。最後に`converter.decode`が最適化後の期待値を符号丸めしてスピンに変換しました。
+# - **Qamomileによるエンドツーエンドの流れ:** `PCEConverter`が与えられた古典変数を符号化し、対応するオブザーバブルを`get_encoded_pauli_list`で取得しました。`@qkernel`で実装されたHardware-efficient ansatzと`qmc.expval`を利用して各相関演算子の期待値を推定し、`QiskitTranspiler`が`ExecutableProgram`を生成して、オプティマイザを使ってパラメータを調整しました。最後に`converter.decode`を用いて調整後のパラメータを使って得られた期待値を符号丸めして対応する古典変数を取り出しました。
 #
-# 同じ`PCEConverter`のワークフローは、量子ビット数がボトルネックになる任意のQUBO/Ising組合せ最適化問題に応用できます。自分の`BinaryModel`を差し替えれば、上記の符号化・トランスパイル・デコードの手順をそのまま再利用できます。
+# 今回の`PCEConverter`のワークフローは、量子ビット数がボトルネックになる任意のQUBO/Ising組合せ最適化問題に応用できます。自分の`BinaryModel`を差し替えれば、上記の符号化・トランスパイル・デコードの手順をそのまま再利用できます。

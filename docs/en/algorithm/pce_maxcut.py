@@ -55,8 +55,8 @@ from qamomile.optimization.pce import PCEConverter
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
-# (pce-background)=
-# ## Background
+# (problem-settings)=
+# ## Problem Settings
 
 # %% [markdown]
 # ### What is MaxCut?
@@ -222,12 +222,12 @@ plt.show()
 # %% [markdown]
 # ### Step 1: Build the `BinaryModel` and `PCEConverter`
 #
-# We build the Ising form derived in [](#pce-background) with
+# We build the Ising form derived in [](#problem-settings) with
 # `BinaryModel.from_ising`: $h_i = 0$, $J_{ij} = 1/2$ on every edge, and
 # constant $-|E|/2$. Passing that spin model and correlator order
-# $k = 2$ to `PCEConverter` lets the converter choose the `PCEEncoder`
-# and qubit count. With this scaling, the spin-model energy equals
-# minus the cut value. A higher cut has a lower energy.
+# $k = 2$ to `PCEConverter` lets the converter choose the required
+# qubit count. With this scaling, the spin-model energy equals minus
+# the cut value. A higher cut has a lower energy.
 
 # %%
 quad = {(i, j): 0.5 for i, j in G.edges()}
@@ -280,7 +280,7 @@ for P_i in observables:
 # `qamomile.circuit.algorithm.basic` and stack them `depth` times,
 # giving $2 \cdot n \cdot \text{depth}$ variational angles in total.
 # The kernel returns $\langle P \rangle$, where `P` is the observable
-# fixed by compile-time bindings, so we transpile the same kernel once
+# fixed by transpile-time bindings, so we transpile the same kernel once
 # per $P_i$.
 #
 # :::{note}
@@ -315,7 +315,8 @@ def pce_ansatz(
 # %% [markdown]
 # To make the structure concrete, here is the circuit diagram at
 # $n = 3$ qubits and `depth = 1` (one layer), with `P` bound
-# to the first encoded observable. The `thetas` entries stay symbolic.
+# to the first encoded observable. The `thetas` entries remain runtime
+# parameters.
 
 # %%
 pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
@@ -323,9 +324,12 @@ pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 # %% [markdown]
 # ### Step 4: Transpile One `ExecutableProgram` per Observable
 #
-# Each $P_i$ is fixed at compile time, so we transpile the kernel once
-# per observable and cache the resulting executables. The compile-time
-# `bindings` fix the structural inputs (`n`, `depth`, `P`);
+# Each $P_i$ must be fixed at transpile time, so we transpile the kernel
+# once per observable and cache the resulting executables. Each
+# `transpiler.transpile(...)` returns an `ExecutableProgram` containing
+# the transpiled backend circuit and the metadata needed to rebind
+# runtime parameters. The transpile-time `bindings` fix the structural
+# inputs (`n`, `depth`, `P`);
 # `parameters=["thetas"]` leaves the variational angles as runtime
 # parameters that the optimizer can change on every call.
 
@@ -441,7 +445,7 @@ plt.show()
 # `BinarySampleSet` in the same vartype as the input model. Here the
 # vartype is SPIN because `ising_model` was built with
 # `BinaryModel.from_ising`. The reported energy follows the convention
-# from [](#pce-background): energy = $-\,\text{cut}$. The decoded energy is
+# from [](#problem-settings): energy = $-\,\text{cut}$. The decoded energy is
 # the negative of the cut value.
 
 # %%
@@ -538,21 +542,21 @@ plt.show()
 # from building the correlator encoding through to decoding the optimized
 # expectation values into a spin assignment.
 #
-# - **Sub-qubit resource use:** PCE represented the 20 spin variables with
+# - **Qubit resource efficiency:** PCE represented the 20 spin variables with
 #   only 3 qubits through 2-body Pauli correlators, roughly a 7x reduction
 #   over the one-qubit-per-variable QAOA encoding.
 # - **Surrogate-loss training:** the variational loop minimized the
 #   tanh-relaxed surrogate rather than an energy directly, and the
 #   decoded assignment matched the brute-force optimum.
-# - **End-to-end Qamomile path:** `PCEConverter` (backed by `PCEEncoder`)
-#   built the encoding and exposed the per-variable observables through
+# - **End-to-end Qamomile path:** `PCEConverter` encoded the given
+#   classical variables and exposed the corresponding observables through
 #   `get_encoded_pauli_list`; a hardware-efficient `@qkernel` ansatz and
-#   `qmc.expval` estimated each correlator; `QiskitTranspiler` produced one
-#   executable per observable that the optimizer drove with
-#   `executable.run`; and `converter.decode` sign-rounded the optimized
-#   expectations into spins.
+#   `qmc.expval` estimated each correlator; `QiskitTranspiler` produced
+#   the `ExecutableProgram` objects, the optimizer tuned the parameters,
+#   and `converter.decode` sign-rounded the expectations obtained with
+#   those tuned parameters back into the corresponding classical variables.
 #
-# The same `PCEConverter` workflow applies to any QUBO / Ising
+# This `PCEConverter` workflow applies to any QUBO / Ising
 # combinatorial problem where qubit count is the bottleneck: swap in your
 # own `BinaryModel` and reuse the encode, transpile, and decode steps
 # shown above.
