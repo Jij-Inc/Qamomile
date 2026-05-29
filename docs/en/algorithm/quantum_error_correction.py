@@ -321,6 +321,10 @@ for label, error_pos in bitflip_cases:
         runtime_bindings={"theta": math.pi},
     )
     print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
+    # Perfect single-X correction on a pure-|1> input is fully deterministic:
+    # every shot reads data[0] = 1.
+    assert counts[0] == 0
+    assert counts[1] == counts[0] + counts[1]
 
 # %% [markdown]
 # ### 2.7 Superposition Input
@@ -343,6 +347,10 @@ for label, error_pos in bitflip_cases:
     )
     total = counts[0] + counts[1]
     print(f"  {label:14s}: P(data[0]=1) = {counts[1] / total:.3f}")
+    # Target probability sin^2(pi/6) = 0.25. With 2000 shots the standard
+    # error is < 0.01, so a 5% window is safely outside shot noise.
+    assert abs(counts[1] / total - 0.25) < 0.05
+    assert total == 2000
 
 # %% [markdown]
 # ### 2.8 Limitation: Powerless Against Phase Errors
@@ -481,6 +489,10 @@ for label, error_pos in phaseflip_cases:
         bindings={"error_pos": error_pos},
     )
     print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
+    # After perfect single-Z correction the final H sends data[0] back to
+    # |0>, so every shot reads 0.
+    assert counts[1] == 0
+    assert counts[0] == counts[0] + counts[1]
 
 # %% [markdown]
 # ### 3.7 Limitation: Only One Error Type
@@ -649,6 +661,10 @@ for name, error_type, error_pos in shor_cases:
     )
     total = counts[0] + counts[1]
     print(f"  {name:6s} | q[{error_pos}]  | {counts[1] / total:.3f}")
+    # The pure-|1> input survives any single Pauli error perfectly under
+    # Shor's code, so q[0] reads 1 on every shot.
+    assert counts[0] == 0
+    assert counts[1] == total
 
 # %% [markdown]
 # ### 4.7 Why It Corrects "Any Single Error"
@@ -747,6 +763,11 @@ counts = _sample_first_bit(
     runtime_bindings={"theta": math.pi},
 )
 print(f"  data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
+# Failure mode: with two X errors the syndrome misidentifies a single-X
+# error and the "correction" turns logical |1> into logical |0>, so every
+# shot deterministically reads data[0] = 0 — that is what d=1 means.
+assert counts[1] == 0
+assert counts[0] == counts[0] + counts[1]
 
 # %% [markdown]
 # `data[0]` becomes 0, not 1. Far from fixing the state, the correction turned the logical $\lvert1\rangle$ into the logical $\lvert0\rangle$.
