@@ -21,8 +21,8 @@ from .frontend.handle import (
     VectorView,
 )
 from .frontend.operation.cast import cast
+from .frontend.operation.control import control
 from .frontend.operation.control_flow import for_items, items, range
-from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
 from .frontend.operation.pauli_evolve import pauli_evolve
@@ -76,7 +76,7 @@ __all__ = [
     "qkernel",
     "composite_gate",
     "CompositeGate",
-    "controlled",
+    "control",
     "cast",
     "bit",
     "float_",

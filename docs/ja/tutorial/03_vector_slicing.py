@@ -220,9 +220,7 @@ except UnreturnedBorrowError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
 else:
-    raise AssertionError(
-        "expected UnreturnedBorrowError, but draw() returned normally"
-    )
+    raise AssertionError("expected UnreturnedBorrowError, but draw() returned normally")
 
 
 # %%
@@ -230,7 +228,9 @@ else:
 def overlapping_views() -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(6, name="q")
     a = q[0:3]
-    b = q[2:5]  # aで貸し出した量子ビットを返却せずに二重に貸し出そうとしているためエラー
+    b = q[
+        2:5
+    ]  # aで貸し出した量子ビットを返却せずに二重に貸し出そうとしているためエラー
     q[0:3] = a
     q[2:5] = b
     return qmc.measure(q)
@@ -265,9 +265,7 @@ except AffineTypeError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
 else:
-    raise AssertionError(
-        "expected AffineTypeError, but draw() returned normally"
-    )
+    raise AssertionError("expected AffineTypeError, but draw() returned normally")
 
 # %% [markdown]
-# **次へ**: [リソース推定](04_resource_estimation.ipynb) シンボリックなコスト分析、ゲート内訳、設計候補の比較を扱います。
+# **次へ**: [制御ゲート](04_controlled_gates.ipynb) — `qmc.control`によるビルトインゲートやサブカーネルの制御、concrete/symbolicの制御数の指定、合成できないパターンのカタログを扱います。

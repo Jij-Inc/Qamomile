@@ -135,4 +135,4 @@ for n_val in [4, 8, 16, 32]:
 # - For parameterized qkernels, results are SymPy expressions showing exact scaling.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
 #
-# **Next**: [Execution Models](05_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.
+# **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.
