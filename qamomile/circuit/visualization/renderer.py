@@ -230,26 +230,45 @@ class MatplotlibRenderer:
                     )
                     block_center_x = (bl + br) / 2
                     ctrl_y_list = [self.qubit_y[q] for q in ctrl_indices]
-
-                    border_endpoints: list[float] = []
                     min_ctrl = min(ctrl_y_list)
                     max_ctrl = max(ctrl_y_list)
-                    if max_ctrl > box_top:
-                        border_endpoints.append(box_top)
-                    if min_ctrl < box_bottom:
-                        border_endpoints.append(box_bottom)
-                    all_y_endpoints = ctrl_y_list + border_endpoints
-                    line_min_y = min(all_y_endpoints)
-                    line_max_y = max(all_y_endpoints)
-                    ax.add_line(
-                        mlines.Line2D(
-                            [block_center_x, block_center_x],
-                            [line_min_y, line_max_y],
-                            color=self.style.wire_color,
-                            linewidth=1.5,
-                            zorder=PORDER_LINE,
+
+                    # The connection line must stop at the target box's
+                    # outer border so the box visually contains the
+                    # whole wrapped gate, and so the line never appears
+                    # to bleed through the box.  When controls live on
+                    # only one side of the box (top *or* bottom) a
+                    # single segment from the far control to the
+                    # nearest box edge does this directly.  When
+                    # controls sit on *both* sides, draw two segments
+                    # so the box's interior region (between
+                    # ``box_top`` and ``box_bottom``) stays empty.
+                    crosses_above = max_ctrl > box_top
+                    crosses_below = min_ctrl < box_bottom
+                    line_segments: list[tuple[float, float]] = []
+                    if crosses_above and crosses_below:
+                        line_segments.append((box_top, max_ctrl))
+                        line_segments.append((min_ctrl, box_bottom))
+                    elif crosses_above:
+                        line_segments.append((box_top, max_ctrl))
+                    elif crosses_below:
+                        line_segments.append((min_ctrl, box_bottom))
+                    else:
+                        # All controls lie inside the box's vertical
+                        # span (degenerate; only happens for malformed
+                        # IR).  Fall back to spanning the controls
+                        # themselves so something is drawn.
+                        line_segments.append((min_ctrl, max_ctrl))
+                    for y_lo, y_hi in line_segments:
+                        ax.add_line(
+                            mlines.Line2D(
+                                [block_center_x, block_center_x],
+                                [y_lo, y_hi],
+                                color=self.style.wire_color,
+                                linewidth=1.5,
+                                zorder=PORDER_LINE,
+                            )
                         )
-                    )
 
                     for ctrl_idx in ctrl_indices:
                         ctrl_y = self.qubit_y[ctrl_idx]
@@ -747,6 +766,68 @@ class MatplotlibRenderer:
                 fontsize=self.style.font_size,
                 zorder=PORDER_TEXT,
             )
+
+            # When the wrapped unitary is raised to a power, draw an
+            # outer dashed wrapper that hugs the *target* box (not the
+            # controls), with a ``pow=N`` annotation in the top-right
+            # corner of that wrapper.  The vertical line and control
+            # dots stay outside, exactly the way an inline-expanded
+            # controlled-U (``VInlineBlock``) renders the same op, so
+            # the collapsed and inline views look like the same shape
+            # at two different zoom levels.
+            if getattr(node, "power", 1) > 1:
+                margin = self.style.power_wrapper_margin
+                lp = self.style.label_padding
+                pow_text = f"pow={node.power}"
+                pow_text_height = self._calculate_text_height(
+                    ax, pow_text, self.style.subfont_size
+                )
+                pow_label_height = pow_text_height + 2 * lp
+
+                outer_left = x_pos - width / 2 - margin
+                outer_right = x_pos + width / 2 + margin
+                outer_bottom = min_target_y - self.style.gate_height / 2 - margin
+                outer_top = (
+                    max_target_y
+                    + self.style.gate_height / 2
+                    + margin
+                    + pow_label_height
+                )
+
+                # ``facecolor=background_color`` (rather than ``"none"``)
+                # so the wrapper *visually* stays transparent but
+                # actually occludes whatever sits behind it.  The
+                # multi-qubit connection line drawn by the controlled-U
+                # box path (``PORDER_LINE`` / ``PORDER_GATE - 1``)
+                # spans the full control <-> target range and would
+                # otherwise show through inside the wrapper's extra
+                # top label band where the ``pow=N`` annotation lives,
+                # contradicting the wrapper's intent of containing
+                # the powered gate.  The matching inline-block border
+                # in ``_draw_inlined_block_border`` already uses the
+                # same ``background_color`` trick.
+                outer_rect = mpatches.Rectangle(
+                    (outer_left, outer_bottom),
+                    outer_right - outer_left,
+                    outer_top - outer_bottom,
+                    facecolor=self.style.background_color,
+                    edgecolor=self.style.block_border_color,
+                    linewidth=1.5,
+                    linestyle="--",
+                    zorder=PORDER_GATE - 0.5,
+                )
+                ax.add_patch(outer_rect)
+
+                ax.text(
+                    outer_right - self.style.label_horizontal_padding,
+                    outer_top - lp,
+                    pow_text,
+                    ha="right",
+                    va="top",
+                    fontsize=self.style.subfont_size,
+                    color=self.style.block_border_color,
+                    zorder=PORDER_TEXT,
+                )
 
     def _draw_vcontrolled_u_special_gate(
         self,

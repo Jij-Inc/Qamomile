@@ -38,6 +38,7 @@ project:
     - title: Release Notes
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_12_4.md
         - file: release_notes/v0_12_3.md
         - file: release_notes/v0_12_2.md
         - file: release_notes/v0_12_1.md
