@@ -6512,7 +6512,7 @@ class TestFQAOAIntegration:
             n: qmc.UInt, beta: qmc.Float, hopping_val: qmc.Float
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = mixer_layer(q, beta, hopping_val)
+            q = mixer_layer(q, beta, hopping_val, n)
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(

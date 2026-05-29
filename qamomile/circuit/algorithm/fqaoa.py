@@ -140,25 +140,30 @@ def mixer_layer(
     q: qmc.Vector[qmc.Qubit],
     beta: qmc.Float,
     hopping: qmc.Float,
+    num_qubits: qmc.UInt,
 ) -> qmc.Vector[qmc.Qubit]:
     """Apply the fermionic mixer layer (even-odd-boundary hopping).
 
     Applies hopping gates in even-pair, odd-pair, and boundary order.
+    For a single-qubit register the mixer is the identity because no distinct
+    hopping pair exists.
 
     Args:
         q (qmc.Vector[qmc.Qubit]): Qubit register.
         beta (qmc.Float): Variational parameter for the mixer layer.
         hopping (qmc.Float): Hopping integral strength.
+        num_qubits (qmc.UInt): Number of qubits in ``q``.
 
     Returns:
         qmc.Vector[qmc.Qubit]: Updated qubit register.
     """
-    last_qubit = q.shape[0] - 1
-    for i in qmc.range(0, last_qubit, 2):
-        q = hopping_gate(q, i, i + 1, beta, hopping)
-    for i in qmc.range(1, last_qubit, 2):
-        q = hopping_gate(q, i, i + 1, beta, hopping)
-    q = hopping_gate(q, qmc.uint(0), last_qubit, beta, hopping)
+    if num_qubits > 1:
+        last_qubit = num_qubits - 1
+        for i in qmc.range(0, last_qubit, 2):
+            q = hopping_gate(q, i, i + 1, beta, hopping)
+        for i in qmc.range(1, last_qubit, 2):
+            q = hopping_gate(q, i, i + 1, beta, hopping)
+        q = hopping_gate(q, qmc.uint(0), last_qubit, beta, hopping)
     return q
 
 
@@ -208,6 +213,7 @@ def fqaoa_layers(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
     hopping: qmc.Float,
+    num_qubits: qmc.UInt,
 ) -> qmc.Vector[qmc.Qubit]:
     """Apply *p* layers of cost + mixer.
 
@@ -224,13 +230,14 @@ def fqaoa_layers(
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
         hopping (qmc.Float): Hopping integral for the mixer.
+        num_qubits (qmc.UInt): Number of qubits in ``q``.
 
     Returns:
         qmc.Vector[qmc.Qubit]: Updated qubit register after all layers.
     """
     for layer in qmc.range(p):
         q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer], hopping)
+        q = mixer_layer(q, betas[layer], hopping, num_qubits)
     return q
 
 
@@ -271,7 +278,7 @@ def fqaoa_state(
     q = qmc.qubit_array(n, name="q")
     q = initial_occupations(q, num_fermions)
     q = givens_rotations(q, givens_ij, givens_theta)
-    q = fqaoa_layers(p, quad, linear, q, gammas, betas, hopping)
+    q = fqaoa_layers(p, quad, linear, q, gammas, betas, hopping, n)
     return q
 
 
@@ -308,7 +315,7 @@ def hubo_cost_layer(
     """
     q = cost_layer(quad, linear, q, gamma)
     for indices, coeff in qmc.items(higher):
-        q = _basic.phase_gadget(q, indices, coeff * gamma)
+        q = _basic.phase_gadget(q, indices, 2.0 * coeff * gamma)
     return q
 
 
@@ -322,6 +329,7 @@ def hubo_fqaoa_layers(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
     hopping: qmc.Float,
+    num_qubits: qmc.UInt,
 ) -> qmc.Vector[qmc.Qubit]:
     """Apply *p* layers of HUBO FQAOA circuit (cost + mixer).
 
@@ -340,13 +348,14 @@ def hubo_fqaoa_layers(
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
         hopping (qmc.Float): Hopping integral for the mixer.
+        num_qubits (qmc.UInt): Number of qubits in ``q``.
 
     Returns:
         qmc.Vector[qmc.Qubit]: Updated qubit register after all layers.
     """
     for layer in qmc.range(p):
         q = hubo_cost_layer(quad, linear, higher, q, gammas[layer])
-        q = mixer_layer(q, betas[layer], hopping)
+        q = mixer_layer(q, betas[layer], hopping, num_qubits)
     return q
 
 
@@ -393,5 +402,5 @@ def hubo_fqaoa_state(
     q = qmc.qubit_array(n, name="q")
     q = initial_occupations(q, num_fermions)
     q = givens_rotations(q, givens_ij, givens_theta)
-    q = hubo_fqaoa_layers(p, quad, linear, higher, q, gammas, betas, hopping)
+    q = hubo_fqaoa_layers(p, quad, linear, higher, q, gammas, betas, hopping, n)
     return q

@@ -5519,7 +5519,7 @@ class TestFQAOAIntegration:
         def circuit(beta: qmc.Float, hop: qmc.Float) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(4, "q")
             q = initial_occupations(q, qmc.uint(2))
-            q = mixer_layer(q, beta, hop)
+            q = mixer_layer(q, beta, hop, qmc.uint(4))
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"beta": 0.5, "hop": 1.0})
@@ -5645,7 +5645,7 @@ class TestFQAOAIntegration:
             n: qmc.UInt, beta: qmc.Float, hopping_val: qmc.Float
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = mixer_layer(q, beta, hopping_val)
+            q = mixer_layer(q, beta, hopping_val, n)
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(
