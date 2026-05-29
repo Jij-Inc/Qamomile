@@ -19,8 +19,8 @@
 #
 # # Pauli Correlation Encoding (PCE)
 #
-# This tutorial demonstrates Pauli Correlation Encoding (PCE) for the
-# MaxCut problem with Qamomile's `PCEConverter`. PCE maps $N$ spin
+# In this tutorial we solve the MaxCut problem with Pauli Correlation
+# Encoding (PCE) using Qamomile's `PCEConverter`. PCE maps $N$ spin
 # variables to expectation values of $k$-body Pauli correlators on a
 # register of $n = \mathcal{O}(N^{1/k})$ qubits. This reduces the qubit
 # count compared with a one-qubit-per-variable QAOA formulation.
@@ -61,10 +61,10 @@ from qamomile.qiskit import QiskitTranspiler
 # %% [markdown]
 # ### What is MaxCut?
 #
-# Given an undirected graph $G = (V, E)$, the **MaxCut** problem asks for
+# Given an undirected graph $G = (V, E)$, the MaxCut problem asks for
 # a partition of the vertices into two sets $S$ and $\bar{S}$ so that the
 # number of edges between the two sets is maximized. We assign each
-# vertex a **spin variable** $s_i \in \{+1, -1\}$. The value
+# vertex a spin variable $s_i \in \{+1, -1\}$. The value
 # $s_i = +1$ places vertex $i$ in $S$, and $s_i = -1$ places it in
 # $\bar{S}$. The cut value is
 #
@@ -91,12 +91,11 @@ from qamomile.qiskit import QiskitTranspiler
 # %% [markdown]
 # ### Create the Graph
 #
-# We use a 20-node **3-regular** random graph (every vertex has exactly
-# three neighbors, giving $|E| = 3 \cdot 20 / 2 = 30$ edges). 3-regular
-# MaxCut is a benchmark in the PCE paper because the
-# uniform-degree structure gives a simple Edwards–Erdős regularizer
-# scale. The instance is also small enough for the brute-force baseline
-# in [](#pce-result) to compute the true optimum.
+# We use a 20-node 3-regular random graph (every vertex has exactly
+# three neighbors, giving $|E| = 3 \cdot 20 / 2 = 30$ edges). MaxCut on
+# a 3-regular graph is a benchmark in the PCE paper. The instance is
+# also small enough for the brute-force baseline to compute the true
+# optimum.
 #
 # `nx.random_regular_graph` can produce disconnected graphs, so we
 # increase the seed until the graph is connected. This keeps the
@@ -141,7 +140,7 @@ plt.show()
 # %% [markdown]
 # ### PCE Encoding
 #
-# PCE picks a **correlator order** $k > 1$ and assigns each spin
+# PCE picks a correlator order $k > 1$ and assigns each spin
 # variable $i \in \{1, \dots, N\}$ to a distinct $k$-body Pauli
 # correlator $P_i$. Each $P_i$ is a tensor product of $k$ non-identity
 # Paulis from $\{X, Y, Z\}$ acting on $k$ of the $n$ qubits. The number
@@ -171,9 +170,9 @@ plt.show()
 # $$
 #
 # into a smooth surrogate loss function $\mathcal{L}$ by replacing each
-# spin $s_i$ with the **tanh-relaxed** correlator expectation
+# spin $s_i$ with the tanh-relaxed correlator expectation
 # $\sigma_i(\boldsymbol{\theta}) = \tanh\bigl(\alpha\, \langle P_i \rangle\bigr)$,
-# and adding a quartic **regularizer** that discourages early
+# and adding a quartic regularizer that discourages early
 # saturation of the relaxed variables. The tanh map keeps $\sigma_i$
 # inside the open interval $(-1, +1)$, where sign rounding can still
 # recover candidate bitstrings:
@@ -221,14 +220,14 @@ plt.show()
 # ## Implementation
 
 # %% [markdown]
-# ### Step 1: Build the BinaryModel and PCEConverter
+# ### Step 1: Build the `BinaryModel` and `PCEConverter`
 #
 # We build the Ising form derived in [](#pce-background) with
 # `BinaryModel.from_ising`: $h_i = 0$, $J_{ij} = 1/2$ on every edge, and
 # constant $-|E|/2$. Passing that spin model and correlator order
 # $k = 2$ to `PCEConverter` lets the converter choose the `PCEEncoder`
 # and qubit count. With this scaling, the spin-model energy equals
-# **minus the cut value**. A higher cut has a lower energy.
+# minus the cut value. A higher cut has a lower energy.
 
 # %%
 quad = {(i, j): 0.5 for i, j in G.edges()}
@@ -272,10 +271,10 @@ for P_i in observables:
     assert len(coeffs) == 1 and abs(coeffs[0] - 1.0) < 1e-12
 
 # %% [markdown]
-# ### Step 3: Define the Hardware-Efficient Ansatz
+# ### Step 3: Define the Ansatz
 #
 # PCE leaves the circuit choice open. The original paper uses a
-# **hardware-efficient brickwork ansatz**: alternating layers of
+# **hardware-efficient ansatz**: alternating layers of
 # single-qubit rotations and two-qubit entangling gates. We use the
 # pre-built `ry_layer`, `rz_layer`, and `cx_entangling_layer` from
 # `qamomile.circuit.algorithm.basic` and stack them `depth` times,
@@ -315,14 +314,14 @@ def pce_ansatz(
 
 # %% [markdown]
 # To make the structure concrete, here is the circuit diagram at
-# $n = 3$ qubits and `depth = 1` (one brickwork layer), with `P` bound
+# $n = 3$ qubits and `depth = 1` (one layer), with `P` bound
 # to the first encoded observable. The `thetas` entries stay symbolic.
 
 # %%
 pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 
 # %% [markdown]
-# ### Step 4: Transpile One Executable per Observable
+# ### Step 4: Transpile One `ExecutableProgram` per Observable
 #
 # Each $P_i$ is fixed at compile time, so we transpile the kernel once
 # per observable and cache the resulting executables. The compile-time
@@ -364,12 +363,12 @@ assert num_thetas == 2 * n * depth
 # We configure the three loss hyperparameters following the original
 # paper:
 #
-# - **$\alpha$** (tanh sharpness): set to $\alpha = N^{k/2}$, where $N$
+# - $\alpha$ (tanh sharpness): set to $\alpha = N^{k/2}$, where $N$
 #   is the number of graph nodes and $k$ is the correlator order. For
 #   our 20-node, $k = 2$ run, $\alpha = 20$.
-# - **$\beta$** (regularizer strength): a fixed value of $1/2$ that the
-#   paper tunes once on random graphs.
-# - **$\nu$** (overall scale): the Edwards–Erdős MaxCut bound,
+# - $\beta$ (regularizer strength): a fixed value of $1/2$ that the
+#   paper has already tuned.
+# - $\nu$ (overall scale): the Edwards–Erdős MaxCut bound,
 #   $\nu = |E|/2 + (N - 1)/4$.
 
 # %%
@@ -379,8 +378,8 @@ maxiter = 10 if docs_test_mode else 100
 
 # Hyperparameters from https://doi.org/10.48550/arXiv.2401.09421:
 #   alpha = N^(k/2) (N = number of nodes, k = PCE correlator order)
-#   beta  = 1/2 (fixed, paper tunes once on random graphs)
-#   nu    = |E| / 2 + (N - 1) / 4 (Edwards-Erdős unweighted MaxCut bound)
+#   beta  = 1/2 (regularizer strength)
+#   nu    = |E| / 2 + (N - 1) / 4 (Edwards-Erdős MaxCut bound)
 N = spin_model.num_bits
 k = converter.correlator_order
 alpha = float(N ** (k / 2))
@@ -439,7 +438,7 @@ plt.show()
 #
 # `PCEConverter.decode(expectations)` takes the per-variable expectation
 # values, sign-rounds each one to a spin, and returns a single-sample
-# `BinarySampleSet` in the **same vartype as the input model**. Here the
+# `BinarySampleSet` in the same vartype as the input model. Here the
 # vartype is SPIN because `ising_model` was built with
 # `BinaryModel.from_ising`. The reported energy follows the convention
 # from [](#pce-background): energy = $-\,\text{cut}$. The decoded energy is
@@ -543,14 +542,12 @@ plt.show()
 #   only 3 qubits through 2-body Pauli correlators, roughly a 7x reduction
 #   over the one-qubit-per-variable QAOA encoding.
 # - **Surrogate-loss training:** the variational loop minimized the
-#   tanh-relaxed surrogate from the original PCE paper (the data term plus
-#   the quartic Edwards–Erdős regularizer) rather than an energy directly,
-#   and the decoded assignment matched the brute-force optimum.
+#   tanh-relaxed surrogate rather than an energy directly, and the
+#   decoded assignment matched the brute-force optimum.
 # - **End-to-end Qamomile path:** `PCEConverter` (backed by `PCEEncoder`)
 #   built the encoding and exposed the per-variable observables through
-#   `get_encoded_pauli_list`; a hardware-efficient `@qkernel` ansatz built
-#   from `ry_layer`, `rz_layer`, and `cx_entangling_layer` estimated each
-#   correlator with `qmc.expval`; `QiskitTranspiler` produced one
+#   `get_encoded_pauli_list`; a hardware-efficient `@qkernel` ansatz and
+#   `qmc.expval` estimated each correlator; `QiskitTranspiler` produced one
 #   executable per observable that the optimizer drove with
 #   `executable.run`; and `converter.decode` sign-rounded the optimized
 #   expectations into spins.
