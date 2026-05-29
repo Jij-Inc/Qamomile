@@ -21,7 +21,7 @@
 #
 # `qmc.control`を使うと、Qamomileの任意のゲート(`qmc.rx`のようなビルトイン関数や、ユーザが書いた`@qmc.qkernel`)の制御版を作れます。
 #
-# `qmc.control`には2つのモードがあります。*concrete mode*は制御qubitの数をPythonの`int`で与え、*symbolic mode*は`qmc.UInt`の量子カーネルパラメータ(あるいはそれを含む式)で与えてtranspile時に解決します。`power=`、デフォルト引数、`Vector[Qubit]`を取る量子カーネル、古典kwargの並び替えなど大半の機能は両モードで同じ挙動です。モードによって違うのは制御引数の渡し方と一部の追加機能だけで、以降のセクションで分けて扱います。
+# `qmc.control`には2つのモードがあります。*concrete mode*は制御量子ビットの数をPythonの`int`で与え、*symbolic mode*は`qmc.UInt`の量子カーネルパラメータ(あるいはそれを含む式)で与えてtranspile時に解決します。`power=`、デフォルト引数、`Vector[Qubit]`を取る量子カーネル、古典kwargの並び替えなど大半の機能は両モードで同じ挙動です。モードによって違うのは制御引数の渡し方と一部の追加機能だけで、以降のセクションで分けて扱います。
 
 # %%
 # Install the latest Qamomile from pip.
@@ -40,7 +40,7 @@ transpiler = QiskitTranspiler()
 # (cg-1)=
 # ## 1. 最小例: controlled-RX
 #
-# `qmc.control`の最も簡単かつ実用的な使い方は、Qamomileで用意されている1つのゲートを制御化することです。例えば以下では、1qubitゲートの`qmc.rx(q, angle)`を`qmc.control`に渡して、2qubitのcontrolled-RXゲートを得ています。
+# `qmc.control`の最も簡単かつ実用的な使い方は、Qamomileで用意されている1つのゲートを制御化することです。例えば以下では、1量子ビットゲートの`qmc.rx(q, angle)`を`qmc.control`に渡して、2量子ビットのcontrolled-RXゲートを得ています。
 
 
 # %%
@@ -99,7 +99,7 @@ assert on_counts == {1: 256}
 # ポイントとして、
 #
 # - `crx = qmc.control(qmc.rx)`はqkernelの中でも外でもどちらに書いてもかまいません。返ってきたものは再利用可能な値なので、変数に置いて何度でも呼び出せます。
-# - `crx(c, t, angle=...)`を呼ぶと、まず制御qubitがpositional引数として並び、次にtarget、最後に古典keyword引数が続きます。順序は制御化する対象の`qmc.rx(q, angle)`シグネチャを踏襲しつつ、先頭に制御を加えた形です。
+# - `crx(c, t, angle=...)`を呼ぶと、まず制御量子ビットがpositional引数として並び、次にtarget、最後に古典keyword引数が続きます。順序は制御化する対象の`qmc.rx(q, angle)`シグネチャを踏襲しつつ、先頭に制御を加えた形です。
 # - 古典パラメータのkeyword名は制御化する対象の関数の名前をそのまま使います(`qmc.rx`なら`angle`、`qmc.p`なら`theta`など)。`qmc.control`が改名することはありません。
 
 # %% [markdown]
@@ -111,7 +111,7 @@ assert on_counts == {1: 256}
 # | 項目 | Concrete | Symbolic |
 # | --- | --- | --- |
 # | `num_controls=` | Pythonの`int`(デフォルト`1`) | `qmc.UInt`ハンドル、または`UInt`式 |
-# | 制御引数 | 合計qubit数が`num_controls`に一致する1つ以上のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | 1つのpositionalな`Vector[Qubit]` / `VectorView`の*pool*(single-pool形、任意で`control_indices`)、**または**`Qubit` / `VectorView` / `Vector[Qubit]`を混ぜた複数のpositional引数 |
+# | 制御引数 | 合計量子ビット数が`num_controls`に一致する1つ以上のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | 1つのpositionalな`Vector[Qubit]` / `VectorView`の*pool*(single-pool形、任意で`control_indices`)、**または**`Qubit` / `VectorView` / `Vector[Qubit]`を混ぜた複数のpositional引数 |
 # | `control_indices` | 受け付けない | 任意。poolのどの量子ビットがactiveかを指定 |
 # | 制御数が解決される時点 | `qmc.control(...)`が評価された時(module load時かtracing時) | transpile時(`bindings`から) |
 #
@@ -121,7 +121,7 @@ assert on_counts == {1: 256}
 # (cg-3)=
 # ## 3. 両モードで動作するパターン
 #
-# 本セクションの各機能は、どちらのモードでも同じ挙動を示します。以下では原則concrete modeを使いますが、同じ機能がsymbolic modeでも利用可能です。concrete modeと違うのは`num_controls`が`UInt`式であることと、qubit数の一致がtranspile時にチェックされることだけです。symbolic専用の引数形は[](#cg-5)で扱います。
+# 本セクションの各機能は、どちらのモードでも同じ挙動を示します。以下では原則concrete modeを使いますが、同じ機能がsymbolic modeでも利用可能です。concrete modeと違うのは`num_controls`が`UInt`式であることと、量子ビット数の一致がtranspile時にチェックされることだけです。symbolic専用の引数形は[](#cg-5)で扱います。
 
 # %% [markdown]
 # (cg-3-1)=
@@ -257,7 +257,7 @@ power_demo_concrete.draw()
 # (cg-3-5)=
 # ### 3.5 制御引数を別々のpositionalで渡す(CCXスタイル)
 #
-# `num_controls=2`にすると、呼び出し側では各制御qubitをそれぞれ独立したpositional引数としてtargetの前に並べます。以下は典型的なCCX(Toffoli)で、2つの制御`c0`、`c1`と1つのtarget`t`を渡しています。同じパターンは`num_controls=3`(CCCX)や`num_controls=4`にも拡張でき、渡したい`Qubit`が`num_controls`で指定した数だけあれば成立します。
+# `num_controls=2`にすると、呼び出し側では各制御量子ビットをそれぞれ独立したpositional引数としてtargetの前に並べます。以下は典型的なCCX(Toffoli)で、2つの制御`c0`、`c1`と1つのtarget`t`を渡しています。同じパターンは`num_controls=3`(CCCX)や`num_controls=4`にも拡張でき、渡したい`Qubit`が`num_controls`で指定した数だけあれば成立します。
 
 
 # %%
@@ -282,7 +282,7 @@ toffoli_demo.draw()
 # (cg-3-6)=
 # ### 3.6 scalar Qubitと`VectorView`の制御を混ぜる
 #
-# positional引数で渡す制御量子ビットは、合計qubit数が`num_controls`と一致する限り、scalarな`Qubit`、`VectorView`、`Vector[Qubit]`を自由に混ぜられます。以下では`num_controls=3`のcontrolled-Hに対し、3つの制御を`qs[0]`(scalar `Qubit`、1qubit)と`qs[1:3]`(`VectorView`、2qubit)で渡しています。
+# positional引数で渡す制御量子ビットは、合計量子ビット数が`num_controls`と一致する限り、scalarな`Qubit`、`VectorView`、`Vector[Qubit]`を自由に混ぜられます。以下では`num_controls=3`のcontrolled-Hに対し、3つの制御を`qs[0]`(scalar `Qubit`、1量子ビット)と`qs[1:3]`(`VectorView`、2量子ビット)で渡しています。
 
 
 # %%
@@ -334,7 +334,7 @@ cnot_demo.draw()
 # 制御量子ビットの渡し方としては以下の2種類があります。
 #
 # - **Single-poolの形**([](#cg-5-1) – [](#cg-5-4)): 制御引数として`Vector[Qubit]`または`VectorView`を1つ渡し、pool全体、もしくは`control_indices`で選んだsubsetがactiveな制御として使用されます。
-# - **Multi-argの形**([](#cg-5-5)): 制御prefixが複数のpositional引数(scalar`Qubit`、`VectorView`、`Vector[Qubit]`、またはこれらの組み合わせ)で、qubit数の合計が`num_controls`と一致するよう渡します。concrete modeで見た([](#cg-3-5) / [](#cg-3-6))を、symbolicな`num_controls`に持ち上げたものです。
+# - **Multi-argの形**([](#cg-5-5)): 制御prefixが複数のpositional引数(scalar`Qubit`、`VectorView`、`Vector[Qubit]`、またはこれらの組み合わせ)で、量子ビット数の合計が`num_controls`と一致するよう渡します。concrete modeで見た([](#cg-3-5) / [](#cg-3-6))を、symbolicな`num_controls`に持ち上げたものです。
 #
 # `control_indices`keywordはsymbolic mode専用で、single-poolの引数のどの量子ビットがactiveな制御として実際に配線されるかを指定します(残りはそのまま素通りします)。`control_indices`はsingle-poolの形でのみ有効で、multi-argの形と組み合わせるとrejectされます。
 
@@ -362,7 +362,7 @@ symbolic_pool.draw(n=3, fold_loops=False)
 # (cg-5-2)=
 # ### 5.2 `n - 1`の典型的なmulti-controlled形
 #
-# multi-controlled-X設計で頻出する形で、レジスタの最初の`n - 1`qubitを制御に、最後の1qubitをtargetにします。`num_controls`の値はsymbolic式の`n - 1`で、制御引数はスライス`qs[0:n - 1]`です。
+# multi-controlled-X設計で頻出する形で、レジスタの最初の`n - 1`量子ビットを制御に、最後の1量子ビットをtargetにします。`num_controls`の値はsymbolic式の`n - 1`で、制御引数はスライス`qs[0:n - 1]`です。
 
 
 # %%
@@ -425,7 +425,7 @@ subset_pool_with_uint.draw(n=4, k_ctrls=3)
 # (cg-5-5)=
 # ### 5.5 Multi-argの制御prefix
 #
-# 制御を複数のpositional引数に分けたい場合、(典型的には「同じ`Vector`のいくつかの量子ビットをactiveな制御に、別の量子ビットをtargetにしたい」場合)symbolic modeでもconcrete modeと同じmulti-argの形([](#cg-3-5) / [](#cg-3-6))が使えます。同じ`Vector[Qubit]`から複数の量子ビットを取り出しても、互いにdisjoint(重ならない)な量子ビットであれば制御prefixに並べられます。制御prefixの各引数のqubit数の合計が、transpile時に`num_controls`と照合されます。
+# 制御を複数のpositional引数に分けたい場合、(典型的には「同じ`Vector`のいくつかの量子ビットをactiveな制御に、別の量子ビットをtargetにしたい」場合)symbolic modeでもconcrete modeと同じmulti-argの形([](#cg-3-5) / [](#cg-3-6))が使えます。同じ`Vector[Qubit]`から複数の量子ビットを取り出しても、互いにdisjoint(重ならない)な量子ビットであれば制御prefixに並べられます。制御prefixの各引数の量子ビット数の合計が、transpile時に`num_controls`と照合されます。
 #
 # なお、`control_indices`はmulti-argの形では使えません([](#cg-6)のreject caseを参照)。subset選択が必要ならsingle-poolの形([](#cg-5-3) / [](#cg-5-4))、multi-argの自由度が必要ならprefix全体をactiveとして使うかのどちらかを選んでください。
 
@@ -461,7 +461,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 #
 # | ケース | モード | 例外 |
 # | --- | --- | --- |
-# | 6.1 制御qubit数が引数境界をまたぐ | concrete | `ValueError` |
+# | 6.1 制御量子ビット数が引数境界をまたぐ | concrete | `ValueError` |
 # | 6.2 concrete modeで`control_indices` | concrete | `ValueError` |
 # | 6.3 concrete modeでsymbolic長の`VectorView` | concrete | `NotImplementedError` |
 # | 6.4 同じpool量子ビットをtargetに再利用 | symbolic | `UnreturnedBorrowError` |
@@ -490,7 +490,7 @@ def expect_error(label: str, exc_type: type, body) -> None:
 
 # %% [markdown]
 # (cg-6-1)=
-# ### 6.1 制御qubit数が引数境界をまたぐ (concrete)
+# ### 6.1 制御量子ビット数が引数境界をまたぐ (concrete)
 #
 # concrete modeはpositional引数を順に確認して、各引数を制御リストに畳み込むということを累計が`num_controls`に達するまで続けます。`VectorView`や`Vector`が与えられ、そこまでの累計の量子ビット数が`num_controls`を超えるような場合にはエラーが起きます。
 
@@ -501,7 +501,7 @@ def case_count_mismatch() -> None:
     def kernel() -> qmc.Bit:
         qs = qmc.qubit_array(6, "qs")
         cg = qmc.control(qmc.x, num_controls=3)
-        view, t = cg(qs[0:5], qs[5])  # 5qubit渡しているが3expected
+        view, t = cg(qs[0:5], qs[5])  # 5量子ビット渡しているが3expected
         qs[0:5] = view
         return qmc.measure(qs[5])
 
@@ -540,7 +540,7 @@ expect_error(
 # (cg-6-3)=
 # ### 6.3 concrete modeでsymbolic長の`VectorView` (concrete)
 #
-# concrete modeは各制御引数のqubit数をコンパイル時に決定する必要があります。長さが`UInt`に依存するスライスはconcrete modeでは未対応で、`NotImplementedError`になります。
+# concrete modeは各制御引数の量子ビット数をコンパイル時に決定する必要があります。長さが`UInt`に依存するスライスはconcrete modeでは未対応で、`NotImplementedError`になります。
 
 
 # %%
@@ -571,7 +571,7 @@ expect_error(
 #
 # Workaround(推奨順):
 #
-# 1. **Multi-arg symbolicの形([](#cg-5-5))。** 各量子ビットまたはsub-viewを別々のpositional引数として渡します。`cg(pool[0], pool[1], pool[3], pool[2])`(またはcontrolled-incrementの例のようにscalar / sliceを混ぜる形)。各引数は`pool`からの別borrowで、borrow trackerがdisjointnessをcheckし、`num_controls`はtranspile時にqubit数の合計と照合されます。
+# 1. **Multi-arg symbolicの形([](#cg-5-5))。** 各量子ビットまたはsub-viewを別々のpositional引数として渡します。`cg(pool[0], pool[1], pool[3], pool[2])`(またはcontrolled-incrementの例のようにscalar / sliceを混ぜる形)。各引数は`pool`からの別borrowで、borrow trackerがdisjointnessをcheckし、`num_controls`はtranspile時に量子ビット数の合計と照合されます。
 # 2. **Concrete mode([](#cg-3-6))。** `num_controls`がPythonの`int`なら、同じmulti-argの形がsymbolicの仕組みなしでそのまま動きます。
 
 
