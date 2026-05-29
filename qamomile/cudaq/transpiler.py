@@ -37,6 +37,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
     QubitAddress,
     QubitMap,
+    ValueResolver,
     resolve_condition_address,
     resolve_if_condition,
 )
@@ -170,6 +171,8 @@ def _has_runtime_control_flow(
 def _collect_loop_carried_clbits(
     operations: list[Operation],
     clbit_map: ClbitMap,
+    bindings: dict[str, Any],
+    resolver: ValueResolver | None,
 ) -> set[int]:
     """Collect clbit indices used as loop-carried conditions in WhileOperations.
 
@@ -178,6 +181,23 @@ def _collect_loop_carried_clbits(
     canonical clbit indices are used as while-loop conditions so the
     emitter can box them as singleton lists (``__b{i} = [False]``,
     accessed via ``__b{i}[0]``).
+
+    Args:
+        operations (list[Operation]): Operations to scan (recursively).
+        clbit_map (ClbitMap): Map from ``QubitAddress`` to physical clbit
+            index, used to translate a resolved condition address into the
+            boxed clbit index.
+        bindings (dict[str, Any]): Active emit-time bindings, forwarded to
+            ``resolve_condition_address`` so that a ``Vector[Bit]`` element
+            condition indexed by a transpile-time-bound parameter resolves
+            to its ``(parent_array.uuid, index)`` key rather than falling
+            back to the scalar UUID.
+        resolver (ValueResolver | None): Resolver used to fold non-constant
+            indices through ``bindings``. ``None`` restricts resolution to
+            constant indices.
+
+    Returns:
+        set[int]: Physical clbit indices that back a while-loop condition.
     """
     result: set[int] = set()
     for op in operations:
@@ -185,24 +205,35 @@ def _collect_loop_carried_clbits(
             cond = op.operands[0]
             cond_val = cond.value if hasattr(cond, "value") else cond
             if isinstance(cond_val, Value):
-                # The pre-scan runs before runtime bindings exist, so the
-                # helper falls through to the scalar UUID for runtime
-                # indices; constant indices on ``Vector[Bit]`` measurements
-                # are still routed to the ``(parent_array, index)`` key.
-                cond_addr = resolve_condition_address(cond_val, {}, None)
+                # Forward the real bindings / resolver so a Vector[Bit]
+                # element indexed by a bound parameter resolves to its
+                # (parent_array, index) clbit key; an index that is still
+                # unresolved here (e.g. an outer loop variable not yet
+                # bound at pre-scan time) falls back to the scalar UUID.
+                cond_addr = resolve_condition_address(cond_val, bindings, resolver)
             else:
                 cond_addr = QubitAddress(str(cond_val))
             if cond_addr in clbit_map:
                 result.add(clbit_map[cond_addr])
             # Also scan inside the while body
-            result |= _collect_loop_carried_clbits(op.operations, clbit_map)
+            result |= _collect_loop_carried_clbits(
+                op.operations, clbit_map, bindings, resolver
+            )
         elif isinstance(op, IfOperation):
-            result |= _collect_loop_carried_clbits(op.true_operations, clbit_map)
-            result |= _collect_loop_carried_clbits(op.false_operations, clbit_map)
+            result |= _collect_loop_carried_clbits(
+                op.true_operations, clbit_map, bindings, resolver
+            )
+            result |= _collect_loop_carried_clbits(
+                op.false_operations, clbit_map, bindings, resolver
+            )
         elif isinstance(op, ForOperation):
-            result |= _collect_loop_carried_clbits(op.operations, clbit_map)
+            result |= _collect_loop_carried_clbits(
+                op.operations, clbit_map, bindings, resolver
+            )
         elif isinstance(op, ForItemsOperation):
-            result |= _collect_loop_carried_clbits(op.operations, clbit_map)
+            result |= _collect_loop_carried_clbits(
+                op.operations, clbit_map, bindings, resolver
+            )
     return result
 
 
@@ -253,7 +284,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
 
         # Pre-scan: identify loop-carried clbits that need singleton-list boxing
-        emitter._boxed_clbits = _collect_loop_carried_clbits(operations, clbit_map)
+        emitter._boxed_clbits = _collect_loop_carried_clbits(
+            operations, clbit_map, bindings, self._resolver
+        )
 
         # Create circuit and emit operations
         circuit = emitter.create_circuit(qubit_count, clbit_count)
