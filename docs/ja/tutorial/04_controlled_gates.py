@@ -39,29 +39,60 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## 1. 最小例: controlled-RX
 #
-# `qmc.control`の最も小さく実用的な使い方は、1つのビルトイン回転をラップすることです。`qmc.rx(q, angle)`は1qubitゲートで、これを`qmc.control`に渡すと2qubitのcontrolled-RXが得られます。
+# `qmc.control`の最も簡単かつ実用的な使い方は、Qamomileで用意されている1つのゲートを制御化することです。例えば以下では、1qubitゲートの`qmc.rx(q, angle)`を`qmc.control`に渡して、2qubitのcontrolled-RXゲートを得ています。
+#
+# 制御が実際に効いていることを確かめるために、制御qubitを先に|1>へ立てるかどうかだけが異なる2つのカーネルを用意し、両方をQiskitにtranspileしてsimulatorで実行し、targetの測定結果を確認します。`angle=math.pi`では`RX(pi)`が|0>を|1>に写すので、制御が|1>のときだけtargetは全shotで|1>になり、それ以外では|0>のままになります。
 
 
 # %%
 @qmc.qkernel
-def crx_demo() -> qmc.Bit:
+def crx_control_off() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
-    # 制御を|1>に立てて、制御回転を発火させます。
+    # 制御は|0>のままなので、制御回転は発火しません。
+    crx = qmc.control(qmc.rx)
+    c, t = crx(c, t, angle=math.pi)
+    return qmc.measure(t)
+
+
+@qmc.qkernel
+def crx_control_on() -> qmc.Bit:
+    c = qmc.qubit(name="c")
+    t = qmc.qubit(name="t")
+    # 制御を|1>に立てるので、制御回転が発火します。
     c = qmc.x(c)
     crx = qmc.control(qmc.rx)
     c, t = crx(c, t, angle=math.pi)
     return qmc.measure(t)
 
 
-crx_demo.draw()
+off_counts = dict(
+    transpiler.transpile(crx_control_off)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+on_counts = dict(
+    transpiler.transpile(crx_control_on)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+print("control |0> ->", off_counts)
+print("control |1> ->", on_counts)
+# ここでの`RX(pi)`は決定的です。制御が|0>なら全shotでtargetは|0>、
+# 制御が|1>なら全shotでtargetは|1>になります。
+assert off_counts == {0: 256}
+assert on_counts == {1: 256}
+
+crx_control_on.draw()
 
 # %% [markdown]
 # 呼び出し側で押さえておきたいポイントは3つです。
 #
 # - `crx = qmc.control(qmc.rx)`はqkernelの中でも外でもどちらに書いてもかまいません。返ってきたものは再利用可能な値なので、変数に置いて何度でも呼び出せます。
-# - `crx(c, t, angle=...)`を呼ぶと、まず制御qubitがpositional引数として並び、次にtarget、最後に古典keyword引数が続きます。順序はラップ対象の`qmc.rx(q, angle)`シグネチャを踏襲しつつ、先頭に制御を1つ加えた形です。
-# - 古典パラメータのkeyword名はラップした関数の名前をそのまま使います(`qmc.rx`なら`angle`、`qmc.p`なら`theta`など)。`qmc.control`が改名することはありません。
+# - `crx(c, t, angle=...)`を呼ぶと、まず制御qubitがpositional引数として並び、次にtarget、最後に古典keyword引数が続きます。順序は制御化する対象の`qmc.rx(q, angle)`シグネチャを踏襲しつつ、先頭に制御を1つ加えた形です。
+# - 古典パラメータのkeyword名は制御化する対象の関数の名前をそのまま使います(`qmc.rx`なら`angle`、`qmc.p`なら`theta`など)。`qmc.control`が改名することはありません。
 
 # %% [markdown]
 # ## 2. 2つのモードの概要
@@ -85,9 +116,9 @@ crx_demo.draw()
 # 本セクションの各機能は、どちらのモードでも同じ挙動を示します。以下のセルはconcrete modeを使います(`UInt`のカーネルパラメータが入らない分、コードが短くなるためです)が、同じ機能はsymbolic modeでも利用可能です。ただしsymbolic modeは*制御引数*の形にも固有の制約があり、scalarな`Qubit`引数を散りばめるのではなく、単一の`Vector[Qubit]`(または`VectorView`)のpoolにしないといけません。モード固有の引数形はSection 4と5で詳しく扱います。本セクションは*挙動*がモードに依存しない機能を集めたものです。
 
 # %% [markdown]
-# ### 3.1 任意のcallableをラップ
+# ### 3.1 任意のcallableを制御化
 #
-# `qmc.control`はビルトインのゲート関数(`qmc.rx`、`qmc.h`、`qmc.p`など)も、ユーザ定義の`@qmc.qkernel`も同様に受け付けます。ラッパーはどちらかを気にしません。ラップ対象のcallableのシグネチャを見て、量子オペランドと古典パラメータを取り出し、残りをcontrolled-Uで包んでemitします。以下の例では、`ch`が単一のプリミティブをラップし、`cg`がゲートを2つ含むユーザ定義のカーネル本体をラップしています。
+# `qmc.control`はビルトインのゲート関数(`qmc.rx`、`qmc.h`、`qmc.p`など)も、ユーザ定義の`@qmc.qkernel`も同様に受け付けます。`qmc.control`はどちらかを気にしません。制御化する対象のcallableのシグネチャを見て、量子オペランドと古典パラメータを取り出し、残りをcontrolled-Uで包んでemitします。以下の例では、`ch`が単一のプリミティブを制御化し、`cg`がゲートを2つ含むユーザ定義のカーネル本体を制御化しています。
 
 
 # %%
@@ -99,7 +130,7 @@ def _h_then_rx(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
 
 
 @qmc.qkernel
-def wrap_any_callable_demo() -> qmc.Vector[qmc.Bit]:
+def control_any_callable_demo() -> qmc.Vector[qmc.Bit]:
     # q[0]は共通の制御。q[1] / q[2]は2つのtarget。
     q = qmc.qubit_array(3, "q")
     q[0] = qmc.x(q[0])
@@ -110,12 +141,12 @@ def wrap_any_callable_demo() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-wrap_any_callable_demo.draw()
+control_any_callable_demo.draw()
 
 # %% [markdown]
 # ### 3.2 `Vector[Qubit]`を受け取るサブカーネル
 #
-# ラップ対象のカーネルは`Vector[Qubit]`引数を取れます。呼び出し側は長さの一致する`Vector`または`VectorView`を渡します。controlled-Uのemit passはこのvectorオペランドを物理target qubitに解決し、ラップされたブロックをbackendに渡します。controlled blockを単一のnativeゲートとして出せるbackendはそれを採用し、出せないbackendは内部ブロックを分解して各ゲートを個別に制御化するfallbackをとります。いずれの場合も呼び出し側は同じで、qubit毎にオペランドを書き並べる必要はありません。
+# 制御化する対象のカーネルは`Vector[Qubit]`引数を取れます。呼び出し側は長さの一致する`Vector`または`VectorView`を渡します。controlled-Uのemit passはこのvectorオペランドを物理target qubitに解決し、内部ブロックをbackendに渡します。Qiskitはcontrolled block全体を1つのnativeゲートとしてemitし、CUDA-Qはブロック内の各ゲートを個別に制御化します。ただし、すべてのbackendが複数qubitの内部ブロックをこの形で制御化できるわけではありません。QuriPartsは上記のmulti-targetケースを明確な`EmitError`でrejectするので、その場合はQiskitかCUDA-Qで実行してください。いずれの場合も呼び出し側は同じで、qubit毎にオペランドを書き並べる必要はありません。
 
 
 # %%
@@ -138,9 +169,9 @@ def vec_target_demo() -> qmc.Vector[qmc.Bit]:
 vec_target_demo.draw()
 
 # %% [markdown]
-# ### 3.3 ラップ対象カーネルのシグネチャ由来のデフォルト値
+# ### 3.3 制御化する対象カーネルのシグネチャ由来のデフォルト値
 #
-# ラップ対象の`@qmc.qkernel`が古典パラメータにPythonのデフォルト値を宣言している場合、呼び出し側ではそのkeywordを省略するか、callsiteでpositionalに上書きするかのどちらでもよいです。ラッパーは欠けた値を`inspect.Signature.bind + apply_defaults`で補完するので、解決後の値は通常の直接呼び出しと同じようにcontrolled-Uまで届きます(デフォルト値を持てるのは`@qmc.qkernel`でラップされたcallableだけです。plain Python関数で同じことを試した場合の挙動はSection 6.7を参照してください)。
+# 制御化する対象の`@qmc.qkernel`が古典パラメータにPythonのデフォルト値を宣言している場合、呼び出し側ではそのkeywordを省略するか、callsiteでpositionalに上書きするかのどちらでもよいです。`qmc.control`は欠けた値を`inspect.Signature.bind + apply_defaults`で補完するので、解決後の値は通常の直接呼び出しと同じようにcontrolled-Uまで届きます(デフォルト値を持てるのは`@qmc.qkernel`のcallableだけです。plain Python関数で同じことを試した場合の挙動はSection 6.7を参照してください)。
 #
 # どちらの形もどちらのモードでも使えます。以下のセルはまずconcrete modeで省略形を示し、続いて同じ省略形をsymbolic modeで繰り返して「両モードでデフォルトが効く」がconcrete専用の便宜ではなく実際に動くことを明示します。
 
@@ -165,7 +196,7 @@ default_arg_demo.draw()
 
 
 # %%
-# 同じ`_phase`カーネルを、今度はsymbolicな`num_controls=n - 1`でラップ
+# 同じ`_phase`カーネルを、今度はsymbolicな`num_controls=n - 1`で制御化
 # します。呼び出し側が`theta`を名指ししなくても`theta=math.pi / 2`の
 # デフォルトはそのまま適用されます。別の角度を使いたいがkwargには
 # 切り替えたくない場合は、省略した`theta`をcallsiteのpositional上書き
@@ -185,7 +216,7 @@ default_arg_demo_symbolic.draw(n=3)
 # %% [markdown]
 # ### 3.4 古典keyword引数を任意の順序で
 #
-# 呼び出し側の古典kwargは名前で照合され、ラップ対象カーネルが宣言した順序に並べ替えられます。そのため、kwargをどちらの順序で書いても同じ回路にコンパイルされます。セル末尾のassertionは、transpileしたQiskit回路を文字列レベルで比較してそれを明示的に検証しています。
+# 呼び出し側の古典kwargは名前で照合され、制御化する対象カーネルが宣言した順序に並べ替えられます。そのため、kwargをどちらの順序で書いても同じ回路にコンパイルされます。セル末尾のassertionは、transpileしたQiskit回路を文字列レベルで比較してそれを明示的に検証しています。
 
 
 # %%
@@ -440,7 +471,7 @@ controlled_increment_demo.draw(n=4, control_index=3)
 # %% [markdown]
 # Multi-argの形について補足:
 #
-# - Call-siteの引数は、ラップ対象のkernelのシグネチャから「制御prefix」と「sub-kernel positional」に分割されます。kwargsで指定されていないpositionalパラメータはすべてpositionalで届く必要があり、その末尾のブロックより*前*が制御prefixです。上記の例では`qmc.x`が1つの`Qubit` positionalを取るので、最後の引数(`tgt`)がtarget、最初の2つ(`ctrl_main`、`prefix`)が制御になります。
+# - Call-siteの引数は、制御化する対象のkernelのシグネチャから「制御prefix」と「sub-kernel positional」に分割されます。kwargsで指定されていないpositionalパラメータはすべてpositionalで届く必要があり、その末尾のブロックより*前*が制御prefixです。上記の例では`qmc.x`が1つの`Qubit` positionalを取るので、最後の引数(`tgt`)がtarget、最初の2つ(`ctrl_main`、`prefix`)が制御になります。
 # - Borrow trackerは、別々の引数が触るスロットが互いにdisjointである限り満たされます。静的なdisjointnessは境界がリテラルなときにcheckされ、symbolic境界(`q[0:target_idx]`と`q[target_idx]`と`q[control_index]`)はtrackerがregister partition向けにすでにサポートしているbound predicatesに任せます。
 # - `control_indices=`はmulti-argの形ではrejectされます(Section 6のreject caseを参照)。subset選択が必要ならsingle-poolの形(5.3 / 5.4)、 multi-argの自由度が必要ならprefix全体をactiveとして使うか、 のどちらかを選んでください。
 
@@ -486,7 +517,7 @@ def expect_error(label: str, exc_type: type, body) -> None:
 #
 # concrete modeはpositional引数を左から右に歩いて、各引数を制御リストに畳み込み、累計が`num_controls`に達するまで続けます。途中の引数が累計を`num_controls`を*超えて*押し込む(以下の例は`num_controls=3`に対して5qubitのスライスを渡す)場合、その呼び出しはcompose時に`ValueError`でrejectされます。引数を境界で綺麗に分割するよう促す形です。
 #
-# (同じ間違いの*too-narrow*版、つまり制御qubitを`num_controls`より少なく渡したケースは、見た目が違います。targetのつもりだった追加のpositional引数が制御リストに畳み込まれてしまい、ラッパーが「targetが残っていない」と苦情を言います。これはPython側の`TypeError: missing a required argument`であって、controlled-Uの`ValueError`ではありません。)
+# (同じ間違いの*too-narrow*版、つまり制御qubitを`num_controls`より少なく渡したケースは、見た目が違います。targetのつもりだった追加のpositional引数が制御リストに畳み込まれてしまい、`qmc.control`が「targetが残っていない」と苦情を言います。これはPython側の`TypeError: missing a required argument`であって、controlled-Uの`ValueError`ではありません。)
 
 
 # %%
@@ -558,7 +589,7 @@ expect_error(
 # %% [markdown]
 # ### 6.4 古典keyword引数のtypo (両方)
 #
-# `qmc.control`はラップ対象カーネルのシグネチャを参照するので、未知のkeyword名はcompose時に検知されます。エラーメッセージはラッパーが実際に理解するパラメータの一覧を含みます。
+# `qmc.control`は制御化する対象カーネルのシグネチャを参照するので、未知のkeyword名はcompose時に検知されます。エラーメッセージは`qmc.control`が実際に理解するパラメータの一覧を含みます。
 
 
 # %%
@@ -617,7 +648,7 @@ expect_error("power=True (bool)", TypeError, case_power_bool)
 # %% [markdown]
 # ### 6.6 `num_controls=0`のリテラル (concrete)
 #
-# 制御が0個の制御ゲートは、要するに元のゲートそのものなので、ラッパーが意味をなしません。引数がPythonの`int < 1`の場合、`qmc.control`はその評価の瞬間に`ValueError`でrejectします(負の`int`も同様にrejectされます)。一方、`qmc.UInt`ハンドルが0に*解決される*ケースは別物で、`qmc.control`は評価時には値を見ないので、rejectはtranspileまたはemissionの段階に下がり、validation / emit / backend側のエラーのいずれかとして表面化します(どのpassが先に検知するかに依存します)。symbolicな`num_controls`は必ず厳密に正の値に束縛してください。
+# 制御が0個の制御ゲートは、要するに元のゲートそのものなので、制御化が意味をなしません。引数がPythonの`int < 1`の場合、`qmc.control`はその評価の瞬間に`ValueError`でrejectします(負の`int`も同様にrejectされます)。一方、`qmc.UInt`ハンドルが0に*解決される*ケースは別物で、`qmc.control`は評価時には値を見ません。0が後段で検知されるかどうかは制御引数の形とbackendに依存します。Qiskitはvalidationまたはbackend側のエラーとして表面化させますが、backendによっては(QuriParts)エラーを出さずに退化した回路をemitします。安全のため、symbolicな`num_controls`は必ず自分で厳密に正の値に束縛してください。
 
 
 # %%
@@ -630,7 +661,7 @@ expect_error("num_controls=0", ValueError, case_num_controls_zero)
 # %% [markdown]
 # ### 6.7 plain関数にPythonのデフォルト値 (両方)
 #
-# `qmc.control`に渡すcallableが`@qmc.qkernel`ではなく、ただのplain Python関数の場合、ラッパーはその場でカーネルを自動合成します。合成側はPython側のデフォルト値をIRレベルのデフォルトに変換できないので、デフォルト値を持つplain関数は`qmc.control(...)`を呼んだ瞬間にrejectされます。直し方は、関数を`@qmc.qkernel`としてマークする(デフォルトはend-to-endで追跡されます)か、デフォルトを外して値を呼び出し側で明示的に渡すかのいずれかです。
+# `qmc.control`に渡すcallableが`@qmc.qkernel`ではなく、ただのplain Python関数の場合、`qmc.control`はその場でカーネルを自動合成します。合成側はPython側のデフォルト値をIRレベルのデフォルトに変換できないので、デフォルト値を持つplain関数は`qmc.control(...)`を呼んだ瞬間にrejectされます。直し方は、関数を`@qmc.qkernel`としてマークする(デフォルトはend-to-endで追跡されます)か、デフォルトを外して値を呼び出し側で明示的に渡すかのいずれかです。
 
 
 # %%
@@ -709,7 +740,7 @@ expect_error(
 # `qmc.control(fn, num_controls=...)`は再利用可能な`ControlledGate`を返します。正しいメンタルモデルは、2つの別々のAPIではなく、2軸のマトリクスです。
 #
 # - **モードは`num_controls`の型で決まります。** Pythonの`int`なら*concrete mode*、`qmc.UInt`ハンドル(または`n - 1`のような`UInt`式)なら*symbolic mode*です。
-# - **ほとんどの機能はモードに依存しません。** 任意のcallable(ビルトインまたは`@qmc.qkernel`)のラップ、`Vector[Qubit]`を受け取るサブカーネル、ラップ対象シグネチャ由来のデフォルト、古典kwargの並び替え、`power=`はすべて両モードで同じ挙動です(Section 3)。
+# - **ほとんどの機能はモードに依存しません。** 任意のcallable(ビルトインまたは`@qmc.qkernel`)の制御化、`Vector[Qubit]`を受け取るサブカーネル、制御化する対象シグネチャ由来のデフォルト、古典kwargの並び替え、`power=`はすべて両モードで同じ挙動です(Section 3)。
 # - **一部の機能はモード固有です。** 複数の独立したpositional制御引数とscalar + `VectorView`混合はconcrete専用(Section 4)、single-poolの呼び出し形 + `control_indices=`によるsubset選択、およびmulti-argの形(Section 5.5)はsymbolic専用(Section 5)です。
 #
 # 実用的な判断ルールとしては、制御数がカーネルパラメータやそれを含む式の場合、特に「最後の1つ以外全部」の典型形`num_controls=n - 1`を含む場合は、迷わず*symbolic mode*を使ってください。制御数がリテラルで、制御対象として個別に名指ししたい特定のqubitがある場合は*concrete mode*を使います。同じ`Vector`内のスロットをcontrolとtargetで分けたい場合はsymbolic mode + multi-arg(5.5)が一番自然です。

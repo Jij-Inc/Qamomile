@@ -50,25 +50,62 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## 1. The minimal example: controlled-RX
 #
-# The smallest useful application of `qmc.control` is wrapping a
-# single built-in rotation. `qmc.rx(q, angle)` is a one-qubit
-# gate; passing it to `qmc.control` produces a two-qubit
-# controlled-RX.
+# The simplest, most practical use of `qmc.control` is to make a
+# controlled version of one of the gates Qamomile provides. For
+# example, below we pass the one-qubit gate `qmc.rx(q, angle)` to
+# `qmc.control` to obtain a two-qubit controlled-RX gate.
+#
+# To confirm the control actually takes effect, we build two
+# kernels that differ only in whether the control qubit is driven
+# to |1> first, transpile both to Qiskit, run them on the
+# simulator, and check the target measurement. With
+# `angle=math.pi`, `RX(pi)` maps |0> to |1>, so the target ends up
+# |1> on every shot exactly when the control is |1>, and stays
+# |0> otherwise.
 
 
 # %%
 @qmc.qkernel
-def crx_demo() -> qmc.Bit:
+def crx_control_off() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
-    # Drive the control to |1> so the controlled rotation fires.
+    # The control stays |0>, so the controlled rotation does NOT fire.
+    crx = qmc.control(qmc.rx)
+    c, t = crx(c, t, angle=math.pi)
+    return qmc.measure(t)
+
+
+@qmc.qkernel
+def crx_control_on() -> qmc.Bit:
+    c = qmc.qubit(name="c")
+    t = qmc.qubit(name="t")
+    # Drive the control to |1>, so the controlled rotation fires.
     c = qmc.x(c)
     crx = qmc.control(qmc.rx)
     c, t = crx(c, t, angle=math.pi)
     return qmc.measure(t)
 
 
-crx_demo.draw()
+off_counts = dict(
+    transpiler.transpile(crx_control_off)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+on_counts = dict(
+    transpiler.transpile(crx_control_on)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+print("control |0> ->", off_counts)
+print("control |1> ->", on_counts)
+# RX(pi) is deterministic here: the target is |0> on every shot
+# when the control is |0>, and |1> on every shot when it is |1>.
+assert off_counts == {0: 256}
+assert on_counts == {1: 256}
+
+crx_control_on.draw()
 
 # %% [markdown]
 # Three things to notice at the call site:
@@ -78,10 +115,11 @@ crx_demo.draw()
 #   bind it to a name and call it as many times as you like.
 # - When you call `crx(c, t, angle=...)`, the control qubits come
 #   first as positional arguments, then the targets, then any
-#   classical keyword arguments. The order mirrors the wrapped
-#   `qmc.rx(q, angle)` signature with one extra control prefixed.
+#   classical keyword arguments. The order mirrors the
+#   `qmc.rx(q, angle)` signature of the gate being controlled,
+#   with one extra control prefixed.
 # - The keyword name for the classical parameter is whatever the
-#   wrapped function uses (`angle` for `qmc.rx`, `theta` for
+#   controlled gate uses (`angle` for `qmc.rx`, `theta` for
 #   `qmc.p`, etc.) — `qmc.control` does not rename it.
 
 # %% [markdown]
@@ -130,15 +168,15 @@ crx_demo.draw()
 # mode-agnostic.
 
 # %% [markdown]
-# ### 3.1 Wrapping any callable
+# ### 3.1 Controlling any callable
 #
 # `qmc.control` accepts either a built-in gate function (`qmc.rx`,
-# `qmc.h`, `qmc.p`, ...) or any user-defined `@qmc.qkernel`. The
-# wrapper does not care which: it looks at the wrapped callable's
+# `qmc.h`, `qmc.p`, ...) or any user-defined `@qmc.qkernel`.
+# `qmc.control` does not care which: it looks at the callable's
 # signature, extracts the quantum operands and the classical
 # parameters, and emits a controlled-U around the rest. In the
-# example below, `ch` wraps a single primitive and `cg` wraps a
-# user-defined kernel body with two gates inside.
+# example below, `ch` controls a single primitive and `cg`
+# controls a user-defined kernel body with two gates inside.
 
 
 # %%
@@ -150,7 +188,7 @@ def _h_then_rx(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
 
 
 @qmc.qkernel
-def wrap_any_callable_demo() -> qmc.Vector[qmc.Bit]:
+def control_any_callable_demo() -> qmc.Vector[qmc.Bit]:
     # q[0] is the shared control; q[1] / q[2] are the two targets.
     q = qmc.qubit_array(3, "q")
     q[0] = qmc.x(q[0])
@@ -161,20 +199,22 @@ def wrap_any_callable_demo() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-wrap_any_callable_demo.draw()
+control_any_callable_demo.draw()
 
 # %% [markdown]
 # ### 3.2 Sub-kernel taking `Vector[Qubit]`
 #
-# A wrapped kernel may take a `Vector[Qubit]` argument. The caller
-# passes a `Vector` or a `VectorView` of the matching length; the
-# controlled-U emit pass resolves the vector operand to its
-# physical target qubits and hands the wrapped block to the
-# backend. Backends that can emit a controlled block as a single
-# native gate do so; the rest fall back to decomposing the inner
-# block and controlling each gate individually. Either way the
-# call site stays the same — you do not have to spell out one
-# operand per qubit.
+# A controlled kernel may take a `Vector[Qubit]` argument. The
+# caller passes a `Vector` or a `VectorView` of the matching
+# length; the controlled-U emit pass resolves the vector operand
+# to its physical target qubits and hands the inner block to the
+# backend. Qiskit emits the whole controlled block as a single
+# native gate, while CUDA-Q controls each gate of the block
+# individually. Not every backend can control a multi-qubit inner
+# block this way — QuriParts rejects the multi-target case above
+# with a clear `EmitError`, so run such kernels on Qiskit or
+# CUDA-Q. Either way the call site stays the same — you do not
+# have to spell out one operand per qubit.
 
 
 # %%
@@ -197,17 +237,17 @@ def vec_target_demo() -> qmc.Vector[qmc.Bit]:
 vec_target_demo.draw()
 
 # %% [markdown]
-# ### 3.3 Default values from the wrapped kernel's signature
+# ### 3.3 Default values from the controlled kernel's signature
 #
-# When the wrapped `@qmc.qkernel` declares a Python default for a
-# classical parameter, callers may either omit that keyword
+# When the controlled `@qmc.qkernel` declares a Python default for
+# a classical parameter, callers may either omit that keyword
 # (letting the default flow through) or override it positionally
-# at the call site. The wrapper fills the missing value in via
+# at the call site. `qmc.control` fills the missing value in via
 # `inspect.Signature.bind + apply_defaults`, so the resolved value
 # reaches the controlled-U just like a normal direct call. (Only
-# `@qmc.qkernel`-wrapped callables can carry defaults — see
-# Section 6.7 for what happens if you try to do the same with a
-# plain Python function.)
+# `@qmc.qkernel` callables can carry defaults — see Section 6.7
+# for what happens if you try to do the same with a plain Python
+# function.)
 #
 # Both forms work in either mode. The cells below show the omit
 # form first in concrete mode, then the same omit form repeated in
@@ -235,7 +275,7 @@ default_arg_demo.draw()
 
 
 # %%
-# Same `_phase` kernel, this time wrapped with a symbolic
+# Same `_phase` kernel, this time controlled with a symbolic
 # `num_controls=n - 1`.  The `theta=math.pi / 2` default still
 # applies even though the caller never names it.  Replace the
 # omitted `theta` with a positional override at the call site
@@ -257,7 +297,7 @@ default_arg_demo_symbolic.draw(n=3)
 # ### 3.4 Classical keyword arguments in any order
 #
 # Classical kwargs at the call site are matched by name and
-# reordered to follow the wrapped kernel's declared signature,
+# reordered to follow the controlled kernel's declared signature,
 # so the same call compiled with the kwargs in either order
 # produces the same circuit. The assertion at the end of the cell
 # verifies that explicitly by comparing the transpiled Qiskit
@@ -301,7 +341,7 @@ kwargs_in_order.draw()
 # %% [markdown]
 # ### 3.5 Controlling `U^k` with `power=`
 #
-# Passing `power=k` controls the *k-th power* of the wrapped
+# Passing `power=k` controls the *k-th power* of the underlying
 # unitary instead of `U` itself — the standard pattern in QPE,
 # where the j-th register applies a controlled-`U^(2**j)`.
 # `power` accepts a Python `int` (resolved at compile time) **or**
@@ -611,7 +651,7 @@ controlled_increment_demo.draw(n=4, control_index=3)
 # A few notes on the multi-arg form:
 #
 # - The call-site args are split into "control prefix" and
-#   "sub-kernel positional" by the wrapped kernel's signature:
+#   "sub-kernel positional" by the controlled kernel's signature:
 #   any positional parameter not provided via kwargs must arrive
 #   positionally, and everything *before* that trailing block is
 #   the control prefix.  In the example, `qmc.x` takes one
@@ -688,7 +728,7 @@ def expect_error(label: str, exc_type: type, body) -> None:
 # (A *too-narrow* version of the same mistake — passing fewer
 # control qubits than `num_controls` — looks different: extra
 # positional arguments that you meant as targets get folded into
-# the control list, and the wrapper then complains it has no
+# the control list, and `qmc.control` then complains it has no
 # target left. That surface is Python's own `TypeError: missing
 # a required argument`, not a controlled-U `ValueError`.)
 
@@ -770,9 +810,9 @@ expect_error(
 # %% [markdown]
 # ### 6.4 Typo in a classical keyword argument (both modes)
 #
-# `qmc.control` inspects the wrapped kernel's signature, so an
+# `qmc.control` inspects the controlled kernel's signature, so an
 # unknown keyword name is caught at compose time. The error
-# message lists the parameters the wrapper actually understands.
+# message lists the parameters `qmc.control` actually understands.
 
 
 # %%
@@ -836,16 +876,17 @@ expect_error("power=True (bool)", TypeError, case_power_bool)
 # ### 6.6 `num_controls=0` literal (concrete)
 #
 # A controlled gate with zero controls would just be the
-# underlying gate, which makes the wrapper meaningless. When the
-# argument is a Python `int < 1`, `qmc.control` rejects this at
+# underlying gate, which makes controlling it meaningless. When
+# the argument is a Python `int < 1`, `qmc.control` rejects this at
 # the moment it is evaluated, with `ValueError` (negative `int`
 # is rejected the same way). A `qmc.UInt` handle that *resolves*
 # to zero is a different story: `qmc.control` does not see the
-# value at evaluation time, so the rejection happens later
-# during transpilation or emission and surfaces as a
-# validation / emit / backend-side error depending on which
-# pass catches it first. Bind any symbolic `num_controls` to a
-# strictly positive value.
+# value at evaluation time. Whether the zero is caught later
+# depends on the control-argument shape and the backend — Qiskit
+# surfaces it as a validation or backend-side error, but some
+# backends (QuriParts) instead emit a degenerate circuit without
+# complaining. The safe rule is to bind any symbolic
+# `num_controls` to a strictly positive value yourself.
 
 
 # %%
@@ -859,7 +900,7 @@ expect_error("num_controls=0", ValueError, case_num_controls_zero)
 # ### 6.7 Plain function with a Python default (both modes)
 #
 # When the callable passed to `qmc.control` is not a `@qmc.qkernel`
-# (just a plain Python function), the wrapper auto-synthesises a
+# (just a plain Python function), `qmc.control` auto-synthesises a
 # kernel around it. The synthesiser cannot turn Python-side
 # default values into IR-level defaults, so plain functions with
 # defaults are rejected at the moment `qmc.control(...)` is
@@ -971,9 +1012,9 @@ expect_error(
 # - **Mode is the type of `num_controls`.** Python `int` puts
 #   you in *concrete* mode; a `qmc.UInt` handle (or any `UInt`
 #   expression like `n - 1`) puts you in *symbolic* mode.
-# - **Most features are mode-agnostic.** Wrapping any callable
+# - **Most features are mode-agnostic.** Controlling any callable
 #   (built-in or `@qmc.qkernel`), sub-kernels that take
-#   `Vector[Qubit]`, defaults from the wrapped signature,
+#   `Vector[Qubit]`, defaults from the controlled signature,
 #   classical-kwarg reordering, and `power=` all work the same
 #   way in either mode (Section 3).
 # - **A few features are mode-specific.** Multiple separate
