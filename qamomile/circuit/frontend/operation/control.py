@@ -1335,6 +1335,17 @@ class ControlledGate:
                 "positional control argument is required."
             )
 
+        if len(control_args) == 1 and not isinstance(control_args[0], ArrayBase):
+            raise ValueError(
+                "When num_controls is symbolic (UInt), a single control "
+                "argument must be a Vector[Qubit] / VectorView pool, not a "
+                "scalar Qubit.  A single fixed scalar control has no symbolic "
+                "meaning (the count is one), so use concrete mode instead -- "
+                "e.g. qmc.control(gate) with the default num_controls=1.  To "
+                "keep a scalar control in symbolic mode, pass it together with "
+                "at least one more control argument (the multi-arg form)."
+            )
+
         is_legacy_pool_form = len(control_args) == 1 and isinstance(
             control_args[0], ArrayBase
         )

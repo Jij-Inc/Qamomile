@@ -3175,3 +3175,31 @@ class TestSymbolicMultiArgControl:
             return qmc.measure(q)
 
         _ = kernel.block
+
+    def test_single_scalar_control_symbolic_raises(self):
+        """A lone scalar ``Qubit`` control is concrete-only; symbolic rejects it.
+
+        In symbolic mode a single control argument is the
+        single-pool form, which requires a ``Vector`` / ``VectorView``
+        (an ``ArrayValue``).  A bare scalar ``Qubit`` as the only
+        control has no symbolic meaning -- the count is fixed at one,
+        so concrete mode is the right tool.  Before the fix this
+        slipped through the frontend and surfaced as an internal
+        ``ValidationError`` ("compiler bug ... contract was violated")
+        deep in ``ConstantFoldingPass`` at transpile time; now it is
+        caught at compose time with a clear, user-facing
+        ``ValueError`` that names the fix.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.control(qmc.rx, num_controls=n)
+            c, t = cg(c, t, angle=math.pi)
+            return qmc.measure(t)
+
+        with pytest.raises(
+            ValueError, match=r"single control argument must be a Vector"
+        ):
+            _ = kernel.block
