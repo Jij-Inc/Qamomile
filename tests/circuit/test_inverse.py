@@ -19,7 +19,6 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
     GateOperationType,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -166,7 +165,7 @@ def _inverse_controlled_concrete_layer(
     rotation_angle: qmc.Float,
 ) -> tuple[qmc.Qubit, qmc.Qubit]:
     """Apply a concrete ControlledUOperation for inverse tests."""
-    ctrl, target = qmc.controlled(_phase_layer)(
+    ctrl, target = qmc.control(_phase_layer)(
         ctrl,
         target,
         rotation_angle=rotation_angle,
@@ -182,7 +181,7 @@ def _inverse_controlled_symbolic_layer(
     rotation_angle: qmc.Float,
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
     """Apply a symbolic-control ControlledUOperation for inverse tests."""
-    controls, target = qmc.controlled(_phase_layer, num_controls=control_count)(
+    controls, target = qmc.control(_phase_layer, num_controls=control_count)(
         controls,
         target,
         rotation_angle=rotation_angle,
@@ -192,32 +191,37 @@ def _inverse_controlled_symbolic_layer(
 
 @qmc.qkernel
 def _inverse_controlled_index_layer(
-    qs: qmc.Vector[qmc.Qubit],
+    controls: qmc.Vector[qmc.Qubit],
+    target: qmc.Qubit,
+    control_count: qmc.UInt,
     rotation_angle: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    """Apply an index-spec ControlledUOperation for inverse tests."""
-    qs = qmc.controlled(_phase_layer, num_controls=1)(
-        qs,
-        target_indices=[1],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    """Apply a control-indices SymbolicControlledUOperation."""
+    controls, target = qmc.control(_phase_layer, num_controls=control_count)(
+        controls,
+        target,
+        control_indices=[0],
         rotation_angle=rotation_angle,
     )
-    return qs
+    return controls, target
 
 
 @qmc.qkernel
 def _inverse_controlled_symbolic_index_layer(
-    qs: qmc.Vector[qmc.Qubit],
+    controls: qmc.Vector[qmc.Qubit],
+    target: qmc.Qubit,
     control_count: qmc.UInt,
-    target_index: qmc.UInt,
+    control_index: qmc.UInt,
     rotation_angle: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    """Apply an index-spec ControlledUOperation with symbolic fields."""
-    qs = qmc.controlled(_phase_layer, num_controls=control_count)(
-        qs,
-        target_indices=[target_index],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    """Apply a control-indices SymbolicControlledUOperation."""
+    controls, target = qmc.control(_phase_layer, num_controls=control_count)(
+        controls,
+        target,
+        control_indices=[control_index],
         rotation_angle=rotation_angle,
     )
-    return qs
+    return controls, target
 
 
 @qmc.qkernel
@@ -609,50 +613,60 @@ def test_inverse_controlled_symbolic_operation() -> None:
 
 
 def test_inverse_controlled_index_operation() -> None:
-    """inverse(qkernel) preserves IndexSpecControlledUOperation shape."""
+    """inverse(qkernel) preserves control_indices on SymbolicControlledU."""
 
     @qmc.qkernel
-    def circuit() -> qmc.Vector[qmc.Qubit]:
-        qs = qmc.qubit_array(2, "qs")
-        qs = qmc.inverse(_inverse_controlled_index_layer)(qs, 0.25)
-        return qs
+    def circuit() -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+        controls = qmc.qubit_array(2, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.inverse(_inverse_controlled_index_layer)(
+            controls,
+            target,
+            1,
+            0.25,
+        )
+        return controls, target
 
     block = circuit.build()
     ctrl_ops = [op for op in block.operations if isinstance(op, ControlledUOperation)]
 
     assert len(ctrl_ops) == 1
-    assert isinstance(ctrl_ops[0], IndexSpecControlledU)
+    assert isinstance(ctrl_ops[0], SymbolicControlledU)
     assert ctrl_ops[0].block is not None
     assert ctrl_ops[0].block.name == "_phase_layer_inverse"
+    assert ctrl_ops[0].control_indices is not None
+    assert ctrl_ops[0].control_indices[0].get_const() == 0
 
 
 def test_inverse_controlled_index_substitutes_symbolic_fields() -> None:
-    """inverse(qkernel) substitutes symbolic IndexSpecControlledU fields."""
+    """inverse(qkernel) substitutes symbolic control_indices fields."""
 
     @qmc.qkernel
     def circuit(
         control_count: qmc.UInt,
-        target_index: qmc.UInt,
-    ) -> qmc.Vector[qmc.Qubit]:
-        qs = qmc.qubit_array(2, "qs")
-        qs = qmc.inverse(_inverse_controlled_symbolic_index_layer)(
-            qs,
+        control_index: qmc.UInt,
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+        controls = qmc.qubit_array(2, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.inverse(_inverse_controlled_symbolic_index_layer)(
+            controls,
+            target,
             control_count,
-            target_index,
+            control_index,
             0.25,
         )
-        return qs
+        return controls, target
 
-    block = circuit.build(parameters=["control_count", "target_index"])
+    block = circuit.build(parameters=["control_count", "control_index"])
     ctrl_ops = [op for op in block.operations if isinstance(op, ControlledUOperation)]
     block_inputs = {value.name: value for value in block.input_values}
 
     assert len(ctrl_ops) == 1
-    assert isinstance(ctrl_ops[0], IndexSpecControlledU)
+    assert isinstance(ctrl_ops[0], SymbolicControlledU)
     assert isinstance(ctrl_ops[0].num_controls, Value)
     assert ctrl_ops[0].num_controls.uuid == block_inputs["control_count"].uuid
-    assert ctrl_ops[0].target_indices is not None
-    assert ctrl_ops[0].target_indices[0].uuid == block_inputs["target_index"].uuid
+    assert ctrl_ops[0].control_indices is not None
+    assert ctrl_ops[0].control_indices[0].uuid == block_inputs["control_index"].uuid
 
 
 def test_inverse_custom_composite_gate_inverts_implementation() -> None:

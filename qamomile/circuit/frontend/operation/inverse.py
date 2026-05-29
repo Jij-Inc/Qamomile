@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
-from qamomile.circuit.frontend.operation.controlled import _qkernel_for_callable
+from qamomile.circuit.frontend.operation.control import _qkernel_for_callable
 from qamomile.circuit.frontend.qkernel import (
     QKernel,
     _promote_literal_to_handle,
@@ -32,7 +32,6 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
     GateOperationType,
-    IndexSpecControlledU,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -721,57 +720,31 @@ class _BlockInverter:
         if isinstance(power, Value):
             power = _as_value(_substitute_value(power, value_map), "ControlledU power")
 
-        if isinstance(op, IndexSpecControlledU):
-            num_controls: int | Value = op.num_controls
-            if isinstance(num_controls, Value):
-                num_controls = _as_value(
-                    _substitute_value(num_controls, value_map),
-                    "ControlledU num_controls",
-                )
-            target_indices = (
-                [
-                    _as_value(
-                        _substitute_value(target_index, value_map),
-                        "ControlledU target index",
-                    )
-                    for target_index in op.target_indices
-                ]
-                if op.target_indices is not None
-                else None
-            )
-            controlled_indices = (
-                [
-                    _as_value(
-                        _substitute_value(controlled_index, value_map),
-                        "ControlledU control index",
-                    )
-                    for controlled_index in op.controlled_indices
-                ]
-                if op.controlled_indices is not None
-                else None
-            )
-            operands = [current_results[0], *mapped_params]
-            inverse_op = IndexSpecControlledU(
-                operands=operands,
-                results=new_results,
-                num_controls=num_controls,
-                power=power,
-                target_indices=target_indices,
-                controlled_indices=controlled_indices,
-                block=inverse_block,
-            )
-        elif isinstance(op, SymbolicControlledU):
+        if isinstance(op, SymbolicControlledU):
             num_controls = _as_value(
                 _substitute_value(op.num_controls, value_map),
                 "ControlledU num_controls",
             )
-            operands = [current_results[0], *current_results[1:], *mapped_params]
+            control_indices = (
+                tuple(
+                    _as_value(
+                        _substitute_value(control_index, value_map),
+                        "ControlledU control index",
+                    )
+                    for control_index in op.control_indices
+                )
+                if op.control_indices is not None
+                else None
+            )
+            operands = [*current_results, *mapped_params]
             inverse_op = SymbolicControlledU(
                 operands=operands,
                 results=new_results,
                 num_controls=num_controls,
+                control_indices=control_indices,
                 power=power,
                 block=inverse_block,
+                num_control_args=op.num_control_args,
             )
         elif isinstance(op, ConcreteControlledU):
             operands = [*current_results, *mapped_params]

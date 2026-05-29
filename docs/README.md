@@ -31,7 +31,7 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 >
 > Several tutorials (e.g. `algorithm/qaoa_graph_partition.py`,
 > `algorithm/qaoa_maxcut.py`, `algorithm/vqe_for_hydrogen.py`,
-> `tutorial/06_classical_flow_patterns.py`) read the
+> `tutorial/07_classical_flow_patterns.py`) read the
 > `QAMOMILE_DOCS_TEST` environment variable and switch to a **reduced
 > workload** (fewer optimizer iterations, fewer shots) when it equals
 > `"1"`. This flag exists only so that `tests/docs/test_tutorials.py`

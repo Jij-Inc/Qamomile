@@ -78,6 +78,11 @@ class VGate:
     has_param: bool = False
     box_width: float | None = None
     control_count: int = 0  # For CONTROLLED_U_BOX: first N indices are controls
+    # For CONTROLLED_U_BOX: ``power`` value of the wrapped unitary.
+    # When > 1, the renderer draws an outer ``pow=N`` wrapper box
+    # around the inner controlled-U rectangle (matching the
+    # ``VInlineBlock`` rendering of an expanded controlled-U block).
+    power: int = 1
 
 
 @dataclass

@@ -49,7 +49,7 @@ def naive_qpe(n: int, phase: float) -> qmc.Vector[qmc.Bit]:
     phase_register = qmc.qubit_array(n, name="phase_reg")
     target = qmc.qubit(name="target")
     target = qmc.x(target)
-    controlled_phase_gate = qmc.controlled(_phase_gate)
+    controlled_phase_gate = qmc.control(_phase_gate)
     num = phase_register.shape[0]
     for i in qmc.range(num):
         phase_register[i] = qmc.h(phase_register[i])
