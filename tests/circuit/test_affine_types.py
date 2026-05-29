@@ -1455,7 +1455,7 @@ class TestStdlibGatesAffine:
 
 
 class TestControlledGateAffine:
-    """qm.controlled() wrappers must enforce affine usage on both control and target."""
+    """qm.control() wrappers must enforce affine usage on both control and target."""
 
     def _make_sub_kernel(self):
         @qkernel
@@ -1467,7 +1467,7 @@ class TestControlledGateAffine:
     def test_controlled_proper_use_works(self):
         """Controlled gate with reassignment of both outputs should succeed."""
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def good_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit]:
@@ -1480,7 +1480,7 @@ class TestControlledGateAffine:
     def test_controlled_reuse_control_raises(self):
         """Reusing control qubit after controlled gate should raise QubitConsumedError."""
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
@@ -1494,7 +1494,7 @@ class TestControlledGateAffine:
     def test_controlled_reuse_target_raises(self):
         """Reusing target qubit after controlled gate should raise QubitConsumedError."""
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
@@ -1506,21 +1506,28 @@ class TestControlledGateAffine:
             bad_circuit.build()
 
     def test_controlled_alias_raises(self):
-        """Same qubit as both control and target should raise QubitAliasError."""
+        """Reusing the same qubit as control + target raises QubitConsumedError.
+
+        Step 6 of the controlled-API redesign dropped the bespoke
+        entry-point ``_validate_no_alias_or_overlap`` check; the
+        ``Handle.consume()`` linear-type layer catches the duplicate
+        on the second consume, so the error class is
+        ``QubitConsumedError`` instead of ``QubitAliasError``.
+        """
         sub = self._make_sub_kernel()
-        ctrl_h = qm.controlled(sub)
+        ctrl_h = qm.control(sub)
 
         @qkernel
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
             return ctrl_h(q, q)  # same qubit in both positions
 
-        with pytest.raises(QubitAliasError):
+        with pytest.raises(QubitConsumedError):
             bad_circuit.build()
 
     def test_double_controlled_proper_use_works(self):
         """Double-controlled gate (num_controls=2) with reassignment should succeed."""
         sub = self._make_sub_kernel()
-        cc_h = qm.controlled(sub, num_controls=2)
+        cc_h = qm.control(sub, num_controls=2)
 
         @qkernel
         def good_circuit(
@@ -1535,7 +1542,7 @@ class TestControlledGateAffine:
     def test_double_controlled_reuse_control_raises(self):
         """Reusing a control qubit after double-controlled gate should raise QubitConsumedError."""
         sub = self._make_sub_kernel()
-        cc_h = qm.controlled(sub, num_controls=2)
+        cc_h = qm.control(sub, num_controls=2)
 
         @qkernel
         def bad_circuit(c0: Qubit, c1: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
@@ -1665,26 +1672,36 @@ class TestArrayConsumeUnreturnedBorrow:
         graph = good_outer.build()
         assert graph is not None
 
-    def test_controlled_index_spec_with_unreturned_vector_borrow_raises(self):
-        """controlled() with target_indices on a Vector with unreturned borrow should raise."""
+    def test_controlled_with_unreturned_vector_borrow_raises(self):
+        """control() called on a Vector with an unreturned borrow should raise.
+
+        Migrated from the old ``target_indices``-on-Vector form: the
+        regression concern (an unreturned element borrow blocks any
+        whole-Vector consume) is now exercised through the new
+        ``Vector[Qubit]`` sub-kernel argument path, which is the
+        moral equivalent — both shapes hand the whole Vector to the
+        controlled call and trip ``validate_all_returned()``.
+        """
 
         @qkernel
-        def x_gate(q: Qubit) -> Qubit:
-            return qm.x(q)
+        def x_gate_broadcast(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            qs = qm.x(qs)
+            return qs
 
         @qkernel
         def bad_controlled() -> qm.Vector[Qubit]:
             qs = qubit_array(3, "qs")
+            ctrl = qm.qubit(name="ctrl")
             _q = qs[0]  # borrow but don't return
-            cx = qm.controlled(x_gate)
-            qs = cx(qs, target_indices=[2])
+            cx = qm.control(x_gate_broadcast)
+            _ctrl_out, qs = cx(ctrl, qs)  # type: ignore
             return qs
 
         with pytest.raises(UnreturnedBorrowError):
             bad_controlled.build()
 
     def test_controlled_symbolic_controls_with_unreturned_borrow_raises(self):
-        """controlled() with symbolic num_controls on a Vector with unreturned borrow should raise."""
+        """control() with symbolic num_controls on a Vector with unreturned borrow should raise."""
         from qamomile.circuit.frontend.handle.primitives import UInt
         from qamomile.circuit.ir.types.primitives import UIntType
         from qamomile.circuit.ir.value import Value
@@ -1700,7 +1717,7 @@ class TestArrayConsumeUnreturnedBorrow:
             qs = qubit_array(3, "qs")
             tgt = qubit_array(1, "tgt")
             _q = qs[0]  # borrow but don't return
-            cx = qm.controlled(x_gate, num_controls=n)
+            cx = qm.control(x_gate, num_controls=n)
             qs, t = cx(qs, tgt[0])
             return qs, t
 

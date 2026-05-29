@@ -1294,16 +1294,18 @@ class TestWholeViewEmit:
             f"expected 4 (the root register size)"
         )
 
-    def test_controlled_u_with_index_spec_on_view(self):
-        """``controlled(_zgate, num_controls=1)(q[1::2], target_indices=[1])`` runs.
+    def test_controlled_u_on_view_elements(self):
+        """``control(_zgate)(q[1], q[3])`` runs on the view's elements.
 
-        Regression: the index-spec path in
-        ``emit_controlled_u_with_index_spec`` used
-        ``QubitAddress(vector_value.uuid, i)`` directly, which missed
-        the view's ``slice_of`` chain.  The previous result was
-        ``EmitError: Qubit <view_uuid>_0 not found in qubit_map``.
-        After the fix, the controlled-Z lands on physical qubits
-        (1, 3), the view's slot 0 / slot 1.
+        Migrated from the old ``index_spec``-on-view test: the new
+        concrete-mode API does not accept ``target_indices`` /
+        ``control_indices``, so the control / target partition is
+        expressed positionally instead.  The original regression
+        concern — that the controlled gate lands on physical qubits
+        (1, 3) via the view's ``slice_of`` chain — is still exercised
+        because ``q[1]`` and ``q[3]`` come from the view's element
+        access (``q[1::2][0]`` and ``q[1::2][1]`` resolve through the
+        same parent_array / element_indices machinery).
         """
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
@@ -1315,9 +1317,9 @@ class TestWholeViewEmit:
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(4, "q")
-            cz = qmc.controlled(_zgate, num_controls=1)
+            cz = qmc.control(_zgate, num_controls=1)
             view = q[1::2]
-            view = cz(view, target_indices=[1])
+            view[0], view[1] = cz(view[0], view[1])
             q[1::2] = view
             return qmc.measure(q)
 

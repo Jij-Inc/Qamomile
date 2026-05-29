@@ -261,4 +261,4 @@ assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 # - `if bit:` / `while bit:`で**測定結果**に基づく分岐。両分岐で同じ量子ビットハンドルを扱う必要があります（アフィンルール）。
 # - これらの制御フローは対象の量子SDKのネイティブな命令（例：Qiskitの`if_else`や`while_loop`）にトランスパイルされます。
 #
-# **次へ**：[再利用パターン](07_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブゲート。
+# **次へ**：[再利用パターン](08_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブゲート。
