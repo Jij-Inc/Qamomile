@@ -206,7 +206,9 @@ parameters = ["theta"]
 block = transpiler.to_block(demo_kernel, bindings=bindings, parameters=parameters)
 pretty_print_block(block)
 print("after to_block:   ", summarise(block))
+assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
+assert list(block.parameters) == ["theta"]
 print(
     "CallBlockOps:     ",
     sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
@@ -248,8 +250,11 @@ def count_calls(ops):
 
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
+assert block.kind.name == "AFFINE"
 print("CallBlockOps (deep):", count_calls(block.operations))
+assert count_calls(block.operations) == 0
 print("is_affine:        ", block.is_affine())
+assert block.is_affine()
 
 # %% [markdown]
 # 再度`pretty_print_block`で眺めると、`call entangle_pair(...)`が消え、`h`/`cx`が直接`for`本体に並んでいることが確認できます。ブロックの`kind`は`AFFINE`へ進みました。
@@ -274,10 +279,14 @@ print(pretty_print_block(block))
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
 print("after partial_eval:", summarise(block))
+assert block.kind.name == "AFFINE"
 print(
     "ForOperations:    ",
     sum(1 for op in block.operations if isinstance(op, ForOperation)),
 )
+# `partial_eval` は ForOperation を展開しない(展開は emit 段の LoopAnalyzer
+# 判定)ので、for ループはそのまま 1 個残る。
+assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 
 # %% [markdown]
 # `UInt`を未バインドのまま残してループ境界に使うと、下流の`validate_symbolic_shapes`パスが該当する値の名前とともに`QamomileCompileError`を送出します。これは「このカーネルは実はコンパイル時に構造化されていない」という状況を、後段での分かりにくいクラッシュではなく読みやすいエラーへ変換することを担当するパスです。
@@ -296,6 +305,7 @@ print(
 # %%
 block = transpiler.analyze(block)
 print("after analyze:    ", summarise(block))
+assert block.kind.name == "ANALYZED"
 
 # %% [markdown]
 # ### 4.5 `plan` — `ProgramPlan`へのセグメント化
@@ -310,6 +320,9 @@ for i, step in enumerate(plan.steps):
         f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)"
     )
 print("total unbound parameters:", list(plan.parameters))
+# NisqSegmentationStrategy により quantum segment は1個に制限される。
+assert len(plan.steps) == 1
+assert list(plan.parameters) == ["theta"]
 
 # %% [markdown]
 # 量子セグメントは`qubit_values`と`num_qubits`も持ちます。これにより`emit`はゲートを配置する前に、バックエンド回路が必要とする量子ビット本数を把握できます。
@@ -321,6 +334,8 @@ print("total unbound parameters:", list(plan.parameters))
 # %%
 executable = transpiler.emit(plan, bindings=bindings, parameters=parameters)
 print("parameter_names:  ", executable.parameter_names)
+# `theta` だけが runtime parameter として残る(`n` はコンパイル時 bind 済)。
+assert list(executable.parameter_names) == ["theta"]
 print()
 print(executable.quantum_circuit)
 
@@ -545,7 +560,9 @@ try:
     )
 
     print("backend circuit type: ", type(quri_exe.quantum_circuit).__name__)
+    assert type(quri_exe.quantum_circuit).__name__ == "LinearMappedParametricQuantumCircuit"
     print("parameter_names:      ", quri_exe.parameter_names)
+    assert list(quri_exe.parameter_names) == ["theta"]
     print()
     for gate in quri_exe.quantum_circuit.gates:
         print(" ", gate)
