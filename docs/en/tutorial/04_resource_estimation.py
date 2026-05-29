@@ -59,9 +59,13 @@ fixed_circuit.draw()
 # %%
 est = fixed_circuit.estimate_resources()
 print("qubits:", est.qubits)
+assert est.qubits == 3
 print("total gates:", est.gates.total)
+assert est.gates.total == 3
 print("single-qubit gates:", est.gates.single_qubit)
+assert est.gates.single_qubit == 1
 print("two-qubit gates:", est.gates.two_qubit)
+assert est.gates.two_qubit == 2
 
 # %% [markdown]
 # ## Symbolic Resource Estimation
@@ -89,11 +93,17 @@ scalable_circuit.draw(n=4, fold_loops=False)
 # %%
 est = scalable_circuit.estimate_resources()
 print("qubits:", est.qubits)
+assert str(est.qubits) == "n"
 print("total gates:", est.gates.total)
+assert str(est.gates.total) == "3*n - 1"
 print("single-qubit gates:", est.gates.single_qubit)
+assert str(est.gates.single_qubit) == "2*n"
 print("two-qubit gates:", est.gates.two_qubit)
+assert str(est.gates.two_qubit) == "n - 1"
 print("rotation gates:", est.gates.rotation_gates)
+assert str(est.gates.rotation_gates) == "n"
 print("parameters:", est.parameters)
+assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
 # The output contains SymPy expressions like `n` for qubits and `3*n - 1` for total gates. These are exact — not approximations.
@@ -127,6 +137,8 @@ for n_val in [4, 8, 16, 32]:
     print(
         f"n={n_val:2d}: {int(c.gates.total):>3} gates total, {int(c.gates.two_qubit):>2} two-qubit"
     )
+    assert int(c.gates.total) == 3 * n_val - 1
+    assert int(c.gates.two_qubit) == n_val - 1
 
 # %% [markdown]
 # ## Summary
