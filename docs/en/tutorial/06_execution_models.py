@@ -33,6 +33,8 @@
 # # !pip install qamomile
 
 # %%
+import math
+
 import qamomile.circuit as qmc
 import qamomile.observable as qmo
 from qamomile.qiskit import QiskitTranspiler
@@ -71,6 +73,13 @@ sample_result = exe_sample.sample(
 
 for outcome, count in sample_result.results:
     print(f"  outcome={outcome}, count={count}")
+assert sample_result.shots == 256
+assert sum(count for _, count in sample_result.results) == 256
+# parity_probe returns tuple[Bit, Bit] -> each outcome is a 2-element tuple.
+assert all(
+    isinstance(outcome, tuple) and len(outcome) == 2
+    for outcome, _ in sample_result.results
+)
 
 # %% [markdown]
 # Each `outcome` is a tuple like `(0, 1)` or `(1, 0)`. The first element corresponds to `q0`, the second to `q1`, matching the order in the `return` statement.
@@ -159,6 +168,10 @@ run_result = exe_run.run(
 
 print("expectation value:", run_result)
 print("python type:", type(run_result))
+assert isinstance(run_result, float)
+# Ry(theta)|0> has <Z> = cos(theta) exactly; the statevector estimator
+# returns it to floating-point precision.
+assert math.isclose(run_result, math.cos(0.7), abs_tol=1e-10)
 
 # %% [markdown]
 # `run().result()` returns a plain `float` — the estimated $\langle \psi \rvert Z \lvert \psi \rangle$ value. For $\theta = 0.7$, the RY gate rotates the qubit as
