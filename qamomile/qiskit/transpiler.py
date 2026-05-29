@@ -162,7 +162,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
     ) -> None:
         """Emit while loop using Qiskit's while_loop context manager."""
         if not op.operands:
-            raise ValueError("WhileOperation requires a condition operand")
+            raise EmitError(
+                "WhileOperation requires a condition operand.",
+                operation="WhileOperation",
+            )
 
         condition = op.operands[0]
         condition_value = condition.value if hasattr(condition, "value") else condition
@@ -274,8 +277,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
               2. Constants: ``v.get_const()`` returns the IR-typed value
                  (Bit→bool, UInt→int, Float→float). No ``bool(...)``
                  coercion — that would clobber numeric arithmetic.
-              3. Clbit references: the canonical ``QubitAddress(v.uuid)``
-                 lookup in ``clbit_map``.
+              3. Clbit references: ``resolve_condition_address(v, ...)``
+                 keyed lookup in ``clbit_map`` — a scalar bit resolves to
+                 ``QubitAddress(v.uuid)`` while a measured ``Vector[Bit]``
+                 element resolves to ``QubitAddress(root_array.uuid,
+                 root_index)`` (walking ``parent_array`` / ``slice_of``).
               4. User parameters: read from the ``parameters`` typed slot
                  by parameter name (the only legitimate name path).
               5. Loop variables: read from the ``loop_vars`` typed slot

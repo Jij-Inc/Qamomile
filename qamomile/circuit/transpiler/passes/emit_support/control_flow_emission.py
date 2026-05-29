@@ -636,7 +636,10 @@ def emit_while(
 ) -> None:
     """Emit while loop operation."""
     if not op.operands:
-        raise ValueError("WhileOperation requires a condition operand")
+        raise EmitError(
+            "WhileOperation requires a condition operand.",
+            operation="WhileOperation",
+        )
 
     condition = op.operands[0]
     condition_value = condition.value if hasattr(condition, "value") else condition
@@ -648,7 +651,13 @@ def emit_while(
         condition_addr = QubitAddress(str(condition_value))
 
     if condition_addr not in clbit_map:
-        raise ValueError("While loop condition not found in classical bit map.")
+        raise EmitError(
+            "Runtime while-conditions must come from measurement results "
+            "or be bound before transpilation. The condition value was "
+            "neither resolved at compile time nor backed by a "
+            "measurement result.",
+            operation="WhileOperation",
+        )
 
     clbit_idx = clbit_map[condition_addr]
 
