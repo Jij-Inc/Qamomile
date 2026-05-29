@@ -55,14 +55,11 @@ transpiler = QiskitTranspiler()
 # controlled version of one of the gates Qamomile provides. For
 # example, below we pass the one-qubit gate `qmc.rx(q, angle)` to
 # `qmc.control` to obtain a two-qubit controlled-RX gate.
-#
-# To confirm the control actually takes effect, we build two
-# kernels that differ only in whether the control qubit is driven
-# to |1> first, transpile both to Qiskit, run them on the
-# simulator, and check the target measurement. With
-# `angle=math.pi`, `RX(pi)` maps |0> to |1>, so the target ends up
-# |1> on every shot exactly when the control is |1>, and stays
-# |0> otherwise.
+
+
+# %%
+# Define the controlled-RX gate.
+crx = qmc.control(qmc.rx)
 
 
 # %%
@@ -71,22 +68,34 @@ def crx_control_off() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
     # The control stays |0>, so the controlled rotation does NOT fire.
-    crx = qmc.control(qmc.rx)
     c, t = crx(c, t, angle=math.pi)
     return qmc.measure(t)
 
 
+crx_control_off.draw()
+
+
+# %%
 @qmc.qkernel
 def crx_control_on() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
     # Drive the control to |1>, so the controlled rotation fires.
     c = qmc.x(c)
-    crx = qmc.control(qmc.rx)
     c, t = crx(c, t, angle=math.pi)
     return qmc.measure(t)
 
 
+crx_control_on.draw()
+
+# %% [markdown]
+# To confirm the control actually takes effect, we transpile both
+# kernels to Qiskit, run them on the simulator, and check the
+# target measurement. With `angle=math.pi`, `RX(pi)` maps |0> to
+# |1>, so the target ends up |1> on every shot when the control is
+# |1>, and stays |0> otherwise.
+
+# %%
 off_counts = dict(
     transpiler.transpile(crx_control_off)
     .sample(transpiler.executor(), shots=256)
@@ -100,17 +109,11 @@ on_counts = dict(
     .results
 )
 print("control |0> ->", off_counts)
-print("control |1> ->", on_counts)
-# RX(pi) is deterministic here: the target is |0> on every shot
-# when the control is |0>, and |1> on every shot when it is |1>.
 assert off_counts == {0: 256}
+print("control |1> ->", on_counts)
 assert on_counts == {1: 256}
 
-crx_control_on.draw()
-
 # %% [markdown]
-# Three things to notice at the call site:
-#
 # - You can write `crx = qmc.control(qmc.rx)` either inside or
 #   outside a qkernel. Either way the returned value is reusable;
 #   bind it to a name and call it as many times as you like.
@@ -118,7 +121,7 @@ crx_control_on.draw()
 #   first as positional arguments, then the targets, then any
 #   classical keyword arguments. The order mirrors the
 #   `qmc.rx(q, angle)` signature of the gate being controlled,
-#   with one extra control prefixed.
+#   with a control prefixed.
 # - The keyword name for the classical parameter is whatever the
 #   controlled gate uses (`angle` for `qmc.rx`, `theta` for
 #   `qmc.p`, etc.) — `qmc.control` does not rename it.
@@ -136,7 +139,7 @@ crx_control_on.draw()
 # | Aspect | Concrete | Symbolic |
 # | --- | --- | --- |
 # | `num_controls=` | Python `int` (default `1`) | `qmc.UInt` handle, or any `UInt` expression |
-# | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `control_indices=`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` (multi-arg form, [](#cg-5-5)) |
+# | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `control_indices=`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` |
 # | `control_indices=` | not accepted | optional — picks which slots of the pool are active |
 # | Control count resolved at | when `qmc.control(...)` is evaluated (module-load or tracing time) | transpile time (from `bindings`) |
 #

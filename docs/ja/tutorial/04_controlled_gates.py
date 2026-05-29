@@ -41,8 +41,11 @@ transpiler = QiskitTranspiler()
 # ## 1. 最小例: controlled-RX
 #
 # `qmc.control`の最も簡単かつ実用的な使い方は、Qamomileで用意されている1つのゲートを制御化することです。例えば以下では、1qubitゲートの`qmc.rx(q, angle)`を`qmc.control`に渡して、2qubitのcontrolled-RXゲートを得ています。
-#
-# 制御が実際に効いていることを確かめるために、制御qubitを先に|1>へ立てるかどうかだけが異なる2つのカーネルを用意し、両方をQiskitにtranspileしてsimulatorで実行し、targetの測定結果を確認します。`angle=math.pi`では`RX(pi)`が|0>を|1>に写すので、制御が|1>のときだけtargetは全shotで|1>になり、それ以外では|0>のままになります。
+
+
+# %%
+# 制御RXゲートを定義します。
+crx = qmc.control(qmc.rx)
 
 
 # %%
@@ -51,22 +54,30 @@ def crx_control_off() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
     # 制御は|0>のままなので、制御回転は発火しません。
-    crx = qmc.control(qmc.rx)
     c, t = crx(c, t, angle=math.pi)
     return qmc.measure(t)
 
 
+crx_control_off.draw()
+
+
+# %%
 @qmc.qkernel
 def crx_control_on() -> qmc.Bit:
     c = qmc.qubit(name="c")
     t = qmc.qubit(name="t")
     # 制御を|1>に立てるので、制御回転が発火します。
     c = qmc.x(c)
-    crx = qmc.control(qmc.rx)
     c, t = crx(c, t, angle=math.pi)
     return qmc.measure(t)
 
 
+crx_control_on.draw()
+
+# %% [markdown]
+# 制御が実際に効いていることを確かめるために、両方の量子カーネルをQiskitにtranspileしてsimulatorで実行し、targetの測定結果を確認します。`angle=math.pi`では`RX(pi)`が|0>を|1>に写すので、制御が|1>のときだけtargetは全shotで|1>になり、それ以外では|0>のままになります。
+
+# %%
 off_counts = dict(
     transpiler.transpile(crx_control_off)
     .sample(transpiler.executor(), shots=256)
@@ -80,19 +91,13 @@ on_counts = dict(
     .results
 )
 print("control |0> ->", off_counts)
-print("control |1> ->", on_counts)
-# ここでの`RX(pi)`は決定的です。制御が|0>なら全shotでtargetは|0>、
-# 制御が|1>なら全shotでtargetは|1>になります。
 assert off_counts == {0: 256}
+print("control |1> ->", on_counts)
 assert on_counts == {1: 256}
 
-crx_control_on.draw()
-
 # %% [markdown]
-# 呼び出し側で押さえておきたいポイントは3つです。
-#
 # - `crx = qmc.control(qmc.rx)`はqkernelの中でも外でもどちらに書いてもかまいません。返ってきたものは再利用可能な値なので、変数に置いて何度でも呼び出せます。
-# - `crx(c, t, angle=...)`を呼ぶと、まず制御qubitがpositional引数として並び、次にtarget、最後に古典keyword引数が続きます。順序は制御化する対象の`qmc.rx(q, angle)`シグネチャを踏襲しつつ、先頭に制御を1つ加えた形です。
+# - `crx(c, t, angle=...)`を呼ぶと、まず制御qubitがpositional引数として並び、次にtarget、最後に古典keyword引数が続きます。順序は制御化する対象の`qmc.rx(q, angle)`シグネチャを踏襲しつつ、先頭に制御を加えた形です。
 # - 古典パラメータのkeyword名は制御化する対象の関数の名前をそのまま使います(`qmc.rx`なら`angle`、`qmc.p`なら`theta`など)。`qmc.control`が改名することはありません。
 
 # %% [markdown]
@@ -104,7 +109,7 @@ crx_control_on.draw()
 # | 項目 | Concrete | Symbolic |
 # | --- | --- | --- |
 # | `num_controls=` | Pythonの`int`(デフォルト`1`) | `qmc.UInt`ハンドル、または`UInt`式 |
-# | 制御引数 | 合計qubit数が`num_controls`に一致する1つ以上のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | 1つのpositionalな`Vector[Qubit]` / `VectorView`の*pool*(single-pool形、任意で`control_indices=`)、**または**`Qubit` / `VectorView` / `Vector[Qubit]`を混ぜた複数のpositional引数(multi-arg形、[](#cg-5-5)) |
+# | 制御引数 | 合計qubit数が`num_controls`に一致する1つ以上のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | 1つのpositionalな`Vector[Qubit]` / `VectorView`の*pool*(single-pool形、任意で`control_indices=`)、**または**`Qubit` / `VectorView` / `Vector[Qubit]`を混ぜた複数のpositional引数 |
 # | `control_indices=` | 受け付けない | 任意。poolのどのスロットがactiveかを指定 |
 # | 制御数が解決される時点 | `qmc.control(...)`が評価された時(module load時かtracing時) | transpile時(`bindings`から) |
 #
