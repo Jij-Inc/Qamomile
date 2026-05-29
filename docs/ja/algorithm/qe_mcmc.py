@@ -71,6 +71,12 @@ all_states = np.array(
     [[1 - 2 * ((k >> i) & 1) for i in range(n_spins)] for k in range(2**n_spins)]
 )
 energies = np.array([ising_energy(s) for s in all_states])
+# n_spins サイト上の 2^n 通りのスピン配置、エネルギーは強磁性 / 反強磁性の
+# 両極端 +/- (n - 1) * J に挟まれる。
+assert all_states.shape == (2**n_spins, n_spins)
+assert energies.shape == (2**n_spins,)
+assert energies.min() == -(n_spins - 1) * J
+assert energies.max() == (n_spins - 1) * J
 
 # エネルギーごとにボルツマン分布を集計してヒストグラムとしてプロット
 unique_energies = np.unique(energies)
@@ -185,6 +191,11 @@ weights = np.exp(-beta * energies)
 probs = weights / weights.sum()
 magnetization_per_state = all_states.mean(axis=1)
 theoretical_magnetization = np.sum(probs * magnetization_per_state)
+# Z2 対称性: 全スピン反転は (h_i = 0 の) エネルギーを変えず磁化だけ反転させるので、
+# ボルツマン重み付き平均はぴったり 0 になる — しかも {+spins, -spins} の対は同じ
+# `probs` を共有するため浮動小数演算上も誤差なくキャンセルする。
+assert theoretical_magnetization == 0.0
+assert np.isclose(probs.sum(), 1.0)
 
 plt.plot(sample_magnetization, label="MCMC estimate")
 plt.axhline(
@@ -282,11 +293,13 @@ time = 12.0  # 総発展時間
 delta_t = 0.8  # Trotterステップの時間幅
 step = int(time/delta_t)
 order = 2  # Suzuki-Trotter近似次数
+assert step == 15  # 12.0 / 0.8
 
 Hs = [
     (1 - gamma) * mixer_hamiltonian,
     gamma * cost_hamiltonian,
 ]
+assert len(Hs) == 2
 
 transpiler = QiskitTranspiler()
 
@@ -382,6 +395,9 @@ T_quantum = (
 weights = np.exp(-beta * energies)
 probs = weights / weights.sum()
 theoretical_magnetization = np.sum(probs * magnetization_per_state)
+# Z2 対称性により依然として 0 — beta は対の重みを変えるだけで {+spins, -spins}
+# の縮退を破らない。
+assert theoretical_magnetization == 0.0
 
 # 比較用に同じ beta、同じステップ数で古典MCMCも実行
 classical_compare_sample = np.zeros((T_quantum, n_spins))
@@ -399,6 +415,10 @@ for t in range(T_quantum):
     proposed_state = quantum_proposal(state, executable, executor)
     state = metropolis_hastings(state, proposed_state, ising_energy, beta)
     quantum_sample[t] = state
+# 両 chain とも n_spins サイト・T_quantum サンプル分の +/- 1 スピン列を生成済み。
+assert quantum_sample.shape == (T_quantum, n_spins)
+assert classical_compare_sample.shape == (T_quantum, n_spins)
+assert set(np.unique(quantum_sample).tolist()).issubset({-1, 1})
 
 
 # %% [markdown]
