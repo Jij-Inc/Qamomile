@@ -12,7 +12,6 @@ from .gate import (
     ControlledUOperation,
     GateOperation,
     GateOperationType,
-    IndexSpecControlledU,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -36,7 +35,6 @@ __all__ = [
     "ControlledUOperation",
     "ConcreteControlledU",
     "SymbolicControlledU",
-    "IndexSpecControlledU",
     "DecodeQFixedOperation",
     "CastOperation",
     # Control flow operations

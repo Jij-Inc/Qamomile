@@ -106,7 +106,7 @@ def _ccx_gate(
 def _controlled_x_kernel() -> tuple[qmc.Qubit, qmc.Qubit]:
     """Apply controlled X so the drawer can use the CX symbol."""
     q = qmc.qubit_array(2, "q")
-    cx = qmc.controlled(_x_gate)
+    cx = qmc.control(_x_gate)
     return cx(q[0], q[1])
 
 
@@ -114,7 +114,7 @@ def _controlled_x_kernel() -> tuple[qmc.Qubit, qmc.Qubit]:
 def _controlled_z_kernel() -> tuple[qmc.Qubit, qmc.Qubit]:
     """Apply controlled Z so the drawer can use the CZ-dot symbol."""
     q = qmc.qubit_array(2, "q")
-    cz = qmc.controlled(_z_gate)
+    cz = qmc.control(_z_gate)
     return cz(q[0], q[1])
 
 
@@ -122,7 +122,7 @@ def _controlled_z_kernel() -> tuple[qmc.Qubit, qmc.Qubit]:
 def _controlled_cx_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     """Apply controlled CX so the drawer can use the Toffoli-style symbol."""
     q = qmc.qubit_array(3, "q")
-    ccx = qmc.controlled(_cx_gate)
+    ccx = qmc.control(_cx_gate)
     return ccx(q[0], q[1], q[2])
 
 
@@ -130,7 +130,7 @@ def _controlled_cx_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
 def _controlled_cz_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     """Apply controlled CZ so the drawer can use the CCZ-style symbol."""
     q = qmc.qubit_array(3, "q")
-    ccz = qmc.controlled(_cz_gate)
+    ccz = qmc.control(_cz_gate)
     return ccz(q[0], q[1], q[2])
 
 
@@ -138,7 +138,7 @@ def _controlled_cz_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
 def _controlled_swap_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     """Apply controlled SWAP so the drawer can use the Fredkin symbol."""
     q = qmc.qubit_array(3, "q")
-    cswap = qmc.controlled(_swap_gate)
+    cswap = qmc.control(_swap_gate)
     return cswap(q[0], q[1], q[2])
 
 
@@ -146,7 +146,7 @@ def _controlled_swap_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
 def _controlled_builtin_swap_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     """Apply controlled built-in SWAP so the synthesized wrapper is covered."""
     q = qmc.qubit_array(3, "q")
-    cswap = qmc.controlled(qmc.swap)
+    cswap = qmc.control(qmc.swap)
     return cswap(q[0], q[1], q[2])
 
 
@@ -154,7 +154,7 @@ def _controlled_builtin_swap_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
 def _controlled_ccx_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     """Apply controlled Toffoli so the drawer can use a multi-control X symbol."""
     q = qmc.qubit_array(4, "q")
-    cccx = qmc.controlled(_ccx_gate)
+    cccx = qmc.control(_ccx_gate)
     return cccx(q[0], q[1], q[2], q[3])
 
 
@@ -162,7 +162,7 @@ def _controlled_ccx_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit, qmc.Qubit
 def _powered_controlled_swap_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     """Keep powered controlled SWAP as a box so the exponent is visible."""
     q = qmc.qubit_array(3, "q")
-    cswap = qmc.controlled(_swap_gate)
+    cswap = qmc.control(_swap_gate)
     return cswap(q[0], q[1], q[2], power=2)
 
 
@@ -245,3 +245,453 @@ def test_controlled_swap_draws_symbols_instead_of_target_box():
 
     assert rounded_boxes == []
     assert len(control_dots) == 1
+
+
+class TestInlineControlledLineLayering:
+    """The vertical connection line drawn for an inline-expanded
+    ``ControlledUOperation`` must stop at the target box's outer border.
+
+    A multi-control MCX whose target qubit happens to lie *between*
+    two control qubits would otherwise show the connection line
+    bleeding through both the target gate's rounded box and the
+    surrounding inline-block green border.  Two changes guard the
+    desired appearance together:
+
+    - ``PORDER_LINE`` sits *below* ``PORDER_GATE``, so any in-band
+      remnant line is at least painted under the gate's body.
+    - The renderer emits *two* line segments when the target box
+      sits between controls above *and* below, so the segment that
+      would otherwise cross the box is never drawn at all.
+
+    Each test below pins one of these guarantees.
+    """
+
+    def test_porder_constants_put_connection_lines_below_gates(self):
+        """The ``PORDER_*`` constants encode the required draw order."""
+        from qamomile.circuit.visualization.types import (
+            PORDER_GATE,
+            PORDER_LINE,
+            PORDER_TEXT,
+            PORDER_WIRE,
+        )
+
+        assert PORDER_WIRE < PORDER_LINE < PORDER_GATE < PORDER_TEXT, (
+            PORDER_WIRE,
+            PORDER_LINE,
+            PORDER_GATE,
+            PORDER_TEXT,
+        )
+
+    def test_inline_controlled_u_line_zorder_below_gate_patches(self):
+        """The control vertical line is drawn under every gate patch.
+
+        Renders the user's multi-arg controlled-X ladder with
+        ``inline=True`` and inspects each ``Line2D`` Matplotlib added.
+        Every line whose zorder lies in the connection-line band must
+        be strictly below the minimum zorder of any drawn gate patch.
+        """
+
+        @qmc.qkernel
+        def _shift_helper(
+            q: qmc.Vector[qmc.Qubit], control_index: qmc.UInt
+        ) -> qmc.Vector[qmc.Qubit]:
+            for target_index in qmc.range(3):
+                mcx = qmc.control(qmc.x, num_controls=target_index + 1)
+                (
+                    q[control_index : control_index + 1],
+                    q[0:target_index],
+                    q[target_index],
+                ) = mcx(
+                    q[control_index : control_index + 1],
+                    q[0:target_index],
+                    q[target_index],
+                )
+            return q
+
+        @qmc.qkernel
+        def _shift_main() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(5, "q")
+            q = _shift_helper(q, control_index=4)
+            return qmc.measure(q)
+
+        from qamomile.circuit.visualization.types import PORDER_GATE
+
+        fig = _shift_main.draw(fold_loops=False, inline=True)
+        ax = fig.axes[0]
+
+        # Every gate patch (FancyBboxPatch for boxed gates, Circle for
+        # control dots / target glyphs) draws at PORDER_GATE.  Any
+        # connection line emitted by the inline-block path must use a
+        # strictly smaller zorder.
+        gate_patch_zs = [
+            patch.get_zorder()
+            for patch in ax.patches
+            if isinstance(patch, (mpatches.FancyBboxPatch, mpatches.Circle))
+        ]
+        assert gate_patch_zs, "expected at least one gate patch in the figure"
+        min_gate_z = min(gate_patch_zs)
+        assert min_gate_z >= PORDER_GATE, (min_gate_z, PORDER_GATE)
+
+        connection_line_zs = [
+            line.get_zorder()
+            for line in ax.lines
+            # Skip the long horizontal qubit wires (PORDER_WIRE) and
+            # text underlines; restrict to vertical connection lines by
+            # checking x-equality at both endpoints.
+            if (
+                len(line.get_xdata()) == 2
+                and float(line.get_xdata()[0]) == float(line.get_xdata()[1])
+            )
+        ]
+        # At least three vertical lines (one per MCX iteration) must
+        # exist; every one of them must sit under the gate patches.
+        assert len(connection_line_zs) >= 3, connection_line_zs
+        assert all(z < min_gate_z for z in connection_line_zs), (
+            connection_line_zs,
+            min_gate_z,
+        )
+
+    def test_target_box_sandwiched_between_controls_emits_two_segments(self):
+        """A target box with controls on both sides splits the line in two.
+
+        Iteration 2 of the helper kernel has ``mcx(q[3:4], q[0:1], q[1])``:
+        controls live at q[0] (above the target) and q[3] (below it),
+        and the target box sits at q[1].  The renderer must emit two
+        vertical line segments -- one from the upper control down to
+        the box's top edge, one from the box's bottom edge down to the
+        lower control -- instead of a single segment that crosses the
+        box.  The combined set of vertical lines in the figure must
+        contain at least one pair whose y-spans are disjoint with a
+        gap matching the target box's height.
+        """
+
+        @qmc.qkernel
+        def _shift_helper(
+            q: qmc.Vector[qmc.Qubit], control_index: qmc.UInt
+        ) -> qmc.Vector[qmc.Qubit]:
+            for target_index in qmc.range(3):
+                mcx = qmc.control(qmc.x, num_controls=target_index + 1)
+                (
+                    q[control_index : control_index + 1],
+                    q[0:target_index],
+                    q[target_index],
+                ) = mcx(
+                    q[control_index : control_index + 1],
+                    q[0:target_index],
+                    q[target_index],
+                )
+            return q
+
+        @qmc.qkernel
+        def _shift_main() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(5, "q")
+            q = _shift_helper(q, control_index=3)
+            return qmc.measure(q)
+
+        fig = _shift_main.draw(fold_loops=False, inline=True)
+        ax = fig.axes[0]
+
+        # Collect (x, y_lo, y_hi) for every vertical Line2D.
+        verticals: list[tuple[float, float, float]] = []
+        for line in ax.lines:
+            xs = line.get_xdata()
+            ys = line.get_ydata()
+            if len(xs) != 2 or float(xs[0]) != float(xs[1]):
+                continue
+            verticals.append((float(xs[0]), float(min(ys)), float(max(ys))))
+
+        # Group verticals by approximate x and find one column with
+        # two segments separated by a gap.  Iteration 2 is the
+        # crossing case (target at q[1], controls at q[0] and q[3]).
+        from collections import defaultdict
+
+        by_x: dict[float, list[tuple[float, float]]] = defaultdict(list)
+        for x, lo, hi in verticals:
+            by_x[round(x, 2)].append((lo, hi))
+
+        found_split = False
+        for x_key, segs in by_x.items():
+            if len(segs) < 2:
+                continue
+            segs_sorted = sorted(segs)
+            for lo1, hi1 in segs_sorted:
+                for lo2, hi2 in segs_sorted:
+                    if (lo2 - hi1) > 0.05:
+                        found_split = True
+                        break
+                if found_split:
+                    break
+            if found_split:
+                break
+        assert found_split, (
+            "expected at least one inline-MCX column to draw the control "
+            "line as two separated segments around the target box"
+        )
+
+
+class TestPhantomWireSuppression:
+    """A symbolic-bound slice inside a sub-kernel loop must alias the
+    parent's existing wires rather than allocating fresh ones.
+
+    Calling ``apply_controlled_shift_1_plus_on_q(q, ...)`` twice with
+    ``inline=True`` used to allocate phantom wires q5 / q6 below the
+    real ``q[0]..q[4]`` because ``build_qubit_map``'s ForOperation
+    handler never pre-evaluated body BinOps; the slice's
+    ``_uint_min(0, target_index)`` clamp could not fold and
+    ``_resolve_view_chain_to_root`` returned ``None``, falling through
+    to ``map_block_results``'s fresh-wire branch.  The fix is a single
+    ``_evaluate_loop_body_intermediates`` call inside the iterations
+    loop; this regression keeps it from going missing.
+    """
+
+    def test_double_inline_call_does_not_grow_qubit_count(self):
+        """Two side-by-side calls keep ``num_qubits == 5``."""
+        from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+        from qamomile.circuit.visualization.style import DEFAULT_STYLE
+
+        @qmc.qkernel
+        def _shift_helper(
+            q: qmc.Vector[qmc.Qubit], control_index: qmc.UInt
+        ) -> qmc.Vector[qmc.Qubit]:
+            for target_index in qmc.range(3):
+                mcx = qmc.control(qmc.x, num_controls=target_index + 1)
+                (
+                    q[control_index : control_index + 1],
+                    q[0:target_index],
+                    q[target_index],
+                ) = mcx(
+                    q[control_index : control_index + 1],
+                    q[0:target_index],
+                    q[target_index],
+                )
+            return q
+
+        @qmc.qkernel
+        def _shift_main() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(5, "q")
+            q = _shift_helper(q, control_index=3)
+            q = _shift_helper(q, control_index=4)
+            return qmc.measure(q)
+
+        graph = _shift_main._build_graph_for_visualization()
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True, fold_loops=False)
+        _, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+        assert num_qubits == 5, (num_qubits, qubit_names)
+        assert sorted(qubit_names.values()) == [
+            "q[0]",
+            "q[1]",
+            "q[2]",
+            "q[3]",
+            "q[4]",
+        ], qubit_names
+
+
+class TestPostInlineVectorAliasing:
+    """``MapBlockResults`` aliases per-element keys across SSA versions.
+
+    When a sub-kernel returns a ``Vector[Qubit]`` after mutating it
+    (e.g. ``qft_encoding``) or a controlled-U produces a next-version
+    ``Vector[Qubit]`` result, the inlined-IR path used by the
+    ``transpiler.to_block + transpiler.inline -> MatplotlibDrawer``
+    workflow ends up with a downstream op whose ``parent_array``
+    points at the *new* ArrayValue ``logical_id``.  The drawer's
+    ``build_qubit_map`` only aliased the scalar lid -> wire pairing
+    via :meth:`map_block_results`, not the per-element keys
+    (``{new_lid}_[i]``).  A subsequent op (``qmc.iqft`` expanded
+    inline to per-element CP/H gates, a per-element ``q[i] = ...``
+    follow-up loop, ...) then fell through the element-key lookup
+    and the CompositeGate / ControlledU dispatch fresh-allocated a
+    phantom wire per element.
+
+    The fix in :func:`map_block_results` copies the operand's
+    ``{operand_lid}_[i]`` keys to ``{result.logical_id}_[i]``
+    whenever both operand and result are ``ArrayValue``.  This test
+    pins it by exercising the user-reported ``transpiler.inline +
+    MatplotlibDrawer`` flow on a kernel that goes through
+    ``qft_encoding -> controlled(qft_encoding) -> iqft``: the
+    qubit count must equal the QInit'd register count, not the
+    register count plus phantom iqft wires.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_qiskit(self):
+        pytest.importorskip("qiskit")
+
+    def test_inline_then_draw_does_not_grow_qubit_count(self):
+        """to_block + inline + drawer keeps num_qubits at the QInit count.
+
+        The bug only triggers when the controlled-U lives *inside* a
+        sub-kernel whose return is a ``Vector[Qubit]`` (here:
+        ``first_degree``), because InlinePass preserves logical ids
+        through plain helper calls and through top-level controlled-U
+        results.  Wrapping the controlled-U in a sub-kernel that
+        returns the modified Vector forces the post-inline IR to
+        carry a new-lid ``ArrayValue`` that the iqft's per-element
+        operands then reference via ``parent_array``.
+        """
+        import math
+
+        from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+        from qamomile.circuit.visualization.style import DEFAULT_STYLE
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def qft_encoding(
+            q: qmc.Vector[qmc.Qubit], coef: qmc.Float
+        ) -> qmc.Vector[qmc.Qubit]:
+            m = q.shape[0]
+            for i in qmc.range(m):
+                q[i] = qmc.p(q[i], 2 * math.pi * coef / (2**m) * (2**i))
+            return q
+
+        @qmc.qkernel
+        def first_degree(
+            q_out: qmc.Vector[qmc.Qubit],
+            q_in: qmc.Vector[qmc.Qubit],
+            control_idx: qmc.UInt,
+            coef: qmc.Float,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            ctrl_qft = qmc.control(qft_encoding)
+            c = q_in[control_idx]
+            c, q_out = ctrl_qft(c, q_out, coef)
+            q_in[control_idx] = c
+            return q_out, q_in
+
+        @qmc.qkernel
+        def main_kernel() -> qmc.Vector[qmc.Bit]:
+            q_out = qmc.qubit_array(4, "q_out")
+            q_in = qmc.qubit_array(2, "q_in")
+            q_out, q_in = first_degree(q_out, q_in, 0, 0.5)
+            q_out = qmc.iqft(q_out)
+            qmc.measure(q_in)
+            return qmc.measure(q_out)
+
+        t = QiskitTranspiler()
+        block = t.to_block(main_kernel)
+        block = t.inline(block)
+
+        analyzer = CircuitAnalyzer(
+            block,
+            DEFAULT_STYLE,
+            inline=True,
+            fold_loops=False,
+            expand_composite=True,
+        )
+        _, qubit_names, num_qubits = analyzer.build_qubit_map(block)
+        assert num_qubits == 6, (num_qubits, qubit_names)
+        assert sorted(qubit_names.values()) == [
+            "q_in[0]",
+            "q_in[1]",
+            "q_out[0]",
+            "q_out[1]",
+            "q_out[2]",
+            "q_out[3]",
+        ], qubit_names
+
+    def test_inline_then_draw_iqft_targets_q_out(self):
+        """The inline-expanded iqft children live on the q_out wires.
+
+        Pins the visual outcome (no phantom wires under iqft) by
+        walking the VisualCircuit children and asserting every
+        VGate emitted by the expanded iqft addresses wires the
+        ``q_out`` register actually owns.  Same wrapping pattern as
+        the qubit-count test above to actually trip the per-element
+        aliasing path.
+        """
+        import math
+
+        from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+        from qamomile.circuit.visualization.style import DEFAULT_STYLE
+        from qamomile.circuit.visualization.visual_ir import (
+            VFoldedBlock,
+            VGate,
+            VInlineBlock,
+            VUnfoldedSequence,
+        )
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def qft_encoding(
+            q: qmc.Vector[qmc.Qubit], coef: qmc.Float
+        ) -> qmc.Vector[qmc.Qubit]:
+            m = q.shape[0]
+            for i in qmc.range(m):
+                q[i] = qmc.p(q[i], 2 * math.pi * coef / (2**m) * (2**i))
+            return q
+
+        @qmc.qkernel
+        def first_degree(
+            q_out: qmc.Vector[qmc.Qubit],
+            q_in: qmc.Vector[qmc.Qubit],
+            control_idx: qmc.UInt,
+            coef: qmc.Float,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            ctrl_qft = qmc.control(qft_encoding)
+            c = q_in[control_idx]
+            c, q_out = ctrl_qft(c, q_out, coef)
+            q_in[control_idx] = c
+            return q_out, q_in
+
+        @qmc.qkernel
+        def main_kernel() -> qmc.Vector[qmc.Bit]:
+            q_out = qmc.qubit_array(4, "q_out")
+            q_in = qmc.qubit_array(2, "q_in")
+            q_out, q_in = first_degree(q_out, q_in, 0, 0.5)
+            q_out = qmc.iqft(q_out)
+            qmc.measure(q_in)
+            return qmc.measure(q_out)
+
+        t = QiskitTranspiler()
+        block = t.to_block(main_kernel)
+        block = t.inline(block)
+
+        analyzer = CircuitAnalyzer(
+            block,
+            DEFAULT_STYLE,
+            inline=True,
+            fold_loops=False,
+            expand_composite=True,
+        )
+        qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(block)
+        vc = analyzer.build_visual_ir(block, qubit_map, qubit_names, num_qubits)
+
+        q_out_wires = {0, 1, 2, 3}
+
+        def collect_iqft_wires(node):
+            """Return all qubit wires used by the iqft inline block."""
+            if isinstance(node, VInlineBlock) and (
+                "iqft" in (node.label or "").lower()
+            ):
+                wires: set[int] = set()
+                stack = list(node.children)
+                while stack:
+                    child = stack.pop()
+                    if isinstance(child, VGate):
+                        wires.update(child.qubit_indices)
+                    elif isinstance(child, (VInlineBlock, VFoldedBlock)):
+                        stack.extend(getattr(child, "children", []))
+                    elif isinstance(child, VUnfoldedSequence):
+                        for iter_children in child.iterations:
+                            stack.extend(iter_children)
+                return wires
+            for child in getattr(node, "children", []) or []:
+                hit = collect_iqft_wires(child)
+                if hit is not None:
+                    return hit
+            if isinstance(node, VUnfoldedSequence):
+                for iter_children in node.iterations:
+                    for child in iter_children:
+                        hit = collect_iqft_wires(child)
+                        if hit is not None:
+                            return hit
+            return None
+
+        iqft_wires = None
+        for top in vc.children:
+            iqft_wires = collect_iqft_wires(top)
+            if iqft_wires is not None:
+                break
+
+        assert iqft_wires is not None, "expected the iqft inline block in the tree"
+        assert iqft_wires, "expected the iqft block to emit at least one gate"
+        assert iqft_wires.issubset(q_out_wires), (iqft_wires, q_out_wires)
