@@ -251,9 +251,7 @@ except UnreturnedBorrowError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
 else:
-    raise AssertionError(
-        "expected UnreturnedBorrowError, but draw() returned normally"
-    )
+    raise AssertionError("expected UnreturnedBorrowError, but draw() returned normally")
 
 
 # %%
@@ -296,10 +294,9 @@ except AffineTypeError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
 else:
-    raise AssertionError(
-        "expected AffineTypeError, but draw() returned normally"
-    )
+    raise AssertionError("expected AffineTypeError, but draw() returned normally")
 
 # %% [markdown]
-# **Next**: [Resource Estimation](04_resource_estimation.ipynb) — symbolic
-# cost analysis, gate breakdowns, and comparing design candidates.
+# **Next**: [Controlled Gates](04_controlled_gates.ipynb) — `qmc.control`
+# for built-in gates and sub-kernels, concrete vs symbolic control counts,
+# and the catalogue of patterns that do not compose.
