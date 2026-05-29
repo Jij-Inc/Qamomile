@@ -61,6 +61,10 @@ N_WEIGHTS_PER_LAYER = N_QUBITS * 3  # RZ, RY, RZ per qubit
 N_WEIGHTS = N_LAYERS * N_WEIGHTS_PER_LAYER
 
 print(f"Qubits: {N_QUBITS}, Layers: {N_LAYERS}, Trainable weights: {N_WEIGHTS}")
+assert N_QUBITS == 4
+assert N_LAYERS == 2
+# N_WEIGHTS = N_LAYERS * N_QUBITS * 3 (RZ + RY + RZ per qubit per layer).
+assert N_WEIGHTS == 24
 
 
 # %% [markdown]
@@ -142,6 +146,13 @@ est = variational_ansatz.estimate_resources(
     bindings={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
 )
 print(est)
+assert est.qubits == 4
+# 4 (input RY encoding) + 2 layers * (4 RZ + 4 RY + 4 RZ) = 28 single-qubit rotations.
+assert est.gates.single_qubit == 28
+# 2 layers * 3 CZs (linear chain on 4 qubits) = 6 two-qubit Cliffords.
+assert est.gates.two_qubit == 6
+assert est.gates.total == 34
+assert est.gates.rotation_gates == 28
 
 # %% [markdown]
 # ## Quantum Forward Pass
@@ -180,6 +191,9 @@ test_weights = rng.uniform(-np.pi, np.pi, N_WEIGHTS)
 
 expvals = quantum_forward(test_inputs, test_weights)
 print("Expectation values:", expvals)
+# Z expectation values are bounded in [-1, 1]; one value per qubit.
+assert expvals.shape == (N_QUBITS,)
+assert all(-1.0 <= float(e) <= 1.0 for e in expvals)
 
 # %% [markdown]
 # ## Parameter Shift Rule for Gradients
@@ -321,6 +335,9 @@ X_train, y_train = subset_dataset(full_train, SELECTED_CLASSES, N_TRAIN_PER_CLAS
 X_test, y_test = subset_dataset(full_test, SELECTED_CLASSES, N_TEST_PER_CLASS)
 
 print(f"Train: {X_train.shape}, Test: {X_test.shape}")
+# 4 classes x N_PER_CLASS samples each; Fashion-MNIST is 1x28x28 grayscale.
+assert X_train.shape == (N_CLASSES * N_TRAIN_PER_CLASS, 1, 28, 28)
+assert X_test.shape == (N_CLASSES * N_TEST_PER_CLASS, 1, 28, 28)
 print(f"Classes: {CLASS_NAMES}")
 
 
