@@ -59,6 +59,8 @@ if TYPE_CHECKING:
 def _build_block_qubit_map(
     block_value: Any,
     target_indices: list[int],
+    emit_pass: Any,
+    bindings: dict[str, Any],
 ) -> dict[str, int]:
     """Build a UUID-to-physical-target map for a controlled block.
 
@@ -67,33 +69,260 @@ def _build_block_qubit_map(
     that SSA result versions inherit the same physical target as their
     operands.
 
-    This allows resolving which physical target an inner gate's operand
-    refers to, even across multiple SSA versions.
-    """
-    qubit_map: dict[str, int] = {}
+    Scalar ``Qubit`` inputs map one UUID -> one physical target;
+    ``Vector[Qubit]`` inputs (``ArrayValue`` carrying a quantum element
+    type) each absorb their own declared length, resolved from
+    ``bindings`` via the emit pass's value resolver.  This mirrors the
+    seeding logic in the base emit pass's ``_populate_input_qubit_map``
+    so multi-vector inner blocks (Step 2.b of the controlled-API
+    redesign) work the same way as single-vector ones did under the
+    old single-``Vector`` enforcement.  The element UUIDs themselves
+    are unknown at seed time — they are created during the inner
+    kernel's tracing — so the body walk below also resolves any operand
+    whose ``parent_array`` matches a registered vector and seeds
+    ``qubit_map`` with the per-element UUID lazily.
 
-    # Seed from block inputs.
+    Args:
+        block_value (Any): Inner block whose ``input_values`` and
+            ``operations`` are walked. Missing attributes are treated as
+            an empty seed source.
+        target_indices (list[int]): Physical target indices the inner
+            block's quantum inputs map onto, in declaration order.
+        emit_pass (Any): The emit pass driving the conversion.  Used
+            for its ``_resolver`` to resolve ``Vector[Qubit]`` shapes
+            against ``bindings`` when the shape is symbolic.
+        bindings (dict[str, Any]): Caller bindings forwarded to the
+            resolver for shape resolution.
+
+    Returns:
+        dict[str, int]: Mapping from operand UUID (per-element or
+            scalar) to physical target index. Empty when ``block_value``
+            has no quantum inputs.
+
+    Raises:
+        EmitError: If a ``Vector[Qubit]`` input length cannot be
+            resolved from ``bindings``, if the resolved length is
+            negative, or if the total declared quantum input footprint
+            exceeds ``len(target_indices)``.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    qubit_map: dict[str, int] = {}
+    # ``Vector[Qubit]`` input UUID -> ``(start_index_in_target_indices,
+    # length)`` so the body walk below can map each per-element operand
+    # back to its physical target.
+    vector_inputs: dict[str, tuple[int, int]] = {}
+
     if hasattr(block_value, "input_values"):
+        quantum_inputs = [
+            iv
+            for iv in block_value.input_values
+            if hasattr(iv, "type") and iv.type.is_quantum()
+        ]
+
+        # Resolve every ``Vector[Qubit]`` input length up-front so we
+        # can budget the target indices per input.  Mirrors the base
+        # emit pass's ``_populate_input_qubit_map`` strategy.
+        resolved_lengths: dict[str, int] = {}
+        for iv in quantum_inputs:
+            if not isinstance(iv, ArrayValue):
+                continue
+            length: int | None = None
+            if iv.shape:
+                size_val = iv.shape[0]
+                if size_val.is_constant():
+                    length = int(size_val.get_const())
+                else:
+                    length = emit_pass._resolver.resolve_int_value(size_val, bindings)
+            if length is None:
+                shape_name = iv.shape[0].name if iv.shape else "<no shape>"
+                raise EmitError(
+                    f"CUDA-Q controlled helper: cannot resolve "
+                    f"Vector[Qubit] input length for {iv.name!r}; "
+                    f"bind {shape_name!r} before transpilation.",
+                    operation="ControlledUOperation",
+                )
+            if length < 0:
+                raise EmitError(
+                    f"CUDA-Q controlled helper: Vector[Qubit] input "
+                    f"{iv.name!r} resolved to a negative length ({length}).",
+                    operation="ControlledUOperation",
+                )
+            resolved_lengths[iv.uuid] = length
+
+        scalar_count = sum(1 for iv in quantum_inputs if not isinstance(iv, ArrayValue))
+        total = scalar_count + sum(resolved_lengths.values())
+        if total > len(target_indices):
+            raise EmitError(
+                f"CUDA-Q controlled helper inner block requires {total} "
+                f"physical qubits (scalars={scalar_count}, vector lengths="
+                f"{sorted(resolved_lengths.values())}) but only "
+                f"{len(target_indices)} target indices are available.",
+                operation="ControlledUOperation",
+            )
+
         qubit_idx = 0
-        for iv in block_value.input_values:
-            if hasattr(iv, "type") and iv.type.is_quantum():
+        for iv in quantum_inputs:
+            if isinstance(iv, ArrayValue):
+                length = resolved_lengths[iv.uuid]
+                vector_inputs[iv.uuid] = (qubit_idx, length)
+                # Also store the base UUID for any downstream lookup
+                # that addresses the array as a whole.
+                if qubit_idx < len(target_indices) and length > 0:
+                    qubit_map[iv.uuid] = target_indices[qubit_idx]
+                qubit_idx += length
+            else:
                 if qubit_idx < len(target_indices):
                     qubit_map[iv.uuid] = target_indices[qubit_idx]
                 qubit_idx += 1
 
-    # Propagate through operations: result inherits operand's target.
-    if hasattr(block_value, "operations"):
-        for op in block_value.operations:
+    # Walk all operations once to:
+    #   (a) seed each per-element operand UUID of a Vector[Qubit] input,
+    #   (b) propagate SSA so result versions inherit operand targets.
+    #
+    # Descend into every nested op list a control-flow op exposes
+    # through the :class:`HasNestedOps` protocol (``ForOperation`` /
+    # ``IfOperation`` / ``WhileOperation`` / ``ForItemsOperation``) so
+    # gates inside a loop or branch are visited too.  Without the
+    # recursion a non-constant element index inside a ``for`` body
+    # would silently bypass :func:`_seed_vector_element_uuid` and
+    # bubble up as a downstream "Missing qubit mapping ..." assertion
+    # instead of the :class:`EmitError` that helper is supposed to
+    # raise.
+    from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+
+    def _walk(ops: Any) -> None:
+        for op in ops:
             if isinstance(op, GateOperation):
+                for operand in op.qubit_operands:
+                    _seed_vector_element_uuid(
+                        operand, vector_inputs, target_indices, qubit_map
+                    )
                 for i, result in enumerate(op.results):
                     if hasattr(result, "type") and result.type.is_quantum():
-                        # Find the corresponding operand's physical target.
-                        if i < len(op.operands):
-                            operand = op.operands[i]
-                            if hasattr(operand, "uuid") and operand.uuid in qubit_map:
+                        if i < len(op.qubit_operands):
+                            operand = op.qubit_operands[i]
+                            if operand.uuid in qubit_map:
                                 qubit_map[result.uuid] = qubit_map[operand.uuid]
+            if isinstance(op, HasNestedOps):
+                for nested in op.nested_op_lists():
+                    _walk(nested)
+
+    if hasattr(block_value, "operations"):
+        _walk(block_value.operations)
 
     return qubit_map
+
+
+def _seed_vector_element_uuid(
+    operand: Any,
+    vector_inputs: dict[str, tuple[int, int]],
+    target_indices: list[int],
+    qubit_map: dict[str, int],
+) -> None:
+    """Seed ``qubit_map`` with a Vector[Qubit] element operand's UUID.
+
+    Resolves an ``operand`` that addresses an element of a ``Vector[Qubit]``
+    input (i.e., ``operand.parent_array`` matches a registered vector
+    and ``operand.element_indices[0]`` is a constant) to its physical
+    target via ``vector_inputs`` and stores it under ``operand.uuid``.
+    Non-element operands (scalar ``Qubit`` inputs already seeded by
+    ``_build_block_qubit_map``) are skipped silently.  Elements whose
+    index is **not** a compile-time constant raise ``EmitError``:
+    the CUDA-Q per-gate fallback this helper feeds cannot synthesise
+    a per-element qubit map without a constant index, so the
+    limitation is surfaced loudly here instead of degenerating into
+    a downstream "Missing qubit mapping ..." assertion.
+
+    Args:
+        operand (Any): A gate operand to seed.
+        vector_inputs (dict[str, tuple[int, int]]): Map from
+            ``Vector[Qubit]`` input UUID to ``(start_offset, length)``
+            in ``target_indices``.
+        target_indices (list[int]): The physical target index list the
+            inner block's quantum inputs map onto.
+        qubit_map (dict[str, int]): UUID-to-physical-target map; mutated
+            in place when the operand is a recognized Vector[Qubit]
+            element.
+
+    Raises:
+        EmitError: Raised in three situations, all of which would
+            otherwise degenerate into a downstream "Missing qubit
+            mapping ..." assertion in ``_emit_cudaq_controlled_ops``.
+            (1) A Vector[Qubit] element addressed by the inner block
+            uses a non-constant element index (e.g. a loop variable
+            that was not folded by the surrounding ``bindings``); the
+            CUDA-Q controlled-U fallback needs a constant slot here.
+            (2) The element index is outside the declared Vector
+            length (``elem_idx < 0`` or ``elem_idx >= length``); the
+            inner block addresses a slot past what the controlled-U
+            was wired up with.  (3) The resolved physical slot
+            ``start + elem_idx`` falls outside ``target_indices``.
+            ``_build_block_qubit_map`` already constrains
+            ``start + length`` to fit, so this third case only
+            triggers on a corrupted ``vector_inputs`` table or an
+            unexpected mismatch between ``target_indices`` and the
+            inner block's declared inputs — both internal-invariant
+            violations rather than user-facing miscompiles, but
+            surfacing them loudly beats a silent ``IndexError``.
+    """
+    parent = getattr(operand, "parent_array", None)
+    if parent is None:
+        return
+    if parent.uuid not in vector_inputs:
+        return
+    indices = tuple(getattr(operand, "element_indices", ()))
+    if not indices:
+        return
+    idx_val = indices[0]
+    if not idx_val.is_constant():
+        # Silently skipping leaves the element's UUID unmapped in
+        # ``qubit_map``, which later trips a hard ``AssertionError``
+        # in ``_emit_cudaq_controlled_ops`` ("Missing qubit mapping
+        # ...") when the inner block addresses the element with a
+        # symbolic loop variable.  Fail loudly here with the actual
+        # limitation instead so the user can act on it.
+        raise EmitError(
+            f"CUDA-Q controlled helper: a ``Vector[Qubit]`` element "
+            f"of {parent.name!r} (uuid {parent.uuid[:8]}) is indexed "
+            f"by a non-constant value (e.g. a loop variable) inside "
+            f"the wrapped block.  The per-gate fallback used by the "
+            f"CUDA-Q controlled-U emit path needs a compile-time-"
+            f"constant element index to seed the per-element qubit "
+            f"map.  Either bind the surrounding loop bounds so the "
+            f"index folds to a constant, or transpile this kernel on "
+            f"a backend that emits the controlled block as a single "
+            f"native gate (Qiskit does so via ``circuit_to_gate``).",
+            operation="ControlledUOperation",
+        )
+    elem_idx = int(idx_val.get_const())
+    start, length = vector_inputs[parent.uuid]
+    if elem_idx < 0 or elem_idx >= length:
+        # Same fail-loudly rationale as the non-constant-index branch
+        # above: silently returning leaves ``operand.uuid`` unseeded
+        # and the inner block's gate addressing this element later
+        # trips ``_emit_cudaq_controlled_ops``'s "Missing qubit
+        # mapping ..." assertion with no clue about the root cause.
+        raise EmitError(
+            f"CUDA-Q controlled helper: Vector[Qubit] element index "
+            f"{elem_idx} is outside the declared length of "
+            f"{parent.name!r} (uuid {parent.uuid[:8]}, [0, {length})).  "
+            f"This usually means the inner controlled block addresses "
+            f"an element past the slice the controlled-U was wired up "
+            f"with.  Check that the wrapped block's ``Vector[Qubit]`` "
+            f"inputs are sized to match the actual targets you pass at "
+            f"the call site.",
+            operation="ControlledUOperation",
+        )
+    slot = start + elem_idx
+    if slot < 0 or slot >= len(target_indices):
+        raise EmitError(
+            f"CUDA-Q controlled helper: Vector[Qubit] element index "
+            f"{elem_idx} resolves to physical slot {slot}, outside the "
+            f"available target range [0, {len(target_indices)}).",
+            operation="ControlledUOperation",
+        )
+    qubit_map.setdefault(operand.uuid, target_indices[slot])
 
 
 def _resolve_gate_targets(
@@ -106,14 +335,27 @@ def _resolve_gate_targets(
     For each quantum operand of the gate, looks up the corresponding
     physical target via ``qubit_map``.  Falls back to ``fallback_targets``
     if no mapping is found.
+
+    Args:
+        op (GateOperation): The gate operation whose operand targets are
+            being resolved.
+        qubit_map (dict[str, int]): UUID-to-physical-target map seeded
+            by ``_build_block_qubit_map``.
+        fallback_targets (list[int]): Default physical targets used when
+            no operand resolves through ``qubit_map``.
+
+    Returns:
+        list[int]: Per-operand physical target indices in
+            ``op.qubit_operands`` order, or ``fallback_targets`` when no
+            operand resolved through the map (matches prior behavior so
+            unrelated controlled callers keep working).
     """
     resolved: list[int] = []
-    for operand in op.operands:
-        if hasattr(operand, "type") and operand.type.is_quantum():
-            if operand.uuid in qubit_map:
-                resolved.append(qubit_map[operand.uuid])
-            elif fallback_targets:
-                resolved.append(fallback_targets[0])
+    for operand in op.qubit_operands:
+        if operand.uuid in qubit_map:
+            resolved.append(qubit_map[operand.uuid])
+        elif fallback_targets:
+            resolved.append(fallback_targets[0])
     return resolved if resolved else fallback_targets
 
 
@@ -596,7 +838,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 
         # Build operand-to-target map from block inputs, propagated
         # through SSA versions.
-        block_qubit_map = _build_block_qubit_map(block_value, target_indices)
+        block_qubit_map = _build_block_qubit_map(
+            block_value, target_indices, self, bindings
+        )
 
         emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
 

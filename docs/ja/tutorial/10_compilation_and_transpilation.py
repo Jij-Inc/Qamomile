@@ -336,7 +336,7 @@ print(executable.quantum_circuit)
 #
 # - **`substitute`** — ユーザーが設定した`SubstitutionRule`を適用してブロックのターゲットを置換したり、複合ゲートの戦略を上書きします。`TranspilerConfig`にルールがない場合はno-opです。
 # - **`resolve_parameter_shapes`** — `bindings`が具体的な`Vector`や`Matrix`値を提供する場合、`{name}_dim{i}`のshape次元を埋めます。これにより下流で`arr.shape[0]`が具体的な`UInt`として解決されます。
-# - **`unroll_recursion`** — 自己再帰の`@qkernel`（例: Suzuki–Trotter、チュートリアル07参照）に対する`inline ↔ partial_eval`の固定点ループです。再帰が底まで展開されると終了し、bindingsでベースケースに到達できない場合はエラーになります。
+# - **`unroll_recursion`** — 自己再帰の`@qkernel`（例: Suzuki–Trotter、チュートリアル08参照）に対する`inline ↔ partial_eval`の固定点ループです。再帰が底まで展開されると終了し、bindingsでベースケースに到達できない場合はエラーになります。
 # - **`affine_validate`** — フロントエンドのチェックをすり抜けたアフィン型違反を捕まえるセーフティネットです。
 # - **`slice_borrow_check`** — `Vector`スライス view 用の定数畳み込み後検査です。フロントエンドは具体境界の重複 view を構築時点で reject しますが、トレース時に境界が symbolic だった view（`q[lo:hi]`で`lo`/`hi`が`UInt`の場合）は`bindings`で境界が具体的になった後でしか検査できません。このパスは`partial_eval`の直後でブロックを walk し、生きている view 同士の重複や破壊済みスロットへの再アクセス（先行する`measure` / `cast` / `expval`で消費されたスロットに後からアクセスするケース）には`SliceBorrowViolationError`を投げます。スライス view はカーネル境界では **affine** として扱われ、ブロック末尾で slice-assign 返却されないまま残っていても flag しません — Deutsch-Jozsa の`ancilla = qs[n]`や Simon's の`qs2 = qs[n:2*n]`（オラクルで使った後、測定せず破棄する scratch register）パターンが素直にコンパイルされます。本当に問題のあるケース — view が生きている間に親を consume / return する — は frontend の`ArrayBase.consume` / `validate_all_returned` / `_validate_returned_arrays`が引き続き捕まえます。`q[i]`のような単一要素借り出しは IR Operation を出さないので、こちらは frontend のトレース時 validator が担当します。
 # - **`strip_slice_ops`** — `slice_borrow_check`の検査が終わった後で、不要になった`SliceArrayOperation`と`ReleaseSliceViewOperation`の宣言マーカーをブロックから取り除きます。これによりセグメンテーション / emit は純粋な量子 op 列だけを見るようになります。スライス済みの`ArrayValue`自体は下流オペランドの`slice_of`チェーンから引き続き参照できます。
@@ -347,7 +347,7 @@ print(executable.quantum_circuit)
 # %% [markdown]
 # ## 5. 制御フロー (`if` / `for` / `while`) の取り扱い
 #
-# パイプラインが制御フローをどう扱うかは、フロントエンドで何を受け付けるかから、各パスがそれをどう変形するか、そしてバックエンドが実行時分岐をサポートするかまで、複数のレイヤーに関わります。ここではその全体像を整理します。ユーザー向けの書き方は[チュートリアル06](06_classical_flow_patterns)にあり、本章はコンパイラ側の視点に絞ります。
+# パイプラインが制御フローをどう扱うかは、フロントエンドで何を受け付けるかから、各パスがそれをどう変形するか、そしてバックエンドが実行時分岐をサポートするかまで、複数のレイヤーに関わります。ここではその全体像を整理します。ユーザー向けの書き方は[チュートリアル07](07_classical_flow_patterns)にあり、本章はコンパイラ側の視点に絞ります。
 #
 # ### 5.1 フロントエンドで受け付ける形
 #

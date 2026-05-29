@@ -38,10 +38,10 @@ def givens_rotation(
     than at module level so importing ``fqaoa`` does not trigger
     eager wrapper synthesis (compile/exec + tracing) for every install.
     The synthesized wrapper is cached per-callable inside
-    ``qmc.controlled``, so the only real cost happens on the first
+    ``qmc.control``, so the only real cost happens on the first
     Givens rotation; subsequent calls hit the cache.
     """
-    controlled_ry = qmc.controlled(qmc.ry)
+    controlled_ry = qmc.control(qmc.ry)
     q[j], q[i] = qmc.cx(q[j], q[i])
     q[i], q[j] = controlled_ry(q[i], q[j], angle=-2.0 * theta)
     q[j], q[i] = qmc.cx(q[j], q[i])
