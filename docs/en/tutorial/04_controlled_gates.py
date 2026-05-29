@@ -148,9 +148,10 @@ crx_control_on.draw()
 # Most of `qmc.control`'s features (`power=`, default values,
 # classical-kwarg reordering, sub-kernels that take
 # `Vector[Qubit]`, ...) behave identically in both modes; Section
-# 3 collects those. The handful of features that are mode-specific
-# are split between Section 4 (concrete only) and Section 5
-# (symbolic only).
+# 3 collects those. Section 4 then shows the multi-argument
+# control shapes (using concrete mode for brevity, though they
+# work symbolically too) and Section 5 the symbolic-mode-specific
+# features.
 
 # %% [markdown]
 # ## 3. Patterns that work in BOTH modes
@@ -163,8 +164,8 @@ crx_control_on.draw()
 # – 5.4) and the multi-arg form (5.5) — the only thing that
 # changes from concrete is that `num_controls` is a `UInt`
 # expression and the qubit-count match is checked at transpile
-# time. Sections 4 and 5 spell out the mode-specific argument
-# shapes; this section is about features whose *behaviour* is
+# time. Sections 4 and 5 spell out the per-mode argument shapes;
+# this section is about features whose *behaviour* is
 # mode-agnostic.
 
 # %% [markdown]
@@ -378,14 +379,15 @@ power_demo_concrete.draw()
 power_demo_symbolic.draw(k=3)
 
 # %% [markdown]
-# ## 4. Concrete-mode-only patterns
+# ## 4. Multiple positional control arguments (concrete mode)
 #
-# The shapes in this section require a Python-`int` value for
-# `num_controls`. They have no symbolic counterpart because
-# symbolic mode takes exactly **one** `Vector[Qubit]` argument as
-# its control pool — neither the multi-positional CCX form nor
-# the scalar / `VectorView` mixed prefix below is expressible
-# that way.
+# The shapes in this section list each control as its own
+# positional argument. They are shown here in concrete mode —
+# where every control's qubit count is a literal — but they are
+# **not** concrete-only: symbolic mode accepts the same
+# multi-argument prefix, as §5.5 demonstrates by lifting exactly
+# these shapes to a `UInt` `num_controls`. Concrete mode is just
+# the shortest way to introduce them.
 
 # %% [markdown]
 # ### 4.1 Multiple separate positional control args (CCX style)
@@ -421,9 +423,8 @@ toffoli_demo.draw()
 # `Vector[Qubit]`s, as long as the total qubit count adds up to
 # `num_controls`. Here the three controls for a `num_controls=3`
 # controlled-H come from `qs[0]` (a scalar `Qubit`, 1 qubit) plus
-# `qs[1:3]` (a `VectorView`, 2 qubits). The same freedom does
-# not exist in symbolic mode, which takes exactly one control
-# argument.
+# `qs[1:3]` (a `VectorView`, 2 qubits). Symbolic mode offers the
+# same freedom through its multi-arg form (§5.5).
 
 
 # %%
@@ -441,13 +442,17 @@ def mixed_controls_demo() -> qmc.Vector[qmc.Bit]:
 mixed_controls_demo.draw()
 
 # %% [markdown]
-# ## 5. Symbolic-mode-only patterns
+# ## 5. Symbolic-mode patterns
 #
-# These shapes require `num_controls` to be a `qmc.UInt` handle
-# (or any `UInt` expression like `n - 1`). The number of *active*
-# controls is decided at transpile time from `bindings`, rather
-# than at the moment `qmc.control(..., num_controls=...)` is
-# evaluated.
+# This section covers what you get when `num_controls` is a
+# `qmc.UInt` handle (or any `UInt` expression like `n - 1`): the
+# number of *active* controls is decided at transpile time from
+# `bindings`, rather than at the moment
+# `qmc.control(..., num_controls=...)` is evaluated. Some of what
+# follows is genuinely symbolic-only (a pool with a symbolic
+# length, and `control_indices=`); the multi-arg shape in 5.5 is
+# simply the symbolic counterpart of the concrete demos in
+# Section 4.
 #
 # Two call-site shapes are supported for the control side:
 #
@@ -1017,11 +1022,13 @@ expect_error(
 #   `Vector[Qubit]`, defaults from the controlled signature,
 #   classical-kwarg reordering, and `power=` all work the same
 #   way in either mode (Section 3).
-# - **A few features are mode-specific.** Multiple separate
-#   positional control arguments and scalar-plus-`VectorView`
-#   mixing are concrete-only (Section 4). The single-pool call
-#   shape, `num_controls = <UInt expression>`, and the subset
-#   selector `control_indices=` are symbolic-only (Section 5).
+# - **A few features are symbolic-only.** Control pools whose
+#   length is symbolic and the subset selector `control_indices=`
+#   exist only in symbolic mode (Section 5). The control-argument
+#   *shapes* themselves — a single pool, or several positional
+#   args mixing scalar `Qubit` / `VectorView` / `Vector` — work in
+#   either mode; Section 4 shows them in concrete mode and §5.5 in
+#   symbolic mode.
 #
 # Practical decision rule: reach for *symbolic* mode whenever
 # the control count is a kernel parameter or an expression over
