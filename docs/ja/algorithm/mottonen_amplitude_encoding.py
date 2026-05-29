@@ -112,9 +112,14 @@ expected = normalize(amps_real)
 print(f"prepared      = {np.round(sv, 4)}")
 print(f"target (norm) = {np.round(expected, 4)}")
 print(f"fidelity      = {fidelity(sv, expected):.6f}")
+# ターゲットは amps_real / ||amps_real|| = a / sqrt(30) で純粋に決定的。
+assert np.allclose(expected, np.array([1.0, 2.0, 3.0, 4.0]) / np.sqrt(30.0))
 assert np.isclose(fidelity(sv, expected), 1.0, atol=ATOL_STATEVECTOR), (
     "実振幅エンコーディングのfidelityが落ちています"
 )
+# 状態ベクトルの基底ごとの確率は位相不変であり、
+# |a_i|^2 / ||a||^2 = [1, 4, 9, 16] / 30 を ATOL 内で再現する必要がある。
+assert np.allclose(np.abs(sv) ** 2, np.abs(expected) ** 2, atol=ATOL_STATEVECTOR)
 
 # %% [markdown]
 # 負の実数振幅は magnitude 段を自然に通過します — 葉レベルの$R_y$角は符号付きの`arctan2`として取られるため、追加の位相段なしで符号が捕捉されます。したがって状態$a = (1, -1, 1, -1)$は`RY`と`CNOT`のみで準備されます。
@@ -292,9 +297,15 @@ try:
 except ValueError as exc:
     print(f"ValueError: {exc}")
     raised = True
+    message = str(exc)
 else:
     raised = False
+    message = ""
 assert raised, "ampsをruntime parameterにすると ValueError が出るはず"
+# エラーメッセージは runtime-parametric API を案内している必要がある。
+assert "amplitude_encoding_from_angles" in message, (
+    "ValueError が amplitude_encoding_from_angles を案内していません"
+)
 
 # %% [markdown]
 # ### 4.2 `amplitude_encoding_from_angles` — 1度コンパイルして何度も再バインド

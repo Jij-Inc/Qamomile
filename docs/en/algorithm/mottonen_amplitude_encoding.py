@@ -145,9 +145,14 @@ expected = normalize(amps_real)
 print(f"prepared      = {np.round(sv, 4)}")
 print(f"target (norm) = {np.round(expected, 4)}")
 print(f"fidelity      = {fidelity(sv, expected):.6f}")
+# Target is purely deterministic from amps_real / ||amps_real|| = a / sqrt(30).
+assert np.allclose(expected, np.array([1.0, 2.0, 3.0, 4.0]) / np.sqrt(30.0))
 assert fidelity(sv, expected) == np.float64(1.0) or np.isclose(
     fidelity(sv, expected), 1.0, atol=ATOL_STATEVECTOR
 ), "real amplitude encoding lost fidelity"
+# The prepared statevector's per-basis probability is phase-invariant and
+# must reproduce |a_i|^2 / ||a||^2 = [1, 4, 9, 16] / 30 exactly (up to ATOL).
+assert np.allclose(np.abs(sv) ** 2, np.abs(expected) ** 2, atol=ATOL_STATEVECTOR)
 
 # %% [markdown]
 # Negative real amplitudes flow through the magnitude stage naturally —
@@ -381,9 +386,15 @@ try:
 except ValueError as exc:
     print(f"ValueError: {exc}")
     raised = True
+    message = str(exc)
 else:
     raised = False
+    message = ""
 assert raised, "expected ValueError when amps is a runtime parameter"
+# The error message must direct the reader to the runtime-parametric API.
+assert "amplitude_encoding_from_angles" in message, (
+    "ValueError no longer directs users to amplitude_encoding_from_angles"
+)
 
 # %% [markdown]
 # ### 4.2 `amplitude_encoding_from_angles` — compile once, re-bind many times
