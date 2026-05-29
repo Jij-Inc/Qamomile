@@ -198,6 +198,7 @@ try:
 except QubitBorrowConflictError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "QubitBorrowConflictError"
 else:
     raise AssertionError(
         "expected QubitBorrowConflictError, but draw() returned normally"
@@ -219,6 +220,7 @@ try:
 except UnreturnedBorrowError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "UnreturnedBorrowError"
 else:
     raise AssertionError(
         "expected UnreturnedBorrowError, but draw() returned normally"
@@ -241,6 +243,7 @@ try:
 except QubitBorrowConflictError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "QubitBorrowConflictError"
 else:
     raise AssertionError(
         "expected QubitBorrowConflictError, but draw() returned normally"
@@ -264,6 +267,7 @@ try:
 except AffineTypeError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "AffineTypeError"
 else:
     raise AssertionError(
         "expected AffineTypeError, but draw() returned normally"
