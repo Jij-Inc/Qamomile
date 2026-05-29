@@ -42,6 +42,8 @@ TUTORIAL_PATTERNS = [
     # a local simulator (e.g. the QURI Parts tutorial below) are opted in
     # explicitly and gated on their optional dependency via
     # OPTIONAL_SKIP_MODULES.
+    "docs/en/integration/cudaq_support.py",
+    "docs/ja/integration/cudaq_support.py",
     "docs/en/integration/quri_parts_support.py",
     "docs/ja/integration/quri_parts_support.py",
     # We will not execute the following directories:
@@ -54,6 +56,7 @@ TUTORIAL_PATTERNS = [
 # and should be skipped when those dependencies are not installed.
 OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
+    "cudaq_support": "cudaq",
     "qsci": "quri_parts",
     "quri_parts_support": "quri_parts.qulacs",
     "hybrid_qnn": "torch",

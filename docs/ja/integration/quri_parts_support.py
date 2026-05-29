@@ -28,6 +28,24 @@
 # 最新の Qamomile を QURI Parts オプション付きで pip からインストールします。
 # # !pip install "qamomile[quri_parts]"
 
+# %%
+import os
+from collections import Counter
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
+from quri_parts.circuit.utils.circuit_drawer import draw_circuit
+from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
+from scipy.optimize import minimize
+
+import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+from qamomile.optimization.binary_model import BinaryModel
+from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
+from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
+
 # %% [markdown]
 # ## MaxCut 問題
 #
@@ -37,14 +55,6 @@
 # ここで作るモデルは、QAOA カーネルに渡す `quad` / `linear` 辞書と、測定結果をスピン値 $(+1 / -1)$ に戻すヘルパーを持つ問題コンテナとして使います。
 
 # %%
-import os
-
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
-
-from qamomile.optimization.binary_model import BinaryModel
-
 G = nx.Graph()
 G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
 num_nodes = G.number_of_nodes()
@@ -87,10 +97,8 @@ plt.show()
 # この係数の違いは変分パラメータ $\gamma$ に吸収しています。つまり、ここで使う $\gamma$ は教科書の QAOA の $\gamma$ の 2 倍に相当します。
 # :::
 
+
 # %%
-import qamomile.circuit as qmc
-
-
 @qmc.qkernel
 def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(n, name="q")
@@ -161,8 +169,6 @@ qaoa_ansatz.draw(
 # 問題の構造を決める引数は `bindings` で固定し、`gammas` / `betas` はランタイムパラメータとして残します。
 
 # %%
-from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
-
 transpiler = QuriPartsTranspiler()
 executor = QuriPartsExecutor()
 
@@ -183,10 +189,10 @@ executable = transpiler.transpile(
 # `type(...)` とパラメータ数で確認し、さらに QURI Parts 組み込みの `draw_circuit` で回路そのものを描画してみましょう。
 
 # %%
-from quri_parts.circuit.utils.circuit_drawer import draw_circuit
-
 quri_circuit = executable.get_first_circuit()
-assert quri_circuit is not None  # transpile() はここで必ず 1 つの量子セグメントを生成する
+assert (
+    quri_circuit is not None
+)  # transpile() はここで必ず 1 つの量子セグメントを生成する
 # `qubit_count` と `parameter_count` は問題設定から一意に決まります。
 # 量子ビット数はグラフのノード数と一致し、ランタイムパラメータ数は層ごとに
 # (gamma | beta) の組が 1 つずつ、合計 2p になります。QuriParts の emit
@@ -240,8 +246,6 @@ print(f"Mean energy at random init: {decoded.energy_mean():+.4f}")
 # 各反復では、同じ `executable` と `QuriPartsExecutor` を再利用します。
 
 # %%
-from scipy.optimize import minimize
-
 cost_history: list[float] = []
 
 
@@ -303,9 +307,6 @@ plt.show()
 # それを QURI Parts の演算子に変換し、各回路に対して `estimate_expectation` を呼び出します。
 
 # %%
-import qamomile.observable as qm_o
-from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
-
 cost_hamiltonian = qm_o.Hamiltonian()
 for (i, j), Jij in spin_model.quad.items():
     cost_hamiltonian.add_term(
@@ -343,9 +344,7 @@ bound_circuit = unbound_circuit.bind_parameters(flat_params)
 print(f"bound   type           : {type(bound_circuit).__name__}")
 
 # 経路 1: 未バインド回路 → パラメトリック estimator。param_values の値が使われます。
-energy_unbound = executor.estimate_expectation(
-    unbound_circuit, quri_H, flat_params
-)
+energy_unbound = executor.estimate_expectation(unbound_circuit, quri_H, flat_params)
 
 # 経路 2: バインド済み回路 → 非パラメトリック estimator。param_values は無視されます。
 energy_bound = executor.estimate_expectation(bound_circuit, quri_H, [])
@@ -386,9 +385,6 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 # これにより、差し替えた sampler が実際に使われていることを確認できます。
 
 # %%
-from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
-from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
-
 noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)])
 noisy_sampler = create_qulacs_noisesimulator_sampler(noise_model)
 noisy_executor = transpiler.executor(sampler=noisy_sampler)
@@ -404,10 +400,57 @@ noisy_result = executable.sample(
     shots=sample_shots,
 ).result()
 
-clean_energy = spin_model.decode_from_sampleresult(clean_result).energy_mean()
-noisy_energy = spin_model.decode_from_sampleresult(noisy_result).energy_mean()
+clean_decoded = spin_model.decode_from_sampleresult(clean_result)
+noisy_decoded = spin_model.decode_from_sampleresult(noisy_result)
+clean_energy = clean_decoded.energy_mean()
+noisy_energy = noisy_decoded.energy_mean()
 print(f"noiseless sampler mean energy: {clean_energy:+.4f}")
 print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
+
+# %% [markdown]
+# どちらのsampler実行もshot countを返すので、サンプルされたエネルギー分布を直接比較できます。
+# 各subplotの縦線は、標本平均エネルギーを表します。
+
+# %%
+
+
+def energy_distribution(decoded_samples):
+    counts: Counter[float] = Counter()
+    for energy, occ in zip(decoded_samples.energy, decoded_samples.num_occurrences):
+        counts[energy] += occ
+    energies = sorted(counts.keys())
+    return energies, [counts[energy] for energy in energies]
+
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
+for ax, decoded_samples, mean_energy, title, color in [
+    (axes[0], clean_decoded, clean_energy, "Noiseless sampler", "#2696EB"),
+    (
+        axes[1],
+        noisy_decoded,
+        noisy_energy,
+        "NoiseSimulator sampler",
+        "#FF8A3D",
+    ),
+]:
+    energies, counts = energy_distribution(decoded_samples)
+    ax.bar(energies, counts, width=0.6, color=color)
+    ax.axvline(
+        mean_energy,
+        color="#2B2B2B",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"mean = {mean_energy:+.3f}",
+    )
+    ax.set_xticks(energies)
+    ax.set_title(title)
+    ax.set_xlabel("Ising energy")
+    ax.legend()
+
+axes[0].set_ylabel("Frequency")
+fig.suptitle("Sampled energy distributions by QURI Parts sampler")
+fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # 脱分極ノイズは QAOA 状態を最大混合状態へ近づけます。
@@ -425,3 +468,8 @@ print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 # - `QuriPartsExecutor` は、既定の Qulacs 状態ベクトルシミュレータ上で、QAOA 形式のサンプリングを行う `executable.sample()` と、ノイズなしの期待値計算を行う `executor.estimate(...)` の両方をサポートします。
 # - `estimate_expectation` は、渡された回路にフリーパラメータが残っているかどうかに応じて、QURI Parts のパラメトリック estimator と非パラメトリック estimator を切り替えます。通常は `executor.estimate()` を使えば、この切り替えを意識せずに済みます。
 # - QURI Parts の `NoiseSimulator` ベースの sampler など、独自の sampler / estimator は `transpiler.executor(...)` 経由で差し替えられます。カーネルをトランスパイルし直す必要はありません。
+
+# %% [markdown]
+# ### See also
+#
+# - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Qバックエンドで扱います。
