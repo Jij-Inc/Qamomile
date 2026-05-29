@@ -386,7 +386,7 @@ class TestVectorBitElementProvenance:
     """``s = qmc.measure(register)`` then ``if s[i]:`` must lower the same
     way as ``bit = qmc.measure(register[i])`` then ``if bit:``.
 
-    Before this fix, indexing a measured ``Vector[Bit]`` lost the
+    Previously, indexing a measured ``Vector[Bit]`` lost the
     measurement-derived marker because
 
     - ``find_measurement_results`` only seeded ``MeasureOperation``
@@ -542,11 +542,10 @@ class TestVectorBitElementProvenance:
 
         CUDA-Q's emit pass goes through both the shared
         ``control_flow_emission.emit_if`` path (the inner condition
-        lookup my fix touches) and the CUDA-Q-specific
-        ``_collect_loop_carried_clbits`` pre-scan (also updated to walk
-        ``parent_array``). Exercising this end-to-end on CUDA-Q ensures
-        both call sites are consistent with the Qiskit-side coverage.
-        Skipped when CUDA-Q is not installed.
+        lookup) and the CUDA-Q-specific ``_collect_loop_carried_clbits``
+        pre-scan (which also walks ``parent_array``). Exercising this
+        end-to-end on CUDA-Q ensures both call sites stay consistent with
+        the Qiskit-side coverage. Skipped when CUDA-Q is not installed.
         """
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
@@ -603,3 +602,68 @@ class TestVectorBitElementProvenance:
             .result()
         )
         assert result.results == [((1, 0), 64)]
+
+    def test_while_on_measured_vector_element(self, transpiler):
+        """A measured ``Vector[Bit]`` element is a valid ``while`` condition.
+
+        The same provenance gap affected ``while s[i]:`` on two fronts:
+        ``ValidateWhileContractPass`` rejected the condition because it
+        only recognized scalar ``MeasureOperation`` results, and
+        ``emit_while`` could not resolve the element's clbit address. This
+        test measures ``anc = |00>`` so ``s[0] == 0`` and the loop body
+        never runs (a measured ``Vector[Bit]`` element is fixed for the
+        loop's lifetime, so a body-entering form cannot terminate). Even
+        so the predicate is a runtime measurement value, so a backend
+        ``while_loop`` op is genuinely emitted and its condition resolved
+        — exercising both the validation and emit paths. ``q`` stays
+        ``|0>`` every shot.
+        """
+        from qiskit.circuit.controlflow import WhileLoopOp
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            anc = qmc.qubit_array(2, name="anc")
+            s = qmc.measure(anc)
+            while s[0]:
+                q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        exe = transpiler.transpile(kernel)
+        qc = exe.compiled_quantum[0].circuit
+        assert any(isinstance(i.operation, WhileLoopOp) for i in qc.data), (
+            "emit_while must emit a runtime while_loop for a measured "
+            "Vector[Bit] element condition."
+        )
+        result = exe.sample(transpiler.executor(), shots=64).result()
+        assert result.results == [((0,), 64)]
+
+    def test_while_on_sliced_view_of_measured_vector(self, transpiler):
+        """A sliced view element resolves as a ``while`` condition too.
+
+        ``s_slice = s[0:4:2]`` then ``while s_slice[0]:`` must trace the
+        ``slice_of`` chain back to the root measured array in both the
+        while-condition validation and emit. ``anc = |0000>`` makes the
+        condition false so the loop never enters; the runtime
+        ``while_loop`` op is still emitted. ``q`` stays ``|0>``.
+        """
+        from qiskit.circuit.controlflow import WhileLoopOp
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            anc = qmc.qubit_array(4, name="anc")
+            s = qmc.measure(anc)
+            s_slice = s[0:4:2]
+            while s_slice[0]:
+                q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        exe = transpiler.transpile(kernel)
+        qc = exe.compiled_quantum[0].circuit
+        assert any(isinstance(i.operation, WhileLoopOp) for i in qc.data), (
+            "emit_while must emit a runtime while_loop for a sliced "
+            "measured Vector[Bit] element condition."
+        )
+        result = exe.sample(transpiler.executor(), shots=64).result()
+        assert result.results == [((0,), 64)]
