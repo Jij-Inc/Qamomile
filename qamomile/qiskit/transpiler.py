@@ -228,10 +228,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             return (circuit.clbits[clbit_idx], 1)
 
         raise EmitError(
-            "Runtime if-conditions must come from measurement results "
-            "or be bound before transpilation. The condition value was "
-            "neither resolved at compile time nor backed by a "
-            "measurement result."
+            "Runtime control-flow conditions (if / while) must come from "
+            "measurement results or be bound before transpilation. The "
+            "condition value was neither resolved at compile time nor "
+            "backed by a measurement result."
         )
 
     def _emit_runtime_classical_expr(
