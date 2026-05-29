@@ -115,13 +115,13 @@ assert on_counts == {1: 256}
 #
 # 判断ルールはシンプルです。qkernelを書く時点で制御数がリテラルとしてわかっており、各制御qubitを個別に名指ししたい場合は*concrete mode*を使います。制御数がカーネルパラメータ(またはそれを含む式、`num_controls=n - 1`は典型的なmulti-controlledの形)の場合は*symbolic mode*を使います。
 #
-# `qmc.control`のほとんどの機能(`power=`、デフォルト値、古典kwargの並び替え、`Vector[Qubit]`を受け取るサブカーネルなど)は両モードで同じ挙動を示します。これらは[](#cg-3)でまとめます。[](#cg-4)はmulti-argの制御引数形(簡潔さのためconcrete modeで例示しますが、symbolicでも動きます)を、[](#cg-5)はsymbolic mode固有の機能を扱います。
+# `qmc.control`のほとんどの機能(`power=`、デフォルト値、古典kwargの並び替え、`Vector[Qubit]`を受け取るサブカーネル、multi-argの制御引数形など)は両モードで同じ挙動を示します。これらは[](#cg-3)でまとめます。[](#cg-4)はconcrete modeを必要とする唯一の形を、[](#cg-5)はsymbolic mode固有の機能を扱います。
 
 # %% [markdown]
 # (cg-3)=
 # ## 3. 両モードで動作するパターン
 #
-# 本セクションの各機能は、どちらのモードでも同じ挙動を示します。以下のセルはconcrete modeを使います(`UInt`のカーネルパラメータが入らない分、コードが短くなるためです)が、同じ機能はsymbolic modeでも利用可能です。symbolic modeはsingle-poolの制御引数形([](#cg-5-1) – [](#cg-5-4))とmulti-arg形([](#cg-5-5))の両方を受け付けます。concrete modeと違うのは`num_controls`が`UInt`式であることと、qubit数の一致がtranspile時にチェックされることだけです。各モードの引数形は[](#cg-4)と[](#cg-5)で詳しく扱います。本セクションは*挙動*がモードに依存しない機能を集めたものです。
+# 本セクションの各機能は、どちらのモードでも同じ挙動を示します。multi-argの制御引数形(3.6 / 3.7)も含みます。以下のセルはconcrete modeを使います(`UInt`のカーネルパラメータが入らない分、コードが短くなるためです)が、同じ機能はsymbolic modeでも利用可能です。symbolic modeはsingle-poolの制御引数形([](#cg-5-1) – [](#cg-5-4))とmulti-arg形([](#cg-5-5))の両方を受け付けます。concrete modeと違うのは`num_controls`が`UInt`式であることと、qubit数の一致がtranspile時にチェックされることだけです。symbolic専用の引数形は[](#cg-5)で扱います。本セクションは*挙動*がモードに依存しない機能を集めたものです。
 
 # %% [markdown]
 # (cg-3-1)=
@@ -300,18 +300,10 @@ power_demo_concrete.draw()
 power_demo_symbolic.draw(k=3)
 
 # %% [markdown]
-# (cg-4)=
-# ## 4. 複数のpositional制御引数 (concrete mode)
+# (cg-3-6)=
+# ### 3.6 制御引数を別々のpositionalで渡す(CCXスタイル)
 #
-# 本セクションの形は、各制御を別々のpositional引数として並べます。ここでは各制御のqubit数がリテラルになるconcrete modeで示しますが、これらはconcrete**専用ではありません**。symbolic modeも同じmulti-argの制御prefixを受け付けます([](#cg-5-5)がまさにこれらの形を`UInt`の`num_controls`に持ち上げています)。concrete modeは単に導入が一番短くなるというだけです。
-#
-# 唯一の本当にconcrete専用の形は、[](#cg-1)の最小の単一scalar制御です。symbolic modeは単一の制御引数をpoolと読んで`Vector` / `VectorView`を要求するため、単一の固定scalar制御はconcrete modeで書きます(symbolicで渡したときのエラーは[](#cg-6-10)を参照)。
-
-# %% [markdown]
-# (cg-4-1)=
-# ### 4.1 制御引数を別々のpositionalで渡す(CCXスタイル)
-#
-# `num_controls=2`にすると、呼び出し側では各制御qubitをそれぞれ独立したpositional引数としてtargetの前に並べます。以下は典型的なCCX(Toffoli)で、2つの制御`c0`、`c1`と1つのtarget`t`を渡しています。同じパターンは`num_controls=3`(CCCX)や`num_controls=4`にも拡張でき、渡したい`Qubit`ハンドルがその数だけあれば成立します。
+# `num_controls=2`にすると、呼び出し側では各制御qubitをそれぞれ独立したpositional引数としてtargetの前に並べます。以下は典型的なCCX(Toffoli)で、2つの制御`c0`、`c1`と1つのtarget`t`を渡しています。同じパターンは`num_controls=3`(CCCX)や`num_controls=4`にも拡張でき、渡したい`Qubit`ハンドルがその数だけあれば成立します。この呼び出し形はsymbolic modeでもそのまま動きます([](#cg-5-5))。ここでは制御数がリテラルなのでconcrete modeで示しています。
 
 
 # %%
@@ -330,10 +322,10 @@ def toffoli_demo() -> qmc.Bit:
 toffoli_demo.draw()
 
 # %% [markdown]
-# (cg-4-2)=
-# ### 4.2 scalar Qubitと`VectorView`の制御を混ぜる
+# (cg-3-7)=
+# ### 3.7 scalar Qubitと`VectorView`の制御を混ぜる
 #
-# concrete modeのpositional制御prefixは、合計qubit数が`num_controls`と一致する限り、scalarな`Qubit`ハンドル、`VectorView`スライス、`Vector[Qubit]`全体を自由に混ぜられます。以下では`num_controls=3`のcontrolled-Hに対し、3つの制御を`qs[0]`(scalar `Qubit`、1qubit)と`qs[1:3]`(`VectorView`、2qubit)で供給しています。symbolic modeも同じ自由度をmulti-argの形([](#cg-5-5))で提供します。
+# positional制御prefixは、合計qubit数が`num_controls`と一致する限り、scalarな`Qubit`ハンドル、`VectorView`スライス、`Vector[Qubit]`全体を自由に混ぜられます。以下では`num_controls=3`のcontrolled-Hに対し、3つの制御を`qs[0]`(scalar `Qubit`、1qubit)と`qs[1:3]`(`VectorView`、2qubit)で供給しています。この混在形は両モードで動き、symbolic modeではmulti-argの形([](#cg-5-5))で到達します。
 
 
 # %%
@@ -351,15 +343,35 @@ def mixed_controls_demo() -> qmc.Vector[qmc.Bit]:
 mixed_controls_demo.draw()
 
 # %% [markdown]
+# (cg-4)=
+# ## 4. concrete専用: 単一のscalar制御
+#
+# 制御引数の形はほぼすべて両モードで動き([](#cg-3))、symbolic modeはさらに固有の機能を持ちます([](#cg-5))。本当にconcrete modeを*必要とする*唯一の形は、最も基本的なもの、つまり単一のscalar `Qubit`を制御にするケースです。symbolic modeでは単一の制御引数はpoolの形と解釈され`Vector` / `VectorView`が要求されるため、scalar1個には行き場がありません。そもそも制御数が1に固定されている制御をsymbolicにする理由もありません。これは[](#cg-1)の最小controlled-RXとまったく同じ形で、以下のcontrolled-X(CNOT)も同じ単一scalar制御の形です。symbolic modeでscalar1個を渡すと明確なエラーになります([](#cg-6-10))。
+
+
+# %%
+@qmc.qkernel
+def cnot_demo() -> qmc.Bit:
+    c = qmc.qubit(name="c")
+    t = qmc.qubit(name="t")
+    c = qmc.x(c)  # 制御を|1>に立ててXを発火させる
+    cx = qmc.control(qmc.x)  # num_controlsはデフォルトの1(concrete)
+    c, t = cx(c, t)
+    return qmc.measure(t)
+
+
+cnot_demo.draw()
+
+# %% [markdown]
 # (cg-5)=
 # ## 5. Symbolic modeのパターン
 #
-# 本セクションは`num_controls`が`qmc.UInt`ハンドル(または`n - 1`のような`UInt`式)のときに何が得られるかを扱います。activeな制御の数は`qmc.control(..., num_controls=...)`の評価時ではなく、`bindings`からtranspile時に決まります。以下のうち本当にsymbolic専用なのは、長さがsymbolicなpoolと`control_indices=`です。[](#cg-5-5)のmulti-argの形は、[](#cg-4)のconcreteなデモのsymbolic版にすぎません。
+# 本セクションは`num_controls`が`qmc.UInt`ハンドル(または`n - 1`のような`UInt`式)のときに何が得られるかを扱います。activeな制御の数は`qmc.control(..., num_controls=...)`の評価時ではなく、`bindings`からtranspile時に決まります。以下のうち本当にsymbolic専用なのは、長さがsymbolicなpoolと`control_indices=`です。[](#cg-5-5)のmulti-argの形は、[](#cg-3-6) / [](#cg-3-7)のconcreteなデモのsymbolic版にすぎません。
 #
 # 制御側のcall-site形は2種類サポートされます。
 #
 # - **Single-poolの形**([](#cg-5-1) – [](#cg-5-4)): 制御引数として`Vector[Qubit]`または`VectorView`を1つ渡し、pool全体、もしくは`control_indices=`で選んだsubsetがactiveな制御として配線されます。
-# - **Multi-argの形**([](#cg-5-5)): 制御prefixが複数のpositional引数(scalar`Qubit`、`VectorView`スライス、`Vector[Qubit]`全体、またはこれらの組み合わせ)で、qubit数の合計が`num_controls`と一致します。concrete modeで既に出ていた形([](#cg-4-1) / [](#cg-4-2))を、symbolicな`num_controls`に持ち上げたものです。
+# - **Multi-argの形**([](#cg-5-5)): 制御prefixが複数のpositional引数(scalar`Qubit`、`VectorView`スライス、`Vector[Qubit]`全体、またはこれらの組み合わせ)で、qubit数の合計が`num_controls`と一致します。concrete modeで既に出ていた形([](#cg-3-6) / [](#cg-3-7))を、symbolicな`num_controls`に持ち上げたものです。
 #
 # `control_indices=`keywordはsymbolic mode専用で、single-poolの引数のどのスロットがactiveな制御として実際に配線されるかを指定します(残りはそのまま素通りします)。`control_indices=`はsingle-poolの形でのみ有効で、multi-argの形と組み合わせるとcompose時にrejectされます。
 
@@ -458,7 +470,7 @@ subset_pool_with_uint.draw(n=4, k_ctrls=3)
 # (cg-5-5)=
 # ### 5.5 Multi-argの制御prefix
 #
-# 制御を複数のpositional引数に分けたい場合、典型的には「同じ`Vector`のいくつかのスロットをactiveな制御に、別のスロットをtargetに」したいときに、symbolic modeでもconcrete modeと同じmulti-argの形([](#cg-4-1) / [](#cg-4-2))が使えます。同じ`Vector[Qubit]`から複数のスロットを取り出しても、互いにdisjoint(重ならない)なスロットであれば制御prefixに並べられます。制御prefixの各引数のqubit数の合計が、transpile時に`num_controls`と照合されます。
+# 制御を複数のpositional引数に分けたい場合、典型的には「同じ`Vector`のいくつかのスロットをactiveな制御に、別のスロットをtargetに」したいときに、symbolic modeでもconcrete modeと同じmulti-argの形([](#cg-3-6) / [](#cg-3-7))が使えます。同じ`Vector[Qubit]`から複数のスロットを取り出しても、互いにdisjoint(重ならない)なスロットであれば制御prefixに並べられます。制御prefixの各引数のqubit数の合計が、transpile時に`num_controls`と照合されます。
 
 
 # %%
@@ -716,7 +728,7 @@ expect_error("plain function with default value", TypeError, case_plain_fn_with_
 # Workaround(推奨順):
 #
 # 1. **Multi-arg symbolicの形([](#cg-5-5))。** 各スロットまたはsub-viewを別々のpositional引数として渡します。`cg(pool[0], pool[1], pool[3], pool[2])`(またはcontrolled-incrementの例のようにscalar / sliceを混ぜる形)。各引数は`pool`からの別borrowで、borrow trackerがdisjointnessをcheckし、`num_controls`はtranspile時にqubit数の合計と照合されます。
-# 2. **Concrete mode([](#cg-4-2))。** `num_controls`がPythonの`int`なら、同じmulti-argの形がsymbolicの仕組みなしでそのまま動きます。
+# 2. **Concrete mode([](#cg-3-7))。** `num_controls`がPythonの`int`なら、同じmulti-argの形がsymbolicの仕組みなしでそのまま動きます。
 
 
 # %%
@@ -802,8 +814,9 @@ expect_error(
 # `qmc.control(fn, num_controls=...)`は再利用可能な`ControlledGate`を返します。正しいメンタルモデルは、2つの別々のAPIではなく、2軸のマトリクスです。
 #
 # - **モードは`num_controls`の型で決まります。** Pythonの`int`なら*concrete mode*、`qmc.UInt`ハンドル(または`n - 1`のような`UInt`式)なら*symbolic mode*です。
-# - **ほとんどの機能はモードに依存しません。** 任意のcallable(ビルトインまたは`@qmc.qkernel`)の制御化、`Vector[Qubit]`を受け取るサブカーネル、制御化する対象シグネチャ由来のデフォルト、古典kwargの並び替え、`power=`はすべて両モードで同じ挙動です([](#cg-3))。
-# - **一部の機能はsymbolic専用です。** 長さがsymbolicな制御poolと`control_indices=`によるsubset選択はsymbolic modeにのみ存在します([](#cg-5))。制御引数の*形*そのもの(単一のpool、またはscalar `Qubit` / `VectorView` / `Vector`を混ぜた複数のpositional引数)は両モードで動き、[](#cg-4)はconcrete modeで、[](#cg-5-5)はsymbolic modeで示します。
+# - **ほとんどの機能はモードに依存しません。** 任意のcallable(ビルトインまたは`@qmc.qkernel`)の制御化、`Vector[Qubit]`を受け取るサブカーネル、制御化する対象シグネチャ由来のデフォルト、古典kwargの並び替え、`power=`、そしてmulti-argの制御引数形(単一のpool、またはscalar `Qubit` / `VectorView` / `Vector`を混ぜた複数のpositional引数)は、すべて両モードで同じ挙動です([](#cg-3)。multi-argの形はconcreteが[](#cg-3-6) / [](#cg-3-7)、symbolicが[](#cg-5-5))。
+# - **一部の機能はsymbolic専用です。** 長さがsymbolicな制御poolと`control_indices=`によるsubset選択はsymbolic modeにのみ存在します([](#cg-5))。
+# - **1つの形だけconcrete専用です。** 単一のscalar `Qubit`を唯一の制御にする形はconcrete modeで書きます([](#cg-4))。symbolic modeは単一の制御引数をpoolと読んで`Vector` / `VectorView`を要求します(または制御引数を2つ以上にします)。
 #
 # 実用的な判断ルールとしては、制御数がカーネルパラメータやそれを含む式の場合、特に「最後の1つ以外全部」の典型形`num_controls=n - 1`を含む場合は、迷わず*symbolic mode*を使ってください。制御数がリテラルで、制御対象として個別に名指ししたい特定のqubitがある場合は*concrete mode*を使います。同じ`Vector`内のスロットをcontrolとtargetで分けたい場合はsymbolic mode + multi-arg([](#cg-5-5))が一番自然です。
 #
