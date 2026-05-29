@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -36,6 +37,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
     QubitAddress,
     QubitMap,
+    resolve_condition_address,
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
@@ -182,8 +184,14 @@ def _collect_loop_carried_clbits(
         if isinstance(op, WhileOperation) and op.operands:
             cond = op.operands[0]
             cond_val = cond.value if hasattr(cond, "value") else cond
-            cond_uuid = cond_val.uuid if hasattr(cond_val, "uuid") else str(cond_val)
-            cond_addr = QubitAddress(cond_uuid)
+            if isinstance(cond_val, Value):
+                # The pre-scan runs before runtime bindings exist, so the
+                # helper falls through to the scalar UUID for runtime
+                # indices; constant indices on ``Vector[Bit]`` measurements
+                # are still routed to the ``(parent_array, index)`` key.
+                cond_addr = resolve_condition_address(cond_val, {}, None)
+            else:
+                cond_addr = QubitAddress(str(cond_val))
             if cond_addr in clbit_map:
                 result.add(clbit_map[cond_addr])
             # Also scan inside the while body

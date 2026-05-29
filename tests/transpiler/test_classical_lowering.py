@@ -375,3 +375,231 @@ class TestSegmentationKeepsRuntimeExprInQuantumSegment:
             f"{len(quantum_steps)}. The runtime classical predicate must be "
             f"kept in the surrounding quantum segment."
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: ``Vector[Bit]`` element-access provenance (BACKLOG-8270)
+# ---------------------------------------------------------------------------
+
+
+class TestVectorBitElementProvenance:
+    """``s = qmc.measure(register)`` then ``if s[i]:`` must lower the same
+    way as ``bit = qmc.measure(register[i])`` then ``if bit:``.
+
+    Before this fix, indexing a measured ``Vector[Bit]`` lost the
+    measurement-derived marker because
+
+    - ``find_measurement_results`` only seeded ``MeasureOperation``
+      results, ignoring ``MeasureVectorOperation`` outputs, and
+    - the emit-time clbit lookup used ``QubitAddress(value.uuid)`` for
+      the if/while condition, but vector elements register under
+      ``QubitAddress(parent_array.uuid, index)``.
+
+    Flat ``if s[i]:`` raised ``EmitError`` and ``if s[i]:`` inside a
+    ``qmc.range`` for loop raised ``MultipleQuantumSegmentsError``.
+    """
+
+    @pytest.fixture
+    def transpiler(self):
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+
+    @pytest.mark.parametrize(
+        "flip_mask",
+        [
+            pytest.param((1, 0), id="anc=10"),
+            pytest.param((0, 1), id="anc=01"),
+            pytest.param((1, 1), id="anc=11"),
+            pytest.param((0, 0), id="anc=00"),
+        ],
+    )
+    def test_flat_if_on_measured_vector_element(self, transpiler, flip_mask):
+        """``if s[i]:`` flips ``q[i]`` for each set ancilla bit.
+
+        Setup: ``anc[i] = X^{flip_mask[i]} |0>``. The body runs
+        ``if s[0]: x(q[0])`` and ``if s[1]: x(q[1])`` after measuring
+        ``anc``, so ``q[i] == flip_mask[i]`` and ``q[2] == 0`` every
+        shot. Parametrised over all four 2-bit ancilla configurations
+        to exercise both true-condition and false-condition arms of
+        each ``if``.
+        """
+
+        @qmc.qkernel
+        def kernel(flip0: qmc.UInt, flip1: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, name="q")
+            anc = qmc.qubit_array(2, name="anc")
+            if flip0:
+                anc[0] = qmc.x(anc[0])
+            if flip1:
+                anc[1] = qmc.x(anc[1])
+            s = qmc.measure(anc)
+            if s[0]:
+                q[0] = qmc.x(q[0])
+            if s[1]:
+                q[1] = qmc.x(q[1])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(
+                kernel, bindings={"flip0": flip_mask[0], "flip1": flip_mask[1]}
+            )
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((flip_mask[0], flip_mask[1], 0), 64)]
+
+    def test_compound_if_over_measured_vector_elements(self, transpiler):
+        """``if s[0] & s[1]:`` lowers ``s[0]`` and ``s[1]`` as runtime
+        clbit references inside a single quantum segment.
+
+        Both ancillas set to ``|1>`` → predicate true → ``q[0]`` flips.
+        Pre-fix this raised ``MultipleQuantumSegmentsError`` because the
+        BinOp was not classified as measurement-derived.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            anc = qmc.qubit_array(2, name="anc")
+            anc[0] = qmc.x(anc[0])
+            anc[1] = qmc.x(anc[1])
+            s = qmc.measure(anc)
+            if s[0] & s[1]:
+                q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((1, 0), 64)]
+
+    def test_if_on_measured_vector_inside_unrolled_for_loop(self, transpiler):
+        """``for i in qmc.range(N): if s[i]: x(q[i])`` flips exactly the
+        qubits whose ancilla measured ``1``.
+
+        Setup: ``anc[0] = |1>``, ``anc[1] = |0>``, ``anc[2] = |1>`` →
+        ``q = (1, 0, 1)``. Pre-fix this raised
+        ``MultipleQuantumSegmentsError``.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, name="q")
+            anc = qmc.qubit_array(3, name="anc")
+            anc[0] = qmc.x(anc[0])
+            anc[2] = qmc.x(anc[2])
+            s = qmc.measure(anc)
+            for i in qmc.range(3):
+                if s[i]:
+                    q[i] = qmc.x(q[i])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((1, 0, 1), 64)]
+
+    def test_measurement_taint_seeded_from_measure_vector(self):
+        """White-box: ``a & b`` over a measured ``Vector[Bit]`` lowers to
+        ``RuntimeClassicalExpr`` even though the operands are
+        ``parent_array`` element accesses, not direct measurement
+        results.
+
+        Without seeding ``MeasureVectorOperation`` results, the taint
+        analysis cannot reach the BinOp and the predicate stays as a
+        plain ``CondOp``, which downstream causes the segmentation pass
+        to split the run into multiple quantum segments.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q = qmc.qubit_array(2, name="q")
+            target = qmc.qubit("t")
+            s = qmc.measure(q)
+            if s[0] & s[1]:
+                target = qmc.x(target)
+            return qmc.measure(target)
+
+        block = _lower_to_classical_lowering(kernel)
+        runtime_ops = [
+            op
+            for op in _walk_ops(block.operations)
+            if isinstance(op, RuntimeClassicalExpr)
+        ]
+        assert any(op.kind is RuntimeOpKind.AND for op in runtime_ops), (
+            "BinOp(AND) over measured-vector elements must lower to "
+            "RuntimeClassicalExpr(AND)."
+        )
+
+    def test_flat_if_on_measured_vector_element_cudaq(self):
+        """The same ``if s[i]:`` pattern compiles on the CUDA-Q backend.
+
+        CUDA-Q's emit pass goes through both the shared
+        ``control_flow_emission.emit_if`` path (the inner condition
+        lookup my fix touches) and the CUDA-Q-specific
+        ``_collect_loop_carried_clbits`` pre-scan (also updated to walk
+        ``parent_array``). Exercising this end-to-end on CUDA-Q ensures
+        both call sites are consistent with the Qiskit-side coverage.
+        Skipped when CUDA-Q is not installed.
+        """
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            anc = qmc.qubit_array(2, name="anc")
+            anc[0] = qmc.x(anc[0])
+            s = qmc.measure(anc)
+            if s[0]:
+                q[0] = qmc.x(q[0])
+            if s[1]:
+                q[1] = qmc.x(q[1])
+            return qmc.measure(q)
+
+        tp = CudaqTranspiler()
+        result = tp.transpile(kernel).sample(tp.executor(), shots=64).result()
+        # CUDA-Q's deterministic runtime if path: anc[0]=1 flips q[0],
+        # anc[1]=0 leaves q[1] untouched. Every shot reads (1, 0).
+        assert result.results == [((1, 0), 64)]
+
+    def test_if_on_sliced_view_of_measured_vector(self, transpiler):
+        """Sliced view of a measured ``Vector[Bit]`` resolves through
+        the ``slice_of`` chain.
+
+        Setup: ``anc = [|1>, |0>, |1>, |0>]`` → ``s = (1, 0, 1, 0)``,
+        ``s_slice = s[0:4:2]`` resolves to root-space indices ``[0, 2]``
+        → values ``(1, 1)``. ``if s_slice[0] & s_slice[1]:`` flips
+        ``q[0]``. Pre-fix this raised ``EmitError`` for the simple form
+        and ``MultipleQuantumSegmentsError`` for the compound form
+        because the address-resolution helper walked ``parent_array``
+        only one level and the taint-analysis dependency graph had no
+        edge across the ``slice_of`` link (``StripSliceArrayOpsPass``
+        removes the explicit ``SliceArrayOperation`` so there is no
+        op-mediated edge).
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            anc = qmc.qubit_array(4, name="anc")
+            anc[0] = qmc.x(anc[0])
+            anc[2] = qmc.x(anc[2])
+            s = qmc.measure(anc)
+            s_slice = s[0:4:2]
+            if s_slice[0] & s_slice[1]:
+                q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((1, 0), 64)]

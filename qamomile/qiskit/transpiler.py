@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -37,6 +38,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
     QubitAddress,
     QubitMap,
+    resolve_condition_address,
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
@@ -212,7 +214,12 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         if stored is not None and not isinstance(stored, (bool, int, float)):
             return stored
 
-        condition_addr = QubitAddress(condition_uuid)
+        if isinstance(condition, Value):
+            condition_addr = resolve_condition_address(
+                condition, bindings, self._resolver
+            )
+        else:
+            condition_addr = QubitAddress(condition_uuid)
         if condition_addr in clbit_map:
             clbit_idx = clbit_map[condition_addr]
             return (circuit.clbits[clbit_idx], 1)
@@ -295,8 +302,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             if hasattr(v, "is_constant") and v.is_constant():
                 return v.get_const()
 
-            # 3. Clbit reference.
-            addr = QubitAddress(v.uuid)
+            # 3. Clbit reference. ``Vector[Bit]`` element accesses route
+            #    through ``QubitAddress(parent_array.uuid, index)``; scalar
+            #    bits use ``QubitAddress(v.uuid)``.
+            addr = resolve_condition_address(v, bindings, self._resolver)
             if addr in clbit_map:
                 return circuit.clbits[clbit_map[addr]]
 
@@ -461,7 +470,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     return stored_v
                 if hasattr(v, "is_constant") and v.is_constant():
                     return bool(v.get_const())
-                addr = QubitAddress(v.uuid)
+                addr = (
+                    resolve_condition_address(v, bindings, self._resolver)
+                    if isinstance(v, Value)
+                    else QubitAddress(v.uuid)
+                )
                 if addr in clbit_map:
                     return circuit.clbits[clbit_map[addr]]
                 if isinstance(stored_v, (bool, int)):
