@@ -130,7 +130,7 @@ def _cry_result_ancilla(theta: qmc.Float, obs: qmc.Observable) -> qmc.Float:
     clock = qmc.qubit_array(1, name="clock")
     clock[0] = qmc.x(clock[0])  # control = |1> so the controlled-Ry always fires
     anc = qmc.qubit_array(1, name="anc")
-    cry = qmc.controlled(qmc.ry, num_controls=1)
+    cry = qmc.control(qmc.ry, num_controls=1)
     res = cry(clock[0], anc[0], angle=theta)
     clock[0] = res[0]
     anc[0] = res[1]

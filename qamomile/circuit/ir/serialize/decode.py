@@ -53,7 +53,6 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
@@ -209,7 +208,7 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
             ``CompositeGateOperation.implementation_block``) may
             legitimately be ``HIERARCHICAL`` — e.g., the cached
             ``kernel.block`` form of a leaf kernel passed to
-            ``qmc.controlled``. Skip the kind check there.
+            ``qmc.control``. Skip the kind check there.
 
     Returns:
         Block: The reconstructed Block.
@@ -1216,6 +1215,14 @@ def _decode_symbolic_controlled(
 ) -> SymbolicControlledU:
     """Decode :class:`SymbolicControlledU`.
 
+    The ``num_control_args`` field is treated as additive: payloads
+    that omit it (either pre-multi-arg encoders or the legacy single-
+    pool form, which the encoder skips for compactness) decode with
+    the dataclass default ``1``.  Newer payloads carry the actual
+    count so the emit pass can split ``operands`` at the correct
+    boundary between the control prefix and the sub-kernel quantum
+    tail.
+
     Args:
         d (dict[str, Any]): The op dict.
         ctx (_DecodeContext): The active decode context.
@@ -1229,58 +1236,22 @@ def _decode_symbolic_controlled(
         if d.get("unitary_block") is not None
         else None
     )
+    controlled_refs = d.get("control_index_refs")
+    control_indices: tuple[Value, ...] | None
+    if controlled_refs is None:
+        control_indices = None
+    else:
+        control_indices = tuple(
+            _materialize_as_value(ctx, ref) for ref in controlled_refs
+        )
     return SymbolicControlledU(
         operands=operands,
         results=results,
         num_controls=_materialize_as_value(ctx, d["num_controls_ref"]),
+        control_indices=control_indices,
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
-    )
-
-
-def _decode_index_spec_controlled(
-    d: dict[str, Any], ctx: _DecodeContext
-) -> IndexSpecControlledU:
-    """Decode :class:`IndexSpecControlledU`.
-
-    Args:
-        d (dict[str, Any]): The op dict.
-        ctx (_DecodeContext): The active decode context.
-
-    Returns:
-        IndexSpecControlledU: The reconstructed op.
-    """
-    operands, results = _operands_results(d, ctx)
-    block = (
-        _decode_block(d["unitary_block"])
-        if d.get("unitary_block") is not None
-        else None
-    )
-    raw_nc = d.get("num_controls", 1)
-    if isinstance(raw_nc, dict) and "$value_ref" in raw_nc:
-        num_controls = _materialize_as_value(ctx, raw_nc["$value_ref"])
-    elif isinstance(raw_nc, int):
-        num_controls = raw_nc
-    else:
-        raise ValueError(f"unrecognized num_controls payload: {raw_nc!r}")
-    target_refs = d.get("target_index_refs")
-    controlled_refs = d.get("controlled_index_refs")
-    return IndexSpecControlledU(
-        operands=operands,
-        results=results,
-        num_controls=num_controls,
-        target_indices=(
-            [_materialize_as_value(ctx, ref) for ref in target_refs]
-            if target_refs is not None
-            else None
-        ),
-        controlled_indices=(
-            [_materialize_as_value(ctx, ref) for ref in controlled_refs]
-            if controlled_refs is not None
-            else None
-        ),
-        power=_decode_power(d.get("power", 1), ctx),
-        block=block,
+        num_control_args=int(d.get("num_control_args", 1)),
     )
 
 
@@ -1399,6 +1370,5 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "IfOperation": _decode_if,
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
-    "IndexSpecControlledU": _decode_index_spec_controlled,
     "CompositeGateOperation": _decode_composite_gate,
 }

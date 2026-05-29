@@ -48,7 +48,6 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
@@ -1067,46 +1066,33 @@ def _encode_symbolic_controlled(
 
     Returns:
         dict[str, Any]: Base op dict plus ``num_controls_ref``
-            (symbolic Value's UUID), ``power``, and nested
-            ``unitary_block`` dict.
+            (symbolic Value's UUID), ``power``, ``control_index_refs``
+            (per-element ``UInt`` Value UUIDs, or ``None`` when the op
+            uses the entire pool), ``num_control_args`` (count of
+            positional control arguments at the call site -- the legacy
+            single-pool form is ``1``, the multi-arg control prefix
+            stores the actual N), and nested ``unitary_block`` dict.
     """
     d = _base_op_dict("SymbolicControlledU", op)
     ctx.register_value(op.num_controls)
     d["num_controls_ref"] = op.num_controls.uuid
     d["power"] = _encode_power(op.power)
-    d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
-    return d
-
-
-def _encode_index_spec_controlled(
-    op: IndexSpecControlledU, ctx: _EncodeContext
-) -> dict[str, Any]:
-    """Encode :class:`IndexSpecControlledU`.
-
-    Args:
-        op (IndexSpecControlledU): The op.
-        ctx (_EncodeContext): The active encoding context.
-
-    Returns:
-        dict[str, Any]: Base op dict plus ``num_controls`` (int or
-            value-ref), index lists (UUIDs), ``power``, and nested
-            ``unitary_block`` dict.
-    """
-    d = _base_op_dict("IndexSpecControlledU", op)
-    if isinstance(op.num_controls, Value):
-        ctx.register_value(op.num_controls)
-        d["num_controls"] = {"$value_ref": op.num_controls.uuid}
+    if op.control_indices is not None:
+        for v in op.control_indices:
+            ctx.register_value(v)
+        d["control_index_refs"] = [v.uuid for v in op.control_indices]
     else:
-        d["num_controls"] = op.num_controls
-    d["power"] = _encode_power(op.power)
-    d["target_index_refs"] = (
-        [v.uuid for v in op.target_indices] if op.target_indices is not None else None
-    )
-    d["controlled_index_refs"] = (
-        [v.uuid for v in op.controlled_indices]
-        if op.controlled_indices is not None
-        else None
-    )
+        d["control_index_refs"] = None
+    # ``num_control_args`` tracks how many positional control arguments
+    # the call site supplied (one ArrayBase pool in the legacy form;
+    # any sequence of scalar Qubits and / or ArrayBases in the multi-
+    # arg form).  The emit pass uses it to split ``operands`` into the
+    # control prefix vs the sub-kernel quantum tail, so a wrong default
+    # at decode time shifts the boundary and corrupts the operand
+    # layout.  Persist the field whenever it differs from the legacy
+    # default of 1 so existing v1 payloads stay readable.
+    if op.num_control_args != 1:
+        d["num_control_args"] = op.num_control_args
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
 
@@ -1219,6 +1205,5 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     IfOperation: _encode_if,
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
-    IndexSpecControlledU: _encode_index_spec_controlled,
     CompositeGateOperation: _encode_composite_gate,
 }

@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import sympy as sp
 
@@ -4802,7 +4804,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target)
             return ctrl, target
 
@@ -4821,7 +4823,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target, theta=0.5)
             return ctrl, target
 
@@ -4840,7 +4842,7 @@ class TestControlledUOperation:
         def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
             counting = qmc.qubit_array(n, name="counting")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             for i in qmc.range(n):
                 counting[i], target = cgate(counting[i], target)
             return counting
@@ -4861,7 +4863,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target, power=4)
             return ctrl, target
 
@@ -4880,7 +4882,7 @@ class TestControlledUOperation:
         def circuit(m: qmc.UInt) -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             for _ in qmc.range(m):
                 ctrl, target = cgate(ctrl, target)
             return ctrl, target
@@ -4902,7 +4904,7 @@ class TestControlledUOperation:
             target1 = qmc.qubit(name="target1")
             ctrl2 = qmc.qubit(name="ctrl2")
             target2 = qmc.qubit(name="target2")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl1, target1 = cgate(ctrl1, target1)
             ctrl2, target2 = cgate(ctrl2, target2)
             return ctrl1, target1, ctrl2, target2
@@ -4924,7 +4926,7 @@ class TestControlledUOperation:
         def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target)
             return ctrl, target
 
@@ -4944,7 +4946,7 @@ class TestControlledUOperation:
         def circuit(m: qmc.UInt) -> tuple[qmc.Qubit, qmc.Qubit]:
             ctrl = qmc.qubit(name="ctrl")
             target = qmc.qubit(name="target")
-            cgate = qmc.controlled(gate)
+            cgate = qmc.control(gate)
             ctrl, target = cgate(ctrl, target, m=m)
             return ctrl, target
 
@@ -4953,28 +4955,18 @@ class TestControlledUOperation:
         assert resource == 2 + m_sym
 
 
-class TestControlledUIndexSpec:
-    """Verify qubit counting for ControlledUOperation with target_indices/controlled_indices."""
+class TestControlledUVectorViewControl:
+    """Qubit counting for ``ControlledUOperation`` with ``VectorView`` controls.
 
-    def test_target_indices_no_inner_alloc(self):
-        """controlled(z, num_controls=3) with target_indices=[3] on 4-qubit array → 4."""
+    Successor to the deleted ``TestControlledUIndexSpec`` suite: the
+    old ``target_indices`` / ``control_indices`` concrete-mode
+    forms were removed when the API redesign collapsed everything
+    onto positional controls.  These tests cover the equivalent
+    ``cg(qs[0:N], qs[N])`` shape with a ``VectorView`` control prefix.
+    """
 
-        @qmc.qkernel
-        def gate(q: qmc.Qubit) -> qmc.Qubit:
-            return qmc.z(q)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Qubit]:
-            qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate, num_controls=3)
-            qs = cg(qs, target_indices=[3])
-            return qs
-
-        resource = qubits_counter(circuit.block)
-        assert resource == 4
-
-    def test_controlled_indices_no_inner_alloc(self):
-        """controlled(z, num_controls=3) with controlled_indices=[0,1,2] on 4-qubit array → 4."""
+    def test_view_control_no_inner_alloc(self):
+        """``cg(qs[0:3], qs[3])`` on a 4-qubit array stays at 4 qubits."""
 
         @qmc.qkernel
         def gate(q: qmc.Qubit) -> qmc.Qubit:
@@ -4983,14 +4975,14 @@ class TestControlledUIndexSpec:
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate, num_controls=3)
-            qs = cg(qs, controlled_indices=[0, 1, 2])
+            cg = qmc.control(gate, num_controls=3)
+            qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
         resource = qubits_counter(circuit.block)
         assert resource == 4
 
-    def test_controlled_indices_inner_alloc(self):
+    def test_view_control_inner_alloc(self):
         """Inner block allocates ancilla → total == array_size + ancilla."""
 
         @qmc.qkernel
@@ -5002,15 +4994,15 @@ class TestControlledUIndexSpec:
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate_with_ancilla, num_controls=3)
-            qs = cg(qs, controlled_indices=[0, 1, 2])
+            cg = qmc.control(gate_with_ancilla, num_controls=3)
+            qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
         resource = qubits_counter(circuit.block)
         assert resource == 4 + 3
 
-    def test_controlled_indices_with_params(self):
-        """Inner block with float param, controlled_indices → qubits == 4."""
+    def test_view_control_with_params(self):
+        """Inner block with float param + view control → qubits == 4."""
 
         @qmc.qkernel
         def param_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
@@ -5020,15 +5012,15 @@ class TestControlledUIndexSpec:
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(param_gate, num_controls=3)
-            qs = cg(qs, controlled_indices=[0, 1, 2], theta=0.5)
+            cg = qmc.control(param_gate, num_controls=3)
+            qs[0:3], qs[3] = cg(qs[0:3], qs[3], theta=0.5)
             return qs
 
         resource = qubits_counter(circuit.block)
         assert resource == 4
 
-    def test_controlled_indices_in_loop(self):
-        """controlled_indices inside loop → no new qubits per iteration."""
+    def test_view_control_in_loop(self):
+        """View-control inside a loop → no new qubits per iteration."""
 
         @qmc.qkernel
         def gate(q: qmc.Qubit) -> qmc.Qubit:
@@ -5037,38 +5029,58 @@ class TestControlledUIndexSpec:
         @qmc.qkernel
         def circuit(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
             qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate, num_controls=3)
+            cg = qmc.control(gate, num_controls=3)
             for _ in qmc.range(m):
-                qs = cg(qs, controlled_indices=[0, 1, 2])
+                qs[0:3], qs[3] = cg(qs[0:3], qs[3])
             return qs
 
         resource = qubits_counter(circuit.block)
         assert resource == 4
 
-    def test_controlled_vs_target_indices_equivalence(self):
-        """Same partition: controlled_indices=[0,1,2] vs target_indices=[3] → same qubit count."""
+    def test_classical_first_signature_shape_propagation(self):
+        """Vector[Qubit] shape resolves even when classical comes first.
+
+        ``_build_controlled_u_child_resolver`` filters both the inner
+        block's formal inputs and the call site's actuals to their
+        quantum subsets before zipping for shape propagation.  The
+        previous unfiltered zip paired the leading classical formal
+        (``theta``) with the leading quantum actual (the
+        ``Vector[Qubit]`` operand), so the Vector formal's symbolic
+        ``shape[0]`` never received the actual size mapping.  The
+        bug only surfaces in the estimate when the inner block
+        *uses* ``q.shape[0]`` to allocate something whose count
+        contributes to the total -- here, a per-call ancilla register
+        sized to match the input.  Without the fix the estimate
+        carries an unresolved ``q_dim0`` symbol; with the fix it
+        folds to the resolved 4 + 3 + 3 = 10.
+        """
 
         @qmc.qkernel
-        def gate(q: qmc.Qubit) -> qmc.Qubit:
-            return qmc.z(q)
+        def sub_classical_first(
+            theta: qmc.Float, q: qmc.Vector[qmc.Qubit]
+        ) -> qmc.Vector[qmc.Qubit]:
+            n = q.shape[0]
+            _anc = qmc.qubit_array(n, name="anc")
+            for i in qmc.range(n):
+                q[i] = qmc.rx(q[i], theta)
+            return q
 
         @qmc.qkernel
-        def circuit_ci() -> qmc.Vector[qmc.Qubit]:
-            qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate, num_controls=3)
-            qs = cg(qs, controlled_indices=[0, 1, 2])
-            return qs
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            ctrl = qmc.qubit_array(4, name="ctrl")
+            qs = qmc.qubit_array(3, name="qs")
+            cg = qmc.control(sub_classical_first, num_controls=4)
+            # Pass ``theta`` positionally so the classical-first
+            # signature binds cleanly through
+            # :meth:`inspect.Signature.bind` (passing it as kwarg
+            # would conflict with the positional ``qs`` that the
+            # control-prefix split has already advanced past).
+            ctrl, qs = cg(ctrl, math.pi / 2, qs)
+            return ctrl
 
-        @qmc.qkernel
-        def circuit_ti() -> qmc.Vector[qmc.Qubit]:
-            qs = qmc.qubit_array(4, name="qs")
-            cg = qmc.controlled(gate, num_controls=3)
-            qs = cg(qs, target_indices=[3])
-            return qs
-
-        resource_ci = qubits_counter(circuit_ci.block)
-        resource_ti = qubits_counter(circuit_ti.block)
-        assert resource_ci == resource_ti
+        # 4 (ctrl) + 3 (qs) + 3 (ancilla sized from q.shape[0]) = 10.
+        resource = qubits_counter(circuit.block)
+        assert resource == 10, resource
 
 
 class TestInputQubits:
