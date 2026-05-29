@@ -19,3 +19,4 @@ Concrete quantum algorithm examples built with Qamomile.
 - [Quantum Kernel Methods](quantum_kernel_classification) — Use quantum feature maps and kernel methods for classification on the make_circles dataset
 - [Implementing Quantum-enhanced MCMC](qe_mcmc) — Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution
 - [Möttönen Amplitude Encoding](mottonen_amplitude_encoding) — Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multiplexers, with three input modes (concrete, bound `Vector[Float]`, runtime-parametric angles)
+- [PCE for MaxCut](pce_maxcut) — Solve a 20-variable MaxCut on just 3 qubits with Pauli Correlation Encoding, training a hardware-efficient ansatz against a tanh-relaxed surrogate and decoding via sign rounding
