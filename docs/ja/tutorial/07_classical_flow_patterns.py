@@ -173,6 +173,16 @@ circuit = transpiler.to_circuit(
 # Qiskit の ``QuantumCircuit.__str__`` は ASCII 回路図を返しますが、
 # 他SDKは objectのreprを返すだけです。SDK 横断で動くよう、ここでは型名を print します。
 print(type(circuit).__name__)
+# 以下の構造アサーションは Qiskit ``QuantumCircuit`` の API
+# (``.num_qubits`` / ``.data``) を使うため、docs テストが実行する
+# デフォルトの Qiskit タブでのみ走り、他タブではスキップされます。
+if type(circuit).__name__ == "QuantumCircuit":
+    assert circuit.num_qubits == 3
+    # n=3 → 初期 H 3個 + 測定 3個、len(edge_data)=3 → RZZ ちょうど 3個。
+    _ops = {}
+    for _instr in circuit.data:
+        _ops[_instr.operation.name] = _ops.get(_instr.operation.name, 0) + 1
+    assert _ops == {"h": 3, "rzz": 3, "measure": 3}
 
 # %% [markdown]
 # `edge_data`の3つのエッジのみがRZZゲートを生成します。
@@ -221,6 +231,9 @@ else:
     result = job.result()
     for value, count in result.results:
         print(f"  bit={value}: {count} shots")
+    # q0 は |1> として準備 → if 分岐で q1 を毎ショット |1> に反転。
+    assert result.shots == 100
+    assert result.results == [(1, 100)]
 
 # %% [markdown]
 # `q0`は |1⟩ として準備されているため、測定結果は常に1となり、`q1`は常に反転されます。全てのショットで1が返るはずです。
@@ -256,6 +269,12 @@ qc_while = exe_while.compiled_quantum[0].circuit
 # 前のセクション同様、型名にフォールバックしてSDK横断で動くようにします — Qiskit の
 # QuantumCircuit は ASCII 図を出しますが、CUDA-Q のartifactは generic な ``__repr__`` です。
 print(type(qc_while).__name__)
+# Qiskit 固有の構造アサーション — 前セクションの注記を参照。
+# デフォルトの Qiskit パスでのみ確認します。
+if type(qc_while).__name__ == "QuantumCircuit":
+    assert qc_while.num_qubits == 2
+    # `while bit:` は Qiskit の `while_loop` 命令に lower される。
+    assert "while_loop" in {instr.operation.name for instr in qc_while.data}
 
 # %% [markdown]
 # ### `if`と`while`の組み合わせ
@@ -290,6 +309,8 @@ def measure_and_correct() -> qmc.Bit:
 exe_combined = transpiler.transpile(measure_and_correct)
 qc_combined = exe_combined.compiled_quantum[0].circuit
 print(qc_combined)
+assert qc_combined.num_qubits == 3
+assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 
 # %% [markdown]
 # ## まとめ

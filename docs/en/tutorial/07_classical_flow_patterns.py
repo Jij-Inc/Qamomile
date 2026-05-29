@@ -189,6 +189,16 @@ circuit = transpiler.to_circuit(
 # SDKs return a different concrete type whose ``__str__`` is just an
 # object ``repr`` — print the type name so this cell is SDK-portable.
 print(type(circuit).__name__)
+# Structural invariants below use the Qiskit ``QuantumCircuit`` API
+# (``.num_qubits`` / ``.data``), so they only run on the default Qiskit
+# tab (which the docs test exercises); other tabs skip them.
+if type(circuit).__name__ == "QuantumCircuit":
+    assert circuit.num_qubits == 3
+    # n=3 -> 3 initial H + 3 measurements; len(edge_data)=3 -> exactly 3 RZZ.
+    _ops = {}
+    for _instr in circuit.data:
+        _ops[_instr.operation.name] = _ops.get(_instr.operation.name, 0) + 1
+    assert _ops == {"h": 3, "rzz": 3, "measure": 3}
 
 # %% [markdown]
 # Only the three edges in `edge_data` produce RZZ gates — no wasted operations.
@@ -237,6 +247,9 @@ else:
     result = job.result()
     for value, count in result.results:
         print(f"  bit={value}: {count} shots")
+    # q0 prepared as |1>; the if-branch flips q1 to |1> on every shot.
+    assert result.shots == 100
+    assert result.results == [(1, 100)]
 
 # %% [markdown]
 # Since `q0` is prepared as |1⟩, the measurement always yields 1, so `q1` always gets flipped — every shot should return 1.
@@ -278,6 +291,12 @@ qc_while = exe_while.compiled_quantum[0].circuit
 # cell is SDK-portable — Qiskit's QuantumCircuit prints an ASCII
 # diagram, CUDA-Q's artifact prints a generic ``__repr__``.
 print(type(qc_while).__name__)
+# Qiskit-specific structural invariants — see the note in the previous
+# section. Only the default Qiskit path is checked here.
+if type(qc_while).__name__ == "QuantumCircuit":
+    assert qc_while.num_qubits == 2
+    # The `while bit:` lowers to a Qiskit `while_loop` instruction.
+    assert "while_loop" in {instr.operation.name for instr in qc_while.data}
 
 # %% [markdown]
 # ### Combining `if` and `while`
@@ -312,6 +331,8 @@ def measure_and_correct() -> qmc.Bit:
 exe_combined = transpiler.transpile(measure_and_correct)
 qc_combined = exe_combined.compiled_quantum[0].circuit
 print(qc_combined)
+assert qc_combined.num_qubits == 3
+assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 
 # %% [markdown]
 # ## Summary
