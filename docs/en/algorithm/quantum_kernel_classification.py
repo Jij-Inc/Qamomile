@@ -88,6 +88,9 @@ X_raw, y = make_circles(
     factor=0.40,
     random_state=RANDOM_STATE,
 )
+assert X_raw.shape == (N_SAMPLES, 2)
+assert y.shape == (N_SAMPLES,)
+assert set(y.tolist()) == {0, 1}
 
 X_train_raw, X_test_raw, y_train, y_test = train_test_split(
     X_raw, y,
@@ -95,6 +98,12 @@ X_train_raw, X_test_raw, y_train, y_test = train_test_split(
     random_state=RANDOM_STATE,
     stratify=y,
 )
+# train + test partition recovers the whole dataset; stratify preserves
+# the binary label set.
+assert len(X_train_raw) + len(X_test_raw) == N_SAMPLES
+assert X_train_raw.shape[1] == 2 and X_test_raw.shape[1] == 2
+assert set(y_train.tolist()) == {0, 1}
+assert set(y_test.tolist()) == {0, 1}
 
 plt.figure(figsize=(5, 4))
 plt.scatter(
@@ -150,6 +159,12 @@ F_test = lift_features(X_test_ang)
 # scale only the nonlinear pair features
 F_train[:, 2:4] = pair_scaler.fit_transform(F_train[:, 2:4])
 F_test[:, 2:4] = pair_scaler.transform(F_test[:, 2:4])
+# Feature lifting widens (n, 2) -> (n, 4); MinMaxScaler clip=True keeps
+# every entry inside [0, pi].
+assert F_train.shape == (len(X_train_raw), 4)
+assert F_test.shape == (len(X_test_raw), 4)
+assert F_train.min() >= 0.0 and F_train.max() <= math.pi + 1e-12
+assert F_test.min() >= 0.0 and F_test.max() <= math.pi + 1e-12
 
 # %% [markdown]
 # ## Feature Map Circuit
@@ -271,6 +286,8 @@ est = overlap_kernel.estimate_resources()
 print("=== symbolic resource estimate ===")
 print("qubits:", est.qubits)
 print("total gates:", est.gates.total)
+# The overlap circuit always acts on exactly 2 qubits, regardless of layers.
+assert est.qubits == 2
 
 # %% [markdown]
 # ## Transpile Once, Bind Many Times
@@ -396,8 +413,18 @@ def project_to_psd_correlation(K: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 # %%
 K_train = train_kernel_matrix(F_train, shots=SHOTS)
 K_train = project_to_psd_correlation(K_train)
+# After PSD correlation projection the train Gram matrix is symmetric
+# with unit diagonal and is positive semi-definite (no negative
+# eigenvalues beyond the eps floor used inside the projector).
+assert K_train.shape == (len(F_train), len(F_train))
+assert np.allclose(K_train, K_train.T)
+assert np.allclose(np.diag(K_train), 1.0)
+assert float(np.linalg.eigvalsh(K_train).min()) >= -1e-9
 
 K_test = cross_kernel_matrix(F_test, F_train, shots=SHOTS)
+# Probabilities estimated from shot counts are always in [0, 1].
+assert K_test.shape == (len(F_test), len(F_train))
+assert K_test.min() >= 0.0 and K_test.max() <= 1.0
 
 # %% [markdown]
 # ## Train Classifiers
@@ -427,6 +454,14 @@ print("=== test accuracy ===")
 print("Quantum kernel SVC :", accuracy_score(y_test, y_pred_qk))
 print("Linear SVC         :", accuracy_score(y_test, y_pred_linear))
 print("RBF SVC            :", accuracy_score(y_test, y_pred_rbf))
+# Every classifier produces exactly one prediction per test point and
+# only emits labels drawn from the training label set.
+assert y_pred_qk.shape == y_test.shape
+assert y_pred_linear.shape == y_test.shape
+assert y_pred_rbf.shape == y_test.shape
+assert set(y_pred_qk.tolist()).issubset({0, 1})
+assert set(y_pred_linear.tolist()).issubset({0, 1})
+assert set(y_pred_rbf.tolist()).issubset({0, 1})
 
 # %% [markdown]
 # ## Visualization
