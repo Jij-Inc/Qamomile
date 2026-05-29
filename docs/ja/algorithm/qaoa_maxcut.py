@@ -65,6 +65,8 @@ import networkx as nx
 G = nx.Graph()
 G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
 num_nodes = G.number_of_nodes()
+assert num_nodes == 5
+assert G.number_of_edges() == 6
 
 pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
@@ -112,6 +114,11 @@ print(f"Variable type:          {spin_model.vartype}")
 print(f"Linear terms (h_i):     {spin_model.linear}")
 print(f"Quadratic terms (J_ij): {spin_model.quad}")
 print(f"Constant:               {spin_model.constant}")
+# スピン領域のモデルで、線形項は無し、各辺に 1 つの J_ij、定数項も無し。
+assert spin_model.vartype.name == "SPIN"
+assert spin_model.linear == {}
+assert len(spin_model.quad) == G.number_of_edges()
+assert spin_model.constant == 0.0
 
 # %% [markdown]
 # > **Note:** `BinaryModel`はQUBO向けの`from_qubo()`や高次版の`from_hubo()`も提供しており、割当問題や制約（ペナルティ項）を伴う問題のようにバイナリ領域で自然に定式化される問題に利用できます。QUBO/JijModelingベースのワークフローについては[QAOAによるグラフ分割](qaoa_graph_partition)を参照してください。
@@ -139,6 +146,12 @@ print(f"Optimal MaxCut value: {best_cut}")
 print(f"Number of optimal partitions: {len(optimal_partitions)}")
 for part in optimal_partitions:
     print(f"  {part}")
+# この固定された 5 ノード 6 辺のグラフでは MaxCut は 5、それを達成する
+# スピン配置は大域反転 s -> -s で結ばれる 2 通りだけ。
+assert best_cut == 5
+assert len(optimal_partitions) == 2
+for part in optimal_partitions:
+    assert tuple(-s for s in part) in optimal_partitions
 
 # %% [markdown]
 # ## QAOA回路: 基本的な考え方
@@ -402,11 +415,17 @@ def cost_fn(params):
 
 rng = np.random.default_rng(SEED)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
+assert initial_params.shape == (2 * p,)
 
 res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": maxiter})
 
 print(f"Optimized cost: {res.fun:.4f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
+assert len(cost_history) == res.nfev
+assert len(res.x) == 2 * p
+if docs_test_mode:
+    # docs テストモードでは COBYLA は maxiter の予算で打ち切られる。
+    assert res.nfev == maxiter
 
 # %%
 plt.figure(figsize=(8, 4))
@@ -453,6 +472,10 @@ for sample, _energy, occ in zip(
 
 print(f"Best QAOA cut: {best_qaoa_cut}  (optimal: {best_cut})")
 print(f"Best partition (spins): {best_qaoa_sample}")
+# QAOA は全探索の最適値を超えられず、分布は最終サンプルの全ショットを
+# 漏れなく数え上げているはず。
+assert best_qaoa_cut <= best_cut
+assert sum(cut_distribution.values()) == sample_shots
 
 # %%
 cuts = sorted(cut_distribution.keys())
@@ -540,6 +563,10 @@ decoded_manual = spin_model.decode_from_sampleresult(result_manual)
 decoded_builtin = spin_model.decode_from_sampleresult(result_builtin)
 print(f"Manual   mean energy: {decoded_manual.energy_mean():.4f}")
 print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
+# 同じシード + ビット単位で同一の回路 ⇒ サンプル列も平均も完全一致するはず。
+# 差分が出る場合は手動版と組み込み版がビット単位で異なる回路を emit したという
+# サイン (ゲート順序やコンパイル経路の差) であり、shot noise の残差ではない。
+assert decoded_manual.energy_mean() == decoded_builtin.energy_mean()
 
 # %% [markdown]
 # ## まとめ

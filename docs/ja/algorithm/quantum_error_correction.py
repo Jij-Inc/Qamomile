@@ -412,6 +412,10 @@ for label, error_pos in bitflip_cases:
         runtime_bindings={"theta": math.pi},
     )
     print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
+    # 純粋な |1> 入力に対する単一 X 訂正は完全に決定的で、各ショットが
+    # data[0] = 1 を返す。
+    assert counts[0] == 0
+    assert counts[1] == counts[0] + counts[1]
 
 # %% [markdown]
 # ### 2.7 重ね合わせ入力
@@ -434,6 +438,10 @@ for label, error_pos in bitflip_cases:
     )
     total = counts[0] + counts[1]
     print(f"  {label:14s}: P(data[0]=1) = {counts[1] / total:.3f}")
+    # 目標確率 sin^2(pi/6) = 0.25。2000 ショットの標準誤差は < 0.01 なので、
+    # 5% の窓ならショットノイズの外。
+    assert abs(counts[1] / total - 0.25) < 0.05
+    assert total == 2000
 
 # %% [markdown]
 # ### 2.8 限界:位相エラーには無力
@@ -572,6 +580,10 @@ for label, error_pos in phaseflip_cases:
         bindings={"error_pos": error_pos},
     )
     print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
+    # 単一 Z 訂正が完全に効いた後、最後の H が data[0] を |0> に戻すので
+    # 各ショットで 0 が読まれる。
+    assert counts[1] == 0
+    assert counts[0] == counts[0] + counts[1]
 
 # %% [markdown]
 # ### 3.7 限界:片方のエラーしか直せない
@@ -740,6 +752,10 @@ for name, error_type, error_pos in shor_cases:
     )
     total = counts[0] + counts[1]
     print(f"  {name:6s} | q[{error_pos}]  | {counts[1] / total:.3f}")
+    # 純粋な |1> 入力は Shor 符号の下で単一 Pauli エラーを完全に乗り越え、
+    # q[0] は各ショットで 1 を返す。
+    assert counts[0] == 0
+    assert counts[1] == total
 
 # %% [markdown]
 # ### 4.7 なぜ「任意の単一エラー」を訂正できるのか
@@ -838,6 +854,11 @@ counts = _sample_first_bit(
     runtime_bindings={"theta": math.pi},
 )
 print(f"  data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
+# 失敗モード: 2 か所の X エラーはシンドロームを単一 X エラーと取り違えさせ、
+# 「訂正」が論理 |1> を論理 |0> に裏返してしまう。各ショットで data[0] = 0 が
+# 決定的に読まれる — これが d=1 の意味。
+assert counts[1] == 0
+assert counts[0] == counts[0] + counts[1]
 
 # %% [markdown]
 # `data[0]` は 1 ではなく 0 になります。訂正が状態を直すどころか、論理 $\lvert1\rangle$ を論理 $\lvert0\rangle$ に変えてしまいました。

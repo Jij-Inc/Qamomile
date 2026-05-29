@@ -259,7 +259,9 @@ parameters = ["theta"]
 
 block = transpiler.to_block(demo_kernel, bindings=bindings, parameters=parameters)
 print("after to_block:   ", summarise(block))
+assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
+assert list(block.parameters) == ["theta"]
 print(
     "CallBlockOps:     ",
     sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
@@ -310,8 +312,11 @@ def count_calls(ops):
 
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
+assert block.kind.name == "AFFINE"
 print("CallBlockOps (deep):", count_calls(block.operations))
+assert count_calls(block.operations) == 0
 print("is_affine:        ", block.is_affine())
+assert block.is_affine()
 
 # %% [markdown]
 # Pretty-printing again confirms that `call entangle_pair(...)` has vanished
@@ -353,10 +358,14 @@ print(pretty_print_block(block))
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
 print("after partial_eval:", summarise(block))
+assert block.kind.name == "AFFINE"
 print(
     "ForOperations:    ",
     sum(1 for op in block.operations if isinstance(op, ForOperation)),
 )
+# `partial_eval` does NOT unroll the ForOperation (that decision is made
+# later by LoopAnalyzer during emit), so the single for-loop survives.
+assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 
 # %% [markdown]
 # If you left a `UInt` unbound and tried to use it as a loop bound, the
@@ -389,6 +398,7 @@ print(
 # %%
 block = transpiler.analyze(block)
 print("after analyze:    ", summarise(block))
+assert block.kind.name == "ANALYZED"
 
 # %% [markdown]
 # ### 4.5 `plan` — segmenting into a `ProgramPlan`
@@ -406,6 +416,9 @@ for i, step in enumerate(plan.steps):
         f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)"
     )
 print("total unbound parameters:", list(plan.parameters))
+# NisqSegmentationStrategy enforces a single quantum segment.
+assert len(plan.steps) == 1
+assert list(plan.parameters) == ["theta"]
 
 # %% [markdown]
 # The quantum segment also carries `qubit_values` and `num_qubits` so `emit`
@@ -422,6 +435,8 @@ print("total unbound parameters:", list(plan.parameters))
 # %%
 executable = transpiler.emit(plan, bindings=bindings, parameters=parameters)
 print("parameter_names:  ", executable.parameter_names)
+# Only `theta` survives as a runtime parameter; `n` was bound at compile time.
+assert list(executable.parameter_names) == ["theta"]
 print()
 print(executable.quantum_circuit)
 
@@ -767,7 +782,9 @@ try:
     )
 
     print("backend circuit type: ", type(quri_exe.quantum_circuit).__name__)
+    assert type(quri_exe.quantum_circuit).__name__ == "LinearMappedParametricQuantumCircuit"
     print("parameter_names:      ", quri_exe.parameter_names)
+    assert list(quri_exe.parameter_names) == ["theta"]
     print()
     for gate in quri_exe.quantum_circuit.gates:
         print(" ", gate)

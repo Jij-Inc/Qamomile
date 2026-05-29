@@ -98,6 +98,12 @@ all_states = np.array(
     [[1 - 2 * ((k >> i) & 1) for i in range(n_spins)] for k in range(2**n_spins)]
 )
 energies = np.array([ising_energy(s) for s in all_states])
+# All 2^n spin configurations on n_spins sites, with energies bounded by
+# the ferromagnetic / antiferromagnetic extrema +/- (n - 1) * J.
+assert all_states.shape == (2**n_spins, n_spins)
+assert energies.shape == (2**n_spins,)
+assert energies.min() == -(n_spins - 1) * J
+assert energies.max() == (n_spins - 1) * J
 
 # Aggregate the Boltzmann distribution by energy and plot as a histogram
 unique_energies = np.unique(energies)
@@ -248,6 +254,12 @@ weights = np.exp(-beta * energies)
 probs = weights / weights.sum()
 magnetization_per_state = all_states.mean(axis=1)
 theoretical_magnetization = np.sum(probs * magnetization_per_state)
+# Z2 symmetry: flipping every spin leaves the (h_i = 0) energy invariant
+# while negating the magnetization, so the Boltzmann-weighted mean is zero
+# exactly — and the per-state contributions cancel exactly in floating
+# point because the {+spins, -spins} pairs share the same `probs` value.
+assert theoretical_magnetization == 0.0
+assert np.isclose(probs.sum(), 1.0)
 
 plt.plot(sample_magnetization, label="MCMC estimate")
 plt.axhline(
@@ -431,11 +443,13 @@ time = 12.0  # Total evolution time
 delta_t = 0.8  # Trotter step size
 step = int(time / delta_t)  # Number of Trotter steps
 order = 2  # Suzuki-Trotter approximation order
+assert step == 15  # 12.0 / 0.8
 
 Hs = [
     (1 - gamma) * mixer_hamiltonian,
     gamma * cost_hamiltonian,
 ]
+assert len(Hs) == 2
 
 executable = transpiler.transpile(
     qemcmc_circuit,
@@ -584,6 +598,9 @@ T_quantum = (
 weights = np.exp(-beta * energies)
 probs = weights / weights.sum()
 theoretical_magnetization = np.sum(probs * magnetization_per_state)
+# Still zero by Z2 symmetry — beta only reweights pairs, it does not break
+# the {+spins, -spins} degeneracy.
+assert theoretical_magnetization == 0.0
 
 # Run a classical MCMC at the same beta and step count for a fair comparison
 classical_compare_sample = np.zeros((T_quantum, n_spins))
@@ -600,6 +617,11 @@ for t in range(T_quantum):
     proposed_state = quantum_proposal(state, executable, executor)
     state = metropolis_hastings(state, proposed_state, ising_energy, beta)
     quantum_sample[t] = state
+# Both chains produced exactly T_quantum samples on n_spins sites with
+# spin values restricted to +/- 1.
+assert quantum_sample.shape == (T_quantum, n_spins)
+assert classical_compare_sample.shape == (T_quantum, n_spins)
+assert set(np.unique(quantum_sample).tolist()).issubset({-1, 1})
 
 
 # %% [markdown]

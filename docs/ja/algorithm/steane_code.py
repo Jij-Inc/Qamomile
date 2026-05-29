@@ -361,6 +361,11 @@ total = sum(count for _, count in result.results)
 valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
 print(f"  |0_L> codeword ratio: {valid / total:.3f}")
 print(f"  distinct codewords observed: {len(result.results)}")
+# Steane の |0_L> はちょうど 8 つの偶重み Hamming 符号語の均等重ね合わせなので、
+# 各ショットは有効な |0_L> 符号語を返し、分布は高々その 8 通りに収まる。
+assert total == 1024
+assert valid == total
+assert len(result.results) <= 8
 
 # %% [markdown]
 # ## 4. シンドローム測定と訂正
@@ -520,6 +525,11 @@ for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]:
             count for outcome, count in result.results if _is_steane_zero_word(outcome)
         )
         print(f"  {name:4s} | q[{pos}]  | {valid / total:.3f}")
+        # Steane は 7 量子ビット上の任意の単一 Pauli エラーを訂正するので、
+        # 訂正後の状態は完全に |0_L> 符号空間に収まり、各ショットは有効な
+        # 符号語を返す。
+        assert total == 128
+        assert valid == total
 
 # %% [markdown]
 # 比率が 1.000 なら、その単一 Pauli エラーに対して状態が $\lvert0_L\rangle$ の符号空間に戻ったことを意味します。$Y=iXZ$ のエラーは $X$ 成分と $Z$ 成分の訂正の両方を引き起こしますが、CSS 符号ではこの2つが独立なので、そのまま訂正できます。
@@ -569,6 +579,13 @@ hamming = sum(
 odd = sum(count for outcome, count in result.results if sum(_bits7(outcome)) % 2 == 1)
 print(f"  Hamming codeword ratio: {hamming / total:.3f}")
 print(f"  odd-weight (|1_L>) fraction: {odd / total:.3f}")
+# |+_L> は 16 個の Hamming 符号語の均等重ね合わせ。各ショットは何らかの
+# Hamming 符号語を返し、奇重み (|1_L>) 半分は約半数 — 1024 ショットの
+# 標準誤差 < 0.02 に対して 5% の窓は安全側。
+assert total == 1024
+assert hamming == total
+assert len(result.results) <= 16
+assert abs(odd / total - 0.5) < 0.05
 
 # %% [markdown]
 # Hamming 符号語の比率は 1.000 で、奇数重みの符号語も約半分現れます。偶数重みしか出ない $\lvert0_L\rangle$ とは異なる ― 状態が $\lvert+_L\rangle$ に移っていることが確認できます。
@@ -595,6 +612,9 @@ result = exe.sample(_seeded_executor, shots=1024).result()
 total = sum(count for _, count in result.results)
 valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
 print(f"  |0_L> codeword ratio: {valid / total:.3f}")
+# H^2 = I なので往復で |0_L> がそのまま復元される — 各ショットは |0_L> 符号語。
+assert total == 1024
+assert valid == total
 
 # %% [markdown]
 # 比率は 1.000 ― 2回の transversal Hadamard で $\lvert0_L\rangle$ に戻りました。7つの物理 $H$ が、確かに論理 $\bar H$ として働いています。

@@ -81,6 +81,11 @@ for i in range(n_qubits):
 exact_eigvals = np.linalg.eigvalsh(H.to_numpy())
 E_exact = float(exact_eigvals[0])
 print(f"Exact ground state energy: {E_exact:.6f}")
+# eigvalsh は昇順で固有値を返すので exact_eigvals[0] が基底状態。
+# 4 量子ビット TFIM のヒルベルト空間は 2^n_qubits 次元。
+assert H.num_qubits == n_qubits
+assert exact_eigvals.shape == (2**n_qubits,)
+assert E_exact == float(exact_eigvals.min())
 
 # %% [markdown]
 # ## ハードウェア効率の良いansatz
@@ -163,6 +168,7 @@ def cost_fn(params: np.ndarray) -> float:
 
 rng = np.random.default_rng(0)
 init_params = rng.uniform(0, 2 * np.pi, n_params)
+assert init_params.shape == (n_params,)
 
 maxiter = max(n_params + 2, 5 if docs_test_mode else 80)
 result = minimize(
@@ -173,6 +179,9 @@ result = minimize(
 )
 opt_params = result.x
 print(f"VQE energy = {result.fun:+.6f}   (gap to E_exact: {result.fun - E_exact:.4e})")
+# 変分原理: COBYLA の予算がいくら短くても VQE エネルギーは E_exact の上界。
+assert result.fun >= E_exact - 1e-9
+assert opt_params.shape == (n_params,)
 
 # %% [markdown]
 # ## ステップ2: Z基底でビット列をサンプリング
@@ -190,6 +199,11 @@ sample_results.sort(key=lambda bc: bc[1], reverse=True)
 print(f"Distinct bitstrings sampled: {len(sample_results)}")
 for bits, c in sample_results[:5]:
     print(f"  {bits}  count={c}")
+# 異なるビット列数はヒルベルト空間の次元を超えず、全ショットがカウントされ、
+# 各ビット列は n_qubits 長。
+assert len(sample_results) <= 2**n_qubits
+assert sum(c for _, c in sample_results) == shots
+assert all(len(bits) == n_qubits for bits, _ in sample_results)
 
 
 # %% [markdown]
@@ -208,6 +222,10 @@ for K, E in zip(ks, energies):
     print(f"K = {K:3d}   E_QSCI = {E:+.6f}   gap = {E - E_exact:+.3e}")
 
 assert all(E >= E_exact - 1e-9 for E in energies), "variational bound violated"
+# Cauchy interlacing: 部分空間を広げると最小固有値は下がる (または変わらない) ので、
+# QSCI エネルギーは K に対して単調非増加。
+assert all(energies[i] >= energies[i + 1] - 1e-9 for i in range(len(energies) - 1))
+assert len(energies) == len(ks)
 
 # %%
 fig, ax = plt.subplots(figsize=(6, 4))

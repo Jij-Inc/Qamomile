@@ -117,6 +117,8 @@ edge_list = [
 G = nx.Graph()
 G.add_nodes_from(range(num_nodes))
 G.add_edges_from(edge_list)
+assert G.number_of_nodes() == num_nodes
+assert G.number_of_edges() == len(edge_list)
 
 pos = nx.spring_layout(G, seed=1)
 plt.figure(figsize=(5, 5))
@@ -157,6 +159,13 @@ converter = QAOAConverter(instance)
 converter.spin_model = converter.spin_model.normalize_by_abs_max()
 hamiltonian = converter.get_cost_hamiltonian()
 print(hamiltonian)
+# この固定インスタンスから導かれるスピン模型の構造的不変量:
+# 頂点 1 個につき量子ビット 1 個、線形 (single-Z) 項は無し、|V|=8, |E|=16 の問題から
+# QUBO 簡約を経た 2 次項の個数も決まる。
+assert converter.spin_model.num_bits == num_nodes
+assert converter.spin_model.linear == {}
+assert len(converter.spin_model.quad) == 12
+assert len(hamiltonian.terms) == 12
 
 # %% [markdown]
 # ## 実行可能な回路へのトランスパイル
@@ -352,6 +361,7 @@ maxiter = 25 if docs_test_mode else 1000
 
 rng = np.random.default_rng(900)
 initial_params = rng.uniform(0, np.pi, 2 * p)
+assert initial_params.shape == (2 * p,)
 
 cost_history = []
 
@@ -386,6 +396,11 @@ res = minimize(
 print(f"Optimized cost: {res.fun:.3f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
 print(f"Function evaluations: {res.nfev}")
+assert len(cost_history) == res.nfev
+assert len(res.x) == 2 * p
+if docs_test_mode:
+    # docs テストモードでは COBYLA は maxiter の予算で打ち切られる。
+    assert res.nfev == maxiter
 
 # %%
 plt.figure(figsize=(8, 4))
@@ -434,6 +449,7 @@ print(
     f"Feasible samples: {total_feasible} / {total_samples} "
     f"({100 * total_feasible / total_samples:.1f}%)"
 )
+assert total_samples == 1000  # 上のハードコードされた shots と一致
 
 # %% [markdown]
 # ### 最良の実行可能解
@@ -450,6 +466,9 @@ if total_feasible > 0:
     }
     print(f"Best feasible solution: {best_sample}")
     print(f"Cut edges:             {best_obj}")
+    # 実行可能解は等分割制約 sum(x_u) == |V|/2 をきっちり満たしているはず。
+    assert sum(best_sample.values()) == num_nodes // 2
+    assert best_obj >= 0
 else:
     print("No feasible solution found. Try increasing p or maxiter.")
     best_sample = None
