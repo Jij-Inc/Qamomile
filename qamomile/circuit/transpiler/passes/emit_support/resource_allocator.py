@@ -17,7 +17,6 @@ from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
     GateOperation,
-    IndexSpecControlledU,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -67,21 +66,44 @@ class ResourceAllocator:
         self,
         operations: list[Operation],
         bindings: dict[str, Any] | None = None,
+        initial_qubit_map: QubitMap | None = None,
+        initial_clbit_map: ClbitMap | None = None,
     ) -> tuple[QubitMap, ClbitMap]:
         """Allocate qubit and clbit indices for all operations.
 
         Args:
-            operations: List of operations to allocate resources for
-            bindings: Optional variable bindings for resolving dynamic sizes
+            operations (list[Operation]): Operations to allocate resources
+                for.
+            bindings (dict[str, Any] | None): Optional variable bindings
+                for resolving dynamic sizes. Defaults to None (treated as
+                an empty mapping).
+            initial_qubit_map (QubitMap | None): Optional pre-populated
+                qubit address mapping. Used by callers that need to seed
+                the allocator with bindings established outside the
+                operation list — for instance, the inner-block emitter
+                in ``blockvalue_to_gate`` pre-allocates ``Vector[Qubit]``
+                input elements (the inner block has no ``QInitOperation``
+                for inputs, so per-element entries must be supplied here
+                or the assertion in ``_allocate_gate`` fires). The map is
+                copied; allocation continues from
+                ``max(values) + 1`` so new ``QInitOperation`` allocations
+                inside ``operations`` do not collide. Defaults to None
+                (treated as empty).
+            initial_clbit_map (ClbitMap | None): Optional pre-populated
+                clbit address mapping. Same semantics as
+                ``initial_qubit_map`` but for classical bits. Defaults to
+                None.
 
         Returns:
-            Tuple of (qubit_map, clbit_map) where each maps
-            QubitAddress to physical index
+            tuple[QubitMap, ClbitMap]: ``(qubit_map, clbit_map)`` where
+                each maps ``QubitAddress`` to a physical index. If an
+                initial map was supplied, its entries are preserved
+                verbatim in the returned map.
         """
-        qubit_map: QubitMap = {}
-        clbit_map: ClbitMap = {}
-        self._next_qubit_index = 0
-        self._next_clbit_index = 0
+        qubit_map: QubitMap = dict(initial_qubit_map) if initial_qubit_map else {}
+        clbit_map: ClbitMap = dict(initial_clbit_map) if initial_clbit_map else {}
+        self._next_qubit_index = max(qubit_map.values(), default=-1) + 1
+        self._next_clbit_index = max(clbit_map.values(), default=-1) + 1
         self._allocate_recursive(operations, qubit_map, clbit_map, bindings or {})
         return qubit_map, clbit_map
 
@@ -421,27 +443,24 @@ class ResourceAllocator:
         # Element Values are created dynamically during frontend tracing
         # (handle/array.py _get_element), so their UUIDs are unknown at
         # QInitOperation time.  Here we lazily map each element UUID to
-        # the physical qubit already allocated under the QubitAddress(parent_uuid, idx) key.
+        # the physical qubit already allocated under the root parent's
+        # QubitAddress key — the chain walk in
+        # ``_resolve_root_qubit_address`` handles sliced views so that
+        # e.g. ``view[0]`` for ``view = q[1:3]`` resolves to the
+        # physical qubit for ``q[1]``.
         for operand in qubit_ops:
             operand_addr = QubitAddress(operand.uuid)
             if operand_addr not in qubit_map:
-                if operand.parent_array is not None and operand.element_indices:
-                    # Array element: resolve via parent_array key
-                    parent_uuid = operand.parent_array.uuid
-                    idx_value = operand.element_indices[0]
-                    if idx_value.is_constant():
-                        idx = int(idx_value.get_const())
-                        key = QubitAddress(parent_uuid, idx)
-                        assert key in qubit_map, (
-                            f"Array element key {str(key)!r} not found in qubit_map. "
-                            f"This indicates a bug in the transpiler pipeline: "
-                            f"QInitOperation for the parent array was not processed "
-                            f"before this GateOperation."
-                        )
-                        qubit_map[operand_addr] = qubit_map[key]
-                    # Non-constant indices (symbolic loop vars) are resolved
-                    # at emit time via ValueResolver.resolve_qubit_index_detailed.
-                else:
+                chain_addr = self._resolve_root_qubit_address(operand)
+                if chain_addr is not None:
+                    assert chain_addr in qubit_map, (
+                        f"Array element key {str(chain_addr)!r} not found in qubit_map. "
+                        f"This indicates a bug in the transpiler pipeline: "
+                        f"QInitOperation for the parent array was not processed "
+                        f"before this GateOperation."
+                    )
+                    qubit_map[operand_addr] = qubit_map[chain_addr]
+                elif operand.parent_array is None or not operand.element_indices:
                     # Scalar qubit: allocate new index.
                     # This path is used for @qkernel input parameters created with
                     # emit_init=False (func_to_block.py), which have no QInitOperation.
@@ -449,6 +468,8 @@ class ResourceAllocator:
                     # block's input_values, so these qubits are first registered here.
                     qubit_map[operand_addr] = self._next_qubit_index
                     self._next_qubit_index += 1
+                # Non-constant indices (symbolic loop vars) are resolved
+                # at emit time via ValueResolver.resolve_qubit_index_detailed.
 
         # Phase 2: Map each result to its corresponding qubit operand (1:1)
         for i, result in enumerate(op.results):
@@ -465,38 +486,160 @@ class ResourceAllocator:
         results: list["Value"],
         qubit_map: QubitMap,
     ) -> None:
-        """Allocate qubits for a list of qubit Values and their results."""
+        """Allocate qubits for a list of qubit Values and their results.
+
+        For view elements (operand whose ``parent_array.slice_of`` is
+        set), the root-space ``QubitAddress`` is derived by walking the
+        slice chain and composing the affine map.  No new physical
+        qubit is allocated for a view element — the root parent's
+        pre-existing physical qubit is reused — which prevents the
+        previous bug where e.g. ``qft(q[1::2])`` inflated the
+        circuit's qubit count beyond the true number of physical
+        qubits because every view element was mistakenly registered
+        under its view-local ``(view_uuid, i)`` key.
+        """
         for qubit in all_qubits:
-            qubit_addr, is_array = resolve_qubit_key(qubit)
-            if qubit_addr is not None:
+            chain_addr = self._resolve_root_qubit_address(qubit)
+            if chain_addr is not None:
+                qubit_addr = chain_addr
                 if qubit_addr not in qubit_map:
-                    # New allocation for qubits not yet registered.
-                    # For scalar qubits, this handles @qkernel input parameters
-                    # (emit_init=False) that have no preceding QInitOperation.
-                    # For array elements, this handles first-seen element keys.
+                    # Element key missing under the root parent — this
+                    # means the QInitOperation for the root was never
+                    # allocated.  Treat it as a hard bug rather than
+                    # silently allocating a fresh index (the prior
+                    # behaviour), because doing so inflates the
+                    # circuit's qubit count when a view is passed to
+                    # a composite gate.
+                    raise AssertionError(
+                        f"Root qubit address '{str(qubit_addr)}' not found in qubit_map "
+                        f"when allocating for element '{qubit.uuid}'. "
+                        "The root array's QInitOperation must be allocated first."
+                    )
+            elif isinstance(qubit, ArrayValue):
+                # Whole ``Vector[Qubit]`` operand (not a per-element
+                # access): its per-element addresses are already in
+                # ``qubit_map`` (placed there by the upstream
+                # ``QInitOperation`` or by a prior allocator that
+                # produced this array as its result, see the
+                # ArrayValue→ArrayValue copy in the result loop
+                # below).  Do **not** fall through to the scalar
+                # fresh-allocate branch -- doing so would allocate a
+                # single wire for the whole vector and leave the
+                # element keys missing, which then trips
+                # ``_resolve_root_qubit_address`` on a downstream op
+                # that addresses elements of this vector (e.g.
+                # ``qmc.iqft`` after ``ctrl_qft(c, q_out, coef)``).
+                qubit_addr = None
+            else:
+                qubit_addr, is_array = resolve_qubit_key(qubit)
+                if qubit_addr is None:
+                    continue
+                if qubit_addr not in qubit_map:
+                    # Scalar qubit or symbolic-index element: fall back
+                    # to the legacy allocation behaviour so qkernel
+                    # input parameters (emit_init=False) and symbolic
+                    # loop-var indices keep working.
                     qubit_map[qubit_addr] = self._next_qubit_index
                     self._next_qubit_index += 1
+
+            if qubit_addr is not None:
                 scalar_addr = QubitAddress(qubit.uuid)
                 if scalar_addr not in qubit_map:
                     qubit_map[scalar_addr] = qubit_map[qubit_addr]
 
         for i, result in enumerate(results):
             result_addr = QubitAddress(result.uuid)
-            if result_addr not in qubit_map and i < len(all_qubits):
-                qubit_addr, is_array = resolve_qubit_key(all_qubits[i])
-                if qubit_addr is not None:
-                    # Alias: result must map to the same physical index as its
-                    # corresponding operand.  If qubit_addr is somehow missing
-                    # (should not happen after the operand loop above), this is
-                    # a bug -- raise explicitly rather than silently allocating.
-                    if qubit_addr in qubit_map:
-                        qubit_map[result_addr] = qubit_map[qubit_addr]
-                    else:
-                        raise AssertionError(
-                            f"Missing qubit address '{str(qubit_addr)}' in qubit_map when "
-                            f"allocating result '{result.uuid}'. "
-                            "This indicates a bug in operand allocation."
-                        )
+            if i < len(all_qubits):
+                operand = all_qubits[i]
+                # ArrayValue input → ArrayValue result: alias every
+                # per-element address from the input's UUID to the
+                # result's UUID.  Mirrors :meth:`_allocate_pauli_evolve`
+                # and the ``SymbolicControlledU`` control-prefix branch
+                # in :meth:`_allocate_controlled_u`.  Without this copy,
+                # a ``ConcreteControlledU`` with a ``Vector[Qubit]``
+                # sub-kernel argument leaves the next-version vector's
+                # element keys unmapped, and any downstream op that
+                # walks ``parent_array.uuid -> (uuid, i)`` (e.g.
+                # ``qmc.iqft`` expanded into per-element CP / H gates,
+                # or a ``MeasureVectorOperation`` on the result)
+                # trips the ``_resolve_root_qubit_address`` assertion.
+                if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
+                    copied = False
+                    for addr, idx in list(qubit_map.items()):
+                        if addr.matches_array(operand.uuid):
+                            new_addr = QubitAddress(result.uuid, addr.element_index)
+                            if new_addr not in qubit_map:
+                                qubit_map[new_addr] = idx
+                                copied = True
+                    if copied and result_addr not in qubit_map:
+                        first_elem = QubitAddress(result.uuid, 0)
+                        if first_elem in qubit_map:
+                            qubit_map[result_addr] = qubit_map[first_elem]
+                    continue
+
+                chain_addr = self._resolve_root_qubit_address(operand)
+                if chain_addr is not None:
+                    qubit_addr = chain_addr
+                else:
+                    qubit_addr, _ = resolve_qubit_key(operand)
+                if qubit_addr is not None and qubit_addr in qubit_map:
+                    physical = qubit_map[qubit_addr]
+                    if result_addr not in qubit_map:
+                        qubit_map[result_addr] = physical
+                    # If the result is itself an array element, also
+                    # register the (parent_array.uuid, idx) key so that
+                    # downstream operations referencing the result's
+                    # parent ``ArrayValue`` (e.g. ``MeasureVectorOperation``
+                    # on a controlled-U's next-version control vector)
+                    # can resolve each element through the same path
+                    # used for QInit-allocated arrays.
+                    result_chain_addr = self._resolve_root_qubit_address(result)
+                    if (
+                        result_chain_addr is not None
+                        and result_chain_addr not in qubit_map
+                    ):
+                        qubit_map[result_chain_addr] = physical
+                elif qubit_addr is not None and result_addr not in qubit_map:
+                    raise AssertionError(
+                        f"Missing qubit address '{str(qubit_addr)}' in qubit_map when "
+                        f"allocating result '{result.uuid}'. "
+                        "This indicates a bug in operand allocation."
+                    )
+
+    def _resolve_root_qubit_address(
+        self,
+        operand: "Value",
+    ) -> QubitAddress | None:
+        """Walk the slice_of chain and return the root-space QubitAddress.
+
+        Composes the nested affine maps so ``view[i]`` resolves to
+        ``QubitAddress(root_uuid, start + step * i)`` for the
+        composed ``(start, step)``.  Returns ``None`` when the operand
+        is not an array element, when its index is non-constant, or
+        when the chain contains any non-constant ``slice_start`` /
+        ``slice_step`` value (the latter case is deferred to the
+        emit-time resolver, which has bindings available).
+        """
+        if operand.parent_array is None or not operand.element_indices:
+            return None
+        idx_value = operand.element_indices[0]
+        if not idx_value.is_constant():
+            return None
+        idx = int(idx_value.get_const())
+        parent = operand.parent_array
+        while parent.slice_of is not None:
+            if (
+                parent.slice_start is None
+                or parent.slice_step is None
+                or not parent.slice_start.is_constant()
+                or not parent.slice_step.is_constant()
+            ):
+                return None
+            start = int(parent.slice_start.get_const())
+            step = int(parent.slice_step.get_const())
+            idx = start + step * idx
+            parent = parent.slice_of
+        return QubitAddress(parent.uuid, idx)
 
     def _allocate_pauli_evolve(
         self,
@@ -531,26 +674,72 @@ class ResourceAllocator:
         qubit_map: QubitMap,
     ) -> None:
         """Allocate resources for a ControlledUOperation."""
-        if isinstance(op, IndexSpecControlledU):
-            # Vector already allocated by QInitOperation.
-            # Map result ArrayValue to same physical qubits.
-            vector_operand = op.operands[0]
-            vector_result = op.results[0]
-            for addr, idx in list(qubit_map.items()):
-                if addr.matches_array(vector_operand.uuid):
-                    result_addr = QubitAddress(vector_result.uuid, addr.element_index)
-                    if result_addr not in qubit_map:
-                        qubit_map[result_addr] = idx
+        if isinstance(op, SymbolicControlledU):
+            from qamomile.circuit.ir.value import ArrayValue
+
+            # Three shapes can land here without having been promoted to
+            # ``ConcreteControlledU`` by ``ConstantFoldingPass``:
+            #
+            #   * single-pool + ``control_indices``: one ``ArrayValue``
+            #     control operand whose pass-through slots cannot be
+            #     represented in ``ConcreteControlledU``'s scalar layout.
+            #   * multi-arg control prefix (``num_control_args > 1``):
+            #     a heterogeneous mix of scalar ``Value`` and
+            #     ``ArrayValue`` operands whose qubit-count sum equals
+            #     ``num_controls``.
+            #   * single-pool with no ``control_indices`` but a
+            #     ``num_controls`` that depends on a loop variable
+            #     (``num_controls = n - 1 - k`` inside a ``qmc.range``):
+            #     constant folding cannot resolve the loop variable so
+            #     the promotion never fires; each unrolled iteration
+            #     instead arrives at the emit pass with a fully
+            #     resolvable ``num_controls``.
+            #
+            # All three flow through the same per-operand allocation:
+            # each input operand keeps its physical mapping onto the
+            # corresponding result operand.  Whether ``num_controls``
+            # ultimately resolves is the emit pass's responsibility;
+            # the allocator only needs to thread per-element addresses
+            # through.
+            for i in range(op.num_control_args):
+                src = op.operands[i]
+                dst = op.results[i]
+                if isinstance(src, ArrayValue):
+                    for addr, idx in list(qubit_map.items()):
+                        if addr.matches_array(src.uuid):
+                            result_addr = QubitAddress(dst.uuid, addr.element_index)
+                            if result_addr not in qubit_map:
+                                qubit_map[result_addr] = idx
+                else:
+                    src_addr = QubitAddress(src.uuid)
+                    if src_addr not in qubit_map:
+                        # Scalar control whose UUID is first introduced
+                        # at this ``SymbolicControlledU`` -- typically a
+                        # top-level ``@qkernel`` ``Qubit`` input
+                        # (``emit_init=False``, so no ``QInitOperation``
+                        # pre-registers it).  ``_allocate_qubit_list``
+                        # already handles the same edge case for the
+                        # concrete-controlled-U path (line ~527); mirror
+                        # the fresh-slot allocation here so emit does
+                        # not later trip on a missing scalar mapping
+                        # for the control prefix.
+                        qubit_map[src_addr] = self._next_qubit_index
+                        self._next_qubit_index += 1
+                    dst_addr = QubitAddress(dst.uuid)
+                    if dst_addr not in qubit_map:
+                        qubit_map[dst_addr] = qubit_map[src_addr]
+            sub_quantum_operands = [
+                v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
+            ]
+            sub_quantum_results = [
+                r for r in op.results[op.num_control_args :] if r.type.is_quantum()
+            ]
+            if sub_quantum_operands:
+                self._allocate_qubit_list(
+                    sub_quantum_operands, sub_quantum_results, qubit_map
+                )
             return
 
-        if isinstance(op, SymbolicControlledU):
-            from qamomile.circuit.transpiler.errors import EmitError
-
-            raise EmitError(
-                "Cannot transpile ControlledUOperation with symbolic num_controls. "
-                "Bind parameters to concrete values before transpilation.",
-                operation="ControlledUOperation",
-            )
         assert isinstance(op, ConcreteControlledU)
         control_qubits = list(op.control_operands)
         target_qubits = [v for v in op.target_operands if v.type.is_quantum()]

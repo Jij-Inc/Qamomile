@@ -301,17 +301,39 @@ def create_dummy_handle(
 
 
 def create_dummy_input(
-    param_type: typing.Any, name: str = "param", emit_init: bool = True
+    param_type: typing.Any,
+    name: str = "param",
+    emit_init: bool = True,
+    *,
+    shape: tuple[int, ...] | None = None,
 ) -> Handle:
     """Create a dummy input based on parameter type annotation.
 
     Args:
-        param_type: The type annotation for the parameter.
-        name: Name for the value.
-        emit_init: If True, emit QInitOperation for qubit arrays (default: True).
-                   Set to False when creating a nested Block's internal dummy inputs.
+        param_type (Any): The type annotation for the parameter.
+        name (str): Name for the value.
+        emit_init (bool): If True, emit QInitOperation for qubit arrays
+            (default: True). Set to False when creating a nested Block's
+            internal dummy inputs, or when the dummy will receive its
+            qubits from a caller's CallBlockOperation.
+        shape (tuple[int, ...] | None): Optional concrete shape for array
+            types. When provided, the dummy array's shape Values carry
+            compile-time constants instead of symbolic placeholders.
+            Used by call-time sub-kernel specialization so that
+            shape-dependent stdlib helpers (qft / iqft / qpe) resolve
+            ``get_size`` to a concrete integer and emit the correct gate
+            sequence. Ignored for non-array types. Default: None
+            (symbolic shape).
 
-    This creates input Handles for function parameters.
+    Returns:
+        Handle: A frontend Handle wrapping a dummy Value or ArrayValue
+            suitable for use as a function-parameter input during
+            tracing.
+
+    Raises:
+        TypeError: If ``param_type`` is not a supported parameter type,
+            or if a Tuple/array annotation is missing its element
+            type(s).
     """
     # Handle Tuple types (e.g., Tuple[UInt, UInt])
     if is_tuple_type(param_type):
@@ -379,12 +401,24 @@ def create_dummy_input(
         # Determine number of dimensions (Vector=1, Matrix=2, Tensor=3)
         ndim = _get_ndim(param_type)
 
-        # Create symbolic dimension Values
-        shape_values = tuple(
-            Value(type=UIntType(), name=f"{name}_dim{i}") for i in range(ndim)
-        )
+        if shape is not None:
+            if len(shape) != ndim:
+                raise TypeError(
+                    f"Concrete shape {shape!r} has {len(shape)} dimensions "
+                    f"but parameter '{name}' of type {param_type} expects "
+                    f"{ndim} dimension(s)."
+                )
+            shape_values = tuple(
+                Value(type=UIntType(), name=f"{name}_dim{i}").with_const(dim)
+                for i, dim in enumerate(shape)
+            )
+        else:
+            # Symbolic dimensions for the standalone trace path.
+            shape_values = tuple(
+                Value(type=UIntType(), name=f"{name}_dim{i}") for i in range(ndim)
+            )
 
-        # Create ArrayValue with symbolic shape
+        # Create ArrayValue with the resolved shape
         array_value = ArrayValue(
             type=element_ir_type,
             name=name,
@@ -418,6 +452,38 @@ def create_dummy_input(
     # Scalar Handle types: map to ValueType first, then create dummy
     value_type = handle_type_map(param_type)
     return create_dummy_handle(value_type, name, emit_init)
+
+
+def _validate_returned_arrays(result: typing.Any) -> None:
+    """Call ``validate_all_returned`` on quantum arrays in the trace result.
+
+    The frontend's ``ArrayBase.validate_all_returned`` is otherwise only
+    triggered by ``consume`` paths (measure / expval / passing to another
+    kernel).  A kernel that takes a borrow and then returns the parent
+    without consuming it — e.g. ``qv = q[0]; return q`` — escapes the
+    consume-driven check entirely.  Running the validator on every
+    returned quantum array handle at trace end closes that hole; it
+    reuses the existing error machinery (``UnreturnedBorrowError``) so
+    users see the same diagnostic they would from a consume failure.
+
+    Args:
+        result: Whatever ``func(**dummy_inputs)`` returned — a Handle,
+            a tuple of Handles, or ``None`` for void.  Non-quantum
+            arrays and scalars are silently skipped.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    def _visit(obj: typing.Any) -> None:
+        if obj is None:
+            return
+        if isinstance(obj, tuple):
+            for item in obj:
+                _visit(item)
+            return
+        if isinstance(obj, ArrayBase) and obj.value.type.is_quantum():
+            obj.validate_all_returned()
+
+    _visit(result)
 
 
 def func_to_block(func: typing.Callable) -> Block:
@@ -487,6 +553,15 @@ def func_to_block(func: typing.Callable) -> Block:
     tracer = Tracer()
     with trace(tracer):
         result = func(**dummy_inputs)  # type: ignore
+
+    # Validate that returned / live quantum arrays have no unreturned
+    # borrows.  The existing ``validate_all_returned`` is consume-driven
+    # (fires on measure / expval / passing to another kernel), so a
+    # kernel that does ``qv = q[0]; return q`` — taking a borrow and
+    # returning the parent without consuming it — would silently pass.
+    # Running the check explicitly at trace end closes that hole
+    # without needing a dedicated consume operation.
+    _validate_returned_arrays(result)
 
     operations = tracer.operations
 

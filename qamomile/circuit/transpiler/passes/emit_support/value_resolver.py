@@ -6,14 +6,14 @@ import numbers
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from qamomile.circuit.transpiler.errors import ResolutionFailureReason
+from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
     QubitMap,
 )
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import Value
+    from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 @dataclass
@@ -70,6 +70,49 @@ class ValueResolver:
             idx = None
             if idx_value.is_constant():
                 idx = int(idx_value.get_const())
+            elif idx_value.uuid in bindings:
+                # UUID is unique; prefer it so BinOp results (which all
+                # share the generic name "uint_tmp" and therefore collide
+                # in bindings-by-name) resolve to the correct iteration
+                # value.  Falling through to name-lookup here produced
+                # "duplicate qubit" errors for patterns like
+                # ``q[2*i], q[2*i+1] = qmc.cx(...)`` inside a for loop.
+                idx = self._resolve_numeric_index(bindings[idx_value.uuid])
+                if idx is None:
+                    bound_val = bindings[idx_value.uuid]
+                    return QubitResolutionResult(
+                        success=False,
+                        failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
+                        failure_details=(
+                            f"Index (uuid: {idx_value.uuid[:8]}...) resolved to "
+                            f"non-numeric type: {type(bound_val).__name__}"
+                        ),
+                    )
+            elif idx_value.name in bindings:
+                idx = self._resolve_numeric_index(bindings[idx_value.name])
+                if idx is None:
+                    bound_val = bindings[idx_value.name]
+                    return QubitResolutionResult(
+                        success=False,
+                        failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
+                        failure_details=(
+                            f"Index '{idx_value.name}' resolved to non-numeric type: "
+                            f"{type(bound_val).__name__}"
+                        ),
+                    )
+            elif idx_value.parent_array is not None:
+                nested_result = self.resolve_classical_value(idx_value, bindings)
+                if nested_result is None:
+                    array_name = idx_value.parent_array.name
+                    return QubitResolutionResult(
+                        success=False,
+                        failure_reason=ResolutionFailureReason.NESTED_ARRAY_RESOLUTION_FAILED,
+                        failure_details=(
+                            f"Nested array access '{array_name}[...]' could not be resolved. "
+                            f"Array '{array_name}' may not be in bindings."
+                        ),
+                    )
+                idx = int(nested_result)
             else:
                 raw = self.lookup_in_bindings(idx_value, bindings)
                 if raw is not None:
@@ -109,6 +152,36 @@ class ValueResolver:
                     )
 
             if idx is not None:
+                # Walk any slice_of chain attached to the parent so
+                # sliced views resolve to their root parent's physical
+                # qubit.  For ordinary (non-sliced) arrays the while
+                # loop's condition is immediately false, so the path
+                # remains a direct qubit_map lookup with the same cost
+                # as before.
+                parent = v.parent_array
+                while (
+                    parent.slice_of is not None
+                    and parent.slice_start is not None
+                    and parent.slice_step is not None
+                ):
+                    start_val = self.resolve_classical_value(
+                        parent.slice_start, bindings
+                    )
+                    step_val = self.resolve_classical_value(parent.slice_step, bindings)
+                    if start_val is None or step_val is None:
+                        return QubitResolutionResult(
+                            success=False,
+                            failure_reason=ResolutionFailureReason.SYMBOLIC_INDEX_NOT_BOUND,
+                            failure_details=(
+                                f"Slice bounds for view over '{parent.slice_of.name}' "
+                                f"could not be resolved; start={parent.slice_start.name}, "
+                                f"step={parent.slice_step.name}."
+                            ),
+                        )
+                    idx = int(start_val) + int(step_val) * idx
+                    parent = parent.slice_of
+                parent_uuid = parent.uuid
+
                 array_qubit_addr = QubitAddress(parent_uuid, idx)
                 if array_qubit_addr in qubit_map:
                     return QubitResolutionResult(
@@ -135,6 +208,75 @@ class ValueResolver:
                 f"and is not an array element."
             ),
         )
+
+    def resolve_slice_chain(
+        self,
+        av: "ArrayValue",
+        bindings: dict[str, Any],
+        *,
+        operation: str = "emit",
+    ) -> tuple["ArrayValue", int, int]:
+        """Walk an ArrayValue's slice_of chain and return root + affine map.
+
+        Composes the nested affine maps so that a view-local index ``i``
+        corresponds to the root-space index ``start + step * i``. For a
+        root ArrayValue (no ``slice_of`` chain), returns ``(av, 0, 1)``
+        so callers can always apply the same formula uniformly.
+
+        Args:
+            av: The possibly-sliced ArrayValue whose root and affine
+                mapping should be resolved.
+            bindings: Compile-time parameter bindings; required when
+                any ``slice_start`` / ``slice_step`` in the chain is
+                symbolic.
+            operation: Human-readable name of the enclosing emit
+                operation. Used only in the ``EmitError`` message when
+                a symbolic slice bound cannot be resolved. Defaults
+                to ``"emit"``.
+
+        Returns:
+            Tuple ``(root_array, start, step)`` where ``root_array`` is
+            the underlying non-sliced ArrayValue, and ``start``/``step``
+            are Python ``int`` values satisfying
+            ``view[i] == root_array[start + step * i]``.
+
+        Raises:
+            EmitError: If any ``slice_start`` or ``slice_step`` in the
+                chain resolves to a non-numeric or unbound value.
+
+        Example:
+            >>> # For ``view = q[1::2]`` where ``q`` has 4 qubits:
+            >>> resolver.resolve_slice_chain(view_av, bindings={})
+            (q_av, 1, 2)
+        """
+        start = 0
+        step = 1
+        cur = av
+        while (
+            cur.slice_of is not None
+            and cur.slice_start is not None
+            and cur.slice_step is not None
+        ):
+            sub_start = self.resolve_classical_value(cur.slice_start, bindings)
+            sub_step = self.resolve_classical_value(cur.slice_step, bindings)
+            if not isinstance(sub_start, (int, float)) or not isinstance(
+                sub_step, (int, float)
+            ):
+                raise EmitError(
+                    f"Cannot resolve slice bounds for view of "
+                    f"'{cur.slice_of.name}': start={cur.slice_start}, "
+                    f"step={cur.slice_step}. Slice views require concrete "
+                    f"start/step at emit time.",
+                    operation=operation,
+                )
+            # Compose: if current (start, step) maps view-local i to
+            # cur-local k = start + step * i, and cur-local k maps to
+            # parent k' = sub_start + sub_step * k, the new map is
+            # parent k' = (sub_start + sub_step * start) + (sub_step * step) * i.
+            start = int(sub_start) + int(sub_step) * start
+            step = int(sub_step) * step
+            cur = cur.slice_of
+        return cur, start, step
 
     # ------------------------------------------------------------------
     # Unified bindings lookup

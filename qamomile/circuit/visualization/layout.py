@@ -149,10 +149,22 @@ class CircuitLayoutEngine:
         """Place a VInlineBlock node (inlined CallBlock/ControlledU/CompositeGate)."""
         affected_qubits = node.affected_qubits
 
-        # Align all affected qubits to the maximum right edge
-        if affected_qubits:
-            max_edge = max(state.qubit_right_edges.get(q, 0.0) for q in affected_qubits)
-            for q in affected_qubits:
+        # The box's visual extent spans every wire from ``min(affected)``
+        # to ``max(affected)`` (any unaffected wire in between still sits
+        # under the dashed boundary).  Reserve the entire span for the
+        # block so a following node cannot slide into that visual extent
+        # — without this, two disjoint-but-interleaved blocks (e.g.
+        # ``h_all(q[0::2])`` and ``x_all(q[1::2])``) would share the
+        # same x-slot and their boxes would overlap visually.
+        if affected_qubits and len(affected_qubits) > 1:
+            span_qubits = list(range(min(affected_qubits), max(affected_qubits) + 1))
+        else:
+            span_qubits = list(affected_qubits)
+
+        # Align all span qubits to the maximum right edge
+        if span_qubits:
+            max_edge = max(state.qubit_right_edges.get(q, 0.0) for q in span_qubits)
+            for q in span_qubits:
                 state.qubit_right_edges[q] = max_edge
                 state.qubit_columns[q] = max_edge + self.style.gate_gap
 
@@ -170,7 +182,7 @@ class CircuitLayoutEngine:
             border_padding + self.style.gate_text_padding,
         )
         advance = max(min_border_advance, border_extent - first_child_half)
-        for q in affected_qubits:
+        for q in span_qubits:
             if q in state.qubit_right_edges:
                 state.qubit_right_edges[q] += advance
                 state.qubit_columns[q] = (
@@ -180,7 +192,7 @@ class CircuitLayoutEngine:
         # Center content when label is wider
         if node.final_width > node.content_width:
             center_offset = (node.final_width - node.content_width) / 2
-            for q in affected_qubits:
+            for q in span_qubits:
                 state.qubit_right_edges[q] += center_offset
                 state.qubit_columns[q] = (
                     state.qubit_right_edges[q] + self.style.gate_gap

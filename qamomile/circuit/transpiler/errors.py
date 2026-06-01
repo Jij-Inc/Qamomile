@@ -251,6 +251,45 @@ class QubitConsumedError(AffineTypeError):
     pass
 
 
+class QubitBorrowConflictError(AffineTypeError):
+    """Qubit slot inaccessible because another live handle borrows it.
+
+    Raised when a qubit slot cannot be accessed because another live
+    handle currently borrows it — a slice view that has not been
+    returned, an outstanding element borrow, or any future borrow form
+    Qamomile may add.  Unlike :class:`QubitConsumedError`, the slot is
+    not destroyed: releasing the borrowing handle (slice assignment,
+    element write-back, etc.) restores access.
+
+    Example of incorrect code (overlapping slice views)::
+
+        a = q[0:3]      # q[0..2] now borrowed by ``a``
+        b = q[2:5]      # ERROR: q[2] is still borrowed by ``a``
+
+    Correct code::
+
+        a = q[0:3]
+        q[0:3] = a      # return ``a`` first
+        b = q[2:5]      # now safe
+
+    Example of incorrect code (element borrow not returned before
+    borrowing a neighbour)::
+
+        q0 = qubits[0]
+        q0 = qmc.h(q0)
+        q1 = qubits[1]  # ERROR: q0 is still borrowed
+
+    Correct code::
+
+        q0 = qubits[0]
+        q0 = qmc.h(q0)
+        qubits[0] = q0  # return the element first
+        q1 = qubits[1]  # now safe
+    """
+
+    pass
+
+
 class QubitAliasError(AffineTypeError):
     """Same qubit used multiple times in one operation.
 
@@ -276,14 +315,36 @@ class UnreturnedBorrowError(AffineTypeError):
 
     Example of incorrect code:
         q0 = qubits[0]
-        q0 = qm.h(q0)
+        q0 = qmc.h(q0)
         q1 = qubits[1]  # ERROR: q0 not returned yet
 
     Correct code:
         q0 = qubits[0]
-        q0 = qm.h(q0)
+        q0 = qmc.h(q0)
         qubits[0] = q0  # Return the borrowed element
         q1 = qubits[1]  # Now safe to borrow another
+    """
+
+    pass
+
+
+class SliceBorrowViolationError(AffineTypeError):
+    """Aliasing detected between a slice view and a direct parent access.
+
+    Raised by :class:`SliceBorrowCheckPass` at transpile time when
+    a parent array slot is simultaneously held by a ``VectorView`` and
+    accessed directly, or when two overlapping views cover the same
+    slot.  For slices with constant bounds this is normally caught at
+    trace time; this error covers the post-fold case when slice bounds
+    were symbolic UInt parameters resolved by bindings.
+
+    Example of incorrect code (detected only after bindings resolve
+    ``lo``/``hi`` to concrete values)::
+
+        region = q[lo:hi]     # bindings give lo=0, hi=4 → covers {0,1,2,3}
+        qa = region[0]        # borrows parent slot 0 via the view
+        qb = q[0]             # borrows parent slot 0 directly
+        # SliceBorrowViolationError: slot 0 is held by a slice view
     """
 
     pass
@@ -294,7 +355,36 @@ class QubitRebindError(AffineTypeError):
 
     When a quantum variable is reassigned, the RHS must consume the
     same variable (self-update pattern). Reassigning from a different
-    quantum variable silently discards the original quantum state.
+    quantum variable would silently discard the original quantum state.
+
+    The check runs at qkernel decoration time as a static AST analysis
+    (see ``qamomile.circuit.frontend.ast_transform.collect_quantum_rebind_violations``)
+    and raises immediately — the wrapped ``QKernel`` object is never
+    constructed when a violation is present. The check is run
+    unconditionally for every decorated kernel: kernel-level quantum
+    parameters (``Qubit`` / ``Vector[Qubit]``) seed origins from the
+    signature, and the analyzer's recognition of internal quantum
+    constructors (``qubit(...)`` / ``qubit_array(...)``) seeds further
+    origins from inside the body so kernels that derive all of their
+    quantum state from internal allocations are also covered.
+
+    Branch-internal rebinds (assignments inside an ``if`` / ``for`` /
+    ``while`` body) are NOT flagged at decoration time: compile-time
+    conditional branches legitimately rebind quantum names (the
+    compile-time-if lowering pass selects one branch and discards the
+    other), and the single-pass AST analyzer cannot distinguish
+    compile-time from runtime branches. To keep those compile-time
+    patterns working, branch-internal violations are suppressed.
+
+    This is a known coverage gap. ``AffineValidationPass`` in the IR
+    layer only enforces "consumed at most once" and does NOT detect
+    "never consumed" / "silent discard" patterns, so a genuine runtime
+    ``if cond: q = qm.qubit("fresh")`` that discards a parameter is
+    currently not raised by either layer. A dedicated IR-level
+    silent-discard pass (or a flow-sensitive frontend analyzer) would
+    be needed to close it; this is tracked as follow-up. Top-level
+    (non-branch-internal) bypasses continue to raise at decoration
+    time.
 
     Example of incorrect code:
         a = qm.h(b)  # ERROR: 'a' was quantum, now overwritten from 'b'

@@ -98,6 +98,7 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "SyntaxError"
 
 # %% [markdown]
 # 常にインデックスベースのアクセスを使用してください：`for i in qmc.range(n): q[i] = qmc.h(q[i])`。
@@ -148,6 +149,10 @@ for theta in [0.1, 0.5, 1.0]:
         bindings={"theta": theta},
     ).result()
     print(f"theta={theta:.1f} -> {result.results}")
+    assert result.shots == 128
+    assert sum(count for _, count in result.results) == 128
+    # n=4 量子ビット測定 → 各 outcome は 4 要素のビット tuple。
+    assert all(len(outcome) == 4 for outcome, _ in result.results)
 
 # %% [markdown]
 # トランスパイル済みオブジェクトは3回の実行すべてで再利用されます。変わるのは実行時のバインディング`{"theta": theta}`だけです。
@@ -165,4 +170,4 @@ for theta in [0.1, 0.5, 1.0]:
 # - パラメータ化された回路には`qmc.qubit_array(n)`と`qmc.range(n)`を使います。常にインデックスベースの更新`q[i] = qmc.gate(q[i])`を使ってください。
 # - バインド/スイープパターン — `transpile(bindings=..., parameters=...)` → ループ — で一度だけトランスパイルして複数回実行できます。
 #
-# **次へ**：[リソース推定](03_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析。
+# **次へ**：[Vectorのスライシング](03_vector_slicing.ipynb) — `VectorView`、スライス代入、ネストしたスライス、ヘルパーカーネルへの引き渡し。

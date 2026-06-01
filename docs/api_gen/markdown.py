@@ -127,9 +127,7 @@ def generate_class_doc(
             lines.append(_make_anchor_target(f"{cls.name}.{method_name}"))
             lines.append(f"{h}## `{method_name}`")
             lines.append("")
-            lines.extend(
-                generate_function_doc(method, config, page_path, registry)
-            )
+            lines.extend(generate_function_doc(method, config, page_path, registry))
 
     return lines
 
@@ -188,8 +186,7 @@ def generate_module_content(
         real_attrs = [
             (n, a)
             for n, a in sorted(attributes)
-            if a.annotation is not None
-            or (a.docstring and a.docstring.value)
+            if a.annotation is not None or (a.docstring and a.docstring.value)
         ]
         if real_attrs:
             lines.append(f"{h} Constants")
@@ -216,9 +213,7 @@ def generate_module_content(
             lines.append(_make_anchor_target(func_name))
             lines.append(f"{h}# `{func_name}`{src}")
             lines.append("")
-            lines.extend(
-                generate_function_doc(func, config, page_path, registry)
-            )
+            lines.extend(generate_function_doc(func, config, page_path, registry))
             if i < len(functions) - 1:
                 lines.append("---")
                 lines.append("")
