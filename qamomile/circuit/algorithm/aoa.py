@@ -102,7 +102,7 @@ def aoa_layers(
         q (qmc.Vector[qmc.Qubit]): Qubit register.
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
-        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer schedule.
 
     Returns:
         qmc.Vector[qmc.Qubit]: Updated qubit register after all layers.
@@ -134,7 +134,7 @@ def aoa_state_superposition(
         n (qmc.UInt): Number of qubits.
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
-        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer schedule.
 
     Returns:
         qmc.Vector[qmc.Qubit]: AOA state vector.
@@ -221,7 +221,7 @@ def aoa_state_dicke(
         n (qmc.UInt): Number of qubits.
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
-        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer schedule.
         initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
         schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]):
             Ordered SCS gate schedule from
@@ -264,7 +264,7 @@ def hubo_aoa_layers(
         q (qmc.Vector[qmc.Qubit]): Qubit register.
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
-        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer schedule.
 
     Returns:
         qmc.Vector[qmc.Qubit]: Updated qubit register after all layers.
@@ -299,7 +299,7 @@ def hubo_aoa_state_superposition(
         n (qmc.UInt): Number of qubits.
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
-        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer schedule.
 
     Returns:
         qmc.Vector[qmc.Qubit]: HUBO AOA state vector.
@@ -371,7 +371,7 @@ def hubo_aoa_state_dicke(
         n (qmc.UInt): Number of qubits.
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
-        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer schedule.
         initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
         schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]):
             Ordered SCS gate schedule from

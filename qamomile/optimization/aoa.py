@@ -96,12 +96,21 @@ class AOAConverter(QAOAConverter):
         Raises:
             ValueError: If the provided schedule does not have shape
                 ``(num_pairs, 2)``.
+                If the schedule contains negative qubit indices.
                 If the schedule contains self-pairs (``(i, i)``).
                 If the schedule contains qubit indices >= num_bits.
         """
-        normalized = np.asarray(pair_indices, dtype=np.uint64)
-        if normalized.ndim != 2 or normalized.shape[1] != 2:
+        signed = np.asarray(pair_indices, dtype=np.int64)
+        if signed.ndim != 2 or signed.shape[1] != 2:
             raise ValueError("pair_indices must have shape (num_pairs, 2).")
+        negative_rows = np.flatnonzero((signed < 0).any(axis=1))
+        if negative_rows.size:
+            offending = signed[negative_rows].tolist()
+            raise ValueError(
+                f"pair_indices contains negative qubit indices at rows "
+                f"{negative_rows.tolist()}: {offending}."
+            )
+        normalized = signed.astype(np.uint64)
         self_pair_rows = np.flatnonzero(normalized[:, 0] == normalized[:, 1])
         if self_pair_rows.size:
             offending = normalized[self_pair_rows].tolist()
@@ -111,10 +120,12 @@ class AOAConverter(QAOAConverter):
             )
 
         n = self.spin_model.num_bits
-        if (normalized >= n).any():
+        out_of_range_rows = np.flatnonzero((normalized >= n).any(axis=1))
+        if out_of_range_rows.size:
+            offending = normalized[out_of_range_rows].tolist()
             raise ValueError(
-                f"pair_indices contains qubit indices >= num_bits ({n}); "
-                f"max value present is {int(normalized.max())}."
+                f"pair_indices contains qubit indices >= num_bits ({n}) at rows "
+                f"{out_of_range_rows.tolist()}: {offending}."
             )
 
         return normalized
@@ -232,6 +243,7 @@ class AOAConverter(QAOAConverter):
                 if mixer_name != MixerName.RING:
                     warnings.warn(
                         f"pair_indices_mixer was provided; the mixer={mixer!r} argument is ignored.",
+                        UserWarning,
                         stacklevel=3,
                     )
             except ValueError:
