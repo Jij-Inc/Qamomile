@@ -251,16 +251,16 @@ def emit_controlled_u_with_symbolic_indices(
     qubit_map: QubitMap,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a ``SymbolicControlledU`` whose ``controlled_indices`` is set.
+    """Emit a ``SymbolicControlledU`` whose ``control_indices`` is set.
 
     Routed from :func:`emit_controlled_u` when the constant-folding
     pass has left the op as ``SymbolicControlledU`` because
-    ``controlled_indices`` carries pass-through semantics that the
+    ``control_indices`` carries pass-through semantics that the
     ``ConcreteControlledU`` promotion cannot represent in its scalar
     control-operand layout (see §12.5 of the design).
 
     The function resolves the symbolic ``num_controls`` and every
-    ``controlled_indices`` entry to concrete ints, walks the control
+    ``control_indices`` entry to concrete ints, walks the control
     pool's ``slice_of`` chain to look up physical qubits per element,
     builds ``control_phys`` from the selected pool slots, expands the
     sub-kernel quantum operands via the §12.1 helper
@@ -274,14 +274,14 @@ def emit_controlled_u_with_symbolic_indices(
             conversion; provides ``_resolver``, ``_emitter``,
             ``_blockvalue_to_gate``, and ``_emit_controlled_fallback``.
         circuit (Any): The backend circuit being built.
-        op (SymbolicControlledU): The IR op with ``controlled_indices``
+        op (SymbolicControlledU): The IR op with ``control_indices``
             **not** ``None``.  Callers must guarantee this; the
-            ``controlled_indices is None`` branch is handled by the
+            ``control_indices is None`` branch is handled by the
             constant-folding promotion to ``ConcreteControlledU``.
         qubit_map (QubitMap): The active ``QubitAddress`` -> physical
             qubit map; mutated in place with the result-side mappings.
         bindings (dict[str, Any]): Caller bindings used to resolve
-            ``num_controls``, ``controlled_indices`` Values, ``c_qs``
+            ``num_controls``, ``control_indices`` Values, ``c_qs``
             length, and slice bounds.
 
     Raises:
@@ -291,16 +291,16 @@ def emit_controlled_u_with_symbolic_indices(
             * the control-vector length cannot be resolved, is shorter
               than ``num_controls``, or is shorter than the largest
               listed index;
-            * a ``controlled_indices`` entry cannot be resolved, is
+            * a ``control_indices`` entry cannot be resolved, is
               negative, or repeats;
-            * ``len(controlled_indices) != num_controls``;
+            * ``len(control_indices) != num_controls``;
             * a sub-quantum operand cannot be expanded to physical
               qubits (delegated to
               :func:`_expand_quantum_operands_to_phys`).
     """
-    assert op.controlled_indices is not None, (
+    assert op.control_indices is not None, (
         "emit_controlled_u_with_symbolic_indices requires "
-        "controlled_indices to be set; the None branch is handled by "
+        "control_indices to be set; the None branch is handled by "
         "the constant-folding promotion to ConcreteControlledU."
     )
 
@@ -320,31 +320,31 @@ def emit_controlled_u_with_symbolic_indices(
         )
 
     resolved_indices: list[int] = []
-    for v in op.controlled_indices:
+    for v in op.control_indices:
         idx = emit_pass._resolver.resolve_classical_value(v, bindings)
         if idx is None:
             raise EmitError(
-                f"Cannot resolve controlled_indices entry {v.name!r} "
+                f"Cannot resolve control_indices entry {v.name!r} "
                 f"for SymbolicControlledU emit.",
                 operation="ControlledUOperation",
             )
         idx_int = int(idx)
         if idx_int < 0:
             raise EmitError(
-                f"Negative controlled_indices entry ({idx_int}) is not allowed.",
+                f"Negative control_indices entry ({idx_int}) is not allowed.",
                 operation="ControlledUOperation",
             )
         resolved_indices.append(idx_int)
 
     if len(resolved_indices) != nc:
         raise EmitError(
-            f"controlled_indices length ({len(resolved_indices)}) does "
+            f"control_indices length ({len(resolved_indices)}) does "
             f"not match num_controls ({nc}).",
             operation="ControlledUOperation",
         )
     if len(set(resolved_indices)) != len(resolved_indices):
         raise EmitError(
-            f"controlled_indices contains duplicate entries: {resolved_indices}.",
+            f"control_indices contains duplicate entries: {resolved_indices}.",
             operation="ControlledUOperation",
         )
 
@@ -374,7 +374,7 @@ def emit_controlled_u_with_symbolic_indices(
     for idx in resolved_indices:
         if idx >= vector_size:
             raise EmitError(
-                f"controlled_indices entry {idx} out of bounds for "
+                f"control_indices entry {idx} out of bounds for "
                 f"control vector of length {vector_size}.",
                 operation="ControlledUOperation",
             )
@@ -502,7 +502,7 @@ def emit_controlled_u_multi_arg(
             conversion.
         circuit (Any): The backend circuit being built.
         op (SymbolicControlledU): The IR op with
-            ``num_control_args > 1`` and ``controlled_indices is
+            ``num_control_args > 1`` and ``control_indices is
             None``.
         qubit_map (QubitMap): The active ``QubitAddress`` ->
             physical qubit map; mutated in place with the
@@ -643,7 +643,7 @@ def emit_controlled_u(
 ) -> None:
     """Emit a ControlledUOperation."""
     if isinstance(op, SymbolicControlledU):
-        if op.controlled_indices is not None:
+        if op.control_indices is not None:
             emit_controlled_u_with_symbolic_indices(
                 emit_pass, circuit, op, qubit_map, bindings
             )
@@ -783,8 +783,21 @@ def emit_controlled_fallback(
         bindings: Parameter bindings.
 
     Raises:
-        EmitError: When num_controls > 1 (multi-control not supported
-            in the default gate-by-gate decomposition).
+        EmitError: When ``num_controls > 1`` (multi-control not
+            supported in the default gate-by-gate decomposition), or
+            when the inner block addresses more than a single target
+            and is not the narrowly-supported "exactly one SWAP op"
+            case.  ``emit_controlled_gate`` only carries a single
+            ``target_idx = target_indices[0]`` mapping, so any inner
+            gate that should land on ``target_indices[i > 0]`` would
+            silently route to slot 0 instead.  SWAP is the lone
+            exception because the SWAP branch in
+            ``emit_controlled_gate`` explicitly reads
+            ``target_indices[0]`` *and* ``target_indices[1]``.
+            Subclasses that carry a proper operand-to-target mapping
+            (the CUDA-Q transpiler's
+            ``_build_block_qubit_map`` override) bypass this check by
+            replacing the method outright.
     """
     if num_controls > 1:
         raise EmitError(
@@ -794,6 +807,33 @@ def emit_controlled_fallback(
             f"fallback decomposition only supports single control.",
             operation="ControlledUOperation",
         )
+    if len(target_indices) > 1:
+        # Walk the inner block's top-level gate operations.  Per-gate
+        # decomposition only routes correctly to ``target_indices[0]``,
+        # except for the SWAP branch which special-cases
+        # ``target_indices[1]``.  Any other shape is a silent
+        # miscompile waiting to fire.
+        inner_gates = [
+            o for o in block_value.operations if isinstance(o, GateOperation)
+        ]
+        is_single_swap = (
+            len(inner_gates) == 1 and inner_gates[0].gate_type == GateOperationType.SWAP
+        )
+        if not is_single_swap:
+            raise EmitError(
+                f"Cannot decompose controlled-U with multi-target inner block "
+                f"(target_indices={target_indices}, block has "
+                f"{len(inner_gates)} gate op(s)) on this backend: the "
+                f"per-gate fallback only routes each inner op to "
+                f"``target_indices[0]``, so any gate intended for "
+                f"``target_indices[i > 0]`` would silently miscompile to "
+                f"slot 0.  Either run this kernel on a backend whose "
+                f"``circuit_to_gate`` succeeds (Qiskit produces a native "
+                f"controlled custom gate), or rewrite the wrapped sub-kernel "
+                f"to take individual ``Qubit`` arguments and apply the "
+                f"control element-by-element at the call site.",
+                operation="ControlledUOperation",
+            )
     for _ in range(power):
         for ctrl_idx in control_indices:
             emit_controlled_block(

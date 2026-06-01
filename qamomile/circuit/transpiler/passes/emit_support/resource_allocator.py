@@ -680,14 +680,14 @@ class ResourceAllocator:
             # Three shapes can land here without having been promoted to
             # ``ConcreteControlledU`` by ``ConstantFoldingPass``:
             #
-            #   * single-pool + ``controlled_indices``: one ``ArrayValue``
+            #   * single-pool + ``control_indices``: one ``ArrayValue``
             #     control operand whose pass-through slots cannot be
             #     represented in ``ConcreteControlledU``'s scalar layout.
             #   * multi-arg control prefix (``num_control_args > 1``):
             #     a heterogeneous mix of scalar ``Value`` and
             #     ``ArrayValue`` operands whose qubit-count sum equals
             #     ``num_controls``.
-            #   * single-pool with no ``controlled_indices`` but a
+            #   * single-pool with no ``control_indices`` but a
             #     ``num_controls`` that depends on a loop variable
             #     (``num_controls = n - 1 - k`` inside a ``qmc.range``):
             #     constant folding cannot resolve the loop variable so

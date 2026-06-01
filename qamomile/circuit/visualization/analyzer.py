@@ -241,6 +241,35 @@ class CircuitAnalyzer:
                 qubit_idx = qubit_map.get(lid)
                 if qubit_idx is not None:
                     qubit_map[result.logical_id] = qubit_idx
+                    # When both operand and result are Vector[Qubit]
+                    # ArrayValues (e.g. a controlled-U whose
+                    # sub-kernel target is a whole ``Vector[Qubit]``,
+                    # or a sub-kernel call that returns ``q`` after
+                    # mutating it), copy every per-element key from
+                    # the operand's lid to the result's lid.  Without
+                    # this, downstream ops that walk
+                    # ``parent_array.logical_id -> {lid}_[i]`` (most
+                    # visibly: ``qmc.iqft`` expanded inline to
+                    # per-element CP / H gates whose ``parent_array``
+                    # is the post-controlled-U next-version
+                    # ``ArrayValue``) fall through the resolver's
+                    # element-key lookup and the CompositeGate /
+                    # ControlledU dispatch fresh-allocates a phantom
+                    # wire per element.
+                    if isinstance(operand, ArrayValue) and isinstance(
+                        result, ArrayValue
+                    ):
+                        operand_lid = logical_id_remap.get(
+                            operand.logical_id, operand.logical_id
+                        )
+                        prefix = f"{operand_lid}_["
+                        prefix_len = len(prefix)
+                        for key, idx in list(qubit_map.items()):
+                            if key.startswith(prefix) and key.endswith("]"):
+                                suffix = key[prefix_len:]
+                                new_key = f"{result.logical_id}_[{suffix}"
+                                if new_key not in qubit_map:
+                                    qubit_map[new_key] = idx
                 else:
                     # Guard: symbolic array element whose parent is known
                     # → don't create a new wire; let layout resolve dynamically
@@ -567,11 +596,40 @@ class CircuitAnalyzer:
                     block_value = op.block
                     if isinstance(block_value, Block):
                         new_remap = dict(logical_id_remap)
+                        # ``op.target_operands`` lays out quantum sub-args
+                        # first then classical (frontend ``_build_operands``
+                        # builds them in that order), while
+                        # ``block_value.input_values`` is in the wrapped
+                        # kernel's signature-declared order (qubit and
+                        # classical possibly interleaved).  Filter both
+                        # to their quantum / classical halves before
+                        # zipping so a signature like
+                        # ``def sub(theta, q: Vector[Qubit])`` does not
+                        # mis-pair the ``theta`` formal with the ``q``
+                        # actual.
+                        quantum_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if isinstance(iv.type, QubitType)
+                        ]
+                        classical_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if not isinstance(iv.type, QubitType)
+                        ]
+                        quantum_actuals = [
+                            v
+                            for v in op.target_operands
+                            if isinstance(v.type, QubitType)
+                        ]
+                        classical_actuals = [
+                            v
+                            for v in op.target_operands
+                            if not isinstance(v.type, QubitType)
+                        ]
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_operands
+                            quantum_formals, quantum_actuals
                         ):
-                            if not isinstance(dummy_input.type, QubitType):
-                                continue
                             actual_lid = self._resolve_array_element_lid(
                                 actual_input,
                                 qubit_map,
@@ -582,13 +640,11 @@ class CircuitAnalyzer:
                             if actual_lid not in qubit_map:
                                 qubit_map[actual_lid] = next_idx
                                 next_idx += 1
-                        # Build child_param_values for non-qubit inputs
+                        # Build child_param_values for non-qubit inputs.
                         child_param_values = dict(param_values) if param_values else {}
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_operands
+                            classical_formals, classical_actuals
                         ):
-                            if isinstance(dummy_input.type, QubitType):
-                                continue
                             c = actual_input.get_const()
                             if c is not None:
                                 child_param_values[dummy_input.logical_id] = c
@@ -624,11 +680,29 @@ class CircuitAnalyzer:
                     block_value = op.implementation
                     if isinstance(block_value, Block):
                         new_remap = dict(logical_id_remap)
+                        # Same formal/actual quantum-vs-classical
+                        # partitioning as the ``ControlledUOperation``
+                        # branch above: pair quantum formals with
+                        # ``op.target_qubits`` (already quantum-only)
+                        # and classical formals with
+                        # ``op.parameters``, so an implementation
+                        # signature that interleaves classical and
+                        # quantum (e.g. ``def impl(theta, q)``) does
+                        # not have its formals slide off the wrong
+                        # side of the unfiltered zip.
+                        quantum_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if isinstance(iv.type, QubitType)
+                        ]
+                        classical_formals = [
+                            iv
+                            for iv in block_value.input_values
+                            if not isinstance(iv.type, QubitType)
+                        ]
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_qubits
+                            quantum_formals, op.target_qubits
                         ):
-                            if not isinstance(dummy_input.type, QubitType):
-                                continue
                             actual_lid = self._resolve_array_element_lid(
                                 actual_input,
                                 qubit_map,
@@ -639,13 +713,11 @@ class CircuitAnalyzer:
                             if actual_lid not in qubit_map:
                                 qubit_map[actual_lid] = next_idx
                                 next_idx += 1
-                        # Build child_param_values for non-qubit inputs
+                        # Build child_param_values for non-qubit inputs.
                         child_param_values = dict(param_values) if param_values else {}
                         for dummy_input, actual_input in zip(
-                            block_value.input_values, op.target_qubits
+                            classical_formals, op.parameters
                         ):
-                            if isinstance(dummy_input.type, QubitType):
-                                continue
                             c = actual_input.get_const()
                             if c is not None:
                                 child_param_values[dummy_input.logical_id] = c
@@ -1141,7 +1213,7 @@ class CircuitAnalyzer:
                 if indices is not None:
                     control_indices.extend(indices)
             # Symbolic-mode subset selection: when the operation
-            # carries a ``controlled_indices`` list, only those pool
+            # carries a ``control_indices`` list, only those pool
             # slots are wired in as active controls.  The remaining
             # slots are pass-through wires and must not appear as
             # control dots in the diagram.  When every index resolves
@@ -1150,7 +1222,7 @@ class CircuitAnalyzer:
             # ``UInt`` expression without a binding) we leave the
             # full list as a safe fallback so the picture still
             # reads sensibly.
-            ctrl_idx_values = getattr(op, "controlled_indices", None)
+            ctrl_idx_values = getattr(op, "control_indices", None)
             if ctrl_idx_values is not None and control_indices:
                 resolved_positions: list[int] = []
                 all_resolved = True
@@ -1296,7 +1368,24 @@ class CircuitAnalyzer:
                 )
                 if indices is not None:
                     affected_qubits.extend(indices)
-            actual_inputs = list(op.target_operands)
+            # ``op.target_operands`` lays out quantum sub-args first
+            # then classical (frontend ``_build_operands`` order),
+            # while ``block_value.input_values`` is in the wrapped
+            # kernel's signature-declared order (quantum and
+            # classical possibly interleaved).  Reorder the actuals
+            # to match the formal order before
+            # :meth:`_build_block_value_mappings` zips them, so a
+            # sub-signature like ``def sub(theta, q: Vector[Qubit])``
+            # does not mis-pair ``theta`` with the ``q`` actual.
+            actual_inputs = self._align_actuals_to_formals(
+                block_value.input_values,
+                quantum_actuals=[
+                    v for v in op.target_operands if isinstance(v.type, QubitType)
+                ],
+                classical_actuals=[
+                    v for v in op.target_operands if not isinstance(v.type, QubitType)
+                ],
+            )
             u_name = getattr(block_value, "name", "U") or "U"
             block_name = u_name
         elif isinstance(op, CompositeGateOperation):
@@ -1309,7 +1398,15 @@ class CircuitAnalyzer:
                 )
                 if indices is not None:
                     affected_qubits.extend(indices)
-            actual_inputs = list(op.target_qubits)
+            # Same alignment as the ``ControlledUOperation`` branch.
+            # ``op.target_qubits`` is already quantum-only and
+            # ``op.parameters`` is classical-only, so we feed them
+            # directly into the formal-order interleaver.
+            actual_inputs = self._align_actuals_to_formals(
+                block_value.input_values,
+                quantum_actuals=list(op.target_qubits),
+                classical_actuals=list(op.parameters),
+            )
             block_name = op.name
         else:
             raise TypeError(f"Unsupported inline block type: {type(op).__name__}")
@@ -3391,6 +3488,69 @@ class CircuitAnalyzer:
         if step_val > 0:
             return (stop_val - start_val + step_val - 1) // step_val
         return (start_val - stop_val - step_val - 1) // (-step_val)
+
+    def _align_actuals_to_formals(
+        self,
+        formals: Sequence[ValueBase],
+        *,
+        quantum_actuals: Sequence[ValueBase],
+        classical_actuals: Sequence[ValueBase],
+    ) -> list[ValueBase]:
+        """Reorder split actual operands to match formal signature order.
+
+        :meth:`_build_block_value_mappings` zips a callee block's
+        ``input_values`` against the caller's ``actual_inputs``
+        positionally three times.  Callers that already have their
+        actuals split into quantum and classical pools (typically
+        ``ControlledUOperation.target_operands`` partitioned by
+        ``QubitType`` or ``CompositeGateOperation.target_qubits`` +
+        ``parameters``) must therefore weave them back into the
+        formals' declared order before handing them off, otherwise
+        a sub-signature like ``def sub(theta, q: Vector[Qubit])``
+        ends up with the ``theta`` formal paired with the ``q``
+        actual (and vice versa) and the inner block's symbolic
+        ``q.shape[0]`` is never bound to the caller's actual
+        ``Vector`` shape.
+
+        Args:
+            formals (Sequence[ValueBase]): The callee block's formal
+                ``input_values``, in signature-declared order.
+            quantum_actuals (Sequence[ValueBase]): Quantum actuals
+                in their original order (e.g. quantum-typed entries
+                of ``op.target_operands``).
+            classical_actuals (Sequence[ValueBase]): Classical
+                actuals in their original order (e.g. classical-
+                typed entries of ``op.target_operands``, or
+                ``op.parameters`` for composites).
+
+        Returns:
+            list[ValueBase]: One actual per formal, in the formals'
+                declared order.  Surplus actuals in either pool are
+                intentionally dropped (never appended after the
+                formal-aligned region) -- appending them would
+                silently mis-pair them with later formals downstream.
+                A shortfall (running out of actuals in either pool
+                before consuming every formal) returns a list
+                shorter than ``formals``; the caller's downstream
+                ``zip`` then truncates, matching the existing
+                behaviour for an unaligned actual list that was
+                already too short.
+        """
+        q_iter = iter(quantum_actuals)
+        c_iter = iter(classical_actuals)
+        aligned: list[ValueBase] = []
+        for formal in formals:
+            pool = q_iter if isinstance(formal.type, QubitType) else c_iter
+            try:
+                aligned.append(next(pool))
+            except StopIteration:
+                # Out of actuals for this kind -- stop early so the
+                # downstream ``zip`` sees a truncated list.  Surplus
+                # entries in the other pool are intentionally
+                # dropped: appending them would silently mis-pair
+                # them with later formals.
+                return aligned
+        return aligned
 
     def _build_block_value_mappings(
         self,

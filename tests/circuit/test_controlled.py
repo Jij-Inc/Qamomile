@@ -1,6 +1,7 @@
 """Tests for controlled gate API with all gate types x num_controls."""
 
 import dataclasses
+import inspect
 import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -60,10 +61,57 @@ def _make_float_handle(name: str = "theta"):
     return Float(value=val)
 
 
-def _mock_qkernel():
-    """Create a mock QKernel with a block property."""
+def _mock_qkernel(
+    *,
+    qubit_params: tuple[str, ...] = ("q",),
+    classical_params: tuple[tuple[str, Any], ...] = (),
+):
+    """Create a mock QKernel that satisfies ``ControlledGate``'s compose-time invariants.
+
+    ``ControlledGate.__init__`` validates that the wrapped object exposes
+    a dict ``input_types`` and an ``inspect.Signature`` ``signature``; the
+    bare-``MagicMock`` shape used to slip through via the now-removed
+    ``not isinstance(input_types, dict)`` fallback path.  This helper
+    synthesizes both attributes so the mock looks like a real qkernel to
+    the validator while letting the test still drive the controlled-gate
+    machinery directly.
+
+    Args:
+        qubit_params: Names of qubit-typed input parameters, in
+            declaration order.  Defaults to ``("q",)`` so a bare
+            ``_mock_qkernel()`` matches a single-qubit sub-kernel like
+            ``qmc.x``.
+        classical_params: Sequence of ``(name, type)`` tuples for
+            classical parameters.  ``type`` must be one of ``Float`` /
+            ``UInt`` / ``float`` / ``int`` (the set
+            ``_params_to_operands`` recognises).
+
+    Returns:
+        A ``MagicMock`` with ``.block`` stubbed, ``.input_types`` set to
+        a real ``dict`` matching the declared shape, and ``.signature``
+        set to a real ``inspect.Signature``.  All three of those
+        attributes are what the validator + downstream helpers
+        (``_sub_positional_count_for_symbolic``,
+        ``_bind_to_sub_signature``, ``_params_to_operands``) consume.
+    """
     qk = MagicMock()
     qk.block = MagicMock(name="block_value")
+
+    input_types: dict[str, Any] = {}
+    sig_params: list[inspect.Parameter] = []
+    for name in qubit_params:
+        input_types[name] = qmc.Qubit
+        sig_params.append(
+            inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+    for name, typ in classical_params:
+        input_types[name] = typ
+        sig_params.append(
+            inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+
+    qk.input_types = input_types
+    qk.signature = inspect.Signature(parameters=sig_params)
     return qk
 
 
@@ -139,7 +187,7 @@ class TestControlledGateCall:
         assert tracer.operations[0].num_controls == nc
 
     def test_single_control_multi_target(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(_mock_qkernel(qubit_params=("q0", "q1")), num_controls=1)
         ctrl, t0, t1 = _make_qubit("ctrl"), _make_qubit("t0"), _make_qubit("t1")
         with trace() as tracer:
             result = cg(ctrl, t0, t1)
@@ -193,7 +241,9 @@ class TestControlledGateCall:
         assert result[1].indices == ()
 
     def test_raw_float_param_becomes_constant_value(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=0.5)
         op = tracer.operations[0]
@@ -203,7 +253,9 @@ class TestControlledGateCall:
         assert param_val.get_const() == 0.5
 
     def test_handle_type_param_uses_value_directly(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         theta = _make_float_handle("theta")
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=theta)
@@ -211,7 +263,10 @@ class TestControlledGateCall:
         assert op.operands[2] is theta.value
 
     def test_multiple_params(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("alpha", Float), ("beta", Float))),
+            num_controls=1,
+        )
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), alpha=1.0, beta=2.0)
         op = tracer.operations[0]
@@ -251,7 +306,9 @@ class TestControlledGateCall:
         assert op.operation_kind == OperationKind.QUANTUM
 
     def test_int_param_converted_to_float(self):
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=3)
         param_val = tracer.operations[0].operands[2]
@@ -260,7 +317,9 @@ class TestControlledGateCall:
 
     def test_target_operands_with_params(self):
         """target_operands includes parameter Values when params are passed."""
-        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("theta", Float),)), num_controls=1
+        )
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
         with trace() as tracer:
@@ -336,17 +395,25 @@ class TestControlledValidation:
             control(_mock_qkernel(), num_controls=-1)
 
     def test_not_enough_args_raises(self):
-        """Passing fewer qubits than num_controls (no targets) raises ValueError."""
+        """Passing fewer qubits than num_controls (no targets) raises.
+
+        Either ``ValueError`` (from :meth:`_call_concrete`'s
+        "no sub-kernel quantum arg" check when the sub-kernel takes
+        no required positional args) or ``TypeError`` (from
+        :meth:`inspect.Signature.bind`'s "missing a required
+        argument" when the sub-kernel does require one) is an
+        acceptable failure mode -- both signal the same thing.
+        """
         cg = ControlledGate(_mock_qkernel(), num_controls=3)
         qs = [_make_qubit(f"q{i}") for i in range(3)]  # 3 controls, 0 targets
         with trace() as tracer:  # noqa: F841
-            with pytest.raises(ValueError):
+            with pytest.raises((ValueError, TypeError)):
                 cg(*qs)
 
-    def test_controlled_indices_in_concrete_mode_raises(self):
-        """Concrete-``num_controls`` rejects ``controlled_indices`` at compose time.
+    def test_control_indices_in_concrete_mode_raises(self):
+        """Concrete-``num_controls`` rejects ``control_indices`` at compose time.
 
-        The redesign restricted ``controlled_indices`` to symbolic
+        The redesign restricted ``control_indices`` to symbolic
         mode (design §1.1, decision #5); concrete mode has no
         selection step.
         """
@@ -354,13 +421,13 @@ class TestControlledValidation:
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace():
             with pytest.raises(ValueError, match="only valid in symbolic mode"):
-                cg(c0, c1, tgt, controlled_indices=[0])
+                cg(c0, c1, tgt, control_indices=[0])
 
 
-class TestNormalizeControlledIndices:
-    """Compose-time validation rules for ``controlled_indices`` entries.
+class TestNormalizeControlIndices:
+    """Compose-time validation rules for ``control_indices`` entries.
 
-    Drives ``ControlledGate._normalize_controlled_indices`` directly
+    Drives ``ControlledGate._normalize_control_indices`` directly
     (rather than through the full ``__call__`` pipeline) so the test
     intent stays focused on the per-entry rules: sequence-type check,
     per-entry type check (``bool`` rejection, ``int`` / ``UInt``
@@ -377,31 +444,31 @@ class TestNormalizeControlledIndices:
     def test_non_sequence_raises_type_error(self):
         cg = self._make_cg()
         with pytest.raises(TypeError, match="must be a Sequence"):
-            cg._normalize_controlled_indices(42)  # type: ignore[arg-type]
+            cg._normalize_control_indices(42)  # type: ignore[arg-type]
 
     def test_bool_entry_raises_type_error(self):
         cg = self._make_cg()
         with pytest.raises(TypeError, match="bool entry"):
-            cg._normalize_controlled_indices([True, 1])
+            cg._normalize_control_indices([True, 1])
 
     def test_string_entry_raises_type_error(self):
         cg = self._make_cg()
         with pytest.raises(TypeError, match="must be int or UInt"):
-            cg._normalize_controlled_indices(["0", 1])  # type: ignore[list-item]
+            cg._normalize_control_indices(["0", 1])  # type: ignore[list-item]
 
     def test_duplicate_literal_int_raises_value_error(self):
         cg = self._make_cg()
         with pytest.raises(ValueError, match="duplicate int entry"):
-            cg._normalize_controlled_indices([0, 0])
+            cg._normalize_control_indices([0, 0])
 
     def test_negative_literal_int_raises_value_error(self):
         cg = self._make_cg()
         with pytest.raises(ValueError, match="negative entry"):
-            cg._normalize_controlled_indices([-1, 0])
+            cg._normalize_control_indices([-1, 0])
 
     def test_accepts_literal_ints(self):
         cg = self._make_cg()
-        result = cg._normalize_controlled_indices([0, 1, 2])
+        result = cg._normalize_control_indices([0, 1, 2])
         assert len(result) == 3
         for i, v in enumerate(result):
             assert v.get_const() == i
@@ -413,7 +480,7 @@ class TestNormalizeControlledIndices:
         cg = self._make_cg()
         v0 = Value(type=UIntType(), name="i0").with_const(0)
         v1 = Value(type=UIntType(), name="i1").with_const(1)
-        result = cg._normalize_controlled_indices(
+        result = cg._normalize_control_indices(
             [UIntHandle(value=v0), UIntHandle(value=v1)]
         )
         assert len(result) == 2
@@ -2265,7 +2332,7 @@ class TestControlledVectorInnerKernelCrossSDK:
     Successor to the old ``TestControlledIndexSpecVectorInnerKernel``
     suite: same inner-kernel shape, but the call site now uses the
     new ``cg(scalar_control, qs[a:b])`` API instead of the deprecated
-    ``cg(qs, target_indices=[...])`` / ``cg(qs, controlled_indices=[...])``
+    ``cg(qs, target_indices=[...])`` / ``cg(qs, control_indices=[...])``
     forms.  Sampling and expectation-value paths are exercised
     independently so the two backend primitives regress separately.
     """
@@ -2616,20 +2683,58 @@ class TestControlledVectorSubArgCrossSDK:
         )
 
 
+class TestControlledVectorSubArgQuriPartsLoudError:
+    """QURI Parts raises ``EmitError`` instead of silently miscompiling.
+
+    The base ``emit_controlled_fallback`` per-gate decomposer used by
+    QURI Parts only routes each inner-block gate to
+    ``target_indices[0]``, so a multi-target controlled custom gate
+    (e.g. ``controlled`` around a sub-kernel that takes a
+    ``Vector[Qubit]`` and touches multiple slots) would have all
+    inner gates land on slot 0 -- a silent miscompile.  After the
+    loud-error guard in :func:`emit_controlled_fallback`, that shape
+    raises ``EmitError`` at transpile time instead.  ``SWAP``-only
+    inner blocks stay supported because the SWAP branch in
+    ``emit_controlled_gate`` explicitly reads both
+    ``target_indices[0]`` and ``target_indices[1]``.
+    """
+
+    def test_quri_parts_rejects_multi_target_custom_gate(self):
+        """``controlled(vector_sub)`` on QURI Parts raises ``EmitError``."""
+        pytest.importorskip("quri_parts")
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def _vec_h(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.h(qs[1])
+            return qs
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vec_h, num_controls=1)
+            qs[0], qs[1:3] = cg(qs[0], qs[1:3])
+            return qmc.measure(qs)
+
+        t = QuriPartsTranspiler()
+        with pytest.raises(EmitError, match=r"multi-target inner block"):
+            t.transpile(kernel)
+
+
 class TestControlledVectorSubArgQiskitEquivalence:
     """Strict expval equivalence for the new Vector sub-arg path.
 
     Only Qiskit is exercised: its controlled-U emit path constructs
     a native controlled custom gate, so the multi-target sub-kernel
     Vector ``RY(theta) ⊗ RY(theta)`` ends up being applied correctly
-    when the control is on.  The QURI Parts backend currently
-    decomposes any controlled custom gate through the standard
-    single-target fallback (``emit_controlled_gate`` uses
-    ``target_indices[0]``), so a multi-target controlled custom gate
-    is silently applied only to the first target — a pre-existing
-    limitation orthogonal to Step 2.b's frontend / emit-side
-    sub_quantum-operand expansion, which is what this test
-    specifically covers.
+    when the control is on.  QURI Parts now raises ``EmitError`` on
+    the same shape (see :class:`TestControlledVectorSubArgQuriPartsLoudError`
+    above), where it used to silently miscompile -- so on that
+    backend the user gets a clear failure at transpile time instead
+    of an incorrect circuit at sample time.
     """
 
     @pytest.fixture(autouse=True)
@@ -2876,10 +2981,10 @@ class TestSymbolicMultiArgControl:
         # Expect deterministic |1001> (q_0=1, q_1=0, q_2=0, q_3=1).
         assert counts == {(1, 0, 0, 1): 256}, counts
 
-    def test_multi_arg_with_controlled_indices_rejected(self):
-        """Multi-arg control prefix + ``controlled_indices=`` is rejected.
+    def test_multi_arg_with_control_indices_rejected(self):
+        """Multi-arg control prefix + ``control_indices=`` is rejected.
 
-        The two features are mutually exclusive: ``controlled_indices``
+        The two features are mutually exclusive: ``control_indices``
         only makes sense over a single control pool (one ``Vector``
         argument), and combining it with multiple positional control
         args raises ``ValueError`` at compose time with an explicit
@@ -2895,7 +3000,7 @@ class TestSymbolicMultiArgControl:
                 tgt = q[3]
                 cg = qmc.control(qmc.x, num_controls=4)
                 ctrl_main, prefix, tgt = cg(
-                    ctrl_main, prefix, tgt, controlled_indices=[0, 1, 2, 3]
+                    ctrl_main, prefix, tgt, control_indices=[0, 1, 2, 3]
                 )
                 q[control_index] = ctrl_main
                 q[0:3] = prefix
@@ -2904,7 +3009,7 @@ class TestSymbolicMultiArgControl:
 
             _ = kernel.block
 
-        # Concrete-mode rejection comes first (controlled_indices in
+        # Concrete-mode rejection comes first (control_indices in
         # concrete mode), so we test the symbolic-mode multi-arg case
         # explicitly with a UInt num_controls below.
 
@@ -2941,8 +3046,8 @@ class TestSymbolicMultiArgControl:
         # n=5 → 4 unrolled MCX iterations + 5 measurements.
         assert qc.num_qubits == 5
 
-    def test_multi_arg_symbolic_with_controlled_indices_rejected(self):
-        """Symbolic multi-arg + ``controlled_indices`` raises ValueError."""
+    def test_multi_arg_symbolic_with_control_indices_rejected(self):
+        """Symbolic multi-arg + ``control_indices`` raises ValueError."""
 
         @qmc.qkernel
         def kernel(
@@ -2954,7 +3059,7 @@ class TestSymbolicMultiArgControl:
             tgt = q[k]
             cg = qmc.control(qmc.x, num_controls=k + 1)
             ctrl_main, prefix, tgt = cg(
-                ctrl_main, prefix, tgt, controlled_indices=[0, 1, 2]
+                ctrl_main, prefix, tgt, control_indices=[0, 1, 2]
             )
             q[control_index] = ctrl_main
             q[0:k] = prefix
@@ -2964,9 +3069,137 @@ class TestSymbolicMultiArgControl:
         try:
             _ = kernel.block
         except ValueError as exc:
-            assert "controlled_indices" in str(exc)
+            assert "control_indices" in str(exc)
             assert "single" in str(exc).lower() or "pool" in str(exc).lower()
         else:
-            raise AssertionError(
-                "expected ValueError for multi-arg + controlled_indices"
-            )
+            raise AssertionError("expected ValueError for multi-arg + control_indices")
+
+    def test_rejects_non_qkernel_wrapped_callable(self):
+        """``qmc.control`` rejects objects that don't expose the required attrs.
+
+        ``ControlledGate.__init__`` validates compose-time that the
+        wrapped object exposes both ``input_types: dict`` and
+        ``signature: inspect.Signature``.  Without those, downstream
+        helpers (``_sub_positional_count_for_symbolic``,
+        ``_bind_to_sub_signature``, ``_params_to_operands``) used to
+        silently fall back to a "legacy single-pool" /
+        caller-order-keyed interpretation, producing silent
+        miscompiles when a user accidentally wrapped a plain object
+        (or a kernel-like that happened to satisfy the duck-typed
+        ``.block`` check in :func:`_qkernel_for_callable`).  This
+        test pins both halves of the validate: missing
+        ``input_types`` and missing ``signature``.
+        """
+
+        class _BareDuckTyped:
+            """Has ``.block`` (so :func:`_qkernel_for_callable` passes it
+            through unchanged) but lacks the validator's required attrs."""
+
+            block = "anything"  # bypasses the synthesize-from-callable path
+
+        with pytest.raises(TypeError, match=r"input_types"):
+            qmc.control(_BareDuckTyped())
+
+        class _NoSignature:
+            block = "anything"
+            input_types: dict = {}
+            # ``signature`` is missing
+
+        with pytest.raises(TypeError, match=r"signature"):
+            qmc.control(_NoSignature())
+
+    def test_symbolic_mode_default_classical_arg_can_be_omitted(self):
+        """``cg(pool, target)`` works when the sub-kernel has a defaulted classical arg.
+
+        ``_sub_positional_count_for_symbolic`` excludes parameters
+        with Python defaults from the required-positional count, so
+        a sub-kernel like ``def sub(q, theta=math.pi / 2)`` only
+        contributes ``q`` to the boundary algorithm.  Before the
+        fix, both ``q`` and ``theta`` were counted as required
+        positional, so the entire 2-arg call ``cg(pool, target)``
+        was treated as the sub-kernel slot with no control prefix
+        and the call site raised ``ValueError`` complaining about
+        the missing control argument.
+        """
+
+        @qmc.qkernel
+        def _sub_with_default(
+            q: qmc.Qubit, theta: qmc.Float = math.pi / 2
+        ) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            cg = qmc.control(_sub_with_default, num_controls=n - 1)
+            q[0 : n - 1], q[n - 1] = cg(q[0 : n - 1], q[n - 1])
+            return qmc.measure(q)
+
+        # Compose-time succeeds (no ValueError about missing
+        # control args).  Tracing the block exercises the boundary
+        # algorithm with a symbolic ``num_controls`` and a default-
+        # valued classical sub-kernel arg.
+        _ = kernel.block
+
+    def test_symbolic_mode_default_classical_arg_can_be_positional_override(self):
+        """``cg(pool, target, theta_val)`` positionally overrides the default.
+
+        Companion to
+        :meth:`test_symbolic_mode_default_classical_arg_can_be_omitted`:
+        the omit case checks that ``theta`` can be left out; this
+        test pins the symmetric promise that ``theta`` can also be
+        supplied positionally to override the default.  Before the
+        fix the boundary algorithm counted only required-positional
+        parameters and so misclassified the trailing ``theta_val``
+        as part of the control prefix, leaving zero quantum
+        sub-kernel args and raising ``ValueError`` ("no sub-kernel
+        quantum arg, see design decision #9").  After the fix the
+        boundary algorithm peels trailing classical-looking caller
+        args (one per unbound default-valued sub-kernel parameter),
+        so ``cg(pool, target, math.pi / 4)`` resolves to
+        ``control_args=(pool,)``, ``sub_positional=(target,
+        math.pi/4)`` and binds ``q=target, theta=math.pi/4``.
+        """
+
+        @qmc.qkernel
+        def _sub_with_default(
+            q: qmc.Qubit, theta: qmc.Float = math.pi / 2
+        ) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            cg = qmc.control(_sub_with_default, num_controls=n - 1)
+            q[0 : n - 1], q[n - 1] = cg(q[0 : n - 1], q[n - 1], math.pi / 4)
+            return qmc.measure(q)
+
+        _ = kernel.block
+
+    def test_single_scalar_control_symbolic_raises(self):
+        """A lone scalar ``Qubit`` control is concrete-only; symbolic rejects it.
+
+        In symbolic mode a single control argument is the
+        single-pool form, which requires a ``Vector`` / ``VectorView``
+        (an ``ArrayValue``).  A bare scalar ``Qubit`` as the only
+        control has no symbolic meaning -- the count is fixed at one,
+        so concrete mode is the right tool.  Before the fix this
+        slipped through the frontend and surfaced as an internal
+        ``ValidationError`` ("compiler bug ... contract was violated")
+        deep in ``ConstantFoldingPass`` at transpile time; now it is
+        caught at compose time with a clear, user-facing
+        ``ValueError`` that names the fix.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.control(qmc.rx, num_controls=n)
+            c, t = cg(c, t, angle=math.pi)
+            return qmc.measure(t)
+
+        with pytest.raises(
+            ValueError, match=r"single control argument must be a Vector"
+        ):
+            _ = kernel.block

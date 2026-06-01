@@ -68,7 +68,9 @@ I2 = np.eye(2, dtype=complex)
 h_field = 0.7
 M = -np.kron(Z, Z) - h_field * (np.kron(I2, X) + np.kron(X, I2))
 print("shape:", M.shape)
+assert M.shape == (4, 4)
 print("Hermitian:", np.allclose(M, M.conj().T))
+assert np.allclose(M, M.conj().T)
 
 # %% [markdown]
 # ## ラップして分解する
@@ -80,6 +82,8 @@ print("Hermitian:", np.allclose(M, M.conj().T))
 # %%
 H_mat = HermitianMatrix(M)
 print("num_qubits:", H_mat.num_qubits)
+# 4x4 行列 → log2(4) = 2 量子ビット。
+assert H_mat.num_qubits == 2
 
 H_op = H_mat.to_hamiltonian()
 print("constant:", H_op.constant)
@@ -139,6 +143,7 @@ qiskit_circuit = transpiler.to_circuit(
     },
 )
 print(qiskit_circuit)
+assert qiskit_circuit.num_qubits == 2
 
 # %% [markdown]
 # ## 厳密な指数関数との比較による検証

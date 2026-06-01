@@ -794,11 +794,23 @@ class MatplotlibRenderer:
                     + pow_label_height
                 )
 
+                # ``facecolor=background_color`` (rather than ``"none"``)
+                # so the wrapper *visually* stays transparent but
+                # actually occludes whatever sits behind it.  The
+                # multi-qubit connection line drawn by the controlled-U
+                # box path (``PORDER_LINE`` / ``PORDER_GATE - 1``)
+                # spans the full control <-> target range and would
+                # otherwise show through inside the wrapper's extra
+                # top label band where the ``pow=N`` annotation lives,
+                # contradicting the wrapper's intent of containing
+                # the powered gate.  The matching inline-block border
+                # in ``_draw_inlined_block_border`` already uses the
+                # same ``background_color`` trick.
                 outer_rect = mpatches.Rectangle(
                     (outer_left, outer_bottom),
                     outer_right - outer_left,
                     outer_top - outer_bottom,
-                    facecolor="none",
+                    facecolor=self.style.background_color,
                     edgecolor=self.style.block_border_color,
                     linewidth=1.5,
                     linestyle="--",

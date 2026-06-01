@@ -1234,19 +1234,19 @@ def _decode_symbolic_controlled(
         if d.get("unitary_block") is not None
         else None
     )
-    controlled_refs = d.get("controlled_index_refs")
-    controlled_indices: tuple[Value, ...] | None
+    controlled_refs = d.get("control_index_refs")
+    control_indices: tuple[Value, ...] | None
     if controlled_refs is None:
-        controlled_indices = None
+        control_indices = None
     else:
-        controlled_indices = tuple(
+        control_indices = tuple(
             _materialize_as_value(ctx, ref) for ref in controlled_refs
         )
     return SymbolicControlledU(
         operands=operands,
         results=results,
         num_controls=_materialize_as_value(ctx, d["num_controls_ref"]),
-        controlled_indices=controlled_indices,
+        control_indices=control_indices,
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
         num_control_args=int(d.get("num_control_args", 1)),

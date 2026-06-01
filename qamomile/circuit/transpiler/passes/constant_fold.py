@@ -409,7 +409,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
         ``q[indices[uint_tmp]]`` are fully resolved).
 
         For ``ControlledUOperation``, also folds ``num_controls`` and
-        ``controlled_indices`` fields.
+        ``control_indices`` fields.
         """
         new_operands: list[Any] = []
         changed = False
@@ -444,15 +444,15 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     changed = True
 
             if isinstance(result_op, SymbolicControlledU):
-                # Always fold the ``controlled_indices`` Value list first
+                # Always fold the ``control_indices`` Value list first
                 # so the IR carries constant ints when the bindings
                 # supply them.
-                if result_op.controlled_indices is not None:
+                if result_op.control_indices is not None:
                     new_ci = self._fold_value_list(
-                        list(result_op.controlled_indices), folded_values
+                        list(result_op.control_indices), folded_values
                     )
                     if new_ci is not None:
-                        extra_kwargs["controlled_indices"] = tuple(new_ci)
+                        extra_kwargs["control_indices"] = tuple(new_ci)
                         changed = True
                 # Fold num_controls: Value -> int.  If resolved to int,
                 # consider promoting to ConcreteControlledU.
@@ -462,7 +462,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 if new_nc is not result_op.num_controls:
                     if (
                         isinstance(new_nc, int)
-                        and result_op.controlled_indices is None
+                        and result_op.control_indices is None
                         and result_op.num_control_args == 1
                     ):
                         # Promote to ConcreteControlledU.
@@ -479,7 +479,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         # target into the control slice and the emit path
                         # produces a partial-arity controlled gate.
                         #
-                        # Skipped when ``controlled_indices`` is non-``None``
+                        # Skipped when ``control_indices`` is non-``None``
                         # because the pass-through semantics of non-selected
                         # pool elements cannot be represented in the
                         # promoted ``ConcreteControlledU`` operand layout
@@ -515,7 +515,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                             # walkers depend on it).  When the
                             # constant fold resolves it to an ``int``
                             # but promotion to ``ConcreteControlledU``
-                            # is blocked (e.g. ``controlled_indices``
+                            # is blocked (e.g. ``control_indices``
                             # is set), bind the constant onto a fresh
                             # copy of the original ``UInt`` ``Value``
                             # so the IR shape stays

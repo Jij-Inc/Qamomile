@@ -2,12 +2,12 @@
 
 The legacy ``IndexSpecControlledU``-specific tests were removed when
 the API redesign deleted the ``target_indices`` parameter and routed
-``controlled_indices`` to symbolic-mode only.  Surviving coverage:
+``control_indices`` to symbolic-mode only.  Surviving coverage:
 
 * ``ConcreteControlledU`` and ``SymbolicControlledU`` field folding
-  (``num_controls``, ``controlled_indices``).
+  (``num_controls``, ``control_indices``).
 * The symbolic-to-concrete promotion in ``ConstantFoldingPass`` —
-  including the new "skip promotion when ``controlled_indices`` is
+  including the new "skip promotion when ``control_indices`` is
   set" branch added in Step 5 of the redesign.
 * Length-mismatch validation between the control vector and
   ``num_controls`` during promotion.
@@ -47,7 +47,7 @@ class TestConstantFoldControlledUFields:
     def test_fold_num_controls_from_binop_promotes_to_concrete(self):
         """``num_controls=n-1`` folds to an ``int`` and promotes to ``ConcreteControlledU``.
 
-        With ``controlled_indices`` left at its default (``None``) the
+        With ``control_indices`` left at its default (``None``) the
         constant-folding pass is free to expand the control vector into
         per-qubit operands and switch the op subclass.
         """
@@ -97,16 +97,16 @@ class TestConstantFoldControlledUFields:
         assert isinstance(cu, ConcreteControlledU)
         assert cu.num_controls == 3
 
-    def test_fold_controlled_indices_in_symbolic_mode(self):
-        """Symbolic-mode ``controlled_indices`` entries fold to constants.
+    def test_fold_control_indices_in_symbolic_mode(self):
+        """Symbolic-mode ``control_indices`` entries fold to constants.
 
         With ``num_controls`` symbolic (``UInt``) and a mixed-literal /
-        ``UInt`` ``controlled_indices`` tuple, the literal entries
+        ``UInt`` ``control_indices`` tuple, the literal entries
         survive folding as constant ``Value``\\ s, the ``UInt`` entries
         are folded against the supplied bindings, and the op stays a
         ``SymbolicControlledU`` because the design forbids promoting
         out of the pass-through-aware emit path while
-        ``controlled_indices`` is set.
+        ``control_indices`` is set.
         """
 
         @qm.qkernel
@@ -114,7 +114,7 @@ class TestConstantFoldControlledUFields:
             qs = qm.qubit_array(n, "qs")
             target = qm.qubit("target")
             cg = qm.control(_zgate, num_controls=k)
-            _qs_out, _target_out = cg(qs, target, controlled_indices=[0, 1, k - 1])
+            _qs_out, _target_out = cg(qs, target, control_indices=[0, 1, k - 1])
             return qm.measure(_qs_out)
 
         from qamomile.qiskit import QiskitTranspiler
@@ -128,18 +128,18 @@ class TestConstantFoldControlledUFields:
         cu = self._find_controlled_u(folded.operations)
         assert cu is not None
         assert isinstance(cu, SymbolicControlledU), (
-            f"Expected the op to stay SymbolicControlledU (controlled_indices "
+            f"Expected the op to stay SymbolicControlledU (control_indices "
             f"blocks promotion), got {type(cu).__name__}"
         )
-        assert cu.controlled_indices is not None
-        assert len(cu.controlled_indices) == 3
+        assert cu.control_indices is not None
+        assert len(cu.control_indices) == 3
         # Literal int entries: already constant at frontend lift time.
-        assert cu.controlled_indices[0].get_const() == 0
-        assert cu.controlled_indices[1].get_const() == 1
+        assert cu.control_indices[0].get_const() == 0
+        assert cu.control_indices[1].get_const() == 1
         # Symbolic UInt entry: folded against the bindings.
-        const_val = cu.controlled_indices[2].get_const()
+        const_val = cu.control_indices[2].get_const()
         assert const_val == 2, (
-            f"Expected controlled_indices[2] const=2 after folding "
+            f"Expected control_indices[2] const=2 after folding "
             f"k=3 → k-1=2; got {const_val}"
         )
 
@@ -226,11 +226,11 @@ class TestConstantFoldControlledUFields:
         with pytest.raises(ValidationError, match="control Vector"):
             transpiler.transpile(kernel, bindings={"m": vector_len, "n": num_controls})
 
-    def test_controlled_indices_blocks_promotion(self):
-        """``controlled_indices`` set keeps the op as ``SymbolicControlledU``.
+    def test_control_indices_blocks_promotion(self):
+        """``control_indices`` set keeps the op as ``SymbolicControlledU``.
 
         Even when ``num_controls`` resolves to a concrete int, the
-        non-``None`` ``controlled_indices`` slot prevents promotion to
+        non-``None`` ``control_indices`` slot prevents promotion to
         ``ConcreteControlledU`` (which has no scalar operand slot for
         a pass-through pool element).
         """
@@ -240,7 +240,7 @@ class TestConstantFoldControlledUFields:
             pool = qm.qubit_array(n, "pool")
             tgt = qm.qubit("tgt")
             cg = qm.control(_zgate, num_controls=n - 1)
-            _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, 2])
+            _pool_out, _tgt_out = cg(pool, tgt, control_indices=[0, 1, 2])
             return qm.measure(_pool_out)
 
         from qamomile.qiskit import QiskitTranspiler
@@ -254,13 +254,13 @@ class TestConstantFoldControlledUFields:
         cu = self._find_controlled_u(folded.operations)
         assert cu is not None
         assert isinstance(cu, SymbolicControlledU)
-        assert cu.controlled_indices is not None
+        assert cu.control_indices is not None
 
     def test_blocked_promotion_keeps_num_controls_as_value(self):
         """``num_controls`` stays a ``Value`` (not a bare ``int``) when promotion is blocked.
 
         When ``num_controls`` resolves to a concrete int but
-        ``controlled_indices`` is set (so promotion to
+        ``control_indices`` is set (so promotion to
         ``ConcreteControlledU`` is skipped), the folded value must
         be written back as a ``Value`` carrying the constant on its
         ``ScalarMetadata`` rather than as a raw ``int``.  Downstream
@@ -275,7 +275,7 @@ class TestConstantFoldControlledUFields:
             pool = qm.qubit_array(n, "pool")
             tgt = qm.qubit("tgt")
             cg = qm.control(_zgate, num_controls=k)
-            _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, n - 1])
+            _pool_out, _tgt_out = cg(pool, tgt, control_indices=[0, 1, n - 1])
             return qm.measure(_pool_out)
 
         from qamomile.circuit.ir.serialize import dump_json
@@ -362,15 +362,15 @@ class TestControlledUTranspileIntegration:
         result = transpiler.transpile(kernel, bindings={"n": n_value})
         assert result is not None
 
-    def test_symbolic_mode_controlled_indices(self):
-        """Symbolic ``num_controls`` with literal ``controlled_indices`` transpiles."""
+    def test_symbolic_mode_control_indices(self):
+        """Symbolic ``num_controls`` with literal ``control_indices`` transpiles."""
 
         @qm.qkernel
         def kernel(n: qm.UInt, k: qm.UInt) -> qm.Vector[qm.Bit]:
             pool = qm.qubit_array(n, "pool")
             tgt = qm.qubit("tgt")
             cg = qm.control(_zgate, num_controls=k)
-            _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, 2])
+            _pool_out, _tgt_out = cg(pool, tgt, control_indices=[0, 1, 2])
             return qm.measure(_pool_out)
 
         from qamomile.qiskit import QiskitTranspiler
@@ -379,15 +379,15 @@ class TestControlledUTranspileIntegration:
         result = transpiler.transpile(kernel, bindings={"n": 4, "k": 3})
         assert result is not None
 
-    def test_symbolic_mode_controlled_indices_with_uint_entry(self):
-        """Symbolic ``num_controls`` with a ``UInt`` entry in ``controlled_indices``."""
+    def test_symbolic_mode_control_indices_with_uint_entry(self):
+        """Symbolic ``num_controls`` with a ``UInt`` entry in ``control_indices``."""
 
         @qm.qkernel
         def kernel(n: qm.UInt, k: qm.UInt) -> qm.Vector[qm.Bit]:
             pool = qm.qubit_array(n, "pool")
             tgt = qm.qubit("tgt")
             cg = qm.control(_zgate, num_controls=k)
-            _pool_out, _tgt_out = cg(pool, tgt, controlled_indices=[0, 1, k - 1])
+            _pool_out, _tgt_out = cg(pool, tgt, control_indices=[0, 1, k - 1])
             return qm.measure(_pool_out)
 
         from qamomile.qiskit import QiskitTranspiler

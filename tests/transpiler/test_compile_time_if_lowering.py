@@ -993,7 +993,7 @@ class TestCombinedArrayAndIndexSubstitution:
 
 
 # ---------------------------------------------------------------------------
-# CC3: SymbolicControlledU field substitution (num_controls + controlled_indices)
+# CC3: SymbolicControlledU field substitution (num_controls + control_indices)
 # ---------------------------------------------------------------------------
 
 
@@ -1003,12 +1003,12 @@ class TestSymbolicControlledUFieldSubstitution:
     The legacy ``IndexSpecControlledU`` version of this test covered
     ``target_indices`` too; that field was deleted alongside the
     index-spec API.  The redesigned ``SymbolicControlledU`` carries
-    ``num_controls``, ``power``, and ``controlled_indices``, so this
+    ``num_controls``, ``power``, and ``control_indices``, so this
     test pins phi resolution on the three remaining fields.
     """
 
     def test_three_fields_substituted(self):
-        """``num_controls``, ``power``, ``controlled_indices`` all resolve."""
+        """``num_controls``, ``power``, ``control_indices`` all resolve."""
         from qamomile.circuit.ir.block import Block
         from qamomile.circuit.ir.operation.gate import (
             ControlledUOperation,
@@ -1021,9 +1021,9 @@ class TestSymbolicControlledUFieldSubstitution:
 
         # True branch values.  Both branches use ``num_controls=1`` to
         # keep the constructed ``SymbolicControlledU`` well-formed
-        # against its ``controlled_indices=(ci_phi,)`` (length 1)
+        # against its ``control_indices=(ci_phi,)`` (length 1)
         # field — the API contract is
-        # ``len(controlled_indices) == num_controls`` and the emit
+        # ``len(control_indices) == num_controls`` and the emit
         # pass enforces it.  The two branches are still
         # distinguishable via their UUIDs (which is what the phi
         # substitution assertions below check).
@@ -1062,7 +1062,7 @@ class TestSymbolicControlledUFieldSubstitution:
             operands=[pool_av, target_q],
             results=[pool_av.next_version(), target_q.next_version()],
             num_controls=nc_phi,
-            controlled_indices=(ci_phi,),
+            control_indices=(ci_phi,),
             power=power_phi,
             block=unitary_block,
         )
@@ -1087,8 +1087,8 @@ class TestSymbolicControlledUFieldSubstitution:
         assert op.num_controls.uuid == nc_true.uuid
         assert isinstance(op.power, Value)
         assert op.power.uuid == power_true.uuid
-        assert op.controlled_indices is not None and len(op.controlled_indices) == 1
-        assert op.controlled_indices[0].uuid == ci_true.uuid
+        assert op.control_indices is not None and len(op.control_indices) == 1
+        assert op.control_indices[0].uuid == ci_true.uuid
 
 
 # ---------------------------------------------------------------------------

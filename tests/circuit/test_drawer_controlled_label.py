@@ -190,10 +190,10 @@ def _controlled_u_box_with_bindings(kernel, **bindings) -> VGate:
 
 
 def test_controlled_box_subset_indices_filter_inactive_pool_slots() -> None:
-    """Non-contiguous ``controlled_indices`` drop the skipped slot from VGate.
+    """Non-contiguous ``control_indices`` drop the skipped slot from VGate.
 
     The diagram for a ``SymbolicControlledU`` with
-    ``controlled_indices=[0, 1, 3]`` over a 4-qubit pool should
+    ``control_indices=[0, 1, 3]`` over a 4-qubit pool should
     keep three control dots (the active slots, on the pool's
     wire indices) and omit pool[2] entirely.  ``control_count``
     is the active count and the inactive slot's wire index does
@@ -205,19 +205,19 @@ def test_controlled_box_subset_indices_filter_inactive_pool_slots() -> None:
         pool = qmc.qubit_array(n, "pool")
         tgt = qmc.qubit(name="tgt")
         cg = qmc.control(qmc.x, num_controls=k_ctrls)
-        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, 3])
+        pool, tgt = cg(pool, tgt, control_indices=[0, 1, 3])
         return qmc.measure(pool)
 
     box = _controlled_u_box_with_bindings(kernel, n=4, k_ctrls=3)
     assert box.control_count == 3, box.control_count
     controls = box.qubit_indices[: box.control_count]
-    # The pool sits on wires 0..3; controlled_indices=[0, 1, 3]
+    # The pool sits on wires 0..3; control_indices=[0, 1, 3]
     # should keep wires 0, 1, 3 and drop wire 2.
     assert controls == [0, 1, 3], controls
 
 
 def test_controlled_box_subset_indices_with_uint_entry_resolves_via_bindings() -> None:
-    """``controlled_indices`` entries that involve ``UInt`` arithmetic resolve from bindings.
+    """``control_indices`` entries that involve ``UInt`` arithmetic resolve from bindings.
 
     With ``[0, 1, n - 1]`` and ``n=4`` the third entry resolves
     to 3, leaving wire 2 inactive — matching the literal
@@ -229,7 +229,7 @@ def test_controlled_box_subset_indices_with_uint_entry_resolves_via_bindings() -
         pool = qmc.qubit_array(n, "pool")
         tgt = qmc.qubit(name="tgt")
         cg = qmc.control(qmc.x, num_controls=k_ctrls)
-        pool, tgt = cg(pool, tgt, controlled_indices=[0, 1, n - 1])
+        pool, tgt = cg(pool, tgt, control_indices=[0, 1, n - 1])
         return qmc.measure(pool)
 
     box = _controlled_u_box_with_bindings(kernel, n=4, k_ctrls=3)

@@ -1299,7 +1299,7 @@ class TestWholeViewEmit:
 
         Migrated from the old ``index_spec``-on-view test: the new
         concrete-mode API does not accept ``target_indices`` /
-        ``controlled_indices``, so the control / target partition is
+        ``control_indices``, so the control / target partition is
         expressed positionally instead.  The original regression
         concern — that the controlled gate lands on physical qubits
         (1, 3) via the view's ``slice_of`` chain — is still exercised

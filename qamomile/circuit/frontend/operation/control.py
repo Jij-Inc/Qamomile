@@ -173,6 +173,42 @@ class ControlledGate:
         if isinstance(num_controls, int) and num_controls < 1:
             raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
         # For UInt (symbolic), validation is deferred to emit time
+
+        # Compose-time validation of the wrapped object's shape.
+        # Downstream helpers (``_sub_positional_count_for_symbolic``,
+        # ``_bind_to_sub_signature``, ``_params_to_operands``) all
+        # require ``input_types`` to be a real ``dict`` and ``signature``
+        # to be an ``inspect.Signature`` so the operand split and
+        # signature-driven kwarg binding produce a sane result.  Before
+        # this check, each of those helpers silently fell back to a
+        # "legacy single-pool" / caller-order interpretation whenever
+        # the attribute was missing or wrong-typed.  In production that
+        # is a silent miscompile (multi-arg control prefix collapses to
+        # one pool, kwargs land at the wrong operand index, etc.); fail
+        # loudly here so the error points back at the ``qmc.control``
+        # call site.  The builtin-callable path goes through
+        # :func:`_qkernel_for_callable` which synthesizes a proper
+        # ``QKernel`` first, so anything legitimately wrapped by
+        # ``qmc.control`` arrives here with both attributes populated.
+        input_types = getattr(qkernel, "input_types", None)
+        if not isinstance(input_types, dict):
+            raise TypeError(
+                f"qmc.control(): wrapped object {qkernel!r} does not expose "
+                f"a dict ``input_types`` attribute (got "
+                f"{type(input_types).__name__}).  Pass a "
+                f"``@qmc.qkernel``-decorated function or a built-in gate "
+                f"callable; arbitrary objects are not supported."
+            )
+        signature = getattr(qkernel, "signature", None)
+        if not isinstance(signature, inspect.Signature):
+            raise TypeError(
+                f"qmc.control(): wrapped object {qkernel!r} does not expose "
+                f"an ``inspect.Signature`` ``signature`` attribute (got "
+                f"{type(signature).__name__}).  Pass a "
+                f"``@qmc.qkernel``-decorated function or a built-in gate "
+                f"callable; arbitrary objects are not supported."
+            )
+
         self._qkernel = qkernel
         self._num_controls = num_controls
 
@@ -227,8 +263,9 @@ class ControlledGate:
         (e.g. ``ForOperation`` requires ``UIntType`` operands at
         expand-controlled-U time).
 
-        Two extra invariants are also enforced when the wrapped object
-        exposes ``input_types`` (i.e. anywhere outside test mocks):
+        Two extra invariants are enforced (the validate in
+        :meth:`ControlledGate.__init__` guarantees the wrapped object
+        exposes a dict ``input_types``, so these always apply):
 
         * **Operand order follows the wrapped kernel's signature**, not
           the caller's kwarg insertion order.  ``ValueResolver``
@@ -240,28 +277,8 @@ class ControlledGate:
           previously these were silently dropped by the same positional
           binding, producing a controlled gate with the default
           (unbound) parameter values and no warning.
-
-        For test mocks (``isinstance(input_types, dict)`` is False) we
-        fall back to the prior caller-order behaviour without
-        validation, since those test fixtures intentionally synthesize
-        ad-hoc parameter dicts.
         """
-        raw = getattr(self._qkernel, "input_types", {})
-        if not isinstance(raw, dict):
-            # Test-mock path: keep prior caller-order, no validation.
-            for param_name, param_value in params.items():
-                if isinstance(param_value, Handle):
-                    operands.append(param_value.value)
-                    continue
-                operands.append(
-                    Value(
-                        type=FloatType(),
-                        name=f"ctrl_param_{param_name}",
-                    ).with_const(float(param_value))
-                )
-            return
-
-        kernel_input_types: dict[str, Any] = raw
+        kernel_input_types: dict[str, Any] = self._qkernel.input_types
         # Classical-parameter names in the wrapped kernel's signature
         # order.  Python ``dict`` preserves insertion order (since 3.7),
         # so iterating ``input_types`` matches the declared signature.
@@ -365,7 +382,7 @@ class ControlledGate:
 
         Used by :meth:`_call_concrete`; the symbolic path constructs
         its ``SymbolicControlledU`` inline because it needs to pass
-        the ``controlled_indices`` field directly.
+        the ``control_indices`` field directly.
         """
         block = self._qkernel.block
         op: ControlledUOperation
@@ -496,9 +513,8 @@ class ControlledGate:
 
         Args:
             sub_args_resolved (dict[str, Any]): The sub-kernel argument
-                dict returned by :meth:`_bind_to_sub_signature` (already
-                in signature order or, for mock kernels, in
-                caller-positional + caller-kwarg order).
+                dict returned by :meth:`_bind_to_sub_signature`,
+                already in signature order.
 
         Returns:
             list[Any]: The quantum handles from *sub_args_resolved* in
@@ -586,34 +602,29 @@ class ControlledGate:
     ) -> dict[str, Any]:
         """Bind sub-kernel arguments to the wrapped kernel's signature.
 
-        For genuine ``@qmc.qkernel`` wrappers (and the auto-synthesised
-        built-in wrappers) the binding is delegated to
+        The wrapped object always carries a real ``inspect.Signature``
+        (qkernel-decorated functions populate it directly; built-in
+        gate callables go through :func:`_qkernel_for_callable`'s
+        synthesized wrapper; the compose-time validate in
+        :meth:`ControlledGate.__init__` rejects anything else).  The
+        binding is therefore always delegated to
         :meth:`inspect.Signature.bind` so positional / keyword mixing
         and Python defaults work out of the box.  ``apply_defaults`` is
         then called so kernels with a default-valued classical
         parameter (``def sub(qa, theta=0.5)``) end up with that
         default baked into the resulting dict.
 
-        For test-mock kernels (``ControlledGate(_mock_qkernel(), ...)``)
-        no real signature exists.  In that case we keep the historical
-        "positional → quantum, kwargs → classical" behaviour by
-        synthesising stable string keys (``"@pos0"``, ``"@pos1"``, ...
-        for positional args; the original kwarg names for kwargs) so
-        downstream helpers can iterate uniformly.  The keys are
-        opaque — only :meth:`_collect_sub_quantum_args` and
-        :meth:`_build_operands` consume them.
-
         Args:
             sub_positional_args (Sequence[Any]): Positional arguments
                 that follow the control prefix.
             sub_kwargs (dict[str, Any]): Keyword arguments passed to
                 ``cg(...)`` after stripping the reserved ``power`` and
-                ``controlled_indices`` kwargs.
+                ``control_indices`` kwargs.
 
         Returns:
-            dict[str, Any]: An ordered dict mapping parameter name
-                (real qkernel path) or synthesised positional key
-                (mock path) to its bound argument.
+            dict[str, Any]: An ordered dict mapping parameter name to
+                its bound argument, in the wrapped kernel's signature
+                order.
 
         Raises:
             TypeError: If :meth:`inspect.Signature.bind` reports a
@@ -623,20 +634,11 @@ class ControlledGate:
                 ``_params_to_operands`` enforced so existing callers'
                 error-message expectations remain stable.
         """
-        input_types = getattr(self._qkernel, "input_types", None)
-        signature = getattr(self._qkernel, "signature", None)
-
-        if not isinstance(input_types, dict) or not isinstance(
-            signature, inspect.Signature
-        ):
-            # Mock path: no real signature, so just key positional args
-            # by index and pass kwargs through untouched.
-            bound: dict[str, Any] = {}
-            for idx, value in enumerate(sub_positional_args):
-                bound[f"@pos{idx}"] = value
-            for name, value in sub_kwargs.items():
-                bound[name] = value
-            return bound
+        # ``ControlledGate.__init__`` validates that ``input_types`` is a
+        # dict and ``signature`` is an ``inspect.Signature``, so both
+        # accesses are safe to use directly here.
+        input_types = self._qkernel.input_types
+        signature = self._qkernel.signature
 
         # Check for unknown kwargs up-front so the legacy "unknown
         # parameter(s)" message wins over ``inspect.Signature.bind``'s
@@ -1037,7 +1039,7 @@ class ControlledGate:
             args (tuple[Any, ...]): Positional arguments to ``cg(...)``
                 including the leading control qubits.
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power`` and ``controlled_indices`` keys.
+                the reserved ``power`` and ``control_indices`` keys.
             power (int | Value): Normalised power (output of
                 :meth:`_normalize_power`).
 
@@ -1104,7 +1106,7 @@ class ControlledGate:
         self,
         *args: Any,
         power: int | UInt = 1,
-        controlled_indices: Sequence[int | UInt] | None = None,
+        control_indices: Sequence[int | UInt] | None = None,
         **params: ParamValue,
     ) -> tuple[Any, ...]:
         """Apply the controlled gate.
@@ -1124,7 +1126,7 @@ class ControlledGate:
           slice — the qubit count of each control argument adds up to
           ``num_controls`` and the split must fall on an argument
           boundary.
-        - ``controlled_indices`` is **not accepted** in this mode and
+        - ``control_indices`` is **not accepted** in this mode and
           raises :class:`ValueError` immediately.
 
         Symbolic mode (``num_controls=UInt``):
@@ -1133,7 +1135,7 @@ class ControlledGate:
           ``VectorView`` whose length need not match ``num_controls``
           at compose time.
         - ``args[1:]`` are passed to the sub-kernel.
-        - ``controlled_indices=(i0, i1, ...)`` selects exactly
+        - ``control_indices=(i0, i1, ...)`` selects exactly
           ``num_controls`` slots from the pool to act as controls;
           omitted slots pass through unchanged.  Each index entry is
           ``int`` or :class:`UInt` (mixing allowed).  ``int``-only
@@ -1148,7 +1150,7 @@ class ControlledGate:
                 be a strictly positive integer (``UInt`` handles are
                 accepted for symbolic powers, e.g. ``2 ** k`` in QPE).
                 Defaults to ``1``.
-            controlled_indices (Sequence[int | UInt] | None): Symbolic
+            control_indices (Sequence[int | UInt] | None): Symbolic
                 mode only — see above.  Defaults to ``None`` which
                 means "use the entire control pool".  Passing a
                 non-``None`` value in concrete mode raises
@@ -1165,11 +1167,11 @@ class ControlledGate:
                 ``Vector`` → ``Vector``).
 
         Raises:
-            ValueError: ``controlled_indices`` is non-``None`` in
+            ValueError: ``control_indices`` is non-``None`` in
                 concrete mode, or the qubit-count split in concrete
                 mode falls inside an argument.
             TypeError: ``power`` is not a positive integer / ``UInt``,
-                a ``controlled_indices`` entry is not ``int`` / ``UInt``,
+                a ``control_indices`` entry is not ``int`` / ``UInt``,
                 or a sub-kernel kwarg does not match the wrapped
                 kernel's signature.
             QubitConsumedError / QubitBorrowConflictError: Duplicate
@@ -1182,22 +1184,20 @@ class ControlledGate:
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
-            return self._call_symbolic(
-                args, normalized_power, params, controlled_indices
-            )
+            return self._call_symbolic(args, normalized_power, params, control_indices)
 
-        if controlled_indices is not None:
+        if control_indices is not None:
             raise ValueError(
-                "controlled_indices is only valid in symbolic mode "
+                "control_indices is only valid in symbolic mode "
                 "(num_controls=UInt).  Got concrete num_controls; "
                 "concrete-mode controls are positional and have no "
                 "selection step (see design §1.1)."
             )
         return self._call_concrete(args, params, normalized_power)
 
-    def _normalize_controlled_indices(
+    def _normalize_control_indices(
         self,
-        controlled_indices: Sequence[int | UInt],
+        control_indices: Sequence[int | UInt],
     ) -> tuple[Value, ...]:
         """Lift a caller-supplied index sequence to a tuple of ``UInt`` Values.
 
@@ -1211,7 +1211,7 @@ class ControlledGate:
         bindings are available.
 
         Args:
-            controlled_indices (Sequence[int | UInt]): Caller-supplied
+            control_indices (Sequence[int | UInt]): Caller-supplied
                 index sequence.  Lists, tuples, and any other
                 ``Sequence`` are accepted; the input is normalised to
                 a tuple of ``Value``\\ s.
@@ -1231,11 +1231,11 @@ class ControlledGate:
                 ``UInt`` duplicates are deferred to emit time.
         """
         try:
-            entries = list(controlled_indices)
+            entries = list(control_indices)
         except TypeError as e:
             raise TypeError(
-                f"controlled_indices must be a Sequence of int / UInt; "
-                f"got {type(controlled_indices).__name__}."
+                f"control_indices must be a Sequence of int / UInt; "
+                f"got {type(control_indices).__name__}."
             ) from e
 
         seen_ints: set[int] = set()
@@ -1243,18 +1243,16 @@ class ControlledGate:
         for idx in entries:
             if isinstance(idx, bool):
                 raise TypeError(
-                    f"controlled_indices: bool entry ({idx!r}) is not "
+                    f"control_indices: bool entry ({idx!r}) is not "
                     f"allowed; cast to int explicitly if intentional."
                 )
             if isinstance(idx, int):
                 if idx < 0:
                     raise ValueError(
-                        f"controlled_indices: negative entry ({idx}) is not allowed."
+                        f"control_indices: negative entry ({idx}) is not allowed."
                     )
                 if idx in seen_ints:
-                    raise ValueError(
-                        f"controlled_indices: duplicate int entry ({idx})."
-                    )
+                    raise ValueError(f"control_indices: duplicate int entry ({idx}).")
                 seen_ints.add(idx)
                 normalized.append(
                     Value(type=UIntType(), name=f"ctrl_idx_{idx}").with_const(idx)
@@ -1263,7 +1261,7 @@ class ControlledGate:
                 normalized.append(idx.value)
             else:
                 raise TypeError(
-                    f"controlled_indices entries must be int or UInt; "
+                    f"control_indices entries must be int or UInt; "
                     f"got {type(idx).__name__}."
                 )
         return tuple(normalized)
@@ -1273,22 +1271,22 @@ class ControlledGate:
         args: tuple[Any, ...],
         power: int | Value,
         sub_kwargs: dict[str, Any],
-        controlled_indices: Sequence[int | UInt] | None,
+        control_indices: Sequence[int | UInt] | None,
     ) -> tuple[Any, ...]:
         """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
         Mirrors :meth:`_call_concrete`'s structure but expects a
         ``Vector[Qubit]`` / ``VectorView[Qubit]`` as ``args[0]`` —
-        the control *pool* — and routes ``controlled_indices`` into
-        the new ``SymbolicControlledU.controlled_indices`` field.
+        the control *pool* — and routes ``control_indices`` into
+        the new ``SymbolicControlledU.control_indices`` field.
 
         Args:
             args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
             power (int | Value): Normalised power (output of
                 :meth:`_normalize_power`).
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power`` and ``controlled_indices`` keys.
-            controlled_indices (Sequence[int | UInt] | None): The
+                the reserved ``power`` and ``control_indices`` keys.
+            control_indices (Sequence[int | UInt] | None): The
                 caller-supplied selection (or ``None`` to use the
                 entire pool).
 
@@ -1322,7 +1320,7 @@ class ControlledGate:
         # (scalar ``Qubit`` and/or ``ArrayBase`` in sequence, qubit-
         # count sum equals ``num_controls`` at transpile time) both
         # flow through this split.
-        sub_positional_count = self._sub_positional_count_for_symbolic(sub_kwargs)
+        sub_positional_count = self._sub_positional_count_for_symbolic(args, sub_kwargs)
         if sub_positional_count > len(args):
             raise ValueError(
                 f"ControlledU: not enough positional args.  The wrapped "
@@ -1337,20 +1335,31 @@ class ControlledGate:
                 "positional control argument is required."
             )
 
+        if len(control_args) == 1 and not isinstance(control_args[0], ArrayBase):
+            raise ValueError(
+                "When num_controls is symbolic (UInt), a single control "
+                "argument must be a Vector[Qubit] / VectorView pool, not a "
+                "scalar Qubit.  A single fixed scalar control has no symbolic "
+                "meaning (the count is one), so use concrete mode instead -- "
+                "e.g. qmc.control(gate) with the default num_controls=1.  To "
+                "keep a scalar control in symbolic mode, pass it together with "
+                "at least one more control argument (the multi-arg form)."
+            )
+
         is_legacy_pool_form = len(control_args) == 1 and isinstance(
             control_args[0], ArrayBase
         )
-        if not is_legacy_pool_form and controlled_indices is not None:
+        if not is_legacy_pool_form and control_indices is not None:
             raise ValueError(
-                "controlled_indices is only supported with a single "
+                "control_indices is only supported with a single "
                 "Vector[Qubit] / VectorView[Qubit] control argument "
-                "(the pool form).  Combining controlled_indices with "
+                "(the pool form).  Combining control_indices with "
                 "multiple positional control args is not supported."
             )
 
         ci_values: tuple[Value, ...] | None = (
-            self._normalize_controlled_indices(controlled_indices)
-            if controlled_indices is not None
+            self._normalize_control_indices(control_indices)
+            if control_indices is not None
             else None
         )
 
@@ -1407,7 +1416,7 @@ class ControlledGate:
             operands=operands,
             results=results,
             num_controls=num_controls.value,
-            controlled_indices=ci_values,
+            control_indices=ci_values,
             power=power,
             block=self._qkernel.block,
             num_control_args=len(consumed_controls),
@@ -1433,36 +1442,75 @@ class ControlledGate:
             )
         return tuple(wrapped)
 
-    def _sub_positional_count_for_symbolic(self, sub_kwargs: dict[str, Any]) -> int:
+    def _sub_positional_count_for_symbolic(
+        self, args: tuple[Any, ...], sub_kwargs: dict[str, Any]
+    ) -> int:
         """How many trailing positional args belong to the sub-kernel.
 
         Used by :meth:`_call_symbolic` to split the call-site args
         into the control prefix and the sub-kernel positional region.
         The wrapped kernel's declared signature is the source of
-        truth: every parameter that is not satisfied via ``sub_kwargs``
-        must arrive positionally.  Mock test kernels (no
-        ``input_types`` dict) fall back to the historical "first arg
-        is the pool, rest goes to the sub-kernel" interpretation by
-        returning ``len(args) - 1`` via a sentinel — handled at the
-        caller by treating a single ``ArrayBase`` arg as the legacy
-        pool form.
+        truth: every parameter that is **required** to arrive
+        positionally (not satisfied via ``sub_kwargs``, and without
+        a Python default) contributes to the base count.  Each
+        default-valued classical parameter that the caller chose to
+        override positionally adds one to the count -- we detect
+        the override by walking ``args`` from the right and peeling
+        trailing classical-looking handles (anything that is not a
+        ``Qubit`` or ``ArrayBase``), up to one peeled arg per
+        unbound default-valued sub-kernel parameter and never deep
+        enough to leave the control prefix empty.  This keeps both
+        ``cg(pool, target)`` and ``cg(pool, target, theta_val)``
+        well-defined against a sub-kernel like
+        ``def sub(q, theta=0.5)``: the omit form fills ``theta``
+        from the default, and the positional form overrides it.
 
         Args:
+            args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
+                Used to count how many trailing default-valued
+                sub-kernel parameters the caller overrode positionally.
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power`` and ``controlled_indices`` keys.
+                the reserved ``power`` and ``control_indices`` keys.
 
         Returns:
-            int: Number of trailing positional args expected by the
-                sub-kernel.  Mock-kernel fallback returns ``1`` so
-                the legacy single-pool form keeps working.
+            int: Number of trailing positional args the sub-kernel
+                consumes at this boundary (required-positional plus
+                any positionally-overridden default-valued params).
         """
-        input_types = getattr(self._qkernel, "input_types", None)
-        if not isinstance(input_types, dict):
-            # Mock kernels: assume the historical single-pool form
-            # (one control pool + one trailing positional arg).
-            return 1
-        positional_names = [n for n in input_types.keys() if n not in sub_kwargs]
-        return len(positional_names)
+        from qamomile.circuit.frontend.handle.array import ArrayBase
+
+        # ``ControlledGate.__init__`` validates that ``input_types`` is
+        # a dict and ``signature`` is an ``inspect.Signature``, so both
+        # accesses are safe to use directly.
+        input_types = self._qkernel.input_types
+        signature = self._qkernel.signature
+
+        required_count = 0
+        unbound_default_count = 0
+        for name in input_types.keys():
+            if name in sub_kwargs:
+                continue
+            if signature.parameters[name].default is inspect.Parameter.empty:
+                required_count += 1
+            else:
+                unbound_default_count += 1
+
+        # Peel from the right of ``args`` to detect positional defaults.
+        # Each peeled arg must be classical-looking (not a quantum
+        # handle), and we must leave at least one arg in the control
+        # prefix for the symbolic-mode invariant.
+        max_peel = min(
+            unbound_default_count,
+            len(args) - required_count - 1,
+        )
+        extra_for_defaults = 0
+        for i in range(max(max_peel, 0)):
+            candidate = args[-(i + 1)]
+            if isinstance(candidate, (Qubit, ArrayBase)):
+                break
+            extra_for_defaults += 1
+
+        return required_count + extra_for_defaults
 
 
 def _classify_callable_param(annotation: Any) -> str:

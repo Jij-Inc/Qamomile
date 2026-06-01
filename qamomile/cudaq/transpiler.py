@@ -280,15 +280,15 @@ def _seed_vector_element_uuid(
         # limitation instead so the user can act on it.
         raise EmitError(
             f"CUDA-Q controlled helper: a ``Vector[Qubit]`` element "
-            f"of {parent.uuid!r} is indexed by a non-constant value "
-            f"(e.g. a loop variable) inside the wrapped block.  The "
-            f"per-gate fallback used by the CUDA-Q controlled-U "
-            f"emit path needs a compile-time-constant element index "
-            f"to seed the per-element qubit map.  Either bind the "
-            f"surrounding loop bounds so the index folds to a "
-            f"constant, or transpile this kernel on a backend that "
-            f"emits the controlled block as a single native gate "
-            f"(Qiskit does so via ``circuit_to_gate``).",
+            f"of {parent.name!r} (uuid {parent.uuid[:8]}) is indexed "
+            f"by a non-constant value (e.g. a loop variable) inside "
+            f"the wrapped block.  The per-gate fallback used by the "
+            f"CUDA-Q controlled-U emit path needs a compile-time-"
+            f"constant element index to seed the per-element qubit "
+            f"map.  Either bind the surrounding loop bounds so the "
+            f"index folds to a constant, or transpile this kernel on "
+            f"a backend that emits the controlled block as a single "
+            f"native gate (Qiskit does so via ``circuit_to_gate``).",
             operation="ControlledUOperation",
         )
     elem_idx = int(idx_val.get_const())
@@ -302,11 +302,12 @@ def _seed_vector_element_uuid(
         raise EmitError(
             f"CUDA-Q controlled helper: Vector[Qubit] element index "
             f"{elem_idx} is outside the declared length of "
-            f"{parent.uuid!r} ([0, {length})).  This usually means "
-            f"the inner controlled block addresses an element past the "
-            f"slice the controlled-U was wired up with.  Check that "
-            f"the wrapped block's ``Vector[Qubit]`` inputs are sized "
-            f"to match the actual targets you pass at the call site.",
+            f"{parent.name!r} (uuid {parent.uuid[:8]}, [0, {length})).  "
+            f"This usually means the inner controlled block addresses "
+            f"an element past the slice the controlled-U was wired up "
+            f"with.  Check that the wrapped block's ``Vector[Qubit]`` "
+            f"inputs are sized to match the actual targets you pass at "
+            f"the call site.",
             operation="ControlledUOperation",
         )
     slot = start + elem_idx
