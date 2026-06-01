@@ -29,15 +29,15 @@
 #
 # The AOA algorithm extends QAOA by using more general mixers and initial states.
 #
-# ### Why does this matter for graph coloring? 
+# ### Why does this matter for graph coloring?
 # The one-hot encoding uses $N \times K$ binary variables but only $K^N$
-# of the $2^{NK}$ bitstrings are feasible (one color per node). 
-# On the 5-node, 3-color instance below, that is 243 feasible states inside 
-# a $2^{15} = 32768$-dimensional Hilbert space, i.e. less than $1\%$. 
-# Standard QAOA starts in a uniform superposition over the full space and uses a transverse-field mixer 
-# ($\sum X_i$) that freely rotates qubits in and out of the feasible subspace, 
-# so most of the sampled bitstrings violate the one-hot constraint and get discarded. 
-# AOA fixes both ends: it starts inside the feasible subspace and uses an XY mixer that 
+# of the $2^{NK}$ bitstrings are feasible (one color per node).
+# On the 5-node, 3-color instance below, that is 243 feasible states inside
+# a $2^{15} = 32768$-dimensional Hilbert space, i.e. less than $1\%$.
+# Standard QAOA starts in a uniform superposition over the full space and uses a transverse-field mixer
+# ($\sum X_i$) that freely rotates qubits in and out of the feasible subspace,
+# so most of the sampled bitstrings violate the one-hot constraint and get discarded.
+# AOA fixes both ends: it starts inside the feasible subspace and uses an XY mixer that
 # preserves Hamming weight, so every sample is feasible by construction.
 #
 # We will proceed as follows:
@@ -76,6 +76,7 @@
 
 # %%
 import jijmodeling as jm
+
 
 @jm.Problem.define("Graph Coloring", sense=jm.ProblemSense.MINIMIZE)
 def graph_coloring_decorated(problem : jm.DecoratedProblem):
@@ -121,8 +122,8 @@ graph_coloring_decorated
 # We use a fixed 5-node graph with 6 edges for reproducibility.
 
 # %%
-import networkx as nx
 import matplotlib.pyplot as plt
+import networkx as nx
 
 num_nodes = 5
 edge_list = [(0, 2), (0, 3), (0, 4), (1, 3), (2, 4), (3, 4)]
@@ -232,13 +233,12 @@ executable_aoa_dicke = converter.transpile(
 # We need to compute the indices consumed by the qkernel by calling the method `compute_dicke_composition_schedule` and `resolve_pair_indices` of the `converter` class.
 
 # %%
-import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.aoa import aoa_state_dicke
 from qamomile.circuit.visualization import MatplotlibDrawer
 
-#We can access the internal logic of the convertor to get the indices for dicke state preparation and mixer construction.
+#We can access the internal logic of the converter to get the indices for dicke state preparation and mixer construction.
 #This is useful for visualizing but not part of the normal user workflow.
-initial_ones, pairs_dicke, triplets_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
+initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
 resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
 
 block = transpiler.to_block(
@@ -250,8 +250,7 @@ block = transpiler.to_block(
         "p": 1,
         "pair_indices_mixer": resolved_pair,
         "initial_ones": initial_ones,
-        "pairs_dicke": pairs_dicke,
-        "triplets_dicke": triplets_dicke,
+        "schedule_dicke": schedule_dicke,
     },
     parameters=["gammas", "betas"],
 )
@@ -283,17 +282,16 @@ fig
 # `xy_mixer`, repeated `p` times.
 
 # %%
-from qamomile.circuit.algorithm.state_preparation import prepare_dicke
-from qamomile.circuit.algorithm.qaoa import ising_cost
 from qamomile.circuit.algorithm.aoa import xy_mixer
+from qamomile.circuit.algorithm.qaoa import ising_cost
+from qamomile.circuit.algorithm.state_preparation import prepare_dicke
 
 block = transpiler.to_block(
     prepare_dicke,
     bindings={
         "n": converter.spin_model.num_bits,
         "initial_ones": initial_ones,
-        "pairs": pairs_dicke,
-        "triplets": triplets_dicke,
+        "schedule": schedule_dicke,
     },
     parameters=[],
 )
@@ -428,9 +426,9 @@ sample_set = converter.decode(sample_result)
 # ### Feasibility Check
 #
 # We can now check the advantage of AOA compared to QAOA.
-#  
+#
 # The problem-tailored XY mixer that we implemented should
-# allow one to remain within the feasible space. Thus, 
+# allow one to remain within the feasible space. Thus,
 # unlike the QAOA case, **candidate solutions** proposed by AOA
 # should all live into the feasible space.
 # That means, they respect the constraint hamming weight $=1$
@@ -449,7 +447,7 @@ print(
 # ### Best Feasible Solution
 #
 # `SampleSet.best_feasible` returns the feasible sample with the
-# best (here: smallest) objective. 
+# best (here: smallest) objective.
 
 # %%
 best = sample_set.best_feasible
@@ -468,7 +466,7 @@ print("Number of Conflicts (neighbor nodes with the same color):", int(round(bes
 # %% [markdown]
 # ### Objective Value Distribution
 #
-# We plot the distribution of the true objective value (number of conflicts). 
+# We plot the distribution of the true objective value (number of conflicts).
 
 # %%
 obj_counts = summary.value_counts().sort_index()
@@ -489,7 +487,7 @@ plt.show()
 # %%
 def get_color_map_from_solution(best_coloring, num_colors):
     """ Creates a color map for the best solution."""
-    
+
     colors = ["#FF6B6B", "#4ECDC4", "#1A535C"]
     color_map = []
     for u in range(num_nodes):

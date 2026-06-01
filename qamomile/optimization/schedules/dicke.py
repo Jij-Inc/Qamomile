@@ -3,20 +3,24 @@
 import numpy as np
 
 
-def _scs_schedule(
-    n_dicke: int, k_dicke: int
-) -> tuple[dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
+def _scs_schedule(n_dicke: int, k_dicke: int) -> dict[tuple[int, int, int], float]:
     """Build one SCS column for an n_dicke-qubit register with weight k_dicke.
+
+    Gates are returned in application order: the 2-qubit SCS pair gate first,
+    followed by the 3-qubit SCS triplet gates for this column.  Pair gates are
+    encoded with a repeated control qubit ``(t, c, c)`` so that all entries
+    share the same 3-tuple key type.  Triplet gates are encoded as
+    ``(t, c1, c2)`` with ``c1 != c2``; because ``c1 = n-k+1 < n = c2`` for
+    k >= 2, the two encodings never collide.
 
     Args:
         n_dicke (int): Number of qubits in the Dicke state.
         k_dicke (int): Hamming weight of the Dicke state.
 
     Returns:
-        tuple[dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
-        ``(pairs, triplets)`` where ``pairs`` maps ``(t, c)`` qubit index pairs
-        to rotation angles and ``triplets`` maps ``(t, c1, c2)`` qubit index
-        triples to rotation angles.
+        dict[tuple[int, int, int], float]: Ordered gate schedule mapping
+        3-tuple qubit indices to rotation angles.  Pair entries satisfy
+        ``key[1] == key[2]``; triplet entries satisfy ``key[1] != key[2]``.
 
     Raises:
         ValueError: If ``k_dicke`` is outside ``[0, n_dicke]``.
@@ -25,40 +29,41 @@ def _scs_schedule(
         raise ValueError("Require 0 <= k_dicke <= n_dicke.")
 
     n = n_dicke - 1
+    schedule: dict[tuple[int, int, int], float] = {}
 
-    pairs: dict[tuple[int, int], float] = {}
-    triplets: dict[tuple[int, int, int], float] = {}
+    # Pair gate encoded as (t, c, c) — c1 == c2 signals a 2-qubit SCS gate.
+    schedule[(n - 1, n, n)] = 2 * np.arccos(1 / np.sqrt(n_dicke))
 
-    pairs[(n - 1, n)] = 2 * np.arccos(1 / np.sqrt(n_dicke))
-
-    # Clamp upper bound to n so that n-k never goes negative.
+    # Triplet gates follow immediately; c1 < c2 always holds here (k >= 2).
     for k in range(2, min(k_dicke + 1, n + 1)):
-        triplets[(n - k, n - k + 1, n)] = 2 * np.arccos(np.sqrt(k / n_dicke))
+        schedule[(n - k, n - k + 1, n)] = 2 * np.arccos(np.sqrt(k / n_dicke))
 
-    return pairs, triplets
+    return schedule
 
 
 def bartschi_eidenbenz_schedule(
     n_dicke: int, k_dicke: int
-) -> tuple[dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
+) -> dict[tuple[int, int, int], float]:
     """Build the Bartschi-Eidenbenz schedule for an n_dicke-qubit register with weight k_dicke.
 
     For the degenerate weights ``k_dicke == 0`` and ``k_dicke == n_dicke``,
     the Dicke state is already a computational basis state (all-zero or
-    all-one) and no SCS rotation is needed; empty dicts are returned so
+    all-one) and no SCS rotation is needed; an empty dict is returned so
     that no gates are emitted.
+
+    Gates are returned in application order: columns are stacked in descending
+    order (largest column first), and within each column the pair gate precedes
+    its triplet gates.  The encoding uses 3-tuple keys throughout: pair gates
+    satisfy ``key[1] == key[2]``; triplet gates satisfy ``key[1] != key[2]``.
 
     Args:
         n_dicke (int): Number of qubits in the Dicke state.
         k_dicke (int): Hamming weight of the Dicke state.
 
     Returns:
-        tuple[dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
-        ``(pairs, triplets)`` — stacked SCS column outputs in descending column
-        order, suitable for direct use with
+        dict[tuple[int, int, int], float]: Ordered gate schedule ready for
+        direct use with
         :func:`~qamomile.circuit.algorithm.state_preparation.dicke.prepare_dicke`.
-        ``pairs`` maps ``(t, c)`` qubit pairs to rotation angles and
-        ``triplets`` maps ``(t, c1, c2)`` qubit triples to rotation angles.
 
     Raises:
         ValueError: If ``k_dicke`` is outside ``[0, n_dicke]``.
@@ -67,26 +72,22 @@ def bartschi_eidenbenz_schedule(
         raise ValueError("Require 0 <= k_dicke <= n_dicke.")
 
     if k_dicke == 0 or k_dicke == n_dicke:
-        return {}, {}
+        return {}
 
-    pairs: dict[tuple[int, int], float] = {}
-    triplets: dict[tuple[int, int, int], float] = {}
+    schedule: dict[tuple[int, int, int], float] = {}
 
     for n in range(n_dicke, 1, -1):
-        # At column n, at most n-1 excitations can flow to the qubits below.
         k_sub = min(k_dicke, n - 1)
-        col_pairs, col_triplets = _scs_schedule(n, k_sub)
-        pairs.update(col_pairs)
-        triplets.update(col_triplets)
+        schedule.update(_scs_schedule(n, k_sub))
 
-    return pairs, triplets
+    return schedule
 
 
 def dicke_state_composition_schedule(
     n_qubits: int,
     block_size: int,
     hamming_weight: int = 1,
-) -> tuple[np.ndarray, dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
+) -> tuple[np.ndarray, dict[tuple[int, int, int], float]]:
     """Build a global schedule for a product of identical Dicke states on blocks.
 
     The register is partitioned into contiguous blocks of size ``block_size``.
@@ -99,12 +100,13 @@ def dicke_state_composition_schedule(
             ``|D^block_size_k>``. Defaults to ``1``.
 
     Returns:
-        tuple[np.ndarray, dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
-        ``(initial_ones, pairs, triplets)`` — global qubit indices and SCS
-        rotation parameters for the full register, ready for use with
+        tuple[np.ndarray, dict[tuple[int, int, int], float]]:
+        ``(initial_ones, schedule)`` — global qubit indices and SCS gate
+        schedule for the full register, ready for use with
         :func:`~qamomile.circuit.algorithm.state_preparation.dicke.prepare_dicke`.
-        ``pairs`` maps ``(t, c)`` qubit pairs to rotation angles and
-        ``triplets`` maps ``(t, c1, c2)`` qubit triples to rotation angles.
+        ``schedule`` maps 3-tuple qubit indices to rotation angles; pair
+        entries satisfy ``key[1] == key[2]`` and triplet entries satisfy
+        ``key[1] != key[2]``.
 
     Raises:
         ValueError: If ``n_qubits <= 0``; if ``block_size <= 0``; if
@@ -123,31 +125,22 @@ def dicke_state_composition_schedule(
     num_blocks = n_qubits // block_size
 
     all_initial_ones: list[int] = []
-    pairs: dict[tuple[int, int], float] = {}
-    triplets: dict[tuple[int, int, int], float] = {}
+    schedule: dict[tuple[int, int, int], float] = {}
 
     for block_idx in range(num_blocks):
         start = block_idx * block_size
 
-        # Use the same basis-state convention as other Dicke utilities:
-        # initialize the last k qubits of each block to |1>.
         if hamming_weight > 0:
             local_initial_ones = np.arange(
                 block_size - hamming_weight, block_size, dtype=np.uint32
             )
             all_initial_ones.extend((local_initial_ones + start).tolist())
 
-        local_pairs, local_triplets = bartschi_eidenbenz_schedule(
-            block_size, hamming_weight
-        )
-
-        for (t, c), angle in local_pairs.items():
-            pairs[(t + start, c + start)] = angle
-        for (t, c1, c2), angle in local_triplets.items():
-            triplets[(t + start, c1 + start, c2 + start)] = angle
+        local_schedule = bartschi_eidenbenz_schedule(block_size, hamming_weight)
+        for (t, c1, c2), angle in local_schedule.items():
+            schedule[(t + start, c1 + start, c2 + start)] = angle
 
     return (
         np.array(all_initial_ones, dtype=np.uint32),
-        pairs,
-        triplets,
+        schedule,
     )

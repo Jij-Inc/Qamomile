@@ -208,8 +208,7 @@ def aoa_state_dicke(
     betas: qmc.Vector[qmc.Float],
     pair_indices_mixer: qmc.Matrix[qmc.UInt],
     initial_ones: qmc.Vector[qmc.UInt],
-    pairs_dicke: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    triplets_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Qubit]:
     """Generate AOA State, whose initial state is a Dicke state, for Ising model.
 
@@ -224,21 +223,16 @@ def aoa_state_dicke(
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
         pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
         initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
-        pairs_dicke (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Precomputed
-            mapping from ``(t, c)`` qubit pairs to rotation angles for the 2-qubit SCS blocks.
-        triplets_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Precomputed mapping
-            from ``(t, c1, c2)`` qubit index triples to rotation angles for the 3-qubit
-            SCS blocks. Keys are length-3 index vectors.
+        schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]):
+            Ordered SCS gate schedule from
+            :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
+            Pair entries satisfy ``key[1] == key[2]``; triplet entries satisfy
+            ``key[1] != key[2]``.
 
     Returns:
         qmc.Vector[qmc.Qubit]: AOA state vector.
     """
-    q = prepare_dicke(
-        n,
-        initial_ones,
-        pairs_dicke,
-        triplets_dicke,
-    )
+    q = prepare_dicke(n, initial_ones, schedule_dicke)
     q = aoa_layers(p, quad, linear, q, gammas, betas, pair_indices_mixer)
     return q
 
@@ -362,8 +356,7 @@ def hubo_aoa_state_dicke(
     betas: qmc.Vector[qmc.Float],
     pair_indices_mixer: qmc.Matrix[qmc.UInt],
     initial_ones: qmc.Vector[qmc.UInt],
-    pairs_dicke: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    triplets_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Qubit]:
     """Generate HUBO AOA state, whose initial state is a Dicke state.
 
@@ -380,20 +373,15 @@ def hubo_aoa_state_dicke(
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
         pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
         initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
-        pairs_dicke (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Precomputed
-            mapping from ``(t, c)`` qubit pairs to rotation angles for the 2-qubit SCS blocks.
-        triplets_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Precomputed mapping
-            from ``(t, c1, c2)`` qubit index triples to rotation angles for the 3-qubit
-            SCS blocks. Keys are length-3 index vectors.
+        schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]):
+            Ordered SCS gate schedule from
+            :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
+            Pair entries satisfy ``key[1] == key[2]``; triplet entries satisfy
+            ``key[1] != key[2]``.
 
     Returns:
         qmc.Vector[qmc.Qubit]: HUBO AOA state vector.
     """
-    q = prepare_dicke(
-        n,
-        initial_ones,
-        pairs_dicke,
-        triplets_dicke,
-    )
+    q = prepare_dicke(n, initial_ones, schedule_dicke)
     q = hubo_aoa_layers(p, quad, linear, higher, q, gammas, betas, pair_indices_mixer)
     return q

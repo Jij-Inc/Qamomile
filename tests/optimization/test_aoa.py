@@ -46,6 +46,7 @@ def _make_3bit_hubo_model() -> BinaryModel:
 
 
 def _make_4bit_quadratic_model() -> BinaryModel:
+    """Create a 4-variable quadratic model with some positive and negative coefficients."""
     return BinaryModel.from_hubo(
         {
             (0, 1): 1.0,

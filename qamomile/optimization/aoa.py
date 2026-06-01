@@ -96,10 +96,27 @@ class AOAConverter(QAOAConverter):
         Raises:
             ValueError: If the provided schedule does not have shape
                 ``(num_pairs, 2)``.
+                If the schedule contains self-pairs (``(i, i)``).
+                If the schedule contains qubit indices >= num_bits.
         """
         normalized = np.asarray(pair_indices, dtype=np.uint64)
         if normalized.ndim != 2 or normalized.shape[1] != 2:
             raise ValueError("pair_indices must have shape (num_pairs, 2).")
+        self_pair_rows = np.flatnonzero(normalized[:, 0] == normalized[:, 1])
+        if self_pair_rows.size:
+            offending = normalized[self_pair_rows].tolist()
+            raise ValueError(
+                f"pair_indices contains self-pairs at rows {self_pair_rows.tolist()}: "
+                f"{offending}. XY mixer pairs must connect two distinct qubits."
+            )
+
+        n = self.spin_model.num_bits
+        if (normalized >= n).any():
+            raise ValueError(
+                f"pair_indices contains qubit indices >= num_bits ({n}); "
+                f"max value present is {int(normalized.max())}."
+            )
+
         return normalized
 
     def _build_ring_pair_indices(self, num_blocks: int, block_size: int) -> np.ndarray:
@@ -201,8 +218,13 @@ class AOAConverter(QAOAConverter):
             numpy.ndarray: A validated ``uint64`` array of qubit pairs.
 
         Raises:
-            ValueError: If neither explicit pairs nor a valid built-in mixer
-                configuration is provided.
+            ValueError: If ``mixer`` is not a recognised :class:`MixerName`
+                value (and ``pair_indices`` is ``None``); if ``block_size`` is
+                ``None`` when ``pair_indices`` is not provided; if
+                ``block_size <= 1``; if ``spin_model.num_bits`` is not
+                divisible by ``block_size``; or if ``pair_indices`` has an
+                invalid shape, contains self-pairs, or references qubit
+                indices outside the model.
         """
         if pair_indices is not None:
             try:
@@ -214,7 +236,7 @@ class AOAConverter(QAOAConverter):
                     )
             except ValueError:
                 warnings.warn(
-                    f"pair_indices was provided; the unrecognised mixer={mixer!r} is ignored.",
+                    f"pair_indices_mixer was provided; the unrecognised mixer={mixer!r} is ignored.",
                     UserWarning,
                     stacklevel=3,
                 )
@@ -243,13 +265,13 @@ class AOAConverter(QAOAConverter):
             case MixerName.FULLY_CONNECTED:
                 return self._build_fully_connected_pair_indices(num_blocks, block_size)
             case _:
-                assert False, f"unreachable: unhandled MixerName {mixer_name!r}"
+                raise RuntimeError(f"unreachable: unhandled MixerName {mixer_name!r}")
 
     def compute_dicke_composition_schedule(
         self,
         hamming_weight: int,
         block_size: int,
-    ) -> tuple[np.ndarray, dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
+    ) -> tuple[np.ndarray, dict[tuple[int, int, int], float]]:
         """Build the global Dicke state preparation schedule for a product of blocks.
 
         Delegates to :func:`dicke_state_composition_schedule` using the total
@@ -260,11 +282,16 @@ class AOAConverter(QAOAConverter):
             block_size (int): Number of qubits per block.
 
         Returns:
-            tuple[np.ndarray, dict[tuple[int, int], float], dict[tuple[int, int, int], float]]:
-            ``(initial_ones, pairs_dicke, triplets_dicke)`` — global qubit indices
-            and SCS rotation parameters for the full register. ``pairs_dicke`` maps
-            ``(t, c)`` qubit pairs to rotation angles and ``triplets_dicke`` maps
-            ``(t, c1, c2)`` qubit triples to rotation angles.
+            tuple[np.ndarray, dict[tuple[int, int, int], float]]:
+            ``(initial_ones, schedule_dicke)`` — global qubit indices and the
+            ordered SCS gate schedule for the full register.  Pair entries in
+            ``schedule_dicke`` satisfy ``key[1] == key[2]``; triplet entries
+            satisfy ``key[1] != key[2]``.
+
+        Raises:
+            ValueError: If ``block_size <= 0``; if ``spin_model.num_bits`` is
+                not divisible by ``block_size``; or if ``hamming_weight`` is
+                outside ``[0, block_size]``.
         """
         n_qubits = self.spin_model.num_bits
         return dicke_state_composition_schedule(n_qubits, block_size, hamming_weight)
@@ -396,8 +423,7 @@ class AOAConverter(QAOAConverter):
         if initial_state == InitialState.DICKE:
             (
                 initial_ones,
-                pairs_dicke,
-                triplets_dicke,
+                schedule_dicke,
             ) = self.compute_dicke_composition_schedule(
                 hamming_weight=hamming_weight,
                 block_size=effective_block_size,
@@ -413,55 +439,53 @@ class AOAConverter(QAOAConverter):
 
         match (quadratic, initial_state):
             case (True, InitialState.UNIFORM):
-                return self._transpile_quadratic(
+                return self._transpile_aoa_quadratic(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                 )
             case (True, InitialState.DICKE):
-                return self._transpile_quadratic_dicke(
+                return self._transpile_aoa_quadratic_dicke(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                     initial_ones=initial_ones,
-                    pairs_dicke=pairs_dicke,
-                    triplets_dicke=triplets_dicke,
+                    schedule_dicke=schedule_dicke,
                 )
             case (True, InitialState.SINGLE_BASIS_STATE):
-                return self._transpile_quadratic_basis_state(
+                return self._transpile_aoa_quadratic_basis_state(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                     initial_ones=initial_ones,
                 )
             case (False, InitialState.UNIFORM):
-                return self._transpile_hubo(
+                return self._transpile_aoa_hubo(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                 )
             case (False, InitialState.DICKE):
-                return self._transpile_hubo_dicke(
+                return self._transpile_aoa_hubo_dicke(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                     initial_ones=initial_ones,
-                    pairs_dicke=pairs_dicke,
-                    triplets_dicke=triplets_dicke,
+                    schedule_dicke=schedule_dicke,
                 )
             case (False, InitialState.SINGLE_BASIS_STATE):
-                return self._transpile_hubo_basis_state(
+                return self._transpile_aoa_hubo_basis_state(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                     initial_ones=initial_ones,
                 )
             case _:
-                assert False, (
+                raise RuntimeError(
                     f"unreachable: quadratic={quadratic}, initial_state={initial_state!r}"
                 )
 
-    def _transpile_quadratic(
+    def _transpile_aoa_quadratic(
         self,
         transpiler: Transpiler,
         *,
@@ -513,15 +537,14 @@ class AOAConverter(QAOAConverter):
             parameters=["gammas", "betas"],
         )
 
-    def _transpile_quadratic_dicke(
+    def _transpile_aoa_quadratic_dicke(
         self,
         transpiler: Transpiler,
         *,
         p: int,
         pair_indices_mixer: np.ndarray,
         initial_ones: np.ndarray,
-        pairs_dicke: dict,
-        triplets_dicke: dict,
+        schedule_dicke: dict,
     ) -> ExecutableProgram:
         """Transpile a quadratic-only model using the AOA circuit with Dicke state preparation.
 
@@ -531,10 +554,8 @@ class AOAConverter(QAOAConverter):
             pair_indices_mixer (numpy.ndarray): Explicit mixer schedule as an array of
                 shape ``(num_pairs, 2)``.
             initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
-            pairs_dicke (dict): Mapping from ``(t, c)`` qubit pairs to rotation angles for
-                the 2-qubit SCS blocks.
-            triplets_dicke (dict): Mapping from ``(t, c1, c2)`` qubit triples to rotation
-                angles for the 3-qubit SCS blocks.
+            schedule_dicke (dict): Ordered SCS gate schedule from
+                :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
 
         Returns:
             ExecutableProgram: The compiled circuit program.
@@ -550,8 +571,7 @@ class AOAConverter(QAOAConverter):
             n: qmc.UInt,
             pair_indices_mixer: qmc.Matrix[qmc.UInt],
             initial_ones: qmc.Vector[qmc.UInt],
-            pairs_dicke: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            triplets_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+            schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = aoa_state_dicke(
                 p=p,
@@ -562,8 +582,7 @@ class AOAConverter(QAOAConverter):
                 betas=betas,
                 pair_indices_mixer=pair_indices_mixer,
                 initial_ones=initial_ones,
-                pairs_dicke=pairs_dicke,
-                triplets_dicke=triplets_dicke,
+                schedule_dicke=schedule_dicke,
             )
             return qmc.measure(q)
 
@@ -576,13 +595,12 @@ class AOAConverter(QAOAConverter):
                 "p": p,
                 "pair_indices_mixer": pair_indices_mixer,
                 "initial_ones": initial_ones,
-                "pairs_dicke": pairs_dicke,
-                "triplets_dicke": triplets_dicke,
+                "schedule_dicke": schedule_dicke,
             },
             parameters=["gammas", "betas"],
         )
 
-    def _transpile_quadratic_basis_state(
+    def _transpile_aoa_quadratic_basis_state(
         self,
         transpiler: Transpiler,
         *,
@@ -639,7 +657,7 @@ class AOAConverter(QAOAConverter):
             parameters=["gammas", "betas"],
         )
 
-    def _transpile_hubo(
+    def _transpile_aoa_hubo(
         self,
         transpiler: Transpiler,
         *,
@@ -694,15 +712,14 @@ class AOAConverter(QAOAConverter):
             parameters=["gammas", "betas"],
         )
 
-    def _transpile_hubo_dicke(
+    def _transpile_aoa_hubo_dicke(
         self,
         transpiler: Transpiler,
         *,
         p: int,
         pair_indices_mixer: np.ndarray,
         initial_ones: np.ndarray,
-        pairs_dicke: dict,
-        triplets_dicke: dict,
+        schedule_dicke: dict,
     ) -> ExecutableProgram:
         """Transpile a HUBO model using the AOA circuit with Dicke state preparation.
 
@@ -712,10 +729,8 @@ class AOAConverter(QAOAConverter):
             pair_indices_mixer (numpy.ndarray): Mixer schedule as an array of
                 shape ``(num_pairs, 2)``.
             initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
-            pairs_dicke (dict): Mapping from ``(t, c)`` qubit pairs to rotation angles for
-                the 2-qubit SCS blocks.
-            triplets_dicke (dict): Mapping from ``(t, c1, c2)`` qubit triples to rotation
-                angles for the 3-qubit SCS blocks.
+            schedule_dicke (dict): Ordered SCS gate schedule from
+                :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
 
         Returns:
             ExecutableProgram: The compiled circuit program.
@@ -732,8 +747,7 @@ class AOAConverter(QAOAConverter):
             n: qmc.UInt,
             pair_indices_mixer: qmc.Matrix[qmc.UInt],
             initial_ones: qmc.Vector[qmc.UInt],
-            pairs_dicke: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            triplets_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+            schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = hubo_aoa_state_dicke(
                 p=p,
@@ -745,8 +759,7 @@ class AOAConverter(QAOAConverter):
                 betas=betas,
                 pair_indices_mixer=pair_indices_mixer,
                 initial_ones=initial_ones,
-                pairs_dicke=pairs_dicke,
-                triplets_dicke=triplets_dicke,
+                schedule_dicke=schedule_dicke,
             )
             return qmc.measure(q)
 
@@ -760,13 +773,12 @@ class AOAConverter(QAOAConverter):
                 "p": p,
                 "pair_indices_mixer": pair_indices_mixer,
                 "initial_ones": initial_ones,
-                "pairs_dicke": pairs_dicke,
-                "triplets_dicke": triplets_dicke,
+                "schedule_dicke": schedule_dicke,
             },
             parameters=["gammas", "betas"],
         )
 
-    def _transpile_hubo_basis_state(
+    def _transpile_aoa_hubo_basis_state(
         self,
         transpiler: Transpiler,
         *,

@@ -77,6 +77,7 @@
 # %%
 import jijmodeling as jm
 
+
 @jm.Problem.define("Graph Coloring", sense=jm.ProblemSense.MINIMIZE)
 def graph_coloring_decorated(problem : jm.DecoratedProblem):
     N = problem.Length()
@@ -121,8 +122,8 @@ graph_coloring_decorated
 # 再現性のために、辺が 6 本の 5 ノード固定グラフを用います。
 
 # %%
-import networkx as nx
 import matplotlib.pyplot as plt
+import networkx as nx
 
 num_nodes = 5
 edge_list = [(0, 2), (0, 3), (0, 4), (1, 3), (2, 4), (3, 4)]
@@ -231,13 +232,12 @@ executable_aoa_dicke = converter.transpile(
 # qkernel が消費するインデックスを得るには、`converter` クラスの `compute_dicke_composition_schedule` と `resolve_pair_indices` メソッドを呼び出す必要があります。
 
 # %%
-import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.aoa import aoa_state_dicke
 from qamomile.circuit.visualization import MatplotlibDrawer
 
 # Dicke 状態の準備とミキサーの構築に必要なインデックスを取得するため、コンバーターの内部ロジックにアクセスできます。
 # これは可視化には便利ですが、通常のユーザーワークフローの一部ではありません。
-initial_ones, pairs_dicke, triplets_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
+initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
 resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
 
 block = transpiler.to_block(
@@ -249,8 +249,7 @@ block = transpiler.to_block(
         "p": 1,
         "pair_indices_mixer": resolved_pair,
         "initial_ones": initial_ones,
-        "pairs_dicke": pairs_dicke,
-        "triplets_dicke": triplets_dicke,
+        "schedule_dicke": schedule_dicke,
     },
     parameters=["gammas", "betas"],
 )
@@ -281,17 +280,16 @@ fig
 # `aoa_layers(p, ...)` は単に `ising_cost` と `xy_mixer` を交互に並べ、`p` 回繰り返したものです。
 
 # %%
-from qamomile.circuit.algorithm.state_preparation import prepare_dicke
-from qamomile.circuit.algorithm.qaoa import ising_cost
 from qamomile.circuit.algorithm.aoa import xy_mixer
+from qamomile.circuit.algorithm.qaoa import ising_cost
+from qamomile.circuit.algorithm.state_preparation import prepare_dicke
 
 block = transpiler.to_block(
     prepare_dicke,
     bindings={
         "n": converter.spin_model.num_bits,
         "initial_ones": initial_ones,
-        "pairs": pairs_dicke,
-        "triplets": triplets_dicke,
+        "schedule": schedule_dicke,
     },
     parameters=[],
 )
@@ -486,7 +484,7 @@ plt.show()
 # %%
 def get_color_map_from_solution(best_coloring, num_colors):
     """ 最良の解に対するカラーマップを作成します。"""
-    
+
     colors = ["#FF6B6B", "#4ECDC4", "#1A535C"]
     color_map = []
     for u in range(num_nodes):

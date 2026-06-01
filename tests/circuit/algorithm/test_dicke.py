@@ -53,6 +53,7 @@ if not BACKENDS:
 
 
 def _qiskit_gate_counts(exe) -> dict[str, int]:
+    """Counts gates in the transpiled Qiskit circuit by name."""
     qc = exe.compiled_quantum[0].circuit
     counts: dict[str, int] = {}
     for inst in qc.data:
@@ -85,6 +86,7 @@ _QURI_PARTS_CANONICAL: dict[str, str] = {
 
 
 def _quri_parts_gate_counts(exe) -> dict[str, int]:
+    """Counts gates in the transpiled Quri Parts circuit by canonical name."""
     circuit = exe.compiled_quantum[0].circuit
     counts: dict[str, int] = {}
     for gate in circuit.gates:
@@ -104,6 +106,7 @@ _CUDAQ_PATTERNS: dict[str, re.Pattern] = {
 
 
 def _cudaq_gate_counts(exe) -> dict[str, int]:
+    """Counts gates in the transpiled Cudaq circuit by name."""
     source = exe.compiled_quantum[0].source
     return {name: len(pat.findall(source)) for name, pat in _CUDAQ_PATTERNS.items()}
 
@@ -142,15 +145,9 @@ def _wrap_scs_gate_3q(
 def _wrap_prepare_dicke(
     n: qmc.UInt,
     initial_ones: qmc.Vector[qmc.UInt],
-    pairs: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    triplets: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    schedule: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = prepare_dicke(
-        n,
-        initial_ones,
-        pairs,
-        triplets,
-    )
+    q = prepare_dicke(n, initial_ones, schedule)
     return qmc.measure(q)
 
 
@@ -158,16 +155,10 @@ def _wrap_prepare_dicke(
 def _wrap_prepare_dicke_expval(
     n: qmc.UInt,
     initial_ones: qmc.Vector[qmc.UInt],
-    pairs: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    triplets: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    schedule: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
     hamiltonian: qmc.Observable,
 ) -> qmc.Float:
-    q = prepare_dicke(
-        n,
-        initial_ones,
-        pairs,
-        triplets,
-    )
+    q = prepare_dicke(n, initial_ones, schedule)
     return qmc.expval(q, hamiltonian)
 
 
@@ -229,11 +220,9 @@ def test_prepare_dicke_applies_basis_initialization_and_scs_rotations(
     name, TranspilerCls
 ):
     """Tests that prepare_dicke applies X gates for initial Hamming weight and the correct number of SCS rotation gates."""
-    (
-        initial_ones,
-        pairs,
-        triplets,
-    ) = dicke_state_composition_schedule(n_qubits=3, block_size=3, hamming_weight=2)
+    initial_ones, schedule = dicke_state_composition_schedule(
+        n_qubits=3, block_size=3, hamming_weight=2
+    )
 
     transpiler = TranspilerCls()
     exe = transpiler.transpile(
@@ -241,11 +230,12 @@ def test_prepare_dicke_applies_basis_initialization_and_scs_rotations(
         bindings={
             "n": 3,
             "initial_ones": initial_ones,
-            "pairs": pairs,
-            "triplets": triplets,
+            "schedule": schedule,
         },
     )
 
+    pairs = {k: v for k, v in schedule.items() if k[1] == k[2]}
+    triplets = {k: v for k, v in schedule.items() if k[1] != k[2]}
     expected_x = len(initial_ones)
     expected_ry = 2 * len(pairs) + 4 * len(triplets)
     expected_cx = 4 * len(pairs) + 6 * len(triplets)
@@ -277,11 +267,9 @@ def test_prepare_dicke_expval_z_sum_is_zero(name, TranspilerCls):
     This test exercises the expval / estimator code path that is not covered
     by the sampling tests.
     """
-    (
-        initial_ones,
-        pairs,
-        triplets,
-    ) = dicke_state_composition_schedule(n_qubits=2, block_size=2, hamming_weight=1)
+    initial_ones, schedule = dicke_state_composition_schedule(
+        n_qubits=2, block_size=2, hamming_weight=1
+    )
 
     H = qm_o.Z(0) + qm_o.Z(1)
 
@@ -291,8 +279,7 @@ def test_prepare_dicke_expval_z_sum_is_zero(name, TranspilerCls):
         bindings={
             "n": 2,
             "initial_ones": initial_ones,
-            "pairs": pairs,
-            "triplets": triplets,
+            "schedule": schedule,
             "hamiltonian": H,
         },
     )
@@ -323,8 +310,8 @@ def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
     contributes (n-k) qubits in |0> (+1 eigenvalue) and k qubits in |1>
     (-1 eigenvalue), giving <sum Z_i> = (n-k) - k = n - 2k.
     """
-    initial_ones, pairs, triplets = (
-        dicke_state_composition_schedule(n_qubits=n, block_size=n, hamming_weight=k)
+    initial_ones, schedule = dicke_state_composition_schedule(
+        n_qubits=n, block_size=n, hamming_weight=k
     )
 
     H = qm_o.Z(0)
@@ -337,8 +324,7 @@ def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
         bindings={
             "n": n,
             "initial_ones": initial_ones,
-            "pairs": pairs,
-            "triplets": triplets,
+            "schedule": schedule,
             "hamiltonian": H,
         },
     )
@@ -364,8 +350,8 @@ def test_prepare_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n, k
     For |D^n_k>, every bitstring in the equal superposition has exactly k set bits,
     so all measurement outcomes must have Hamming weight k.
     """
-    initial_ones, pairs, triplets = (
-        dicke_state_composition_schedule(n_qubits=n, block_size=n, hamming_weight=k)
+    initial_ones, schedule = dicke_state_composition_schedule(
+        n_qubits=n, block_size=n, hamming_weight=k
     )
 
     transpiler = TranspilerCls()
@@ -374,8 +360,7 @@ def test_prepare_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n, k
         bindings={
             "n": n,
             "initial_ones": initial_ones,
-            "pairs": pairs,
-            "triplets": triplets,
+            "schedule": schedule,
         },
     )
 
