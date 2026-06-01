@@ -164,7 +164,10 @@ qaoa_ansatz.draw(
 from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
 
 transpiler = QuriPartsTranspiler()
-executor = QuriPartsExecutor()
+# `seed` を渡すと Qulacs sampler が再現可能になります。同じ seed と回路で `sample(...)` を
+# 2 回呼ぶと、まったく同じショットカウントが得られます。非決定的なサンプリングにしたい場合は
+# この引数を省略する（または `seed=None` を渡す）だけです。
+executor = QuriPartsExecutor(seed=42)
 
 executable = transpiler.transpile(
     qaoa_ansatz,
@@ -274,8 +277,8 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# `QuriPartsExecutor` が使う Qulacs sampler はショットごとの RNG に seed を設定しないため、最適化の軌跡や最終エネルギーは実行ごとに少し変わります。
-# それでも、この 5 ノードグラフ上の $H_C$ の基底状態エネルギー付近までは収束するはずです。
+# 上の `QuriPartsExecutor` は `seed=42` で構築しているため Qulacs sampler は再現可能で、このページを再実行しても同じ最適化の軌跡と最終エネルギーが得られます。元の非決定的な挙動に戻すには `seed` 引数を外してください。
+# この 5 ノードグラフ上の $H_C$ の基底状態エネルギー付近までは収束するはずです。
 # ここで得た最適パラメータ (`opt_gammas`、`opt_betas`) を、以降の例でも使います。
 
 # %% [markdown]
