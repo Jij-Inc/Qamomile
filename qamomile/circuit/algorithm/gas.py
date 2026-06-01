@@ -4,15 +4,27 @@ import qamomile.circuit as qmc
 import numpy as np
 
 @qmc.qkernel
+def qft_encoding(
+    q: qmc.Vector[qmc.Qubit],
+    coef: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Encode a classical value into the phase of a quantum state using the QFT."""
+    m = q.shape[0]
+    theta = 2*np.pi*coef/(2**m)
+    for i in range(m):
+        q[i] = qmc.p(q[i], theta * (2 ** (i) ))
+    return q
+
+@qmc.qkernel
 def zero_degree_qft_encoding(
     q_output: qmc.Vector[qmc.Qubit],
     q_input: qmc.Vector[qmc.Qubit],
     coef: qmc.Float,
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
     """Apply a phase gate without any control qubits."""
-    m = q_output.shape[0]
-    for i in range(m):
-        qmc.p(q_output[i], (2 ** i) * 2*np.pi*coef/(2**m))
+    
+    q_output = qft_encoding(q_output, coef)
+    
     return q_output, q_input
 
 @qmc.qkernel
@@ -23,10 +35,12 @@ def first_degree_qft_encoding(
     coef: qmc.Float,
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
     """Apply a phase gate controlled by a single control qubit."""
-    m = q_output.shape[0]
-    mcp_phase = qmc.control(qmc.p, num_controls=1)
-    for i in range(m):
-        mcp_phase(q_input[control_idx], q_output[i], theta= (2 ** i) * 2*np.pi*coef/(2**m) )
+    
+    ctrl_qft = qmc.control(qft_encoding)#, num_controls=number_of_controls)
+    ctrl_qubit = q_input[control_idx]
+    ctrl_qubit, q_output = ctrl_qft(ctrl_qubit, q_output, coef)
+    q_input[control_idx] = ctrl_qubit
+    
     return q_output, q_input
 
 @qmc.qkernel
@@ -38,10 +52,14 @@ def second_degree_qft_encoding(
     coef: qmc.Float,
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
     """Apply a phase gate controlled by two control qubits."""
-    m = q_output.shape[0]
-    mcp_phase = qmc.control(qmc.p, num_controls=2)
-    for i in range(m):
-        mcp_phase(q_input[control_idx0], q_input[control_idx1], q_output[i], theta= (2 ** i) * 2*np.pi*coef/(2**m) )
+    
+    ctrl_qft = qmc.control(qft_encoding, num_controls=2)
+    ctrl_qubit0 = q_input[control_idx0]
+    ctrl_qubit1 = q_input[control_idx1]
+    ctrl_qubit0, ctrl_qubit1, q_output = ctrl_qft(ctrl_qubit0, ctrl_qubit1, q_output, coef)
+    q_input[control_idx0] = ctrl_qubit0
+    q_input[control_idx1] = ctrl_qubit1
+    
     return q_output, q_input
 
 @qmc.qkernel
