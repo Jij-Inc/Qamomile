@@ -156,15 +156,18 @@ class MathematicalProblemConverter(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
+    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian | None:
         """Construct the cost Hamiltonian.
 
         Subclasses must implement this method to build the appropriate
         Hamiltonian for their specific algorithm (e.g., Pauli-Z for QAOA,
-        QRAC-encoded for QRAO).
+        QRAC-encoded for QRAO). Oracle-based converters such as
+        ``GASConverter`` return ``None`` because they do not expose a cost
+        Hamiltonian.
 
         Returns:
-            qm_o.Hamiltonian: The cost Hamiltonian.
+            qm_o.Hamiltonian | None: The cost Hamiltonian, or ``None`` for
+            oracle-based converters.
         """
         ...
 
