@@ -144,7 +144,7 @@ def apply_function_preparation_qubo(
             q_output, q_input, control_idx, coef
         )
 
-    for (ctrl0, ctrl1), coef in quad.items():
+    for (ctrl0, ctrl1), coef in qmc.items(quad):
         q_output, q_input = second_degree_qft_encoding(
             q_output, q_input, ctrl0, ctrl1, coef
         )

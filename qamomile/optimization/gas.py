@@ -12,7 +12,6 @@ import numpy as np
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.gas import (
     grover_algorithm,
-    qft_encoding,
     zero_degree_qft_encoding,
 )
 from qamomile.circuit.transpiler.executable import ExecutableProgram
@@ -58,10 +57,23 @@ class GASConverter(MathematicalProblemConverter):
         f_max = binary_model.constant + sum(c for c in all_coeffs if c > 0)
         f_min = binary_model.constant + sum(c for c in all_coeffs if c < 0)
         half_range = f_max - f_min
-        return int(math.floor(math.log2(half_range))) + 2 if half_range > 0 else 1
+        if half_range <= 0:
+            return 2
+        return max(2, int(math.floor(math.log2(half_range))) + 2)
 
     def get_cost_hamiltonian(self) -> None:
-        """Return no cost Hamiltonian because GAS is oracle-based."""
+        """Return None because GAS is oracle-based and has no cost Hamiltonian.
+
+        GAS marks states via an oracle reflection rather than minimizing the
+        expectation value of a cost Hamiltonian, so there is no Hamiltonian to
+        expose. The ``MathematicalProblemConverter`` base contract allows
+        oracle-based converters to return ``None`` here (the return type is
+        ``qm_o.Hamiltonian | None``); callers must handle the ``None`` case.
+
+        Returns:
+            None: GAS exposes no cost Hamiltonian.
+
+        """
         return None
 
     def transpile(
@@ -194,7 +206,12 @@ class GASConverter(MathematicalProblemConverter):
                 q_input: qmc.Vector[qmc.Qubit],
                 theta: qmc.Float,
             ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-                q_output = qft_encoding(q_output, theta)
+                # theta is already the pre-scaled angle (2π·coef/2^m); apply
+                # p-rotations directly to avoid the extra 2π/2^m scaling that
+                # qft_encoding would introduce.
+                m = q_output.shape[0]
+                for i in qmc.range(m):
+                    q_output[i] = qmc.p(q_output[i], theta * (2**i))
                 return q_output, q_input
 
             return constant_encoding
@@ -225,6 +242,8 @@ class GASConverter(MathematicalProblemConverter):
     ):
         """Factory that composes a recursive chain of term encoders with baked-in angles.
 
+        An empty ``encoders`` list (or exhausted recursion) returns an identity kernel.
+
         Args:
             encoders (list): Encoder kernels to apply in sequence.
             theta_values (list): Per-encoder phase angles.
@@ -234,6 +253,17 @@ class GASConverter(MathematicalProblemConverter):
             callable: A qkernel with signature ``(q_output, q_input)``.
 
         """
+        if not encoders or start_idx >= len(encoders):
+
+            @qmc.qkernel
+            def identity(
+                q_output: qmc.Vector[qmc.Qubit],
+                q_input: qmc.Vector[qmc.Qubit],
+            ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+                return q_output, q_input
+
+            return identity
+
         current_encoder = encoders[start_idx]
         current_theta = theta_values[
             start_idx
@@ -360,11 +390,7 @@ class GASConverter(MathematicalProblemConverter):
         encoders_rev = list(reversed(encoders))
         thetas_rev = list(reversed(functional_theta_dagger))
 
-        all_phases_dagger = (
-            self._compose_encoders_baked(encoders_rev, thetas_rev)
-            if encoders_rev
-            else None
-        )
+        all_phases_dagger = self._compose_encoders_baked(encoders_rev, thetas_rev)
 
         @qmc.qkernel
         def apply_hubo_preparation_dagger(
@@ -375,8 +401,7 @@ class GASConverter(MathematicalProblemConverter):
             # Reverse of the final iqft
             q_output = qmc.qft(q_output)
             # Reverse all phase encodings with negated angles
-            if all_phases_dagger is not None:
-                q_output, q_input = all_phases_dagger(q_output, q_input)
+            q_output, q_input = all_phases_dagger(q_output, q_input)
             # Reverse the zero-degree phase with negated y
             q_output, q_input = zero_degree_qft_encoding(q_output, q_input, (-1.0) * y)
             # Reverse the initial Hadamards (H is self-adjoint)

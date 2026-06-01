@@ -2,8 +2,6 @@
 
 import pytest
 
-pytest.importorskip("qiskit")
-
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.gas import (
     apply_function_preparation_qubo,
@@ -15,7 +13,59 @@ from qamomile.circuit.algorithm.gas import (
     second_degree_qft_encoding,
     zero_degree_qft_encoding,
 )
-from qamomile.qiskit.transpiler import QiskitTranspiler
+
+
+# ---------------------------------------------------------------------------
+# Backend factories
+# ---------------------------------------------------------------------------
+
+
+def _qiskit_transpiler():
+    """Return a QiskitTranspiler, skipping if qiskit is unavailable.
+
+    Returns:
+        QiskitTranspiler: A fresh Qiskit backend transpiler.
+    """
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit.transpiler import QiskitTranspiler
+
+    return QiskitTranspiler()
+
+
+def _quri_parts_transpiler():
+    """Return a QuriPartsTranspiler, skipping if quri_parts is unavailable.
+
+    Returns:
+        QuriPartsTranspiler: A fresh QuriParts backend transpiler.
+    """
+    pytest.importorskip("quri_parts")
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    return QuriPartsTranspiler()
+
+
+def _cudaq_transpiler():
+    """Return a CudaqTranspiler, skipping if cudaq is unavailable.
+
+    Returns:
+        CudaqTranspiler: A fresh CUDA-Q backend transpiler.
+    """
+    pytest.importorskip("cudaq")
+    from qamomile.cudaq import CudaqTranspiler
+
+    return CudaqTranspiler()
+
+
+_BACKENDS = [
+    pytest.param(_qiskit_transpiler, id="qiskit"),
+    pytest.param(_quri_parts_transpiler, id="quri_parts"),
+    pytest.param(_cudaq_transpiler, id="cudaq"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Module-level qkernels (reused across tests)
+# ---------------------------------------------------------------------------
 
 
 @qmc.qkernel
@@ -118,15 +168,36 @@ def _wrap_grover_algorithm(
     return qmc.measure(q_input)
 
 
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+
 def _sample_results(exe, transpiler, bindings: dict, shots: int = 16):
-    """Sample an executable with bindings and return result rows."""
+    """Sample an executable with bindings and return result rows.
+
+    Args:
+        exe (ExecutableProgram): The compiled circuit to sample.
+        transpiler (Transpiler): Backend transpiler owning the executor.
+        bindings (dict): Runtime parameter bindings for the sample call.
+        shots (int): Number of shots.
+
+    Returns:
+        list: List of (bitstring, count) result rows.
+    """
     job = exe.sample(transpiler.executor(), bindings=bindings, shots=shots)
     return job.result().results
 
 
-def test_qft_encoding_transpile_smoke():
-    """qft_encoding wrapper transpiles and samples valid bitstrings."""
-    tr = QiskitTranspiler()
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
+def test_qft_encoding_transpile_smoke(make_transpiler):
+    """qft_encoding wrapper transpiles and samples valid bitstrings on each backend."""
+    tr = make_transpiler()
     exe = tr.transpile(_wrap_qft_encoding, bindings={"n": 3, "coef": 1.2})
     results = _sample_results(exe, tr, bindings={})
 
@@ -136,6 +207,7 @@ def test_qft_encoding_transpile_smoke():
         assert count > 0
 
 
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
 @pytest.mark.parametrize(
     "kernel,bindings,expected_len",
     [
@@ -149,9 +221,9 @@ def test_qft_encoding_transpile_smoke():
     ],
     ids=["zero-degree", "first-degree", "second-degree"],
 )
-def test_degree_encodings_transpile_and_sample_smoke(kernel, bindings, expected_len):
-    """Degree-specific encoders transpile and produce valid samples."""
-    tr = QiskitTranspiler()
+def test_degree_encodings_transpile_and_sample_smoke(make_transpiler, kernel, bindings, expected_len):
+    """Degree-specific encoders transpile and produce valid samples on each backend."""
+    tr = make_transpiler()
     exe = tr.transpile(kernel, bindings=bindings)
     results = _sample_results(exe, tr, bindings={})
 
@@ -161,9 +233,10 @@ def test_degree_encodings_transpile_and_sample_smoke(kernel, bindings, expected_
         assert count > 0
 
 
-def test_apply_then_dagger_restores_input_register():
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
+def test_apply_then_dagger_restores_input_register(make_transpiler):
     """Applying preparation then dagger restores the input register to |0...0>."""
-    tr = QiskitTranspiler()
+    tr = make_transpiler()
     bindings = {
         "n": 3,
         "m": 4,
@@ -180,9 +253,10 @@ def test_apply_then_dagger_restores_input_register():
         assert count > 0
 
 
-def test_function_preparation_transpile_and_sample_smoke():
-    """function_preparation_qubo transpiles and samples valid input bitstrings."""
-    tr = QiskitTranspiler()
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
+def test_function_preparation_transpile_and_sample_smoke(make_transpiler):
+    """function_preparation_qubo transpiles and samples valid input bitstrings on each backend."""
+    tr = make_transpiler()
     bindings = {
         "n": 3,
         "m": 4,
@@ -199,9 +273,10 @@ def test_function_preparation_transpile_and_sample_smoke():
         assert count > 0
 
 
-def test_grover_algorithm_transpile_and_sample_smoke():
-    """grover_algorithm transpiles and samples valid input bitstrings."""
-    tr = QiskitTranspiler()
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
+def test_grover_algorithm_transpile_and_sample_smoke(make_transpiler):
+    """grover_algorithm transpiles and samples valid input bitstrings on each backend."""
+    tr = make_transpiler()
     bindings = {
         "n": 3,
         "m": 4,
