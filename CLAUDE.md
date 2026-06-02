@@ -436,7 +436,12 @@ Never include **bare** `@username` or `@org/team` mention tokens in normal GitHu
 
 Do not add external URLs (arXiv, blog posts, docs sites, vendor pages, etc.) to commits, PRs, issues, **or PR / code review comments and replies** unless the user has explicitly provided that URL in the current conversation. When in doubt, omit the link or ask the user to supply one. Internal references to other issues / PRs in this repo (e.g., `#354`) are fine when factually relevant.
 
+This restriction is **not limited to clickable URLs**: do not paste **identifiers, IDs, or titles of external articles or external trackers** either — arXiv IDs (`2507.06198`), DOIs, paper / blog-post titles, external bug-tracker keys, or **internal backlog IDs** (e.g., `BACKLOG-8115`) and Notion page titles — into commits, PRs, issues, or PR / code review comments and replies, unless the user explicitly provided that reference in the current conversation. These bare references are editorial too: they point readers at an external or non-public source just as a URL would, only without the hyperlink. When an external work genuinely needs to be cited, describe it in plain prose (e.g., "the stochastic-differential-equation quantum algorithm") and let the user supply the exact citation. Internal references to this repo's own issues / PRs (`#354`) remain fine.
+
 This rule targets **editorial** content — prose humans read. URLs that are functional metadata consumed by tooling rather than read by people (e.g., `$schema` references in JSON / YAML config files, dependency URLs in lockfiles, IDE / editor schema hints) are out of scope and may be added when the tool requires them.
 
 - ✅ "Implements the Trotter circuit (see #337 for the design discussion)."
 - ❌ "Implements the Trotter circuit (see `<external-url>`)." (the URL is shown as a `<external-url>` placeholder rather than a real address so this example itself doesn't render as a clickable external link; outside this kind of placeholder, never paste a literal external URL in prose unless the user explicitly provided it)
+- ✅ "Implements the stochastic-differential-equation quantum algorithm."
+- ❌ "Implements the algorithm from arXiv:2507.06198." (a bare external article ID — drop it unless the user supplied the reference)
+- ❌ "Closes the qulacs-seed gap (BACKLOG-8115)." (an internal backlog ID — describe the work in prose instead and leave the tracker key out of the public record)
