@@ -123,7 +123,7 @@ def _wrap_second_degree(
 def _wrap_apply_then_dagger(
     n: qmc.UInt,
     m: qmc.UInt,
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
@@ -143,7 +143,7 @@ def _wrap_apply_then_dagger(
 def _wrap_function_preparation(
     n: qmc.UInt,
     m: qmc.UInt,
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
@@ -157,7 +157,7 @@ def _wrap_function_preparation(
 def _wrap_grover_algorithm(
     n: qmc.UInt,
     m: qmc.UInt,
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     iters: qmc.UInt,

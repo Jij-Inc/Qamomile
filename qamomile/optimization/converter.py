@@ -156,22 +156,19 @@ class MathematicalProblemConverter(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian | None:
+    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Construct the cost Hamiltonian.
 
         Subclasses must implement this method to build the appropriate
         Hamiltonian for their specific algorithm (e.g., Pauli-Z for QAOA,
         QRAC-encoded for QRAO). Oracle-based converters that do not use a cost                                                  
         Hamiltonian (e.g., ``GASConverter``) should raise ``NotImplementedError``                                               
-        so that accidental calls fail fast rather than silently propagating                                                     
-        ``None``.
 
         Returns:
-            qm_o.Hamiltonian | None: The cost Hamiltonian, or ``None`` if the                                                   
-            subclass explicitly documents a no-Hamiltonian contract.
+            qm_o.Hamiltonian: The cost Hamiltonian.
 
         Raises:
-            NotImplementedError: If the converter does not expose a cost                                                        
+            NotImplementedError: If the converter does not expose a cost 
             Hamiltonian.
         """
         ...
