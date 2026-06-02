@@ -15,6 +15,7 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.gas import (
     grover_algorithm,
+    qft_encoding,
     zero_degree_qft_encoding,
 )
 from qamomile.circuit.transpiler.executable import ExecutableProgram
@@ -233,7 +234,7 @@ class GASConverter(MathematicalProblemConverter):
         )
         if has_non_integer and approximate_real_coefficients:
             self.binary_model = self.approximate_real_valued_model(
-                self.binary_model, quantization_parameter=quantization_parameter
+                self.effective_model, quantization_parameter=quantization_parameter
             )
             warnings.warn(
                 "The binary model contains non-integer coefficients. "
@@ -242,11 +243,13 @@ class GASConverter(MathematicalProblemConverter):
                 "Use approximate_real_coefficients=False to disable this approximation "
                 "and use the original real coefficients."
             )
+        else:
+            self.effective_model = self.binary_model
 
         if output_bits is None:
-            output_bits = self._required_output_bits(self.binary_model)
+            output_bits = self._required_output_bits(self.effective_model)
 
-        if not self.binary_model.higher:
+        if not self.effective_model.higher:
             return self._transpile_quadratic(
                 transpiler, output_bits=output_bits, y=y, num_iterations=num_iterations
             )
@@ -306,16 +309,16 @@ class GASConverter(MathematicalProblemConverter):
         # The QFT register encodes  y_circuit + Σ linear[i]·xᵢ + Σ quad[i,j]·xᵢxⱼ
         # = (constant − y) + (f(x) − constant)  =  f(x) − y.
         # The oracle fires when this is negative (MSB = 1), i.e. f(x) < y.
-        y_circuit = int(self.binary_model.constant - y)
+        y_circuit = self.effective_model.constant - y
 
         return transpiler.transpile(
             measure_grover_algorithm,
             bindings={
-                "n": self.binary_model.num_bits,
+                "n": self.effective_model.num_bits,
                 "m": output_bits,
                 "y": y_circuit,
-                "linear": self.binary_model.linear,
-                "quad": self.binary_model.quad,
+                "linear": self.effective_model.linear,
+                "quad": self.effective_model.quad,
                 "iters": num_iterations,
             },
         )
@@ -325,49 +328,34 @@ class GASConverter(MathematicalProblemConverter):
     ######################################################################################
 
     def _make_term_encoding(self, ctrl_indices: list[int]) -> qmc.QKernel:
-        """Factory to create kernel that encodes one polynomial term by controlled phase.
+        """Factory to create kernel that encodes one polynomial term via qft_encoding.
 
         Args:
             ctrl_indices (list[int]): Input-qubit indices used as controls.
 
         Returns:
-            qmc.QKernel: A qkernel with signature ``(q_output, q_input, theta)``.
+            qmc.QKernel: A qkernel with signature ``(q_output, q_input, coef)``.
 
         """
         degree = len(ctrl_indices)
 
         if degree == 0:
-
-            @qmc.qkernel
-            def constant_encoding(
-                q_output: qmc.Vector[qmc.Qubit],
-                q_input: qmc.Vector[qmc.Qubit],
-                theta: qmc.Float,
-            ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-                # theta is already the pre-scaled angle (2π·coef/2^m); apply
-                # p-rotations directly to avoid the extra 2π/2^m scaling that
-                # qft_encoding would introduce.
-                m = q_output.shape[0]
-                for i in qmc.range(m):
-                    q_output[i] = qmc.p(q_output[i], theta * (2**i))  # type: ignore[operator]
-                return q_output, q_input
-
-            return constant_encoding
+            return zero_degree_qft_encoding
 
         @qmc.qkernel
         def term_encoding(
             q_output: qmc.Vector[qmc.Qubit],
             q_input: qmc.Vector[qmc.Qubit],
-            theta: qmc.Float,
+            coef: qmc.Float,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            m = q_output.shape[0]
-            # num_controls must be a Python int — baked in via closure over `degree`.
-            mcp_phase = qmc.control(qmc.p, num_controls=degree)
-            # ctrl_indices is a plain Python list resolved at trace time; build
-            # controls once outside the loop — it does not depend on i.
+            # num_controls baked in at factory time via closure over `degree`.
+            ctrl_qft = qmc.control(qft_encoding, num_controls=degree)
             controls = [q_input[ci] for ci in ctrl_indices]
-            for i in qmc.range(m):
-                mcp_phase(*controls, q_output[i], theta=theta * (2**i))  # type: ignore[operator]
+            result = ctrl_qft(*controls, q_output, coef)
+            # result = (ctrl_0, ..., ctrl_{degree-1}, q_output)
+            for k in range(degree):
+                q_input[ctrl_indices[k]] = result[k]  # type: ignore[index]
+            q_output = result[degree]  # type: ignore[index]
             return q_output, q_input
 
         return term_encoding
@@ -375,30 +363,30 @@ class GASConverter(MathematicalProblemConverter):
     def _compose_encoders_baked(
         self,
         encoders: list[qmc.QKernel],
-        theta_values: list[float],
+        coef_values: list[float],
     ) -> qmc.QKernel:
-        """Factory that composes term encoders with baked-in angles into a single kernel.
+        """Factory that composes term encoders with baked-in coefficients into a single kernel.
 
         Builds the chain iteratively at factory time — no Python recursion — so
         models with many terms do not hit the interpreter's recursion limit. Each
-        ``(encoder, theta)`` pair is wrapped in its own helper to ensure correct
+        ``(encoder, coef)`` pair is wrapped in its own helper to ensure correct
         closure capture before being prepended to the growing chain.
 
         Args:
             encoders (list[qmc.QKernel]): Encoder kernels to apply in sequence.
-            theta_values (list[float]): Per-encoder phase angles, one per encoder.
+            coef_values (list[float]): Per-encoder raw coefficients, one per encoder.
 
         Returns:
             qmc.QKernel: A qkernel with signature ``(q_output, q_input)``.
 
         """
-        if len(encoders) != len(theta_values):
+        if len(encoders) != len(coef_values):
             raise ValueError(
-                "encoders and theta_values must have the same length "
-                f"(got {len(encoders)} and {len(theta_values)})."
+                "encoders and coef_values must have the same length "
+                f"(got {len(encoders)} and {len(coef_values)})."
             )
 
-        steps = list(zip(encoders, theta_values))
+        steps = list(zip(encoders, coef_values))
 
         if not steps:
 
@@ -457,23 +445,20 @@ class GASConverter(MathematicalProblemConverter):
         terms_indices = []
         coefficients = []
 
-        for idx, coef in self.binary_model.linear.items():
+        for idx, coef in self.effective_model.linear.items():
             terms_indices.append([idx])
             coefficients.append(float(coef))
 
-        for idxs, coef in self.binary_model.quad.items():
+        for idxs, coef in self.effective_model.quad.items():
             terms_indices.append(list(idxs))
             coefficients.append(float(coef))
 
-        for idxs, coef in self.binary_model.higher.items():
+        for idxs, coef in self.effective_model.higher.items():
             terms_indices.append(list(idxs))
             coefficients.append(float(coef))
-
-        # Pre-compute phase angles for each term.
-        functional_theta = [2 * np.pi * c / (2**output_bits) for c in coefficients]
 
         encoders = [self._make_term_encoding(idxs) for idxs in terms_indices]
-        all_phases = self._compose_encoders_baked(encoders, functional_theta)
+        all_phases = self._compose_encoders_baked(encoders, coefficients)
 
         @qmc.qkernel
         def apply_hubo_preparation(
@@ -483,7 +468,7 @@ class GASConverter(MathematicalProblemConverter):
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
             for i in qmc.range(output_bits):
                 q_output[i] = qmc.h(q_output[i])
-            for i in qmc.range(self.binary_model.num_bits):
+            for i in qmc.range(self.effective_model.num_bits):
                 q_input[i] = qmc.h(q_input[i])
 
             q_output, q_input = zero_degree_qft_encoding(q_output, q_input, y)
@@ -515,27 +500,24 @@ class GASConverter(MathematicalProblemConverter):
         terms_indices = []
         coefficients = []
 
-        for idx, coef in self.binary_model.linear.items():
+        for idx, coef in self.effective_model.linear.items():
             terms_indices.append([idx])
             coefficients.append(float(coef))
 
-        for idxs, coef in self.binary_model.quad.items():
+        for idxs, coef in self.effective_model.quad.items():
             terms_indices.append(list(idxs))
             coefficients.append(float(coef))
 
-        for idxs, coef in self.binary_model.higher.items():
+        for idxs, coef in self.effective_model.higher.items():
             terms_indices.append(list(idxs))
             coefficients.append(float(coef))
 
-        # Negate all angles for the dagger, then reverse order of application.
-        functional_theta_dagger = [
-            -2 * np.pi * c / (2**output_bits) for c in coefficients
-        ]
+        # Negate all coefficients for the dagger, then reverse order of application.
         encoders = [self._make_term_encoding(idxs) for idxs in terms_indices]
         encoders_rev = list(reversed(encoders))
-        thetas_rev = list(reversed(functional_theta_dagger))
+        coefs_neg_rev = list(reversed([-c for c in coefficients]))
 
-        all_phases_dagger = self._compose_encoders_baked(encoders_rev, thetas_rev)
+        all_phases_dagger = self._compose_encoders_baked(encoders_rev, coefs_neg_rev)
 
         @qmc.qkernel
         def apply_hubo_preparation_dagger(
@@ -550,7 +532,7 @@ class GASConverter(MathematicalProblemConverter):
             # Reverse the zero-degree phase with negated y
             q_output, q_input = zero_degree_qft_encoding(q_output, q_input, (-1.0) * y)
             # Reverse the initial Hadamards (H is self-adjoint)
-            for i in qmc.range(self.binary_model.num_bits):
+            for i in qmc.range(self.effective_model.num_bits):
                 q_input[i] = qmc.h(q_input[i])
             for i in qmc.range(output_bits):
                 q_output[i] = qmc.h(q_output[i])
@@ -695,7 +677,7 @@ class GASConverter(MathematicalProblemConverter):
             Args:
                 n (qmc.UInt): Number of input (decision-variable) qubits.
                 m (qmc.UInt): Number of output (objective-value) qubits.
-                y (qmc.Float): Internal circuit threshold: ``binary_model.constant − best_y``.
+                y (qmc.Float): Internal circuit threshold: ``effective_model.constant − best_y``.
                     Encodes the shift so the oracle fires on ``f(x) < best_y``.
                 iters (qmc.UInt): Number of Grover iterations. Defaults to 1.
 
@@ -711,12 +693,12 @@ class GASConverter(MathematicalProblemConverter):
             )
             return qmc.measure(q_input)
 
-        y_circuit = int(self.binary_model.constant - y)
+        y_circuit =self.effective_model.constant - y
 
         return transpiler.transpile(
             measure_hubo_grover_algorithm,
             bindings={
-                "n": self.binary_model.num_bits,
+                "n": self.effective_model.num_bits,
                 "m": output_bits,
                 "y": y_circuit,
                 "iters": num_iterations,
