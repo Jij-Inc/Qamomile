@@ -455,6 +455,29 @@ class ArrayBase(Handle, Generic[T]):
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 
+        # Bounds-check a constant index that overflows a constant dimension.
+        # This stops an out-of-range constant access — e.g. ``empty[0]`` on
+        # a length-0 slice view (``empty = s[1:1]``) or ``s[5]`` on a
+        # length-3 array — from being built into the IR. For a measured
+        # ``Vector[Bit]`` such an element would otherwise compose to a
+        # valid-but-wrong root clbit at emit time and be read silently. Only
+        # the ``idx >= dim`` overflow is rejected here: negative indices are
+        # a separate (unsupported) concern already diagnosed downstream, and
+        # symbolic indices / dimensions (loop variables, runtime parameters)
+        # carry no provable range and are deferred to emit-time resolution.
+        if len(indices) == 1 and self._shape:
+            idx_const = _as_int_const(indices[0])
+            dim_const = _as_int_const(self._shape[0])
+            if (
+                idx_const is not None
+                and dim_const is not None
+                and idx_const >= dim_const
+            ):
+                raise IndexError(
+                    f"Index {idx_const} is out of range for "
+                    f"'{self.value.name or 'array'}' of length {dim_const}."
+                )
+
         # Check if the array itself has been consumed (e.g., by cast or measure)
         if self._consumed and self.value.type.is_quantum():
             display_name = self.value.name or "array"
