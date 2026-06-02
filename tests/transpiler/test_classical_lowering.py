@@ -843,6 +843,63 @@ class TestVectorBitElementProvenance:
             "clbit than the body re-measures into, which would loop forever."
         )
 
+    @pytest.mark.parametrize("idx", [0, 1])
+    def test_while_loop_carried_init_from_bound_param_vector_element(
+        self, transpiler, idx
+    ):
+        """A loop-carried ``while`` whose initial condition indexes a measured
+        ``Vector[Bit]`` with a transpile-time *bound parameter* aliases its
+        loop-carried clbit correctly.
+
+        Same loop-carried alias contract as
+        ``test_while_loop_carried_init_from_measured_vector_element``, but the
+        element index in ``bit = s[idx]`` comes from a kernel parameter
+        resolved through ``bindings={"idx": idx}`` rather than a literal. The
+        binding is folded to a constant before the resource allocator runs, so
+        the allocator must still resolve ``s[idx]`` to the measured vector's
+        ``(root, idx)`` clbit and alias the body re-measurement onto it.
+        Verified structurally (no execution): a broken alias would leave the
+        ``while`` reading a stale clbit and never terminate. Regression for the
+        bound-parameter index path of the loop-carried alias.
+        """
+        from qiskit.circuit.controlflow import WhileLoopOp
+
+        @qmc.qkernel
+        def kernel(idx: qmc.UInt) -> qmc.Bit:
+            anc = qmc.qubit_array(2, name="anc")
+            qz = qmc.qubit("qz")
+            anc[idx] = qmc.x(anc[idx])
+            s = qmc.measure(anc)
+            bit = s[idx]
+            while bit:
+                bit = qmc.measure(qz)
+            return bit
+
+        qc = (
+            transpiler.transpile(kernel, bindings={"idx": idx})
+            .compiled_quantum[0]
+            .circuit
+        )
+        clbit_index = {bit: i for i, bit in enumerate(qc.clbits)}
+        while_ops = [
+            inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)
+        ]
+        assert while_ops, "expected a runtime while_loop"
+        cond_clbit = clbit_index[while_ops[0].operation.condition[0]]
+        body = while_ops[0].operation.blocks[0]
+        body_to_outer = {b: while_ops[0].clbits[j] for j, b in enumerate(body.clbits)}
+        body_measure_clbits = [
+            clbit_index[body_to_outer[binst.clbits[0]]]
+            for binst in body.data
+            if binst.operation.name == "measure"
+        ]
+        assert body_measure_clbits, "expected a re-measure inside the while body"
+        assert all(c == cond_clbit for c in body_measure_clbits), (
+            "loop-carried alias broken for a bound-parameter index: the while "
+            "condition reads a different clbit than the body re-measures into, "
+            "which would loop forever."
+        )
+
     def test_out_of_bounds_constant_element_index_rejected(self, transpiler):
         """A constant index that overflows a constant dimension is rejected
         at trace time rather than silently misresolving.
