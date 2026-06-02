@@ -245,7 +245,7 @@ class MathematicalProblemConverter(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian | None:
+    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Construct the cost Hamiltonian.
 
         Subclasses must implement this method to build the appropriate

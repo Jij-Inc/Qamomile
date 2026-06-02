@@ -3,7 +3,7 @@
 Covers both the QUBO (build-in kernel) and HUBO (qkernel-factory) paths.
 
 GAS is an oracle-based algorithm: ``GASConverter.get_cost_hamiltonian()``
-returns ``None`` by design and the circuit terminates in
+raises ``NotImplementedError`` by design and the circuit terminates in
 ``qmc.measure(q_input)`` to read out the optimal bitstring. There is no
 expectation-value semantics, so the cross-backend coverage required by
 CLAUDE.md exercises the *sampling* primitive only — the expval path does

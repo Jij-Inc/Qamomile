@@ -57,10 +57,10 @@ class GASConverter(MathematicalProblemConverter):
         )
         f_max = binary_model.constant + sum(c for c in all_coeffs if c > 0)
         f_min = binary_model.constant + sum(c for c in all_coeffs if c < 0)
-        half_range = f_max - f_min
-        if half_range <= 0:
+        range_span = f_max - f_min
+        if range_span <= 0:
             return 2
-        return max(2, int(math.floor(math.log2(half_range))) + 2)
+        return max(2, int(math.floor(math.log2(range_span))) + 2)
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian | None:
         """Raise NotImplementedError because GAS is oracle-based and has no cost Hamiltonian.
@@ -261,6 +261,12 @@ class GASConverter(MathematicalProblemConverter):
             callable: A qkernel with signature ``(q_output, q_input)``.
 
         """
+        if len(encoders) != len(theta_values):
+            raise ValueError(
+                "encoders and theta_values must have the same length "
+                f"(got {len(encoders)} and {len(theta_values)})."
+            )
+
         steps = list(zip(encoders, theta_values))
 
         if not steps:
