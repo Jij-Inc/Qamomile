@@ -152,7 +152,7 @@ def sampling_grover_algorithm(
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     iters: qmc.UInt = 1
-) -> qmc.Tuple[qmc.UInt, qmc.UInt]:
+) -> qmc.Tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     q_output,q_input = grover_algorithm(
         n,
         m,
