@@ -83,6 +83,13 @@ result = (
     .result()
 )
 print("GHZ result:", result.results)
+assert result.shots == 128
+assert sum(count for _, count in result.results) == 128
+# 4-qubit GHZ state -> only (0, 0, 0, 0) and (1, 1, 1, 1) outcomes.
+assert all(
+    outcome in {(0, 0, 0, 0), (1, 1, 1, 1)}
+    for outcome, _ in result.results
+)
 
 # %% [markdown]
 # The helper `entangle_once` keeps the call site readable. In the transpiled circuit, it is inlined — you see individual CX gates, not a sub-block.
@@ -199,7 +206,11 @@ algorithm_skeleton.draw(fold_loops=False)
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
+assert est.qubits == 3
 print("total gates:", est.gates.total)
+# 3 H gates (broadcast over qubit_array(3)); the stub `oracle_box` is
+# counted via gates.oracle_calls, not gates.total.
+assert est.gates.total == 3
 
 # %% [markdown]
 # Next, we build a qkernel that mixes ordinary gates with multiple stub oracles.
@@ -254,9 +265,19 @@ iterative_oracle_skeleton.draw(rounds=4, fold_loops=False)
 # %%
 oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
 print("total gates:", oracle_est.gates.total)
+assert str(oracle_est.gates.total) == "3*rounds + 3"
 print("two-qubit gates:", oracle_est.gates.two_qubit)
+assert str(oracle_est.gates.two_qubit) == "2*rounds + 1"
 print("oracle_calls:", oracle_est.gates.oracle_calls)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_calls.items()} == {
+    "phase_oracle": "rounds + 1",
+    "mixing_oracle": "rounds",
+}
 print("oracle_queries:", oracle_est.gates.oracle_queries)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_queries.items()} == {
+    "phase_oracle": "2*rounds + 2",
+    "mixing_oracle": "rounds",
+}
 
 # %% [markdown]
 # Substitute a concrete value for `rounds` to get numeric counts:
@@ -264,7 +285,9 @@ print("oracle_queries:", oracle_est.gates.oracle_queries)
 # %%
 oracle_est_4 = oracle_est.substitute(rounds=4)
 print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
+assert oracle_est_4.gates.oracle_calls == {"phase_oracle": 5, "mixing_oracle": 4}
 print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
+assert oracle_est_4.gates.oracle_queries == {"phase_oracle": 10, "mixing_oracle": 4}
 
 # %% [markdown]
 # In this example, resource analysis works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `oracle_calls` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `oracle_queries` (weighted by each stub's `query_complexity`).

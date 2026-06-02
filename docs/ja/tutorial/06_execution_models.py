@@ -33,6 +33,8 @@
 # # !pip install qamomile
 
 # %%
+import math
+
 import qamomile.circuit as qmc
 import qamomile.observable as qmo
 from qamomile.qiskit import QiskitTranspiler
@@ -71,6 +73,13 @@ sample_result = exe_sample.sample(
 
 for outcome, count in sample_result.results:
     print(f"  outcome={outcome}, count={count}")
+assert sample_result.shots == 256
+assert sum(count for _, count in sample_result.results) == 256
+# parity_probe は tuple[Bit, Bit] を返す → 各 outcome は 2 要素 tuple。
+assert all(
+    isinstance(outcome, tuple) and len(outcome) == 2
+    for outcome, _ in sample_result.results
+)
 
 # %% [markdown]
 # 各`outcome`は`(0, 1)`や`(1, 0)`のようなタプルです。最初の要素は`q0`に、2番目の要素は`q1`に対応し、`return`文での順序と一致します。
@@ -157,6 +166,10 @@ run_result = exe_run.run(
 
 print("expectation value:", run_result)
 print("python type:", type(run_result))
+assert isinstance(run_result, float)
+# Ry(theta)|0> の <Z> は厳密に cos(theta)。statevector estimator は
+# 浮動小数点精度で返す。
+assert math.isclose(run_result, math.cos(0.7), abs_tol=1e-10)
 
 # %% [markdown]
 # `run().result()`はプレーンな`float`を返します — 推定された$\langle \psi \rvert Z \lvert \psi \rangle$の値です。$\theta = 0.7$の場合、RYゲートが量子ビットを

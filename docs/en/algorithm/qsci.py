@@ -92,6 +92,11 @@ for i in range(n_qubits):
 exact_eigvals = np.linalg.eigvalsh(H.to_numpy())
 E_exact = float(exact_eigvals[0])
 print(f"Exact ground state energy: {E_exact:.6f}")
+# eigvalsh returns ascending eigenvalues, so exact_eigvals[0] is the ground
+# state. The 4-qubit TFIM Hilbert space is 2^n_qubits-dimensional.
+assert H.num_qubits == n_qubits
+assert exact_eigvals.shape == (2**n_qubits,)
+assert E_exact == float(exact_eigvals.min())
 
 # %% [markdown]
 # ## Hardware-efficient ansatz
@@ -182,6 +187,7 @@ def cost_fn(params: np.ndarray) -> float:
 
 rng = np.random.default_rng(0)
 init_params = rng.uniform(0, 2 * np.pi, n_params)
+assert init_params.shape == (n_params,)
 
 maxiter = max(n_params + 2, 5 if docs_test_mode else 80)
 result = minimize(
@@ -192,6 +198,10 @@ result = minimize(
 )
 opt_params = result.x
 print(f"VQE energy = {result.fun:+.6f}   (gap to E_exact: {result.fun - E_exact:.4e})")
+# Variational principle: any VQE energy is an upper bound on E_exact, no
+# matter how short the COBYLA budget.
+assert result.fun >= E_exact - 1e-9
+assert opt_params.shape == (n_params,)
 
 # %% [markdown]
 # ## Step 2: Sample bitstrings in the Z basis
@@ -211,6 +221,11 @@ sample_results.sort(key=lambda bc: bc[1], reverse=True)
 print(f"Distinct bitstrings sampled: {len(sample_results)}")
 for bits, c in sample_results[:5]:
     print(f"  {bits}  count={c}")
+# Distinct bitstrings cannot exceed the dimension of the Hilbert space,
+# every shot is accounted for, and each bitstring is n_qubits long.
+assert len(sample_results) <= 2**n_qubits
+assert sum(c for _, c in sample_results) == shots
+assert all(len(bits) == n_qubits for bits, _ in sample_results)
 
 
 # %% [markdown]
@@ -235,6 +250,10 @@ for K, E in zip(ks, energies):
     print(f"K = {K:3d}   E_QSCI = {E:+.6f}   gap = {E - E_exact:+.3e}")
 
 assert all(E >= E_exact - 1e-9 for E in energies), "variational bound violated"
+# Cauchy interlacing: enlarging the subspace can only lower (or keep) the
+# minimum eigenvalue, so QSCI energies are monotonically non-increasing in K.
+assert all(energies[i] >= energies[i + 1] - 1e-9 for i in range(len(energies) - 1))
+assert len(energies) == len(ks)
 
 # %%
 fig, ax = plt.subplots(figsize=(6, 4))

@@ -21,7 +21,7 @@ dependencies = [
 include = ["qamomile*"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "W"]
 ignore = ["E501"]  # To ignore errors for documentations
 
 [tool.ruff.lint.isort]
@@ -67,6 +67,7 @@ dev = [
     "openfermion>=1.6.0",
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",
+    "ommx-quantum-benchmarks>=0.0.2",
 ]
 
 [tool.pytest.ini_options]

@@ -72,6 +72,8 @@ import networkx as nx
 G = nx.Graph()
 G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
 num_nodes = G.number_of_nodes()
+assert num_nodes == 5
+assert G.number_of_edges() == 6
 
 pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
@@ -123,6 +125,11 @@ print(f"Variable type:          {spin_model.vartype}")
 print(f"Linear terms (h_i):     {spin_model.linear}")
 print(f"Quadratic terms (J_ij): {spin_model.quad}")
 print(f"Constant:               {spin_model.constant}")
+# Spin-domain model with no linear field, one J_ij per graph edge, no offset.
+assert spin_model.vartype.name == "SPIN"
+assert spin_model.linear == {}
+assert len(spin_model.quad) == G.number_of_edges()
+assert spin_model.constant == 0.0
 
 # %% [markdown]
 # > **Note:** `BinaryModel` also provides `from_qubo()` and `from_hubo()` for
@@ -156,6 +163,12 @@ print(f"Optimal MaxCut value: {best_cut}")
 print(f"Number of optimal partitions: {len(optimal_partitions)}")
 for part in optimal_partitions:
     print(f"  {part}")
+# The MaxCut of this fixed 5-node, 6-edge graph is 5; it is achieved by
+# exactly two spin configurations related by the global flip s -> -s.
+assert best_cut == 5
+assert len(optimal_partitions) == 2
+for part in optimal_partitions:
+    assert tuple(-s for s in part) in optimal_partitions
 
 # %% [markdown]
 # ## QAOA Circuit: The Idea
@@ -357,11 +370,17 @@ def cost_fn(params):
 
 rng = np.random.default_rng(SEED)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
+assert initial_params.shape == (2 * p,)
 
 res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": maxiter})
 
 print(f"Optimized cost: {res.fun:.4f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
+assert len(cost_history) == res.nfev
+assert len(res.x) == 2 * p
+if docs_test_mode:
+    # In docs test mode COBYLA is truncated at the maxiter budget.
+    assert res.nfev == maxiter
 
 # %%
 plt.figure(figsize=(8, 4))
@@ -411,6 +430,10 @@ for sample, _energy, occ in zip(
 
 print(f"Best QAOA cut: {best_qaoa_cut}  (optimal: {best_cut})")
 print(f"Best partition (spins): {best_qaoa_sample}")
+# QAOA cannot exceed the brute-force optimum, and the distribution must
+# account for every shot of the final sample.
+assert best_qaoa_cut <= best_cut
+assert sum(cut_distribution.values()) == sample_shots
 
 # %%
 cuts = sorted(cut_distribution.keys())
@@ -510,6 +533,10 @@ decoded_manual = spin_model.decode_from_sampleresult(result_manual)
 decoded_builtin = spin_model.decode_from_sampleresult(result_builtin)
 print(f"Manual   mean energy: {decoded_manual.energy_mean():.4f}")
 print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
+# Same seed + bit-identical circuit ⇒ identical samples ⇒ identical mean.
+# Any divergence here means the manual and built-in paths emitted different
+# circuits (gate ordering, compilation difference) — not shot noise.
+assert decoded_manual.energy_mean() == decoded_builtin.energy_mean()
 
 # %% [markdown]
 # ## Summary

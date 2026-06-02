@@ -244,6 +244,12 @@ total = sum(count for _, count in result.results)
 valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
 print(f"  |0_L> codeword ratio: {valid / total:.3f}")
 print(f"  distinct codewords observed: {len(result.results)}")
+# The Steane |0_L> is an equal superposition of exactly 8 even-weight
+# Hamming codewords, so every shot reads a valid |0_L> codeword and the
+# distribution covers at most those 8 outcomes.
+assert total == 1024
+assert valid == total
+assert len(result.results) <= 8
 
 # %% [markdown]
 # ## 4. Syndrome Measurement and Correction
@@ -403,6 +409,11 @@ for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]:
             count for outcome, count in result.results if _is_steane_zero_word(outcome)
         )
         print(f"  {name:4s} | q[{pos}]  | {valid / total:.3f}")
+        # Steane corrects every single Pauli error on any of the 7 qubits,
+        # so the post-correction state lies entirely in the |0_L> code
+        # space — every shot reads a valid codeword.
+        assert total == 128
+        assert valid == total
 
 # %% [markdown]
 # A ratio of 1.000 means the state returned to the $\lvert0_L\rangle$ code space for that single Pauli error. A $Y=iXZ$ error triggers both the $X$-component and the $Z$-component correction, but in a CSS code these two are independent, so it is corrected as is.
@@ -452,6 +463,13 @@ hamming = sum(
 odd = sum(count for outcome, count in result.results if sum(_bits7(outcome)) % 2 == 1)
 print(f"  Hamming codeword ratio: {hamming / total:.3f}")
 print(f"  odd-weight (|1_L>) fraction: {odd / total:.3f}")
+# |+_L> is an equal superposition of all 16 Hamming codewords, so every
+# shot reads some Hamming codeword and the odd-weight half (|1_L>) shows
+# up roughly half the time — 5% window > 1024-shot standard error of < 0.02.
+assert total == 1024
+assert hamming == total
+assert len(result.results) <= 16
+assert abs(odd / total - 0.5) < 0.05
 
 # %% [markdown]
 # The Hamming codeword ratio is 1.000, and odd-weight codewords appear about half the time. Unlike $\lvert0_L\rangle$, which produces only even-weight codewords, this confirms the state has moved to $\lvert+_L\rangle$.
@@ -478,6 +496,10 @@ result = exe.sample(_seeded_executor, shots=1024).result()
 total = sum(count for _, count in result.results)
 valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
 print(f"  |0_L> codeword ratio: {valid / total:.3f}")
+# H^2 = I, so the round trip restores |0_L> exactly — every shot reads a
+# |0_L> codeword.
+assert total == 1024
+assert valid == total
 
 # %% [markdown]
 # The ratio is 1.000 — two transversal Hadamards return to $\lvert0_L\rangle$. The seven physical $H$ gates indeed act as the logical $\bar H$.

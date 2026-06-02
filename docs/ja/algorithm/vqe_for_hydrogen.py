@@ -67,6 +67,10 @@ molecule = of_chem.MolecularData(geometry, basis, multiplicity, charge, descript
 molecule = of_pyscf.run_pyscf(molecule, run_scf=True, run_fci=True)
 n_qubit = molecule.n_qubits
 n_electron = molecule.n_electrons
+# H2 を STO-3G 基底で扱うと、空間軌道 2 個 -> スピン軌道 4 個 -> 4 量子ビット、
+# 電子数は 2。
+assert n_qubit == 4
+assert n_electron == 2
 fermionic_hamiltonian = of_trans.get_fermion_operator(
     molecule.get_molecular_hamiltonian()
 )
@@ -100,12 +104,13 @@ def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
 
 
 hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
+assert hamiltonian.num_qubits == n_qubit
 
 
 # %% [markdown]
 # ## VQE アンザッツの作成
 #
-# このセクションでは、VQEアルゴリズムのための EfficientSU2 アンザッツを `@qkernel` デコレータを用いて作成します。アンザッツとは、試行波動関数を準備するパラメータ付き量子回路です。`ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算します。
+# このセクションでは、VQEアルゴリズムのための Hardware Efficient SU(2) アンザッツを `@qkernel` デコレータを用いて作成します。アンザッツとは、試行波動関数を準備するパラメータ付き量子回路です。`ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算します。
 
 
 # %%
@@ -164,6 +169,10 @@ def cost_callback(param_values):
 num_params = len(executable.parameter_names)
 rng = np.random.default_rng(42)
 initial_params = rng.uniform(0, np.pi, num_params)
+# 各 rep は RY 層 (n パラメータ) と RZ 層 (n パラメータ) を、最後の追加層も
+# RY + RZ ペアをもう 1 つ出すので、パラメータ数は (reps + 1) * 2 * n_qubit。
+assert num_params == (reps + 1) * 2 * n_qubit
+assert initial_params.shape == (num_params,)
 
 # VQE 最適化を実行します
 maxiter = 1 if docs_test_mode else 50
@@ -176,6 +185,9 @@ result = minimize(
     callback=cost_callback,
 )
 print(result)
+# 変分原理: BFGS の予算が短くても、試行エネルギーは FCI 基底エネルギーの上界。
+assert result.fun >= molecule.fci_energy - 1e-9
+assert len(result.x) == num_params
 
 # %%
 plt.plot(cost_history)
@@ -212,9 +224,12 @@ def hydrogen_molecule(bond_length):
 
 n_points = 3 if docs_test_mode else 15
 bond_lengths = np.linspace(0.2, 1.5, n_points)
+assert bond_lengths.shape == (n_points,)
 energies = []
 for bond_length in bond_lengths:
     hamiltonian, fci_energy = hydrogen_molecule(bond_length)
+    # 結合長を変えても H2 は 4 量子ビット問題のまま。
+    assert hamiltonian.num_qubits == 4
 
     executable = transpiler.transpile(
         vqe_ansatz,
@@ -232,8 +247,12 @@ for bond_length in bond_lengths:
     )
 
     energies.append(result.fun)
+    # 変分原理はどの結合長でも成り立つ。
+    assert result.fun >= fci_energy - 1e-9
 
     print("distance: ", bond_length, "energy: ", result.fun, "fci_energy: ", fci_energy)
+
+assert len(energies) == n_points
 
 # %%
 plt.plot(bond_lengths, energies, "-o")

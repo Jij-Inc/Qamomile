@@ -61,6 +61,10 @@ N_WEIGHTS_PER_LAYER = N_QUBITS * 3  # 各量子ビットに RZ, RY, RZ
 N_WEIGHTS = N_LAYERS * N_WEIGHTS_PER_LAYER
 
 print(f"量子ビット数: {N_QUBITS}, 層数: {N_LAYERS}, 学習パラメータ数: {N_WEIGHTS}")
+assert N_QUBITS == 4
+assert N_LAYERS == 2
+# N_WEIGHTS = N_LAYERS * N_QUBITS * 3(1層あたり量子ビットごとに RZ + RY + RZ)。
+assert N_WEIGHTS == 24
 
 
 # %% [markdown]
@@ -141,6 +145,13 @@ est = variational_ansatz.estimate_resources(
     bindings={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
 )
 print(est)
+assert est.qubits == 4
+# 入力 RY 4 + 2 層 * (RZ 4 + RY 4 + RZ 4) = 1-qubit 回転 28 個。
+assert est.gates.single_qubit == 28
+# 2 層 * 3 CZ(4 量子ビット線形チェーン)= 2-qubit Clifford 6 個。
+assert est.gates.two_qubit == 6
+assert est.gates.total == 34
+assert est.gates.rotation_gates == 28
 
 # %% [markdown]
 # ## 量子フォワードパス
@@ -179,6 +190,9 @@ test_weights = rng.uniform(-np.pi, np.pi, N_WEIGHTS)
 
 expvals = quantum_forward(test_inputs, test_weights)
 print("期待値:", expvals)
+# Z の期待値は [-1, 1]、量子ビット 1 個に 1 値。
+assert expvals.shape == (N_QUBITS,)
+assert all(-1.0 <= float(e) <= 1.0 for e in expvals)
 
 # %% [markdown]
 # ## パラメータシフトルールによる勾配計算
@@ -320,6 +334,9 @@ X_train, y_train = subset_dataset(full_train, SELECTED_CLASSES, N_TRAIN_PER_CLAS
 X_test, y_test = subset_dataset(full_test, SELECTED_CLASSES, N_TEST_PER_CLASS)
 
 print(f"訓練データ: {X_train.shape}, テストデータ: {X_test.shape}")
+# 4 クラス × N_PER_CLASS サンプル; Fashion-MNIST は 1x28x28 グレースケール。
+assert X_train.shape == (N_CLASSES * N_TRAIN_PER_CLASS, 1, 28, 28)
+assert X_test.shape == (N_CLASSES * N_TEST_PER_CLASS, 1, 28, 28)
 print(f"クラス: {CLASS_NAMES}")
 
 
