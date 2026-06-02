@@ -24,10 +24,11 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
+    resolve_condition_address_detailed,
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
@@ -218,10 +219,7 @@ class ResourceAllocator:
                         if hasattr(initial_cond, "value")
                         else initial_cond
                     )
-                    init_uuid = (
-                        init_val.uuid if hasattr(init_val, "uuid") else str(init_val)
-                    )
-                    init_addr = QubitAddress(init_uuid)
+                    init_addr = self._condition_source_address(init_val, bindings)
 
                     # Save the canonical clbit for the initial condition
                     # BEFORE body allocation.  An if-only (no else) inside
@@ -248,12 +246,7 @@ class ResourceAllocator:
                         if hasattr(loop_carried, "value")
                         else loop_carried
                     )
-                    carried_uuid = (
-                        carried_val.uuid
-                        if hasattr(carried_val, "uuid")
-                        else str(carried_val)
-                    )
-                    carried_addr = QubitAddress(carried_uuid)
+                    carried_addr = self._condition_source_address(carried_val, bindings)
                     carried_clbit = clbit_map.get(carried_addr)
 
                     # Alias the loop-carried condition to the initial
@@ -301,6 +294,38 @@ class ResourceAllocator:
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
 
+    @staticmethod
+    def _condition_source_address(
+        value: Any,
+        bindings: dict[str, Any],
+    ) -> QubitAddress:
+        """Resolve a while / phi condition source to its ``clbit_map`` key.
+
+        A measured ``Vector[Bit]`` element (``s[i]`` from
+        ``s = qmc.measure(register)``) registers its clbit under
+        ``QubitAddress(root_array.uuid, index)``, not the element's own
+        UUID. Resolving the source the same way the emit-time condition
+        lookup does keeps the loop-carried / phi clbit alias consistent
+        with where the clbit was actually allocated. The allocator has no
+        ``ValueResolver``, so only constant indices / slice bounds resolve;
+        an unresolved element falls back to its scalar UUID (which is not
+        registered, so the caller's ``clbit_map`` lookup misses and the
+        aliasing is correctly skipped rather than pointed at a wrong slot).
+
+        Args:
+            value (Any): The condition / phi source — an IR ``Value`` or, in
+                degenerate cases, a non-Value (handled via ``str``).
+            bindings (dict[str, Any]): Active bindings for constant folding.
+
+        Returns:
+            QubitAddress: The address the source's classical bit is
+                registered under.
+        """
+        if isinstance(value, Value):
+            address, _ = resolve_condition_address_detailed(value, bindings, None)
+            return address
+        return QubitAddress(str(value))
+
     def _alias_loop_carried_clbits(
         self,
         operations: list[Operation],
@@ -332,8 +357,8 @@ class ResourceAllocator:
                     continue
                 true_val = phi.operands[1]
                 false_val = phi.operands[2]
-                true_addr = QubitAddress(true_val.uuid)
-                false_addr = QubitAddress(false_val.uuid)
+                true_addr = self._condition_source_address(true_val, {})
+                false_addr = self._condition_source_address(false_val, {})
                 if true_addr in clbit_map:
                     clbit_map[true_addr] = canonical_clbit
                 if false_addr in clbit_map:

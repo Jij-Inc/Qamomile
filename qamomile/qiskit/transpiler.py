@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -37,6 +38,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
     QubitAddress,
     QubitMap,
+    resolve_condition_address,
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
@@ -160,7 +162,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
     ) -> None:
         """Emit while loop using Qiskit's while_loop context manager."""
         if not op.operands:
-            raise ValueError("WhileOperation requires a condition operand")
+            raise EmitError(
+                "WhileOperation requires a condition operand.",
+                operation="WhileOperation",
+            )
 
         condition = op.operands[0]
         condition_value = condition.value if hasattr(condition, "value") else condition
@@ -212,16 +217,21 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         if stored is not None and not isinstance(stored, (bool, int, float)):
             return stored
 
-        condition_addr = QubitAddress(condition_uuid)
+        if isinstance(condition, Value):
+            condition_addr = resolve_condition_address(
+                condition, bindings, self._resolver
+            )
+        else:
+            condition_addr = QubitAddress(condition_uuid)
         if condition_addr in clbit_map:
             clbit_idx = clbit_map[condition_addr]
             return (circuit.clbits[clbit_idx], 1)
 
         raise EmitError(
-            "Runtime if-conditions must come from measurement results "
-            "or be bound before transpilation. The condition value was "
-            "neither resolved at compile time nor backed by a "
-            "measurement result."
+            "Runtime control-flow conditions (if / while) must come from "
+            "measurement results or be bound before transpilation. The "
+            "condition value was neither resolved at compile time nor "
+            "backed by a measurement result."
         )
 
     def _emit_runtime_classical_expr(
@@ -267,8 +277,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
               2. Constants: ``v.get_const()`` returns the IR-typed value
                  (Bit→bool, UInt→int, Float→float). No ``bool(...)``
                  coercion — that would clobber numeric arithmetic.
-              3. Clbit references: the canonical ``QubitAddress(v.uuid)``
-                 lookup in ``clbit_map``.
+              3. Clbit references: ``resolve_condition_address(v, ...)``
+                 keyed lookup in ``clbit_map`` — a scalar bit resolves to
+                 ``QubitAddress(v.uuid)`` while a measured ``Vector[Bit]``
+                 element resolves to ``QubitAddress(root_array.uuid,
+                 root_index)`` (walking ``parent_array`` / ``slice_of``).
               4. User parameters: read from the ``parameters`` typed slot
                  by parameter name (the only legitimate name path).
               5. Loop variables: read from the ``loop_vars`` typed slot
@@ -295,8 +308,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             if hasattr(v, "is_constant") and v.is_constant():
                 return v.get_const()
 
-            # 3. Clbit reference.
-            addr = QubitAddress(v.uuid)
+            # 3. Clbit reference. ``Vector[Bit]`` element accesses route
+            #    through ``QubitAddress(parent_array.uuid, index)``; scalar
+            #    bits use ``QubitAddress(v.uuid)``.
+            addr = resolve_condition_address(v, bindings, self._resolver)
             if addr in clbit_map:
                 return circuit.clbits[clbit_map[addr]]
 
@@ -461,7 +476,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     return stored_v
                 if hasattr(v, "is_constant") and v.is_constant():
                     return bool(v.get_const())
-                addr = QubitAddress(v.uuid)
+                addr = (
+                    resolve_condition_address(v, bindings, self._resolver)
+                    if isinstance(v, Value)
+                    else QubitAddress(v.uuid)
+                )
                 if addr in clbit_map:
                     return circuit.clbits[clbit_map[addr]]
                 if isinstance(stored_v, (bool, int)):

@@ -29,9 +29,64 @@ from qamomile.circuit.transpiler.errors import EmitError
 from .condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
+    resolve_condition_address_detailed,
     resolve_if_condition,
 )
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
+from .value_resolver import ValueResolver
+
+
+def resolve_condition_address(
+    condition: Value,
+    bindings: dict[str, Any],
+    resolver: ValueResolver | None,
+) -> QubitAddress:
+    """Resolve a runtime control-flow condition to its ``clbit_map`` key.
+
+    Scalar measurement results carry their own UUID and the clbit allocator
+    registers them under ``QubitAddress(bit.uuid)``. ``Vector[Bit]`` element
+    accesses (``s[i]`` where ``s = qmc.measure(register)``) instead live
+    under ``QubitAddress(root_array.uuid, root_index)``. The element index
+    and every ``slice_start`` / ``slice_step`` along the parent's
+    ``slice_of`` chain are resolved the same way — taken directly when
+    constant, otherwise folded through ``bindings`` via ``resolver`` so
+    that loop-variable indices and runtime-valued slice bounds (``s[j:k]``
+    where ``j``/``k`` are loop variables) both work. The chain composes
+    into a root-space index via the standard affine map
+    ``root_index = start + step * view_local_index`` repeated along the
+    chain — matching ``ResourceAllocator._resolve_root_qubit_address`` /
+    ``ValueResolver.resolve_slice_chain``. Falls back to the scalar
+    address when no parent array is set, or when the index or any slice
+    bound cannot be resolved to a concrete int (e.g. a backend runtime
+    parameter, which cannot index a static classical register, or any
+    symbolic value with no ``resolver``), deferring the diagnostic to the
+    caller's ``clbit_map`` lookup. Used by both the default if/while
+    emission path and the Qiskit / CUDA-Q backends when looking up a
+    measurement-derived clbit for a runtime predicate.
+
+    Args:
+        condition (Value): Condition operand of an ``IfOperation`` or
+            ``WhileOperation``, or an operand of a measurement-derived
+            classical predicate (e.g. inside ``RuntimeClassicalExpr``).
+        bindings (dict[str, Any]): Active emit-time bindings used to
+            resolve symbolic indices and slice bounds (loop variables,
+            compile-time-bound parameters).
+        resolver (ValueResolver | None): The active ``ValueResolver``
+            exposing ``resolve_int_value``. ``None`` is accepted for
+            early-emit pre-scans (e.g. CUDA-Q's loop-carried clbit
+            collector) that run before runtime bindings exist — only the
+            constant path is taken in that case; symbolic indices and
+            symbolic slice bounds fall through to the scalar UUID.
+
+    Returns:
+        QubitAddress: Key suitable for looking up the condition in
+            ``clbit_map``.
+
+    Raises:
+        No exceptions for any well-formed IR. See
+        ``resolve_condition_address_detailed`` for the resolution contract.
+    """
+    return resolve_condition_address_detailed(condition, bindings, resolver)[0]
 
 
 def resolve_loop_bounds(
@@ -397,7 +452,7 @@ def emit_if(
         register_classical_phi_aliases(emit_pass, op.phi_ops, bindings, resolved)
         return
 
-    condition_addr = QubitAddress(condition.uuid)
+    condition_addr = resolve_condition_address(condition, bindings, emit_pass._resolver)
 
     if condition_addr not in clbit_map:
         raise EmitError(
@@ -558,19 +613,28 @@ def emit_while(
 ) -> None:
     """Emit while loop operation."""
     if not op.operands:
-        raise ValueError("WhileOperation requires a condition operand")
+        raise EmitError(
+            "WhileOperation requires a condition operand.",
+            operation="WhileOperation",
+        )
 
     condition = op.operands[0]
     condition_value = condition.value if hasattr(condition, "value") else condition
-    condition_uuid = (
-        condition_value.uuid
-        if hasattr(condition_value, "uuid")
-        else str(condition_value)
-    )
-    condition_addr = QubitAddress(condition_uuid)
+    if isinstance(condition_value, Value):
+        condition_addr = resolve_condition_address(
+            condition_value, bindings, emit_pass._resolver
+        )
+    else:
+        condition_addr = QubitAddress(str(condition_value))
 
     if condition_addr not in clbit_map:
-        raise ValueError("While loop condition not found in classical bit map.")
+        raise EmitError(
+            "Runtime while-conditions must come from measurement results "
+            "or be bound before transpilation. The condition value was "
+            "neither resolved at compile time nor backed by a "
+            "measurement result.",
+            operation="WhileOperation",
+        )
 
     clbit_idx = clbit_map[condition_addr]
 

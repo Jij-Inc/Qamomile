@@ -6,10 +6,89 @@ from typing import Any
 
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.types.primitives import BitType
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
-from .value_resolver import resolve_qubit_key
+from .value_resolver import ValueResolver, resolve_qubit_key
+
+
+def resolve_condition_address_detailed(
+    condition: Value,
+    bindings: dict[str, Any],
+    resolver: ValueResolver | None = None,
+) -> tuple[QubitAddress, bool]:
+    """Resolve a condition / source ``Value`` to its ``clbit_map`` key.
+
+    Single source of truth (shared by ``control_flow_emission.emit_if`` /
+    ``emit_while``, the Qiskit / CUDA-Q backends, ``ResourceAllocator``'s
+    loop-carried / phi aliasing, and the phi-output mapping helpers here)
+    for turning a runtime control-flow condition — or a phi source Value —
+    into the address its classical bit is registered under.
+
+    Scalar measurement results register under ``QubitAddress(bit.uuid)``,
+    while a ``Vector[Bit]`` element ``s[i]`` (``s = qmc.measure(register)``)
+    registers under ``QubitAddress(root_array.uuid, root_index)``. The
+    element index and every ``slice_start`` / ``slice_step`` along the
+    parent's ``slice_of`` chain are resolved the same way — taken directly
+    when constant, otherwise folded through ``bindings`` via ``resolver`` —
+    and composed into the root index via ``root_index = start + step *
+    view_local_index`` repeated along the chain.
+
+    Args:
+        condition (Value): The condition operand or phi source Value.
+        bindings (dict[str, Any]): Active emit-time bindings used to fold
+            symbolic indices / slice bounds. May be empty for callers that
+            only have constant addresses to resolve (e.g. the allocator's
+            pre-emit pass).
+        resolver (ValueResolver | None): Resolver exposing
+            ``resolve_int_value``; ``None`` restricts resolution to
+            constants. Defaults to None.
+
+    Returns:
+        tuple[QubitAddress, bool]: ``(address, resolved_as_element)``.
+            ``resolved_as_element`` is ``True`` only when ``condition`` is a
+            ``Vector[Bit]`` element whose index (and any slice bounds)
+            resolved to concrete ints, giving the root-space
+            ``QubitAddress(root.uuid, root_index)``. It is ``False`` for a
+            plain scalar, or when an element's index / slice bound could
+            not be resolved (the scalar UUID fallback). Callers that mutate
+            ``clbit_map`` should trust the address as a vector key only when
+            this flag is ``True``, to avoid aliasing an unresolved element
+            onto an unrelated scalar slot.
+    """
+
+    def _resolve_int(value: Value | None) -> int | None:
+        """Resolve an index / slice-bound Value to a concrete int or None.
+
+        Args:
+            value (Value | None): The index or slice-bound Value, or None.
+
+        Returns:
+            int | None: The concrete integer when constant or resolvable
+                through ``bindings`` via ``resolver``; ``None`` otherwise.
+        """
+        if value is None:
+            return None
+        if value.is_constant():
+            return int(value.get_const())
+        if resolver is not None:
+            return resolver.resolve_int_value(value, bindings)
+        return None
+
+    if condition.parent_array is None or not condition.element_indices:
+        return QubitAddress(condition.uuid), False
+    idx = _resolve_int(condition.element_indices[0])
+    if idx is None:
+        return QubitAddress(condition.uuid), False
+    parent = condition.parent_array
+    while parent.slice_of is not None:
+        start = _resolve_int(parent.slice_start)
+        step = _resolve_int(parent.slice_step)
+        if start is None or step is None:
+            return QubitAddress(condition.uuid), False
+        idx = start + step * idx
+        parent = parent.slice_of
+    return QubitAddress(parent.uuid, idx), True
 
 
 def _coerce_to_bool(value: Any) -> bool | None:
@@ -86,7 +165,10 @@ def remap_static_phi_outputs(
                 if phys is not None:
                     qubit_map[QubitAddress(output.uuid)] = phys
         else:
-            src_addr = QubitAddress(selected_val.uuid)
+            # Scalar Bit source: resolve vector-element sources (``s[i]``
+            # from a measured ``Vector[Bit]``) to their root clbit key, not
+            # the element's own UUID (which is not registered in clbit_map).
+            src_addr, _ = resolve_condition_address_detailed(selected_val, {}, None)
             if src_addr in clbit_map:
                 clbit_map[QubitAddress(output.uuid)] = clbit_map[src_addr]
 
@@ -201,12 +283,18 @@ def map_phi_outputs(
                                 if sec_addr in clbit_map:
                                     clbit_map[sec_addr] = phys_idx
             else:
-                true_clbit = clbit_map.get(QubitAddress(true_val.uuid))
-                false_clbit = clbit_map.get(QubitAddress(false_val.uuid))
+                # Scalar Bit phi: resolve vector-element sources to their
+                # root clbit key so a measured ``Vector[Bit]`` element merged
+                # through a phi (``if sel: bit = s[0] else: bit = t[0]``)
+                # maps to the right clbit instead of the element's own UUID.
+                true_addr, _ = resolve_condition_address_detailed(true_val, {}, None)
+                false_addr, _ = resolve_condition_address_detailed(false_val, {}, None)
+                true_clbit = clbit_map.get(true_addr)
+                false_clbit = clbit_map.get(false_addr)
 
                 if true_clbit is not None:
                     clbit_map[QubitAddress(output.uuid)] = true_clbit
                     if false_clbit is not None and false_clbit != true_clbit:
-                        clbit_map[QubitAddress(false_val.uuid)] = true_clbit
+                        clbit_map[false_addr] = true_clbit
                 elif false_clbit is not None:
                     clbit_map[QubitAddress(output.uuid)] = false_clbit
