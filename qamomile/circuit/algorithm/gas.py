@@ -23,7 +23,7 @@ def qft_encoding(
     m = q.shape[0]
     theta = 2 * np.pi * coef / (2**m)
     for i in qmc.range(m):
-        q[i] = qmc.p(q[i], theta * (2**i))
+        q[i] = qmc.p(q[i], theta * (2**i))  # type: ignore[operator]
     return q
 
 
@@ -279,11 +279,11 @@ def diffusion_op(
 
     for i in qmc.range(n):
         q_input[i] = qmc.x(q_input[i])
-    controls = q_input[0 : n - 1]
-    target = q_input[n - 1]
+    controls = q_input[0 : n - 1]  # type: ignore[misc]
+    target = q_input[n - 1]  # type: ignore[misc]
     controls, target = controlled_z(controls, target)
-    q_input[0 : n - 1] = controls  # ReleaseSliceViewOperation — releases borrow
-    q_input[n - 1] = target
+    q_input[0 : n - 1] = controls  # type: ignore[misc]  # ReleaseSliceViewOperation — releases borrow
+    q_input[n - 1] = target  # type: ignore[misc]
     for i in qmc.range(n):
         q_input[i] = qmc.x(q_input[i])
     return q_input
@@ -340,7 +340,7 @@ def grover_algorithm(
     y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    iters: qmc.UInt = 1,
+    iters: qmc.UInt = 1,  # type: ignore[assignment]
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
     """Run repeated Grover iterations for the QUBO GAS circuit.
 

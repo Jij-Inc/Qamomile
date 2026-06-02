@@ -1,8 +1,10 @@
 """Tests for qamomile/circuit/algorithm/gas.py circuit primitives."""
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.gas import (
     apply_function_preparation_qubo,
     apply_function_preparation_qubo_dagger,
@@ -13,7 +15,6 @@ from qamomile.circuit.algorithm.gas import (
     second_degree_qft_encoding,
     zero_degree_qft_encoding,
 )
-
 
 # ---------------------------------------------------------------------------
 # Backend factories
@@ -221,7 +222,9 @@ def test_qft_encoding_transpile_smoke(make_transpiler):
     ],
     ids=["zero-degree", "first-degree", "second-degree"],
 )
-def test_degree_encodings_transpile_and_sample_smoke(make_transpiler, kernel, bindings, expected_len):
+def test_degree_encodings_transpile_and_sample_smoke(
+    make_transpiler, kernel, bindings, expected_len
+):
     """Degree-specific encoders transpile and produce valid samples on each backend."""
     tr = make_transpiler()
     exe = tr.transpile(kernel, bindings=bindings)
@@ -292,3 +295,36 @@ def test_grover_algorithm_transpile_and_sample_smoke(make_transpiler):
     for bits, count in results:
         assert len(bits) == 3
         assert count > 0
+
+
+# ---------------------------------------------------------------------------
+# Estimator (expval) path
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _wrap_qft_encoding_expval(
+    coef: qmc.Float,
+    H: qmc.Observable,
+) -> qmc.Float:
+    """Apply qft_encoding on a fresh 1-qubit |0> register and return <H>."""
+    q = qmc.qubit_array(1, name="q")
+    q = qft_encoding(q, coef)
+    return qmc.expval(q, H)
+
+
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
+def test_qft_encoding_expval_zero_coef_ground_state(make_transpiler):
+    """qft_encoding with coef=0 leaves |0> unchanged; Z-observable expval is +1.
+
+    With coef=0, the phase gate applies zero rotation and the state remains |0>.
+    The expectation of Z on |0> is exactly +1. This analytic reference is trivial
+    (<Z>_{|0>} = 1) and exercises the estimator path independently from the sampler
+    path on every backend.
+    """
+    tr = make_transpiler()
+    H = qm_o.Z(0)
+    exe = tr.transpile(_wrap_qft_encoding_expval, bindings={"coef": 0.0, "H": H})
+    result = exe.run(tr.executor()).result()
+
+    np.testing.assert_allclose(result, 1.0, atol=1e-6)
