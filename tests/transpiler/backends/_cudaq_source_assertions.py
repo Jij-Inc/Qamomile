@@ -287,9 +287,10 @@ def assert_inspect_source_matches_artifact(circuit: CudaqKernelArtifact) -> None
     kernel_source = inspect.getsource(circuit.kernel_func.kernelFunction)
     expected_source = circuit.entry_source or circuit.source
     assert _canonical_ast(kernel_source) == _canonical_ast(expected_source), (
-        "inspect.getsource() returned source that differs from CudaqKernelArtifact.source.\n"
+        "inspect.getsource() returned source that differs from the artifact "
+        "entry source.\n"
         f"inspect.getsource():\n{kernel_source}\n"
-        f"artifact.source:\n{expected_source}"
+        f"artifact entry source:\n{expected_source}"
     )
 
 
