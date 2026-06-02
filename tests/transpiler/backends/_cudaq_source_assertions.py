@@ -203,6 +203,21 @@ class _ExpectedCudaqSourceBuilder:
             else:
                 self._emit(f"x(q[{target}])")
             return
+        if kind == "controlled_kernel_call":
+            helper_name, controls, targets, uses_thetas = args
+            if len(controls) == 1:
+                control_src = f"q[{controls[0]}]"
+            else:
+                control_src = "[" + ", ".join(f"q[{index}]" for index in controls) + "]"
+            call_args = [
+                helper_name,
+                control_src,
+                *[f"q[{index}]" for index in targets],
+            ]
+            if uses_thetas:
+                call_args.append("thetas")
+            self._emit(f"cudaq.control({', '.join(call_args)})")
+            return
         if kind == "measure":
             qubit, clbit = args
             if self._mode == ExecutionMode.RUNNABLE:
@@ -257,11 +272,12 @@ def assert_traced_source_matches_artifact(
     ).build(_get_trace(circuit))
 
     expected_ast = _canonical_ast(expected)
-    actual_ast = _canonical_ast(circuit.source)
+    actual_source = circuit.entry_source or circuit.source
+    actual_ast = _canonical_ast(actual_source)
     assert actual_ast == expected_ast, (
         "Generated CUDA-Q source does not match the traced emission contract.\n"
         f"Expected source:\n{expected}\n"
-        f"Actual source:\n{circuit.source}"
+        f"Actual source:\n{actual_source}"
     )
 
 
@@ -269,10 +285,11 @@ def assert_inspect_source_matches_artifact(circuit: CudaqKernelArtifact) -> None
     """Assert that ``inspect.getsource`` resolves to the artifact source."""
     assert circuit.kernel_func is not None, "Expected finalized CUDA-Q kernel."
     kernel_source = inspect.getsource(circuit.kernel_func.kernelFunction)
-    assert _canonical_ast(kernel_source) == _canonical_ast(circuit.source), (
+    expected_source = circuit.entry_source or circuit.source
+    assert _canonical_ast(kernel_source) == _canonical_ast(expected_source), (
         "inspect.getsource() returned source that differs from CudaqKernelArtifact.source.\n"
         f"inspect.getsource():\n{kernel_source}\n"
-        f"artifact.source:\n{circuit.source}"
+        f"artifact.source:\n{expected_source}"
     )
 
 
@@ -297,6 +314,8 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
         return finalized
 
     def _record(self, circuit: CudaqKernelArtifact, kind: str, *args: Any) -> None:
+        if getattr(self, "_suppress_trace", False):
+            return
         _get_trace(circuit).append(EmissionAction(kind, args))
 
     def emit_h(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
@@ -460,6 +479,30 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
             target_idx,
         )
         super().emit_multi_controlled_x(circuit, control_indices, target_idx)
+
+    def emit_controlled_kernel_call(
+        self,
+        circuit: CudaqKernelArtifact,
+        helper_name: str,
+        control_indices: list[int],
+        target_indices: list[int],
+        uses_thetas: bool,
+    ) -> None:
+        self._record(
+            circuit,
+            "controlled_kernel_call",
+            helper_name,
+            list(control_indices),
+            list(target_indices),
+            uses_thetas,
+        )
+        super().emit_controlled_kernel_call(
+            circuit,
+            helper_name,
+            control_indices,
+            target_indices,
+            uses_thetas,
+        )
 
     def emit_if_start(
         self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
