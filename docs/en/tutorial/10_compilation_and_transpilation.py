@@ -30,13 +30,26 @@
 # - Simply understand what `transpile()` actually does
 #
 # We will walk a small `@qkernel` through the pipeline stage by stage using the
-# step-by-step public API on `Transpiler`, inspect the intermediate
-# representation at each step, and compare how two backends (Qiskit and
-# QURI Parts) turn the same plan into different circuits.
+# step-by-step public API on `Transpiler`, and inspect the intermediate
+# representation at each step.
+#
+# **This chapter pins itself to `QiskitTranspiler` throughout — there is no
+# SDK selector tab at the top, unlike the other tutorials.** The subject is
+# Qamomile's compilation pipeline itself, which is backend-agnostic; the only
+# thing the choice of `Transpiler` controls here is what the final emit pass
+# (the very last stage) produces. We pick one backend to keep the walk-through
+# concrete. The trailing "compare how two backends turn the same plan into
+# different circuits" section briefly re-transpiles the same kernel with
+# `QuriPartsTranspiler` just to illustrate that the emit step is the only
+# backend-specific stage — but everything up to that point is the same Qamomile
+# pipeline regardless of the Transpiler you pick.
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# This notebook is Qiskit-pinned (see the intro above), with a short
+# QuriParts side-by-side at the end — install with the ``quri_parts``
+# extra so that final cell can run.
+# # !pip install "qamomile[quri_parts]"
 
 # %% [markdown]
 # ## 1. The Pipeline at a Glance

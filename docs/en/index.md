@@ -14,17 +14,21 @@ pip install qamomile
 
 ## Supported Quantum SDKs
 
-Qamomile supports multiple quantum SDKs as execution backends. Qiskit is included by default; the others are optional extras.
+Qamomile supports multiple quantum SDKs as execution backends. Qiskit is included by default; the others are optional extras. The first three (Qiskit, CUDA-Q, QURI Parts) each ship their own `Transpiler` + `Executor` pair, so you can swap between them by switching the import below. qBraid is structured differently — it's an execution-only adapter that runs a Qiskit-transpiled circuit on qBraid-supported devices, so it has its own section.
 
-### Qiskit (default)
+::::{tab-set}
+:::{tab-item} Qiskit (default)
+:sync: qiskit
 
 Included with `pip install qamomile`. No extra flags needed.
 
 ```python
 from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
 ```
+:::
 
-### CUDA-Q (optional)
+:::{tab-item} CUDA-Q
+:sync: cudaq
 
 CUDA-Q supports Linux and macOS ARM64 (Apple Silicon). Choose the extra that matches your CUDA version:
 
@@ -36,8 +40,10 @@ pip install "qamomile[cudaq-cu13]"   # CUDA 13.x, Linux or macOS ARM64
 ```python
 from qamomile.cudaq import CudaqTranspiler, CudaqExecutor
 ```
+:::
 
-### QURI Parts (optional)
+:::{tab-item} QURI Parts
+:sync: quri_parts
 
 ```bash
 pip install "qamomile[quri_parts]"
@@ -46,18 +52,27 @@ pip install "qamomile[quri_parts]"
 ```python
 from qamomile.quri_parts import QuriPartsTranspiler, QuriPartsExecutor
 ```
+:::
+::::
 
-### qBraid (optional)
+### qBraid (optional, execution-only)
 
-Runs Qiskit circuits on qBraid-supported devices and simulators.
+qBraid is an execution-only adapter — there is no `QBraidTranspiler`. The
+workflow is to transpile through `QiskitTranspiler` first, then dispatch
+the resulting Qiskit circuit to a qBraid-supported device or simulator
+via `QBraidExecutor`:
 
 ```bash
 pip install "qamomile[qbraid]"
 ```
 
 ```python
+from qamomile.qiskit import QiskitTranspiler
 from qamomile.qbraid import QBraidExecutor
 ```
+
+See [integration/qbraid_executor](integration/qbraid_executor.ipynb)
+for the full walk-through, including how to wire your qBraid API key.
 
 ## Sections
 

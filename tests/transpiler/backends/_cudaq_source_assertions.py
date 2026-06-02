@@ -211,7 +211,11 @@ class _ExpectedCudaqSourceBuilder:
         if kind == "barrier":
             return
         if kind == "if_start":
-            self._emit(f"if {self._clbit_ref(args[0])}:")
+            # args[0] can be an int clbit index or a str compound predicate
+            cond_text = (
+                self._clbit_ref(args[0]) if isinstance(args[0], int) else args[0]
+            )
+            self._emit(f"if {cond_text}:")
             self._indent += 1
             return
         if kind == "else_start":
@@ -223,7 +227,11 @@ class _ExpectedCudaqSourceBuilder:
             self._indent -= 1
             return
         if kind == "while_start":
-            self._emit(f"while {self._clbit_ref(args[0])}:")
+            # args[0] can be an int clbit index or a str compound predicate
+            cond_text = (
+                self._clbit_ref(args[0]) if isinstance(args[0], int) else args[0]
+            )
+            self._emit(f"while {cond_text}:")
             self._indent += 1
             return
         if kind == "while_end":
@@ -462,10 +470,10 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
         super().emit_multi_controlled_x(circuit, control_indices, target_idx)
 
     def emit_if_start(
-        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
+        self, circuit: CudaqKernelArtifact, clbit_or_expr: int | str, value: int = 1
     ) -> dict[str, Any]:
-        self._record(circuit, "if_start", clbit, value)
-        return super().emit_if_start(circuit, clbit, value)
+        self._record(circuit, "if_start", clbit_or_expr, value)
+        return super().emit_if_start(circuit, clbit_or_expr, value)
 
     def emit_else_start(
         self, circuit: CudaqKernelArtifact, context: dict[str, Any]
@@ -480,10 +488,10 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
         super().emit_if_end(circuit, context)
 
     def emit_while_start(
-        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
+        self, circuit: CudaqKernelArtifact, clbit_or_expr: int | str, value: int = 1
     ) -> dict[str, Any]:
-        self._record(circuit, "while_start", clbit, value)
-        return super().emit_while_start(circuit, clbit, value)
+        self._record(circuit, "while_start", clbit_or_expr, value)
+        return super().emit_while_start(circuit, clbit_or_expr, value)
 
     def emit_while_end(
         self, circuit: CudaqKernelArtifact, context: dict[str, Any]

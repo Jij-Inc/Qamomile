@@ -41,7 +41,10 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xなら`qamomile[cudaq-cu13]`)。Linux / macOS-arm64 / WSL2のみ。
 
 # %% [markdown]
 # ## インストール
@@ -54,13 +57,56 @@
 #
 # このチュートリアルでは、具体的な量子SDKとしてQiskitを使用します。QuriPartsもサポートされており、トランスパイル可能な量子SDKは今後も増えていく予定です。
 
+# %% [markdown]
+# このチュートリアルではQiskitをデフォルトで使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。チュートリアル本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — このチュートリアルはデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+
 # %%
 import math
 
 import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
 
 # %% [markdown]
 # ## 最初の量子カーネル：偏りのあるコイン
@@ -187,16 +233,14 @@ print("probabilities:", result.probabilities())
 # %% [markdown]
 # ## トランスパイル後の回路の確認
 #
-# `to_circuit()`はすべてのパラメータをバインドした状態でトランスパイルし、量子SDK固有の回路（例: Qiskitの`QuantumCircuit`）を返します。量子SDKの形式で回路を確認できるので、デバッグに便利です。
+# `to_circuit()`はすべてのパラメータをバインドした状態でトランスパイルし、**SDK固有の回路オブジェクト**（例: Qiskitの`QuantumCircuit`、QURI Partsの`LinearMappedParametricQuantumCircuit`）を返します。SDK固有のツールに渡したいときやデバッグに便利です。返ってくる型は、上で選んだTranspilerに応じて変わります。SDK非依存に図として確認したい場合はチュートリアル前半の`biased_coin.draw(...)`を、SDK固有の回路図が見たい場合は各SDKの描画API（Qiskitなら`circuit.draw()`、CUDA-Qなら`cudaq.draw(...)`）を使ってください。
 
 # %%
-qiskit_circuit = transpiler.to_circuit(
+circuit = transpiler.to_circuit(
     biased_coin,
     bindings={"theta": math.pi / 4},
 )
-print(qiskit_circuit)
-assert qiskit_circuit.num_qubits == 1
-assert qiskit_circuit.num_clbits == 1
+print(type(circuit).__name__)
 
 # %% [markdown]
 # ## 複数量子ビットの例
@@ -277,6 +321,14 @@ except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
     assert type(e).__name__ == "QubitConsumedError"
+else:
+    # ``else``節は decorator も ``.draw()`` も例外を出さなかったときに実行されます。
+    # ここで AssertionError を発火させることで、affine型チェックが将来何かの拍子で
+    # 動かなくなった場合に docs テストが silent pass せず必ず検知できます。
+    # (silent pass のままだと「壊れた主張を教え続ける」状態になってしまう)
+    raise AssertionError(
+        "bad_rebindはエラーになることを期待しているが、通ってしまった。"
+    )
 
 # %% [markdown]
 # 修正は簡単です：`qmc.h(q)`ではなく、常に`q = qmc.h(q)`と書いてください。

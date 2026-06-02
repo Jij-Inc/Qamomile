@@ -40,19 +40,73 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# (Google Colab) Pick the line that matches your chosen Transpiler tab
+# below and remove the leading "# " from it to run.
+# # !pip install qamomile                  # Qiskit (default)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use qamomile[cudaq-cu13] on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+
+# %% [markdown]
+# This article uses Qiskit by default. Qamomile transpiles the same
+# `@qkernel` to multiple quantum SDKs, so you can follow it with another
+# SDK by swapping the import shown below — the rest of the article code
+# is identical regardless of the SDK you pick. On Colab, uncomment the
+# matching `pip install` line in the cell above first.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+# `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+# matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+# macOS arm64, and Windows-via-WSL2 only.
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — by default this article uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
 
 # %%
 import matplotlib.pyplot as plt
 import numpy as np
-from qiskit import QuantumCircuit, transpile as qk_transpile
-from qiskit_aer import AerSimulator
 from scipy.linalg import expm
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import trotterized_time_evolution
-from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # ## The Rabi Hamiltonian
@@ -120,7 +174,97 @@ H_mat = 0.5 * omega * Z_mat + 0.5 * Omega * X_mat
 sv_exact = expm(-1j * T * H_mat) @ np.array([1.0, 0.0], dtype=complex)
 
 
+# %% [markdown]
+# We need a way to read out the statevector of a transpiled circuit so
+# we can compare each Trotter approximation against the exact reference
+# below. The "right" API for this is SDK-specific; the tab block shows
+# the reference implementation per SDK. The default Qiskit version is
+# the one the rest of this article runs against.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit import QuantumCircuit, transpile as qk_transpile
+# from qiskit_aer import AerSimulator
+#
+# def statevector(circuit) -> np.ndarray:
+#     """Strip measurements, lower PauliEvolutionGate, and read out the state.
+#
+#     The default ``pauli_evolve`` emitter produces a ``PauliEvolutionGate``,
+#     which is not in AerSimulator's native basis. We run a shallow Qiskit
+#     transpile pass to expand it into elementary rotations before
+#     simulating.
+#     """
+#     stripped = QuantumCircuit(*circuit.qregs)
+#     for instr in circuit.data:
+#         if instr.operation.name not in ("measure", "save_statevector"):
+#             stripped.append(instr)
+#     stripped = qk_transpile(
+#         stripped,
+#         basis_gates=["u", "cx", "rx", "ry", "rz", "h", "p", "sx", "x", "y", "z"],
+#     )
+#     stripped.save_statevector()
+#     sim = AerSimulator(method="statevector")
+#     return np.asarray(sim.run(stripped).result().get_statevector())
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from quri_parts.core.state import GeneralCircuitQuantumState
+# from quri_parts.qulacs.simulator import evaluate_state_to_vector
+#
+# def statevector(circuit) -> np.ndarray:
+#     # `circuit` here is the QURI Parts circuit returned by
+#     # ``transpiler.to_circuit(...)``; with all parameters bound it is
+#     # a concrete (non-parametric) circuit. ``evaluate_state_to_vector``
+#     # delegates to qulacs to compute the exact statevector.
+#     state = GeneralCircuitQuantumState(circuit.qubit_count, circuit)
+#     return np.asarray(evaluate_state_to_vector(state).vector)
+# ```
+#
+# Caveat: this is the typical recipe but has not been exercised against
+# this article's Trotter pipeline. If `transpiler.to_circuit(...)`
+# returns a parametric form for your kernel, bind all parameters first
+# (e.g. with `bindings={...}` to `to_circuit`) before calling
+# `statevector`.
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+# def statevector(circuit) -> np.ndarray:
+#     # ``transpiler.to_circuit(...)`` returns a CUDA-Q artifact; the
+#     # underlying ``cudaq.kernel`` is on its ``kernel_func`` field.
+#     # ``cudaq.get_state`` evaluates the kernel and returns a state
+#     # object whose ``__array__`` is the statevector.
+#     state = cudaq.get_state(circuit.kernel_func)
+#     return np.asarray(state)
+# ```
+#
+# Caveat: untested against this article's Trotter pipeline. CUDA-Q's
+# kernel-vs-circuit object surface differs from Qiskit's; if your
+# `circuit` is a different artifact type, you may need to extract the
+# kernel a slightly different way.
+# :::
+# ::::
+
 # %%
+# Statevector helper — by default this article uses Qiskit's
+# AerSimulator. If you picked a different tab above, copy that tab's
+# `statevector` definition over the one below (and make sure the
+# matching pip install line at the top of this article is uncommented).
+from qiskit import QuantumCircuit, transpile as qk_transpile
+from qiskit_aer import AerSimulator
+
+
 def statevector(circuit) -> np.ndarray:
     """Strip measurements, lower PauliEvolutionGate, and read out the state.
 
@@ -344,7 +488,7 @@ def rabi_from_algorithm(
 # corresponding `order` bindings.
 
 # %%
-tr = QiskitTranspiler()
+tr = transpiler
 N_demo = 8
 s1_s2_kernels = {"S1": rabi_s1, "S2": rabi_s2}
 suzuki_orders = {"S4": 4, "S6": 6}

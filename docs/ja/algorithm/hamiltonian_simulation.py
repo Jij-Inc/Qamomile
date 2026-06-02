@@ -25,19 +25,65 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xなら`qamomile[cudaq-cu13]`)。Linux / macOS-arm64 / WSL2のみ。
+
+# %% [markdown]
+# この記事はデフォルトでQiskitを使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。記事本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — この記事はデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
 
 # %%
 import matplotlib.pyplot as plt
 import numpy as np
-from qiskit import QuantumCircuit, transpile as qk_transpile
-from qiskit_aer import AerSimulator
 from scipy.linalg import expm
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import trotterized_time_evolution
-from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # ## Rabiハミルトニアン
@@ -89,7 +135,83 @@ H_mat = 0.5 * omega * Z_mat + 0.5 * Omega * X_mat
 sv_exact = expm(-1j * T * H_mat) @ np.array([1.0, 0.0], dtype=complex)
 
 
+# %% [markdown]
+# トランスパイル後の回路から状態ベクトルを取得する仕組みが必要です（後述の厳密リファレンスに対して各Trotter近似のフィデリティを取るため）。「正しい」APIはSDKによって違うので、各SDK向けのリファレンス実装をタブにまとめます。デフォルトのQiskit版がこの記事の以降のコードで使われます。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit import QuantumCircuit, transpile as qk_transpile
+# from qiskit_aer import AerSimulator
+#
+# def statevector(circuit) -> np.ndarray:
+#     """測定を取り除き、PauliEvolutionGateを展開して状態ベクトルを読み出します。
+#
+#     デフォルトの``pauli_evolve`` emitterは``PauliEvolutionGate``を生成しますが、
+#     これはAerSimulatorのネイティブ基底には含まれません。そこでシミュレーション前に、
+#     浅いQiskitのトランスパイルで基本回転ゲートに展開します。
+#     """
+#     stripped = QuantumCircuit(*circuit.qregs)
+#     for instr in circuit.data:
+#         if instr.operation.name not in ("measure", "save_statevector"):
+#             stripped.append(instr)
+#     stripped = qk_transpile(
+#         stripped,
+#         basis_gates=["u", "cx", "rx", "ry", "rz", "h", "p", "sx", "x", "y", "z"],
+#     )
+#     stripped.save_statevector()
+#     sim = AerSimulator(method="statevector")
+#     return np.asarray(sim.run(stripped).result().get_statevector())
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from quri_parts.core.state import GeneralCircuitQuantumState
+# from quri_parts.qulacs.simulator import evaluate_state_to_vector
+#
+# def statevector(circuit) -> np.ndarray:
+#     # `circuit`は`transpiler.to_circuit(...)`が返したQURI Parts回路です。
+#     # 全パラメータをbindした状態なら非パラメトリックな具象回路になります。
+#     # `evaluate_state_to_vector`はqulacsに委譲して厳密な状態ベクトルを計算します。
+#     state = GeneralCircuitQuantumState(circuit.qubit_count, circuit)
+#     return np.asarray(evaluate_state_to_vector(state).vector)
+# ```
+#
+# 注意: 一般的なレシピですが、この記事のTrotterパイプラインでは検証していません。`transpiler.to_circuit(...)`がパラメトリック形式を返す場合、先に全パラメータをbindしてから（例: `to_circuit`に`bindings={...}`を渡す）`statevector`を呼んでください。
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+# def statevector(circuit) -> np.ndarray:
+#     # `transpiler.to_circuit(...)`はCUDA-Qのartifactを返します。背後の
+#     # `cudaq.kernel`は`kernel_func`属性に保持されています。
+#     # `cudaq.get_state`はカーネルを評価し、`__array__`が状態ベクトルになる
+#     # state objectを返します。
+#     state = cudaq.get_state(circuit.kernel_func)
+#     return np.asarray(state)
+# ```
+#
+# 注意: この記事のTrotterパイプラインでは未検証です。CUDA-Qのkernel/circuitオブジェクト構造はQiskitとは異なるので、`circuit`が別のartifact型の場合は少し違う方法でカーネルを取り出す必要があるかもしれません。
+# :::
+# ::::
+
 # %%
+# Statevector helper — この記事はデフォルトで Qiskit の AerSimulator を使います。
+# 上のタブで別のSDKを選んだ場合は、対応するタブの `statevector` 定義で以下を上書きしてください
+# （あわせて記事冒頭のpipセルで対応する行のコメントも外しておくこと）。
+from qiskit import QuantumCircuit, transpile as qk_transpile
+from qiskit_aer import AerSimulator
+
+
 def statevector(circuit) -> np.ndarray:
     """測定を取り除き、PauliEvolutionGateを展開して状態ベクトルを読み出します。
 
@@ -273,7 +395,7 @@ def rabi_from_algorithm(
 # 収束性のスイープを行う前に、各カーネルを一度トランスパイルし、状態ベクトルが妥当な範囲に収まることを確認します。$S_1$と$S_2$は専用カーネルを使い、$S_4$と$S_6$はそれぞれ対応する`order`バインドで`rabi_suzuki`から生成します。
 
 # %%
-tr = QiskitTranspiler()
+tr = transpiler
 N_demo = 8
 s1_s2_kernels = {"S1": rabi_s1, "S2": rabi_s2}
 suzuki_orders = {"S4": 4, "S6": 6}

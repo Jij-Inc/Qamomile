@@ -33,10 +33,127 @@
 # **前提知識**: [前編](quantum_error_correction.ipynb)の内容(シンドローム測定、Pauli エラー、スタビライザという用語)。
 
 # %%
-# 最新のQamomileをpipからインストールします。
-# # !pip install qamomile
-# # or
-# # !uv add qamomile
+# 最新のQamomileをpipからインストールします！
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xなら`qamomile[cudaq-cu13]`)。Linux / macOS-arm64 / WSL2のみ。
+
+# %% [markdown]
+# この記事はデフォルトでQiskitを使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。記事本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+#
+# **注意 — この記事は QURI Parts では走りません。** 記事の核は mid-circuit measurement（スタビライザ補助量子ビットの`qmc.measure`をしてから、シンドロームに応じた条件付きX/Zゲートを打つ）で、qulacs / QURI Parts のデフォルトサンプラはこれを公開APIレベルでサポートしていません。Qamomile の QURI Parts バックエンドはこの記事の RuntimeClassicalExpr ノードを emit しようとして`EmitError`を出します。最後まで通したい場合は Qiskit か CUDA-Q タブを使ってください。
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — この記事はデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+
+# %% [markdown]
+# ドキュメントの出力を再現可能にするため、シード固定の executor を作ります。シミュレータをどうシードするかは選んだSDKによって違うので、上のタブで別のSDKを選んだ場合は下のタブブロックから対応するスニペットをコピペしてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit_aer import AerSimulator
+#
+# _seeded_executor = transpiler.executor(
+#     backend=AerSimulator(seed_simulator=42, max_parallel_threads=1)
+# )
+# ```
+#
+# `seed_simulator=42`でショットごとのドローを再現可能にし、`max_parallel_threads=1`でAerの並列サンプリングがスレッド間で乱数ドローを混ぜることを防ぎます。
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+# # cudaqの乱数はプロセスグローバルです。set_random_seedはこの後の
+# # cudaq.sample / observe / run 呼び出しすべてに影響します。ノートブック内の再現性には
+# # 十分ですが、同一プロセスで並行カーネルが走る場合は安全ではありません。
+# cudaq.set_random_seed(42)
+# _seeded_executor = transpiler.executor()
+# ```
+#
+# 補足: Steane 復号は 3 ビットシンドロームに対する NOT と AND の組み合わせでどの量子ビットを訂正するかを決めます。Qamomile の CUDA-Q emit pass はこの複合述語を生成カーネル内の Python `if`/`and`/`not` 分岐 + `cudaq.run` 経路に降ろすので、この記事は CUDA-Q でも最後まで動きます。
+# :::
+# ::::
+#
+# （ここに QURI Parts タブはありません — qulacs / QURI Parts は公開 API レベルで mid-circuit measurement をサポートしていないため、この記事の核である「シンドローム測定 → 条件付き訂正」のパターン自体が QURI Parts では走らないからです。冒頭の Transpiler タブブロックにも同じ警告を入れています。）
+
+# %%
+import qamomile.circuit as qmc
+
+# %%
+# Executor — この記事はデフォルトで Qiskit の AerSimulator (シード固定) を使います。
+# 上のタブで別のSDKを選んだ場合は、対応するタブのスニペットで以下を上書きしてください
+# （あわせて記事冒頭のpipセルで対応する行のコメントも外しておくこと）。
+from qiskit_aer import AerSimulator
+
+_seeded_executor = transpiler.executor(
+    backend=AerSimulator(seed_simulator=42, max_parallel_threads=1)
+)
+
+
+def _bits7(outcome) -> list[int]:
+    """Return seven measured bits in qubit-index order."""
+    if isinstance(outcome, (list, tuple)):
+        return list(outcome)
+    return [(outcome >> i) & 1 for i in range(7)]
+
+
+def _is_steane_zero_word(outcome) -> bool:
+    """Return True when the outcome is an even Hamming codeword."""
+    bits = _bits7(outcome)
+    h_checks = [
+        bits[3] ^ bits[4] ^ bits[5] ^ bits[6],
+        bits[1] ^ bits[2] ^ bits[5] ^ bits[6],
+        bits[0] ^ bits[2] ^ bits[4] ^ bits[6],
+    ]
+    return all(check == 0 for check in h_checks) and sum(bits) % 2 == 0
 
 # %% [markdown]
 # ## 1. スタビライザ形式論

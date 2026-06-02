@@ -29,15 +29,78 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# (Google Colab) Pick the line that matches your chosen Transpiler tab
+# below and remove the leading "# " from it to run.
+# # !pip install qamomile                  # Qiskit (default)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use qamomile[cudaq-cu13] on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+
+# %% [markdown]
+# This article uses Qiskit by default. Qamomile transpiles the same
+# `@qkernel` to multiple quantum SDKs, so you can follow it with another
+# SDK by swapping the import shown below — the rest of the article code
+# is identical regardless of the SDK you pick. On Colab, uncomment the
+# matching `pip install` line in the cell above first.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+#
+# **Heads-up — this article does not run end-to-end on QURI Parts.**
+# The later sections measure a qubit mid-circuit and then branch on
+# the result via `if bit:` / `while bit:`. The QURI Parts default
+# simulator (qulacs) does not expose mid-circuit measurement at the
+# public-API level, so the runtime control-flow demos will not
+# execute on this backend regardless of Qamomile's emit pass. Stick
+# with the Qiskit or CUDA-Q tab if you want to follow the article
+# end-to-end.
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+# `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+# matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+# macOS arm64, and Windows-via-WSL2 only.
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — by default this article uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
 
 # %%
 import os
 
 import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
 
 # %% [markdown]
 # ## `qmc.range` Loops
@@ -122,13 +185,20 @@ circuit = transpiler.to_circuit(
     sparse_coupling,
     bindings={"n": 3, "edges": edge_data, "gamma": 0.4},
 )
-print(circuit)
-assert circuit.num_qubits == 3
-# n=3 -> 3 initial H + 3 measurements; len(edge_data)=3 -> exactly 3 RZZ.
-_ops = {}
-for _instr in circuit.data:
-    _ops[_instr.operation.name] = _ops.get(_instr.operation.name, 0) + 1
-assert _ops == {"h": 3, "rzz": 3, "measure": 3}
+# Qiskit's ``QuantumCircuit.__str__`` gives an ASCII diagram. Other
+# SDKs return a different concrete type whose ``__str__`` is just an
+# object ``repr`` — print the type name so this cell is SDK-portable.
+print(type(circuit).__name__)
+# Structural invariants below use the Qiskit ``QuantumCircuit`` API
+# (``.num_qubits`` / ``.data``), so they only run on the default Qiskit
+# tab (which the docs test exercises); other tabs skip them.
+if type(circuit).__name__ == "QuantumCircuit":
+    assert circuit.num_qubits == 3
+    # n=3 -> 3 initial H + 3 measurements; len(edge_data)=3 -> exactly 3 RZZ.
+    _ops = {}
+    for _instr in circuit.data:
+        _ops[_instr.operation.name] = _ops.get(_instr.operation.name, 0) + 1
+    assert _ops == {"h": 3, "rzz": 3, "measure": 3}
 
 # %% [markdown]
 # Only the three edges in `edge_data` produce RZZ gates — no wasted operations.
@@ -207,15 +277,26 @@ def repeat_until_zero() -> qmc.Bit:
 
 
 # %% [markdown]
-# This transpiles to a Qiskit `while_loop` instruction. We can inspect the generated circuit structure:
+# This transpiles to whatever runtime-loop primitive the backend
+# offers — Qiskit emits a `while_loop` instruction inside a
+# `QuantumCircuit`; CUDA-Q emits a `while:` block inside the
+# `@cudaq.kernel` source. We can inspect the generated circuit
+# structure (the printed type tells you which SDK-native object came
+# back):
 
 # %%
 exe_while = transpiler.transpile(repeat_until_zero)
 qc_while = exe_while.compiled_quantum[0].circuit
-print(qc_while)
-assert qc_while.num_qubits == 2
-# The `while bit:` lowers to a Qiskit `while_loop` instruction.
-assert "while_loop" in {instr.operation.name for instr in qc_while.data}
+# As with the previous section, fall back to the type name so this
+# cell is SDK-portable — Qiskit's QuantumCircuit prints an ASCII
+# diagram, CUDA-Q's artifact prints a generic ``__repr__``.
+print(type(qc_while).__name__)
+# Qiskit-specific structural invariants — see the note in the previous
+# section. Only the default Qiskit path is checked here.
+if type(qc_while).__name__ == "QuantumCircuit":
+    assert qc_while.num_qubits == 2
+    # The `while bit:` lowers to a Qiskit `while_loop` instruction.
+    assert "while_loop" in {instr.operation.name for instr in qc_while.data}
 
 # %% [markdown]
 # ### Combining `if` and `while`

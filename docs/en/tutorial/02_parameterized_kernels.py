@@ -29,7 +29,11 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# (Google Colab) Pick the line that matches your chosen Transpiler tab
+# below and remove the leading "# " from it to run.
+# # !pip install qamomile                  # Qiskit (default)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use qamomile[cudaq-cu13] on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
 
 # %% [markdown]
 # ## Typical Roles of `UInt` and `Float`
@@ -45,11 +49,61 @@
 #
 # The common pattern is: bind structure at transpile time, sweep gate parameters at execution time.
 
+# %% [markdown]
+# This article uses Qiskit by default. Qamomile transpiles the same
+# `@qkernel` to multiple quantum SDKs, so you can follow it with another
+# SDK by swapping the import shown below — the rest of the article code
+# is identical regardless of the SDK you pick. On Colab, uncomment the
+# matching `pip install` line in the cell above first.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+# `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+# matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+# macOS arm64, and Windows-via-WSL2 only.
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
 # %%
-import qamomile.circuit as qmc
+# Transpiler — by default this article uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+
+# %%
+import qamomile.circuit as qmc
 
 # %% [markdown]
 # ## `qubit_array` and `qmc.range`
@@ -99,6 +153,13 @@ except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
     assert type(e).__name__ == "SyntaxError"
+else:
+    # The ``else`` branch runs only if neither the decorator nor
+    # ``.draw()`` raised. Surfacing that as an AssertionError turns
+    # "silent success" into a docs-test failure so we notice if the
+    # iteration check ever stops firing — the example would then be
+    # silently teaching a broken claim.
+    raise AssertionError("Expected bad_iteration to raise; it did not.")
 
 # %% [markdown]
 # Always use index-based access: `for i in qmc.range(n): q[i] = qmc.h(q[i])`.

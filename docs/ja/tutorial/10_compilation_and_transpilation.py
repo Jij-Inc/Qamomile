@@ -28,13 +28,16 @@
 # - 新しいバックエンド（別の量子SDKなど）を追加したい
 # - `transpile()`が実際に何をしているのかを単純に理解したい
 #
-# 小さな`@qkernel`を`Transpiler`のステップ実行用公開APIでパイプラインを1段ずつ通し、各ステップで中間表現を確認します。そして同じプランを2つのバックエンド（QiskitとQURI Parts）がどのように異なる回路へ変換するかを比較します。
+# 小さな`@qkernel`を`Transpiler`のステップ実行用公開APIでパイプラインを1段ずつ通し、各ステップで中間表現を確認します。
+#
+# **このチュートリアルは終始`QiskitTranspiler`に固定します — 他のチュートリアルにあるような冒頭の SDK 選択タブはここでは置きません。** 主題は Qamomile のコンパイルパイプライン自体で、これは SDK 非依存です。`Transpiler`の選択が影響するのは最後の emit パス（最終段）のみで、それまでの段は同じ Qamomile pipeline です。本チャプターでは walk-through を具体的にするため一つの backend（Qiskit）に固定します。末尾の「2つのバックエンドが同じプランをどう違う回路へ変換するか」を比較するセクションでは、同じカーネルを `QuriPartsTranspiler` で再トランスパイルして、emit のみが backend 固有であることを示します。
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
-# # or
-# # !uv add qamomile
+# このノートブックは Qiskit に固定 (冒頭の説明参照)、末尾だけ短い QuriParts との
+# 比較セクションがあります — その最後のセルを動かすために ``quri_parts`` extra 付きで
+# インストールしてください。
+# # !pip install "qamomile[quri_parts]"
 
 # %% [markdown]
 # ## 1. パイプラインの全体像

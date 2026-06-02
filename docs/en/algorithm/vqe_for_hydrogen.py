@@ -30,8 +30,65 @@
 # We show how to solve quantum chemistry problems using quantum computing, focusing on finding the minimum-energy structure of the H₂ molecule.
 
 # %%
-# Required packages can be installed with the following command
-# # !pip install openfermion pyscf openfermionpyscf
+# Install the latest Qamomile through pip!
+# (Google Colab) Pick the line that matches your chosen Transpiler tab
+# below and remove the leading "# " from it to run.
+# # !pip install qamomile openfermion pyscf openfermionpyscf                  # Qiskit (default)
+# # !pip install "qamomile[quri_parts]" openfermion pyscf openfermionpyscf    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]" openfermion pyscf openfermionpyscf    # CUDA-Q on a CUDA 12.x toolchain (use qamomile[cudaq-cu13] on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+
+# %% [markdown]
+# This article uses Qiskit by default. Qamomile transpiles the same
+# `@qkernel` to multiple quantum SDKs, so you can follow it with another
+# SDK by swapping the import shown below — the rest of the article code
+# is identical regardless of the SDK you pick. On Colab, uncomment the
+# matching `pip install` line in the cell above first.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+# `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+# matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+# macOS arm64, and Windows-via-WSL2 only.
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — by default this article uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
 
 # %%
 import os
@@ -42,14 +99,11 @@ import numpy as np
 import openfermion.chem as of_chem
 import openfermion.transforms as of_trans
 import openfermionpyscf as of_pyscf
-from qiskit_aer.primitives import EstimatorV2
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.qiskit.transpiler import QiskitExecutor
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
@@ -135,12 +189,11 @@ def vqe_ansatz(
 
 
 # %% [markdown]
-# ## Running VQE with Qiskit
+# ## Running VQE
 #
-# In this section, we transpile the VQE kernel to an executable object using `QiskitTranspiler`. The default executor runs this object and returns the expectation value, which the defined qkernel computes using `expval`. Thus, the user only needs to implement the optimisation loop.
+# In this section, we transpile the VQE kernel to an executable object using the `transpiler` constructed at the top of this article. The default executor runs the executable and returns the expectation value that the qkernel computes via `expval`; only the optimisation loop is left for us to implement. The Transpiler / Executor tab block already in this article controls which SDK actually carries out that emit + execute pair — swap tabs to switch SDKs.
 
 # %%
-transpiler = QiskitTranspiler()
 reps = 4
 
 executable = transpiler.transpile(
@@ -149,12 +202,72 @@ executable = transpiler.transpile(
     parameters=["thetas"],
 )
 
-# Transpiled quantum circuit
-executable.quantum_circuit.draw("mpl")
+# Transpiled quantum circuit (SDK-native object; `.draw("mpl")` is
+# Qiskit-specific, so we just print the type for SDK portability — use
+# the SDK's own drawing API for an actual diagram).
+print(type(executable.quantum_circuit).__name__)
+
+# %% [markdown]
+# We need an executor that can compute expectation values (the
+# `expval` inside `vqe_ansatz` returns a parametric `Float` that the
+# optimisation loop drives to its minimum). How to wire that depends
+# on the SDK you picked at the top — copy the matching snippet from
+# the tab block below into the executor cell further down.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit_aer.primitives import EstimatorV2
+# from qamomile.qiskit.transpiler import QiskitExecutor
+#
+# executor = QiskitExecutor(estimator=EstimatorV2())
+# ```
+#
+# `EstimatorV2` is Qiskit's current-generation primitive; it computes
+# expectation values in one shot rather than going through sampling.
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsExecutor
+#
+# # QuriPartsExecutor lazily constructs a parametric estimator backed
+# # by qulacs when one isn't supplied. That default is fine for the
+# # VQE loop below.
+# executor = QuriPartsExecutor()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# from qamomile.cudaq import CudaqExecutor
+#
+# # CudaqExecutor computes expectation values via cudaq.observe under
+# # the hood — no explicit estimator wiring is needed.
+# executor = CudaqExecutor()
+# ```
+# :::
+# ::::
+
+# %%
+# Executor — by default this article uses Qiskit's EstimatorV2 for
+# expectation values. If you picked a different tab above, copy that
+# tab's snippet over the lines below (and make sure the matching pip
+# install line at the top of this article is uncommented).
+from qiskit_aer.primitives import EstimatorV2
+
+from qamomile.qiskit.transpiler import QiskitExecutor
+
+executor = QiskitExecutor(estimator=EstimatorV2())
 
 # %%
 cost_history = []
-executor = QiskitExecutor(estimator=EstimatorV2())
 
 
 def cost_fn(param_values):

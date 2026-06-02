@@ -23,7 +23,11 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# (Google Colab) 下の §3 トランスパイル節の Transpiler タブで選んだ SDK に
+# 対応する行の先頭の "# " を外して実行してください。
+# # !pip install qamomile                  # Qiskit (デフォルト)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA 12.x ツールチェインの場合の CUDA-Q (CUDA 13.x なら qamomile[cudaq-cu13])。Linux / macOS-arm64 / WSL2 のみ。
 
 # %% [markdown]
 # ---
@@ -285,9 +289,50 @@ def qemcmc_circuit(
 # ### 3. トランスパイル
 #
 # カーネルをトランスパイルします。量子回路を実行するには、ハミルトニアンの混合係数$\gamma$とシミュレーション時間$t$を固定する必要があります。 [](https://doi.org/10.1103/PhysRevA.111.042615) に従い、$\gamma=0.45$、$t=12$、$\Delta t = 0.8$と設定します。トランスパイル時に`n`、`order`、`time`、`step`をバインドし、`input_bits`はランタイムパラメータとして残します。
+#
+# この記事ではデフォルトで Qiskit を使います。Qamomile は同じ`@qkernel`を複数のSDKにトランスパイルできるので、別のSDKで読みたい場合は下のインポートを差し替えるだけで、本文の他のコードはそのままで動きます。Colabでは記事冒頭のセルにある対応する`pip install`行のコメントを先に外してください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# インストールしている CUDA Toolkit が CUDA 12.x なら`qamomile[cudaq-cu12]`を、CUDA 13.x なら`qamomile[cudaq-cu13]`を使ってください。CUDA-Q は Linux / macOS arm64 / Windows-via-WSL2 のみサポートされています。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
 # %%
+# Transpiler — デフォルトでは Qiskit を使います。上のタブで別の SDK (QURI Parts / CUDA-Q) を選んだ場合は、そのタブの2行をこのセルの下の2行と置き換え、記事冒頭で対応する pip install 行のコメントが外れていることを確認してください。
 from qamomile.qiskit import QiskitTranspiler
 
+transpiler = QiskitTranspiler()
+
+# %%
 gamma = 0.45  # 混合係数
 time = 12.0  # 総発展時間
 delta_t = 0.8  # Trotterステップの時間幅
@@ -300,8 +345,6 @@ Hs = [
     gamma * cost_hamiltonian,
 ]
 assert len(Hs) == 2
-
-transpiler = QiskitTranspiler()
 
 executable = transpiler.transpile(
     qemcmc_circuit,
@@ -383,9 +426,48 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 # %% [markdown]
 # 実装したQeMCMCアルゴリズムを実行してみましょう。先ほどよりも低温の $\beta = 1.0$ に設定し、古典MCMCの局所更新では混合が遅くなる条件で量子提案分布の挙動を観察します。公平な比較のため、同じ $\beta = 1.0$ で古典MCMCも併走させます。
 
+# 再現性のためにシード付きサンプラを用意します。シード付きサンプラの作り方は SDK 依存なので、§3 で選んだ Transpiler に合うタブを選んでください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit_aer import AerSimulator
+#
+# executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# QURI Parts のデフォルトの qulacs サンプラはこのチュートリアル程度であれば十分決定的なので、明示的にシードを設定する必要はありません。
+#
+# ```python
+# executor = transpiler.executor()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+# cudaq.set_random_seed(7)
+# executor = transpiler.executor()
+# ```
+# :::
+# ::::
+
 # %%
+# シード付き executor — デフォルトでは Qiskit を使います。上のタブで別の SDK を選んだ場合は、そのタブのスニペットをこのセルの下と入れ替えてください。
 from qiskit_aer import AerSimulator
 
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
+
+# %%
 beta = 1.0  # 局所更新では混合が遅くなる低温に切り替える
 T_quantum = (
     20 if docs_test_mode else 1000
@@ -408,7 +490,6 @@ for t in range(T_quantum):
     classical_compare_sample[t] = state
 
 # QeMCMC
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
 state = np.ones(n_spins, dtype=int)  # 初期状態
 for t in range(T_quantum):

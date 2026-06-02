@@ -195,11 +195,25 @@ class QiskitGateEmitter:
     def emit_if_start(
         self,
         circuit: "QuantumCircuit",
-        clbit: int,
+        clbit_or_expr: int | str,
         value: int = 1,
     ) -> Any:
-        """Start a native if using Qiskit's if_test context manager."""
-        return _QiskitIfContext(circuit, clbit, value)
+        """Start a native if using Qiskit's if_test context manager.
+
+        Compound predicates (``str``) are handled by
+        ``QiskitEmitPass._emit_if`` directly via the Qiskit ``Expr``
+        / ``circuit.if_test`` path and never reach this method — so we
+        only handle the ``int`` clbit case here. Keeping the wider
+        protocol signature on the method keeps callers and IDEs
+        happy.
+        """
+        if not isinstance(clbit_or_expr, int):
+            raise TypeError(
+                "QiskitGateEmitter.emit_if_start expects an int clbit; "
+                "compound predicates go through QiskitEmitPass._emit_if "
+                "directly via circuit.if_test."
+            )
+        return _QiskitIfContext(circuit, clbit_or_expr, value)
 
     def emit_else_start(self, circuit: "QuantumCircuit", context: Any) -> None:
         """Handled by context manager."""
@@ -216,11 +230,22 @@ class QiskitGateEmitter:
     def emit_while_start(
         self,
         circuit: "QuantumCircuit",
-        clbit: int,
+        clbit_or_expr: int | str,
         value: int = 1,
     ) -> Any:
-        """Start a native while loop."""
-        return _QiskitWhileContext(circuit, clbit, value)
+        """Start a native while loop.
+
+        See :meth:`emit_if_start` — the ``str`` (compound predicate)
+        branch is handled by ``QiskitEmitPass._emit_while`` directly
+        via ``circuit.while_loop`` and never reaches this method.
+        """
+        if not isinstance(clbit_or_expr, int):
+            raise TypeError(
+                "QiskitGateEmitter.emit_while_start expects an int clbit; "
+                "compound predicates go through QiskitEmitPass._emit_while "
+                "directly via circuit.while_loop."
+            )
+        return _QiskitWhileContext(circuit, clbit_or_expr, value)
 
     def emit_while_end(self, circuit: "QuantumCircuit", context: Any) -> None:
         """Handled by context manager."""

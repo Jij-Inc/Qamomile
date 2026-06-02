@@ -29,15 +29,63 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xなら`qamomile[cudaq-cu13]`)。Linux / macOS-arm64 / WSL2のみ。
+
+# %% [markdown]
+# この記事はデフォルトでQiskitを使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。記事本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+#
+# **注意 — この記事は QURI Parts では最後まで通りません。** 後半のセクションは中間測定 (`qmc.measure`) の結果で`if bit:` / `while bit:`で分岐するパターンを扱いますが、QURI Partsのデフォルトシミュレータ (qulacs) は公開APIレベルで中間測定をサポートしていないため、Qamomileのemit pass の有無に関係なく runtime control-flow のデモは実行できません。最後まで通したい場合は Qiskit か CUDA-Q タブを選んでください。
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — この記事はデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
 
 # %%
 import os
 
 import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
 
 # %% [markdown]
 # ## `qmc.range`ループ
@@ -122,13 +170,19 @@ circuit = transpiler.to_circuit(
     sparse_coupling,
     bindings={"n": 3, "edges": edge_data, "gamma": 0.4},
 )
-print(circuit)
-assert circuit.num_qubits == 3
-# n=3 → 初期 H 3個 + 測定 3個、len(edge_data)=3 → RZZ ちょうど 3個。
-_ops = {}
-for _instr in circuit.data:
-    _ops[_instr.operation.name] = _ops.get(_instr.operation.name, 0) + 1
-assert _ops == {"h": 3, "rzz": 3, "measure": 3}
+# Qiskit の ``QuantumCircuit.__str__`` は ASCII 回路図を返しますが、
+# 他SDKは objectのreprを返すだけです。SDK 横断で動くよう、ここでは型名を print します。
+print(type(circuit).__name__)
+# 以下の構造アサーションは Qiskit ``QuantumCircuit`` の API
+# (``.num_qubits`` / ``.data``) を使うため、docs テストが実行する
+# デフォルトの Qiskit タブでのみ走り、他タブではスキップされます。
+if type(circuit).__name__ == "QuantumCircuit":
+    assert circuit.num_qubits == 3
+    # n=3 → 初期 H 3個 + 測定 3個、len(edge_data)=3 → RZZ ちょうど 3個。
+    _ops = {}
+    for _instr in circuit.data:
+        _ops[_instr.operation.name] = _ops.get(_instr.operation.name, 0) + 1
+    assert _ops == {"h": 3, "rzz": 3, "measure": 3}
 
 # %% [markdown]
 # `edge_data`の3つのエッジのみがRZZゲートを生成します。
@@ -207,15 +261,20 @@ def repeat_until_zero() -> qmc.Bit:
 
 
 # %% [markdown]
-# これはQiskitの`while_loop`命令にトランスパイルされます。生成された回路構造を確認できます:
+# これは backend ごとに固有のランタイムループプリミティブにトランスパイルされます — Qiskit は `QuantumCircuit` 内の `while_loop` 命令、CUDA-Q は `@cudaq.kernel` 内の `while:` ブロックとして emit します。生成された回路の型名で SDK-native オブジェクトを確認できます:
 
 # %%
 exe_while = transpiler.transpile(repeat_until_zero)
 qc_while = exe_while.compiled_quantum[0].circuit
-print(qc_while)
-assert qc_while.num_qubits == 2
-# `while bit:` は Qiskit の `while_loop` 命令に lower される。
-assert "while_loop" in {instr.operation.name for instr in qc_while.data}
+# 前のセクション同様、型名にフォールバックしてSDK横断で動くようにします — Qiskit の
+# QuantumCircuit は ASCII 図を出しますが、CUDA-Q のartifactは generic な ``__repr__`` です。
+print(type(qc_while).__name__)
+# Qiskit 固有の構造アサーション — 前セクションの注記を参照。
+# デフォルトの Qiskit パスでのみ確認します。
+if type(qc_while).__name__ == "QuantumCircuit":
+    assert qc_while.num_qubits == 2
+    # `while bit:` は Qiskit の `while_loop` 命令に lower される。
+    assert "while_loop" in {instr.operation.name for instr in qc_while.data}
 
 # %% [markdown]
 # ### `if`と`while`の組み合わせ

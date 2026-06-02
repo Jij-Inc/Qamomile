@@ -33,10 +33,159 @@
 # **Prerequisites**: the content of [the first part](quantum_error_correction.ipynb) (syndrome measurement, Pauli errors, the term "stabilizer").
 
 # %%
-# Install the latest Qamomile from pip.
-# # !pip install qamomile
-# # or
-# # !uv add qamomile
+# Install the latest Qamomile through pip!
+# (Google Colab) Pick the line that matches your chosen Transpiler tab
+# below and remove the leading "# " from it to run.
+# # !pip install qamomile                  # Qiskit (default)
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use qamomile[cudaq-cu13] on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+
+# %% [markdown]
+# This article uses Qiskit by default. Qamomile transpiles the same
+# `@qkernel` to multiple quantum SDKs, so you can follow it with another
+# SDK by swapping the import shown below — the rest of the article code
+# is identical regardless of the SDK you pick. On Colab, uncomment the
+# matching `pip install` line in the cell above first.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+#
+# **Heads-up — this article does not run on QURI Parts.** It relies
+# on mid-circuit measurement (qmc.measure of stabilizer ancillas
+# during the circuit, followed by syndrome-conditional X / Z gates),
+# which qulacs / QURI Parts' default sampler does not currently
+# support at the public-API level. Qamomile's QURI Parts backend
+# therefore raises an `EmitError` when this article tries to lower
+# its RuntimeClassicalExpr nodes. Use the Qiskit or CUDA-Q tab to
+# follow this article end-to-end.
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+# `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+# matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+# macOS arm64, and Windows-via-WSL2 only.
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
+# %%
+# Transpiler — by default this article uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+
+# %% [markdown]
+# Create a seeded executor so the documentation output is reproducible
+# across runs. How to seed the underlying simulator depends on the SDK
+# you picked at the top — copy the matching snippet below into the
+# executor cell further down if you swapped tabs.
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit_aer import AerSimulator
+#
+# _seeded_executor = transpiler.executor(
+#     backend=AerSimulator(seed_simulator=42, max_parallel_threads=1)
+# )
+# ```
+#
+# `seed_simulator=42` makes per-shot draws reproducible;
+# `max_parallel_threads=1` is needed because Aer's parallel sampling
+# can otherwise shuffle draws across threads.
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+# # cudaq's RNG is process-global; set_random_seed affects every
+# # subsequent cudaq.sample / cudaq.observe / cudaq.run call in this
+# # Python process. Good enough for in-notebook reproducibility, NOT
+# # safe across concurrent kernels in the same process.
+# cudaq.set_random_seed(42)
+# _seeded_executor = transpiler.executor()
+# ```
+#
+# Note: the Steane decoder uses 3-bit syndromes combined with NOT and
+# AND on measurement bits to pick which qubit to correct. Qamomile's
+# CUDA-Q emit pass lowers those compound predicates to Python
+# `if`/`and`/`not` branches inside the emitted `@cudaq.kernel`,
+# executed via `cudaq.run` — so the article works end-to-end on
+# CUDA-Q.
+# :::
+# ::::
+#
+# (No QURI Parts tab here — qulacs / QURI Parts does not currently
+# support mid-circuit measurement at the public-API level, so this
+# article's syndrome-measurement → conditional-correction pattern
+# can't run on that SDK regardless of the Qamomile emitter. See the
+# Transpiler tab block at the top of this article for the
+# corresponding warning.)
+
+# %%
+import qamomile.circuit as qmc
+
+# %%
+# Executor — by default this article uses Qiskit's AerSimulator with
+# a fixed seed. If you picked a different tab above, copy that tab's
+# snippet over the lines below (and make sure the matching pip install
+# line at the top of this article is uncommented).
+from qiskit_aer import AerSimulator
+
+_seeded_executor = transpiler.executor(
+    backend=AerSimulator(seed_simulator=42, max_parallel_threads=1)
+)
+
+
+def _bits7(outcome) -> list[int]:
+    """Return seven measured bits in qubit-index order."""
+    if isinstance(outcome, (list, tuple)):
+        return list(outcome)
+    return [(outcome >> i) & 1 for i in range(7)]
+
+
+def _is_steane_zero_word(outcome) -> bool:
+    """Return True when the outcome is an even Hamming codeword."""
+    bits = _bits7(outcome)
+    h_checks = [
+        bits[3] ^ bits[4] ^ bits[5] ^ bits[6],
+        bits[1] ^ bits[2] ^ bits[5] ^ bits[6],
+        bits[0] ^ bits[2] ^ bits[4] ^ bits[6],
+    ]
+    return all(check == 0 for check in h_checks) and sum(bits) % 2 == 0
 
 # %% [markdown]
 # ## 1. Stabilizer Formalism
