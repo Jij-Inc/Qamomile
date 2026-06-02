@@ -1,4 +1,5 @@
 import inspect
+import types
 import typing
 
 import qamomile.circuit.ir.types as ir_types
@@ -213,8 +214,49 @@ def is_dict_type(t: typing.Any) -> bool:
     return False
 
 
+def resolve_handle_class(type_: typing.Any) -> typing.Any:
+    """Extract the Handle subclass from a ``int | UInt``-style Union, if any.
+
+    Frontend kernels can declare scalar parameters using the literal-friendly
+    Union form ``int | UInt`` / ``float | Float`` / ``bool | Bit`` to keep the
+    call site able to pass a raw Python literal without manual wrapping. The
+    rest of the compiler (IR port type derivation, bound-input construction,
+    literal auto-promotion) expects to see a single Handle class. This helper
+    centralises the Union-to-Handle reduction so each consumer can run its
+    type-key dispatch unchanged.
+
+    Args:
+        type_ (Any): A Python type annotation. Typically a ``Handle`` subclass,
+            a parameterised generic like ``Vector[Qubit]``, or a Union that
+            includes exactly one ``Handle`` subclass alongside one or more
+            other type members.
+
+    Returns:
+        Any: The Handle subclass member of the Union when ``type_`` is a Union
+            containing exactly one ``Handle`` subclass; otherwise ``type_``
+            unchanged. Non-Handle members of the Union are not validated here
+            — downstream consumers handle them via their existing dispatch
+            (e.g. ``_promote_literal_to_handle`` ignores values that do not
+            match the resolved Handle's accepted primitive types, and the
+            bound-input path simply uses the resolved Handle's constructor).
+    """
+    if typing.get_origin(type_) is typing.Union or isinstance(type_, types.UnionType):
+        args = typing.get_args(type_)
+        handle_members = [
+            a for a in args if isinstance(a, type) and issubclass(a, Handle)
+        ]
+        if len(handle_members) == 1:
+            return handle_members[0]
+    return type_
+
+
 def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
     """Map Handle type to ValueType."""
+    # Reduce ``int | UInt`` etc. literal-friendly Union annotations to their
+    # Handle member; the IR port type for ``int | UInt`` is the same UIntType
+    # the bare ``UInt`` annotation would produce.
+    handle_type = resolve_handle_class(handle_type)
+
     # Handle Array types
     if is_array_type(handle_type):
         # For generic aliases like Vector[Bit], get element type from __args__

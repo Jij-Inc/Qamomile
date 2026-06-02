@@ -338,7 +338,10 @@ sample_result = executable.sample(
 # インスタンスで評価された`ommx.v1.SampleSet`が返る。実行可能性、真の目的関数値、
 # 制約ごとの違反量がOMMXのAPIから直接得られるため、自前の実行可能性判定や
 # 目的関数値計算ヘルパーは不要。
+import ommx.v1
+
 sample_set = converter.decode(sample_result)
+assert isinstance(sample_set, ommx.v1.SampleSet)
 
 # %% [markdown]
 # ## 結果の分析

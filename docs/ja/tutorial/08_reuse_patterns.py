@@ -101,8 +101,8 @@ print(qc.draw())
 @qmc.qkernel
 def rotate_first(
     q: qmc.Vector[qmc.Qubit],
-    idx: qmc.UInt,
-    angle: qmc.Float,
+    idx: int | qmc.UInt,
+    angle: float | qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
     q[idx] = qmc.ry(q[idx], angle)
     return q

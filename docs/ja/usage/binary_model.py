@@ -224,7 +224,7 @@ assert qubo_model.coefficients == {
 #
 
 # %%
-hubo = {
+hubo: dict[tuple[int, ...], float] = {
     (0,): 1.0,
     (1,): 2.0,
     (2,): 3.0,
