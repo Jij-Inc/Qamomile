@@ -45,15 +45,20 @@ def resolve_condition_address(
     Scalar measurement results carry their own UUID and the clbit allocator
     registers them under ``QubitAddress(bit.uuid)``. ``Vector[Bit]`` element
     accesses (``s[i]`` where ``s = qmc.measure(register)``) instead live
-    under ``QubitAddress(root_array.uuid, root_index)``. The index value is
-    folded through ``bindings`` to handle loop-variable indices alongside
-    constant ones, and the parent's ``slice_of`` chain is walked so that a
-    sliced view (``s[a:b:c][i]``) composes into a root-space index via the
-    standard affine map ``root_index = start + step * view_local_index``
-    repeated along the chain — matching ``ResourceAllocator._resolve_root_qubit_address``.
-    Falls back to the scalar address when no parent array is set, when the
-    index cannot be resolved, or when any ``slice_start`` / ``slice_step``
-    along the chain is non-constant, deferring the diagnostic to the
+    under ``QubitAddress(root_array.uuid, root_index)``. The element index
+    and every ``slice_start`` / ``slice_step`` along the parent's
+    ``slice_of`` chain are resolved the same way — taken directly when
+    constant, otherwise folded through ``bindings`` via ``resolver`` so
+    that loop-variable indices and runtime-valued slice bounds (``s[j:k]``
+    where ``j``/``k`` are loop variables) both work. The chain composes
+    into a root-space index via the standard affine map
+    ``root_index = start + step * view_local_index`` repeated along the
+    chain — matching ``ResourceAllocator._resolve_root_qubit_address`` /
+    ``ValueResolver.resolve_slice_chain``. Falls back to the scalar
+    address when no parent array is set, or when the index or any slice
+    bound cannot be resolved to a concrete int (e.g. a backend runtime
+    parameter, which cannot index a static classical register, or any
+    symbolic value with no ``resolver``), deferring the diagnostic to the
     caller's ``clbit_map`` lookup. Used by both the default if/while
     emission path and the Qiskit / CUDA-Q backends when looking up a
     measurement-derived clbit for a runtime predicate.
@@ -63,50 +68,60 @@ def resolve_condition_address(
             ``WhileOperation``, or an operand of a measurement-derived
             classical predicate (e.g. inside ``RuntimeClassicalExpr``).
         bindings (dict[str, Any]): Active emit-time bindings used to
-            resolve symbolic indices (loop variables, runtime parameters).
+            resolve symbolic indices and slice bounds (loop variables,
+            compile-time-bound parameters).
         resolver (ValueResolver | None): The active ``ValueResolver``
             exposing ``resolve_int_value``. ``None`` is accepted for
             early-emit pre-scans (e.g. CUDA-Q's loop-carried clbit
             collector) that run before runtime bindings exist — only the
-            constant-index path is taken in that case; runtime indices
-            fall through to the scalar UUID.
+            constant path is taken in that case; symbolic indices and
+            symbolic slice bounds fall through to the scalar UUID.
 
     Returns:
         QubitAddress: Key suitable for looking up the condition in
             ``clbit_map``.
 
     Raises:
-        No exceptions for any well-formed IR. The ``int(...)`` coercions
-        on index, ``slice_start``, and ``slice_step`` are guarded by
-        ``is_constant()`` returning ``True``, which by the ``Value``
-        contract implies ``get_const()`` returns a numeric type
-        (``int`` / ``float`` / ``bool``) accepted by ``int(...)``.
-        A malformed IR could surface ``TypeError`` / ``ValueError`` here,
-        but that is a compiler-internal invariant violation, not a
-        user-input condition.
+        No exceptions for any well-formed IR. ``int(...)`` coercions are
+        guarded by ``is_constant()`` (which by the ``Value`` contract
+        implies ``get_const()`` returns a numeric type), and
+        ``resolver.resolve_int_value`` returns ``None`` rather than
+        raising on an unresolvable symbolic value. A malformed IR could
+        surface ``TypeError`` / ``ValueError`` here, but that is a
+        compiler-internal invariant violation, not a user-input condition.
     """
+
+    def _resolve_int(value: Value | None) -> int | None:
+        """Resolve a Value (element index or slice bound) to a concrete int.
+
+        Args:
+            value (Value | None): The index or slice-bound Value to fold,
+                or ``None`` when the bound is absent.
+
+        Returns:
+            int | None: The concrete integer when the value is constant or
+                resolvable through ``bindings`` via ``resolver``; ``None``
+                otherwise (no value, or symbolic with no / failed resolver).
+        """
+        if value is None:
+            return None
+        if value.is_constant():
+            return int(value.get_const())
+        if resolver is not None:
+            return resolver.resolve_int_value(value, bindings)
+        return None
+
     if condition.parent_array is None or not condition.element_indices:
         return QubitAddress(condition.uuid)
-    idx_value = condition.element_indices[0]
-    if idx_value.is_constant():
-        idx: int | None = int(idx_value.get_const())
-    elif resolver is not None:
-        idx = resolver.resolve_int_value(idx_value, bindings)
-    else:
-        idx = None
+    idx = _resolve_int(condition.element_indices[0])
     if idx is None:
         return QubitAddress(condition.uuid)
     parent = condition.parent_array
     while parent.slice_of is not None:
-        if (
-            parent.slice_start is None
-            or parent.slice_step is None
-            or not parent.slice_start.is_constant()
-            or not parent.slice_step.is_constant()
-        ):
+        start = _resolve_int(parent.slice_start)
+        step = _resolve_int(parent.slice_step)
+        if start is None or step is None:
             return QubitAddress(condition.uuid)
-        start = int(parent.slice_start.get_const())
-        step = int(parent.slice_step.get_const())
         idx = start + step * idx
         parent = parent.slice_of
     return QubitAddress(parent.uuid, idx)

@@ -667,3 +667,69 @@ class TestVectorBitElementProvenance:
         )
         result = exe.sample(transpiler.executor(), shots=64).result()
         assert result.results == [((0,), 64)]
+
+    def test_if_on_runtime_bound_slice_of_measured_vector(self, transpiler):
+        """A slice whose bounds are loop variables resolves per iteration.
+
+        ``s_view = s[j:j+1]`` inside ``for j in qmc.range(3)`` has a
+        non-constant ``slice_start`` (the loop variable ``j``), so the
+        view-element condition ``if s_view[0]:`` (== ``s[j]``) can only be
+        resolved by folding the slice bound through the emit-time
+        bindings. ``resolve_condition_address`` now resolves both the
+        element index and each ``slice_start`` / ``slice_step`` the same
+        way (constant, else via the resolver), composing the affine map to
+        the root measured array. Setup: ``anc = (1,0,1,0,1,0)`` so
+        ``s[j]`` flips ``q[j]`` for even ``j`` only, giving ``q ==
+        (1, 0, 1)`` every shot. Before this, a non-constant slice bound
+        fell back to the scalar UUID and raised ``EmitError``.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, name="q")
+            anc = qmc.qubit_array(6, name="anc")
+            anc[0] = qmc.x(anc[0])
+            anc[2] = qmc.x(anc[2])
+            anc[4] = qmc.x(anc[4])
+            s = qmc.measure(anc)
+            for j in qmc.range(3):
+                s_view = s[j : j + 1]
+                if s_view[0]:
+                    q[j] = qmc.x(q[j])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((1, 0, 1), 64)]
+
+    def test_if_on_runtime_strided_slice_of_measured_vector(self, transpiler):
+        """A strided slice with a loop-variable start resolves too.
+
+        ``s_view = s[j::2]`` then ``if s_view[0]:`` (== ``s[j]``) exercises
+        the ``start + step * idx`` composition with a non-constant
+        ``slice_start`` (the loop variable ``j``) and a constant
+        ``slice_step`` of 2. Setup: ``anc = (0, 1, 0, 0)`` so only
+        ``s[1] == 1`` flips ``q[1]``, giving ``q == (0, 1)`` every shot.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            anc = qmc.qubit_array(4, name="anc")
+            anc[1] = qmc.x(anc[1])
+            s = qmc.measure(anc)
+            for j in qmc.range(2):
+                s_view = s[j::2]
+                if s_view[0]:
+                    q[j] = qmc.x(q[j])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((0, 1), 64)]
