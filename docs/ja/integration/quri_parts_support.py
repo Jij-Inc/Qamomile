@@ -164,9 +164,8 @@ qaoa_ansatz.draw(
 from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
 
 transpiler = QuriPartsTranspiler()
-# `seed` を渡すと Qulacs sampler が再現可能になります。同じ seed と回路で `sample(...)` を
-# 2 回呼ぶと、まったく同じショットカウントが得られます。非決定的なサンプリングにしたい場合は
-# この引数を省略する（または `seed=None` を渡す）だけです。
+# `seed` を渡すと Qulacs sampler が再現可能になります。同じ seed と回路で `sample(...)` を 2 回呼ぶと、まったく同じショットカウントが得られます。
+# 非決定的なサンプリングにしたい場合は、この引数を省略する（または `seed=None` を渡す）だけです。
 executor = QuriPartsExecutor(seed=42)
 
 executable = transpiler.transpile(
