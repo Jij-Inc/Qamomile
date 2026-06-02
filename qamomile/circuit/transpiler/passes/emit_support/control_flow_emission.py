@@ -29,6 +29,7 @@ from qamomile.circuit.transpiler.errors import EmitError
 from .condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
+    resolve_condition_address_detailed,
     resolve_if_condition,
 )
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
@@ -82,49 +83,10 @@ def resolve_condition_address(
             ``clbit_map``.
 
     Raises:
-        No exceptions for any well-formed IR. ``int(...)`` coercions are
-        guarded by ``is_constant()`` (which by the ``Value`` contract
-        implies ``get_const()`` returns a numeric type), and
-        ``resolver.resolve_int_value`` returns ``None`` rather than
-        raising on an unresolvable symbolic value. A malformed IR could
-        surface ``TypeError`` / ``ValueError`` here, but that is a
-        compiler-internal invariant violation, not a user-input condition.
+        No exceptions for any well-formed IR. See
+        ``resolve_condition_address_detailed`` for the resolution contract.
     """
-
-    def _resolve_int(value: Value | None) -> int | None:
-        """Resolve a Value (element index or slice bound) to a concrete int.
-
-        Args:
-            value (Value | None): The index or slice-bound Value to fold,
-                or ``None`` when the bound is absent.
-
-        Returns:
-            int | None: The concrete integer when the value is constant or
-                resolvable through ``bindings`` via ``resolver``; ``None``
-                otherwise (no value, or symbolic with no / failed resolver).
-        """
-        if value is None:
-            return None
-        if value.is_constant():
-            return int(value.get_const())
-        if resolver is not None:
-            return resolver.resolve_int_value(value, bindings)
-        return None
-
-    if condition.parent_array is None or not condition.element_indices:
-        return QubitAddress(condition.uuid)
-    idx = _resolve_int(condition.element_indices[0])
-    if idx is None:
-        return QubitAddress(condition.uuid)
-    parent = condition.parent_array
-    while parent.slice_of is not None:
-        start = _resolve_int(parent.slice_start)
-        step = _resolve_int(parent.slice_step)
-        if start is None or step is None:
-            return QubitAddress(condition.uuid)
-        idx = start + step * idx
-        parent = parent.slice_of
-    return QubitAddress(parent.uuid, idx)
+    return resolve_condition_address_detailed(condition, bindings, resolver)[0]
 
 
 def resolve_loop_bounds(

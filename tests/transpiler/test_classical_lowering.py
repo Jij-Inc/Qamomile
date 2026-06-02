@@ -733,3 +733,148 @@ class TestVectorBitElementProvenance:
             .result()
         )
         assert result.results == [((0, 1), 64)]
+
+    def test_for_loop_condition_only_loop_var(self, transpiler):
+        """A loop variable that appears only in a runtime condition forces
+        the for loop to unroll.
+
+        ``for j in qmc.range(3): if s[j]: q[0] = x(q[0])`` reads the loop
+        variable ``j`` only inside the ``if`` condition — the body indexes
+        ``q[0]``, not ``q[j]``. A native backend for-loop would keep ``j``
+        as a loop parameter that classical-register indexing cannot
+        consume, so ``LoopAnalyzer`` must detect the condition's loop-var
+        dependency and unroll. Setup: ``anc = (1, 0, 1)``, so ``q[0]`` is
+        flipped at ``j = 0`` and ``j = 2`` (twice → back to 0). Without
+        unrolling this raised ``EmitError``.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            anc = qmc.qubit_array(3, name="anc")
+            anc[0] = qmc.x(anc[0])
+            anc[2] = qmc.x(anc[2])
+            s = qmc.measure(anc)
+            for j in qmc.range(3):
+                if s[j]:
+                    q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((0,), 64)]
+
+    def test_for_loop_condition_only_loop_var_in_slice_bound(self, transpiler):
+        """The loop variable in a slice bound of a condition also forces
+        unrolling.
+
+        ``for j in qmc.range(3): if s[j:j+1][0]: ...`` carries the loop
+        variable in the view's ``slice_start`` rather than the element
+        index, so ``LoopAnalyzer`` must inspect the ``slice_of`` chain too.
+        Setup: ``anc = (0, 1, 0)`` → only ``j = 1`` flips ``q[0]`` → 1.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            anc = qmc.qubit_array(3, name="anc")
+            anc[1] = qmc.x(anc[1])
+            s = qmc.measure(anc)
+            for j in qmc.range(3):
+                if s[j : j + 1][0]:
+                    q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=64)
+            .result()
+        )
+        assert result.results == [((1,), 64)]
+
+    def test_while_loop_carried_init_from_measured_vector_element(self, transpiler):
+        """A ``while`` whose initial condition is a measured ``Vector[Bit]``
+        element aliases its loop-carried clbit correctly.
+
+        ``bit = s[0]; while bit: bit = qmc.measure(qz)`` reassigns the
+        condition in the body (loop-carried). The resource allocator must
+        recognise that the initial condition ``s[0]`` lives at the measured
+        vector's ``(root, index)`` clbit so the body's re-measurement
+        aliases onto the same physical clbit the ``while`` reads. A broken
+        alias leaves the condition stuck on the stale initial value and the
+        loop never terminates, so this is verified structurally (no
+        execution): the emitted ``while_loop`` condition clbit must equal
+        the clbit the body re-measures into. Regression for a loop-carried
+        alias that ignored vector-element sources.
+        """
+        from qiskit.circuit.controlflow import WhileLoopOp
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            anc = qmc.qubit_array(1, name="anc")
+            qz = qmc.qubit("qz")
+            anc[0] = qmc.x(anc[0])
+            s = qmc.measure(anc)
+            bit = s[0]
+            while bit:
+                bit = qmc.measure(qz)
+            return bit
+
+        qc = transpiler.transpile(kernel).compiled_quantum[0].circuit
+        clbit_index = {bit: i for i, bit in enumerate(qc.clbits)}
+        while_ops = [
+            inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)
+        ]
+        assert while_ops, "expected a runtime while_loop"
+        cond_clbit = clbit_index[while_ops[0].operation.condition[0]]
+        body = while_ops[0].operation.blocks[0]
+        body_to_outer = {b: while_ops[0].clbits[j] for j, b in enumerate(body.clbits)}
+        body_measure_clbits = [
+            clbit_index[body_to_outer[binst.clbits[0]]]
+            for binst in body.data
+            if binst.operation.name == "measure"
+        ]
+        assert body_measure_clbits, "expected a re-measure inside the while body"
+        assert all(c == cond_clbit for c in body_measure_clbits), (
+            "loop-carried alias broken: the while condition reads a different "
+            "clbit than the body re-measures into, which would loop forever."
+        )
+
+    def test_out_of_bounds_constant_element_index_rejected(self, transpiler):
+        """A constant index that overflows a constant dimension is rejected
+        at trace time rather than silently misresolving.
+
+        ``empty = s[1:1]; empty[0]`` indexes a length-0 slice view; the
+        element would otherwise compose to a valid-but-wrong root clbit
+        (``s[1]``) and be read silently. A plain out-of-range index
+        (``s[5]`` on a length-2 register) is rejected the same way. Both
+        raise ``IndexError`` while a kernel is being traced.
+        """
+
+        @qmc.qkernel
+        def empty_slice_kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            anc = qmc.qubit_array(3, name="anc")
+            s = qmc.measure(anc)
+            empty = s[1:1]
+            if empty[0]:
+                q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        with pytest.raises(IndexError):
+            transpiler.transpile(empty_slice_kernel)
+
+        @qmc.qkernel
+        def oob_kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            anc = qmc.qubit_array(2, name="anc")
+            s = qmc.measure(anc)
+            if s[5]:
+                q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        with pytest.raises(IndexError):
+            transpiler.transpile(oob_kernel)
