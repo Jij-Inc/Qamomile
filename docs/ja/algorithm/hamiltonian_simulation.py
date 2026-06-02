@@ -107,7 +107,9 @@ def statevector(circuit) -> np.ndarray:
         stripped,
         basis_gates=["u", "cx", "rx", "ry", "rz", "h", "p", "sx", "x", "y", "z"],
     )
-    stripped.save_statevector()
+    # ``save_statevector`` は qiskit-aer が ``QuantumCircuit`` に monkey-patch
+    # するメソッドで、base qiskit の typeshed には存在しない。
+    stripped.save_statevector()  # type: ignore[attr-defined]
     sim = AerSimulator(method="statevector")
     return np.asarray(sim.run(stripped).result().get_statevector())
 

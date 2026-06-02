@@ -40,4 +40,4 @@ jobs:
         shell: bash
         run: |
           set -eux
-          uv run zuban check qamomile/
+          uv run zuban check qamomile/ docs/
