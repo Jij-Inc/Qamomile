@@ -31,7 +31,6 @@ from qamomile.circuit.frontend.func_to_block import (
     is_array_type,
     is_dict_type,
     is_tuple_type,
-    resolve_handle_class,
 )
 from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
@@ -107,10 +106,6 @@ def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
     if isinstance(value, Handle):
         return value
     is_bool = isinstance(value, bool)
-    # Reduce ``int | UInt`` / ``float | Float`` / ``bool | Bit`` style Union
-    # annotations to their Handle member so the existing identity dispatch
-    # below applies uniformly to the bare-class and Union-with-primitive forms.
-    expected_type = resolve_handle_class(expected_type)
     if expected_type is UInt:
         if isinstance(value, int) and not is_bool:
             return uint(value)
@@ -916,10 +911,6 @@ class QKernel(Generic[P, R]):
 
     def _create_bound_input(self, param_type: Any, name: str, value: Any) -> Handle:
         """Create a Handle for a bound (concrete) value."""
-        # Reduce ``int | UInt`` etc. Union annotations to their Handle member
-        # so the membership checks below dispatch identically for the bare-
-        # class and Union-with-primitive forms.
-        param_type = resolve_handle_class(param_type)
         # Scalar float
         if param_type in (float, Float):
             return Float(
