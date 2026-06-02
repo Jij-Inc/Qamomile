@@ -10,6 +10,7 @@ import math
 import numpy as np
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.gas import (
     grover_algorithm,
     zero_degree_qft_encoding,
@@ -61,20 +62,26 @@ class GASConverter(MathematicalProblemConverter):
             return 2
         return max(2, int(math.floor(math.log2(half_range))) + 2)
 
-    def get_cost_hamiltonian(self) -> None:
-        """Return None because GAS is oracle-based and has no cost Hamiltonian.
+    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian | None:
+        """Raise NotImplementedError because GAS is oracle-based and has no cost Hamiltonian.
 
         GAS marks states via an oracle reflection rather than minimizing the
-        expectation value of a cost Hamiltonian, so there is no Hamiltonian to
-        expose. The ``MathematicalProblemConverter`` base contract allows
-        oracle-based converters to return ``None`` here (the return type is
-        ``qm_o.Hamiltonian | None``); callers must handle the ``None`` case.
+        expectation value of a cost Hamiltonian. This method always raises so
+        that incorrect usage fails immediately rather than propagating a silent
+        ``None`` that would cause a confusing error later.
 
         Returns:
-            None: GAS exposes no cost Hamiltonian.
+            qm_o.Hamiltonian | None: Never returns; declared for base-class
+            compatibility only.
+
+        Raises:
+            NotImplementedError: Always. GAS exposes no cost Hamiltonian.
 
         """
-        return None
+        raise NotImplementedError(
+            "GASConverter does not expose a cost Hamiltonian. "
+            "GAS is oracle-based and does not use Hamiltonian expectation values."
+        )
 
     def transpile(
         self,
@@ -150,7 +157,7 @@ class GASConverter(MathematicalProblemConverter):
         def measure_grover_algorithm(
             n: qmc.UInt,
             m: qmc.UInt,
-            y: qmc.UInt,
+            y: qmc.Float,
             linear: qmc.Dict[qmc.UInt, qmc.Float],
             quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
             iters: qmc.UInt = 1,
@@ -225,10 +232,10 @@ class GASConverter(MathematicalProblemConverter):
             m = q_output.shape[0]
             # num_controls must be a Python int — baked in via closure over `degree`.
             mcp_phase = qmc.control(qmc.p, num_controls=degree)
+            # ctrl_indices is a plain Python list resolved at trace time; build
+            # controls once outside the loop — it does not depend on i.
+            controls = [q_input[ci] for ci in ctrl_indices]
             for i in qmc.range(m):
-                # ctrl_indices is a plain Python list; the comprehension is fully
-                # resolved at trace time (not a @qkernel for-statement).
-                controls = [q_input[ci] for ci in ctrl_indices]
                 mcp_phase(*controls, q_output[i], theta=theta * (2**i))
             return q_output, q_input
 
@@ -238,22 +245,25 @@ class GASConverter(MathematicalProblemConverter):
         self,
         encoders: list,
         theta_values: list,
-        start_idx: int = 0,
     ):
-        """Factory that composes a recursive chain of term encoders with baked-in angles.
+        """Factory that composes term encoders with baked-in angles into a single kernel.
 
-        An empty ``encoders`` list (or exhausted recursion) returns an identity kernel.
+        Builds the chain iteratively at factory time — no Python recursion — so
+        models with many terms do not hit the interpreter's recursion limit. Each
+        ``(encoder, theta)`` pair is wrapped in its own helper to ensure correct
+        closure capture before being prepended to the growing chain.
 
         Args:
             encoders (list): Encoder kernels to apply in sequence.
-            theta_values (list): Per-encoder phase angles.
-            start_idx (int): Index of the first encoder in the recursive chain.
+            theta_values (list): Per-encoder phase angles, one per encoder.
 
         Returns:
             callable: A qkernel with signature ``(q_output, q_input)``.
 
         """
-        if not encoders or start_idx >= len(encoders):
+        steps = list(zip(encoders, theta_values))
+
+        if not steps:
 
             @qmc.qkernel
             def identity(
@@ -264,35 +274,33 @@ class GASConverter(MathematicalProblemConverter):
 
             return identity
 
-        current_encoder = encoders[start_idx]
-        current_theta = theta_values[
-            start_idx
-        ]  # Python float, captured at factory time
-
-        if start_idx == len(encoders) - 1:
-
+        def _make_leaf(enc, th):
             @qmc.qkernel
-            def last_step(
+            def leaf(
                 q_output: qmc.Vector[qmc.Qubit],
                 q_input: qmc.Vector[qmc.Qubit],
             ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-                q_output, q_input = current_encoder(q_output, q_input, current_theta)
+                q_output, q_input = enc(q_output, q_input, th)
                 return q_output, q_input
 
-            return last_step
+            return leaf
 
-        rest_chain = self._compose_encoders_baked(encoders, theta_values, start_idx + 1)
+        def _make_step(enc, th, rest):
+            @qmc.qkernel
+            def step(
+                q_output: qmc.Vector[qmc.Qubit],
+                q_input: qmc.Vector[qmc.Qubit],
+            ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+                q_output, q_input = enc(q_output, q_input, th)
+                q_output, q_input = rest(q_output, q_input)
+                return q_output, q_input
 
-        @qmc.qkernel
-        def chain_step(
-            q_output: qmc.Vector[qmc.Qubit],
-            q_input: qmc.Vector[qmc.Qubit],
-        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            q_output, q_input = current_encoder(q_output, q_input, current_theta)
-            q_output, q_input = rest_chain(q_output, q_input)
-            return q_output, q_input
+            return step
 
-        return chain_step
+        chain = _make_leaf(*steps[-1])
+        for enc, th in reversed(steps[:-1]):
+            chain = _make_step(enc, th, chain)
+        return chain
 
     def _make_apply_function_preparation_hubo(
         self,
@@ -334,7 +342,7 @@ class GASConverter(MathematicalProblemConverter):
         def apply_hubo_preparation(
             q_output: qmc.Vector[qmc.Qubit],
             q_input: qmc.Vector[qmc.Qubit],
-            y: qmc.UInt,
+            y: qmc.Float,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
             for i in qmc.range(output_bits):
                 q_output[i] = qmc.h(q_output[i])
@@ -396,7 +404,7 @@ class GASConverter(MathematicalProblemConverter):
         def apply_hubo_preparation_dagger(
             q_output: qmc.Vector[qmc.Qubit],
             q_input: qmc.Vector[qmc.Qubit],
-            y: qmc.UInt,
+            y: qmc.Float,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
             # Reverse of the final iqft
             q_output = qmc.qft(q_output)
@@ -473,14 +481,14 @@ class GASConverter(MathematicalProblemConverter):
         def hubo_grover_operator(
             q_output: qmc.Vector[qmc.Qubit],
             q_input: qmc.Vector[qmc.Qubit],
-            y: qmc.UInt,
+            y: qmc.Float,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
             """Apply one Grover iteration for the HUBO GAS oracle.
 
             Args:
                 q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
                 q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
-                y (qmc.UInt): Objective threshold offset encoded as a constant term.
+                y (qmc.Float): Objective threshold offset encoded as a constant term.
 
             Returns:
                 tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated output and input registers.
@@ -510,7 +518,7 @@ class GASConverter(MathematicalProblemConverter):
         def hubo_grover_algorithm(
             n: qmc.UInt,
             m: qmc.UInt,
-            y: qmc.UInt,
+            y: qmc.Float,
             iters: qmc.UInt = 1,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
             """Run repeated Grover iterations for the HUBO GAS circuit.
@@ -518,7 +526,7 @@ class GASConverter(MathematicalProblemConverter):
             Args:
                 n (qmc.UInt): Number of input qubits.
                 m (qmc.UInt): Number of output qubits.
-                y (qmc.UInt): Objective threshold offset encoded as a constant term.
+                y (qmc.Float): Objective threshold offset encoded as a constant term.
                 iters (qmc.UInt): Number of Grover iterations.
 
             Returns:
@@ -542,7 +550,7 @@ class GASConverter(MathematicalProblemConverter):
         def measure_hubo_grover_algorithm(
             n: qmc.UInt,
             m: qmc.UInt,
-            y: qmc.UInt,
+            y: qmc.Float,
             iters: qmc.UInt = 1,
         ) -> qmc.Vector[qmc.Bit]:
             """Measure the input register after applying the Grover algorithm.
@@ -550,7 +558,7 @@ class GASConverter(MathematicalProblemConverter):
             Args:
                 n (qmc.UInt): Number of input (decision-variable) qubits.
                 m (qmc.UInt): Number of output (objective-value) qubits.
-                y (qmc.UInt): Internal circuit threshold: ``binary_model.constant − best_y``.
+                y (qmc.Float): Internal circuit threshold: ``binary_model.constant − best_y``.
                     Encodes the shift so the oracle fires on ``f(x) < best_y``.
                 iters (qmc.UInt): Number of Grover iterations. Defaults to 1.
 

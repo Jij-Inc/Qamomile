@@ -110,7 +110,7 @@ def second_degree_qft_encoding(
 def apply_function_preparation_qubo(
     q_output: qmc.Vector[qmc.Qubit],
     q_input: qmc.Vector[qmc.Qubit],
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -119,7 +119,7 @@ def apply_function_preparation_qubo(
     Args:
         q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
         q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
-        y (qmc.UInt): Objective threshold offset encoded as a constant term.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
         linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients indexed by variable.
         quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic coefficients indexed by variable pairs.
 
@@ -158,7 +158,7 @@ def apply_function_preparation_qubo(
 def function_preparation_qubo(
     n: qmc.UInt,
     m: qmc.UInt,
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -167,7 +167,7 @@ def function_preparation_qubo(
     Args:
         n (qmc.UInt): Number of input qubits.
         m (qmc.UInt): Number of output qubits.
-        y (qmc.UInt): Objective threshold offset encoded as a constant term.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
         linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients indexed by variable.
         quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic coefficients indexed by variable pairs.
 
@@ -187,7 +187,7 @@ def function_preparation_qubo(
 def apply_function_preparation_qubo_dagger(
     q_output: qmc.Vector[qmc.Qubit],
     q_input: qmc.Vector[qmc.Qubit],
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -196,7 +196,7 @@ def apply_function_preparation_qubo_dagger(
     Args:
         q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
         q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
-        y (qmc.UInt): Objective threshold offset encoded as a constant term.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
         linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients indexed by variable.
         quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic coefficients indexed by variable pairs.
 
@@ -233,7 +233,7 @@ def apply_function_preparation_qubo_dagger(
 def function_preparation_qubo_dagger(
     n: qmc.UInt,
     m: qmc.UInt,
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -242,7 +242,7 @@ def function_preparation_qubo_dagger(
     Args:
         n (qmc.UInt): Number of input qubits.
         m (qmc.UInt): Number of output qubits.
-        y (qmc.UInt): Objective threshold offset encoded as a constant term.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
         linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients indexed by variable.
         quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic coefficients indexed by variable pairs.
 
@@ -293,7 +293,7 @@ def diffusion_op(
 def grover_operator(
     q_output: qmc.Vector[qmc.Qubit],
     q_input: qmc.Vector[qmc.Qubit],
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -302,7 +302,7 @@ def grover_operator(
     Args:
         q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
         q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
-        y (qmc.UInt): Objective threshold offset encoded as a constant term.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
         linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients indexed by variable.
         quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic coefficients indexed by variable pairs.
 
@@ -337,7 +337,7 @@ def grover_operator(
 def grover_algorithm(
     n: qmc.UInt,
     m: qmc.UInt,
-    y: qmc.UInt,
+    y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     iters: qmc.UInt = 1,
@@ -347,7 +347,7 @@ def grover_algorithm(
     Args:
         n (qmc.UInt): Number of input qubits.
         m (qmc.UInt): Number of output qubits.
-        y (qmc.UInt): Objective threshold offset encoded as a constant term.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
         linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients indexed by variable.
         quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic coefficients indexed by variable pairs.
         iters (qmc.UInt): Number of Grover iterations.
