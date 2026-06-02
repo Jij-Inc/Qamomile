@@ -21,6 +21,7 @@ import enum
 import itertools
 import linecache
 import math
+from collections.abc import Callable
 from typing import Any
 
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
@@ -128,6 +129,9 @@ class CudaqKernelArtifact:
         num_qubits: Number of qubits in the circuit.
         num_clbits: Number of classical bits in the circuit.
         source: Generated Python source code (for debugging).
+        entry_source: Generated Python source for the entry-point kernel
+            only.  ``source`` may also include helper kernels emitted
+            for ``cudaq.control``.
         execution_mode: Whether this is a STATIC or RUNNABLE kernel.
         param_count: Number of variational parameters.
     """
@@ -136,6 +140,7 @@ class CudaqKernelArtifact:
     num_qubits: int
     num_clbits: int
     source: str = ""
+    entry_source: str = ""
     execution_mode: ExecutionMode = ExecutionMode.STATIC
     param_count: int = 0
 
@@ -179,6 +184,12 @@ class CudaqKernelEmitter:
         self._num_clbits: int = 0
         self._measurement_mode: MeasurementMode = MeasurementMode.STATIC
         self._boxed_clbits: set[int] = set()
+        self._helper_sources: list[str] = []
+        self._helper_cache: dict[tuple[int, bool, tuple[str, ...]], str] = {}
+        self._helper_counter = itertools.count()
+        self._qubit_refs: dict[int, str] = {}
+        self._building_helper: bool = False
+        self._helper_param_used: bool = False
 
     @property
     def measurement_mode(self) -> MeasurementMode:
@@ -196,6 +207,31 @@ class CudaqKernelEmitter:
     def _emit(self, line: str) -> None:
         """Append an indented source line."""
         self._lines.append("    " * self._indent + line)
+
+    def _qref(self, idx: int) -> str:
+        """Return the source expression for a qubit slot.
+
+        Args:
+            idx (int): Helper-local or entry-kernel qubit slot.
+
+        Returns:
+            str: Source expression that references the slot.
+        """
+        return self._qubit_refs.get(idx, f"q[{idx}]")
+
+    def _control_ref(self, indices: list[int]) -> str:
+        """Return the source expression for a CUDA-Q control operand.
+
+        Args:
+            indices (list[int]): Control qubit slots.
+
+        Returns:
+            str: Single-qubit expression for one control, or a list
+            expression for multiple controls.
+        """
+        if len(indices) == 1:
+            return self._qref(indices[0])
+        return "[" + ", ".join(self._qref(index) for index in indices) + "]"
 
     def _clbit_ref(self, idx: int) -> str:
         """Return the source expression to read clbit *idx*.
@@ -234,6 +270,11 @@ class CudaqKernelEmitter:
         self._param_map.clear()
         self._param_count = 0
         self._lines.clear()
+        self._helper_sources.clear()
+        self._helper_cache.clear()
+        self._qubit_refs.clear()
+        self._building_helper = False
+        self._helper_param_used = False
         self._indent = 1
 
         self._emit(f"q = cudaq.qvector({num_qubits})")
@@ -281,7 +322,8 @@ class CudaqKernelEmitter:
                 sig = "def _qamomile_kernel():"
 
         body = "\n".join(self._lines)
-        source = f"@cudaq.kernel\n{sig}\n{body}\n"
+        main_source = f"@cudaq.kernel\n{sig}\n{body}\n"
+        source = "\n".join([*self._helper_sources, main_source])
 
         # Register source in linecache with a unique synthetic filename so
         # that ``inspect.getsource()`` succeeds.  CUDA-Q's decorator calls
@@ -302,9 +344,114 @@ class CudaqKernelEmitter:
 
         circuit.kernel_func = namespace["_qamomile_kernel"]
         circuit.source = source
+        circuit.entry_source = main_source
         circuit.execution_mode = mode
         circuit.param_count = self._param_count
         return circuit
+
+    def build_controlled_helper(
+        self,
+        num_targets: int,
+        emit_body: Callable[[], None],
+    ) -> tuple[str, bool]:
+        """Build a pure-device helper kernel for ``cudaq.control``.
+
+        Args:
+            num_targets (int): Number of target qubit arguments accepted
+                by the helper.
+            emit_body (Callable[[], None]): Callback that emits the
+                helper body into this emitter while qubit slots are mapped
+                to helper arguments.
+
+        Returns:
+            tuple[str, bool]: Helper function name, and whether the
+            caller must pass the entry-point ``thetas`` parameter list.
+
+        Raises:
+            EmitError: Propagated from ``emit_body`` when the helper
+                body cannot be emitted for CUDA-Q.
+        """
+        saved_lines = self._lines
+        saved_indent = self._indent
+        saved_qubit_refs = self._qubit_refs
+        saved_mode = self._measurement_mode
+        saved_num_clbits = self._num_clbits
+        saved_boxed_clbits = self._boxed_clbits
+        saved_suppress_trace = getattr(self, "_suppress_trace", False)
+        saved_building_helper = self._building_helper
+        saved_helper_param_used = self._helper_param_used
+
+        self._lines = []
+        self._indent = 1
+        self._qubit_refs = {i: f"t{i}" for i in range(num_targets)}
+        self._measurement_mode = MeasurementMode.STATIC
+        self._num_clbits = 0
+        self._boxed_clbits = set()
+        self._building_helper = True
+        self._helper_param_used = False
+        setattr(self, "_suppress_trace", True)
+
+        try:
+            emit_body()
+            helper_lines = self._lines
+            uses_thetas = self._helper_param_used
+            cache_key = (num_targets, uses_thetas, tuple(helper_lines))
+            cached_name = self._helper_cache.get(cache_key)
+            if cached_name is not None:
+                return cached_name, uses_thetas
+
+            helper_name = f"_qamomile_controlled_{next(self._helper_counter)}"
+            args = [f"t{i}: cudaq.qubit" for i in range(num_targets)]
+            if uses_thetas:
+                args.append("thetas: list[float]")
+            body = "\n".join(helper_lines) if helper_lines else "    pass"
+            self._helper_sources.append(
+                f"@cudaq.kernel\ndef {helper_name}({', '.join(args)}):\n{body}\n"
+            )
+            self._helper_cache[cache_key] = helper_name
+            return helper_name, uses_thetas
+        finally:
+            self._lines = saved_lines
+            self._indent = saved_indent
+            self._qubit_refs = saved_qubit_refs
+            self._measurement_mode = saved_mode
+            self._num_clbits = saved_num_clbits
+            self._boxed_clbits = saved_boxed_clbits
+            self._building_helper = saved_building_helper
+            self._helper_param_used = saved_helper_param_used
+            setattr(self, "_suppress_trace", saved_suppress_trace)
+
+    def emit_controlled_kernel_call(
+        self,
+        circuit: CudaqKernelArtifact,
+        helper_name: str,
+        control_indices: list[int],
+        target_indices: list[int],
+        uses_thetas: bool,
+    ) -> None:
+        """Emit a ``cudaq.control`` call to a generated helper kernel.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being
+                emitted.  The argument is accepted for GateEmitter
+                symmetry and tracing subclasses.
+            helper_name (str): Name of the generated helper function.
+            control_indices (list[int]): Physical control qubit slots.
+            target_indices (list[int]): Physical target qubit slots.
+            uses_thetas (bool): Whether to pass the entry-point
+                ``thetas`` parameter list to the helper.
+        """
+        del circuit
+        args = [
+            helper_name,
+            self._control_ref(control_indices),
+            *[self._qref(index) for index in target_indices],
+        ]
+        if uses_thetas:
+            args.append("thetas")
+            if self._building_helper:
+                self._helper_param_used = True
+        self._emit(f"cudaq.control({', '.join(args)})")
 
     def create_parameter(self, name: str) -> CudaqExpr:
         """Return a ``CudaqExpr`` referencing ``thetas[i]``.
@@ -324,6 +471,8 @@ class CudaqKernelEmitter:
         if name not in self._param_map:
             self._param_map[name] = self._param_count
             self._param_count += 1
+        if self._building_helper:
+            self._helper_param_used = True
         return CudaqExpr(f"thetas[{self._param_map[name]}]")
 
     # ------------------------------------------------------------------
@@ -332,35 +481,35 @@ class CudaqKernelEmitter:
 
     def emit_h(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit Hadamard gate."""
-        self._emit(f"h(q[{qubit}])")
+        self._emit(f"h({self._qref(qubit)})")
 
     def emit_x(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit Pauli-X gate."""
-        self._emit(f"x(q[{qubit}])")
+        self._emit(f"x({self._qref(qubit)})")
 
     def emit_y(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit Pauli-Y gate."""
-        self._emit(f"y(q[{qubit}])")
+        self._emit(f"y({self._qref(qubit)})")
 
     def emit_z(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit Pauli-Z gate."""
-        self._emit(f"z(q[{qubit}])")
+        self._emit(f"z({self._qref(qubit)})")
 
     def emit_s(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit S (phase) gate."""
-        self._emit(f"s(q[{qubit}])")
+        self._emit(f"s({self._qref(qubit)})")
 
     def emit_sdg(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit S-dagger gate."""
-        self._emit(f"sdg(q[{qubit}])")
+        self._emit(f"sdg({self._qref(qubit)})")
 
     def emit_t(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit T gate."""
-        self._emit(f"t(q[{qubit}])")
+        self._emit(f"t({self._qref(qubit)})")
 
     def emit_tdg(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         """Emit T-dagger gate."""
-        self._emit(f"tdg(q[{qubit}])")
+        self._emit(f"tdg({self._qref(qubit)})")
 
     # ------------------------------------------------------------------
     # Single-qubit rotation gates
@@ -378,25 +527,25 @@ class CudaqKernelEmitter:
         self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
         """Emit RX rotation gate."""
-        self._emit(f"rx({self._angle_expr(angle)}, q[{qubit}])")
+        self._emit(f"rx({self._angle_expr(angle)}, {self._qref(qubit)})")
 
     def emit_ry(
         self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
         """Emit RY rotation gate."""
-        self._emit(f"ry({self._angle_expr(angle)}, q[{qubit}])")
+        self._emit(f"ry({self._angle_expr(angle)}, {self._qref(qubit)})")
 
     def emit_rz(
         self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
         """Emit RZ rotation gate."""
-        self._emit(f"rz({self._angle_expr(angle)}, q[{qubit}])")
+        self._emit(f"rz({self._angle_expr(angle)}, {self._qref(qubit)})")
 
     def emit_p(
         self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
         """Emit phase gate (R1)."""
-        self._emit(f"r1({self._angle_expr(angle)}, q[{qubit}])")
+        self._emit(f"r1({self._angle_expr(angle)}, {self._qref(qubit)})")
 
     # ------------------------------------------------------------------
     # Two-qubit gates
@@ -404,15 +553,15 @@ class CudaqKernelEmitter:
 
     def emit_cx(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
         """Emit CNOT (controlled-X) gate."""
-        self._emit(f"x.ctrl(q[{control}], q[{target}])")
+        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
 
     def emit_cz(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
         """Emit controlled-Z gate."""
-        self._emit(f"z.ctrl(q[{control}], q[{target}])")
+        self._emit(f"z.ctrl({self._qref(control)}, {self._qref(target)})")
 
     def emit_swap(self, circuit: CudaqKernelArtifact, qubit1: int, qubit2: int) -> None:
         """Emit SWAP gate."""
-        self._emit(f"swap(q[{qubit1}], q[{qubit2}])")
+        self._emit(f"swap({self._qref(qubit1)}, {self._qref(qubit2)})")
 
     # ------------------------------------------------------------------
     # Two-qubit rotation gates
@@ -438,11 +587,11 @@ class CudaqKernelEmitter:
         else:
             half = f"({a}) * 0.5"
             neg_half = f"({a}) * (-0.5)"
-        self._emit(f"rz({half}, q[{target}])")
-        self._emit(f"x.ctrl(q[{control}], q[{target}])")
-        self._emit(f"rz({neg_half}, q[{target}])")
-        self._emit(f"x.ctrl(q[{control}], q[{target}])")
-        self._emit(f"rz({half}, q[{control}])")
+        self._emit(f"rz({half}, {self._qref(target)})")
+        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
+        self._emit(f"rz({neg_half}, {self._qref(target)})")
+        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
+        self._emit(f"rz({half}, {self._qref(control)})")
 
     def emit_rzz(
         self,
@@ -459,9 +608,9 @@ class CudaqKernelEmitter:
             CNOT(q1, q2)
         """
         a = self._angle_expr(angle)
-        self._emit(f"x.ctrl(q[{qubit1}], q[{qubit2}])")
-        self._emit(f"rz({a}, q[{qubit2}])")
-        self._emit(f"x.ctrl(q[{qubit1}], q[{qubit2}])")
+        self._emit(f"x.ctrl({self._qref(qubit1)}, {self._qref(qubit2)})")
+        self._emit(f"rz({a}, {self._qref(qubit2)})")
+        self._emit(f"x.ctrl({self._qref(qubit1)}, {self._qref(qubit2)})")
 
     # ------------------------------------------------------------------
     # Three-qubit gates
@@ -494,9 +643,9 @@ class CudaqKernelEmitter:
         codegen produces the exact source contract expected by the tracing
         test emitter, without double-recording primitive gate calls.
         """
-        self._emit(f"ry({math.pi / 4}, q[{target}])")
-        self._emit(f"x.ctrl(q[{control}], q[{target}])")
-        self._emit(f"ry({-math.pi / 4}, q[{target}])")
+        self._emit(f"ry({math.pi / 4}, {self._qref(target)})")
+        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
+        self._emit(f"ry({-math.pi / 4}, {self._qref(target)})")
 
     def emit_cy(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
         """Emit controlled-Y via decomposition.
@@ -506,9 +655,9 @@ class CudaqKernelEmitter:
         :meth:`emit_ch` for why this is inlined rather than delegating to
         :func:`emit_decomposition`.
         """
-        self._emit(f"sdg(q[{target}])")
-        self._emit(f"x.ctrl(q[{control}], q[{target}])")
-        self._emit(f"s(q[{target}])")
+        self._emit(f"sdg({self._qref(target)})")
+        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
+        self._emit(f"s({self._qref(target)})")
 
     def emit_crx(
         self,
@@ -519,7 +668,7 @@ class CudaqKernelEmitter:
     ) -> None:
         """Emit controlled-RX gate."""
         a = self._angle_expr(angle)
-        self._emit(f"rx.ctrl({a}, q[{control}], q[{target}])")
+        self._emit(f"rx.ctrl({a}, {self._qref(control)}, {self._qref(target)})")
 
     def emit_cry(
         self,
@@ -530,7 +679,7 @@ class CudaqKernelEmitter:
     ) -> None:
         """Emit controlled-RY gate."""
         a = self._angle_expr(angle)
-        self._emit(f"ry.ctrl({a}, q[{control}], q[{target}])")
+        self._emit(f"ry.ctrl({a}, {self._qref(control)}, {self._qref(target)})")
 
     def emit_crz(
         self,
@@ -541,7 +690,7 @@ class CudaqKernelEmitter:
     ) -> None:
         """Emit controlled-RZ gate."""
         a = self._angle_expr(angle)
-        self._emit(f"rz.ctrl({a}, q[{control}], q[{target}])")
+        self._emit(f"rz.ctrl({a}, {self._qref(control)}, {self._qref(target)})")
 
     # ------------------------------------------------------------------
     # Measurement
@@ -561,7 +710,7 @@ class CudaqKernelEmitter:
         """
         if self.measurement_mode == MeasurementMode.STATIC:
             return
-        self._emit(self._clbit_store(clbit, f"mz(q[{qubit}])"))
+        self._emit(self._clbit_store(clbit, f"mz({self._qref(qubit)})"))
         self._measurement_map[clbit] = qubit
 
     # ------------------------------------------------------------------
@@ -605,8 +754,8 @@ class CudaqKernelEmitter:
         target_idx: int,
     ) -> None:
         """Emit multi-controlled X using ``x.ctrl(c0, c1, ..., target)``."""
-        args = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"x.ctrl({args}, q[{target_idx}])")
+        args = ", ".join(self._qref(i) for i in control_indices)
+        self._emit(f"x.ctrl({args}, {self._qref(target_idx)})")
 
     # ------------------------------------------------------------------
     # Control flow support

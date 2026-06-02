@@ -17,13 +17,23 @@ import dataclasses
 from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
+    HasNestedOps,
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.expval import ExpvalOp
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    GateOperation,
+    GateOperationType,
+    MeasureOperation,
+    MeasureQFixedOperation,
+    MeasureVectorOperation,
+)
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
@@ -410,6 +420,151 @@ def _has_runtime_control_flow(
     return False
 
 
+def _validate_controlled_helper_unitary_ops(
+    operations: Sequence[Operation],
+    bindings: dict[str, Any],
+) -> None:
+    """Validate that a CUDA-Q controlled helper is unitary-only.
+
+    Args:
+        operations (Sequence[Operation]): Operations in the helper block
+            or in a nested control-flow body.
+        bindings (dict[str, Any]): Emit-time bindings used to decide
+            whether ``if`` conditions are compile-time constants.
+
+    Raises:
+        EmitError: If the controlled target contains measurement,
+            expectation-value computation, runtime classical state, or
+            measurement-dependent control flow.
+    """
+    non_unitary_ops = (
+        MeasureOperation,
+        MeasureVectorOperation,
+        MeasureQFixedOperation,
+        ExpvalOp,
+        RuntimeClassicalExpr,
+    )
+    for op in operations:
+        if isinstance(op, non_unitary_ops):
+            raise EmitError(
+                f"CUDA-Q cudaq.control helper kernels must be unitary-only; "
+                f"found {type(op).__name__}.",
+                operation="ControlledUOperation",
+            )
+        if isinstance(op, WhileOperation):
+            raise EmitError(
+                "CUDA-Q cudaq.control helper kernels must be unitary-only; "
+                "runtime while-loops are not supported inside a controlled target.",
+                operation="ControlledUOperation",
+            )
+        if isinstance(op, IfOperation):
+            resolved_condition = resolve_if_condition(op.condition, bindings)
+            if resolved_condition is None:
+                raise EmitError(
+                    "CUDA-Q cudaq.control helper kernels must be unitary-only; "
+                    "measurement-dependent if-statements are not supported inside "
+                    "a controlled target.",
+                    operation="ControlledUOperation",
+                )
+            selected_ops = (
+                op.true_operations if resolved_condition else op.false_operations
+            )
+            _validate_controlled_helper_unitary_ops(selected_ops, bindings)
+            continue
+        if isinstance(op, ControlledUOperation) and op.block is not None:
+            _validate_controlled_helper_unitary_ops(op.block.operations, bindings)
+        if isinstance(op, HasNestedOps):
+            for nested in op.nested_op_lists():
+                _validate_controlled_helper_unitary_ops(nested, bindings)
+
+
+def _build_helper_qubit_map(
+    block_value: Any,
+    target_slots: list[int],
+    emit_pass: Any,
+    bindings: dict[str, Any],
+) -> QubitMap:
+    """Build a helper-local ``QubitMap`` for a controlled block.
+
+    Args:
+        block_value (Any): Inner block whose quantum inputs are mapped.
+        target_slots (list[int]): Helper-local qubit slots, one per
+            flattened target qubit argument.
+        emit_pass (Any): Emit pass used to resolve symbolic vector
+            shapes.
+        bindings (dict[str, Any]): Bindings used for shape resolution.
+
+    Returns:
+        QubitMap: Mapping accepted by ``StandardEmitPass._emit_operations``.
+
+    Raises:
+        EmitError: If a vector input length cannot be resolved, is
+            negative, or requires more target slots than the controlled
+            call supplied.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    helper_map: QubitMap = {}
+    quantum_inputs = [
+        iv
+        for iv in getattr(block_value, "input_values", [])
+        if hasattr(iv, "type") and iv.type.is_quantum()
+    ]
+
+    slot = 0
+    for input_value in quantum_inputs:
+        if isinstance(input_value, ArrayValue):
+            length: int | None = None
+            if input_value.shape:
+                size_value = input_value.shape[0]
+                if size_value.is_constant():
+                    length = int(size_value.get_const())
+                else:
+                    length = emit_pass._resolver.resolve_int_value(size_value, bindings)
+            if length is None:
+                shape_name = (
+                    input_value.shape[0].name if input_value.shape else "<no shape>"
+                )
+                raise EmitError(
+                    f"CUDA-Q controlled helper: cannot resolve "
+                    f"Vector[Qubit] input length for {input_value.name!r}; "
+                    f"bind {shape_name!r} before transpilation.",
+                    operation="ControlledUOperation",
+                )
+            if length < 0:
+                raise EmitError(
+                    f"CUDA-Q controlled helper: Vector[Qubit] input "
+                    f"{input_value.name!r} resolved to a negative length "
+                    f"({length}).",
+                    operation="ControlledUOperation",
+                )
+            if slot + length > len(target_slots):
+                raise EmitError(
+                    f"CUDA-Q controlled helper inner block requires at least "
+                    f"{slot + length} target qubit slot(s), but only "
+                    f"{len(target_slots)} are available.",
+                    operation="ControlledUOperation",
+                )
+            if length:
+                helper_map[QubitAddress(input_value.uuid)] = target_slots[slot]
+            for i in range(length):
+                helper_map[QubitAddress(input_value.uuid, i)] = target_slots[slot + i]
+            slot += length
+            continue
+
+        if slot >= len(target_slots):
+            raise EmitError(
+                f"CUDA-Q controlled helper inner block requires at least "
+                f"{slot + 1} target qubit slot(s), but only "
+                f"{len(target_slots)} are available.",
+                operation="ControlledUOperation",
+            )
+        helper_map[QubitAddress(input_value.uuid)] = target_slots[slot]
+        slot += 1
+
+    return helper_map
+
+
 def _collect_loop_carried_clbits(
     operations: list[Operation],
     clbit_map: ClbitMap,
@@ -613,59 +768,76 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         power: int,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit controlled-U using CUDA-Q native multi-control.
+        """Emit controlled-U through a generated CUDA-Q helper kernel.
 
-        CUDA-Q supports ``kernel.<gate>([controls], target)`` for
-        multi-controlled single-qubit gates.  This override handles
-        multi-control by iterating over the block body and emitting each
-        gate with native multi-control.
-
-        An operand-to-target resolver maps each inner gate's operand to
-        the correct physical target index based on block input positions,
-        rather than hardcoding ``target_indices[0]``.
-
-        For single-control cases, compile-time resolvable ``ForOperation``
-        loops are unrolled and their body gates emitted with correct
-        operand-to-target mapping.  Multi-control helpers with non-gate
-        operations raise ``EmitError``.
+        Generates a pure-device ``@cudaq.kernel`` for the wrapped
+        Qamomile block and emits ``cudaq.control(helper, controls,
+        *targets)`` in the outer kernel.  This uses CUDA-Q's native
+        controlled-kernel support instead of decomposing the helper
+        gate-by-gate.
 
         Args:
-            circuit: The CUDA-Q kernel artifact being built.
-            block_value: The block value containing operations to control.
-            num_controls: Number of control qubits.
-            control_indices: Physical indices of control qubits.
-            target_indices: Physical indices of target qubits.
-            power: Number of times to repeat the controlled operation.
-            bindings: Parameter bindings.
+            circuit (CudaqKernelArtifact): The CUDA-Q kernel artifact
+                being built.
+            block_value (Any): The block value containing operations to
+                control.
+            num_controls (int): Number of control qubits.
+            control_indices (list[int]): Physical indices of control
+                qubits.
+            target_indices (list[int]): Physical indices of target
+                qubits.
+            power (int): Number of times to repeat the controlled
+                operation.
+            bindings (dict[str, Any]): Parameter bindings local to the
+                controlled block.
 
         Raises:
-            EmitError: When the block body contains unsupported operations
-                or operand-to-target resolution fails.
+            EmitError: When the controlled block is missing operations or
+                contains non-unitary runtime constructs.
         """
         if not hasattr(block_value, "operations"):
             raise EmitError(
                 "Cannot emit controlled operation: block has no operations.",
                 operation="ControlledUOperation",
             )
+        if num_controls <= 0:
+            raise EmitError(
+                "CUDA-Q cudaq.control requires at least one control qubit.",
+                operation="ControlledUOperation",
+            )
 
-        # Build operand-to-target map from block inputs, propagated
-        # through SSA versions.
-        block_qubit_map = _build_block_qubit_map(
-            block_value, target_indices, self, bindings
+        _validate_controlled_helper_unitary_ops(block_value.operations, bindings)
+
+        helper_targets = list(range(len(target_indices)))
+        helper_qubit_map = _build_helper_qubit_map(
+            block_value, helper_targets, self, bindings
         )
 
         emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
 
-        for _ in range(power):
-            self._emit_cudaq_controlled_ops(
+        def emit_body() -> None:
+            """Emit the wrapped block body into the helper source."""
+            self._emit_operations(
                 circuit,
                 block_value.operations,
-                num_controls,
+                helper_qubit_map,
+                {},
+                bindings,
+                force_unroll=True,
+            )
+
+        helper_name, uses_thetas = emitter.build_controlled_helper(
+            len(target_indices),
+            emit_body,
+        )
+
+        for _ in range(power):
+            emitter.emit_controlled_kernel_call(
+                circuit,
+                helper_name,
                 control_indices,
                 target_indices,
-                block_qubit_map,
-                emitter,
-                bindings,
+                uses_thetas,
             )
 
     def _emit_cudaq_controlled_ops(
@@ -1050,7 +1222,9 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
             spin_op = hamiltonian  # type: ignore[unreachable]
 
         if isinstance(circuit, BoundCudaqKernelArtifact):
-            result = cudaq.observe(circuit.kernel_func, spin_op, circuit.param_values)  # type: ignore[operator]
+            result: Any = cudaq.observe(
+                circuit.kernel_func, spin_op, circuit.param_values
+            )  # type: ignore[operator]
         else:
             if params is not None:
                 result = cudaq.observe(circuit.kernel_func, spin_op, list(params))  # type: ignore[operator]
