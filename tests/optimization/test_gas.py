@@ -234,6 +234,196 @@ def test_required_output_bits_hubo_only_model():
     assert conv2._required_output_bits(conv2.binary_model) == 3
 
 
+def test_post_init_keeps_all_zero_real_model_unchanged():
+    """All-zero real model remains valid and does not trigger divide-by-zero."""
+    model = BinaryModel.from_hubo({(0,): 0.0, (1,): 0.0}, constant=0.0)
+    conv = GASConverter(model)
+
+    assert conv.binary_model.constant == 0.0
+    assert all(c == 0.0 for c in conv.binary_model.coefficients.values())
+
+
+# ---------------------------------------------------------------------------
+# _detect_eps (backend-independent)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_eps_integer_floats():
+    """_detect_eps returns 0.1 for integer-valued floats (str repr always has '.0')."""
+    # str(1.0)='1.0', str(2.0)='2.0' → exp=-1 → 10^-1=0.1 for each
+    eps = GASConverter._detect_eps([1.0, 2.0, 3.0])
+    assert np.isclose(eps, 0.1)
+
+
+def test_detect_eps_one_decimal_place():
+    """_detect_eps returns 0.1 for values with exactly one decimal place."""
+    eps = GASConverter._detect_eps([0.3, 0.7])
+    assert np.isclose(eps, 0.1)
+
+
+def test_detect_eps_two_decimal_places():
+    """_detect_eps returns 0.01 for values with two decimal places."""
+    eps = GASConverter._detect_eps([0.25, 0.50])
+    assert np.isclose(eps, 0.01)
+
+
+def test_detect_eps_uses_finest_precision():
+    """_detect_eps returns the minimum (finest) epsilon across all input values."""
+    # 0.3 → 0.1; 0.25 → 0.01 → min = 0.01
+    eps = GASConverter._detect_eps([0.3, 0.25])
+    assert np.isclose(eps, 0.01)
+
+
+def test_detect_eps_irrational_fraction_is_tiny():
+    """_detect_eps returns a very small epsilon for full-precision float fractions."""
+    # str(1/3) has 16+ significant decimal digits
+    eps = GASConverter._detect_eps([1 / 3])
+    assert eps <= 1e-10
+
+
+def test_detect_eps_empty_list():
+    """_detect_eps returns 1.0 when given an empty list."""
+    eps = GASConverter._detect_eps([])
+    assert np.isclose(eps, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# _greedy_quantization_parameter (backend-independent)
+# ---------------------------------------------------------------------------
+
+
+def test_greedy_quantization_parameter_returns_int():
+    """_greedy_quantization_parameter always returns a plain int."""
+    model = BinaryModel.from_hubo({(0,): 1.0, (1,): 2.0})
+    result = GASConverter._greedy_quantization_parameter(model)
+    assert isinstance(result, int)
+
+
+def test_greedy_quantization_parameter_minimum_safety_bits():
+    """_greedy_quantization_parameter returns at least the safety offset (2 bits)."""
+    # Even a trivial single-term model must have the 2-bit safety margin.
+    model = BinaryModel.from_hubo({(0,): 1.0})
+    result = GASConverter._greedy_quantization_parameter(model)
+    assert result >= 2
+
+
+def test_greedy_quantization_parameter_known_value():
+    """_greedy_quantization_parameter matches the hand-computed value for a simple model.
+
+    For BinaryModel.from_hubo({(0,): 2.0}):
+      coeffs = [0.0, 2.0], max_coeff=2.0
+      eps = _detect_eps([0.0, 2.0]) = 0.1  (both str-repr have one decimal)
+      p = ceil(log2(2.0/0.1)) = ceil(log2(20)) = 5
+      N_terms=2  →  log_N = ceil(log2(2)) = 1
+      result = p + log_N + safety = 5 + 1 + 2 = 8
+    """
+    model = BinaryModel.from_hubo({(0,): 2.0})
+    result = GASConverter._greedy_quantization_parameter(model)
+    assert result == 8
+
+
+def test_greedy_quantization_parameter_increases_with_precision():
+    """A finer-precision coefficient alongside a large one raises the parameter.
+
+    m1 = {(0,): 3.0}:            max=3.0, eps=0.1,  ratio=30,  p=5
+    m2 = {(0,): 3.0, (1,): 0.01}: max=3.0, eps=0.01, ratio=300, p=9
+
+    Adding a more precise coefficient tightens eps and forces a higher p.
+    """
+    m1 = BinaryModel.from_hubo({(0,): 3.0})
+    m2 = BinaryModel.from_hubo({(0,): 3.0, (1,): 0.01})
+    q1 = GASConverter._greedy_quantization_parameter(m1)
+    q2 = GASConverter._greedy_quantization_parameter(m2)
+    assert q2 > q1
+
+
+def test_greedy_quantization_parameter_more_terms_increases_log_n():
+    """Adding more terms increases log_N, raising the quantization parameter."""
+    m_small = BinaryModel.from_hubo({(0,): 1.0})
+    m_large = BinaryModel.from_hubo(
+        {
+            (0,): 1.0,
+            (1,): 1.0,
+            (2,): 1.0,
+            (3,): 1.0,
+            (4,): 1.0,
+            (5,): 1.0,
+            (6,): 1.0,
+            (7,): 1.0,
+        }
+    )
+    q_small = GASConverter._greedy_quantization_parameter(m_small)
+    q_large = GASConverter._greedy_quantization_parameter(m_large)
+    assert q_large >= q_small
+
+
+# ---------------------------------------------------------------------------
+# approximate_real_valued_model (backend-independent)
+# ---------------------------------------------------------------------------
+
+
+def _all_integer(model: BinaryModel) -> bool:
+    """Return True when every coefficient in model is an integer."""
+    vals = [model.constant] + list(model.coefficients.values())
+    return all(np.isclose(v, round(v), atol=1e-12) for v in vals)
+
+
+def test_approximate_real_valued_model_fractional_constant():
+    """A fractional constant alone is rounded to the nearest integer."""
+    model = BinaryModel.from_hubo({(0,): 1.0}, constant=0.5)
+    approx = GASConverter.approximate_real_valued_model(model)
+    assert _all_integer(approx)
+
+
+def test_approximate_real_valued_model_fractional_coefficients():
+    """Real-valued coefficients are all mapped to integers."""
+    model = BinaryModel.from_hubo({(0,): 0.3, (1,): -1.2, (0, 1): 0.25}, constant=0.7)
+    approx = GASConverter.approximate_real_valued_model(model)
+    assert _all_integer(approx)
+
+
+def test_approximate_real_valued_model_zero_model_unchanged():
+    """All-zero model is returned as-is without raising divide-by-zero."""
+    model = BinaryModel.from_hubo({(0,): 0.0, (1,): 0.0}, constant=0.0)
+    approx = GASConverter.approximate_real_valued_model(model)
+    assert approx.constant == 0.0
+    assert all(c == 0.0 for c in approx.coefficients.values())
+
+
+def test_approximate_real_valued_model_preserves_signs():
+    """Positive and negative coefficients retain their signs after approximation."""
+    model = BinaryModel.from_hubo({(0,): 1.0, (1,): -2.0}, constant=0.0)
+    approx = GASConverter.approximate_real_valued_model(model, quantization_parameter=4)
+    assert approx.coefficients[(0,)] > 0
+    assert approx.coefficients[(1,)] < 0
+
+
+def test_approximate_real_valued_model_explicit_quantization_parameter():
+    """Explicit quantization_parameter controls the integer scale factor.
+
+    With quantization_parameter=4 and max_coeff=4.0:
+      round(4.0/4.0 * 2^3) = 8   (coefficient (0,))
+      round(2.0/4.0 * 2^3) = 4   (coefficient (1,))
+    """
+    model = BinaryModel.from_hubo({(0,): 4.0, (1,): 2.0}, constant=0.0)
+    approx = GASConverter.approximate_real_valued_model(model, quantization_parameter=4)
+    assert approx.coefficients[(0,)] == 8
+    assert approx.coefficients[(1,)] == 4
+
+
+def test_approximate_real_valued_model_auto_vs_explicit_both_integer():
+    """Auto (None) and explicit quantization_parameter both produce integer models."""
+    model = BinaryModel.from_hubo({(0,): 0.3, (1,): 0.7}, constant=0.1)
+    approx_auto = GASConverter.approximate_real_valued_model(
+        model, quantization_parameter=None
+    )
+    approx_explicit = GASConverter.approximate_real_valued_model(
+        model, quantization_parameter=8
+    )
+    assert _all_integer(approx_auto)
+    assert _all_integer(approx_explicit)
+
+
 # ---------------------------------------------------------------------------
 # _make_term_encoding factory (cross-backend)
 # ---------------------------------------------------------------------------
