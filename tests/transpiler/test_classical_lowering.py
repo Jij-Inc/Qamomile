@@ -878,3 +878,46 @@ class TestVectorBitElementProvenance:
 
         with pytest.raises(IndexError):
             transpiler.transpile(oob_kernel)
+
+    @pytest.mark.parametrize("msg_bit", [0, 1])
+    def test_teleportation_with_vector_measured_corrections(self, transpiler, msg_bit):
+        """End-to-end quantum teleportation built with a ``qubit_array``.
+
+        The Bell measurement of the message qubit plus Alice's half of the
+        Bell pair is taken as a single vector measurement
+        ``m = qmc.measure(ab)``, and the X / Z corrections on Bob are
+        conditioned on the elements ``m[1]`` / ``m[0]``. This is exactly the
+        measured-``Vector[Bit]``-element-as-runtime-condition pattern that
+        the unfixed pipeline rejected with ``EmitError``. The corrections
+        make Bob deterministic, so teleporting ``|msg_bit>`` yields
+        ``msg_bit`` on Bob every shot regardless of the random intermediate
+        Bell-measurement outcomes (which split the result into several
+        rows, all carrying the same Bob value).
+        """
+
+        @qmc.qkernel
+        def teleport(prep: qmc.UInt) -> qmc.Bit:
+            ab = qmc.qubit_array(2, name="ab")  # ab[0]=message, ab[1]=Alice
+            bob = qmc.qubit("bob")
+            if prep:
+                ab[0] = qmc.x(ab[0])
+            ab[1] = qmc.h(ab[1])
+            ab[1], bob = qmc.cx(ab[1], bob)
+            ab[0], ab[1] = qmc.cx(ab[0], ab[1])
+            ab[0] = qmc.h(ab[0])
+            m = qmc.measure(ab)
+            if m[1]:
+                bob = qmc.x(bob)
+            if m[0]:
+                bob = qmc.z(bob)
+            return qmc.measure(bob)
+
+        result = (
+            transpiler.transpile(teleport, bindings={"prep": msg_bit})
+            .sample(transpiler.executor(), shots=128)
+            .result()
+        )
+        assert all(bob == msg_bit for bob, _ in result.results), (
+            f"teleporting |{msg_bit}> must put Bob in |{msg_bit}>, got {result.results}"
+        )
+        assert sum(count for _, count in result.results) == 128
