@@ -17,6 +17,85 @@ This documentation system uses a modern workflow where:
 2. **IDE support**: Edit with full Python IDE features (linting, type checking, refactoring)
 3. **Jupyter Book 2.x**: Single `myst.yml` config, Python-based build (no Node.js)
 
+## Authoring Policy
+
+The docs are reader-first, Qamomile-first, and testable. Each article should
+teach one clear purpose: a Qamomile workflow, an algorithm implemented with
+Qamomile, an integration boundary, or one usage detail. If a page needs two
+independent goals, split it into two pages.
+
+### Content principles
+
+- **One note for one purpose**: keep each notebook focused on a single outcome.
+- **Reader-first explanations**: prefer the shortest path that helps a user
+  understand and run the example. Move detailed mechanics into `usage/` pages.
+- **Verified claims only**: avoid unreviewed academic claims. When an algorithm
+  page needs theory, keep the statement narrow, cite or link the source, and
+  verify the implemented behavior with assertions or reference values.
+- **Qamomile-first examples**: use Qamomile qkernels, observables, converters,
+  drawings, resource estimates, and execution APIs wherever possible.
+- **Docs as tests**: every runnable notebook should include assertions for the
+  important shapes, counts, or result properties. Keep runtime small enough for
+  `tests/docs/test_tutorials.py`.
+- **No manual References section**: use MyST cross-references, citations, or
+  external links instead of hand-maintaining a References section.
+- **Use MyST notes for remarks**: tips, notes, and remarks should use
+  `:::{note}` blocks.
+
+### Page shape
+
+Every notebook-style article should follow this top-level flow:
+
+1. First markdown cell with `tags:` frontmatter.
+2. H1 title plus a short paragraph clarifying the scope.
+3. Commented Colab install cell.
+4. One imports cell containing all imports used by the page.
+5. Section-specific body.
+6. `## Summary` with concrete take-home messages.
+
+### Section roles
+
+| Section | Purpose | Body outline |
+| --- | --- | --- |
+| `tutorial/` | Teach new users how to use Qamomile. | Goal, build with Qamomile, inspect, run, summary. Avoid deep side topics. |
+| `algorithm/` | Explain an algorithm through Qamomile. | Background if needed, problem settings if needed, algorithm, implementation, result if needed, Qamomile built-in if applicable, summary. |
+| `usage/` | Explain one Qamomile feature or workflow detail. | Feature/workflow, minimal example, common pattern if needed, notes if needed, summary. |
+| `integration/` | Explain how Qamomile integrates with another target. | Integration target, installation if needed, build with Qamomile, connect, run or inspect if safe, summary. |
+
+### Skeletons
+
+Authoring templates live in `docs/skeletons/`. They are intentionally outside
+`docs/en/` and `docs/ja/`, so they are not rendered, synced, or executed by the
+docs build. Start new notebook-style pages from the closest skeleton:
+
+| Skeleton | Destination |
+| --- | --- |
+| `docs/skeletons/tutorial.py` | `docs/{en,ja}/tutorial/<slug>.py` |
+| `docs/skeletons/algorithm.py` | `docs/{en,ja}/algorithm/<slug>.py` |
+| `docs/skeletons/usage.py` | `docs/{en,ja}/usage/<slug>.py` |
+| `docs/skeletons/integration.py` | `docs/{en,ja}/integration/<slug>.py` |
+
+### MyST conventions
+
+Use MyST directives when they improve readability without hiding required
+context. For example, tabbed comparisons can use the standard MyST `tab-set`
+and `tab-item` directives:
+
+````markdown
+::::{tab-set}
+:::{tab-item} From scratch
+Implement the Qamomile qkernel step by step.
+:::
+
+:::{tab-item} Built-in
+Show the corresponding Qamomile helper.
+:::
+::::
+````
+
+See the official MyST guide for the current tabs syntax:
+https://mystmd.org/guide/dropdowns-cards-and-tabs
+
 ### Notebook Execution Strategy
 
 ReadTheDocs has a build time limit that is too short to execute all notebooks during hosting. Therefore, notebooks must be **pre-executed before pushing** to the branch:
@@ -63,6 +142,7 @@ docs/
 ├── scripts/                     # Build helper scripts
 │                                #   - build_doc_tags.py: generate per-tag pages, inject chip blocks, inject section browse-by-tag clouds
 │                                #   - inject_colab_launch.py: post-build "open in Colab" button on every rendered HTML page
+├── skeletons/                   # Authoring templates for new notebook-style pages (not rendered)
 │
 ├── _build_src/                  # Build-time scratch tree (gitignored)
 │                                #   build.sh copies en/ and ja/ here, runs
@@ -167,9 +247,11 @@ For reference, the underlying flow:
 
 ### Creating a new page
 
-1. **Create the `.py` file** in both `en/` and `ja/` with the standard
-   jupytext header, a frontmatter block carrying `tags`, then the H1
-   and content:
+1. **Start from a skeleton** in `docs/skeletons/` and copy it into both
+   `en/` and `ja/` under the matching section. The skeletons encode the
+   standard jupytext header, tag frontmatter location, Colab install cell,
+   imports cell, section-specific outline, and required summary shape.
+   Replace the placeholders with one focused article:
 
    ```python
    # ---
@@ -200,6 +282,8 @@ For reference, the underlying flow:
    [Tags](#tags) below). Every article carries the **section tag**
    that matches its containing directory (`tutorial`, `algorithm`,
    `usage`, or `integration`) plus any topical tags that apply.
+   Keep the first scope paragraph reader-facing: explain what this one
+   notebook covers and what it intentionally leaves out.
 
 2. **Update the section landing page** by adding a bullet/link in
    the matching `<section>/index.md`. Each section's `index.md` is
