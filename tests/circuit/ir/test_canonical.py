@@ -455,6 +455,7 @@ class TestMetadataUUIDRewrite:
         """ArrayRuntimeMetadata element-UUID lists track canonical UUIDs."""
         e0 = Value(type=FloatType(), name="e0")
         e1 = Value(type=FloatType(), name="e1")
+        parent = ArrayValue(type=QubitType(), name="parent")
         arr = ArrayValue(
             type=FloatType(),
             name="arr",
@@ -462,12 +463,17 @@ class TestMetadataUUIDRewrite:
                 array_runtime=ArrayRuntimeMetadata(
                     element_uuids=(e0.uuid, e1.uuid),
                     element_logical_ids=(e0.logical_id, e1.logical_id),
+                    element_parent_uuids=(parent.uuid, None),
+                    element_parent_indices=(1, None),
                 ),
             ),
         )
-        block = _make_minimal_block(input_values=[e0, e1], output_values=[arr])
+        block = _make_minimal_block(
+            input_values=[e0, e1, parent],
+            output_values=[arr],
+        )
         canon = canonicalize(block)
-        ce0, ce1 = canon.input_values
+        ce0, ce1, cparent = canon.input_values
         carr = canon.output_values[0]
         assert carr.metadata.array_runtime is not None
         assert carr.metadata.array_runtime.element_uuids == (ce0.uuid, ce1.uuid)
@@ -475,6 +481,11 @@ class TestMetadataUUIDRewrite:
             ce0.logical_id,
             ce1.logical_id,
         )
+        assert carr.metadata.array_runtime.element_parent_uuids == (
+            cparent.uuid,
+            None,
+        )
+        assert carr.metadata.array_runtime.element_parent_indices == (1, None)
 
     def test_scalar_metadata_preserved_verbatim(self):
         """ScalarMetadata (no UUID refs) carries through unchanged."""

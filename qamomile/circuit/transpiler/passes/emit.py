@@ -374,7 +374,22 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                 # Non-view case: match legacy direct element_uuid lookup
                 # so arrays whose elements were registered under explicit
                 # UUIDs (e.g. tuple-packed expval qubits) still resolve.
+                parent_uuids = qubits_value.get_element_parent_uuids()
+                parent_indices = qubits_value.get_element_parent_indices()
+                for i, parent_uuid in enumerate(parent_uuids):
+                    if (
+                        parent_uuid is None
+                        or i >= len(parent_indices)
+                        or parent_indices[i] is None
+                    ):
+                        continue
+                    addr = QubitAddress(parent_uuid, int(parent_indices[i]))
+                    if addr in uuid_to_physical:
+                        qubit_map[i] = uuid_to_physical[addr]
+
                 for i, qubit_uuid in enumerate(qubits_value.get_element_uuids()):
+                    if i in qubit_map:
+                        continue
                     addr = QubitAddress(qubit_uuid)
                     if addr in uuid_to_physical:
                         qubit_map[i] = uuid_to_physical[addr]

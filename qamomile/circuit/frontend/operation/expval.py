@@ -18,6 +18,57 @@ if TYPE_CHECKING:
     pass
 
 
+def _const_int(value: Value | None) -> int | None:
+    """Resolve a constant integer IR value.
+
+    Args:
+        value (Value | None): Candidate integer value, or ``None`` when
+            the reference is absent.
+
+    Returns:
+        int | None: The integer payload when ``value`` is constant;
+            otherwise ``None``.
+    """
+    if value is None or not value.is_constant():
+        return None
+    const = value.get_const()
+    if const is None:
+        return None
+    return int(const)
+
+
+def _element_root_reference(qubit_value: Value) -> tuple[str | None, int | None]:
+    """Resolve a tuple-form qubit element to its root array slot.
+
+    Args:
+        qubit_value (Value): Scalar qubit value passed as one element of
+            an ``expval((...), H)`` tuple.
+
+    Returns:
+        tuple[str | None, int | None]: Root array UUID and root element
+            index when the scalar comes from a constant-index array
+            element; ``(None, None)`` for standalone scalar qubits or
+            symbolic element accesses.
+    """
+    parent = qubit_value.parent_array
+    if parent is None or not qubit_value.element_indices:
+        return None, None
+
+    idx = _const_int(qubit_value.element_indices[0])
+    if idx is None:
+        return None, None
+
+    while parent.slice_of is not None:
+        start = _const_int(parent.slice_start)
+        step = _const_int(parent.slice_step)
+        if start is None or step is None:
+            return parent.uuid, idx
+        idx = start + step * idx
+        parent = parent.slice_of
+
+    return parent.uuid, idx
+
+
 def expval(
     qubits: Vector[Qubit] | tuple[Qubit, ...],
     hamiltonian: Observable,
@@ -93,6 +144,7 @@ def expval(
         # unpacking is unaffected.
         consumed_qubits = tuple(q.consume(operation_name="expval") for q in qubits)
         qubit_values = [q.value for q in consumed_qubits]
+        element_parent_refs = tuple(_element_root_reference(q) for q in qubit_values)
         qubits_value = ArrayValue(
             type=qubit_values[0].type,
             name="expval_qubits",
@@ -100,6 +152,8 @@ def expval(
         ).with_array_runtime_metadata(
             element_uuids=tuple(q.uuid for q in qubit_values),
             element_logical_ids=tuple(q.logical_id for q in qubit_values),
+            element_parent_uuids=tuple(parent for parent, _ in element_parent_refs),
+            element_parent_indices=tuple(idx for _, idx in element_parent_refs),
         )
     else:
         # Guard for Vector[Qubit] operands: if any slot of the array was

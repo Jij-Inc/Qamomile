@@ -67,6 +67,8 @@ class ArrayRuntimeMetadata:
     const_array: typing.Any = None
     element_uuids: tuple[str, ...] = ()
     element_logical_ids: tuple[str, ...] = ()
+    element_parent_uuids: tuple[str | None, ...] = ()
+    element_parent_indices: tuple[int | None, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -238,12 +240,36 @@ class _MetadataValueMixin:
             return ()
         return self.metadata.array_runtime.element_uuids
 
+    def get_element_parent_uuids(self) -> tuple[str | None, ...]:
+        """Return root parent UUIDs for tuple-packed array elements.
+
+        Returns:
+            tuple[str | None, ...]: Root array UUID per element, or
+                ``None`` where an element is a standalone scalar.
+        """
+        if self.metadata.array_runtime is None:
+            return ()
+        return self.metadata.array_runtime.element_parent_uuids
+
+    def get_element_parent_indices(self) -> tuple[int | None, ...]:
+        """Return root parent indices for tuple-packed array elements.
+
+        Returns:
+            tuple[int | None, ...]: Root-space index per element, or
+                ``None`` where an element is a standalone scalar.
+        """
+        if self.metadata.array_runtime is None:
+            return ()
+        return self.metadata.array_runtime.element_parent_indices
+
     def with_array_runtime_metadata(
         self,
         *,
         const_array: typing.Any = _UNSET,
         element_uuids: Sequence[str] | object = _UNSET,
         element_logical_ids: Sequence[str] | object = _UNSET,
+        element_parent_uuids: Sequence[str | None] | object = _UNSET,
+        element_parent_indices: Sequence[int | None] | object = _UNSET,
     ) -> typing.Self:
         current = self.metadata.array_runtime or ArrayRuntimeMetadata()
         new_const_array = (
@@ -259,6 +285,16 @@ class _MetadataValueMixin:
             if element_logical_ids is _UNSET
             else tuple(typing.cast(Sequence[str], element_logical_ids))
         )
+        new_element_parent_uuids = (
+            current.element_parent_uuids
+            if element_parent_uuids is _UNSET
+            else tuple(typing.cast(Sequence[str | None], element_parent_uuids))
+        )
+        new_element_parent_indices = (
+            current.element_parent_indices
+            if element_parent_indices is _UNSET
+            else tuple(typing.cast(Sequence[int | None], element_parent_indices))
+        )
         return self._replace_metadata(
             dataclasses.replace(
                 self.metadata,
@@ -266,6 +302,8 @@ class _MetadataValueMixin:
                     const_array=new_const_array,
                     element_uuids=new_element_uuids,
                     element_logical_ids=new_element_logical_ids,
+                    element_parent_uuids=new_element_parent_uuids,
+                    element_parent_indices=new_element_parent_indices,
                 ),
             )
         )
