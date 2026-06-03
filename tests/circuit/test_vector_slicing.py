@@ -8,12 +8,53 @@ pattern — the use case the slicing feature was introduced to support.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.frontend.handle import VectorView
+from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+from qamomile.circuit.transpiler.passes.slice_borrow_check import (
+    SliceBorrowCheckPass,
+    _SnapshotKind,
+)
+
+
+def _uint_value(name: str, const: int | None = None) -> Value:
+    """Create a UInt IR value for slice-borrow synthetic tests."""
+    value = Value(type=UIntType(), name=name)
+    if const is not None:
+        return value.with_const(const)
+    return value
+
+
+def _qubit_array(name: str, length: Value) -> ArrayValue:
+    """Create a root qubit ArrayValue for slice-borrow synthetic tests."""
+    return ArrayValue(type=QubitType(), name=name, shape=(length,))
+
+
+def _slice_array(
+    root: ArrayValue,
+    name: str,
+    start: Value,
+    step: Value,
+    length: Value,
+) -> ArrayValue:
+    """Create a sliced ArrayValue for slice-borrow synthetic tests."""
+    return ArrayValue(
+        type=QubitType(),
+        name=name,
+        shape=(length,),
+        slice_of=root,
+        slice_start=start,
+        slice_step=step,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Frontend-only behavioural tests (no backend required)
@@ -979,6 +1020,179 @@ class TestPostFoldLinearity:
         transpiler = QiskitTranspiler()
         with pytest.raises((SliceBorrowViolationError, QubitBorrowConflictError)):
             transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
+
+
+class TestSameSliceVersionRefresh:
+    """Regression coverage for same-slice SSA-version refreshes."""
+
+    def test_controlled_gate_refresh_on_slice_controls_transpiles(self):
+        """A controlled gate may return a newer version of the same slice."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        num_qubits = 3
+        thetas_list = [
+            [0],
+            [1, 2],
+            [3, 4, 5, 6],
+        ]
+
+        @qmc.qkernel
+        def state_prep() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(num_qubits, "qs")
+
+            qs[0] = qmc.ry(qs[0], thetas_list[0][0])
+
+            controlled_ry = qmc.control(qmc.ry, num_controls=1)
+            controls = qs[:1]
+            target = qs[1]
+
+            controls = qmc.x(controls)
+            controls, target = controlled_ry(controls, target, thetas_list[1][0])
+            controls = qmc.x(controls)
+
+            qs[:1] = controls
+            qs[1] = target
+
+            return qs
+
+        @qmc.qkernel
+        def main() -> qmc.Vector[qmc.Bit]:
+            qs = state_prep()
+            return qmc.measure(qs)
+
+        executable = QiskitTranspiler().transpile(main)
+
+        assert executable.get_first_circuit().num_qubits == num_qubits
+
+    def test_bound_positive_for_loop_refreshes_outer_slice_view(self):
+        """A bound positive loop count permits body-local same-slice refresh."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit(repetitions: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            controls = q[:1]
+            for _ in qmc.range(repetitions):
+                controls = qmc.x(controls)
+            q[:1] = controls
+            return qmc.measure(q)
+
+        executable = QiskitTranspiler().transpile(circuit, bindings={"repetitions": 2})
+
+        assert executable.get_first_circuit().num_qubits == 3
+
+    def test_concrete_forward_refresh_updates_existing_owner(self):
+        """A newer concrete same-slice version replaces the old owner."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        root = _qubit_array("q", _uint_value("n", 4))
+        owner = _slice_array(
+            root,
+            "view",
+            _uint_value("start", 0),
+            _uint_value("step", 1),
+            _uint_value("length", 2),
+        )
+        refreshed = owner.next_version()
+
+        checker._register_slice_bulk_borrow_if_new(owner, state)
+        checker._register_slice_bulk_borrow_if_new(refreshed, state)
+
+        assert state
+        assert {view.uuid for view in state.values()} == {refreshed.uuid}
+
+    def test_concrete_stale_same_slice_refresh_is_rejected(self):
+        """An older concrete same-slice version cannot replace a newer owner."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        root = _qubit_array("q", _uint_value("n", 4))
+        stale = _slice_array(
+            root,
+            "view",
+            _uint_value("start", 0),
+            _uint_value("step", 1),
+            _uint_value("length", 2),
+        )
+        current = stale.next_version()
+
+        checker._register_slice_bulk_borrow_if_new(stale, state)
+        checker._register_slice_bulk_borrow_if_new(current, state)
+
+        with pytest.raises(SliceBorrowViolationError, match="forward SSA-version"):
+            checker._register_slice_bulk_borrow_if_new(stale, state)
+
+    def test_symbolic_exact_descriptor_forward_refresh_is_allowed(self):
+        """A symbolic slice may refresh only when descriptor SSA values match."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        n = _uint_value("n")
+        start = _uint_value("i")
+        step = _uint_value("step")
+        root = _qubit_array("q", n)
+        owner = _slice_array(root, "view", start, step, n)
+        refreshed = owner.next_version()
+
+        checker._register_slice_bulk_borrow_if_new(owner, state)
+        checker._register_slice_bulk_borrow_if_new(refreshed, state)
+
+        assert len(state) == 1
+        assert next(iter(state.values())).uuid == refreshed.uuid
+
+    def test_symbolic_changed_descriptor_is_rejected(self):
+        """A different symbolic descriptor is not a same-slice refresh."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        n = _uint_value("n")
+        start = _uint_value("i")
+        changed_start = _uint_value("i_plus_zero")
+        step = _uint_value("step")
+        root = _qubit_array("q", n)
+        owner = _slice_array(root, "view", start, step, n)
+        changed = dataclasses.replace(owner.next_version(), slice_start=changed_start)
+
+        checker._register_slice_bulk_borrow_if_new(owner, state)
+
+        with pytest.raises(SliceBorrowViolationError, match="may overlap"):
+            checker._register_slice_bulk_borrow_if_new(changed, state)
+
+    def test_symbolic_recomputed_descriptor_is_rejected(self):
+        """A new slice lineage with the same symbolic descriptor is not a refresh."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        n = _uint_value("n")
+        start = _uint_value("i")
+        step = _uint_value("step")
+        root = _qubit_array("q", n)
+        owner = _slice_array(root, "view", start, step, n)
+        recomputed = _slice_array(root, "recomputed", start, step, n)
+
+        checker._register_slice_bulk_borrow_if_new(owner, state)
+
+        with pytest.raises(SliceBorrowViolationError, match="not a forward"):
+            checker._register_slice_bulk_borrow_if_new(recomputed, state)
+
+    def test_symbolic_refresh_inside_unsafe_snapshot_is_rejected(self):
+        """Unsafe control-flow bodies cannot refresh outer symbolic views."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        n = _uint_value("n")
+        start = _uint_value("i")
+        step = _uint_value("step")
+        root = _qubit_array("q", n)
+        owner = _slice_array(root, "view", start, step, n)
+        refreshed = owner.next_version()
+
+        checker._register_slice_bulk_borrow_if_new(owner, state)
+        checker._outer_snapshot_stack.append(
+            (_SnapshotKind.UNSAFE_CONTROL_BODY, dict(state))
+        )
+        try:
+            with pytest.raises(SliceBorrowViolationError, match="may be skipped"):
+                checker._register_slice_bulk_borrow_if_new(refreshed, state)
+        finally:
+            checker._outer_snapshot_stack.pop()
 
     def test_nested_const_view_locks_parent_slot(self):
         """Constant nested view (``q[0::2][1:3]``) locks the covered root slot.
