@@ -305,23 +305,30 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         ``qubits[i]``. When ``qubits_value`` is a sliced view
         (``expval(q[1::2], Z(0))``), the view's ``slice_of`` chain is
         walked so Pauli index i resolves to the root parent's
-        ``start + step * i``-th physical qubit. The caller then feeds
-        this mapping into ``hamiltonian.remap_qubits(...)`` which
-        rewrites observable qubit indices to physical-space indices in
-        one go.
+        ``start + step * i``-th physical qubit. For a tuple of Vector
+        elements whose own UUIDs are not registered in the quantum
+        segment (e.g. an ungated ancilla, or a gate/composite result),
+        the flat UUID lookup misses and i falls back to the element's
+        root ``(array_uuid, index)`` address captured at trace time,
+        which the root array's ``QInitOperation`` always registers. The
+        caller then feeds this mapping into ``hamiltonian.remap_qubits(...)``
+        which rewrites observable qubit indices to physical-space
+        indices in one go.
 
         Args:
-            qubits_value: The Value representing the qubit tuple /
-                array / view to evaluate the observable over.
-            quantum_segment_index: Index of the quantum segment whose
+            qubits_value (Value | None): The Value representing the qubit
+                tuple / array / view to evaluate the observable over.
+                ``None`` yields an empty map.
+            quantum_segment_index (int): Index of the quantum segment whose
                 compiled ``qubit_map`` supplies the physical qubit
                 positions.
-            compiled_quantum: List of already compiled quantum segments.
+            compiled_quantum (list[CompiledQuantumSegment[T]]): Already
+                compiled quantum segments.
 
         Returns:
-            Dict mapping Pauli index -> physical qubit index. Empty
-            when the segment index is invalid or when no entry
-            resolved.
+            dict[int, int]: Mapping from Pauli index to physical qubit
+                index. Empty when the segment index is invalid or when no
+                entry resolved.
         """
         from qamomile.circuit.ir.value import ArrayValue
 
