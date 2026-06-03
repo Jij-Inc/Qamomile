@@ -1300,6 +1300,11 @@ def _decode_composite_gate(
         if d.get("implementation_block") is not None
         else None
     )
+    inverse_source = (
+        _decode_block(d["inverse_source_block"])
+        if d.get("inverse_source_block") is not None
+        else None
+    )
     return CompositeGateOperation(
         operands=operands,
         results=results,
@@ -1310,6 +1315,7 @@ def _decode_composite_gate(
         resource_metadata=_decode_resource_metadata(d.get("resource_metadata")),
         has_implementation=bool(d.get("has_implementation", True)),
         implementation_block=implementation,
+        inverse_source_block=inverse_source,
         composite_gate_instance=None,
         strategy_name=d.get("strategy_name"),
     )

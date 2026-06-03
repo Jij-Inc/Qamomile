@@ -392,6 +392,19 @@ class GateEmitter(Protocol[T]):
         """
         ...
 
+    def gate_inverse(self, gate: Any) -> Any:
+        """Create a backend-native inverse gate when supported.
+
+        Args:
+            gate (Any): Backend-specific gate object returned by
+                `circuit_to_gate`.
+
+        Returns:
+            Any: Backend-specific inverse gate object, or None when the
+            backend cannot invert reusable gates natively.
+        """
+        return None
+
     # Control flow support (optional - backends can return False to fall back)
     def supports_for_loop(self) -> bool:
         """Check if backend supports native for loops."""

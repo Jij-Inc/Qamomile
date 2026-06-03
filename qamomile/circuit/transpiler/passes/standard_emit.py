@@ -428,9 +428,32 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         )
 
     def _blockvalue_to_gate(
-        self, block_value: Any, num_qubits: int, bindings: dict[str, Any]
+        self,
+        block_value: Any,
+        num_qubits: int,
+        bindings: dict[str, Any],
+        input_operands: list[Any] | None = None,
     ) -> Any:
-        return blockvalue_to_gate(self, block_value, num_qubits, bindings)
+        """Convert a nested block into a reusable backend gate.
+
+        Args:
+            block_value (Any): Block-like object to emit into a temporary
+                backend circuit.
+            num_qubits (int): Number of qubits in the temporary circuit.
+            bindings (dict[str, Any]): Active emit bindings.
+            input_operands (list[Any] | None): Optional call-site operands
+                used to bind block inputs. Defaults to None.
+
+        Returns:
+            Any: Backend gate object, or None when conversion fails.
+        """
+        return blockvalue_to_gate(
+            self,
+            block_value,
+            num_qubits,
+            bindings,
+            input_operands=input_operands,
+        )
 
     # ------------------------------------------------------------------
     # Helpers called from emit_support modules

@@ -17,6 +17,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -27,6 +28,9 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    evaluate_binop,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
@@ -104,6 +108,8 @@ def emit_controlled_operations(
             emit_controlled_gate(
                 emit_pass, circuit, op, control_idx, target_indices, bindings
             )
+        elif isinstance(op, BinOp):
+            evaluate_binop(emit_pass, op, bindings)
         elif isinstance(op, ForOperation):
             start = (
                 emit_pass._resolver.resolve_int_value(op.operands[0], bindings)
@@ -854,20 +860,62 @@ def emit_custom_composite(
     qubit_indices: list[int],
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a custom composite gate with implementation."""
-    num_qubits = len(qubit_indices)
-    custom_gate = emit_pass._blockvalue_to_gate(impl, num_qubits, bindings)
+    """Emit a custom composite gate with implementation.
 
-    if custom_gate is not None:
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (Any): Composite gate operation.
+        impl (Any): Fallback implementation block to emit.
+        qubit_indices (list[int]): Physical qubits for the operation.
+        bindings (dict[str, Any]): Active emit bindings.
+    """
+    num_qubits = len(qubit_indices)
+    if getattr(op, "inverse_source_block", None) is not None:
+        source_gate = emit_pass._blockvalue_to_gate(
+            op.inverse_source_block,
+            num_qubits,
+            bindings,
+            input_operands=op.operands,
+        )
+        if source_gate is not None:
+            inverse_gate = emit_pass._emitter.gate_inverse(source_gate)
+            if inverse_gate is not None and _gate_matches_qubit_count(
+                inverse_gate,
+                num_qubits,
+            ):
+                emit_pass._emitter.append_gate(circuit, inverse_gate, qubit_indices)
+                return
+
+    custom_gate = emit_pass._blockvalue_to_gate(
+        impl,
+        num_qubits,
+        bindings,
+        input_operands=op.operands,
+    )
+
+    if custom_gate is not None and _gate_matches_qubit_count(custom_gate, num_qubits):
         emit_pass._emitter.append_gate(circuit, custom_gate, qubit_indices)
     else:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
+        local_bindings = _bind_block_inputs(
+            emit_pass,
+            impl,
+            op.operands,
+            num_qubits,
+            bindings,
+            local_qubit_map,
+        )
 
         if hasattr(impl, "input_values"):
-            for i, input_val in enumerate(impl.input_values):
-                if i < len(qubit_indices):
-                    local_qubit_map[QubitAddress(input_val.uuid)] = qubit_indices[i]
+            quantum_inputs = [
+                value
+                for value in impl.input_values
+                if hasattr(value, "type") and value.type.is_quantum()
+            ]
+            for input_val, qubit_index in zip(quantum_inputs, qubit_indices):
+                local_qubit_map[QubitAddress(input_val.uuid)] = qubit_index
 
         if hasattr(impl, "operations"):
             emit_pass._emit_operations(
@@ -875,7 +923,7 @@ def emit_custom_composite(
                 impl.operations,
                 local_qubit_map,
                 local_clbit_map,
-                bindings,
+                local_bindings,
                 force_unroll=True,
             )
 
@@ -885,6 +933,7 @@ def blockvalue_to_gate(
     block_value: Any,
     num_qubits: int,
     bindings: dict[str, Any],
+    input_operands: list[Any] | None = None,
 ) -> Any:
     """Convert a Block to a backend gate.
 
@@ -912,6 +961,11 @@ def blockvalue_to_gate(
         bindings (dict[str, Any]): Parameter bindings forwarded to the
             allocator and ``_emit_operations``. Also consulted when
             resolving ``Vector[Qubit]`` input shapes.
+        input_operands (list[Any] | None): Optional call-site operands
+            corresponding to `block_value.input_values`. Quantum operands
+            are used for input qubit mapping; classical operands are
+            resolved into local bindings before the nested block is
+            emitted. Defaults to None.
 
     Returns:
         Any: A backend gate object produced by
@@ -926,19 +980,27 @@ def blockvalue_to_gate(
     try:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
+        local_bindings = _bind_block_inputs(
+            emit_pass,
+            block_value,
+            input_operands,
+            num_qubits,
+            bindings,
+            local_qubit_map,
+        )
 
-        if hasattr(block_value, "input_values"):
+        if hasattr(block_value, "input_values") and input_operands is None:
             _populate_input_qubit_map(
                 emit_pass,
                 block_value.input_values,
                 num_qubits,
-                bindings,
+                local_bindings,
                 local_qubit_map,
             )
 
         local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
             block_value.operations,
-            bindings,
+            local_bindings,
             initial_qubit_map=local_qubit_map,
             initial_clbit_map=local_clbit_map,
         )
@@ -953,7 +1015,7 @@ def blockvalue_to_gate(
             block_value.operations,
             local_qubit_map,
             local_clbit_map,
-            bindings,
+            local_bindings,
             force_unroll=True,
         )
 
@@ -967,6 +1029,110 @@ def blockvalue_to_gate(
             exc_info=True,
         )
         return None
+
+
+def _bind_block_inputs(
+    emit_pass: "StandardEmitPass",
+    block_value: Any,
+    input_operands: list[Any] | None,
+    num_qubits: int,
+    bindings: dict[str, Any],
+    qubit_map: QubitMap,
+) -> dict[str, Any]:
+    """Bind nested block inputs to call-site operands for emission.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        block_value (Any): Nested block whose inputs are being emitted.
+        input_operands (list[Any] | None): Call-site operands. When None,
+            no direct binding is performed.
+        num_qubits (int): Total qubits available for the nested block.
+        bindings (dict[str, Any]): Parent emit bindings.
+        qubit_map (QubitMap): Local qubit map to populate for quantum
+            inputs.
+
+    Returns:
+        dict[str, Any]: Local bindings for nested emission.
+    """
+    local_bindings = dict(bindings)
+    if input_operands is None or not hasattr(block_value, "input_values"):
+        return local_bindings
+
+    quantum_inputs = [
+        formal
+        for formal in block_value.input_values
+        if hasattr(formal, "type") and formal.type.is_quantum()
+    ]
+    classical_inputs = [
+        formal
+        for formal in block_value.input_values
+        if not (hasattr(formal, "type") and formal.type.is_quantum())
+    ]
+    quantum_operands = list(input_operands[: len(quantum_inputs)])
+    classical_operands = list(input_operands[len(quantum_inputs) :])
+
+    quantum_pairs = []
+    for formal, actual in zip(quantum_inputs, quantum_operands):
+        quantum_pairs.append((formal, actual))
+    for formal, actual in zip(classical_inputs, classical_operands):
+        if hasattr(formal, "uuid"):
+            local_bindings[formal.uuid] = _resolve_call_operand(
+                emit_pass,
+                actual,
+                bindings,
+            )
+
+    for formal, qubit_index in zip(
+        (pair[0] for pair in quantum_pairs), range(num_qubits)
+    ):
+        if hasattr(formal, "type") and formal.type.is_quantum():
+            qubit_map[QubitAddress(formal.uuid)] = qubit_index
+
+    return local_bindings
+
+
+def _gate_matches_qubit_count(gate: Any, num_qubits: int) -> bool:
+    """Return whether a backend gate can be appended at the call site.
+
+    Args:
+        gate (Any): Backend gate candidate.
+        num_qubits (int): Number of qubits supplied by the call site.
+
+    Returns:
+        bool: True when the backend does not expose a qubit-count field or
+            when the field matches `num_qubits`.
+    """
+    gate_num_qubits = getattr(gate, "num_qubits", None)
+    return gate_num_qubits is None or gate_num_qubits == num_qubits
+
+
+def _resolve_call_operand(
+    emit_pass: "StandardEmitPass",
+    actual: Any,
+    bindings: dict[str, Any],
+) -> Any:
+    """Resolve a call-site classical operand for nested block emission.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        actual (Any): Call-site operand.
+        bindings (dict[str, Any]): Parent emit bindings.
+
+    Returns:
+        Any: Concrete value, backend parameter, or backend expression.
+    """
+    if not hasattr(actual, "uuid"):
+        return actual
+    resolved = emit_pass._resolver.resolve_classical_value(
+        actual,
+        bindings,
+    )
+    if resolved is not None:
+        return resolved
+    param_key = emit_pass._resolver.get_parameter_key(actual, bindings)
+    if param_key is not None:
+        return emit_pass._get_or_create_parameter(param_key, actual.uuid)
+    return actual
 
 
 def _populate_input_qubit_map(

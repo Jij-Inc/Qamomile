@@ -12,6 +12,7 @@ from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
+    ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
@@ -79,6 +80,49 @@ ANGLE_CASES = [
     pytest.param(("random", 0), id="seed-0"),
     pytest.param(("random", 42), id="seed-42"),
 ]
+
+UNARY_NATIVE_NONPARAMETRIC_GATES = ("h", "x", "y", "z", "s", "sdg", "t", "tdg")
+UNARY_NATIVE_PARAMETRIC_GATES = ("p", "rx", "ry", "rz")
+TWO_QUBIT_NATIVE_NONPARAMETRIC_GATES = ("cx", "cz", "swap")
+TWO_QUBIT_NATIVE_PARAMETRIC_GATES = ("cp", "rzz")
+THREE_QUBIT_NATIVE_GATES = ("ccx",)
+
+UNARY_NATIVE_CASES = [
+    pytest.param(gate_name, None, id=gate_name)
+    for gate_name in UNARY_NATIVE_NONPARAMETRIC_GATES
+] + [
+    pytest.param(gate_name, angle_case, id=f"{gate_name}-{angle_case_id}")
+    for gate_name in UNARY_NATIVE_PARAMETRIC_GATES
+    for angle_case, angle_case_id in [
+        (0.0, "zero"),
+        (math.pi, "pi"),
+        (2.0 * math.pi, "two-pi"),
+        (("random", 0), "seed-0"),
+        (("random", 42), "seed-42"),
+    ]
+]
+
+MULTI_QUBIT_NATIVE_CASES = (
+    [
+        pytest.param(gate_name, None, id=gate_name)
+        for gate_name in TWO_QUBIT_NATIVE_NONPARAMETRIC_GATES
+    ]
+    + [
+        pytest.param(gate_name, angle_case, id=f"{gate_name}-{angle_case_id}")
+        for gate_name in TWO_QUBIT_NATIVE_PARAMETRIC_GATES
+        for angle_case, angle_case_id in [
+            (0.0, "zero"),
+            (math.pi, "pi"),
+            (2.0 * math.pi, "two-pi"),
+            (("random", 0), "seed-0"),
+            (("random", 42), "seed-42"),
+        ]
+    ]
+    + [
+        pytest.param(gate_name, None, id=gate_name)
+        for gate_name in THREE_QUBIT_NATIVE_GATES
+    ]
+)
 
 
 @qmc.qkernel
@@ -174,6 +218,18 @@ def _inverse_controlled_concrete_layer(
 
 
 @qmc.qkernel
+def _inverse_controlled_native_layer(
+    ctrl: qmc.Qubit,
+    target: qmc.Qubit,
+    rotation_angle: qmc.Float,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply a controlled built-in native gate for inverse tests."""
+    controlled_rx = qmc.control(qmc.rx)
+    ctrl, target = controlled_rx(ctrl, target, rotation_angle)
+    return ctrl, target
+
+
+@qmc.qkernel
 def _inverse_controlled_symbolic_layer(
     controls: qmc.Vector[qmc.Qubit],
     target: qmc.Qubit,
@@ -252,9 +308,21 @@ def _inverse_custom_composite_layer(q: qmc.Qubit) -> qmc.Qubit:
     return q
 
 
-@qmc.composite_gate(stub=True, name="stub_inverse_gate", num_qubits=1)
+_STUB_RESOURCE_METADATA = ResourceMetadata(
+    query_complexity=7,
+    t_gates=3,
+    total_gates=5,
+)
+
+
+@qmc.composite_gate(
+    stub=True,
+    name="stub_inverse_gate",
+    num_qubits=1,
+    resource_metadata=_STUB_RESOURCE_METADATA,
+)
 def _stub_composite_gate() -> None:
-    """Define a stub composite gate for inverse rejection tests."""
+    """Define a stub composite gate for inverse tests."""
 
 
 @qmc.qkernel
@@ -294,6 +362,309 @@ def _sum_z_hamiltonian(num_qubits: int) -> qm_o.Hamiltonian:
     for idx in range(num_qubits):
         hamiltonian += qm_o.Z(idx)
     return hamiltonian
+
+
+def _assert_all_zero_samples(sample_result: object, width: int) -> None:
+    """Assert that every sampled bitstring is all zero.
+
+    Args:
+        sample_result (object): Backend sample result exposing a `results`
+            iterable of `(bitstring, count)` pairs.
+        width (int): Expected bitstring width.
+
+    Returns:
+        None.
+    """
+    expected_bits: object = (0,) * width
+    expected_values = {0, expected_bits} if width == 1 else {expected_bits}
+    for value, count in sample_result.results:  # type: ignore[attr-defined]
+        assert count > 0
+        assert value in expected_values
+
+
+def _apply_unary_native_gate(
+    gate_name: str,
+    target: object,
+    angle: float | None,
+) -> object:
+    """Apply a unary native gate by name.
+
+    Args:
+        gate_name (str): Native unary gate name.
+        target (object): Qubit, Vector, or VectorView target.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        object: Updated target handle.
+    """
+    gate = getattr(qmc, gate_name)
+    if angle is None:
+        return gate(target)
+    return gate(target, angle)
+
+
+def _apply_inverse_unary_native_gate(
+    gate_name: str,
+    target: object,
+    angle: float | None,
+) -> object:
+    """Apply the inverse of a unary native gate by name.
+
+    Args:
+        gate_name (str): Native unary gate name.
+        target (object): Qubit, Vector, or VectorView target.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        object: Updated target handle.
+    """
+    inverse_gate = qmc.inverse(getattr(qmc, gate_name))
+    if angle is None:
+        return inverse_gate(target)
+    return inverse_gate(target, angle)
+
+
+def _apply_multi_native_gate(
+    gate_name: str,
+    qs: qmc.Vector[qmc.Qubit],
+    angle: float | None,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a multi-qubit native gate to the leading qubits.
+
+    Args:
+        gate_name (str): Native multi-qubit gate name.
+        qs (qmc.Vector[qmc.Qubit]): Register to update.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated register.
+
+    Raises:
+        AssertionError: If `gate_name` is not a supported native gate.
+    """
+    match gate_name:
+        case "cx":
+            qs[0], qs[1] = qmc.cx(qs[0], qs[1])
+        case "cz":
+            qs[0], qs[1] = qmc.cz(qs[0], qs[1])
+        case "swap":
+            qs[0], qs[1] = qmc.swap(qs[0], qs[1])
+        case "cp":
+            assert angle is not None
+            qs[0], qs[1] = qmc.cp(qs[0], qs[1], angle)
+        case "rzz":
+            assert angle is not None
+            qs[0], qs[1] = qmc.rzz(qs[0], qs[1], angle)
+        case "ccx":
+            qs[0], qs[1], qs[2] = qmc.ccx(qs[0], qs[1], qs[2])
+        case _:
+            raise AssertionError(f"unsupported native gate {gate_name!r}")
+    return qs
+
+
+def _apply_inverse_multi_native_gate(
+    gate_name: str,
+    qs: qmc.Vector[qmc.Qubit],
+    angle: float | None,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply the inverse of a multi-qubit native gate to leading qubits.
+
+    Args:
+        gate_name (str): Native multi-qubit gate name.
+        qs (qmc.Vector[qmc.Qubit]): Register to update.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated register.
+
+    Raises:
+        AssertionError: If `gate_name` is not a supported native gate.
+    """
+    inverse_gate = qmc.inverse(getattr(qmc, gate_name))
+    match gate_name:
+        case "cx" | "cz" | "swap":
+            qs[0], qs[1] = inverse_gate(qs[0], qs[1])
+        case "cp" | "rzz":
+            assert angle is not None
+            qs[0], qs[1] = inverse_gate(qs[0], qs[1], angle)
+        case "ccx":
+            qs[0], qs[1], qs[2] = inverse_gate(qs[0], qs[1], qs[2])
+        case _:
+            raise AssertionError(f"unsupported native gate {gate_name!r}")
+    return qs
+
+
+def _prepare_multi_native_roundtrip_state(
+    gate_name: str,
+    qs: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Prepare a state that makes the native gate action observable.
+
+    Args:
+        gate_name (str): Native multi-qubit gate name.
+        qs (qmc.Vector[qmc.Qubit]): Register to update.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Prepared register.
+
+    Raises:
+        AssertionError: If `gate_name` is not supported.
+    """
+    match gate_name:
+        case "cx":
+            qs[0] = qmc.h(qs[0])
+        case "cz" | "cp" | "rzz":
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.h(qs[1])
+        case "swap":
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.x(qs[1])
+        case "ccx":
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.h(qs[1])
+        case _:
+            raise AssertionError(f"unsupported native gate {gate_name!r}")
+    return qs
+
+
+def _unprepare_multi_native_roundtrip_state(
+    gate_name: str,
+    qs: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Undo the native-gate test-state preparation.
+
+    Args:
+        gate_name (str): Native multi-qubit gate name.
+        qs (qmc.Vector[qmc.Qubit]): Register to update.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Unprepared register.
+
+    Raises:
+        AssertionError: If `gate_name` is not supported.
+    """
+    match gate_name:
+        case "cx":
+            qs[0] = qmc.h(qs[0])
+        case "cz" | "cp" | "rzz":
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.h(qs[1])
+        case "swap":
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.x(qs[1])
+        case "ccx":
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.h(qs[1])
+        case _:
+            raise AssertionError(f"unsupported native gate {gate_name!r}")
+    return qs
+
+
+def _native_unary_scalar_roundtrip_kernel(
+    gate_name: str,
+    angle: float | None,
+) -> qmc.QKernel:
+    """Build a scalar unary native-gate inverse roundtrip kernel.
+
+    Args:
+        gate_name (str): Native unary gate name.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        qmc.QKernel: Kernel that samples zero iff the roundtrip is identity.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.h(q)
+        q = _apply_unary_native_gate(gate_name, q, angle)
+        q = _apply_inverse_unary_native_gate(gate_name, q, angle)
+        q = qmc.h(q)
+        return qmc.measure(q)
+
+    return circuit
+
+
+def _native_unary_vector_roundtrip_kernel(
+    gate_name: str,
+    angle: float | None,
+) -> qmc.QKernel:
+    """Build a Vector-broadcast unary native inverse roundtrip kernel.
+
+    Args:
+        gate_name (str): Native unary gate name.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        qmc.QKernel: Kernel that samples all-zero after the roundtrip.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = qmc.h(qs)
+        qs = _apply_unary_native_gate(gate_name, qs, angle)
+        qs = _apply_inverse_unary_native_gate(gate_name, qs, angle)
+        qs = qmc.h(qs)
+        return qmc.measure(qs)
+
+    return circuit
+
+
+def _native_unary_vector_view_roundtrip_kernel(
+    gate_name: str,
+    angle: float | None,
+) -> qmc.QKernel:
+    """Build a VectorView-broadcast unary native inverse roundtrip kernel.
+
+    Args:
+        gate_name (str): Native unary gate name.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        qmc.QKernel: Kernel that samples all-zero after the sliced roundtrip.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(5, "qs")
+        view = qs[1:4]
+        view = qmc.h(view)
+        view = _apply_unary_native_gate(gate_name, view, angle)
+        view = _apply_inverse_unary_native_gate(gate_name, view, angle)
+        view = qmc.h(view)
+        qs[1:4] = view
+        return qmc.measure(qs)
+
+    return circuit
+
+
+def _native_multi_roundtrip_kernel(
+    gate_name: str,
+    angle: float | None,
+) -> qmc.QKernel:
+    """Build a multi-qubit native inverse roundtrip kernel.
+
+    Args:
+        gate_name (str): Native multi-qubit gate name.
+        angle (float | None): Rotation angle for parametric gates, or None.
+
+    Returns:
+        qmc.QKernel: Kernel that samples all-zero after the roundtrip.
+    """
+    width = 3 if gate_name in THREE_QUBIT_NATIVE_GATES else 2
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(width, "qs")
+        qs = _prepare_multi_native_roundtrip_state(gate_name, qs)
+        qs = _apply_multi_native_gate(gate_name, qs, angle)
+        qs = _apply_inverse_multi_native_gate(gate_name, qs, angle)
+        qs = _unprepare_multi_native_roundtrip_state(gate_name, qs)
+        return qmc.measure(qs)
+
+    return circuit
 
 
 def _inverse_roundtrip_sample_kernel(num_qubits: int) -> qmc.QKernel:
@@ -338,6 +709,121 @@ def _inverse_roundtrip_expval_kernel(num_qubits: int) -> qmc.QKernel:
         return qmc.expval(qs, observable)
 
     return circuit
+
+
+def _controlled_qkernel_roundtrip_kernel() -> qmc.QKernel:
+    """Build a controlled-qkernel inverse roundtrip kernel.
+
+    Returns:
+        qmc.QKernel: Kernel that samples all-zero after controlled-U and
+            inverse controlled-U are applied.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs[0] = qmc.h(qs[0])
+        qs[0], qs[1] = _inverse_controlled_concrete_layer(qs[0], qs[1], 0.37)
+        qs[0], qs[1] = qmc.inverse(_inverse_controlled_concrete_layer)(
+            qs[0],
+            qs[1],
+            0.37,
+        )
+        qs[0] = qmc.h(qs[0])
+        return qmc.measure(qs)
+
+    return circuit
+
+
+def _controlled_native_roundtrip_kernel() -> qmc.QKernel:
+    """Build a directly controlled native-gate inverse roundtrip kernel.
+
+    Returns:
+        qmc.QKernel: Kernel that samples all-zero after `control(qmc.rx)` and
+            its inverse are applied.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs[0] = qmc.h(qs[0])
+        qs[0], qs[1] = _inverse_controlled_native_layer(qs[0], qs[1], 0.37)
+        qs[0], qs[1] = qmc.inverse(_inverse_controlled_native_layer)(
+            qs[0],
+            qs[1],
+            0.37,
+        )
+        qs[0] = qmc.h(qs[0])
+        return qmc.measure(qs)
+
+    return circuit
+
+
+def _fixed_scalar_qkernel_roundtrip_kernel() -> qmc.QKernel:
+    """Build a scalar qkernel inverse roundtrip kernel with fixed angles.
+
+    Returns:
+        qmc.QKernel: Kernel that samples zero after a qkernel and its
+            inverse are applied.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.h(q)
+        q = _inverse_layer(q, 0.37)
+        q = qmc.inverse(_inverse_layer)(q, 0.37)
+        q = qmc.h(q)
+        return qmc.measure(q)
+
+    return circuit
+
+
+def _custom_composite_qkernel_roundtrip_kernel() -> qmc.QKernel:
+    """Build a custom-composite inverse roundtrip kernel.
+
+    Returns:
+        qmc.QKernel: Kernel that samples zero after composite and inverse
+            composite are applied.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.x(q)
+        q = _inverse_custom_composite_layer(q)
+        q = qmc.inverse(_inverse_custom_composite_layer)(q)
+        q = qmc.x(q)
+        return qmc.measure(q)
+
+    return circuit
+
+
+def _vector_loop_qkernel_roundtrip_kernel() -> qmc.QKernel:
+    """Build a Vector-loop qkernel inverse roundtrip kernel.
+
+    Returns:
+        qmc.QKernel: Kernel that samples all-zero after a loop body and its
+            inverse are applied.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = _inverse_loop_layer(qs)
+        qs = qmc.inverse(_inverse_loop_layer)(qs)
+        return qmc.measure(qs)
+
+    return circuit
+
+
+QKERNEL_ROUNDTRIP_CASES = [
+    pytest.param(_fixed_scalar_qkernel_roundtrip_kernel, 1, id="scalar-layer"),
+    pytest.param(_controlled_qkernel_roundtrip_kernel, 2, id="controlled"),
+    pytest.param(_controlled_native_roundtrip_kernel, 2, id="controlled-native"),
+    pytest.param(_custom_composite_qkernel_roundtrip_kernel, 1, id="custom-composite"),
+    pytest.param(_vector_loop_qkernel_roundtrip_kernel, 3, id="vector-loop"),
+]
 
 
 def test_inverse_native_rotation_negates_angle() -> None:
@@ -403,6 +889,77 @@ def test_inverse_native_dagger_gate() -> None:
     ]
 
 
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("gate_name, angle_case", UNARY_NATIVE_CASES)
+def test_inverse_native_unary_scalar_roundtrip_cross_backend(
+    transpiler_factory,
+    gate_name: str,
+    angle_case: float | tuple[str, int] | None,
+) -> None:
+    """Every unary native gate followed by its inverse samples zero."""
+    angle = None if angle_case is None else _angle_from_case(angle_case)
+    transpiler = transpiler_factory()
+    executable = transpiler.transpile(
+        _native_unary_scalar_roundtrip_kernel(gate_name, angle)
+    )
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+
+    _assert_all_zero_samples(sample_result, 1)
+
+
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("gate_name, angle_case", UNARY_NATIVE_CASES)
+def test_inverse_native_unary_vector_broadcast_roundtrip_cross_backend(
+    transpiler_factory,
+    gate_name: str,
+    angle_case: float | tuple[str, int] | None,
+) -> None:
+    """Every Vector-broadcast unary native inverse roundtrip samples zero."""
+    angle = None if angle_case is None else _angle_from_case(angle_case)
+    transpiler = transpiler_factory()
+    executable = transpiler.transpile(
+        _native_unary_vector_roundtrip_kernel(gate_name, angle)
+    )
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+
+    _assert_all_zero_samples(sample_result, 3)
+
+
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("gate_name, angle_case", UNARY_NATIVE_CASES)
+def test_inverse_native_unary_vector_view_broadcast_roundtrip_cross_backend(
+    transpiler_factory,
+    gate_name: str,
+    angle_case: float | tuple[str, int] | None,
+) -> None:
+    """Every VectorView-broadcast unary native inverse roundtrip samples zero."""
+    angle = None if angle_case is None else _angle_from_case(angle_case)
+    transpiler = transpiler_factory()
+    executable = transpiler.transpile(
+        _native_unary_vector_view_roundtrip_kernel(gate_name, angle)
+    )
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+
+    _assert_all_zero_samples(sample_result, 5)
+
+
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("gate_name, angle_case", MULTI_QUBIT_NATIVE_CASES)
+def test_inverse_native_multi_qubit_roundtrip_cross_backend(
+    transpiler_factory,
+    gate_name: str,
+    angle_case: float | tuple[str, int] | None,
+) -> None:
+    """Every multi-qubit native gate followed by its inverse samples zero."""
+    angle = None if angle_case is None else _angle_from_case(angle_case)
+    transpiler = transpiler_factory()
+    executable = transpiler.transpile(_native_multi_roundtrip_kernel(gate_name, angle))
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+    width = 3 if gate_name in THREE_QUBIT_NATIVE_GATES else 2
+
+    _assert_all_zero_samples(sample_result, width)
+
+
 def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
     """inverse(qkernel) returns a reusable callable wrapper."""
 
@@ -414,8 +971,18 @@ def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
         return q
 
     block = circuit.build(parameters=["rotation_angle"])
-    gates = [op for op in block.operations if isinstance(op, GateOperation)]
+    composites = [
+        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    ]
 
+    assert len(composites) == 1
+    assert composites[0].inverse_source_block is _inverse_layer.block
+    assert composites[0].implementation_block is not None
+    gates = [
+        op
+        for op in composites[0].implementation_block.operations
+        if isinstance(op, GateOperation)
+    ]
     assert [gate.gate_type for gate in gates] == [
         GateOperationType.RZ,
         GateOperationType.H,
@@ -454,8 +1021,8 @@ def test_inverse_qkernel_rejects_reordered_quantum_outputs() -> None:
         circuit.build()
 
 
-def test_inverse_qkernel_inlines_reverse_operations() -> None:
-    """inverse(qkernel) emits the wrapped block's operations in reverse order."""
+def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:
+    """inverse(qkernel) stores a backend-native source and fallback block."""
 
     @qmc.qkernel
     def circuit(rotation_angle: qmc.Float) -> qmc.Qubit:
@@ -466,14 +1033,25 @@ def test_inverse_qkernel_inlines_reverse_operations() -> None:
 
     block = circuit.build(parameters=["rotation_angle"])
     call_ops = [op for op in block.operations if isinstance(op, CallBlockOperation)]
-    angle_ops = [
-        op
-        for op in block.operations
-        if isinstance(op, BinOp) and op.kind is BinOpKind.MUL
+    composites = [
+        op for op in block.operations if isinstance(op, CompositeGateOperation)
     ]
-    gates = [op for op in block.operations if isinstance(op, GateOperation)]
 
     assert len(call_ops) == 1
+    assert len(composites) == 1
+    assert composites[0].inverse_source_block is _inverse_layer.block
+    assert composites[0].implementation_block is not None
+
+    angle_ops = [
+        op
+        for op in composites[0].implementation_block.operations
+        if isinstance(op, BinOp) and op.kind is BinOpKind.MUL
+    ]
+    gates = [
+        op
+        for op in composites[0].implementation_block.operations
+        if isinstance(op, GateOperation)
+    ]
     assert len(angle_ops) == 1
     assert [gate.gate_type for gate in gates] == [
         GateOperationType.RZ,
@@ -651,8 +1229,17 @@ def test_inverse_controlled_concrete_operation() -> None:
         return ctrl, target
 
     block = circuit.build()
-    ctrl_ops = [op for op in block.operations if isinstance(op, ControlledUOperation)]
+    composites = [
+        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    ]
 
+    assert len(composites) == 1
+    assert composites[0].implementation_block is not None
+    ctrl_ops = [
+        op
+        for op in composites[0].implementation_block.operations
+        if isinstance(op, ControlledUOperation)
+    ]
     assert len(ctrl_ops) == 1
     assert isinstance(ctrl_ops[0], ConcreteControlledU)
     assert ctrl_ops[0].block is not None
@@ -779,15 +1366,25 @@ def test_inverse_custom_composite_gate_inverts_implementation() -> None:
     ]
 
     assert len(composites) == 1
-    assert composites[0].gate_type is CompositeGateType.CUSTOM
-    assert composites[0].custom_name == "custom_h_inverse"
-    assert composites[0].has_implementation
-    assert composites[0].implementation_block is not None
-    assert composites[0].implementation_block.name.endswith("_inverse")
+    outer = composites[0]
+    assert outer.inverse_source_block is _inverse_custom_composite_layer.block
+    assert outer.implementation_block is not None
+    inner_composites = [
+        op
+        for op in outer.implementation_block.operations
+        if isinstance(op, CompositeGateOperation)
+    ]
+    assert len(inner_composites) == 1
+    assert inner_composites[0].gate_type is CompositeGateType.CUSTOM
+    assert inner_composites[0].custom_name == "custom_h_inverse"
+    assert inner_composites[0].has_implementation
+    assert inner_composites[0].inverse_source_block is _custom_composite_impl.block
+    assert inner_composites[0].implementation_block is not None
+    assert inner_composites[0].implementation_block.name.endswith("_inverse")
 
 
-def test_inverse_stub_composite_gate_raises() -> None:
-    """inverse(qkernel) rejects stub composites without implementations."""
+def test_inverse_stub_composite_gate_builds_opaque_inverse() -> None:
+    """inverse(qkernel) keeps stub composite resources on an opaque inverse."""
 
     @qmc.qkernel
     def circuit() -> qmc.Qubit:
@@ -795,8 +1392,24 @@ def test_inverse_stub_composite_gate_raises() -> None:
         q = qmc.inverse(_inverse_stub_composite_layer)(q)
         return q
 
-    with pytest.raises(NotImplementedError, match="stub composite gate"):
-        circuit.build()
+    block = circuit.build()
+    composites = [
+        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    ]
+
+    assert len(composites) == 1
+    outer = composites[0]
+    assert outer.implementation_block is not None
+    inner_composites = [
+        op
+        for op in outer.implementation_block.operations
+        if isinstance(op, CompositeGateOperation)
+    ]
+    assert len(inner_composites) == 1
+    assert inner_composites[0].custom_name == "stub_inverse_gate_inv"
+    assert not inner_composites[0].has_implementation
+    assert inner_composites[0].implementation_block is None
+    assert inner_composites[0].resource_metadata == _STUB_RESOURCE_METADATA
 
 
 def test_inverse_qkernel_transpiles_to_identity(qiskit_transpiler) -> None:
@@ -815,6 +1428,26 @@ def test_inverse_qkernel_transpiles_to_identity(qiskit_transpiler) -> None:
     assert np.allclose(statevector, np.array([1.0, 0.0]), atol=1e-8)
 
 
+def test_inverse_qkernel_prefers_qiskit_backend_inverse(qiskit_transpiler) -> None:
+    """inverse(qkernel) uses Qiskit's reusable-gate inverse when available."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.inverse(_inverse_layer)(q, 0.37)
+        return qmc.measure(q)
+
+    qc = qiskit_transpiler.to_circuit(circuit)
+    quantum_ops = [
+        instruction.operation
+        for instruction in qc.data
+        if instruction.operation.name != "measure"
+    ]
+
+    assert len(quantum_ops) == 1
+    assert quantum_ops[0].name.endswith("_dg")
+
+
 def test_inverse_nested_qkernel_call_transpiles_to_identity(qiskit_transpiler) -> None:
     """inverse(qkernel) preserves the current value across nested calls."""
 
@@ -829,6 +1462,21 @@ def test_inverse_nested_qkernel_call_transpiles_to_identity(qiskit_transpiler) -
     statevector = run_statevector(qc)
 
     assert np.allclose(statevector, np.array([1.0, 0.0]), atol=1e-8)
+
+
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("kernel_factory, width", QKERNEL_ROUNDTRIP_CASES)
+def test_inverse_allowed_qkernel_roundtrip_cross_backend(
+    transpiler_factory,
+    kernel_factory,
+    width: int,
+) -> None:
+    """Allowed qkernel inverse roundtrips sample all-zero on every backend."""
+    transpiler = transpiler_factory()
+    executable = transpiler.transpile(kernel_factory())
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+
+    _assert_all_zero_samples(sample_result, width)
 
 
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
@@ -853,9 +1501,7 @@ def test_inverse_roundtrip_cross_backend_sampling_and_expval(
         shots=64,
         bindings={"rotation_angle": rotation_angle},
     ).result()
-    expected_bits = (0,) * num_qubits
-    for value, _count in sample_result.results:
-        assert value == expected_bits
+    _assert_all_zero_samples(sample_result, num_qubits)
 
     expval_kernel = _inverse_roundtrip_expval_kernel(num_qubits)
     observable = _sum_z_hamiltonian(num_qubits)

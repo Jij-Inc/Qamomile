@@ -94,6 +94,8 @@ class CompositeGateOperation(Operation):
         custom_name: Name for CUSTOM gate types (used for identification)
         resource_metadata: Optional resource estimation metadata
         has_implementation: Whether this operation has an implementation Block
+        inverse_source_block: Original implementation Block whose backend-native
+            inverse may be emitted before falling back to `implementation_block`.
         composite_gate_instance: Optional reference to the CompositeGate class instance
             that created this operation (for accessing _decompose() at emit time)
         strategy_name: Optional name of the decomposition strategy to use.
@@ -107,6 +109,7 @@ class CompositeGateOperation(Operation):
     resource_metadata: ResourceMetadata | None = None
     has_implementation: bool = True
     implementation_block: Block | None = None
+    inverse_source_block: Block | None = None
     composite_gate_instance: Any = None  # Reference to CompositeGate instance
     strategy_name: str | None = None  # Selected decomposition strategy
 

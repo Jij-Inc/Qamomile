@@ -657,6 +657,17 @@ class QuriPartsGateEmitter:
         """
         return None
 
+    def gate_inverse(self, gate: Any) -> Any:
+        """Return None because QURI Parts lacks reusable inverse gates.
+
+        Args:
+            gate (Any): Ignored reusable gate placeholder.
+
+        Returns:
+            Any: Always None.
+        """
+        return None
+
     # Control flow support - not supported by QURI Parts
     def supports_for_loop(self) -> bool:
         """QURI Parts does not support native for loops."""

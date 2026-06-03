@@ -402,6 +402,12 @@ class _Canonicalizer:
         ):
             sub = self.canonical_block(new_op.implementation_block)
             new_op = dataclasses.replace(new_op, implementation_block=sub)
+        if (
+            isinstance(new_op, CompositeGateOperation)
+            and new_op.inverse_source_block is not None
+        ):
+            sub = self.canonical_block(new_op.inverse_source_block)
+            new_op = dataclasses.replace(new_op, inverse_source_block=sub)
 
         # ControlledUOperation carries the unitary as a nested ``block``
         # field. Canonicalize it through the same canonicalizer so UUIDs
@@ -778,10 +784,13 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _collect_from_operation(child, visit)
-    if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
-        # Nested block's values participate in the same canonical
-        # universe; recurse to ensure they are declared too.
-        _collect_from_subblock(op.implementation_block, visit)
+    if isinstance(op, CompositeGateOperation):
+        if op.implementation_block is not None:
+            # Nested block's values participate in the same canonical
+            # universe; recurse to ensure they are declared too.
+            _collect_from_subblock(op.implementation_block, visit)
+        if op.inverse_source_block is not None:
+            _collect_from_subblock(op.inverse_source_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
 
@@ -826,6 +835,7 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         # are emitted separately by ``_emit_operation`` so they are not
         # rendered through ``repr`` here.
         "implementation_block",
+        "inverse_source_block",
         "block",
     }
 )
@@ -947,6 +957,9 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
         out.append(f"{pad}{_INLINE_INDENT}implementation:")
         _emit_block(op.implementation_block, out, indent + 2)
+    if isinstance(op, CompositeGateOperation) and op.inverse_source_block is not None:
+        out.append(f"{pad}{_INLINE_INDENT}inverse_source:")
+        _emit_block(op.inverse_source_block, out, indent + 2)
 
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")

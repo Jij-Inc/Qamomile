@@ -224,8 +224,11 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _walk_op_values(child, ctx)
-    if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
-        _walk_block_values(op.implementation_block, ctx)
+    if isinstance(op, CompositeGateOperation):
+        if op.implementation_block is not None:
+            _walk_block_values(op.implementation_block, ctx)
+        if op.inverse_source_block is not None:
+            _walk_block_values(op.inverse_source_block, ctx)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _walk_block_values(op.block, ctx)
 
@@ -1141,6 +1144,11 @@ def _encode_composite_gate(
     d["implementation_block"] = (
         _encode_block(op.implementation_block, ctx)
         if op.implementation_block is not None
+        else None
+    )
+    d["inverse_source_block"] = (
+        _encode_block(op.inverse_source_block, ctx)
+        if op.inverse_source_block is not None
         else None
     )
     # ``composite_gate_instance`` is an opaque Python callable; it is

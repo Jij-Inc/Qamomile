@@ -21,6 +21,7 @@ from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
+    ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -257,6 +258,39 @@ def _validate_input_shape(
             f"inverse(): argument {name!r} shape does not match the wrapped "
             f"kernel input; expected {expected}, got {got}."
         )
+
+
+def _copy_resource_metadata(
+    resource_metadata: ResourceMetadata | None,
+) -> ResourceMetadata | None:
+    """Copy resource metadata for an inverse opaque composite.
+
+    Args:
+        resource_metadata (ResourceMetadata | None): Metadata attached to
+            the original composite operation.
+
+    Returns:
+        ResourceMetadata | None: Independent metadata object with the same
+            resource values, or None when the original had no metadata.
+    """
+    if resource_metadata is None:
+        return None
+    return dataclasses.replace(
+        resource_metadata,
+        custom_metadata=dict(resource_metadata.custom_metadata),
+    )
+
+
+def _inverse_stub_name(name: str) -> str:
+    """Return an opaque inverse-stub name.
+
+    Args:
+        name (str): Original custom composite name.
+
+    Returns:
+        str: Name with an `_inv` suffix toggled.
+    """
+    return name[:-4] if name.endswith("_inv") else f"{name}_inv"
 
 
 def _operation_result_map(
@@ -695,6 +729,7 @@ class _BlockInverter:
         has_implementation = op.has_implementation
         resource_metadata = op.resource_metadata
         strategy_name = op.strategy_name
+        source_block = None
 
         if op.gate_type is CompositeGateType.QFT:
             from qamomile.circuit.stdlib.qft import IQFT
@@ -716,14 +751,18 @@ class _BlockInverter:
                 strategy_name = None
         elif op.implementation is not None:
             gate_type = CompositeGateType.CUSTOM
+            source_block = op.implementation
             implementation_block = self.invert_block(op.implementation)
             has_implementation = True
             resource_metadata = None
             custom_name = f"{op.name}_inverse"
         else:
-            raise NotImplementedError(
-                f"inverse() cannot invert stub composite gate {op.name!r}."
-            )
+            gate_type = CompositeGateType.CUSTOM
+            source_block = None
+            implementation_block = None
+            has_implementation = False
+            resource_metadata = _copy_resource_metadata(op.resource_metadata)
+            custom_name = _inverse_stub_name(op.name)
 
         inverse_op = CompositeGateOperation(
             operands=[*current_qubits, *mapped_params],
@@ -735,6 +774,9 @@ class _BlockInverter:
             resource_metadata=resource_metadata,
             has_implementation=has_implementation,
             implementation_block=implementation_block,
+            inverse_source_block=source_block
+            if op.gate_type is CompositeGateType.CUSTOM
+            else None,
             composite_gate_instance=None,
             strategy_name=strategy_name,
         )
@@ -1151,6 +1193,75 @@ class InverseGate:
             name=active.name,
         )
 
+    def _can_emit_atomic_inverse(self, bindings: list[_InputBinding]) -> bool:
+        """Return whether this inverse call can stay atomic until emit.
+
+        Args:
+            bindings (list[_InputBinding]): Prepared call-site bindings.
+
+        Returns:
+            bool: True when every quantum input is scalar. Vector inputs
+                still use the existing gate-by-gate inverse fallback because
+                CompositeGateOperation operands are scalar-qubit oriented at
+                emit time.
+        """
+        return all(
+            not isinstance(binding.active_handle.value, ArrayValue)
+            for binding in bindings
+            if binding.is_quantum
+        )
+
+    def _emit_atomic_inverse(
+        self,
+        block: Block,
+        bindings: list[_InputBinding],
+    ) -> Any:
+        """Emit an inverse qkernel as an atomic inverse composite.
+
+        Args:
+            block (Block): Wrapped qkernel block.
+            bindings (list[_InputBinding]): Prepared call-site bindings.
+
+        Returns:
+            Any: Quantum output handle, or a tuple of handles when the
+                wrapped kernel has multiple quantum inputs.
+        """
+        inverse_block = _BlockInverter().invert_block(block)
+        quantum_bindings = [binding for binding in bindings if binding.is_quantum]
+        quantum_values = [
+            _as_value(binding.active_handle.value, "inverse qkernel input")
+            for binding in quantum_bindings
+        ]
+        parameter_values = [
+            _as_value(binding.active_handle.value, "inverse qkernel parameter")
+            for binding in bindings
+            if not binding.is_quantum
+        ]
+        result_values = [value.next_version() for value in quantum_values]
+        op = CompositeGateOperation(
+            operands=[*quantum_values, *parameter_values],
+            results=result_values,
+            gate_type=CompositeGateType.CUSTOM,
+            num_control_qubits=0,
+            num_target_qubits=len(quantum_values),
+            custom_name=f"{block.name}_inverse",
+            resource_metadata=None,
+            has_implementation=True,
+            implementation_block=inverse_block,
+            inverse_source_block=block,
+            composite_gate_instance=None,
+            strategy_name=None,
+        )
+        get_current_tracer().add_operation(op)
+
+        outputs = [
+            self._wrap_quantum_result(binding, value)
+            for binding, value in zip(quantum_bindings, result_values)
+        ]
+        if len(outputs) == 1:
+            return outputs[0]
+        return tuple(outputs)
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Apply the inverse at the current trace site.
 
@@ -1165,6 +1276,9 @@ class InverseGate:
         bound_args = self._bind_arguments(*args, **kwargs)
         block = self._select_block(bound_args.arguments)
         bindings = self._prepare_inputs(block, bound_args.arguments)
+        if self._can_emit_atomic_inverse(bindings):
+            return self._emit_atomic_inverse(block, bindings)
+
         value_map = self._initial_value_map(bindings)
         operations = _BlockInverter().invert_call_site(block, value_map)
 

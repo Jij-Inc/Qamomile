@@ -712,7 +712,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
-    ) -> None:
+    ) -> Any:
         """Handle if-operations for both static and runtime paths.
 
         Compile-time constant conditions are always handled by the
@@ -748,6 +748,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         block_value: Any,
         num_qubits: int,
         bindings: dict[str, Any],
+        input_operands: list[Any] | None = None,
     ) -> None:
         """No-op: CUDA-Q codegen does not support sub-circuit gate conversion.
 
@@ -755,6 +756,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         destructively resets the stateful source builder.  Since CUDA-Q's
         ``circuit_to_gate()`` always returns ``None``, skip the probe
         entirely to avoid corrupting the outer kernel source.
+
+        Args:
+            block_value (Any): Ignored nested block.
+            num_qubits (int): Ignored nested circuit width.
+            bindings (dict[str, Any]): Ignored emit bindings.
+            input_operands (list[Any] | None): Ignored call-site operands.
+                Defaults to None.
         """
         return None
 

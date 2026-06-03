@@ -383,6 +383,12 @@ class InlinePass(Pass[Block, Block]):
         ):
             return False
 
+        # Inverse composites keep the original source block so emit can
+        # prefer a backend-native inverse before falling back to the
+        # already-inverted implementation block.
+        if op.inverse_source_block is not None:
+            return False
+
         # Custom gates with implementations should be inlined
         return op.has_implementation and op.implementation is not None
 
@@ -438,11 +444,18 @@ class InlinePass(Pass[Block, Block]):
         if not return_values:
             return_values = [remapper.clone_value(v) for v in impl.output_values]
 
-        # Map block's return values to operation's result values
+        # Map block's return values to operation's result values. This mirrors
+        # _inline_call: a composite implementation usually returns a fresh
+        # value produced inside the inlined body, not the original operation
+        # result placeholder.
+        sub = ValueSubstitutor({k: v for k, v in local_map.items()}, transitive=True)
         for block_return, op_result in zip(return_values, op.results):
             if block_return.uuid in local_map:
                 value_map[op_result.uuid] = local_map[block_return.uuid]
             else:
-                value_map[op_result.uuid] = op_result
+                substituted = sub.substitute_value(block_return)
+                value_map[op_result.uuid] = (
+                    substituted if isinstance(substituted, Value) else op_result
+                )
 
         return inlined

@@ -743,6 +743,17 @@ class CudaqKernelEmitter:
         """No-op: not supported by CUDA-Q codegen path."""
         return None
 
+    def gate_inverse(self, gate: Any) -> Any:
+        """Return None because CUDA-Q source emission has no reusable inverse gate.
+
+        Args:
+            gate (Any): Ignored reusable gate placeholder.
+
+        Returns:
+            Any: Always None.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Multi-controlled gate emission
     # ------------------------------------------------------------------
