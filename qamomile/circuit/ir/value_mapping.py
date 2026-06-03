@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, cast
+from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
@@ -22,17 +22,17 @@ class ValueSubstitutor:
     """Substitute IR values in operations using a UUID-keyed mapping.
 
     Args:
-        value_map (dict[str, ValueBase]): Mapping from original value UUIDs
+        value_map (Mapping[str, ValueBase]): Mapping from original value UUIDs
             to replacement values.
         transitive (bool): Whether substitutions should chase chains such
             as ``A -> B -> C`` to the terminal value. Defaults to False.
     """
 
-    def __init__(self, value_map: dict[str, ValueBase], transitive: bool = False):
+    def __init__(self, value_map: Mapping[str, ValueBase], transitive: bool = False):
         """Initialize the substitutor.
 
         Args:
-            value_map (dict[str, ValueBase]): Mapping from original value
+            value_map (Mapping[str, ValueBase]): Mapping from original value
                 UUIDs to replacement values.
             transitive (bool): Whether substitutions should chase chains
                 to their terminal value. Defaults to False.
