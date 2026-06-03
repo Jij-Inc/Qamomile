@@ -23,7 +23,14 @@ import qamomile.observable as qm_o
     ]
 )
 def backend(request):
-    """Yield an installed transpiler for each supported SDK backend."""
+    """Yield an installed transpiler for each supported SDK backend.
+
+    Args:
+        request (pytest.FixtureRequest): Parametrized pytest fixture request.
+
+    Returns:
+        tuple[str, object]: Backend name and transpiler instance.
+    """
     name = request.param
     if name == "qiskit":
         pytest.importorskip("qiskit")
@@ -45,7 +52,14 @@ def backend(request):
 
 @qmc.qkernel
 def _flip_second_in_qkernel(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Flip logical qubit 1 inside a sub-kernel."""
+    """Flip logical qubit 1 inside a sub-kernel.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Qubit register to mutate.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Register with logical qubit 1 flipped.
+    """
     q[1] = qmc.x(q[1])
     return q
 
@@ -56,7 +70,16 @@ def _random_ry_layer(
     angles: qmc.Vector[qmc.Float],
     n: qmc.UInt,
 ) -> qmc.Vector[qmc.Qubit]:
-    """Apply per-qubit RY angles inside a sub-kernel."""
+    """Apply per-qubit RY angles inside a sub-kernel.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Qubit register to rotate.
+        angles (qmc.Vector[qmc.Float]): Per-qubit rotation angles.
+        n (qmc.UInt): Number of logical qubits to rotate.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Rotated qubit register.
+    """
     for i in qmc.range(n):
         q[i] = qmc.ry(q[i], angles[i])
     return q
@@ -64,7 +87,14 @@ def _random_ry_layer(
 
 @qmc.qkernel
 def _offset_native_gate(obs: qmc.Observable) -> qmc.Float:
-    """Prepare an offset register with a native element gate."""
+    """Prepare an offset register with a native element gate.
+
+    Args:
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(2, "q")
@@ -74,7 +104,14 @@ def _offset_native_gate(obs: qmc.Observable) -> qmc.Float:
 
 @qmc.qkernel
 def _offset_qkernel_call(obs: qmc.Observable) -> qmc.Float:
-    """Prepare an offset register through a sub-kernel call."""
+    """Prepare an offset register through a sub-kernel call.
+
+    Args:
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(2, "q")
@@ -84,7 +121,14 @@ def _offset_qkernel_call(obs: qmc.Observable) -> qmc.Float:
 
 @qmc.qkernel
 def _offset_composite_gate(obs: qmc.Observable) -> qmc.Float:
-    """Prepare an offset register through CompositeGate operations."""
+    """Prepare an offset register through CompositeGate operations.
+
+    Args:
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(2, "q")
@@ -96,7 +140,14 @@ def _offset_composite_gate(obs: qmc.Observable) -> qmc.Float:
 
 @qmc.qkernel
 def _offset_broadcast(obs: qmc.Observable) -> qmc.Float:
-    """Prepare an offset register with whole-Vector gate broadcast."""
+    """Prepare an offset register with whole-Vector gate broadcast.
+
+    Args:
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     _ = qmc.qubit("anc")
     q = qmc.qubit_array(2, "q")
     q = qmc.x(q)
@@ -105,7 +156,14 @@ def _offset_broadcast(obs: qmc.Observable) -> qmc.Float:
 
 @qmc.qkernel
 def _offset_view_broadcast(obs: qmc.Observable) -> qmc.Float:
-    """Prepare an offset register with view broadcast then whole expval."""
+    """Prepare an offset register with view broadcast then whole expval.
+
+    Args:
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(3, "q")
@@ -121,7 +179,16 @@ def _offset_random_native(
     angles: qmc.Vector[qmc.Float],
     obs: qmc.Observable,
 ) -> qmc.Float:
-    """Prepare random per-qubit RY states with native element gates."""
+    """Prepare random per-qubit RY states with native element gates.
+
+    Args:
+        n (qmc.UInt): Number of logical qubits to allocate.
+        angles (qmc.Vector[qmc.Float]): Per-qubit rotation angles.
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(n, "q")
@@ -136,7 +203,16 @@ def _offset_random_qkernel(
     angles: qmc.Vector[qmc.Float],
     obs: qmc.Observable,
 ) -> qmc.Float:
-    """Prepare random per-qubit RY states through a sub-kernel."""
+    """Prepare random per-qubit RY states through a sub-kernel.
+
+    Args:
+        n (qmc.UInt): Number of logical qubits to allocate.
+        angles (qmc.Vector[qmc.Float]): Per-qubit rotation angles.
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(n, "q")
@@ -150,7 +226,16 @@ def _offset_random_composite(
     angles: qmc.Vector[qmc.Float],
     obs: qmc.Observable,
 ) -> qmc.Float:
-    """Sandwich random RY states between QFT and IQFT composite gates."""
+    """Sandwich random RY states between QFT and IQFT composite gates.
+
+    Args:
+        n (qmc.UInt): Number of logical qubits to allocate.
+        angles (qmc.Vector[qmc.Float]): Per-qubit rotation angles.
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(n, "q")
@@ -166,7 +251,15 @@ def _offset_random_broadcast(
     theta: qmc.Float,
     obs: qmc.Observable,
 ) -> qmc.Float:
-    """Prepare random RY states with whole-Vector broadcast."""
+    """Prepare random RY states with whole-Vector broadcast.
+
+    Args:
+        theta (qmc.Float): Broadcast rotation angle.
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(2, "q")
@@ -180,7 +273,16 @@ def _offset_random_view_broadcast(
     theta_view: qmc.Float,
     obs: qmc.Observable,
 ) -> qmc.Float:
-    """Prepare random RY states with a view broadcast."""
+    """Prepare random RY states with a view broadcast.
+
+    Args:
+        theta0 (qmc.Float): Rotation angle for logical qubit 0.
+        theta_view (qmc.Float): Broadcast rotation angle for the slice view.
+        obs (qmc.Observable): Observable evaluated over the whole register.
+
+    Returns:
+        qmc.Float: Expectation value of the observable.
+    """
     anc = qmc.qubit("anc")
     anc = qmc.x(anc)
     q = qmc.qubit_array(3, "q")
@@ -242,7 +344,18 @@ RANDOM_CASES = [
 
 
 def _run_expval(transpiler, kernel, bindings, target, expected_map):
-    """Run a whole-Vector expval and assert the compiled remap."""
+    """Run a whole-Vector expval and assert the compiled remap.
+
+    Args:
+        transpiler (object): Backend transpiler under test.
+        kernel (object): Qkernel that accepts ``obs`` through bindings.
+        bindings (dict[str, object]): Additional compile-time bindings.
+        target (int): Logical observable target index.
+        expected_map (dict[int, int]): Expected Pauli-index remap.
+
+    Returns:
+        float: Executed expectation value.
+    """
     exe = transpiler.transpile(
         kernel,
         bindings={**bindings, "obs": qm_o.Z(target)},
