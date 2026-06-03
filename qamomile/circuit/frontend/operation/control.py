@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
 
 # Type alias for parameter values
-ParamValue = Union[float, int, Float, UInt]
+ParamValue = Union[float, int, Handle]
 
 # Counter for synthesized-wrapper filenames; ensures distinct
 # ``linecache`` entries even when the same gate is wrapped multiple times.
@@ -70,6 +70,72 @@ _synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" 
 # the only case that lands here; non-hashable callables fall through to
 # no caching at all.
 _synthesized_kernel_cache_strong: dict[Callable[..., Any], Any] = {}
+
+
+def _array_element_type(param_type: Any) -> Any | None:
+    """Return the element handle type for an array annotation.
+
+    Args:
+        param_type (Any): A frontend annotation such as
+            ``Vector[Float]`` or ``Vector[Qubit]``.
+
+    Returns:
+        Any | None: The element handle type when *param_type* is an
+            array annotation, or ``None`` for scalar annotations.
+    """
+    args = get_args(param_type)
+    if args:
+        return args[0]
+    return getattr(param_type, "element_type", None)
+
+
+def _is_quantum_param_decl(param_type: Any) -> bool:
+    """Return whether a qkernel parameter declaration is quantum.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for ``Qubit`` and ``Vector[Qubit]``-like
+            declarations, otherwise ``False``.
+    """
+    if param_type is Qubit:
+        return True
+    return _array_element_type(param_type) is Qubit
+
+
+def _is_classical_param_decl(param_type: Any) -> bool:
+    """Return whether a qkernel parameter declaration is classical.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for scalar ``Float`` / ``UInt`` declarations and
+            their array forms such as ``Vector[Float]``.
+    """
+    if param_type in (Float, float, UInt, int):
+        return True
+    return _array_element_type(param_type) in (Float, float, UInt, int)
+
+
+def _is_quantum_handle(value: Any) -> bool:
+    """Return whether a runtime handle carries quantum data.
+
+    Args:
+        value (Any): A caller argument or bound qkernel argument.
+
+    Returns:
+        bool: ``True`` for scalar ``Qubit`` handles and arrays whose
+            element IR type is quantum.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if isinstance(value, Qubit):
+        return True
+    if isinstance(value, ArrayBase):
+        return value.value.type.is_quantum()
+    return False
 
 
 def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
@@ -285,7 +351,7 @@ class ControlledGate:
         classical_names = [
             name
             for name, decl in kernel_input_types.items()
-            if decl is UInt or decl is int or decl is Float or decl is float
+            if _is_classical_param_decl(decl)
         ]
         classical_set = set(classical_names)
 
@@ -333,6 +399,14 @@ class ControlledGate:
                     name=f"ctrl_param_{param_name}",
                 ).with_const(int(param_value))
             else:
+                if _array_element_type(declared) is not None:
+                    raise TypeError(
+                        f"control(): parameter {param_name!r} is declared "
+                        f"as an array parameter but received "
+                        f"{type(param_value).__name__} ({param_value!r}). "
+                        f"Pass the corresponding Vector handle from the "
+                        f"caller kernel instead."
+                    )
                 # Float-declared param.  Accept Python int / float
                 # (auto-promote ``int`` as the qkernel decorator does)
                 # but reject ``bool`` so ``True`` doesn't surprise as
@@ -460,6 +534,13 @@ class ControlledGate:
             if running == num_controls:
                 return controls, list(args[idx:])
             if isinstance(arg, ArrayBase):
+                if not _is_quantum_handle(arg):
+                    raise ValueError(
+                        f"concrete num_controls: positional argument #{idx} "
+                        f"in the control region must be a Qubit, "
+                        f"Vector[Qubit], or VectorView[Qubit]; got "
+                        f"{type(arg).__name__} with non-quantum element type."
+                    )
                 length = arg._shape[0] if arg._shape else None
                 length_int = _as_int_const(length) if length is not None else None
                 if length_int is None:
@@ -520,11 +601,7 @@ class ControlledGate:
             list[Any]: The quantum handles from *sub_args_resolved* in
                 the same iteration order.
         """
-        from qamomile.circuit.frontend.handle.array import ArrayBase
-
-        return [
-            h for h in sub_args_resolved.values() if isinstance(h, (Qubit, ArrayBase))
-        ]
+        return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
 
     # ``_validate_no_alias_or_overlap`` used to live here as an entry-
     # point alias / overlap check, mirroring the
@@ -651,7 +728,7 @@ class ControlledGate:
             classical_names = [
                 n
                 for n, decl in input_types.items()
-                if decl is UInt or decl is int or decl is Float or decl is float
+                if _is_classical_param_decl(decl)
             ]
             raise TypeError(
                 f"control(): unknown parameter(s) {extras!r}. "
@@ -1477,8 +1554,6 @@ class ControlledGate:
                 consumes at this boundary (required-positional plus
                 any positionally-overridden default-valued params).
         """
-        from qamomile.circuit.frontend.handle.array import ArrayBase
-
         # ``ControlledGate.__init__`` validates that ``input_types`` is
         # a dict and ``signature`` is an ``inspect.Signature``, so both
         # accesses are safe to use directly.
@@ -1506,7 +1581,7 @@ class ControlledGate:
         extra_for_defaults = 0
         for i in range(max(max_peel, 0)):
             candidate = args[-(i + 1)]
-            if isinstance(candidate, (Qubit, ArrayBase)):
+            if _is_quantum_handle(candidate):
                 break
             extra_for_defaults += 1
 

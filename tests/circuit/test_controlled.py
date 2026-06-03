@@ -2531,6 +2531,89 @@ def _vector_ry_pair(
     return qs
 
 
+@qmc.qkernel
+def _vector_angle_pair(
+    qs: qmc.Vector[qmc.Qubit],
+    angles: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply independent vector-parameter rotations to a 2-qubit target."""
+    qs[0] = qmc.ry(qs[0], angles[0])
+    qs[1] = qmc.ry(qs[1], angles[1])
+    return qs
+
+
+@qmc.qkernel
+def _broadcast_rx_then_ry(
+    qs: qmc.Vector[qmc.Qubit],
+    angles: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Broadcast ``RX`` over a vector target, then rotate one element."""
+    qs = qmc.rx(qs, angles[0])
+    qs[0] = qmc.ry(qs[0], angles[1])
+    return qs
+
+
+class _BellPairComposite(qmc.CompositeGate):
+    """Custom two-qubit CompositeGate used inside controlled test kernels."""
+
+    custom_name = "controlled_test_bell_pair"
+
+    @property
+    def num_target_qubits(self) -> int:
+        return 2
+
+    def _decompose(
+        self,
+        qubits: qmc.Vector[qmc.Qubit] | tuple[qmc.Qubit, ...],
+    ) -> tuple[qmc.Qubit, ...]:
+        q0, q1 = qubits
+        q0 = qmc.h(q0)
+        q0, q1 = qmc.cx(q0, q1)
+        return q0, q1
+
+
+_BELL_PAIR_COMPOSITE = _BellPairComposite()
+
+
+@qmc.qkernel
+def _composite_bell_pair(
+    qs: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a custom CompositeGate to a two-qubit vector target."""
+    q0 = qs[0]
+    q1 = qs[1]
+    q0, q1 = _BELL_PAIR_COMPOSITE(q0, q1)
+    qs[0] = q0
+    qs[1] = q1
+    return qs
+
+
+@qmc.qkernel
+def _qft_pair(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply the built-in QFT CompositeGate to a two-qubit vector target."""
+    return qmc.qft(qs)
+
+
+@qmc.qkernel
+def _nested_ccx_on_triplet(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    q2: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply an inner two-control X gate inside an outer controlled block."""
+    ccx = qmc.control(qmc.x, num_controls=2)
+    q0, q1, q2 = ccx(q0, q1, q2)
+    return q0, q1, q2
+
+
+def _counts_dict(results):
+    counts: dict[Any, int] = {}
+    for value, count in results:
+        key = tuple(value) if not isinstance(value, int) else value
+        counts[key] = counts.get(key, 0) + count
+    return counts
+
+
 @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
 class TestControlledVectorViewControlCrossSDK:
     """``cg(qs[0:N], target)`` — VectorView ``N``-control + scalar target.
@@ -2681,6 +2764,357 @@ class TestControlledVectorSubArgCrossSDK:
             f"Vector sub-arg sampling produced {total} shots "
             f"(expected 128) on SDK={transpiler_factory.__name__}"
         )
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledNativeMixedControlCrossSDK:
+    """Native controlled gates with scalar + sliced-vector controls."""
+
+    def test_scalar_plus_vectorview_controls_sample(self, transpiler_factory):
+        """``control(qmc.x, 3)(scalar, qs[0:2], target)`` samples correctly."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[3] = qmc.x(qs[3])
+            ctrl_main = qs[3]
+            prefix = qs[0:2]
+            target = qs[2]
+            mcx = qmc.control(qmc.x, num_controls=3)
+            ctrl_main, prefix, target = mcx(ctrl_main, prefix, target)
+            qs[3] = ctrl_main
+            qs[0:2] = prefix
+            qs[2] = target
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit)
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support mixed "
+                f"scalar/VectorView native controls: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
+
+
+class TestControlledVectorClassicalParameter:
+    """Controlled custom kernels with ``Vector[Float]`` parameters."""
+
+    def test_frontend_accepts_vector_float_parameter(self):
+        """``Vector[Float]`` is treated as a classical sub-kernel parameter."""
+
+        @qmc.qkernel
+        def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vector_angle_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        _ = kernel.block
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    def test_vector_float_parameter_sampling_runs(self, transpiler_factory):
+        """Bound ``Vector[Float]`` parameter survives controlled-U emission."""
+
+        @qmc.qkernel
+        def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vector_angle_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel, bindings={"angles": [0.25, -0.4]})
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support Vector[Float] "
+                f"parameters under controlled custom kernels: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128
+
+    @pytest.mark.parametrize("seed", [0, 7, 42])
+    def test_qiskit_expval_matches_scalar_parameter_form(self, seed):
+        """Vector-parameter and scalar-parameter controlled forms agree."""
+        pytest.importorskip("qiskit")
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        rng = np.random.default_rng(seed)
+        angles = [
+            float(rng.uniform(-math.pi, math.pi)),
+            float(rng.uniform(-math.pi, math.pi)),
+        ]
+
+        @qmc.qkernel
+        def scalar_pair(
+            q0: qmc.Qubit,
+            q1: qmc.Qubit,
+            theta0: qmc.Float,
+            theta1: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            q0 = qmc.ry(q0, theta0)
+            q1 = qmc.ry(q1, theta1)
+            return q0, q1
+
+        @qmc.qkernel
+        def vector_kernel(
+            obs: qmc.Observable,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vector_angle_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(obs: qmc.Observable) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(scalar_pair, num_controls=1)
+            qs[0], qs[1], qs[2] = cg(
+                qs[0],
+                qs[1],
+                qs[2],
+                theta0=angles[0],
+                theta1=angles[1],
+            )
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=3)
+        for i in range(3):
+            H += qm_o.Z(i)
+
+        t = QiskitTranspiler()
+        exe_vector = t.transpile(
+            vector_kernel,
+            bindings={"obs": H, "angles": angles},
+        )
+        exe_scalar = t.transpile(scalar_kernel, bindings={"obs": H})
+        val_vector = exe_vector.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_vector, val_scalar, atol=1e-6)
+
+
+class TestControlledBroadcastWithVectorFloatParameter:
+    """Controlled custom kernels that broadcast over sliced vector targets."""
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    def test_broadcast_slice_sampling_runs(self, transpiler_factory):
+        """Controlled broadcast over ``qs[1:3]`` samples on supported SDKs."""
+
+        @qmc.qkernel
+        def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_broadcast_rx_then_ry, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel, bindings={"angles": [0.3, -0.2]})
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support controlled "
+                f"broadcast over sliced vector targets: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128
+
+    @pytest.mark.parametrize("seed", [1, 5])
+    def test_qiskit_broadcast_slice_expval_matches_scalar_form(self, seed):
+        """Broadcast on ``qs[1:3]`` agrees with an explicit scalar wrapper."""
+        pytest.importorskip("qiskit")
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        rng = np.random.default_rng(seed)
+        angles = [
+            float(rng.uniform(-math.pi, math.pi)),
+            float(rng.uniform(-math.pi, math.pi)),
+        ]
+
+        @qmc.qkernel
+        def scalar_broadcast_equivalent(
+            q0: qmc.Qubit,
+            q1: qmc.Qubit,
+            angles: qmc.Vector[qmc.Float],
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            q0 = qmc.rx(q0, angles[0])
+            q1 = qmc.rx(q1, angles[0])
+            q0 = qmc.ry(q0, angles[1])
+            return q0, q1
+
+        @qmc.qkernel
+        def broadcast_kernel(
+            obs: qmc.Observable,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_broadcast_rx_then_ry, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(
+            obs: qmc.Observable,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(scalar_broadcast_equivalent, num_controls=1)
+            qs[0], qs[1], qs[2] = cg(qs[0], qs[1], qs[2], angles=angles)
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=3)
+        for i in range(3):
+            H += qm_o.Z(i)
+
+        t = QiskitTranspiler()
+        bindings = {"obs": H, "angles": angles}
+        exe_broadcast = t.transpile(broadcast_kernel, bindings=bindings)
+        exe_scalar = t.transpile(scalar_kernel, bindings=bindings)
+        val_broadcast = exe_broadcast.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_broadcast, val_scalar, atol=1e-6)
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledCompositeGateCrossSDK:
+    """Controlled custom kernels whose body contains CompositeGate operations."""
+
+    @pytest.mark.parametrize("inner", [_composite_bell_pair, _qft_pair])
+    def test_composite_inner_kernel_sampling_runs_or_errors_loudly(
+        self,
+        transpiler_factory,
+        inner,
+    ):
+        """Custom and built-in CompositeGate bodies are never silently ignored."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            cg = qmc.control(inner, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3])
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit)
+        except EmitError as e:
+            message = str(e)
+            assert (
+                "CompositeGate" in message
+                or "controlled-U" in message
+                or "controlled gate" in message
+            )
+            return
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestNestedControlledUCrossSDK:
+    """Outer controlled custom kernel around an inner controlled operation."""
+
+    def test_nested_control_samples_or_errors_loudly(self, transpiler_factory):
+        """Nested control either executes correctly or raises ``EmitError``."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.control(_nested_ccx_on_triplet, num_controls=1)
+            qs[0], qs[1], qs[2], qs[3] = cg(qs[0], qs[1], qs[2], qs[3])
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit)
+        except EmitError as e:
+            message = str(e)
+            assert (
+                "nested ControlledUOperation" in message
+                or "multi-controlled operation" in message
+                or "controlled-U" in message
+            )
+            return
+
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
+
+
+class TestControlledCompositeGateQiskit:
+    """Qiskit positive checks for controlled CompositeGate bodies."""
+
+    def test_custom_composite_statevector_is_nontrivial(self):
+        """Qiskit controls the CompositeGate body instead of dropping it."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_composite_bell_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3])
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = QiskitTranspiler()
+        statevector = _get_statevector(t, circuit, {})
+        assert np.count_nonzero(np.abs(statevector) > 1e-8) == 2
+
+
+class TestNestedControlledUQiskit:
+    """Qiskit positive checks for nested controlled custom kernels."""
+
+    def test_executes_outer_control_around_inner_controlled_u(self):
+        """Qiskit preserves both outer and inner controls in a nested custom gate."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.control(_nested_ccx_on_triplet, num_controls=1)
+            qs[0], qs[1], qs[2], qs[3] = cg(qs[0], qs[1], qs[2], qs[3])
+            return qmc.measure(qs)
+
+        t = QiskitTranspiler()
+        exe = t.transpile(circuit)
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
 
 
 class TestControlledVectorSubArgQuriPartsLoudError:
