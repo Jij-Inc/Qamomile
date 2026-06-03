@@ -712,7 +712,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
-    ) -> Any:
+    ) -> None:
         """Handle if-operations for both static and runtime paths.
 
         Compile-time constant conditions are always handled by the
