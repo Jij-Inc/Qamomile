@@ -241,6 +241,56 @@ class UInt(ArithmeticMixin, Handle):
         _emit_binop(coerced.value, self.value, result, BinOpKind.POW)
         return result
 
+    def __index__(self) -> int:
+        """Return the underlying Python ``int`` when the handle is constant.
+
+        Implementing ``__index__`` makes ``UInt`` satisfy the
+        :class:`typing.SupportsIndex` protocol so that constructs like
+        ``q[0 : n - 1]`` (slice with a ``UInt`` bound) type-check — Python
+        builds the ``slice`` object as ``slice(0, n - 1)`` and
+        ``slice.__init__`` accepts only ``SupportsIndex`` for its
+        arguments at the stub level. Without ``__index__`` static checkers
+        flag every such slice as ``"Slice index must be an integer,
+        SupportsIndex or None"``.
+
+        Runtime semantics:
+
+        - When ``self.value.is_constant()`` returns ``True``, this returns
+          the underlying ``int`` const so callers that legitimately want
+          the concrete value (``range(uint_const)``, list indexing with a
+          constant ``UInt``, ...) see the expected behaviour.
+        - When the handle is symbolic, this raises ``TypeError``. Symbolic
+          ``UInt`` cannot be coerced to a concrete ``int`` at trace time;
+          the kinds of operations that actually need an ``int`` here (raw
+          Python list / ``range`` / etc.) cannot consume a symbolic value
+          either, so raising surfaces the misuse loudly rather than
+          letting it propagate. ``Vector`` slicing does *not* take this
+          path because ``Vector.__getitem__(slice)`` reads
+          ``slice.start`` / ``slice.stop`` directly and dispatches on
+          ``int`` / ``UInt`` without going through ``__index__``.
+
+        Returns:
+            int: The underlying integer when this handle wraps a
+                compile-time constant.
+
+        Raises:
+            TypeError: When this handle is symbolic (no compile-time
+                constant attached). Symbolic ``UInt`` cannot be turned
+                into a Python ``int``.
+        """
+        if self.value.is_constant():
+            const = self.value.get_const()
+            if isinstance(const, int):
+                return const
+        raise TypeError(
+            "Symbolic UInt cannot be converted to a Python int via "
+            "__index__(). This typically happens when a symbolic UInt is "
+            "passed to a Python builtin that requires a concrete integer "
+            "(e.g. range(), list indexing). For Vector slicing the "
+            "symbolic bound is handled directly by Vector.__getitem__ "
+            "without going through __index__."
+        )
+
 
 @dataclasses.dataclass
 class Float(ArithmeticMixin, Handle):

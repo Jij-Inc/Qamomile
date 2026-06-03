@@ -186,7 +186,9 @@ executable = transpiler.transpile(
 # We can confirm that with `type(...)` and the parameter count, then inspect the circuit directly with QURI Parts' built-in `draw_circuit`.
 
 # %%
-from quri_parts.circuit.utils.circuit_drawer import draw_circuit
+from quri_parts.circuit.utils.circuit_drawer import (  # type: ignore[import-not-found]
+    draw_circuit,
+)
 
 quri_circuit = executable.get_first_circuit()
 assert quri_circuit is not None  # transpile() always emits one quantum segment here
@@ -388,8 +390,13 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 # This confirms that the swapped sampler is actually being used.
 
 # %%
-from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
-from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
+from quri_parts.circuit.noise import (  # type: ignore[import-not-found]
+    DepolarizingNoise,
+    NoiseModel,
+)
+from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
+    create_qulacs_noisesimulator_sampler,
+)
 
 noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)])
 noisy_sampler = create_qulacs_noisesimulator_sampler(noise_model)

@@ -38,7 +38,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import yaml
 
@@ -207,7 +207,7 @@ def _parse_article_frontmatter(cell_md: str) -> tuple[dict, str]:
     yaml_block = cell_md[3:end_idx].strip()
     rest = cell_md[end_idx + len("\n---") :].lstrip()
     try:
-        fm = yaml.safe_load(yaml_block) or {}
+        fm: dict[str, Any] = yaml.safe_load(yaml_block) or {}
     except yaml.YAMLError:
         fm = {}
     return fm, rest
@@ -256,7 +256,7 @@ def _load_article(py_path: Path, section: str) -> Article | None:
         or _extract_h1(body)
         or py_path.stem.replace("_", " ").title()
     )
-    raw_tags = fm.get("tags") or []
+    raw_tags: Any = fm.get("tags") or []
     if not isinstance(raw_tags, list):
         return None
     tags = tuple(str(t) for t in raw_tags)

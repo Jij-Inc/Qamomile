@@ -372,7 +372,10 @@ sample_result = executable.sample(
 # feasibility, the true objective, and per-constraint diagnostics are
 # available through OMMX's own API — no hand-rolled feasibility or
 # objective helper is needed.
+import ommx.v1
+
 sample_set = converter.decode(sample_result)
+assert isinstance(sample_set, ommx.v1.SampleSet)
 
 # %% [markdown]
 # ## Analyze the Results
