@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -82,6 +83,46 @@ _ROTATION_GATES: frozenset[GateOperationType] = frozenset(
         GateOperationType.RZZ,
     }
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class _NativeInverseCallable:
+    """Apply the inverse of a native frontend gate callable.
+
+    Args:
+        forward_callable (Callable[..., Any]): Native gate callable whose
+            signature should be mirrored for argument binding.
+        inverse_callable (Callable[..., Any]): Native gate callable to invoke
+            for the inverse operation.
+        angle_param (str | None): Name of the angle parameter to negate before
+            invoking `inverse_callable`. Defaults to None for non-parametric
+            gates.
+    """
+
+    forward_callable: Callable[..., Any]
+    inverse_callable: Callable[..., Any]
+    angle_param: str | None = None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Apply the native inverse operation.
+
+        Args:
+            *args (Any): Positional arguments accepted by `forward_callable`.
+            **kwargs (Any): Keyword arguments accepted by `forward_callable`.
+
+        Returns:
+            Any: Result from `inverse_callable`.
+
+        Raises:
+            TypeError: If the supplied arguments do not match the native gate
+                signature.
+        """
+        if self.angle_param is None:
+            return self.inverse_callable(*args, **kwargs)
+        signature = inspect.signature(self.forward_callable)
+        bound = signature.bind(*args, **kwargs)
+        bound.arguments[self.angle_param] = -bound.arguments[self.angle_param]
+        return self.inverse_callable(*bound.args, **bound.kwargs)
 
 
 @dataclasses.dataclass
@@ -187,6 +228,35 @@ def _const_uint(name: str, value: int) -> Value:
         Value: A `UIntType` value carrying `value` as metadata.
     """
     return Value(type=UIntType(), name=name).with_const(value)
+
+
+def _validate_input_shape(
+    name: str,
+    block_input: ValueBase,
+    actual: ValueBase,
+) -> None:
+    """Validate that an inverse call argument matches the wrapped input shape.
+
+    Args:
+        name (str): Python argument name being checked.
+        block_input (ValueBase): Input value declared by the wrapped block.
+        actual (ValueBase): Caller-side value supplied to the inverse wrapper.
+
+    Returns:
+        None.
+
+    Raises:
+        TypeError: If one side is an array value and the other is scalar.
+    """
+    expected_array = isinstance(block_input, ArrayValue)
+    actual_array = isinstance(actual, ArrayValue)
+    if expected_array != actual_array:
+        expected = "Vector" if expected_array else "scalar"
+        got = "Vector" if actual_array else "scalar"
+        raise TypeError(
+            f"inverse(): argument {name!r} shape does not match the wrapped "
+            f"kernel input; expected {expected}, got {got}."
+        )
 
 
 def _operation_result_map(
@@ -322,14 +392,28 @@ class _BlockInverter:
 
         Raises:
             TypeError: If any output is non-quantum or does not correspond
-                to a quantum input with the same logical identity.
+                to a quantum input with the same logical identity and output
+                position.
         """
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        quantum_outputs = list(block.output_values)
+        if len(quantum_outputs) != len(quantum_inputs):
+            raise TypeError(
+                "inverse() can only invert kernels whose quantum outputs "
+                "preserve every quantum input."
+            )
+        for input_value, output in zip(quantum_inputs, quantum_outputs):
+            if output.logical_id != input_value.logical_id:
+                raise TypeError(
+                    "inverse() can only invert kernels whose quantum outputs "
+                    "preserve the input order."
+                )
         quantum_inputs_by_logical_id = {
-            value.logical_id: value
-            for value in block.input_values
-            if value.type.is_quantum()
+            value.logical_id: value for value in quantum_inputs
         }
-        for output in block.output_values:
+        for output in quantum_outputs:
             if not output.type.is_quantum():
                 raise TypeError(
                     "inverse() can only invert kernels whose outputs are "
@@ -609,6 +693,7 @@ class _BlockInverter:
         custom_name = op.custom_name
         implementation_block = op.implementation_block
         has_implementation = op.has_implementation
+        resource_metadata = op.resource_metadata
         strategy_name = op.strategy_name
 
         if op.gate_type is CompositeGateType.QFT:
@@ -630,8 +715,10 @@ class _BlockInverter:
             if strategy_name is not None and QFT.get_strategy(strategy_name) is None:
                 strategy_name = None
         elif op.implementation is not None:
+            gate_type = CompositeGateType.CUSTOM
             implementation_block = self.invert_block(op.implementation)
             has_implementation = True
+            resource_metadata = None
             custom_name = f"{op.name}_inverse"
         else:
             raise NotImplementedError(
@@ -645,7 +732,7 @@ class _BlockInverter:
             num_control_qubits=op.num_control_qubits,
             num_target_qubits=op.num_target_qubits,
             custom_name=custom_name,
-            resource_metadata=op.resource_metadata,
+            resource_metadata=resource_metadata,
             has_implementation=has_implementation,
             implementation_block=implementation_block,
             composite_gate_instance=None,
@@ -978,6 +1065,7 @@ class InverseGate:
                     active_handle = handle.consume(
                         operation_name=f"Inverse[{self._qkernel.name}]"
                     )
+            _validate_input_shape(name, block_input, active_handle.value)
             bindings.append(
                 _InputBinding(
                     name=name,
@@ -1117,6 +1205,57 @@ def _inverse_known_qft_target(target: Any) -> Any | None:
     return None
 
 
+def _inverse_native_gate_target(target: Any) -> Any | None:
+    """Return a native frontend inverse callable when `target` is known.
+
+    Args:
+        target (Any): Object supplied to `inverse`.
+
+    Returns:
+        Any | None: Callable native inverse wrapper, or None when `target` is
+            not a recognized native gate callable.
+    """
+    from qamomile.circuit.frontend.operation import qubit_gates
+
+    direct_map: dict[Callable[..., Any], Callable[..., Any]] = {
+        qubit_gates.h: qubit_gates.h,
+        qubit_gates.x: qubit_gates.x,
+        qubit_gates.y: qubit_gates.y,
+        qubit_gates.z: qubit_gates.z,
+        qubit_gates.cx: qubit_gates.cx,
+        qubit_gates.cz: qubit_gates.cz,
+        qubit_gates.swap: qubit_gates.swap,
+        qubit_gates.ccx: qubit_gates.ccx,
+        qubit_gates.s: qubit_gates.sdg,
+        qubit_gates.sdg: qubit_gates.s,
+        qubit_gates.t: qubit_gates.tdg,
+        qubit_gates.tdg: qubit_gates.t,
+    }
+    for forward_callable, inverse_callable in direct_map.items():
+        if target is forward_callable:
+            return _NativeInverseCallable(
+                forward_callable=forward_callable,
+                inverse_callable=inverse_callable,
+            )
+
+    rotation_map: dict[Callable[..., Any], tuple[Callable[..., Any], str]] = {
+        qubit_gates.p: (qubit_gates.p, "theta"),
+        qubit_gates.rx: (qubit_gates.rx, "angle"),
+        qubit_gates.ry: (qubit_gates.ry, "angle"),
+        qubit_gates.rz: (qubit_gates.rz, "angle"),
+        qubit_gates.cp: (qubit_gates.cp, "theta"),
+        qubit_gates.rzz: (qubit_gates.rzz, "angle"),
+    }
+    for forward_callable, (inverse_callable, angle_param) in rotation_map.items():
+        if target is forward_callable:
+            return _NativeInverseCallable(
+                forward_callable=forward_callable,
+                inverse_callable=inverse_callable,
+                angle_param=angle_param,
+            )
+    return None
+
+
 def inverse(target: QKernel | Callable[..., Any] | CompositeGate) -> Any:
     """Create an inverse operation wrapper.
 
@@ -1153,6 +1292,9 @@ def inverse(target: QKernel | Callable[..., Any] | CompositeGate) -> Any:
     known_inverse = _inverse_known_qft_target(target)
     if known_inverse is not None:
         return known_inverse
+    native_inverse = _inverse_native_gate_target(target)
+    if native_inverse is not None:
+        return native_inverse
     if isinstance(target, CompositeGate):
         raise TypeError(
             "inverse() only supports direct CompositeGate inversion for QFT "

@@ -363,6 +363,27 @@ def test_inverse_native_rotation_negates_angle() -> None:
     assert gates[1].theta.get_const() == -0.25
 
 
+def test_inverse_native_rotation_broadcasts_vector() -> None:
+    """inverse(rz) preserves native Vector broadcast semantics."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Qubit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = qmc.rz(qs, 0.25)
+        qs = qmc.inverse(qmc.rz)(qs, 0.25)
+        return qs
+
+    block = circuit.build()
+    loops = [op for op in block.operations if isinstance(op, ForOperation)]
+    inverse_gates = [op for op in loops[1].operations if isinstance(op, GateOperation)]
+
+    assert len(loops) == 2
+    assert len(inverse_gates) == 1
+    assert inverse_gates[0].gate_type is GateOperationType.RZ
+    assert inverse_gates[0].theta is not None
+    assert inverse_gates[0].theta.get_const() == -0.25
+
+
 def test_inverse_native_dagger_gate() -> None:
     """inverse(s) emits SDG as the dagger gate."""
 
@@ -380,6 +401,57 @@ def test_inverse_native_dagger_gate() -> None:
         GateOperationType.S,
         GateOperationType.SDG,
     ]
+
+
+def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
+    """inverse(qkernel) returns a reusable callable wrapper."""
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Qubit:
+        q = qmc.qubit("q")
+        inverse_layer = qmc.inverse(_inverse_layer)
+        q = inverse_layer(q, rotation_angle)
+        return q
+
+    block = circuit.build(parameters=["rotation_angle"])
+    gates = [op for op in block.operations if isinstance(op, GateOperation)]
+
+    assert [gate.gate_type for gate in gates] == [
+        GateOperationType.RZ,
+        GateOperationType.H,
+    ]
+
+
+def test_inverse_qkernel_rejects_vector_for_scalar_input() -> None:
+    """inverse(qkernel) rejects shape-mismatched quantum inputs."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Qubit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = qmc.inverse(_inverse_layer)(qs, 0.25)
+        return qs
+
+    with pytest.raises(TypeError, match="expected scalar, got Vector"):
+        circuit.build()
+
+
+def test_inverse_qkernel_rejects_reordered_quantum_outputs() -> None:
+    """inverse(qkernel) rejects kernels that only reorder output wires."""
+
+    @qmc.qkernel
+    def reorder(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Return the same quantum inputs in a different order."""
+        return b, a
+
+    @qmc.qkernel
+    def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
+        a = qmc.qubit("a")
+        b = qmc.qubit("b")
+        a, b = qmc.inverse(reorder)(a, b)
+        return a, b
+
+    with pytest.raises(TypeError, match="preserve the input order"):
+        circuit.build()
 
 
 def test_inverse_qkernel_inlines_reverse_operations() -> None:
@@ -586,6 +658,29 @@ def test_inverse_controlled_concrete_operation() -> None:
     assert ctrl_ops[0].block is not None
     assert ctrl_ops[0].block.name == "_phase_layer_inverse"
     assert any(isinstance(op, BinOp) for op in ctrl_ops[0].block.operations)
+
+
+def test_inverse_controlled_concrete_roundtrip_statevector(qiskit_transpiler) -> None:
+    """controlled-U followed by inverse(controlled-U) executes as identity."""
+
+    @qmc.qkernel
+    def controlled_roundtrip() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs[0] = qmc.x(qs[0])
+        qs[0], qs[1] = _inverse_controlled_concrete_layer(qs[0], qs[1], 0.37)
+        qs[0], qs[1] = qmc.inverse(_inverse_controlled_concrete_layer)(
+            qs[0],
+            qs[1],
+            0.37,
+        )
+        return qmc.measure(qs)
+
+    qc = qiskit_transpiler.to_circuit(controlled_roundtrip)
+    statevector = run_statevector(qc)
+    expected = np.zeros(4, dtype=complex)
+    expected[1] = 1.0
+
+    assert np.allclose(statevector, expected, atol=1e-8)
 
 
 def test_inverse_controlled_symbolic_operation() -> None:
