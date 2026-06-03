@@ -378,20 +378,33 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                     addr = QubitAddress(qubit_uuid)
                     if addr in uuid_to_physical:
                         qubit_map[i] = uuid_to_physical[addr]
-            else:
-                # View case: enumerate by view length (via element_uuids
-                # or shape) and look up each position in the root's
-                # registered (root_uuid, index) composite keys.
-                length = len(qubits_value.get_element_uuids())
-                if length == 0 and qubits_value.shape:
-                    resolved = self._resolver.resolve_int_value(
-                        qubits_value.shape[0], self.bindings
-                    )
-                    length = resolved if resolved is not None else 0
-                for i in range(length):
-                    addr = QubitAddress(root_av.uuid, start + step * i)
-                    if addr in uuid_to_physical:
-                        qubit_map[i] = uuid_to_physical[addr]
+
+                # Whole Vector[Qubit] operands created by
+                # ``qubit_array(...)`` do not carry explicit
+                # element_uuids; QInit registers them under
+                # QubitAddress(array_uuid, i) instead.  If the legacy
+                # tuple-style lookup above did not resolve anything,
+                # fall through to the same root-address enumeration used
+                # for views so offset whole registers remap observable
+                # indices to their actual physical qubits.
+                if qubit_map:
+                    return qubit_map
+
+            # View case, or whole Vector fallback: enumerate by operand
+            # length (via element_uuids or shape) and look up each
+            # position in the root's registered (root_uuid, index)
+            # composite keys.  For non-view whole arrays, start=0 and
+            # step=1.
+            length = len(qubits_value.get_element_uuids())
+            if length == 0 and qubits_value.shape:
+                resolved = self._resolver.resolve_int_value(
+                    qubits_value.shape[0], self.bindings
+                )
+                length = resolved if resolved is not None else 0
+            for i in range(length):
+                addr = QubitAddress(root_av.uuid, start + step * i)
+                if addr in uuid_to_physical:
+                    qubit_map[i] = uuid_to_physical[addr]
         else:
             # Single qubit or Vector case - map index 0 to the qubit
             if hasattr(qubits_value, "uuid"):
