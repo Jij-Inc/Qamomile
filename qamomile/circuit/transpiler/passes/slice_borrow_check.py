@@ -1069,23 +1069,9 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     f"Only exact forward refresh of the same symbolic "
                     f"descriptor is supported for symbolic slices."
                 )
-            if isinstance(owner, _ConsumedSlotMarker):
-                raise SliceBorrowViolationError(
-                    f"Symbolic slice view '{av.name}' is constructed on "
-                    f"'{root.name}' while another symbolic descriptor on "
-                    f"the same root was destroyed by a prior destructive "
-                    f"view operation."
-                )
         if existing is None:
             state[key] = av
             return
-        if isinstance(existing, _ConsumedSlotMarker):
-            raise SliceBorrowViolationError(
-                f"Slice view '{av.name}' uses symbolic slice descriptor "
-                f"'{_slot_descriptor(key)}' on '{root.name}', but that "
-                f"descriptor was destroyed by a prior destructive view "
-                f"operation."
-            )
         if not isinstance(existing, ArrayValue):
             raise SliceBorrowViolationError(
                 self._format_view_registration_conflict(existing, av, -1, root)
