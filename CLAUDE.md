@@ -36,7 +36,7 @@ uv run ruff check qamomile/
 uv run ruff format qamomile/
 
 # Type checking with zuban
-uv run zuban qamomile/
+uv run zuban check qamomile/
 
 # Build documentation (from docs/en or docs/ja directory)
 jupyter-book build .
@@ -434,9 +434,16 @@ Never include **bare** `@username` or `@org/team` mention tokens in normal GitHu
 
 ### No unsolicited external links
 
-Do not add external URLs (arXiv, blog posts, docs sites, vendor pages, etc.) to commits, PRs, issues, **or PR / code review comments and replies** unless the user has explicitly provided that URL in the current conversation. When in doubt, omit the link or ask the user to supply one. Internal references to other issues / PRs in this repo (e.g., `#354`) are fine when factually relevant.
+Do not add external URLs (blog posts, docs sites, vendor pages, internal tools like Notion / Slack, etc.) to commits, PRs, issues, **or PR / code review comments and replies** unless the user has explicitly provided that URL in the current conversation. When in doubt, omit the link or ask the user to supply one. Internal references to other issues / PRs in this repo (e.g., `#354`) are fine when factually relevant.
+
+This restriction is **not limited to clickable URLs**: do not paste **identifiers, IDs, or titles of private / internal sources** either — internal-tracker keys, **backlog IDs** (e.g., `BACKLOG-XXXX`), Notion page titles or IDs, Slack message links, internal doc titles — into commits, PRs, issues, or PR / code review comments and replies, unless the user explicitly provided that reference in the current conversation. These bare references are editorial too: they point readers at a non-public source just as a URL would, only without the hyperlink. When such work needs to be referenced, describe it in plain prose (e.g., "the qulacs-seed reproducibility gap") and leave the private key out of the public record.
+
+**The one allowed exception is published academic preprints / papers.** arXiv links and bare arXiv IDs (`arXiv:XXXX.XXXXX`), DOIs, and paper titles are fine to cite directly in commits / PRs / issues / review comments — these are public, stable scholarly references, not links into private tooling. You do not need the user to pre-supply an arXiv ID before citing it.
 
 This rule targets **editorial** content — prose humans read. URLs that are functional metadata consumed by tooling rather than read by people (e.g., `$schema` references in JSON / YAML config files, dependency URLs in lockfiles, IDE / editor schema hints) are out of scope and may be added when the tool requires them.
 
 - ✅ "Implements the Trotter circuit (see #337 for the design discussion)."
 - ❌ "Implements the Trotter circuit (see `<external-url>`)." (the URL is shown as a `<external-url>` placeholder rather than a real address so this example itself doesn't render as a clickable external link; outside this kind of placeholder, never paste a literal external URL in prose unless the user explicitly provided it)
+- ✅ "Implements the stochastic-differential-equation quantum algorithm (arXiv:XXXX.XXXXX)." (a published preprint ID is allowed; shown here with a placeholder, but a real arXiv ID is fine in actual prose)
+- ❌ "Closes the qulacs-seed gap (BACKLOG-XXXX)." (an internal backlog ID — describe the work in prose instead and leave the tracker key out of the public record)
+- ❌ "Per the design doc at `<notion-url>` / the 'QURI Parts seed support' Notion page." (a link or title into private tooling — omit it; reference the public record or describe the rationale inline)

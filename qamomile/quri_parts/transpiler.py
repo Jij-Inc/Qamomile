@@ -22,9 +22,67 @@ from .exceptions import QamomileQuriPartsTranspileError
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
-    import quri_parts.circuit as qp_c
-    import quri_parts.core.operator as qp_o
-    from quri_parts.circuit import ImmutableBoundParametricQuantumCircuit
+    import quri_parts.circuit as qp_c  # type: ignore[import-not-found]
+    import quri_parts.core.operator as qp_o  # type: ignore[import-not-found]
+    from quri_parts.circuit import (  # type: ignore[import-not-found]
+        ImmutableBoundParametricQuantumCircuit,
+    )
+
+
+def _create_seeded_qulacs_vector_sampler(seed: int) -> Any:
+    """Create a qulacs vector sampler that seeds its measurement RNG.
+
+    The high-level ``create_qulacs_vector_sampler`` exposed by QURI Parts
+    does not thread a random seed down to qulacs, so this helper reproduces
+    its qulacs state-vector sampling path while forwarding ``seed`` to
+    ``qulacs.QuantumState.sampling``. Sampling the same circuit with the
+    same seed therefore yields identical measurement counts.
+
+    Unlike the default QURI Parts sampler, this path does not switch to the
+    multinomial state-vector fast-path at very large shot counts (that
+    branch is unseedable upstream); it always uses ``QuantumState.sampling``.
+    The resulting distribution is statistically identical, only potentially
+    slower for very large shot counts.
+
+    Args:
+        seed (int): Random seed forwarded to ``QuantumState.sampling`` on
+            every call, making sampling deterministic.
+
+    Returns:
+        Any: A sampler callable taking ``(circuit, shots)`` and returning a
+            ``collections.Counter`` mapping basis-state integers to counts.
+
+    Raises:
+        ImportError: If quri-parts-qulacs (or qulacs) is not installed.
+    """
+    from collections import Counter
+
+    import qulacs  # type: ignore[import-not-found]
+
+    from quri_parts.qulacs.circuit import (  # type: ignore[import-not-found]
+        convert_circuit,
+    )
+
+    def sampler(circuit: Any, shots: int) -> Any:
+        """Sample ``circuit`` for ``shots`` shots using the fixed seed.
+
+        Args:
+            circuit (Any): The QURI Parts circuit to sample.
+            shots (int): Number of measurement shots.
+
+        Returns:
+            Any: A ``collections.Counter`` mapping basis-state integers to
+                their observed counts.
+
+        Raises:
+            Exception: Propagates any qulacs / QURI Parts circuit-conversion
+                or sampling error raised for a malformed circuit.
+        """
+        state = qulacs.QuantumState(circuit.qubit_count)
+        convert_circuit(circuit).update_quantum_state(state)
+        return Counter(state.sampling(shots, seed))
+
+    return sampler
 
 
 class QuriPartsEmitPass(
@@ -71,25 +129,56 @@ class QuriPartsExecutor(
         self,
         sampler: Any = None,
         estimator: Any = None,
+        seed: int | None = None,
     ):
-        """Initialize executor with optional sampler and estimator.
+        """Initialize executor with optional sampler, estimator, and seed.
 
         Args:
-            sampler: QURI Parts sampler (defaults to qulacs vector sampler)
-            estimator: QURI Parts parametric estimator (defaults to qulacs)
+            sampler (Any): QURI Parts sampler. Defaults to None, meaning a
+                qulacs vector sampler is created lazily on first use.
+            estimator (Any): QURI Parts parametric estimator. Defaults to
+                None, meaning a qulacs parametric estimator is created
+                lazily on first use.
+            seed (int | None): Optional random seed forwarded to the qulacs
+                vector sampler so that sampling is reproducible. When set,
+                two ``execute`` calls with the same seed and circuit return
+                identical shot counts, which unblocks reproducible
+                tutorials and benchmarks. Defaults to None, meaning
+                sampling is non-deterministic. The seed is only applied to
+                the default qulacs sampler; it is ignored when a custom
+                ``sampler`` is supplied, since an arbitrary sampler has no
+                standard seed interface.
         """
         self._sampler = sampler
         self._estimator = estimator
         self._non_parametric_estimator: Any = None
+        self._seed = seed
 
     @property
     def sampler(self) -> Any:
-        """Lazy initialization of sampler."""
+        """Lazy initialization of sampler.
+
+        When a ``seed`` was supplied to the constructor (and no custom
+        sampler was given), a seeded qulacs vector sampler is created so
+        that sampling is reproducible.
+
+        Returns:
+            Any: A QURI Parts sampler callable taking ``(circuit, shots)``
+                and returning measurement counts.
+
+        Raises:
+            ImportError: If quri-parts-qulacs is not installed.
+        """
         if self._sampler is None:
             try:
-                from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
+                if self._seed is None:
+                    from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
+                        create_qulacs_vector_sampler,
+                    )
 
-                self._sampler = create_qulacs_vector_sampler()
+                    self._sampler = create_qulacs_vector_sampler()
+                else:
+                    self._sampler = _create_seeded_qulacs_vector_sampler(self._seed)
             except ImportError as e:
                 raise ImportError(
                     "quri-parts-qulacs is required for QuriPartsExecutor. "
@@ -102,7 +191,7 @@ class QuriPartsExecutor(
         """Lazy initialization of parametric estimator for optimization."""
         if self._estimator is None:
             try:
-                from quri_parts.qulacs.estimator import (
+                from quri_parts.qulacs.estimator import (  # type: ignore[import-not-found]
                     create_qulacs_vector_parametric_estimator,
                 )
 
@@ -124,7 +213,7 @@ class QuriPartsExecutor(
         """
         if self._non_parametric_estimator is None:
             try:
-                from quri_parts.qulacs.estimator import (
+                from quri_parts.qulacs.estimator import (  # type: ignore[import-not-found]
                     create_qulacs_vector_estimator,
                 )
 
@@ -241,7 +330,10 @@ class QuriPartsExecutor(
         Returns:
             Real part of the expectation value
         """
-        from quri_parts.core.state import apply_circuit, quantum_state
+        from quri_parts.core.state import (  # type: ignore[import-not-found]
+            apply_circuit,
+            quantum_state,
+        )
 
         cb_state = quantum_state(circuit.qubit_count, bits=0)
         circuit_state = apply_circuit(circuit, cb_state)
@@ -299,14 +391,23 @@ class QuriPartsTranspiler(
         self,
         sampler: Any = None,
         estimator: Any = None,
+        seed: int | None = None,
     ) -> QuriPartsExecutor:
         """Create a QURI Parts executor.
 
         Args:
-            sampler: Optional custom sampler (defaults to qulacs vector sampler)
-            estimator: Optional custom estimator (defaults to qulacs parametric estimator)
+            sampler (Any): Optional custom sampler. Defaults to None,
+                meaning the qulacs vector sampler is used.
+            estimator (Any): Optional custom estimator. Defaults to None,
+                meaning the qulacs parametric estimator is used.
+            seed (int | None): Optional random seed forwarded to the qulacs
+                vector sampler for reproducible sampling. Defaults to None,
+                meaning sampling is non-deterministic. The seed is ignored
+                when a custom ``sampler`` is supplied, since an arbitrary
+                sampler has no standard seed interface.
 
         Returns:
-            QuriPartsExecutor configured for this backend
+            QuriPartsExecutor: Executor configured for this backend, bound
+                to the given seed.
         """
-        return QuriPartsExecutor(sampler, estimator)
+        return QuriPartsExecutor(sampler, estimator, seed=seed)

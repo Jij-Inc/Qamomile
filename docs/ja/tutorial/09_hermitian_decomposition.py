@@ -68,7 +68,9 @@ I2 = np.eye(2, dtype=complex)
 h_field = 0.7
 M = -np.kron(Z, Z) - h_field * (np.kron(I2, X) + np.kron(X, I2))
 print("shape:", M.shape)
+assert M.shape == (4, 4)
 print("Hermitian:", np.allclose(M, M.conj().T))
+assert np.allclose(M, M.conj().T)
 
 # %% [markdown]
 # ## ラップして分解する
@@ -80,6 +82,8 @@ print("Hermitian:", np.allclose(M, M.conj().T))
 # %%
 H_mat = HermitianMatrix(M)
 print("num_qubits:", H_mat.num_qubits)
+# 4x4 行列 → log2(4) = 2 量子ビット。
+assert H_mat.num_qubits == 2
 
 H_op = H_mat.to_hamiltonian()
 print("constant:", H_op.constant)
@@ -139,6 +143,7 @@ qiskit_circuit = transpiler.to_circuit(
     },
 )
 print(qiskit_circuit)
+assert qiskit_circuit.num_qubits == 2
 
 # %% [markdown]
 # ## 厳密な指数関数との比較による検証
@@ -158,6 +163,11 @@ from scipy.sparse import SparseEfficiencyWarning
 # 残らないよう、ここだけ抑制しています。(回路を decompose しても警告は消えます
 # が、厳密な発展が Trotter 近似に置き換わり下のフィデリティチェックが破綻します。)
 qiskit_unitary_circuit = qiskit_circuit.remove_final_measurements(inplace=False)
+# ``inplace=False`` のとき新しい回路が必ず返るが、typeshed は
+# ``inplace=True`` のケースのために戻り値を ``QuantumCircuit | None`` と
+# 宣言しているので、ここで assert して下の ``Statevector.from_instruction``
+# の型を通す。
+assert qiskit_unitary_circuit is not None
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", category=SparseEfficiencyWarning)
     psi_qm = np.array(Statevector.from_instruction(qiskit_unitary_circuit).data)

@@ -61,6 +61,10 @@ N_WEIGHTS_PER_LAYER = N_QUBITS * 3  # RZ, RY, RZ per qubit
 N_WEIGHTS = N_LAYERS * N_WEIGHTS_PER_LAYER
 
 print(f"Qubits: {N_QUBITS}, Layers: {N_LAYERS}, Trainable weights: {N_WEIGHTS}")
+assert N_QUBITS == 4
+assert N_LAYERS == 2
+# N_WEIGHTS = N_LAYERS * N_QUBITS * 3 (RZ + RY + RZ per qubit per layer).
+assert N_WEIGHTS == 24
 
 
 # %% [markdown]
@@ -142,6 +146,13 @@ est = variational_ansatz.estimate_resources(
     bindings={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
 )
 print(est)
+assert est.qubits == 4
+# 4 (input RY encoding) + 2 layers * (4 RZ + 4 RY + 4 RZ) = 28 single-qubit rotations.
+assert est.gates.single_qubit == 28
+# 2 layers * 3 CZs (linear chain on 4 qubits) = 6 two-qubit Cliffords.
+assert est.gates.two_qubit == 6
+assert est.gates.total == 34
+assert est.gates.rotation_gates == 28
 
 # %% [markdown]
 # ## Quantum Forward Pass
@@ -180,6 +191,9 @@ test_weights = rng.uniform(-np.pi, np.pi, N_WEIGHTS)
 
 expvals = quantum_forward(test_inputs, test_weights)
 print("Expectation values:", expvals)
+# Z expectation values are bounded in [-1, 1]; one value per qubit.
+assert expvals.shape == (N_QUBITS,)
+assert all(-1.0 <= float(e) <= 1.0 for e in expvals)
 
 # %% [markdown]
 # ## Parameter Shift Rule for Gradients
@@ -321,6 +335,9 @@ X_train, y_train = subset_dataset(full_train, SELECTED_CLASSES, N_TRAIN_PER_CLAS
 X_test, y_test = subset_dataset(full_test, SELECTED_CLASSES, N_TEST_PER_CLASS)
 
 print(f"Train: {X_train.shape}, Test: {X_test.shape}")
+# 4 classes x N_PER_CLASS samples each; Fashion-MNIST is 1x28x28 grayscale.
+assert X_train.shape == (N_CLASSES * N_TRAIN_PER_CLASS, 1, 28, 28)
+assert X_test.shape == (N_CLASSES * N_TEST_PER_CLASS, 1, 28, 28)
 print(f"Classes: {CLASS_NAMES}")
 
 
@@ -420,10 +437,27 @@ logits, feats, q_out = hybrid_model(xb)
 loss = criterion(logits, yb)
 loss.backward()
 
-print("feature_extractor first conv grad mean:",
-      hybrid_model.feature_extractor[0].weight.grad.abs().mean().item())
+# ``loss.backward()`` populates ``.grad`` on each parameter; assert here
+# so the torch stubs that declare ``.grad`` as ``Tensor | None`` narrow.
+# ``nn.Sequential.__getitem__`` is typed as
+# ``Tensor | None | Module`` in the torch stub (it accepts both indices
+# and slices), so narrow to ``nn.Module`` explicitly before grabbing the
+# layer's ``.weight``.
+first_conv = hybrid_model.feature_extractor[0]
+assert isinstance(first_conv, torch.nn.Module)
+first_conv_weight = first_conv.weight  # type: ignore[union-attr]
+assert first_conv_weight.grad is not None
+quantum_grad = hybrid_model.qlayer.weights.grad
+assert quantum_grad is not None
+print(
+    "feature_extractor first conv grad mean:",
+    # zuban treats the chained ``.grad.abs()`` on a stub-typed Tensor as
+    # "Tensor not callable"; the runtime call is the standard
+    # ``Tensor.abs`` method which produces a Tensor.
+    first_conv_weight.grad.abs().mean().item(),  # type: ignore[operator]
+)
 print("quantum weights grad mean:",
-      hybrid_model.qlayer.weights.grad.abs().mean().item())
+      quantum_grad.abs().mean().item())
 
 optimizer.zero_grad()
 
@@ -489,9 +523,12 @@ for i in range(n_show):
         ha="center", va="bottom", fontsize=7, color=color,
         clip_on=False,
     )
+    # ``Tensor.item()`` is typed as ``int | float | bool`` in the torch
+    # stub even for an integer-typed tensor; the runtime value here is
+    # always an ``int`` class label, so cast explicitly for the list index.
     axes[2].text(
         28 * i + 14, 29,
-        CLASS_NAMES[y_test[i].item()],
+        CLASS_NAMES[int(y_test[i].item())],
         ha="center", va="top", fontsize=7,
         clip_on=False,
     )

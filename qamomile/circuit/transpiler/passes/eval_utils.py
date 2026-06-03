@@ -193,7 +193,7 @@ def evaluate_binop_values(
             case BinOpKind.MIN:
                 return left if left <= right else right
             case _:
-                return None
+                return None  # type: ignore[unreachable]
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -231,7 +231,7 @@ def evaluate_compop_values(
             case CompOpKind.GE:
                 return left >= right
             case _:
-                return None
+                return None  # type: ignore[unreachable]
     except (TypeError, ValueError):
         return None
 
@@ -260,7 +260,7 @@ def evaluate_condop_values(
             case CondOpKind.OR:
                 return bool(left or right)
             case _:
-                return None
+                return None  # type: ignore[unreachable]
     except (TypeError, ValueError):
         return None
 

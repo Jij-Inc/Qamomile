@@ -19,8 +19,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    RuntimeClassicalExpr,
+)
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    HasNestedOps,
+    IfOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 
@@ -58,6 +66,96 @@ class LoopAnalyzer:
             return True
         if self._has_loop_var_binop(op.operations, loop_uuid):
             return True
+        if self._has_loop_var_condition(op.operations, loop_uuid):
+            return True
+        return False
+
+    def _has_loop_var_condition(
+        self,
+        operations: list[Operation],
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """True when a runtime control-flow condition depends on the loop var.
+
+        A native backend loop (e.g. Qiskit ``for_loop``) keeps the loop
+        variable as a backend loop parameter that classical-register
+        indexing cannot consume. So when an ``IfOperation`` / ``WhileOperation``
+        condition — or a ``RuntimeClassicalExpr`` operand — reads a measured
+        ``Vector[Bit]`` element indexed by the loop variable (``if s[j]:``)
+        or sliced by it (``if s[j:j+1][0]:``), the loop must be unrolled so
+        the index resolves to a concrete clbit per iteration. Without this
+        the condition's clbit address cannot be resolved and emit fails.
+
+        Args:
+            operations (list[Operation]): Loop-body operations to scan.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable,
+                or None for legacy IR without ``loop_var_value``.
+
+        Returns:
+            bool: True if any runtime condition depends on the loop variable.
+        """
+        for op in operations:
+            if isinstance(op, IfOperation):
+                if self._value_depends_on_loop_var(op.condition, loop_var_uuid):
+                    return True
+            elif isinstance(op, WhileOperation):
+                if any(
+                    self._value_depends_on_loop_var(operand, loop_var_uuid)
+                    for operand in op.operands
+                ):
+                    return True
+            elif isinstance(op, RuntimeClassicalExpr):
+                if any(
+                    self._value_depends_on_loop_var(operand, loop_var_uuid)
+                    for operand in op.operands
+                ):
+                    return True
+            if isinstance(op, HasNestedOps):
+                if any(
+                    self._has_loop_var_condition(op_list, loop_var_uuid)
+                    for op_list in op.nested_op_lists()
+                ):
+                    return True
+        return False
+
+    def _value_depends_on_loop_var(
+        self,
+        value: object,
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """True when a condition Value reads the loop variable.
+
+        Covers three forms: the value *is* the loop variable; its element
+        index depends on it (``s[j]``); or a ``slice_start`` / ``slice_step``
+        along its ``parent_array``'s ``slice_of`` chain depends on it
+        (``s[j:j+1][0]``).
+
+        Args:
+            value (object): Candidate condition operand (an IR ``Value`` or
+                a non-Value, which never depends on the loop variable).
+            loop_var_uuid (str | None): UUID of the enclosing loop variable.
+
+        Returns:
+            bool: True if ``value`` depends on the loop variable.
+        """
+        from qamomile.circuit.ir.value import Value as _Value
+
+        if not isinstance(value, _Value):
+            return False
+        if _is_loop_var(value, loop_var_uuid):
+            return True
+        if value.element_indices:
+            for idx in value.element_indices:
+                if self._index_depends_on_loop_var(idx, loop_var_uuid):
+                    return True
+        parent = value.parent_array
+        while parent is not None:
+            for bound in (parent.slice_start, parent.slice_step):
+                if isinstance(bound, _Value) and self._index_depends_on_loop_var(
+                    bound, loop_var_uuid
+                ):
+                    return True
+            parent = parent.slice_of
         return False
 
     def _has_loop_var_binop(

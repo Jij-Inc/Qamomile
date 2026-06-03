@@ -98,6 +98,7 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+    assert type(e).__name__ == "SyntaxError"
 
 # %% [markdown]
 # 常にインデックスベースのアクセスを使用してください：`for i in qmc.range(n): q[i] = qmc.h(q[i])`。
@@ -148,6 +149,10 @@ for theta in [0.1, 0.5, 1.0]:
         bindings={"theta": theta},
     ).result()
     print(f"theta={theta:.1f} -> {result.results}")
+    assert result.shots == 128
+    assert sum(count for _, count in result.results) == 128
+    # n=4 量子ビット測定 → 各 outcome は 4 要素のビット tuple。
+    assert all(len(outcome) == 4 for outcome, _ in result.results)
 
 # %% [markdown]
 # トランスパイル済みオブジェクトは3回の実行すべてで再利用されます。変わるのは実行時のバインディング`{"theta": theta}`だけです。

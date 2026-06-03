@@ -272,12 +272,12 @@ class BinaryModel(Generic[VT]):
             ValueError: If state values are invalid for the vartype.
         """
         if self.vartype == VarType.SPIN:
-            if not np.allclose(np.abs(state), 1.0):
+            if not np.allclose(np.abs(state), 1.0):  # type: ignore[unreachable]
                 raise ValueError(
                     "All elements must be close to +1 or -1 for SPIN vartype."
                 )
         elif self.vartype == VarType.BINARY:
-            if not all(v in (0, 1) for v in state):
+            if not all(v in (0, 1) for v in state):  # type: ignore[unreachable]
                 raise ValueError("All elements must be 0 or 1 for BINARY vartype.")
 
         energy = self.constant

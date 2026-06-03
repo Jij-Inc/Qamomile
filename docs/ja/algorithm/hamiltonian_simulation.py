@@ -28,6 +28,8 @@
 # # !pip install qamomile
 
 # %%
+from typing import Any
+
 import matplotlib.pyplot as plt
 import numpy as np
 from qiskit import QuantumCircuit, transpile as qk_transpile
@@ -105,7 +107,9 @@ def statevector(circuit) -> np.ndarray:
         stripped,
         basis_gates=["u", "cx", "rx", "ry", "rz", "h", "p", "sx", "x", "y", "z"],
     )
-    stripped.save_statevector()
+    # ``save_statevector`` は qiskit-aer が ``QuantumCircuit`` に monkey-patch
+    # するメソッドで、base qiskit の typeshed には存在しない。
+    stripped.save_statevector()  # type: ignore[attr-defined]
     sim = AerSimulator(method="statevector")
     return np.asarray(sim.run(stripped).result().get_statevector())
 
@@ -310,7 +314,7 @@ for name, order in suzuki_orders.items():
 # %%
 Ns = np.array([2, 4, 8, 16, 32, 64])
 all_names = ["S1", "S2", "S4", "S6"]
-errors = {name: [] for name in all_names}
+errors: dict[str, Any] = {name: [] for name in all_names}
 
 for N in Ns:
     for name, ker in s1_s2_kernels.items():

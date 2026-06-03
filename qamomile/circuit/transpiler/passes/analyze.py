@@ -6,7 +6,7 @@ import dataclasses
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.gate import MeasureOperation
+from qamomile.circuit.ir.operation.gate import MeasureOperation, MeasureVectorOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.value import Value, ValueBase
 from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
@@ -27,14 +27,21 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
     """Build a map from each value UUID to the UUIDs it depends on.
 
     Walks operations recursively (through ``HasNestedOps``) and records,
-    for each result UUID, the set of operand UUIDs that produced it.
-    Used downstream by measurement-taint analysis.
+    for each result UUID, the set of operand UUIDs that produced it. Also
+    seeds an edge from each ``ArrayValue`` element (``Value`` carrying
+    ``parent_array``) to its parent array UUID, and walks the parent's
+    ``slice_of`` chain so that a sliced view (e.g. ``s[0:4:2][i]`` for
+    ``s = qmc.measure(register)``) inherits taint from the root measured
+    array. ``StripSliceArrayOpsPass`` removes the explicit
+    ``SliceArrayOperation`` boundary before this pass runs, so the
+    ``slice_of`` link is the only remaining connection between a view and
+    its root in the IR. Used downstream by measurement-taint analysis.
 
     Args:
-        operations: Top-level operations of the block.
+        operations (list[Operation]): Top-level operations of the block.
 
     Returns:
-        Mapping ``result_uuid -> set(operand_uuid, ...)``.
+        dict[str, set[str]]: Mapping ``result_uuid -> set(operand_uuid, ...)``.
     """
 
     class DependencyGraphBuilder(ControlFlowVisitor):
@@ -47,6 +54,17 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
                 if result.uuid not in self.graph:
                     self.graph[result.uuid] = set()
                 self.graph[result.uuid].update(operand_uuids)
+            for v in op.operands:
+                if not isinstance(v, ValueBase):
+                    continue
+                parent = getattr(v, "parent_array", None)
+                if parent is None:
+                    continue
+                self.graph.setdefault(v.uuid, set()).add(parent.uuid)
+                cur = parent
+                while getattr(cur, "slice_of", None) is not None:
+                    self.graph.setdefault(cur.uuid, set()).add(cur.slice_of.uuid)
+                    cur = cur.slice_of
 
     builder = DependencyGraphBuilder()
     builder.visit_operations(operations)
@@ -54,10 +72,20 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
 
 
 def find_measurement_results(operations: list[Operation]) -> set[str]:
-    """Find all value UUIDs that are direct results of ``MeasureOperation``.
+    """Find all value UUIDs that are direct results of measurement ops.
 
     Walks operations recursively (through ``HasNestedOps``) and collects
-    every measurement result's UUID. The seed for taint propagation.
+    every measurement result's UUID, covering both scalar
+    ``MeasureOperation`` and vector ``MeasureVectorOperation``. The
+    returned set is the seed for taint propagation; ``Vector[Bit]``
+    element accesses inherit the parent array's taint through the
+    parent-array edges added by ``build_dependency_graph``.
+
+    Args:
+        operations (list[Operation]): Top-level operations of the block.
+
+    Returns:
+        set[str]: Result UUIDs of every measurement operation.
     """
 
     class MeasurementResultCollector(ControlFlowVisitor):
@@ -65,7 +93,7 @@ def find_measurement_results(operations: list[Operation]) -> set[str]:
             self.result_uuids: set[str] = set()
 
         def visit_operation(self, op: Operation) -> None:
-            if isinstance(op, MeasureOperation):
+            if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
                 for result in op.results:
                     self.result_uuids.add(result.uuid)
 
@@ -81,12 +109,18 @@ def find_measurement_derived_values(
     """Forward-propagate measurement taint through the dependency graph.
 
     Args:
-        dependency_graph: ``result_uuid -> set(operand_uuid, ...)``.
-        measurement_uuids: Seed set (results of ``MeasureOperation``).
+        dependency_graph (dict[str, set[str]]): ``result_uuid ->
+            set(operand_uuid, ...)`` as produced by
+            ``build_dependency_graph``, including the parent-array /
+            slice-of edges that connect measured-vector elements to the
+            root measured array.
+        measurement_uuids (set[str]): Seed set (results of
+            ``MeasureOperation`` / ``MeasureVectorOperation`` collected by
+            ``find_measurement_results``).
 
     Returns:
-        The set of all UUIDs transitively derived from a measurement,
-        including the seeds themselves.
+        set[str]: The set of all UUIDs transitively derived from a
+            measurement, including the seeds themselves.
     """
     derived: set[str] = set()
     worklist = list(measurement_uuids)

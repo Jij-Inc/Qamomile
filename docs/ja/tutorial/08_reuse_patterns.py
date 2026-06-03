@@ -76,6 +76,13 @@ result = (
     .result()
 )
 print("GHZ result:", result.results)
+assert result.shots == 128
+assert sum(count for _, count in result.results) == 128
+# 4 量子ビット GHZ 状態 → (0, 0, 0, 0) と (1, 1, 1, 1) のみ出現。
+assert all(
+    outcome in {(0, 0, 0, 0), (1, 1, 1, 1)}
+    for outcome, _ in result.results
+)
 
 # %% [markdown]
 # ヘルパー`entangle_once`により、呼び出し側のコードが読みやすくなります。トランスパイル後の回路ではインライン展開されるため、サブブロックではなく個々のCXゲートが見えます。
@@ -104,7 +111,10 @@ def rotate_first(
 @qmc.qkernel
 def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
-    q = rotate_first(q, 0, 0.5)  # int・floatリテラルをそのまま渡せる
+    # int / float リテラルは runtime で ``qmc.UInt`` / ``qmc.Float`` に
+    # auto-promote されるが、kernel の静的シグネチャは Qamomile ハンドル型を
+    # そのまま要求する。下の ignore はその意図的なギャップを明示するもの。
+    q = rotate_first(q, 0, 0.5)  # type: ignore[arg-type]
     return qmc.measure(q)
 
 
@@ -192,7 +202,11 @@ algorithm_skeleton.draw(fold_loops=False)
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
+assert est.qubits == 3
 print("total gates:", est.gates.total)
+# H ゲート 3 個(qubit_array(3) へのブロードキャスト); stub の `oracle_box`
+# は gates.total ではなく gates.oracle_calls にカウントされる。
+assert est.gates.total == 3
 
 # %% [markdown]
 # 次に、通常ゲートと複数スタブオラクルを混在させたqkernelで確認します。
@@ -248,9 +262,19 @@ iterative_oracle_skeleton.draw(rounds=4, fold_loops=False)
 # %%
 oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
 print("total gates:", oracle_est.gates.total)
+assert str(oracle_est.gates.total) == "3*rounds + 3"
 print("two-qubit gates:", oracle_est.gates.two_qubit)
+assert str(oracle_est.gates.two_qubit) == "2*rounds + 1"
 print("oracle_calls:", oracle_est.gates.oracle_calls)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_calls.items()} == {
+    "oracle": "rounds + 1",
+    "mixing": "rounds",
+}
 print("oracle_queries:", oracle_est.gates.oracle_queries)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_queries.items()} == {
+    "oracle": "2*rounds + 2",
+    "mixing": "rounds",
+}
 
 # %% [markdown]
 # `rounds`に具体的な値を代入して、数値的なカウントを確認します：
@@ -258,7 +282,9 @@ print("oracle_queries:", oracle_est.gates.oracle_queries)
 # %%
 oracle_est_4 = oracle_est.substitute(rounds=4)
 print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
+assert oracle_est_4.gates.oracle_calls == {"oracle": 5, "mixing": 4}
 print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
+assert oracle_est_4.gates.oracle_queries == {"oracle": 10, "mixing": 4}
 
 # %% [markdown]
 # この例のように、オラクル内部が不明でも回路解析を進められます。既知部分は通常通りカウントされ、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。

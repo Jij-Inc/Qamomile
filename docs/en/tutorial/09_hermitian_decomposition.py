@@ -68,7 +68,9 @@ I2 = np.eye(2, dtype=complex)
 h_field = 0.7
 M = -np.kron(Z, Z) - h_field * (np.kron(I2, X) + np.kron(X, I2))
 print("shape:", M.shape)
+assert M.shape == (4, 4)
 print("Hermitian:", np.allclose(M, M.conj().T))
+assert np.allclose(M, M.conj().T)
 
 # %% [markdown]
 # ## Wrap and Decompose
@@ -80,6 +82,8 @@ print("Hermitian:", np.allclose(M, M.conj().T))
 # %%
 H_mat = HermitianMatrix(M)
 print("num_qubits:", H_mat.num_qubits)
+# 4x4 matrix -> log2(4) = 2 qubits.
+assert H_mat.num_qubits == 2
 
 H_op = H_mat.to_hamiltonian()
 print("constant:", H_op.constant)
@@ -139,6 +143,7 @@ qiskit_circuit = transpiler.to_circuit(
     },
 )
 print(qiskit_circuit)
+assert qiskit_circuit.num_qubits == 2
 
 # %% [markdown]
 # ## Verify Against the Exact Exponential
@@ -159,6 +164,11 @@ from scipy.sparse import SparseEfficiencyWarning
 # warning but replace the exact evolution with its Trotter approximation,
 # which would break the fidelity check below.)
 qiskit_unitary_circuit = qiskit_circuit.remove_final_measurements(inplace=False)
+# ``inplace=False`` ensures a fresh circuit is returned; the typeshed stub
+# declares the return as ``QuantumCircuit | None`` to cover the
+# ``inplace=True`` case, so assert here so ``Statevector.from_instruction``
+# below type-checks.
+assert qiskit_unitary_circuit is not None
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", category=SparseEfficiencyWarning)
     psi_qm = np.array(Statevector.from_instruction(qiskit_unitary_circuit).data)
