@@ -343,7 +343,9 @@ class _BlockInverter:
             TypeError: If the block output contract is not unitary-like.
         """
         self._reject_unsupported_control_flow(block.operations)
-        value_map = {value.uuid: value for value in block.input_values}
+        value_map: dict[str, ValueBase] = {
+            value.uuid: value for value in block.input_values
+        }
         self._seed_output_values(block, value_map)
         operations = self._invert_block_operations(block, value_map)
         output_values = [
