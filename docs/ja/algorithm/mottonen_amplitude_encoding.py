@@ -84,9 +84,11 @@ def normalize(amps: list[float] | list[complex]) -> np.ndarray:
 def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
     """*kernel*をQiskitのstatevectorシミュレータで実行してデータを返す。"""
     qc = transpiler.to_circuit(kernel, bindings=bindings or None)
-    return Statevector.from_instruction(
-        qc.remove_final_measurements(inplace=False)
-    ).data
+    # ``inplace=False`` で新しい回路が返る。typeshed は ``inplace=True`` のため
+    # 戻り値を ``QuantumCircuit | None`` と宣言しているので assert で narrow。
+    stripped = qc.remove_final_measurements(inplace=False)
+    assert stripped is not None
+    return Statevector.from_instruction(stripped).data
 
 
 # %% [markdown]

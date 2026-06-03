@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
@@ -222,14 +222,20 @@ class ConstantFoldingPass(Pass[Block, Block]):
         """
         from qamomile.circuit.ir.value import ArrayValue
 
-        new_op = self._substitute_folded_operands(op, folded_values)
+        new_op = cast(
+            SliceArrayOperation,
+            self._substitute_folded_operands(op, folded_values),
+        )
         if not new_op.results or not isinstance(new_op.results[0], ArrayValue):
             return new_op
         result = new_op.results[0]
         folded_result = self._substitute_in_value(result, folded_values)
         if folded_result is result or not isinstance(folded_result, ArrayValue):
             return new_op
-        return dataclasses.replace(new_op, results=[folded_result])
+        return cast(
+            SliceArrayOperation,
+            dataclasses.replace(new_op, results=[folded_result]),
+        )
 
     @staticmethod
     def _evaluate_binop(

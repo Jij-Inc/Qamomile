@@ -22,9 +22,11 @@ from .exceptions import QamomileQuriPartsTranspileError
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
-    import quri_parts.circuit as qp_c
-    import quri_parts.core.operator as qp_o
-    from quri_parts.circuit import ImmutableBoundParametricQuantumCircuit
+    import quri_parts.circuit as qp_c  # type: ignore[import-not-found]
+    import quri_parts.core.operator as qp_o  # type: ignore[import-not-found]
+    from quri_parts.circuit import (  # type: ignore[import-not-found]
+        ImmutableBoundParametricQuantumCircuit,
+    )
 
 
 def _create_seeded_qulacs_vector_sampler(seed: int) -> Any:
@@ -55,9 +57,11 @@ def _create_seeded_qulacs_vector_sampler(seed: int) -> Any:
     """
     from collections import Counter
 
-    import qulacs
+    import qulacs  # type: ignore[import-not-found]
 
-    from quri_parts.qulacs.circuit import convert_circuit
+    from quri_parts.qulacs.circuit import (  # type: ignore[import-not-found]
+        convert_circuit,
+    )
 
     def sampler(circuit: Any, shots: int) -> Any:
         """Sample ``circuit`` for ``shots`` shots using the fixed seed.
@@ -168,7 +172,7 @@ class QuriPartsExecutor(
         if self._sampler is None:
             try:
                 if self._seed is None:
-                    from quri_parts.qulacs.sampler import (
+                    from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
                         create_qulacs_vector_sampler,
                     )
 
@@ -187,7 +191,7 @@ class QuriPartsExecutor(
         """Lazy initialization of parametric estimator for optimization."""
         if self._estimator is None:
             try:
-                from quri_parts.qulacs.estimator import (
+                from quri_parts.qulacs.estimator import (  # type: ignore[import-not-found]
                     create_qulacs_vector_parametric_estimator,
                 )
 
@@ -209,7 +213,7 @@ class QuriPartsExecutor(
         """
         if self._non_parametric_estimator is None:
             try:
-                from quri_parts.qulacs.estimator import (
+                from quri_parts.qulacs.estimator import (  # type: ignore[import-not-found]
                     create_qulacs_vector_estimator,
                 )
 
@@ -326,7 +330,10 @@ class QuriPartsExecutor(
         Returns:
             Real part of the expectation value
         """
-        from quri_parts.core.state import apply_circuit, quantum_state
+        from quri_parts.core.state import (  # type: ignore[import-not-found]
+            apply_circuit,
+            quantum_state,
+        )
 
         cb_state = quantum_state(circuit.qubit_count, bits=0)
         circuit_state = apply_circuit(circuit, cb_state)

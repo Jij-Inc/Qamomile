@@ -6,7 +6,7 @@ into Qiskit QuantumCircuits.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence, cast
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
@@ -351,6 +351,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 )
             result = expr.logic_not(inner)
         else:
+            assert kind is not None
             lhs = resolve_operand(op.operands[0])
             rhs = resolve_operand(op.operands[1])
             if lhs is None or rhs is None:
@@ -512,7 +513,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 return expr.not_equal(lhs, rhs)
             return None
 
-        return None
+        return None  # type: ignore[unreachable]
 
     def _emit_pauli_evolve(
         self,
@@ -741,20 +742,21 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         # Check if this is V1 or V2 interface
         # V2 interface (new): run([(circuit, observable, params)])
         # V1 interface (old): run(circuits, observables, parameter_values)
+        estimator_run = cast(Any, self._estimator).run
         try:
             # Try V2 interface first
-            job = self._estimator.run([(circuit, sparse_pauli_op, param_values)])  # type: ignore[arg-type,call-arg,list-item]
+            job = estimator_run([(circuit, sparse_pauli_op, param_values)])
             result = job.result()
-            return float(result[0].data.evs)  # type: ignore[union-attr]
+            return float(result[0].data.evs)
         except (TypeError, AttributeError):
             # Fall back to V1 interface
-            job = self._estimator.run(  # type: ignore[call-arg,arg-type,list-item]
+            job = estimator_run(
                 [circuit],
                 [sparse_pauli_op],
-                [param_values] if param_values else None,  # type: ignore[arg-type,list-item]
+                [param_values] if param_values else None,
             )
             result = job.result()
-            return float(result.values[0])  # type: ignore[union-attr]
+            return float(result.values[0])
 
     def _ensure_measurements(self, circuit: "QuantumCircuit") -> "QuantumCircuit":
         """Ensure circuit has measurements, adding measure_all if needed."""

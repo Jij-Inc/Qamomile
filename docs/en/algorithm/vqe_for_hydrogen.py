@@ -188,14 +188,19 @@ result = minimize(
 print(result)
 # Variational principle: any trial energy is an upper bound on the FCI
 # ground-state energy, regardless of how short the BFGS budget is.
-assert result.fun >= molecule.fci_energy - 1e-9
+# ``run_fci=True`` was passed to ``of_pyscf.run_pyscf`` above, so
+# ``molecule.fci_energy`` is populated; openfermion's stub declares it
+# ``float | None`` to cover the ``run_fci=False`` case, so narrow here.
+fci_ref = molecule.fci_energy
+assert fci_ref is not None
+assert result.fun >= fci_ref - 1e-9
 assert len(result.x) == num_params
 
 # %%
 plt.plot(cost_history)
 plt.plot(
     range(len(cost_history)),
-    [molecule.fci_energy] * len(cost_history),
+    [fci_ref] * len(cost_history),
     linestyle="dashed",
     color="black",
     label="Exact Solution",
@@ -249,6 +254,9 @@ for bond_length in bond_lengths:
     )
 
     energies.append(result.fun)
+    # ``run_fci=True`` was passed, so ``fci_energy`` is populated;
+    # narrow off openfermion's ``float | None`` stub.
+    assert fci_energy is not None
     # Variational principle holds at every bond length.
     assert result.fun >= fci_energy - 1e-9
 

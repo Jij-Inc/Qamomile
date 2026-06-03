@@ -36,10 +36,20 @@ def is_public(name: str) -> bool:
 
 def module_belongs_to_package(module: griffe.Module, package_dir: Path) -> bool:
     """Check if a module's source file is within the given package directory."""
-    if module.filepath is None:
-        return False
+    filepath = module.filepath
+    # griffe's stub declares ``filepath`` as ``Path | list[Path]`` but at
+    # runtime modules loaded without an on-disk source produce ``None``,
+    # hence the defensive check (``type: ignore[unreachable]`` quiets the
+    # stub-driven analysis). Namespace packages produce ``list[Path]``;
+    # pick the first source for the source-tree containment check.
+    if filepath is None:  # type: ignore[unreachable]
+        return False  # type: ignore[unreachable]
+    if isinstance(filepath, list):
+        if not filepath:
+            return False
+        filepath = filepath[0]
     try:
-        module_path = Path(module.filepath).resolve()
+        module_path = Path(filepath).resolve()
         package_root = package_dir.resolve()
         return module_path.is_relative_to(package_root)
     except Exception:

@@ -113,9 +113,11 @@ def normalize(amps: list[float] | list[complex]) -> np.ndarray:
 def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
     """Run *kernel* through Qiskit's statevector simulator and return the data."""
     qc = transpiler.to_circuit(kernel, bindings=bindings or None)
-    return Statevector.from_instruction(
-        qc.remove_final_measurements(inplace=False)
-    ).data
+    # ``inplace=False`` returns a new circuit; the typeshed stub declares
+    # ``QuantumCircuit | None`` to cover ``inplace=True``.
+    stripped = qc.remove_final_measurements(inplace=False)
+    assert stripped is not None
+    return Statevector.from_instruction(stripped).data
 
 
 # %% [markdown]
