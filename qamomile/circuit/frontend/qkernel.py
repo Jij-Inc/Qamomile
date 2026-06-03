@@ -496,7 +496,7 @@ class QKernel(Generic[P, R]):
                 )
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
-        inputs_map = {}
+        inputs_map: dict[str, Value] = {}
         # Track borrow provenance for input-derived quantum scalar handles.
         # After the call, return values with matching logical_id will have
         # their parent/indices restored so that borrow-return validation
@@ -670,7 +670,7 @@ class QKernel(Generic[P, R]):
                     )
                     in_view = input_view_metas.get(meta_key)
                     if in_view is not None and in_view._slice_parent is not None:
-                        length = shape[0] if shape else val.shape[0]
+                        length = shape[0] if shape else UInt(value=val.shape[0])
                         new_view = VectorView._wrap_unregistered(
                             parent=in_view._slice_parent,
                             sliced_av=val,

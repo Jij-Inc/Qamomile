@@ -692,7 +692,7 @@ def composite_gate(
                 num_targets += sum(1 for arg in args if arg is Qubit)
             elif is_array_type(param_type):
                 args = getattr(param_type, "__args__", ())
-                if args and args[0] is Qubit:
+                if args and args[0] is Qubit:  # type: ignore[misc]
                     raise TypeError(
                         "@composite_gate does not support qkernels with "
                         "array-of-qubit parameters (Vector[Qubit] etc.) yet. "

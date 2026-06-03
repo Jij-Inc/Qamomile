@@ -21,8 +21,15 @@ def _source_link(obj: griffe.Object, config: ApiGenConfig) -> str:
     """Generate a GitHub source link for an object."""
     if obj.filepath is None or obj.lineno is None:
         return ""
+    filepath = obj.filepath
+    # Namespace packages can produce ``list[Path]`` for ``filepath``; pick
+    # the first source for the source-link target.
+    if isinstance(filepath, list):
+        if not filepath:
+            return ""
+        filepath = filepath[0]
     try:
-        rel = Path(obj.filepath).resolve().relative_to(config.repo_root)
+        rel = Path(filepath).resolve().relative_to(config.repo_root)
     except ValueError:
         return ""
     return f" [[source]({config.github_base_url}/{rel}#L{obj.lineno})]"

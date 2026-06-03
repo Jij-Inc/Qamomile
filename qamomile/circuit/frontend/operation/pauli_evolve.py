@@ -80,9 +80,9 @@ def pauli_evolve(
     # consume below.
     input_is_view = isinstance(q, VectorView)
     if input_is_view:
-        view_parent = q._slice_parent
-        view_start = q._slice_start
-        view_step = q._slice_step
+        view_parent = q._slice_parent  # type: ignore[attr-defined]
+        view_start = q._slice_start  # type: ignore[attr-defined]
+        view_step = q._slice_step  # type: ignore[attr-defined]
         view_length = q._shape[0]
 
     qubits_value = q.value
@@ -120,7 +120,7 @@ def pauli_evolve(
             start_uint=view_start,
             step_uint=view_step,
         )
-        q._transfer_borrow_to(new_view, "pauli_evolve")
+        q._transfer_borrow_to(new_view, "pauli_evolve")  # type: ignore[attr-defined]
         return cast(Vector[Qubit], new_view)
 
     consumed = q.consume("pauli_evolve")
