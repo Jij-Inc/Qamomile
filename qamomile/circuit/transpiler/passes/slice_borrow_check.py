@@ -897,7 +897,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     self._format_view_registration_conflict(
                         other_view,
                         av,
-                        next(iter(touched_views_coverage[other_uuid])),
+                        min(touched_views_coverage[other_uuid]),
                         root,
                     )
                 )
@@ -1205,13 +1205,6 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         for key, owner in state.items():
             if key[0] != root.logical_id or not key[1].startswith("sym:"):
                 continue
-            if isinstance(owner, _ConsumedSlotMarker):
-                raise SliceBorrowViolationError(
-                    f"Slice view '{av.name}' is constructed on "
-                    f"'{root.name}' while symbolic descriptor "
-                    f"'{_slot_descriptor(key)}' has already been "
-                    f"destroyed by a prior destructive view operation."
-                )
             if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
                 raise SliceBorrowViolationError(
                     f"Slice view '{av.name}' has concrete coverage on "
