@@ -26,7 +26,7 @@ independent goals, split it into two pages.
 
 ### Content principles
 
-- **One note for one purpose**: keep each notebook focused on a single outcome.
+- **One notebook for one purpose**: keep each notebook focused on a single outcome.
 - **Reader-first explanations**: prefer the shortest path that helps a user
   understand and run the example. Move detailed mechanics into `usage/` pages.
 - **Verified claims only**: avoid unreviewed academic claims. When an algorithm

@@ -12,7 +12,7 @@ by the documentation build.
 4. Replace the placeholder sections with one focused story.
 5. Update the matching section `index.md`.
 
-Use one note for one purpose: each page should teach one workflow, algorithm,
+Use one notebook for one purpose: each page should teach one workflow, algorithm,
 integration, or feature. If a topic needs multiple goals, split it into
 multiple pages.
 
