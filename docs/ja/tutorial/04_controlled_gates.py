@@ -193,7 +193,14 @@ vec_target_demo.draw()
 
 # %%
 @qmc.qkernel
-def _phase(q: qmc.Qubit, theta: qmc.Float = math.pi / 2) -> qmc.Qubit:
+def _phase(
+    q: qmc.Qubit,
+    # runtime: ``_create_bound_input`` は ``qmc.Float`` 引数のデフォルトに
+    # 生の ``float`` を受けて定数 ``Float`` handle に wrap する。静的シグネチャは
+    # ハンドル型のままにしておくため、デフォルトリテラルが ``Float`` インスタンス
+    # でないことを ``# type: ignore`` で許容する。
+    theta: qmc.Float = math.pi / 2,  # type: ignore[assignment]
+) -> qmc.Qubit:
     return qmc.rx(q, theta)
 
 
@@ -437,8 +444,10 @@ def controlled_increment_demo(
 ) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, "q")
     q[control_index] = qmc.x(q[control_index])
-    n = q.shape[0]
-    for k in qmc.range(n - 1):
+    # ``q.shape[0]`` は ``int | UInt`` 型なので、`n` パラメータ (狭い
+    # ``qmc.UInt``) に再代入すると型が広がる。ローカル名で受ける。
+    n_shape = q.shape[0]
+    for k in qmc.range(n_shape - 1):
         target_idx = n - 2 - k
         ctrl_main = q[control_index]
         prefix = q[0:target_idx]
@@ -470,7 +479,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 
 
 # %%
-def expect_error(label: str, exc_type: type, body) -> None:
+def expect_error(label: str, exc_type: type[BaseException], body) -> None:
     """``body``が``exc_type``の例外を投げることをassertします。
 
     ヘルパは*想定*の例外クラスだけをcatchします。それ以外の

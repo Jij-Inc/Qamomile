@@ -164,6 +164,11 @@ from scipy.sparse import SparseEfficiencyWarning
 # warning but replace the exact evolution with its Trotter approximation,
 # which would break the fidelity check below.)
 qiskit_unitary_circuit = qiskit_circuit.remove_final_measurements(inplace=False)
+# ``inplace=False`` ensures a fresh circuit is returned; the typeshed stub
+# declares the return as ``QuantumCircuit | None`` to cover the
+# ``inplace=True`` case, so assert here so ``Statevector.from_instruction``
+# below type-checks.
+assert qiskit_unitary_circuit is not None
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", category=SparseEfficiencyWarning)
     psi_qm = np.array(Statevector.from_instruction(qiskit_unitary_circuit).data)

@@ -534,12 +534,12 @@ class ArrayBase(Handle, Generic[T]):
         # ``a[overlap_idx]`` after ``b = a[inner_range]`` would silently
         # double-use the qubit ``b`` is also claiming.
         if (
-            isinstance(self, VectorView)
+            isinstance(self, VectorView)  # type: ignore[unreachable]
             and self.value.type.is_quantum()
             and self._slice_covered_indices is not None
             and len(indices) == 1
         ):
-            local_idx = _as_int_const(indices[0])
+            local_idx = _as_int_const(indices[0])  # type: ignore[unreachable]
             if local_idx is not None and 0 <= local_idx < len(
                 self._slice_covered_indices
             ):
@@ -816,9 +816,6 @@ class Vector(ArrayBase[T]):
 
     value: ArrayValue = dataclasses.field(default=None)  # type: ignore
     _shape: tuple[int | UInt] = dataclasses.field(default=(0,))
-    _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
-        default_factory=dict
-    )
 
     @overload
     def __getitem__(self, index: int) -> T: ...
@@ -996,7 +993,7 @@ class Vector(ArrayBase[T]):
         #     ``_slice_parent``; the view's own ``_consumed`` is also
         #     checked because a view may itself have been retired
         #     (e.g. by ``cast``).
-        self_root = self._slice_parent if isinstance(self, VectorView) else self
+        self_root = self._slice_parent if isinstance(self, VectorView) else self  # type: ignore[attr-defined,unreachable]
         if self_root._consumed and self_root.value.type.is_quantum():
             display_name = self_root.value.name or "array"
             raise QubitConsumedError(
@@ -1008,11 +1005,11 @@ class Vector(ArrayBase[T]):
                 first_use_location=self_root._consumed_by,
             )
         if (
-            isinstance(self, VectorView)
+            isinstance(self, VectorView)  # type: ignore[unreachable]
             and self._consumed
             and self.value.type.is_quantum()
         ):
-            display_name = self.value.name or "view"
+            display_name = self.value.name or "view"  # type: ignore[unreachable]
             raise QubitConsumedError(
                 f"Slice assignment LHS view '{display_name}' was "
                 f"already consumed by '{self._consumed_by}'.",
@@ -1171,11 +1168,11 @@ class Vector(ArrayBase[T]):
         #       the outer must reclaim them so it can still be
         #       returned to its own parent later.
         if (
-            isinstance(self, VectorView)
+            isinstance(self, VectorView)  # type: ignore[unreachable]
             and lhs_covered is not None
             and self_root.value.type.is_quantum()
         ):
-            for idx in lhs_covered:
+            for idx in lhs_covered:  # type: ignore[unreachable]
                 key = (f"const:{idx}",)
                 if self_root._borrowed_indices.get(key) is None:
                     self_root._borrowed_indices[key] = self
@@ -1486,9 +1483,6 @@ class Matrix(ArrayBase[T]):
 
     value: ArrayValue = dataclasses.field(default=None)  # type: ignore
     _shape: tuple[int | UInt, int | UInt] = dataclasses.field(default=(0, 0))
-    _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
-        default_factory=dict
-    )
 
     def __getitem__(self, index: tuple[int | UInt, int | UInt]) -> T:
         """Get element at the given (row, col) index."""
@@ -1529,9 +1523,6 @@ class Tensor(ArrayBase[T]):
 
     value: ArrayValue = dataclasses.field(default=None)  # type: ignore
     _shape: tuple[int | UInt, ...] = dataclasses.field(default_factory=tuple)
-    _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
-        default_factory=dict
-    )
 
     def __getitem__(self, index: tuple[int | UInt, ...]) -> T:
         """Get element at the given indices."""
