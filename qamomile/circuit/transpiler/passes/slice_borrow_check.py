@@ -81,11 +81,9 @@ from qamomile.circuit.ir.operation import (
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, CompOp
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
     ForOperation,
     HasNestedOps,
     IfOperation,
-    WhileOperation,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -465,8 +463,6 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         # that this pass does not model.
         if isinstance(op, ForOperation) and trip_count is not None and trip_count > 0:
             snapshot_kind = _SnapshotKind.FOR_STATIC_NONZERO
-        elif isinstance(op, (ForItemsOperation, WhileOperation, ForOperation)):
-            snapshot_kind = _SnapshotKind.UNSAFE_CONTROL_BODY
         else:
             snapshot_kind = _SnapshotKind.UNSAFE_CONTROL_BODY
 
