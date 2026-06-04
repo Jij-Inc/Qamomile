@@ -55,7 +55,7 @@
 # ```
 #
 # 上図の initialize($\vert v \rangle$)は、入力データに応じて量子状態を初期化するサブルーチンを表しています。
-# 量子状態を初期化する手法にはいくつかありますが、以降に示す実装では [Möttönen の振幅園コーディング](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/algorithm/mottonen-amplitude-encoding/) を用いています。
+# 量子状態を初期化する手法にはいくつかありますが、以降に示す実装では [Möttönen の振幅エンコーディング](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/algorithm/mottonen-amplitude-encoding/) を用いています。
 # [Pfeffer 2023](https://arxiv.org/abs/2301.13835) では古典的な行・列分解にヒントを得て、$d$ 次元配列に対して $d$ 個の1次元 QFT をテンソル積構造で並列実行することで、$M=(2^n)^d$ の配列に対して $\mathcal{O} (\log^2 (M)/d)$ の計算量を達成しました。
 # しかしこの手法は、各次元サイズが $N_i = 2^{n_i}$ でなければならないという制限がありました。
 # そこで、[Sampei et al. (2025)](https://pubs.rsc.org/en/content/articlelanding/2025/cp/d4cp04399e)ではこの制限を解消する手法を提案しました。
@@ -104,7 +104,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm import amplitude_encoding
-from qamomile.circuit.frontend.handle import Vector
+# from qamomile.circuit.frontend.handle import Vector  # unused
 from qamomile.circuit.stdlib.qft import QFT
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
@@ -153,6 +153,8 @@ def padding_array(array_2d: np.ndarray, num_x_target: int, num_y_target: int) ->
     array_2d_padding = np.pad(array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right)))
     return array_2d_padding
 
+Nqx = int(np.ceil(np.log2(Nx)))
+Nqy = int(np.ceil(np.log2(Ny)))
 Nx_target = 2 ** Nqx
 Ny_target = 2 ** Nqy
 f_padding = padding_array(f, Nx_target, Ny_target)
@@ -189,8 +191,6 @@ w2d = wx[:, None] * wy[None, :]
 # 窓関数の概形を描画してみましょう。
 
 # %%
-w2dmin = np.min(w2d)
-w2dmax = np.max(w2d)
 im3 = plt.pcolor(w2d, cmap="plasma")
 cbar = plt.colorbar(im3)
 cbar.set_label("Flat top function", fontsize=14)
@@ -208,8 +208,7 @@ plt.show()
 # ここで用いる量子ビット数は、$x$ 方向に3量子ビットと $y$ 方向に3量子ビットの、計6量子ビットとします。
 
 # %%
-Nqx = 3
-Nqy = 3
+# Nqx / Nqy are defined above from Nx / Ny
 
 def apply_partial_qft(qubits, start, length):
     qft_gate = QFT(length)
@@ -254,8 +253,8 @@ def compute_prob(result: SampleResult) -> np.ndarray:
     prob = np.zeros(f_padding.shape)
     total = sum(c for _, c in result.results)
     for bits, count in result.results:
-        kx = sum([2 ** i * bits[i] for i in range(Nqx)])
-        ky = sum([2 ** i * bits[i+Nqx] for i in range(Nqy)])
+        kx = sum(bits[i] << (Nqx - 1 - i) for i in range(Nqx))
+        ky = sum(bits[Nqx + i] << (Nqy - 1 - i) for i in range(Nqy))
         prob[kx, ky] += count / total
     return prob
 
