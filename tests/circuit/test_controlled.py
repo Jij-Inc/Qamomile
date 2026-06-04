@@ -3298,6 +3298,80 @@ class TestControlledMixedQuantumClassicalSignature:
         with pytest.raises(TypeError, match="array parameter"):
             build_block()
 
+    def test_vector_float_rejects_vector_qubit_handle(self):
+        """Vector[Float] controlled params reject Vector[Qubit] handles."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                bad_angles = qmc.qubit_array(2, "bad_angles")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=math.pi,
+                    angles=bad_angles,
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="quantum handle"):
+            build_block()
+
+    def test_scalar_float_rejects_qubit_handle(self):
+        """Float controlled params reject Qubit handles."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                bad_theta = qmc.qubit(name="bad_theta")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=bad_theta,
+                    angles=angles,
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="quantum handle"):
+            build_block()
+
+    def test_vector_float_rejects_scalar_float_handle(self):
+        """Vector[Float] controlled params reject scalar Float handles."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=theta,
+                    angles=theta,
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="array parameter"):
+            build_block()
+
 
 @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
 class TestControlledCompositeGateCrossSDK:

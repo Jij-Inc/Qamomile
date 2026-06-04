@@ -193,6 +193,76 @@ def _is_quantum_handle(value: Any) -> bool:
     return False
 
 
+def _validate_classical_param_handle(
+    param_name: str,
+    declared: Any,
+    param_value: Handle,
+) -> None:
+    """Validate that a handle matches a classical parameter declaration.
+
+    Args:
+        param_name (str): Wrapped-kernel parameter name, used in error
+            messages.
+        declared (Any): Resolved wrapped-kernel input annotation.
+        param_value (Handle): Caller-supplied handle value.
+
+    Raises:
+        TypeError: If the supplied handle is quantum or does not match the
+            declared scalar, array, or observable parameter kind.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if _is_quantum_handle(param_value):
+        raise TypeError(
+            f"control(): parameter {param_name!r} is declared as a "
+            f"classical parameter but received quantum handle "
+            f"{type(param_value).__name__}. Pass a classical handle instead."
+        )
+
+    if declared is Observable:
+        if not isinstance(param_value, Observable):
+            raise TypeError(
+                f"control(): parameter {param_name!r} is declared as "
+                f"Observable but received {type(param_value).__name__}. "
+                f"Pass an Observable handle from the enclosing qkernel."
+            )
+        return
+
+    element_type = _array_element_type(declared)
+    if element_type is not None:
+        if not isinstance(param_value, ArrayBase):
+            raise TypeError(
+                f"control(): parameter {param_name!r} is declared as "
+                f"an array parameter but received "
+                f"{type(param_value).__name__}. Pass the corresponding "
+                f"Vector handle from the caller kernel instead."
+            )
+        expected_type = UIntType() if element_type in (UInt, int) else FloatType()
+        if param_value.value.type != expected_type:
+            raise TypeError(
+                f"control(): parameter {param_name!r} expects "
+                f"{expected_type.label()} elements but received "
+                f"{param_value.value.type.label()} elements."
+            )
+        return
+
+    if _is_uint_param_decl(declared):
+        if not isinstance(param_value, UInt):
+            raise TypeError(
+                f"control(): parameter {param_name!r} is declared as "
+                f"UInt/int but received {type(param_value).__name__}. "
+                f"Pass a UInt handle instead."
+            )
+        return
+
+    if not isinstance(param_value, Float):
+        raise TypeError(
+            f"control(): parameter {param_name!r} is declared as "
+            f"Float/float but received {type(param_value).__name__}. "
+            f"Pass a Float handle instead."
+        )
+
+
 def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
     """Build the exec namespace used when compiling a synthesized wrapper.
 
@@ -431,10 +501,11 @@ class ControlledGate:
             if param_name not in params:
                 continue
             param_value = params[param_name]
+            declared = kernel_input_types[param_name]
             if isinstance(param_value, Handle):
+                _validate_classical_param_handle(param_name, declared, param_value)
                 operands.append(param_value.value)
                 continue
-            declared = kernel_input_types[param_name]
             if declared is Observable:
                 raise TypeError(
                     f"control(): parameter {param_name!r} is declared as "
@@ -704,6 +775,27 @@ class ControlledGate:
                 the same iteration order.
         """
         return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
+
+    def _validate_bound_classical_handles(
+        self,
+        sub_args_resolved: dict[str, Any],
+    ) -> None:
+        """Validate bound classical parameters before quantum filtering.
+
+        Args:
+            sub_args_resolved (dict[str, Any]): Bound sub-kernel
+                arguments in wrapped-kernel signature order.
+
+        Raises:
+            TypeError: If a classical parameter is bound to an
+                incompatible handle, including quantum handles that would
+                otherwise be collected as target operands.
+        """
+        kernel_input_types: dict[str, Any] = self._qkernel.input_types
+        for name, value in sub_args_resolved.items():
+            declared = kernel_input_types[name]
+            if _is_classical_param_decl(declared) and isinstance(value, Handle):
+                _validate_classical_param_handle(name, declared, value)
 
     # ``_validate_no_alias_or_overlap`` used to live here as an entry-
     # point alias / overlap check, mirroring the
@@ -1239,6 +1331,7 @@ class ControlledGate:
 
         controls, sub_positional = self._split_controls_by_count(args, num_controls)
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        self._validate_bound_classical_handles(sub_args_resolved)
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(
@@ -1542,6 +1635,7 @@ class ControlledGate:
         )
 
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        self._validate_bound_classical_handles(sub_args_resolved)
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(
