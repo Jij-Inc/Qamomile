@@ -39,7 +39,7 @@
 import math
 
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+from qamomile.circuit.transpiler.errors import EmitError, UnreturnedBorrowError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -582,6 +582,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | 6.4 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg control prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 single scalar control in symbolic mode | symbolic | `ValueError` |
+# | 6.7 controlled QFT over a sub-kernel `UInt` slice | concrete | `EmitError` |
 
 
 # %%
@@ -794,6 +795,55 @@ expect_error(
     "single scalar control in symbolic mode",
     ValueError,
     case_single_scalar_control_symbolic,
+)
+
+# %% [markdown]
+# (cg-6-7)=
+# ### 6.7 Controlled QFT over a sub-kernel `UInt` slice (concrete)
+#
+# A controlled sub-kernel may call `qmc.qft` / `qmc.iqft` on a
+# `Vector[Qubit]` argument whose size is known at the call site.
+# For example, `controlled_qft = qmc.control(apply_qft)` works
+# when `apply_qft(q)` applies QFT to all of `q`.
+#
+# The narrower pattern below is still unsupported: the wrapped
+# sub-kernel receives a classical `UInt` argument and uses it to
+# form a `q[:m]` slice before calling QFT. The controlled-U emitter
+# does not yet lower that parameterized sliced composite block into
+# a backend gate, so transpilation raises `EmitError`.
+#
+# Workaround: make the QFT/IQFT width come from the target vector's
+# concrete shape at the controlled call site. In practice, pass the
+# exact target view to a sub-kernel that applies QFT to the whole
+# vector argument, instead of passing a larger vector plus a separate
+# `UInt` slice length.
+
+
+# %%
+def case_controlled_qft_over_uint_slice() -> None:
+    @qmc.qkernel
+    def qft_prefix(q: qmc.Vector[qmc.Qubit], m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+        prefix = q[:m]
+        prefix = qmc.qft(prefix)
+        q[:m] = prefix
+        return q
+
+    @qmc.qkernel
+    def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n + 1, "q")
+        q[0] = qmc.x(q[0])
+        controlled_qft = qmc.control(qft_prefix)
+        q[0], targets = controlled_qft(q[0], q[1 : n + 1], n)
+        q[1 : n + 1] = targets
+        return qmc.measure(q)
+
+    transpiler.transpile(kernel, bindings={"n": 2})
+
+
+expect_error(
+    "controlled QFT over a sub-kernel UInt slice",
+    EmitError,
+    case_controlled_qft_over_uint_slice,
 )
 
 # %% [markdown]

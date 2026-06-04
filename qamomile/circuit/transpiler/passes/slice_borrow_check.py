@@ -692,6 +692,59 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         for k in to_remove:
             del state[k]
 
+    def _release_keys_for_view(
+        self, view_value: ArrayValue, state: State
+    ) -> list[BorrowKey]:
+        """Find state entries that a slice-assignment release should drop.
+
+        The normal release key is the view's own ``logical_id``.  A
+        nested full-slice handoff may leave the IR borrow state pointing
+        at the skipped outer view while the release operand is the inner
+        view that fully replaced it.  When concrete coverage proves that
+        both owners cover exactly the same root slots, release the stale
+        equivalent owner as well.
+
+        Args:
+            view_value (ArrayValue): Sliced view operand from
+                ``ReleaseSliceViewOperation``.
+            state (State): Current borrow-state map.
+
+        Returns:
+            list[BorrowKey]: State keys that should be removed.
+        """
+        target_logical_id = view_value.logical_id
+        release_keys = {
+            k
+            for k, owner in state.items()
+            if isinstance(owner, ArrayValue) and owner.logical_id == target_logical_id
+        }
+
+        target_coverage = self._collect_view_coverage(view_value)
+        if target_coverage is None:
+            return list(release_keys)
+
+        target_root = _root_of(view_value)
+        equivalent_owner_ids: set[str] = set()
+        for slot in target_coverage:
+            key = _const_key(target_root, slot)
+            owner = state.get(key)
+            if not isinstance(owner, ArrayValue):
+                continue
+            if owner.logical_id == target_logical_id:
+                continue
+            if _root_of(owner).logical_id != target_root.logical_id:
+                continue
+            if self._collect_view_coverage(owner) == target_coverage:
+                equivalent_owner_ids.add(owner.uuid)
+
+        if not equivalent_owner_ids:
+            return list(release_keys)
+
+        for k, owner in state.items():
+            if isinstance(owner, ArrayValue) and owner.uuid in equivalent_owner_ids:
+                release_keys.add(k)
+        return list(release_keys)
+
     def _handle_release(self, view_value: ValueBase, state: State) -> None:
         """Apply a slice-assignment release to ``state``.
 
@@ -725,12 +778,12 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         if not isinstance(view_value, ArrayValue):
             return
 
-        target_logical_id = view_value.logical_id
+        release_keys = self._release_keys_for_view(view_value, state)
         offenders = [
             k
             for _, snapshot in self._outer_snapshot_stack
-            for k, owner in snapshot.items()
-            if isinstance(owner, ArrayValue) and owner.logical_id == target_logical_id
+            for k in release_keys
+            if k in snapshot
         ]
         if offenders:
             raise SliceBorrowViolationError(
@@ -745,7 +798,8 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 f"control-flow region."
             )
 
-        self._release_by_owner_logical_id(target_logical_id, state)
+        for key in release_keys:
+            state.pop(key, None)
 
     def _guard_drain_against_outer_snapshot(
         self,
@@ -805,6 +859,42 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             f"Move the outer view's construction *inside* the body, "
             f"or rework the slicing so the body does not overlap the "
             f"outer view."
+        )
+
+    def _can_body_local_same_coverage_handoff(
+        self,
+        owner: ArrayValue,
+        keys: list[BorrowKey],
+    ) -> bool:
+        """Check whether a same-coverage handoff may rewrite body state.
+
+        Distinct-lineage same-coverage replacement is normally treated
+        as an implicit drain and is rejected inside control-flow bodies.
+        A statically non-zero ``For`` body is the narrow exception:
+        the body definitely executes at least once, and the rewrite is
+        used only while checking that simulated body.  The enclosing
+        state remains conservative after merge.
+
+        Args:
+            owner (ArrayValue): Existing owner that the body-local
+                handoff would replace.
+            keys (list[BorrowKey]): Exact state entries covered by the
+                owner and candidate.
+
+        Returns:
+            bool: ``True`` when every matching active snapshot is a
+                statically non-zero ``For`` body.
+        """
+        matching_kinds: list[str] = []
+        for kind, snapshot in self._outer_snapshot_stack:
+            for key in keys:
+                snapshot_owner = snapshot.get(key)
+                if isinstance(snapshot_owner, ArrayValue) and (
+                    snapshot_owner.uuid == owner.uuid
+                ):
+                    matching_kinds.append(kind)
+        return bool(matching_kinds) and all(
+            kind == _SnapshotKind.FOR_STATIC_NONZERO for kind in matching_kinds
         )
 
     # ------------------------------------------------------------------
@@ -941,6 +1031,23 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # slots can both appear as distinct ``logical_id``s with
                 # identical coverage because ``VectorView._nested_slice``
                 # flattens nested ``slice_of`` chains to the root.
+                refresh_keys = [_const_key(root, slot) for slot in other_full]
+                if self._can_body_local_same_coverage_handoff(other_view, refresh_keys):
+                    # In a statically non-zero loop body, a concrete
+                    # full-slice handoff is path-insensitive for the body
+                    # walk: the inner view fully replaces the outer for
+                    # every simulated iteration.  Keep the rewrite local
+                    # to ``body_state``; the outer merge stays
+                    # conservative, and a later top-level release can
+                    # clear the equivalent stale owner by coverage.
+                    for old_key in refresh_keys:
+                        existing = state.get(old_key)
+                        if (
+                            isinstance(existing, ArrayValue)
+                            and existing.uuid == other_view.uuid
+                        ):
+                            state[old_key] = av
+                    continue
                 self._guard_drain_against_outer_snapshot(
                     other_view, av, root, "same-coverage replacement"
                 )
@@ -1561,8 +1668,9 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
 
         Returns:
             int | None: The Python ``range`` trip count when all three
-                loop bounds are concrete and the step is non-zero;
-                otherwise ``None``.
+                loop bounds are concrete and the step is non-zero,
+                ``1`` as a positive sentinel when the exact count is
+                too large for ``len(range(...))``, otherwise ``None``.
         """
         if len(op.operands) < 3:
             return None
@@ -1571,7 +1679,11 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         step = self._const_int(op.operands[2])
         if start is None or stop is None or step is None or step == 0:
             return None
-        return len(range(start, stop, step))
+        loop_range = range(start, stop, step)
+        try:
+            return len(loop_range)
+        except OverflowError:
+            return 1 if loop_range else 0
 
     @staticmethod
     def _owner_root_uuid(owner: Owner) -> str | None:

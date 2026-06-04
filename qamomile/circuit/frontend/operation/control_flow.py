@@ -1,3 +1,4 @@
+import builtins
 import contextlib
 import copy
 import typing
@@ -161,6 +162,20 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
     elif isinstance(template_handle, Bit):
         return Bit(value=value)
     elif isinstance(template_handle, ArrayBase):
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        if isinstance(template_handle, VectorView):
+            assert isinstance(value, ArrayValue)
+            view = VectorView._wrap_unregistered(
+                parent=template_handle._slice_parent,
+                sliced_av=value,
+                length=template_handle._shape[0],
+                start_uint=template_handle._slice_start,
+                step_uint=template_handle._slice_step,
+            )
+            view._slice_covered_indices = template_handle._slice_covered_indices
+            view._slice_outer_view = template_handle._slice_outer_view
+            return view
         cls = type(template_handle)
         assert isinstance(value, ArrayValue)
         return cls._create_from_value(value=value, shape=template_handle._shape)
@@ -228,6 +243,66 @@ def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
     raise TypeError(f"Cannot convert {type(val)} to IR Value")
 
 
+def _const_int_for_loop_bound(val: typing.Any) -> int | None:
+    """Return a concrete loop-bound integer when available.
+
+    Args:
+        val: Python integer, ``UInt`` handle, or IR ``Value`` used as a
+            ``qmc.range`` bound.
+
+    Returns:
+        Concrete ``int`` when ``val`` is statically known, otherwise
+        ``None``.
+    """
+    if isinstance(val, bool):
+        return int(val)
+    if isinstance(val, int):
+        return val
+    if isinstance(val, UInt):
+        const_value = val.value.get_const()
+    elif isinstance(val, Value):
+        const_value = val.get_const()
+    else:
+        return None
+    if isinstance(const_value, bool):
+        return int(const_value)
+    if isinstance(const_value, int):
+        return const_value
+    return None
+
+
+def should_trace_for_loop(
+    start: typing.Any, stop: typing.Any, step: typing.Any
+) -> bool:
+    """Decide whether a ``qmc.range`` body must be traced.
+
+    The frontend executes loop bodies once to capture a ``ForOperation``.
+    When all bounds are concrete and Python's ``range`` would execute
+    zero times, tracing the body would incorrectly leak borrow /
+    destructive-consume state into the enclosing scope.  Symbolic or
+    invalid bounds stay conservative and trace the body so the normal
+    compiler validation path reports any errors.
+
+    Args:
+        start: Loop start bound.
+        stop: Loop stop bound.
+        step: Loop step bound.
+
+    Returns:
+        ``False`` only for statically-known zero-trip loops; ``True``
+        otherwise.
+    """
+    start_int = _const_int_for_loop_bound(start)
+    stop_int = _const_int_for_loop_bound(stop)
+    step_int = _const_int_for_loop_bound(step)
+    if start_int is None or stop_int is None or step_int is None:
+        return True
+    try:
+        return bool(builtins.range(start_int, stop_int, step_int))
+    except ValueError:
+        return True
+
+
 def _create_phi_for_values(
     condition_value: Value,
     true_val: typing.Any,
@@ -263,6 +338,9 @@ def _create_phi_for_values(
             type=true_v.type,
             name=f"{true_v.name}_phi_{phi_index}",
             shape=true_v.shape,
+            slice_of=true_v.slice_of,
+            slice_start=true_v.slice_start,
+            slice_step=true_v.slice_step,
         )
     else:
         phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi_{phi_index}")
@@ -377,7 +455,9 @@ def emit_if(
             f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
         )
     merged_results = []
-    for true_val, false_val in zip(true_result, false_result, strict=True):
+    for original_val, true_val, false_val in zip(
+        variables, true_result, false_result, strict=True
+    ):
         if isinstance(true_val, (Handle, Value)):
             if not isinstance(false_val, (Handle, Value)):
                 raise TypeError(
@@ -393,11 +473,13 @@ def emit_if(
             # (e.g. ``j_phi_4``) for read-only scalar loop variables,
             # which downstream emit-time loop unrolling cannot bind.
             #
-            # Array handles (Vector/Matrix/Tensor) are excluded from this
-            # optimization: their `.value` (ArrayValue) is not updated
-            # when elements are written via ``arr[i] = ...``, so identity
-            # of `.value` doesn't reliably indicate "unchanged". For arrays
-            # we conservatively keep the phi.
+            # Array handles normally need a phi because whole-array ops
+            # can return a fresh ``ArrayValue``.  When both branches
+            # still point at the exact same ``ArrayValue`` and neither
+            # branch consumed it, however, the array handle itself did
+            # not change.  Reuse the original outer handle so parent
+            # borrow tables (for live slice views captured outside the
+            # branch) are not replaced by a phi-root with empty state.
             from qamomile.circuit.frontend.handle.array import ArrayBase
 
             true_v = true_val.value if hasattr(true_val, "value") else true_val
@@ -416,6 +498,16 @@ def emit_if(
                 and not false_consumed
             ):
                 merged_results.append(true_val)
+                continue
+            if (
+                is_array_handle
+                and isinstance(true_v, ArrayValue)
+                and isinstance(false_v, ArrayValue)
+                and true_v is false_v
+                and not true_consumed
+                and not false_consumed
+            ):
+                merged_results.append(original_val)
                 continue
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op

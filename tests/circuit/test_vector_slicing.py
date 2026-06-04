@@ -682,6 +682,63 @@ class TestVectorViewAsKernelArgument:
         ]
         assert applied == [0, 2, 4]
 
+    def test_view_argument_full_reslice_return_stays_a_view(self):
+        """A sub-kernel may return a full re-slice of its view argument."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def reslice_identity(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            view = q[0 : q.shape[0]]
+            return view
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            evens = reslice_identity(evens)
+            evens = qmc.h(evens)
+            q[0:4:2] = evens
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        applied = [
+            qc.qubits.index(inst.qubits[0])
+            for inst in qc.data
+            if inst.operation.name == "h"
+        ]
+        assert applied == [0, 2]
+
+    def test_view_argument_mutate_then_full_reslice_targets_parent_slots(self):
+        """A full re-slice return preserves in-callee operations on the view."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def h_then_reslice(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.h(q)
+            return q[:]
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            evens = h_then_reslice(evens)
+            q[0:4:2] = evens
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        applied = [
+            qc.qubits.index(inst.qubits[0])
+            for inst in qc.data
+            if inst.operation.name == "h"
+        ]
+        assert applied == [0, 2]
+
     @pytest.mark.parametrize("n", [4, 6, 8])
     def test_two_qubit_subroutine_via_view_pair(self, n):
         """Pair subroutine across ``q[0::2]``/``q[1::2]`` produces brick-wall CX."""
@@ -1082,6 +1139,189 @@ class TestSameSliceVersionRefresh:
         executable = QiskitTranspiler().transpile(circuit, bindings={"repetitions": 2})
 
         assert executable.get_first_circuit().num_qubits == 3
+
+    def test_runtime_if_preserves_slice_view_metadata(self):
+        """Runtime branch merge keeps refreshed slice metadata assignable."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            controls = q[:1]
+            flag = qmc.measure(q[2])
+            if flag:
+                controls = qmc.x(controls)
+            q[:1] = controls
+            return qmc.measure(q[:2])
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert executable.get_first_circuit().num_qubits == 3
+
+    def test_zero_trip_loop_does_not_trace_destructive_slice_body(self):
+        """Literal zero-trip loops do not leak skipped destructive slice use."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            for _ in qmc.range(0):
+                _ = qmc.measure(q[1::2])
+            return qmc.measure(q)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert executable.get_first_circuit().num_qubits == 4
+
+    def test_bound_zero_loop_does_not_trace_destructive_slice_body(self):
+        """Bound zero-trip loops do not leak skipped destructive slice use."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit(repetitions: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            for _ in qmc.range(repetitions):
+                _ = qmc.measure(q[1::2])
+            return qmc.measure(q)
+
+        executable = QiskitTranspiler().transpile(circuit, bindings={"repetitions": 0})
+
+        assert executable.get_first_circuit().num_qubits == 4
+
+    def test_static_loop_nested_full_slice_refresh_transpiles(self):
+        """Static non-zero loops may hand off a full nested slice refresh."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0::2]
+            for _ in qmc.range(1):
+                evens = evens[:]
+                evens[0] = qmc.h(evens[0])
+            q[0::2] = evens
+            return qmc.measure(q)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert executable.get_first_circuit().num_qubits == 4
+
+    def test_static_loop_nested_full_slice_release_allows_direct_access(self):
+        """Full nested-slice release clears stale IR owners by coverage."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0::2]
+            for _ in qmc.range(1):
+                evens = evens[:]
+                evens[0] = qmc.h(evens[0])
+            q[0::2] = evens
+            q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert executable.get_first_circuit().num_qubits == 4
+
+    def test_static_loop_nested_full_slice_marker_only_transpiles(self):
+        """Marker-only full-slice refresh loops are stripped cleanly."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0::2]
+            for _ in qmc.range(1):
+                evens = evens[:]
+            q[0::2] = evens
+            return qmc.measure(q)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert executable.get_first_circuit().num_qubits == 4
+
+    def test_skipped_outer_view_is_consumed_after_full_slice_handoff(self):
+        """Direct root return retires the skipped outer view."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            outer = q[0::2]
+            inner = outer[:]
+            q[0::2] = inner
+            outer[0] = qmc.h(outer[0])
+            return qmc.measure(q)
+
+        with pytest.raises(QubitConsumedError, match="already consumed"):
+            _ = circuit.block
+
+    def test_multilevel_full_slice_handoff_retires_all_skipped_outers(self):
+        """Direct root return retires every skipped full-slice ancestor."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            outer = q[0::2]
+            middle = outer[:]
+            inner = middle[:]
+            q[0::2] = inner
+            outer[0] = qmc.h(outer[0])
+            return qmc.measure(q)
+
+        with pytest.raises(QubitConsumedError, match="already consumed"):
+            _ = circuit.block
+
+    def test_partial_ancestor_nested_handoff_stays_rejected(self):
+        """Root direct return cannot skip a wider outer ancestor."""
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(6, "q")
+            outer = q[0::2]
+            middle = outer[1:]
+            inner = middle[:]
+            q[2::2] = inner
+            return qmc.measure(q)
+
+        with pytest.raises(AffineTypeError, match="immediate outer view"):
+            _ = circuit.block
+
+    def test_runtime_if_nested_full_slice_handoff_stays_rejected(self):
+        """Branch-dependent nested full-slice handoff stays unsafe."""
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0::2]
+            flag = qmc.measure(q[3])
+            if flag:
+                evens = evens[:]
+                evens[0] = qmc.h(evens[0])
+            q[0::2] = evens
+            return qmc.measure(q[:3])
+
+        with pytest.raises(QubitBorrowConflictError):
+            _ = circuit.block
+
+    def test_huge_static_loop_bound_does_not_overflow_trace_guard(self):
+        """Static loop trace guard handles ranges larger than ssize_t."""
+        from qamomile.circuit.frontend.operation.control_flow import (
+            should_trace_for_loop,
+        )
+
+        assert should_trace_for_loop(0, 10**100, 1) is True
 
     def test_concrete_forward_refresh_updates_existing_owner(self):
         """A newer concrete same-slice version replaces the old owner."""
