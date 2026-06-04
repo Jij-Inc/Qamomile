@@ -4,7 +4,7 @@ The kernel prepares ``|bits>`` from ``|0>^n`` via ``Rx(pi * bits[i])`` on each
 qubit.  Sampling must yield exactly the prepared bit string on every shot, and
 the expectation value of any diagonal Pauli-Z Hamiltonian must match the
 analytical eigenvalue at ``|bits>``.  We pin both paths down on Qiskit,
-QURI Parts, and CUDA-Q so that any backend-specific Rx parameter or
+QURI Parts, and CUDA-Q so that any engine-specific Rx parameter or
 measurement-readout bug surfaces here.
 """
 
@@ -16,6 +16,7 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.state_preparation import computational_basis_state
+from tests.engine_cases import SDK_ENGINES, EngineCase
 
 
 @qmc.qkernel
@@ -39,30 +40,6 @@ def _cb_expval_kernel(
     q = qmc.qubit_array(n, name="q")
     q = computational_basis_state(q, bits)
     return qmc.expval(q, hamiltonian)
-
-
-def _quri_parts_transpiler():
-    """Return a ``QuriPartsTranspiler`` or skip the test if unavailable."""
-    pytest.importorskip("quri_parts.qulacs")
-    from qamomile.quri_parts import QuriPartsTranspiler
-
-    return QuriPartsTranspiler()
-
-
-def _cudaq_transpiler():
-    """Return a ``CudaqTranspiler`` or skip the test if unavailable."""
-    pytest.importorskip("cudaq")
-    from qamomile.cudaq import CudaqTranspiler
-
-    return CudaqTranspiler()
-
-
-def _qiskit_transpiler():
-    """Return a ``QiskitTranspiler`` or skip the test if unavailable."""
-    pytest.importorskip("qiskit")
-    from qamomile.qiskit import QiskitTranspiler
-
-    return QiskitTranspiler()
 
 
 def _random_bits(rng: np.random.Generator, n: int) -> list[int]:
@@ -141,33 +118,16 @@ _BOUNDARY_SIZES = [1, 3, 4]
 
 
 class TestComputationalBasisStateSample:
-    """Deterministic sampling: |bits> sampled with probability 1 on every backend."""
+    """Deterministic sampling: |bits> sampled with probability 1 on every engine."""
 
+    @pytest.mark.parametrize("engine", SDK_ENGINES)
     @pytest.mark.parametrize("n", _SIZES)
     @pytest.mark.parametrize("seed", _SEEDS)
-    def test_qiskit(self, n: int, seed: int) -> None:
+    def test_compile_time_bits(self, engine: EngineCase, n: int, seed: int) -> None:
         rng = np.random.default_rng(seed)
         bits = _random_bits(rng, n)
         shots = 64
-        results = _sample_compile_time(_qiskit_transpiler(), n, bits, shots)
-        _assert_deterministic_sample(results, bits, shots)
-
-    @pytest.mark.parametrize("n", _SIZES)
-    @pytest.mark.parametrize("seed", _SEEDS)
-    def test_quri_parts(self, n: int, seed: int) -> None:
-        rng = np.random.default_rng(seed)
-        bits = _random_bits(rng, n)
-        shots = 64
-        results = _sample_compile_time(_quri_parts_transpiler(), n, bits, shots)
-        _assert_deterministic_sample(results, bits, shots)
-
-    @pytest.mark.parametrize("n", _SIZES)
-    @pytest.mark.parametrize("seed", _SEEDS)
-    def test_cudaq(self, n: int, seed: int) -> None:
-        rng = np.random.default_rng(seed)
-        bits = _random_bits(rng, n)
-        shots = 64
-        results = _sample_compile_time(_cudaq_transpiler(), n, bits, shots)
+        results = _sample_compile_time(engine.transpiler(), n, bits, shots)
         _assert_deterministic_sample(results, bits, shots)
 
 
@@ -180,31 +140,14 @@ class TestComputationalBasisStateRuntimeBits:
     runtime binding still produces the deterministic outcome.
     """
 
+    @pytest.mark.parametrize("engine", SDK_ENGINES)
     @pytest.mark.parametrize("n", _SIZES)
     @pytest.mark.parametrize("seed", _SEEDS)
-    def test_qiskit(self, n: int, seed: int) -> None:
+    def test_runtime_bits(self, engine: EngineCase, n: int, seed: int) -> None:
         rng = np.random.default_rng(seed)
         bits = _random_bits(rng, n)
         shots = 64
-        results = _sample_runtime_bits(_qiskit_transpiler(), n, bits, shots)
-        _assert_deterministic_sample(results, bits, shots)
-
-    @pytest.mark.parametrize("n", _SIZES)
-    @pytest.mark.parametrize("seed", _SEEDS)
-    def test_quri_parts(self, n: int, seed: int) -> None:
-        rng = np.random.default_rng(seed)
-        bits = _random_bits(rng, n)
-        shots = 64
-        results = _sample_runtime_bits(_quri_parts_transpiler(), n, bits, shots)
-        _assert_deterministic_sample(results, bits, shots)
-
-    @pytest.mark.parametrize("n", _SIZES)
-    @pytest.mark.parametrize("seed", _SEEDS)
-    def test_cudaq(self, n: int, seed: int) -> None:
-        rng = np.random.default_rng(seed)
-        bits = _random_bits(rng, n)
-        shots = 64
-        results = _sample_runtime_bits(_cudaq_transpiler(), n, bits, shots)
+        results = _sample_runtime_bits(engine.transpiler(), n, bits, shots)
         _assert_deterministic_sample(results, bits, shots)
 
 
@@ -213,72 +156,32 @@ class TestComputationalBasisStateExpval:
 
     _TOLERANCE = 1e-8
 
+    @pytest.mark.parametrize("engine", SDK_ENGINES)
     @pytest.mark.parametrize("n", _SIZES)
     @pytest.mark.parametrize("seed", _SEEDS)
-    def test_qiskit(self, n: int, seed: int) -> None:
+    def test_compile_time_bits(self, engine: EngineCase, n: int, seed: int) -> None:
         rng = np.random.default_rng(seed)
         bits = _random_bits(rng, n)
         coeffs = rng.uniform(-1.0, 1.0, size=n).tolist()
         H = _z_hamiltonian(coeffs)
         expected = _exact_z_expval(coeffs, bits)
 
-        observed = _expval_compile_time(_qiskit_transpiler(), n, bits, H)
-        assert abs(observed - expected) < self._TOLERANCE, (
-            f"qiskit expval={observed}, expected={expected}"
-        )
-
-    @pytest.mark.parametrize("n", _SIZES)
-    @pytest.mark.parametrize("seed", _SEEDS)
-    def test_quri_parts(self, n: int, seed: int) -> None:
-        rng = np.random.default_rng(seed)
-        bits = _random_bits(rng, n)
-        coeffs = rng.uniform(-1.0, 1.0, size=n).tolist()
-        H = _z_hamiltonian(coeffs)
-        expected = _exact_z_expval(coeffs, bits)
-
-        observed = _expval_compile_time(_quri_parts_transpiler(), n, bits, H)
-        assert abs(observed - expected) < self._TOLERANCE, (
-            f"quri_parts expval={observed}, expected={expected}"
-        )
-
-    @pytest.mark.parametrize("n", _SIZES)
-    @pytest.mark.parametrize("seed", _SEEDS)
-    def test_cudaq(self, n: int, seed: int) -> None:
-        rng = np.random.default_rng(seed)
-        bits = _random_bits(rng, n)
-        coeffs = rng.uniform(-1.0, 1.0, size=n).tolist()
-        H = _z_hamiltonian(coeffs)
-        expected = _exact_z_expval(coeffs, bits)
-
-        observed = _expval_compile_time(_cudaq_transpiler(), n, bits, H)
-        assert abs(observed - expected) < self._TOLERANCE, (
-            f"cudaq expval={observed}, expected={expected}"
+        observed = _expval_compile_time(engine.transpiler(), n, bits, H)
+        assert abs(observed - expected) < max(self._TOLERANCE, engine.expval_atol), (
+            f"{engine.name} expval={observed}, expected={expected}"
         )
 
 
 class TestComputationalBasisStateBoundary:
     """All-zero and all-one bit patterns: identity preparation and full flip."""
 
+    @pytest.mark.parametrize("engine", SDK_ENGINES)
     @pytest.mark.parametrize("n", _BOUNDARY_SIZES)
     @pytest.mark.parametrize("pattern", ["all_zero", "all_one"])
-    def test_qiskit(self, n: int, pattern: str) -> None:
+    def test_compile_time_bits(
+        self, engine: EngineCase, n: int, pattern: str
+    ) -> None:
         bits = [0] * n if pattern == "all_zero" else [1] * n
         shots = 32
-        results = _sample_compile_time(_qiskit_transpiler(), n, bits, shots)
-        _assert_deterministic_sample(results, bits, shots)
-
-    @pytest.mark.parametrize("n", _BOUNDARY_SIZES)
-    @pytest.mark.parametrize("pattern", ["all_zero", "all_one"])
-    def test_quri_parts(self, n: int, pattern: str) -> None:
-        bits = [0] * n if pattern == "all_zero" else [1] * n
-        shots = 32
-        results = _sample_compile_time(_quri_parts_transpiler(), n, bits, shots)
-        _assert_deterministic_sample(results, bits, shots)
-
-    @pytest.mark.parametrize("n", _BOUNDARY_SIZES)
-    @pytest.mark.parametrize("pattern", ["all_zero", "all_one"])
-    def test_cudaq(self, n: int, pattern: str) -> None:
-        bits = [0] * n if pattern == "all_zero" else [1] * n
-        shots = 32
-        results = _sample_compile_time(_cudaq_transpiler(), n, bits, shots)
+        results = _sample_compile_time(engine.transpiler(), n, bits, shots)
         _assert_deterministic_sample(results, bits, shots)
