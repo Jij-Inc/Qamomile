@@ -164,7 +164,10 @@ qaoa_ansatz.draw(
 from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
 
 transpiler = QuriPartsTranspiler()
-executor = QuriPartsExecutor()
+# Passing a `seed` makes the Qulacs sampler reproducible: two `sample(...)`
+# calls with the same seed and circuit return identical shot counts. Omit it
+# (or pass `seed=None`) for non-deterministic sampling.
+executor = QuriPartsExecutor(seed=42)
 
 executable = transpiler.transpile(
     qaoa_ansatz,
@@ -183,7 +186,9 @@ executable = transpiler.transpile(
 # We can confirm that with `type(...)` and the parameter count, then inspect the circuit directly with QURI Parts' built-in `draw_circuit`.
 
 # %%
-from quri_parts.circuit.utils.circuit_drawer import draw_circuit
+from quri_parts.circuit.utils.circuit_drawer import (  # type: ignore[import-not-found]
+    draw_circuit,
+)
 
 quri_circuit = executable.get_first_circuit()
 assert quri_circuit is not None  # transpile() always emits one quantum segment here
@@ -273,8 +278,8 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# The Qulacs sampler used inside `QuriPartsExecutor` does not seed its per-shot RNG, so the optimization trajectory and final energy will vary slightly across runs.
-# The optimizer should still converge close to the ground-state energy of $H_C$ on this 5-node graph.
+# Because the `QuriPartsExecutor` above was constructed with `seed=42`, the Qulacs sampler is reproducible, so re-running this page yields the same optimization trajectory and final energy; drop the `seed` argument to recover the original non-deterministic behavior.
+# The optimizer should converge close to the ground-state energy of $H_C$ on this 5-node graph.
 # The optimized parameters from this run (`opt_gammas`, `opt_betas`) are reused throughout the rest of this page.
 
 # %% [markdown]
@@ -385,8 +390,13 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 # This confirms that the swapped sampler is actually being used.
 
 # %%
-from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
-from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
+from quri_parts.circuit.noise import (  # type: ignore[import-not-found]
+    DepolarizingNoise,
+    NoiseModel,
+)
+from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
+    create_qulacs_noisesimulator_sampler,
+)
 
 noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)])
 noisy_sampler = create_qulacs_noisesimulator_sampler(noise_model)

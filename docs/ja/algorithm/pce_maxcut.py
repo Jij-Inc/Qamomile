@@ -41,7 +41,7 @@ from qamomile.circuit.algorithm.basic import (
     ry_layer,
     rz_layer,
 )
-from qamomile.optimization.binary_model import BinaryModel
+from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet
 from qamomile.optimization.pce import PCEConverter
 from qamomile.qiskit import QiskitTranspiler
 
@@ -343,6 +343,11 @@ plt.show()
 # %%
 final_expectations = measure_expectations(list(res.x))
 sampleset = converter.decode(final_expectations)
+# ``PCEConverter`` を ``BinaryModel`` (上の ``ising_model``) から構築したので、
+# ``decode`` は ``BinarySampleSet`` を返す。型上は ``BinarySampleSet | SampleSet``
+# の Union (converter は OMMX ``Instance`` も受け入れるため) なので、ここで
+# narrow して下の ``.vartype`` / ``.energy`` / ``.samples`` を通す。
+assert isinstance(sampleset, BinarySampleSet)
 
 print("Final per-variable expectations:")
 for i, e in enumerate(final_expectations):
