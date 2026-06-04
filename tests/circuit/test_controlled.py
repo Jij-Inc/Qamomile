@@ -1070,6 +1070,19 @@ _BUILTIN_BACKENDS = [
     ),
 ]
 
+_QISKIT_CUDAQ_BACKENDS = [
+    pytest.param(
+        _qiskit_transpiler_factory,
+        id="qiskit",
+        marks=pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed"),
+    ),
+    pytest.param(
+        _cudaq_transpiler_factory,
+        id="cudaq",
+        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+    ),
+]
+
 
 # -- Acceptance: control() factory takes built-ins -------------------------
 
@@ -2618,6 +2631,63 @@ def _nested_ccx_on_triplet(
     return q0, q1, q2
 
 
+@qmc.qkernel
+def _nested_cx_on_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply an inner controlled-X gate to a two-qubit pair."""
+    cx = qmc.control(qmc.x, num_controls=1)
+    q0, q1 = cx(q0, q1)
+    return q0, q1
+
+
+@qmc.qkernel
+def _double_nested_ccx_on_triplet(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    q2: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply a two-level nested controlled-X to a three-qubit triplet."""
+    ccx = qmc.control(_nested_cx_on_pair, num_controls=1)
+    q0, q1, q2 = ccx(q0, q1, q2)
+    return q0, q1, q2
+
+
+def _make_deep_nested_control_circuit(
+    initial_one_indices: tuple[int, ...],
+) -> Any:
+    """Create a circuit with three nested controlled layers.
+
+    Args:
+        initial_one_indices (tuple[int, ...]): Qubit indices to initialize
+            to ``|1>`` before applying the nested controlled operation.
+
+    Returns:
+        Any: A qkernel that measures the four-qubit output state.
+    """
+
+    def _prepare(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply compile-time selected X gates to the test register."""
+        if 0 in initial_one_indices:
+            qs[0] = qmc.x(qs[0])
+        if 1 in initial_one_indices:
+            qs[1] = qmc.x(qs[1])
+        if 2 in initial_one_indices:
+            qs[2] = qmc.x(qs[2])
+        return qs
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(4, "qs")
+        qs = _prepare(qs)
+        cccx = qmc.control(_double_nested_ccx_on_triplet, num_controls=1)
+        qs[0], qs[1], qs[2], qs[3] = cccx(qs[0], qs[1], qs[2], qs[3])
+        return qmc.measure(qs)
+
+    return circuit
+
+
 def _counts_dict(results):
     counts: dict[Any, int] = {}
     for value, count in results:
@@ -3130,19 +3200,88 @@ class TestNestedControlledUQiskit:
         assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
 
 
-class TestControlledVectorSubArgQuriPartsLoudError:
-    """QURI Parts rejects unsupported multi-target controlled blocks.
+@pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_BACKENDS)
+class TestDeepNestedControlledUQiskitCudaq:
+    """Positive checks for deeply nested controls on Qiskit and CUDA-Q."""
+
+    @pytest.mark.parametrize(
+        ("initial_one_indices", "expected"),
+        [
+            ((0, 1, 2), (1, 1, 1, 1)),
+            ((1, 2), (0, 1, 1, 0)),
+            ((0, 2), (1, 0, 1, 0)),
+            ((0, 1), (1, 1, 0, 0)),
+        ],
+    )
+    def test_three_level_nested_control_samples(
+        self,
+        transpiler_factory,
+        initial_one_indices,
+        expected,
+    ):
+        """Qiskit and CUDA-Q preserve three nested controlled layers."""
+        circuit = _make_deep_nested_control_circuit(initial_one_indices)
+        t = transpiler_factory()
+        exe = t.transpile(circuit)
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {expected: 128}
+
+
+class TestNestedControlledUQuriParts:
+    """QURI Parts positive checks for recursive controlled fallback."""
+
+    @pytest.mark.parametrize(
+        ("initial_one_indices", "expected"),
+        [
+            ((0, 1), (1, 1, 1)),
+            ((1,), (0, 1, 0)),
+            ((0,), (1, 0, 0)),
+        ],
+    )
+    def test_two_level_nested_control_samples(
+        self,
+        initial_one_indices,
+        expected,
+    ):
+        """QURI Parts flattens nested controls that fit existing primitives."""
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        def _prepare(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            """Apply compile-time selected X gates to the test register."""
+            if 0 in initial_one_indices:
+                qs[0] = qmc.x(qs[0])
+            if 1 in initial_one_indices:
+                qs[1] = qmc.x(qs[1])
+            return qs
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs = _prepare(qs)
+            ccx = qmc.control(_nested_cx_on_pair, num_controls=1)
+            qs[0], qs[1], qs[2] = ccx(qs[0], qs[1], qs[2])
+            return qmc.measure(qs)
+
+        t = QuriPartsTranspiler()
+        exe = t.transpile(circuit)
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {expected: 128}
+
+
+class TestControlledVectorSubArgQuriParts:
+    """QURI Parts recursively emits supported multi-target controlled blocks.
 
     QURI Parts cannot convert a sub-circuit to a reusable controlled
-    custom-gate object. Its backend-specific fallback intentionally
-    avoids dense unitary synthesis, so multi-target custom blocks must
-    fail loudly instead of falling back to the base per-gate decomposer,
-    whose target-index mapping is intentionally too narrow for this
-    shape.
+    custom-gate object. Its backend-specific fallback therefore walks
+    supported primitive gate bodies itself, preserving each inner gate's
+    target mapping instead of delegating to the shared single-target
+    fallback.
     """
 
-    def test_quri_parts_rejects_multi_target_custom_gate(self):
-        """``controlled(vector_sub)`` on QURI Parts raises a clear error."""
+    def test_quri_parts_emits_supported_multi_target_custom_gate(self):
+        """``controlled(vector_sub)`` runs when each inner gate is supported."""
         pytest.importorskip("quri_parts")
         from qamomile.quri_parts import QuriPartsTranspiler
 
@@ -3161,8 +3300,11 @@ class TestControlledVectorSubArgQuriPartsLoudError:
             return qmc.measure(qs)
 
         t = QuriPartsTranspiler()
-        with pytest.raises(EmitError, match="multi-target inner block"):
-            t.transpile(kernel)
+        exe = t.transpile(kernel)
+        result = exe.sample(t.executor(), shots=128).result()
+        counts = _counts_dict(result.results)
+        assert sum(counts.values()) == 128
+        assert all(value[0] == 1 for value in counts)
 
 
 class TestControlledVectorSubArgQiskitEquivalence:
