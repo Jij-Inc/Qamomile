@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Build script for Qamomile Documentation
-# Alternative to Makefile for non-Make environments
 
 set -e  # Exit on error
 
@@ -9,8 +8,13 @@ cd "$(dirname "$0")"
 
 # Languages and target directories
 LANGS=(en ja)
-# integration is excluded because those notebooks may require API keys
-# and can't be automatically synced/executed.
+# Sections whose .py sources are synced to .ipynb. This includes integration
+# because jupytext sync only rewrites cell sources and does not execute code.
+SYNC_DIRS=(tutorial algorithm usage integration)
+# Sections whose notebooks are executed by bulk execute/sync-build targets.
+# integration is excluded because some pages currently require credentials;
+# docs tests cover integration pages with file-level skips for credentialed
+# notebooks.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
 TARGET_DIRS=(tutorial algorithm usage)
 
@@ -31,24 +35,25 @@ show_help() {
     echo "Usage: ./build.sh [command]"
     echo ""
     echo "Available commands:"
-    echo "  build          - Build both English and Japanese documentation (no sync)"
-    echo "  build-en       - Build English documentation only (no sync)"
-    echo "  build-ja       - Build Japanese documentation only (no sync)"
-    echo "  sync           - Convert all .py files to .ipynb (both languages)"
-    echo "  sync-en        - Convert English .py files to .ipynb"
-    echo "  sync-ja        - Convert Japanese .py files to .ipynb"
-    echo "  execute        - Execute all .ipynb notebooks (both languages)"
-    echo "  execute-en     - Execute English .ipynb notebooks"
-    echo "  execute-ja     - Execute Japanese .ipynb notebooks"
-    echo "  sync-build     - Sync, execute, and build both languages"
-    echo "  sync-build-en  - Sync, execute, and build English documentation"
-    echo "  sync-build-ja  - Sync, execute, and build Japanese documentation"
-    echo "  clean          - Remove generated .ipynb files and build outputs"
-    echo "  clean-all      - Remove everything including execution cache"
-    echo "  serve-en       - Sync, build (if needed), and serve English docs (port 8000)"
-    echo "  serve-ja       - Sync, build (if needed), and serve Japanese docs (port 8000)"
-    echo "  fresh-en       - Clean, sync, rebuild, and serve English docs"
-    echo "  fresh-ja       - Clean, sync, rebuild, and serve Japanese docs"
+    echo "  build          - Build both languages (no source-tree sync or notebook execution)"
+    echo "  build-en       - Build English only (no source-tree sync or notebook execution)"
+    echo "  build-ja       - Build Japanese only (no source-tree sync or notebook execution)"
+    echo "  sync           - Convert .py files under SYNC_DIRS to .ipynb (both languages)"
+    echo "  sync-en        - Convert English .py files under SYNC_DIRS to .ipynb"
+    echo "  sync-ja        - Convert Japanese .py files under SYNC_DIRS to .ipynb"
+    echo "  execute        - Execute bulk-runnable .ipynb notebooks (both languages)"
+    echo "  execute-en     - Execute English bulk-runnable .ipynb notebooks"
+    echo "  execute-ja     - Execute Japanese bulk-runnable .ipynb notebooks"
+    echo "  sync-build     - Sync, execute bulk-runnable notebooks, and build both languages"
+    echo "  sync-build-en  - Sync, execute bulk-runnable notebooks, and build English documentation"
+    echo "  sync-build-ja  - Sync, execute bulk-runnable notebooks, and build Japanese documentation"
+    echo "  page-build     - Sync, execute, and build one or more page sources"
+    echo "  clean          - Remove generated target notebooks, copied API docs, and build outputs"
+    echo "  clean-all      - Run clean and remove execution cache"
+    echo "  serve-en       - Serve English docs; sync-build first if output is missing (port 8000)"
+    echo "  serve-ja       - Serve Japanese docs; sync-build first if output is missing (port 8000)"
+    echo "  fresh-en       - Clean, sync-build, and serve English docs"
+    echo "  fresh-ja       - Clean, sync-build, and serve Japanese docs"
     echo "  help           - Show this help message"
     echo ""
 }
@@ -117,9 +122,8 @@ setup_build_src() {
     # for the locales we actually copied above.
     generate_doc_tags "$build_src_root"
 
-    local sync_dirs=("${TARGET_DIRS[@]}" "integration")
     for _lang in "${langs[@]}"; do
-        for _dir in "${sync_dirs[@]}"; do
+        for _dir in "${SYNC_DIRS[@]}"; do
             shopt -s nullglob
             _py_files=("${build_src_root}/${_lang}/${_dir}"/*.py)
             shopt -u nullglob
@@ -151,17 +155,7 @@ copy_api() {
 sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
-    # Include integration/ here even though TARGET_DIRS excludes it.
-    # Rationale: jupytext only rewrites cell sources — it does not
-    # execute the notebook, so syncing integration/ has no API-key
-    # dependency. Without this include, ``./build.sh sync`` would
-    # leave docs/<lang>/integration/*.ipynb stale relative to its
-    # .py source whenever a contributor updated only the .py and ran
-    # the sync target. This list must stay in lock-step with the
-    # ``sync_dirs`` defined inside ``setup_build_src`` (which already
-    # includes integration/ for the same reason).
-    local sync_dirs=("${TARGET_DIRS[@]}" "integration")
-    for dir in "${sync_dirs[@]}"; do
+    for dir in "${SYNC_DIRS[@]}"; do
         local py_files=()
         shopt -s nullglob
         py_files=("${lang}/${dir}"/*.py)
@@ -172,12 +166,12 @@ sync_lang() {
         fi
         uv run jupytext --to ipynb "${py_files[@]}"
     done
-    # execute_lang still excludes integration/ because executing those
-    # notebooks does need API keys.
+    # execute_lang still excludes integration/ because this shell command
+    # has no file-level skip list for credentialed notebooks.
     info "${lang} notebooks synced"
 }
 
-# Execute .ipynb notebooks for a single language
+# Execute bulk-runnable .ipynb notebooks for a single language
 execute_lang() {
     local lang="$1"
     local dir nb
@@ -218,16 +212,16 @@ _build_lang_from_build_src() {
     info "${lang} documentation built: ${lang}/_build/html/index.html"
 }
 
-# Build documentation for a single language (no sync). Public entry
-# point — runs generate_api + copy_api + setup_build_src then builds
-# just this lang. We always run the API generation pair so the build
-# is self-contained: a contributor running ``./build.sh build-en`` on
-# a fresh clone (where ``docs/api/`` is gitignored and absent) does
-# not get a missing-toc-entry error from mystmd. The pair is fast and
-# idempotent, so re-running them on every single-locale build is an
-# acceptable cost; ``build_all`` calls them once up front and then
-# delegates to ``_build_lang_from_build_src`` directly so we don't
-# double-run.
+# Build documentation for a single language with no source-tree sync or
+# notebook execution. Public entry point — runs generate_api + copy_api +
+# setup_build_src then builds just this lang. We always run the API
+# generation pair so the build is self-contained: a contributor running
+# ``./build.sh build-en`` on a fresh clone (where ``docs/api/`` is
+# gitignored and absent) does not get a missing-toc-entry error from
+# mystmd. The pair is fast and idempotent, so re-running them on every
+# single-locale build is an acceptable cost; ``build_all`` calls them
+# once up front and then delegates to ``_build_lang_from_build_src``
+# directly so we don't double-run.
 build_lang() {
     local lang="$1"
     generate_api
@@ -236,7 +230,7 @@ build_lang() {
     _build_lang_from_build_src "$lang"
 }
 
-# Sync, execute, and build documentation for a single language
+# Sync, execute bulk-runnable notebooks, and build documentation for a single language
 sync_build_lang() {
     local lang="$1"
     sync_lang "$lang"
@@ -265,6 +259,66 @@ sync_build_all() {
     _build_lang_from_build_src en
     _build_lang_from_build_src ja
     info "Both English and Japanese documentation synced and built successfully"
+}
+
+normalize_page_source() {
+    local raw="$1"
+    local path="${raw#./}"
+    path="${path#docs/}"
+    if [[ "$path" != en/* && "$path" != ja/* ]]; then
+        echo "Page source must be under docs/en/ or docs/ja/: ${raw}" >&2
+        return 1
+    fi
+    if [[ "$path" != *.py ]]; then
+        echo "Page source must be a jupytext .py file: ${raw}" >&2
+        return 1
+    fi
+    if [ ! -f "$path" ]; then
+        echo "Page source not found: ${raw}" >&2
+        return 1
+    fi
+    echo "$path"
+}
+
+# Sync, execute, and build only the languages touched by one or more pages.
+page_build() {
+    if [ "$#" -eq 0 ]; then
+        error "Usage: ./build.sh page-build docs/en/<section>/foo.py [docs/ja/<section>/foo.py ...]"
+    fi
+
+    local pages=()
+    local raw page ipynb lang
+    local build_en=0
+    local build_ja=0
+    for raw in "$@"; do
+        page="$(normalize_page_source "$raw")" || exit 1
+        pages+=("$page")
+        lang="${page%%/*}"
+        if [ "$lang" = "en" ]; then
+            build_en=1
+        else
+            build_ja=1
+        fi
+    done
+
+    for page in "${pages[@]}"; do
+        ipynb="${page%.py}.ipynb"
+        info "Syncing ${page} -> ${ipynb}..."
+        uv run jupytext --to ipynb --update "$page"
+        info "Executing ${ipynb}..."
+        uv run jupyter nbconvert --to notebook --execute --inplace "$ipynb"
+    done
+
+    local langs=()
+    [ "$build_en" -eq 1 ] && langs+=(en)
+    [ "$build_ja" -eq 1 ] && langs+=(ja)
+    generate_api
+    copy_api
+    setup_build_src "${langs[@]}"
+    for lang in "${langs[@]}"; do
+        _build_lang_from_build_src "$lang"
+    done
+    info "Requested page source(s) synced, executed, and built"
 }
 
 # Serve documentation for a single language
@@ -315,7 +369,7 @@ clean() {
         rm -rf "${_lang}/api"
     done
     rm -rf "_build_src"
-    info "Cleaned generated .ipynb files and build outputs"
+    info "Cleaned generated target notebooks, copied API docs, and build outputs"
 }
 
 clean_all() {
@@ -325,7 +379,7 @@ clean_all() {
     for _lang in "${LANGS[@]}"; do
         rm -rf "${_lang}/_build/.jupyter_cache"
     done
-    info "All generated files and cache removed"
+    info "Generated target notebooks, copied API docs, build outputs, and execution cache removed"
 }
 
 # Main command dispatcher
@@ -334,16 +388,17 @@ case "${1:-help}" in
     build-en)   build_lang en ;;
     build-ja)   build_lang ja ;;
     sync)       sync_lang en; sync_lang ja
-                info "All Python scripts converted to notebooks" ;;
+                info "All SYNC_DIRS Python scripts converted to notebooks" ;;
     sync-en)    sync_lang en ;;
     sync-ja)    sync_lang ja ;;
     execute)    execute_lang en; execute_lang ja
-                info "All notebooks executed" ;;
+                info "All bulk-runnable notebooks executed" ;;
     execute-en) execute_lang en ;;
     execute-ja) execute_lang ja ;;
     sync-build)     sync_build_all ;;
     sync-build-en)  sync_build_lang en ;;
     sync-build-ja)  sync_build_lang ja ;;
+    page-build) shift; page_build "$@" ;;
     clean)      clean ;;
     clean-all)  clean_all ;;
     serve-en)   serve_lang en ;;
