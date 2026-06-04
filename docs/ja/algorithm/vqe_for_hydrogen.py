@@ -110,7 +110,7 @@ assert hamiltonian.num_qubits == n_qubit
 # %% [markdown]
 # ## VQE アンザッツの作成
 #
-# このセクションでは、VQEアルゴリズムのための EfficientSU2 アンザッツを `@qkernel` デコレータを用いて作成します。アンザッツとは、試行波動関数を準備するパラメータ付き量子回路です。`ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算します。
+# このセクションでは、VQEアルゴリズムのための Hardware Efficient SU(2) アンザッツを `@qkernel` デコレータを用いて作成します。アンザッツとは、試行波動関数を準備するパラメータ付き量子回路です。`ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算します。
 
 
 # %%
@@ -186,14 +186,19 @@ result = minimize(
 )
 print(result)
 # 変分原理: BFGS の予算が短くても、試行エネルギーは FCI 基底エネルギーの上界。
-assert result.fun >= molecule.fci_energy - 1e-9
+# 上で ``run_fci=True`` を渡しているので ``molecule.fci_energy`` は埋まっている。
+# openfermion の stub は ``run_fci=False`` のケースも考慮して ``float | None``
+# と宣言しているので、ここで narrow する。
+fci_ref = molecule.fci_energy
+assert fci_ref is not None
+assert result.fun >= fci_ref - 1e-9
 assert len(result.x) == num_params
 
 # %%
 plt.plot(cost_history)
 plt.plot(
     range(len(cost_history)),
-    [molecule.fci_energy] * len(cost_history),
+    [fci_ref] * len(cost_history),
     linestyle="dashed",
     color="black",
     label="Exact Solution",
@@ -247,6 +252,9 @@ for bond_length in bond_lengths:
     )
 
     energies.append(result.fun)
+    # ``run_fci=True`` を渡しているので ``fci_energy`` は populate されている。
+    # openfermion stub の ``float | None`` をここで narrow。
+    assert fci_energy is not None
     # 変分原理はどの結合長でも成り立つ。
     assert result.fun >= fci_energy - 1e-9
 

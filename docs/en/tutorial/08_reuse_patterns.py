@@ -118,7 +118,12 @@ def rotate_first(
 @qmc.qkernel
 def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
-    q = rotate_first(q, 0, 0.5)  # int and float literals are accepted directly
+    # Raw int / float literals are auto-promoted to ``qmc.UInt`` / ``qmc.Float``
+    # at runtime, but the static signature keeps the strict handle types so the
+    # kernel contract stays in terms of Qamomile handles. The ignore below
+    # acknowledges the deliberate gap between the static signature and the
+    # runtime literal-acceptance.
+    q = rotate_first(q, 0, 0.5)  # type: ignore[arg-type]
     return qmc.measure(q)
 
 

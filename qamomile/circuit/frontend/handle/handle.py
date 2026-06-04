@@ -52,6 +52,8 @@ def _emit_binop(
             on fold) or a raw Value (emit-only legacy path).
         kind: The :class:`BinOpKind` to apply.
     """
+    from qamomile.circuit.frontend.handle.primitives import Bit, Float, UInt
+
     if isinstance(result, Handle) and lhs.is_constant() and rhs.is_constant():
         lhs_v = lhs.get_const()
         rhs_v = rhs.get_const()
@@ -59,11 +61,11 @@ def _emit_binop(
             folded = evaluate_binop_values(kind, lhs_v, rhs_v)
             if folded is not None:
                 result.value = result.value.with_const(folded)
-                if hasattr(result, "init_value"):
+                if isinstance(result, (UInt, Float, Bit)):
                     try:
-                        result.init_value = type(result.init_value)(folded)
+                        result.init_value = type(result.init_value)(folded)  # type: ignore[assignment]
                     except (TypeError, ValueError):
-                        result.init_value = folded
+                        result.init_value = folded  # type: ignore[assignment]
                 return
 
     result_value = result.value if isinstance(result, Handle) else result

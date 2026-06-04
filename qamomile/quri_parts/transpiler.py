@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Sequence
 
+from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.gate import GateOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
     QuantumExecutor,
@@ -22,9 +26,118 @@ from .exceptions import QamomileQuriPartsTranspileError
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
-    import quri_parts.circuit as qp_c
-    import quri_parts.core.operator as qp_o
-    from quri_parts.circuit import ImmutableBoundParametricQuantumCircuit
+    import quri_parts.circuit as qp_c  # type: ignore[import-not-found]
+    import quri_parts.core.operator as qp_o  # type: ignore[import-not-found]
+    from quri_parts.circuit import (  # type: ignore[import-not-found]
+        ImmutableBoundParametricQuantumCircuit,
+    )
+
+
+def _ensure_quri_controlled_block_gate_by_gate_supported(block_value: Any) -> None:
+    """Reject controlled block bodies QURI Parts cannot safely decompose.
+
+    QURI Parts has no backend gate object for controlled sub-circuits and
+    this backend intentionally does not fall back to dense unitary
+    synthesis. The shared gate-by-gate fallback can only emit primitive
+    gates and statically resolved ``ForOperation`` bodies. Everything else
+    must fail before emission so unsupported operations are not silently
+    dropped.
+
+    Args:
+        block_value (Any): Controlled-U block whose body will be emitted
+            through the shared gate-by-gate fallback.
+
+    Raises:
+        EmitError: If the block body contains an operation that QURI Parts
+            cannot safely emit under outer controls without dense unitary
+            synthesis.
+    """
+    _ensure_quri_controlled_operations_gate_by_gate_supported(
+        getattr(block_value, "operations", ())
+    )
+
+
+def _ensure_quri_controlled_operations_gate_by_gate_supported(
+    operations: Sequence[Any],
+) -> None:
+    """Reject operations outside QURI Parts controlled gate-by-gate support.
+
+    Args:
+        operations (Sequence[Any]): Operations from a controlled block body
+            or from a statically unrolled ``ForOperation`` body.
+
+    Raises:
+        EmitError: If any operation cannot be emitted by the shared
+            primitive gate-by-gate controlled fallback.
+    """
+    for op in operations:
+        if isinstance(op, (GateOperation, ReturnOperation)):
+            continue
+        if isinstance(op, ForOperation):
+            _ensure_quri_controlled_operations_gate_by_gate_supported(op.operations)
+            continue
+        raise EmitError(
+            "QURI Parts controlled fallback only supports primitive gate "
+            "bodies and statically resolved for-loops. "
+            f"Unsupported operation: {type(op).__name__}.",
+            operation="ControlledUOperation",
+        )
+
+
+def _create_seeded_qulacs_vector_sampler(seed: int) -> Any:
+    """Create a qulacs vector sampler that seeds its measurement RNG.
+
+    The high-level ``create_qulacs_vector_sampler`` exposed by QURI Parts
+    does not thread a random seed down to qulacs, so this helper reproduces
+    its qulacs state-vector sampling path while forwarding ``seed`` to
+    ``qulacs.QuantumState.sampling``. Sampling the same circuit with the
+    same seed therefore yields identical measurement counts.
+
+    Unlike the default QURI Parts sampler, this path does not switch to the
+    multinomial state-vector fast-path at very large shot counts (that
+    branch is unseedable upstream); it always uses ``QuantumState.sampling``.
+    The resulting distribution is statistically identical, only potentially
+    slower for very large shot counts.
+
+    Args:
+        seed (int): Random seed forwarded to ``QuantumState.sampling`` on
+            every call, making sampling deterministic.
+
+    Returns:
+        Any: A sampler callable taking ``(circuit, shots)`` and returning a
+            ``collections.Counter`` mapping basis-state integers to counts.
+
+    Raises:
+        ImportError: If quri-parts-qulacs (or qulacs) is not installed.
+    """
+    from collections import Counter
+
+    import qulacs  # type: ignore[import-not-found]
+
+    from quri_parts.qulacs.circuit import (  # type: ignore[import-not-found]
+        convert_circuit,
+    )
+
+    def sampler(circuit: Any, shots: int) -> Any:
+        """Sample ``circuit`` for ``shots`` shots using the fixed seed.
+
+        Args:
+            circuit (Any): The QURI Parts circuit to sample.
+            shots (int): Number of measurement shots.
+
+        Returns:
+            Any: A ``collections.Counter`` mapping basis-state integers to
+                their observed counts.
+
+        Raises:
+            Exception: Propagates any qulacs / QURI Parts circuit-conversion
+                or sampling error raised for a malformed circuit.
+        """
+        state = qulacs.QuantumState(circuit.qubit_count)
+        convert_circuit(circuit).update_quantum_state(state)
+        return Counter(state.sampling(shots, seed))
+
+    return sampler
 
 
 class QuriPartsEmitPass(
@@ -52,6 +165,82 @@ class QuriPartsEmitPass(
         composite_emitters: list[Any] = []
         super().__init__(emitter, bindings, parameters, composite_emitters)  # type: ignore[arg-type]
 
+    def _blockvalue_to_gate(
+        self,
+        block_value: Any,
+        num_qubits: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Return no native gate object for QURI Parts controlled blocks.
+
+        QURI Parts' emitter cannot turn a temporary circuit into a gate
+        object that can be appended and controlled later.  The shared
+        probe would still build a sub-circuit before discovering that
+        ``circuit_to_gate()`` returns ``None``, which can pollute the
+        parent emitter's current-circuit and parameter state.  Skip that
+        probe and let ``_emit_controlled_fallback`` try the shared
+        gate-by-gate decomposition directly.
+
+        Args:
+            block_value (Any): Ignored inner block value.
+            num_qubits (int): Ignored target qubit count.
+            bindings (dict[str, Any]): Ignored local bindings.
+
+        Returns:
+            None: Always signals that the backend-specific fallback must
+            handle the controlled block.
+        """
+        del block_value, num_qubits, bindings
+        return None
+
+    def _emit_controlled_fallback(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        block_value: Any,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit controlled-U fallback through gate-by-gate decomposition.
+
+        QURI Parts does not expose a custom-gate object that can be
+        returned by ``circuit_to_gate`` and then controlled.  Avoid
+        replacing that missing primitive with a dense matrix fallback:
+        full-unitary extraction scales exponentially and can hide shapes
+        that the backend cannot route gate-by-gate.  Instead, delegate to
+        the shared controlled decomposition and surface its ``EmitError``
+        if the block shape is unsupported.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit being emitted.
+            block_value (Any): Inner controlled-U block.
+            num_controls (int): Number of physical control qubits.
+            control_indices (list[int]): Physical control qubits.
+            target_indices (list[int]): Physical target qubits.
+            power (int): Positive power to apply to the inner unitary
+                before controlling it.
+            bindings (dict[str, Any]): Local block bindings.
+
+        Raises:
+            EmitError: If safe gate-by-gate controlled decomposition
+                cannot emit the block.
+        """
+        if not target_indices:
+            return
+        _ensure_quri_controlled_block_gate_by_gate_supported(block_value)
+        super()._emit_controlled_fallback(
+            circuit,
+            block_value,
+            num_controls,
+            control_indices,
+            target_indices,
+            power,
+            bindings,
+        )
+
 
 class QuriPartsExecutor(
     QuantumExecutor["qp_c.LinearMappedUnboundParametricQuantumCircuit"]
@@ -71,25 +260,56 @@ class QuriPartsExecutor(
         self,
         sampler: Any = None,
         estimator: Any = None,
+        seed: int | None = None,
     ):
-        """Initialize executor with optional sampler and estimator.
+        """Initialize executor with optional sampler, estimator, and seed.
 
         Args:
-            sampler: QURI Parts sampler (defaults to qulacs vector sampler)
-            estimator: QURI Parts parametric estimator (defaults to qulacs)
+            sampler (Any): QURI Parts sampler. Defaults to None, meaning a
+                qulacs vector sampler is created lazily on first use.
+            estimator (Any): QURI Parts parametric estimator. Defaults to
+                None, meaning a qulacs parametric estimator is created
+                lazily on first use.
+            seed (int | None): Optional random seed forwarded to the qulacs
+                vector sampler so that sampling is reproducible. When set,
+                two ``execute`` calls with the same seed and circuit return
+                identical shot counts, which unblocks reproducible
+                tutorials and benchmarks. Defaults to None, meaning
+                sampling is non-deterministic. The seed is only applied to
+                the default qulacs sampler; it is ignored when a custom
+                ``sampler`` is supplied, since an arbitrary sampler has no
+                standard seed interface.
         """
         self._sampler = sampler
         self._estimator = estimator
         self._non_parametric_estimator: Any = None
+        self._seed = seed
 
     @property
     def sampler(self) -> Any:
-        """Lazy initialization of sampler."""
+        """Lazy initialization of sampler.
+
+        When a ``seed`` was supplied to the constructor (and no custom
+        sampler was given), a seeded qulacs vector sampler is created so
+        that sampling is reproducible.
+
+        Returns:
+            Any: A QURI Parts sampler callable taking ``(circuit, shots)``
+                and returning measurement counts.
+
+        Raises:
+            ImportError: If quri-parts-qulacs is not installed.
+        """
         if self._sampler is None:
             try:
-                from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
+                if self._seed is None:
+                    from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
+                        create_qulacs_vector_sampler,
+                    )
 
-                self._sampler = create_qulacs_vector_sampler()
+                    self._sampler = create_qulacs_vector_sampler()
+                else:
+                    self._sampler = _create_seeded_qulacs_vector_sampler(self._seed)
             except ImportError as e:
                 raise ImportError(
                     "quri-parts-qulacs is required for QuriPartsExecutor. "
@@ -102,7 +322,7 @@ class QuriPartsExecutor(
         """Lazy initialization of parametric estimator for optimization."""
         if self._estimator is None:
             try:
-                from quri_parts.qulacs.estimator import (
+                from quri_parts.qulacs.estimator import (  # type: ignore[import-not-found]
                     create_qulacs_vector_parametric_estimator,
                 )
 
@@ -124,7 +344,7 @@ class QuriPartsExecutor(
         """
         if self._non_parametric_estimator is None:
             try:
-                from quri_parts.qulacs.estimator import (
+                from quri_parts.qulacs.estimator import (  # type: ignore[import-not-found]
                     create_qulacs_vector_estimator,
                 )
 
@@ -241,7 +461,10 @@ class QuriPartsExecutor(
         Returns:
             Real part of the expectation value
         """
-        from quri_parts.core.state import apply_circuit, quantum_state
+        from quri_parts.core.state import (  # type: ignore[import-not-found]
+            apply_circuit,
+            quantum_state,
+        )
 
         cb_state = quantum_state(circuit.qubit_count, bits=0)
         circuit_state = apply_circuit(circuit, cb_state)
@@ -299,14 +522,23 @@ class QuriPartsTranspiler(
         self,
         sampler: Any = None,
         estimator: Any = None,
+        seed: int | None = None,
     ) -> QuriPartsExecutor:
         """Create a QURI Parts executor.
 
         Args:
-            sampler: Optional custom sampler (defaults to qulacs vector sampler)
-            estimator: Optional custom estimator (defaults to qulacs parametric estimator)
+            sampler (Any): Optional custom sampler. Defaults to None,
+                meaning the qulacs vector sampler is used.
+            estimator (Any): Optional custom estimator. Defaults to None,
+                meaning the qulacs parametric estimator is used.
+            seed (int | None): Optional random seed forwarded to the qulacs
+                vector sampler for reproducible sampling. Defaults to None,
+                meaning sampling is non-deterministic. The seed is ignored
+                when a custom ``sampler`` is supplied, since an arbitrary
+                sampler has no standard seed interface.
 
         Returns:
-            QuriPartsExecutor configured for this backend
+            QuriPartsExecutor: Executor configured for this backend, bound
+                to the given seed.
         """
-        return QuriPartsExecutor(sampler, estimator)
+        return QuriPartsExecutor(sampler, estimator, seed=seed)
