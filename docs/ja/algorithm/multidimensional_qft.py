@@ -50,12 +50,13 @@
 #
 # ```{figure} assets/multidimensional_qft_01.png
 # :scale: 100 %
+# :alt: quantum circuit to calculate the d-dimensional FFT from Pfeffer (2023)
 #
-# [Pfeffer (2023)](https://arxiv.org/abs/2301.13835)より。
+# [Pfeffer (2023)](https://arxiv.org/abs/2301.13835)より、d次元の FFT 回路を計算するための量子回路図。
 # ```
 #
 # 上図の initialize($\vert v \rangle$)は、入力データに応じて量子状態を初期化するサブルーチンを表しています。
-# 量子状態を初期化する手法にはいくつかありますが、以降に示す実装では [Möttönen の振幅園コーディング](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/algorithm/mottonen-amplitude-encoding/) を用いています。
+# 量子状態を初期化する手法にはいくつかありますが、以降に示す実装では [Möttönen の振幅エンコーディング](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/algorithm/mottonen-amplitude-encoding/) を用いています。
 # [Pfeffer 2023](https://arxiv.org/abs/2301.13835) では古典的な行・列分解にヒントを得て、$d$ 次元配列に対して $d$ 個の1次元 QFT をテンソル積構造で並列実行することで、$M=(2^n)^d$ の配列に対して $\mathcal{O} (\log^2 (M)/d)$ の計算量を達成しました。
 # しかしこの手法は、各次元サイズが $N_i = 2^{n_i}$ でなければならないという制限がありました。
 # そこで、[Sampei et al. (2025)](https://pubs.rsc.org/en/content/articlelanding/2025/cp/d4cp04399e)ではこの制限を解消する手法を提案しました。
@@ -77,7 +78,7 @@
 # ### フラットトップ窓関数の適用
 #
 # 領域の切り捨て/ゼロ埋めだけを適用したデータの周波数解析を行うと、本来のスペクトルの横に余分な成分が生じます。
-# これをサイドローブと呼び、これは領域を切り取ったことで生まれるアーティファクトです。
+# これをサイドローブと呼び、これは領域を切り取ったことで生まれる人工的なスペクトルです。
 # そこでこれを抑えるために、切り捨て/ゼロ埋めされた入力データ区間の両端を滑らかにゼロに近づける重みづけ関数 (窓関数) を導入しましょう。
 # この論文では、次のようなフラットトップ関数を用いています。
 #
@@ -140,10 +141,12 @@ plt.show()
 #
 # このデータはサイズが2のべき乗でないために、そのままでは実装されたQFTを適用することができません。
 # そこでゼロ埋めを施すことで、サイズを2のべき乗に拡張しましょう。
+# ここで用いる量子ビット数は、$x, y$ 方向ともに3量子ビットずつとします。
+# すなわち、グリッド数を $2^3 = 8$ になるようにゼロ埋めを行います。
 
 # %%
 def padding_array(array_2d: np.ndarray, num_x_target: int, num_y_target: int) -> np.ndarray:
-    num_x, num_y = array_2d.shape
+    num_x, num_y = array_2d.shape    
     pad_width_x = num_x_target - num_x
     pad_width_y = num_y_target - num_y
     pad_x_left = int(np.ceil(pad_width_x / 2.0))
@@ -153,6 +156,8 @@ def padding_array(array_2d: np.ndarray, num_x_target: int, num_y_target: int) ->
     array_2d_padding = np.pad(array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right)))
     return array_2d_padding
 
+Nqx = 3
+Nqy = 3
 Nx_target = 2 ** Nqx
 Ny_target = 2 ** Nqy
 f_padding = padding_array(f, Nx_target, Ny_target)
@@ -198,6 +203,7 @@ plt.xlabel("x", fontsize=14)
 plt.ylabel("y", fontsize=14)
 plt.show()
 
+
 # %% [markdown]
 # サイドローブを抑えるために、中心領域のみを切り出しつつ、ゆっくりと減衰するような広がった概形になっていることがわかります。
 # この窓関数をゼロ埋めされたデータに適用し、2次元QFTを実行しましょう。
@@ -205,12 +211,9 @@ plt.show()
 # %% [markdown]
 # ### 多次元QFT
 #
-# ここで用いる量子ビット数は、$x$ 方向に3量子ビットと $y$ 方向に3量子ビットの、計6量子ビットとします。
+# Qamomileの`QFT`クラスを用いて、多次元 QFT を実装しましょう。
 
 # %%
-Nqx = 3
-Nqy = 3
-
 def apply_partial_qft(qubits, start, length):
     qft_gate = QFT(length)
     qubit_args = [qubits[start+i] for i in range(length)]
@@ -236,6 +239,7 @@ def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]
 # ### 回路のトランスパイル
 #
 # 先ほど実装したQFT回路をトランスパイルしましょう。
+# Qiskitバックエンドでコンパイルします。
 # このとき、`bindings`に先ほどのデータを入力します。
 
 # %%
@@ -293,7 +297,8 @@ axes[0].set_ylabel("ky")
 im5 = axes[1].pcolor(prob, vmin=vmin, vmax=vmax, cmap="viridis")
 axes[1].set_title("Quantum")
 axes[1].set_xlabel("kx")
-# 両プロットで共通の 1 本のカラーバー
+print("Classical peak value: {}".format(prob_classical.max()))
+print("Quantum peak value: {}".format(prob.max()))
 fig.colorbar(im5, ax=axes, fraction=0.046, pad=0.04)
 plt.show()
 
@@ -333,11 +338,13 @@ axes[0].set_ylabel("ky")
 im7 = axes[1].pcolor(prob2, vmin=vmin, vmax=vmax, cmap="viridis")
 axes[1].set_title("Quantum")
 axes[1].set_xlabel("kx")
+print("Classical peak value: {}".format(prob_classical2.max()))
+print("Quantum peak value: {}".format(prob2.max()))
 fig.colorbar(im7, ax=axes, fraction=0.046, pad=0.04)
 plt.show()
 
 # %% [markdown]
-# 窓関数を導入することで、ピークの値は下がっているものの、サイドローブの範囲が局在化していることがわかります。
+# 窓関数を適用する以前よりピークの値は下がっているものの、サイドローブの範囲が局在化していることがわかります。
 
 # %% [markdown]
 # ## まとめ
