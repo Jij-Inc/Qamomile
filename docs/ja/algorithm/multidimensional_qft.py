@@ -38,6 +38,7 @@ from qamomile.circuit.stdlib.qft import QFT
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
 
+# %% [markdown]
 # ## 背景
 #
 # ### 問題: ナノシート材料の特性評価
@@ -150,8 +151,8 @@ def padding_array(array_2d: np.ndarray, num_x_target: int, num_y_target: int) ->
     array_2d_padding = np.pad(array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right)))
     return array_2d_padding
 
-Nqx = int(np.ceil(np.log2(Nx)))
-Nqy = int(np.ceil(np.log2(Ny)))
+Nqx = 3
+Nqy = 3
 Nx_target = 2 ** Nqx
 Ny_target = 2 ** Nqy
 f_padding = padding_array(f, Nx_target, Ny_target)
