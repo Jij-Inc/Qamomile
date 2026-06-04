@@ -110,9 +110,7 @@ def _resolve_quri_gate_targets(
     """
     target_indices: list[int] = []
     for operand in op.qubit_operands:
-        index = emit_pass._resolver.resolve_qubit_index(
-            operand, qubit_map, bindings
-        )
+        index = emit_pass._resolver.resolve_qubit_index(operand, qubit_map, bindings)
         if index is None:
             raise EmitError(
                 f"QURI Parts controlled fallback cannot resolve gate "
@@ -274,9 +272,7 @@ def _emit_quri_nested_controlled_u(
         _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
         for operand in target_qubit_operands
     ]
-    target_indices = [
-        index for group in target_index_groups for index in group
-    ]
+    target_indices = [index for group in target_index_groups for index in group]
     local_bindings = emit_pass._resolver.bind_block_params(
         op.block, param_operands, bindings
     )
@@ -352,9 +348,7 @@ def _emit_quri_controlled_operations(
                 resolve_loop_bounds,
             )
 
-            start, stop, step = resolve_loop_bounds(
-                emit_pass._resolver, op, bindings
-            )
+            start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
             if start is None or stop is None or step is None:
                 raise EmitError(
                     "Cannot resolve ForOperation bounds in QURI Parts "
@@ -530,8 +524,7 @@ class QuriPartsEmitPass(
             return
         if not hasattr(block_value, "operations"):
             raise EmitError(
-                "Cannot emit QURI Parts controlled fallback: block has no "
-                "operations.",
+                "Cannot emit QURI Parts controlled fallback: block has no operations.",
                 operation="ControlledUOperation",
             )
         if num_controls != len(control_indices):
