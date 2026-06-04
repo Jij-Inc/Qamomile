@@ -963,9 +963,11 @@ def blockvalue_to_gate(
             resolving ``Vector[Qubit]`` input shapes.
         input_operands (list[Any] | None): Optional call-site operands
             corresponding to `block_value.input_values`. Quantum operands
-            are used for input qubit mapping; classical operands are
-            resolved into local bindings before the nested block is
-            emitted. Defaults to None.
+            determine how many formal quantum inputs are paired with the
+            call-site qubit positions, but their objects are not otherwise
+            inspected for mapping; classical operands are resolved into
+            local bindings before the nested block is emitted. Defaults to
+            None.
 
     Returns:
         Any: A backend gate object produced by
@@ -1044,8 +1046,11 @@ def _bind_block_inputs(
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
         block_value (Any): Nested block whose inputs are being emitted.
-        input_operands (list[Any] | None): Call-site operands. When None,
-            no direct binding is performed.
+        input_operands (list[Any] | None): Call-site operands. Quantum
+            operands are used only to pair formal quantum inputs with
+            positional call-site qubit indices; classical operands are
+            resolved into local bindings. When None, no direct binding is
+            performed.
         num_qubits (int): Total qubits available for the nested block.
         bindings (dict[str, Any]): Parent emit bindings.
         qubit_map (QubitMap): Local qubit map to populate for quantum
