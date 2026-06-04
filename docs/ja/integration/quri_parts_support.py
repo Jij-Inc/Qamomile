@@ -191,13 +191,10 @@ executable = transpiler.transpile(
 # `type(...)` とパラメータ数で確認し、さらに QURI Parts 組み込みの `draw_circuit` で回路そのものを描画してみましょう。
 
 # %%
-<<<<<<< HEAD
-=======
 from quri_parts.circuit.utils.circuit_drawer import (  # type: ignore[import-not-found]
     draw_circuit,
 )
 
->>>>>>> origin/main
 quri_circuit = executable.get_first_circuit()
 assert (
     quri_circuit is not None
@@ -394,8 +391,6 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 # これにより、差し替えた sampler が実際に使われていることを確認できます。
 
 # %%
-<<<<<<< HEAD
-=======
 from quri_parts.circuit.noise import (  # type: ignore[import-not-found]
     DepolarizingNoise,
     NoiseModel,
@@ -404,7 +399,6 @@ from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
     create_qulacs_noisesimulator_sampler,
 )
 
->>>>>>> origin/main
 noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)])
 noisy_sampler = create_qulacs_noisesimulator_sampler(noise_model)
 noisy_executor = transpiler.executor(sampler=noisy_sampler)
