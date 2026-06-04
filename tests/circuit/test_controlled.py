@@ -2578,6 +2578,20 @@ def _broadcast_rx_then_ry(
     return qs
 
 
+@qmc.qkernel
+def _mixed_scalar_vector_targets(
+    head: qmc.Qubit,
+    tail: qmc.Vector[qmc.Qubit],
+    theta: qmc.Float,
+    angles: qmc.Vector[qmc.Float],
+) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
+    """Rotate scalar and vector targets with scalar and vector parameters."""
+    head = qmc.ry(head, theta)
+    tail[0] = qmc.rx(tail[0], angles[0])
+    tail[1] = qmc.ry(tail[1], angles[1])
+    return head, tail
+
+
 class _BellPairComposite(qmc.CompositeGate):
     """Custom two-qubit CompositeGate used inside controlled test kernels."""
 
@@ -3079,6 +3093,210 @@ class TestControlledBroadcastWithVectorFloatParameter:
         val_broadcast = exe_broadcast.run(t.executor()).result()
         val_scalar = exe_scalar.run(t.executor()).result()
         assert np.isclose(val_broadcast, val_scalar, atol=1e-6)
+
+
+class TestControlledMixedQuantumClassicalSignature:
+    """Controlled custom kernels mixing scalar/vector quantum and classical args."""
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    def test_noncontiguous_slice_target_sample_and_run(self, transpiler_factory):
+        """Mix scalar target, stepped VectorView target, Float, and Vector[Float]."""
+        import qamomile.observable as qm_o
+
+        @qmc.qkernel
+        def sample_kernel(
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(5, "qs")
+            qs[0] = qmc.x(qs[0])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+            qs[0], qs[1], tail = controlled_mixed(
+                qs[0],
+                qs[1],
+                qs[2:5:2],
+                theta,
+                angles=angles,
+            )
+            qs[2:5:2] = tail
+            return qmc.measure(qs)
+
+        @qmc.qkernel
+        def run_kernel(
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+            obs: qmc.Observable,
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(5, "qs")
+            qs[0] = qmc.x(qs[0])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+            qs[0], qs[1], tail = controlled_mixed(
+                qs[0],
+                qs[1],
+                qs[2:5:2],
+                theta,
+                angles=angles,
+            )
+            qs[2:5:2] = tail
+            return qmc.expval(qs, obs)
+
+        t = transpiler_factory()
+        bindings = {
+            "theta": math.pi,
+            "angles": [math.pi, math.pi],
+        }
+        try:
+            sample_exe = t.transpile(sample_kernel, bindings=bindings)
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support mixed "
+                f"controlled custom signatures: {e}"
+            )
+
+        sample_result = sample_exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(sample_result.results) == {(1, 1, 1, 0, 1): 128}
+
+        H = qm_o.Hamiltonian.zero(num_qubits=5)
+        for i in range(5):
+            H += qm_o.Z(i)
+        run_exe = t.transpile(run_kernel, bindings={**bindings, "obs": H})
+        got = run_exe.run(t.executor()).result()
+        assert np.isclose(got, -3.0, atol=1e-6)
+
+    @pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_BACKENDS)
+    def test_scalar_plus_vectorview_controls_custom_kernel(self, transpiler_factory):
+        """Mix scalar and VectorView controls around a mixed-signature custom kernel."""
+
+        @qmc.qkernel
+        def kernel(
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(6, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[5] = qmc.x(qs[5])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets, num_controls=3)
+            qs[5], controls, qs[2], tail = controlled_mixed(
+                qs[5],
+                qs[0:2],
+                qs[2],
+                qs[3:5],
+                theta,
+                angles=angles,
+            )
+            qs[0:2] = controls
+            qs[3:5] = tail
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        exe = t.transpile(
+            kernel,
+            bindings={"theta": math.pi, "angles": [math.pi, math.pi]},
+        )
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1, 1, 1): 128}
+
+    @pytest.mark.parametrize("seed", [0, 3, 9])
+    def test_reordered_kwargs_match_scalar_form_qiskit(self, seed):
+        """Signature-order parameter binding survives mixed kwargs."""
+        pytest.importorskip("qiskit")
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+        angles = [
+            float(rng.uniform(-math.pi, math.pi)),
+            float(rng.uniform(-math.pi, math.pi)),
+        ]
+
+        @qmc.qkernel
+        def scalar_form(
+            head: qmc.Qubit,
+            tail0: qmc.Qubit,
+            tail1: qmc.Qubit,
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+            head = qmc.ry(head, theta)
+            tail0 = qmc.rx(tail0, angles[0])
+            tail1 = qmc.ry(tail1, angles[1])
+            return head, tail0, tail1
+
+        @qmc.qkernel
+        def vector_kernel(
+            obs: qmc.Observable,
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.h(qs[0])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+            qs[0], qs[1], tail = controlled_mixed(
+                qs[0],
+                qs[1],
+                qs[2:4],
+                angles=angles,
+                theta=theta,
+            )
+            qs[2:4] = tail
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(
+            obs: qmc.Observable,
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.h(qs[0])
+            controlled_scalar = qmc.control(scalar_form)
+            qs[0], qs[1], qs[2], qs[3] = controlled_scalar(
+                qs[0],
+                qs[1],
+                qs[2],
+                qs[3],
+                angles=angles,
+                theta=theta,
+            )
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=4)
+        for i in range(4):
+            H += qm_o.Z(i)
+
+        t = QiskitTranspiler()
+        bindings = {"obs": H, "theta": theta, "angles": angles}
+        exe_vector = t.transpile(vector_kernel, bindings=bindings)
+        exe_scalar = t.transpile(scalar_kernel, bindings=bindings)
+        val_vector = exe_vector.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_vector, val_scalar, atol=1e-6)
+
+    def test_raw_vector_float_literal_rejected(self):
+        """Raw Python lists are not accepted for Vector[Float] controlled params."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=math.pi,
+                    angles=[math.pi, math.pi],
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="array parameter"):
+            build_block()
 
 
 @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
