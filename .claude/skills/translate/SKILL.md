@@ -9,12 +9,13 @@ description: docs/en/配下の英語ドキュメント(.py jupytext形式)をdoc
 
 ## ワークフロー
 
-1. `docs/en/`側の対象`.py`ファイルを読む
-2. `docs/ja/`側に対応するディレクトリがなければ作成
-3. 以下の翻訳ルールに従って`.py`ファイルを翻訳・作成
-4. `uv run jupytext --to notebook <作成した.py>`で`.ipynb`を生成
-5. 必要に応じて`docs/ja/myst.yml`のtocに追加
-6. 対応する`index.md`がなければ作成
+0. `docs/README.md`を読む。docs build/testの最新ルールはそこをsource of truthにする。
+1. `docs/en/`側の対象`.py`ファイルを読む。
+2. `docs/ja/`側に対応するディレクトリがなければ作成する。
+3. 以下の翻訳ルールに従って`.py`ファイルを翻訳・作成する。**既存のMarkdown構造、見出し階層、セル順、コードブロック、表、リストは原則としてEN側と同じ形に保つ。翻訳時にskeletonを当て直したり、ページ構成を再設計したりしない。**
+4. 対応する`.ipynb`を更新する。安全に実行できる通常ページなら`./docs/build.sh page-build docs/ja/<section>/<file>.py`を使い、`.py`→`.ipynb`同期、notebook実行、JA docs buildをまとめて行う。API keyやremote side effectが必要なページでは、必要なcredentialがない限り実行せず、`uv run jupytext --to ipynb --update docs/ja/<section>/<file>.py`でpaired notebookだけ同期する。
+5. 既存の通常セクション（`tutorial/`、`algorithm/`、`usage/`、`integration/`）へ翻訳を追加・更新するだけなら、`docs/ja/myst.yml`は触らない。TOCは`pattern: <section>/*.ipynb`で自動発見される。`myst.yml`を更新するのは、新しいトップレベルsectionや、release notesのように明示`children`で管理されている例外だけ。
+6. 対応する`index.md`は、JA側に存在しない新しいsectionを作る場合や、新規翻訳ページを読者に見せるためsection indexの記事リスト更新が必要な場合だけ作成・更新する。
 
 > **既訳がある場合（更新・差分再翻訳）**: 対象ファイルがすでに`docs/ja/`に存在する場合は、新規翻訳ではなく更新になる。その場合はステップ3の前に **ルール10** に従って「EN側が前回同期から何を変えたか」を全部洗い出すこと。新しく足されたセクションだけを訳して、その変更が前方の表・intro・まとめに与えた波及を訳し漏らすと、JA内部で矛盾が残る。
 
