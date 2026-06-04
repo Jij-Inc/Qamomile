@@ -7,7 +7,14 @@ import pytest
 
 import qamomile.circuit as qm
 from qamomile.circuit.frontend.ast_transform import ControlFlowTransformer
-from qamomile.circuit.frontend.handle import Qubit, UInt, Vector
+from qamomile.circuit.frontend.handle import (
+    Handle,
+    Observable,
+    QFixed,
+    Qubit,
+    UInt,
+    Vector,
+)
 from qamomile.circuit.frontend.handle.primitives import Float
 from qamomile.circuit.frontend.operation.control_flow import _create_phi_for_values
 from qamomile.circuit.frontend.qkernel import qkernel
@@ -18,6 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.types import ObservableType, QFixedType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 
@@ -280,6 +288,84 @@ class TestIfElseErrorHandling:
         false_val = Float(value=Value(type=FloatType(), name="f_false"))
 
         with pytest.raises(TypeError, match="Type mismatch in if-else branches"):
+            _create_phi_for_values(condition, true_val, false_val, if_op)
+
+    def test_phi_merge_preserves_qfixed_handle_type_and_metadata(self):
+        """QFixed phi merge should keep the QFixed handle and carrier metadata."""
+        if_op = IfOperation()
+        condition = Value(type=BitType(), name="cond")
+        qfixed_type = QFixedType(integer_bits=1, fractional_bits=2)
+        carriers = ("q0", "q1", "q2")
+        true_val = QFixed(
+            value=Value(type=qfixed_type, name="qf_true").with_qfixed_metadata(
+                qubit_uuids=carriers,
+                num_bits=3,
+                int_bits=1,
+            )
+        )
+        false_val = QFixed(
+            value=Value(type=qfixed_type, name="qf_false").with_qfixed_metadata(
+                qubit_uuids=carriers,
+                num_bits=3,
+                int_bits=1,
+            )
+        )
+
+        phi_output, merged = _create_phi_for_values(
+            condition, true_val, false_val, if_op
+        )
+
+        assert isinstance(merged, QFixed)
+        assert phi_output.get_qfixed_qubit_uuids() == carriers
+        assert phi_output.get_qfixed_num_bits() == 3
+        assert phi_output.get_qfixed_int_bits() == 1
+
+    def test_phi_merge_rejects_qfixed_with_different_carriers(self):
+        """QFixed phi merge should reject condition-dependent carrier layouts."""
+        if_op = IfOperation()
+        condition = Value(type=BitType(), name="cond")
+        qfixed_type = QFixedType(integer_bits=0, fractional_bits=2)
+        true_val = QFixed(
+            value=Value(type=qfixed_type, name="qf_true").with_qfixed_metadata(
+                qubit_uuids=("q0", "q1"),
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        false_val = QFixed(
+            value=Value(type=qfixed_type, name="qf_false").with_qfixed_metadata(
+                qubit_uuids=("q2", "q3"),
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+
+        with pytest.raises(TypeError, match="identical carrier qubits"):
+            _create_phi_for_values(condition, true_val, false_val, if_op)
+
+    def test_phi_merge_preserves_observable_handle_type(self):
+        """Observable phi merge should keep the Observable frontend handle."""
+        if_op = IfOperation()
+        condition = Value(type=BitType(), name="cond")
+        true_val = Observable(value=Value(type=ObservableType(), name="obs_true"))
+        false_val = Observable(value=Value(type=ObservableType(), name="obs_false"))
+
+        _, merged = _create_phi_for_values(condition, true_val, false_val, if_op)
+
+        assert isinstance(merged, Observable)
+
+    def test_phi_merge_rejects_unknown_handle_type(self):
+        """Unsupported Handle subclasses should fail at phi creation."""
+
+        class CustomHandle(Handle):
+            pass
+
+        if_op = IfOperation()
+        condition = Value(type=BitType(), name="cond")
+        true_val = CustomHandle(value=Value(type=FloatType(), name="custom_true"))
+        false_val = CustomHandle(value=Value(type=FloatType(), name="custom_false"))
+
+        with pytest.raises(TypeError, match="Unsupported Handle type.*CustomHandle"):
             _create_phi_for_values(condition, true_val, false_val, if_op)
 
 

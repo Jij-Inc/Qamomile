@@ -402,7 +402,9 @@ def emit_controlled_u_with_symbolic_indices(
 
     remaining_operands = op.operands[1:]
     target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [v for v in remaining_operands if v.type.is_classical()]
+    param_operands = [
+        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    ]
 
     target_indices: list[int] = []
     target_index_groups: list[list[int]] = []
@@ -557,7 +559,9 @@ def emit_controlled_u_multi_arg(
 
     remaining_operands = op.operands[op.num_control_args :]
     target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [v for v in remaining_operands if v.type.is_classical()]
+    param_operands = [
+        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    ]
 
     target_indices: list[int] = []
     target_index_groups: list[list[int]] = []
@@ -675,7 +679,9 @@ def emit_controlled_u(
     remaining_operands = op.operands[nc:]
 
     target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [v for v in remaining_operands if v.type.is_classical()]
+    param_operands = [
+        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    ]
 
     # Resolve controls via ``resolve_qubit_index``: frontend Step 2.a
     # normalises ``operands[:num_controls]`` to one scalar per physical
@@ -733,12 +739,34 @@ def emit_controlled_u(
         emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
 
+    power_value = resolve_power(emit_pass, op, bindings)
+    if _should_emit_single_target_block_per_vector_element(
+        block_value, target_qubit_operands, target_indices
+    ):
+        _emit_single_target_block_per_vector_element(
+            emit_pass,
+            circuit,
+            block_value,
+            nc,
+            control_indices,
+            target_indices,
+            power_value,
+            local_bindings,
+        )
+        _map_controlled_u_results(
+            op,
+            nc,
+            control_indices,
+            target_qubit_operands,
+            target_index_groups,
+            qubit_map,
+        )
+        return
+
     num_targets = len(target_indices)
     unitary_gate = emit_pass._blockvalue_to_gate(
         block_value, num_targets, local_bindings
     )
-
-    power_value = resolve_power(emit_pass, op, bindings)
 
     if unitary_gate is not None:
         if power_value > 1:
@@ -761,6 +789,96 @@ def emit_controlled_u(
     _map_controlled_u_results(
         op, nc, control_indices, target_qubit_operands, target_index_groups, qubit_map
     )
+
+
+def _should_emit_single_target_block_per_vector_element(
+    block_value: Any,
+    target_qubit_operands: list[Any],
+    target_indices: list[int],
+) -> bool:
+    """Check for scalar-target controlled-U applied to a vector target.
+
+    Built-in gates such as ``qmc.x`` are wrapped as scalar-qbit
+    qkernels for ``qmc.control``.  When the caller supplies a
+    ``Vector[Qubit]`` or ``VectorView[Qubit]`` target, the natural
+    broadcast meaning is to apply the same controlled scalar block to
+    every physical target element.  This helper detects exactly that
+    shape so the emitter does not attempt to turn a one-qubit block
+    into a multi-target custom gate.
+
+    Args:
+        block_value (Any): Inner controlled block.
+        target_qubit_operands (list[Any]): Quantum target operands
+            supplied at the controlled-U call site.
+        target_indices (list[int]): Flattened physical target qubits.
+
+    Returns:
+        bool: ``True`` when a single scalar formal target is being
+            broadcast over a vector actual target.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    if len(target_qubit_operands) != 1 or len(target_indices) <= 1:
+        return False
+    if not isinstance(target_qubit_operands[0], ArrayValue):
+        return False
+    quantum_inputs = [
+        input_value
+        for input_value in getattr(block_value, "input_values", [])
+        if hasattr(input_value, "type") and input_value.type.is_quantum()
+    ]
+    return len(quantum_inputs) == 1 and not isinstance(quantum_inputs[0], ArrayValue)
+
+
+def _emit_single_target_block_per_vector_element(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    block_value: Any,
+    num_controls: int,
+    control_indices: list[int],
+    target_indices: list[int],
+    power: int,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a scalar controlled-U once for each vector target element.
+
+    Args:
+        emit_pass (StandardEmitPass): Driving emit pass.
+        circuit (Any): Backend circuit being emitted.
+        block_value (Any): Single-target inner block.
+        num_controls (int): Number of control qubits.
+        control_indices (list[int]): Physical control qubits.
+        target_indices (list[int]): Physical target qubits to receive
+            the broadcasted controlled operation.
+        power (int): Positive controlled-U power.
+        bindings (dict[str, Any]): Local bindings for the inner block.
+
+    Raises:
+        EmitError: If the backend cannot convert the block to a gate and
+            the fallback controlled decomposition does not support the
+            block shape.
+    """
+    unitary_gate = emit_pass._blockvalue_to_gate(block_value, 1, bindings)
+    if unitary_gate is not None:
+        if power > 1:
+            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
+        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, num_controls)
+        for target_idx in target_indices:
+            emit_pass._emitter.append_gate(
+                circuit, controlled_gate, control_indices + [target_idx]
+            )
+        return
+
+    for target_idx in target_indices:
+        emit_pass._emit_controlled_fallback(
+            circuit,
+            block_value,
+            num_controls,
+            control_indices,
+            [target_idx],
+            power,
+            bindings,
+        )
 
 
 def emit_controlled_fallback(
