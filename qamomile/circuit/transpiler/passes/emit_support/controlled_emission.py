@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
@@ -104,6 +105,16 @@ def emit_controlled_operations(
             emit_controlled_gate(
                 emit_pass, circuit, op, control_idx, target_indices, bindings
             )
+        elif isinstance(op, ControlledUOperation):
+            raise EmitError(
+                "Cannot decompose nested ControlledUOperation in a controlled "
+                "block on this backend: the fallback path controls each "
+                "top-level inner operation with a single outer control and "
+                "cannot preserve the nested operation's own controls. Use a "
+                "backend that can convert the inner block to a native "
+                "controlled gate, or flatten the controls explicitly.",
+                operation="ControlledUOperation",
+            )
         elif isinstance(op, ForOperation):
             start = (
                 emit_pass._resolver.resolve_int_value(op.operands[0], bindings)
@@ -146,6 +157,14 @@ def emit_controlled_operations(
             raise EmitError(
                 f"Unsupported control flow {type(op).__name__} in controlled "
                 f"block decomposition. Only ForOperation is supported.",
+                operation="ControlledGate",
+            )
+        elif isinstance(op, ReturnOperation):
+            continue
+        else:
+            raise EmitError(
+                f"Unsupported operation {type(op).__name__} in controlled "
+                f"block decomposition.",
                 operation="ControlledGate",
             )
 
@@ -902,8 +921,9 @@ def emit_controlled_fallback(
 
     Raises:
         EmitError: When ``num_controls > 1`` (multi-control not
-            supported in the default gate-by-gate decomposition), or
-            when the inner block addresses more than a single target
+            supported in the default gate-by-gate decomposition), when
+            the inner block contains a nested ``ControlledUOperation``,
+            or when the inner block addresses more than a single target
             and is not the narrowly-supported "exactly one SWAP op"
             case.  ``emit_controlled_gate`` only carries a single
             ``target_idx = target_indices[0]`` mapping, so any inner
@@ -923,6 +943,17 @@ def emit_controlled_fallback(
             f"(num_controls={num_controls}): "
             f"block-to-gate conversion failed and the "
             f"fallback decomposition only supports single control.",
+            operation="ControlledUOperation",
+        )
+    nested_controlled = [
+        o for o in block_value.operations if isinstance(o, ControlledUOperation)
+    ]
+    if nested_controlled:
+        raise EmitError(
+            "Cannot decompose controlled-U with nested ControlledUOperation "
+            "on this backend: the fallback path controls each top-level "
+            "inner operation with a single outer control and cannot preserve "
+            "the nested operation's own controls.",
             operation="ControlledUOperation",
         )
     if len(target_indices) > 1:
