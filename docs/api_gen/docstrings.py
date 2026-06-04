@@ -38,7 +38,11 @@ def write_docstring(
     docstring.value = rst_to_myst(original_value)
 
     try:
-        sections = docstring.parse(config.docstring_style)
+        # griffe's ``Docstring.parse`` typed as
+        # ``Literal['google', 'numpy', 'sphinx', 'auto'] | Parser | None``;
+        # ``config.docstring_style`` is a plain ``str`` set by the
+        # ApiGenConfig caller, so suppress the arg-type mismatch.
+        sections = docstring.parse(config.docstring_style)  # type: ignore[arg-type]
     except Exception:
         for line in docstring.value.strip().splitlines():
             lines.append(line)

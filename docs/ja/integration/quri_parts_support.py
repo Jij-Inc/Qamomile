@@ -164,7 +164,9 @@ qaoa_ansatz.draw(
 from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
 
 transpiler = QuriPartsTranspiler()
-executor = QuriPartsExecutor()
+# `seed` を渡すと Qulacs sampler が再現可能になります。同じ seed と回路で `sample(...)` を 2 回呼ぶと、まったく同じショットカウントが得られます。
+# 非決定的なサンプリングにしたい場合は、この引数を省略する（または `seed=None` を渡す）だけです。
+executor = QuriPartsExecutor(seed=42)
 
 executable = transpiler.transpile(
     qaoa_ansatz,
@@ -183,7 +185,9 @@ executable = transpiler.transpile(
 # `type(...)` とパラメータ数で確認し、さらに QURI Parts 組み込みの `draw_circuit` で回路そのものを描画してみましょう。
 
 # %%
-from quri_parts.circuit.utils.circuit_drawer import draw_circuit
+from quri_parts.circuit.utils.circuit_drawer import (  # type: ignore[import-not-found]
+    draw_circuit,
+)
 
 quri_circuit = executable.get_first_circuit()
 assert quri_circuit is not None  # transpile() はここで必ず 1 つの量子セグメントを生成する
@@ -274,8 +278,8 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# `QuriPartsExecutor` が使う Qulacs sampler はショットごとの RNG に seed を設定しないため、最適化の軌跡や最終エネルギーは実行ごとに少し変わります。
-# それでも、この 5 ノードグラフ上の $H_C$ の基底状態エネルギー付近までは収束するはずです。
+# 上の `QuriPartsExecutor` は `seed=42` で構築しているため Qulacs sampler は再現可能で、このページを再実行しても同じ最適化の軌跡と最終エネルギーが得られます。元の非決定的な挙動に戻すには `seed` 引数を外してください。
+# この 5 ノードグラフ上の $H_C$ の基底状態エネルギー付近までは収束するはずです。
 # ここで得た最適パラメータ (`opt_gammas`、`opt_betas`) を、以降の例でも使います。
 
 # %% [markdown]
@@ -386,8 +390,13 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 # これにより、差し替えた sampler が実際に使われていることを確認できます。
 
 # %%
-from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
-from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
+from quri_parts.circuit.noise import (  # type: ignore[import-not-found]
+    DepolarizingNoise,
+    NoiseModel,
+)
+from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
+    create_qulacs_noisesimulator_sampler,
+)
 
 noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)])
 noisy_sampler = create_qulacs_noisesimulator_sampler(noise_model)

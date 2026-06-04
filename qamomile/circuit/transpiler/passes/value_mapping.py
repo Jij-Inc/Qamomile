@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid as uuid_module
-from typing import Any, cast
+from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -223,7 +223,7 @@ class ValueSubstitutor:
     for phi substitution during compile-time if lowering.
     """
 
-    def __init__(self, value_map: dict[str, ValueBase], transitive: bool = False):
+    def __init__(self, value_map: Mapping[str, ValueBase], transitive: bool = False):
         self._value_map = value_map
         self._transitive = transitive
 

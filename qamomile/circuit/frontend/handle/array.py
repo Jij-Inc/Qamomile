@@ -455,6 +455,29 @@ class ArrayBase(Handle, Generic[T]):
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 
+        # Bounds-check a constant index that overflows a constant dimension.
+        # This stops an out-of-range constant access — e.g. ``empty[0]`` on
+        # a length-0 slice view (``empty = s[1:1]``) or ``s[5]`` on a
+        # length-3 array — from being built into the IR. For a measured
+        # ``Vector[Bit]`` such an element would otherwise compose to a
+        # valid-but-wrong root clbit at emit time and be read silently. Only
+        # the ``idx >= dim`` overflow is rejected here: negative indices are
+        # a separate (unsupported) concern already diagnosed downstream, and
+        # symbolic indices / dimensions (loop variables, runtime parameters)
+        # carry no provable range and are deferred to emit-time resolution.
+        if len(indices) == 1 and self._shape:
+            idx_const = _as_int_const(indices[0])
+            dim_const = _as_int_const(self._shape[0])
+            if (
+                idx_const is not None
+                and dim_const is not None
+                and idx_const >= dim_const
+            ):
+                raise IndexError(
+                    f"Index {idx_const} is out of range for "
+                    f"'{self.value.name or 'array'}' of length {dim_const}."
+                )
+
         # Check if the array itself has been consumed (e.g., by cast or measure)
         if self._consumed and self.value.type.is_quantum():
             display_name = self.value.name or "array"
@@ -511,12 +534,12 @@ class ArrayBase(Handle, Generic[T]):
         # ``a[overlap_idx]`` after ``b = a[inner_range]`` would silently
         # double-use the qubit ``b`` is also claiming.
         if (
-            isinstance(self, VectorView)
+            isinstance(self, VectorView)  # type: ignore[unreachable]
             and self.value.type.is_quantum()
             and self._slice_covered_indices is not None
             and len(indices) == 1
         ):
-            local_idx = _as_int_const(indices[0])
+            local_idx = _as_int_const(indices[0])  # type: ignore[unreachable]
             if local_idx is not None and 0 <= local_idx < len(
                 self._slice_covered_indices
             ):
@@ -793,9 +816,10 @@ class Vector(ArrayBase[T]):
 
     value: ArrayValue = dataclasses.field(default=None)  # type: ignore
     _shape: tuple[int | UInt] = dataclasses.field(default=(0,))
-    _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
-        default_factory=dict
-    )
+    _borrowed_indices: dict[
+        tuple[str, ...],
+        "tuple[UInt, ...] | ArrayBase[T]",
+    ] = dataclasses.field(default_factory=dict)
 
     @overload
     def __getitem__(self, index: int) -> T: ...
@@ -915,11 +939,13 @@ class Vector(ArrayBase[T]):
         (1) RHS is a ``VectorView``; (2) RHS is not already consumed;
         (3) LHS root (and, for a view LHS, the view itself) is still
         live — mirrors the consumed-array guard in
-        :meth:`_return_element`; (4) RHS root matches LHS root;
-        (5) compute LHS coverage; (6) RHS coverage matches LHS
-        coverage; (7) every covered parent slot is currently owned by
-        the RHS view (catches a silently-drained stale view); (8)
-        consume the RHS view; (9) emit
+        :meth:`_return_element`; (4) compute LHS coverage; (5) RHS
+        root matches LHS root, except for a concrete nested full-slice
+        that fully replaces its immediate outer and returns directly
+        to the same root; (6) RHS coverage matches LHS coverage; (7)
+        every covered parent slot is currently owned by the RHS view
+        (catches a silently-drained stale view); (8) consume the RHS
+        view; (9) emit
         :class:`ReleaseSliceViewOperation`.
 
         Args:
@@ -973,7 +999,7 @@ class Vector(ArrayBase[T]):
         #     ``_slice_parent``; the view's own ``_consumed`` is also
         #     checked because a view may itself have been retired
         #     (e.g. by ``cast``).
-        self_root = self._slice_parent if isinstance(self, VectorView) else self
+        self_root = self._slice_parent if isinstance(self, VectorView) else self  # type: ignore[attr-defined,unreachable]
         if self_root._consumed and self_root.value.type.is_quantum():
             display_name = self_root.value.name or "array"
             raise QubitConsumedError(
@@ -985,11 +1011,11 @@ class Vector(ArrayBase[T]):
                 first_use_location=self_root._consumed_by,
             )
         if (
-            isinstance(self, VectorView)
+            isinstance(self, VectorView)  # type: ignore[unreachable]
             and self._consumed
             and self.value.type.is_quantum()
         ):
-            display_name = self.value.name or "view"
+            display_name = self.value.name or "view"  # type: ignore[unreachable]
             raise QubitConsumedError(
                 f"Slice assignment LHS view '{display_name}' was "
                 f"already consumed by '{self._consumed_by}'.",
@@ -998,7 +1024,26 @@ class Vector(ArrayBase[T]):
                 first_use_location=self._consumed_by,
             )
 
-        # (4) Identity check.  Two flavours depending on whether the
+        # (4) Compute the would-be LHS coverage side-effect-free.  If
+        #     anything along the chain (parent length, slice bound) is
+        #     still a symbolic ``UInt`` at trace time, defer the deep
+        #     checks (6) and (7) to the post-fold
+        #     ``SliceBorrowCheckPass`` — the bindings haven't been
+        #     applied yet, so concrete coverage is unknowable here.
+        try:
+            lhs_covered: tuple[int, ...] | None = self._normalize_slice_to_covered(s)
+        except ValueError:
+            lhs_covered = None
+
+        rhs_covered: tuple[int, ...] | None = None
+        if lhs_covered is not None:
+            rhs_covered = value._slice_covered_indices
+            if rhs_covered is None:
+                rhs_covered = _coverage_from_array_value(value.value)
+
+        skipped_outer_views: list[VectorView[T]] = []
+
+        # (5) Identity check.  Two flavours depending on whether the
         #     RHS came from a top-level slice or a nested slice:
         #
         #     * top-level (``value._slice_outer_view is None``):
@@ -1010,20 +1055,54 @@ class Vector(ArrayBase[T]):
         #       view through its immediate outer first
         #       (``outer[range] = inner``), then return the outer to
         #       the root (``root[range] = outer``).  Allowing
-        #       ``root[range] = inner`` would skip the outer view's
-        #       release and leave the outer in an inconsistent
-        #       state.
+        #       ``root[range] = inner`` would normally skip the outer
+        #       view's release and leave the outer in an inconsistent
+        #       state.  The one safe exception is ``inner = outer[:]``:
+        #       when the nested slice, its outer view, and the root LHS
+        #       cover exactly the same concrete slots, the inner has
+        #       fully replaced the outer.  In that case root assignment
+        #       can release the inner directly, and we retire the
+        #       skipped outer below so it cannot be reused afterward.
         if value._slice_outer_view is not None:
             if value._slice_outer_view is not self:
-                raise AffineTypeError(
-                    f"Nested slice view '{value.value.name}' must be "
-                    f"returned through its immediate outer view first "
-                    f"(e.g. ``outer_view[a:b:c] = inner_view``); only "
-                    f"then can the outer view be returned to "
-                    f"'{self_root.value.name}'.",
-                    handle_name=value.value.name or "view",
-                    operation_name="slice assignment",
+                outer_view = value._slice_outer_view
+                outer_chain: list[VectorView[T]] = []
+                chain_matches_full_coverage = True
+                while outer_view is not None:
+                    outer_covered = outer_view._slice_covered_indices
+                    if outer_covered is None:
+                        outer_covered = _coverage_from_array_value(outer_view.value)
+                    if (
+                        outer_covered is None
+                        or lhs_covered is None
+                        or rhs_covered is None
+                        or value._slice_parent is not self_root
+                        or outer_view._slice_parent is not self_root
+                        or outer_view._borrowed_indices
+                        or tuple(lhs_covered) != tuple(rhs_covered)
+                        or tuple(rhs_covered) != tuple(outer_covered)
+                    ):
+                        chain_matches_full_coverage = False
+                        break
+                    outer_chain.append(outer_view)
+                    outer_view = outer_view._slice_outer_view
+                can_skip_outer = (
+                    not hasattr(self, "_slice_parent")
+                    and bool(outer_chain)
+                    and chain_matches_full_coverage
                 )
+                if can_skip_outer:
+                    skipped_outer_views = outer_chain
+                else:
+                    raise AffineTypeError(
+                        f"Nested slice view '{value.value.name}' must be "
+                        f"returned through its immediate outer view first "
+                        f"(e.g. ``outer_view[a:b:c] = inner_view``); only "
+                        f"then can the outer view be returned to "
+                        f"'{self_root.value.name}'.",
+                        handle_name=value.value.name or "view",
+                        operation_name="slice assignment",
+                    )
         elif value._slice_parent is not self_root:
             raise AffineTypeError(
                 f"Slice assignment on '{self.value.name}' expects a "
@@ -1033,17 +1112,6 @@ class Vector(ArrayBase[T]):
                 handle_name=self.value.name,
                 operation_name="slice assignment",
             )
-
-        # (5) Compute the would-be LHS coverage side-effect-free.  If
-        #     anything along the chain (parent length, slice bound) is
-        #     still a symbolic ``UInt`` at trace time, defer the deep
-        #     checks (6) and (7) to the post-fold
-        #     ``SliceBorrowCheckPass`` — the bindings haven't been
-        #     applied yet, so concrete coverage is unknowable here.
-        try:
-            lhs_covered: tuple[int, ...] | None = self._normalize_slice_to_covered(s)
-        except ValueError:
-            lhs_covered = None
 
         if lhs_covered is not None:
             # (6) Compare with the RHS view's recorded coverage.  The
@@ -1062,9 +1130,6 @@ class Vector(ArrayBase[T]):
             #     back to recomputing the coverage from the underlying
             #     ``ArrayValue`` so coverage mismatch is still caught
             #     after the broadcast.
-            rhs_covered = value._slice_covered_indices
-            if rhs_covered is None:
-                rhs_covered = _coverage_from_array_value(value.value)
             if rhs_covered is not None and tuple(lhs_covered) != tuple(rhs_covered):
                 raise AffineTypeError(
                     f"Slice assignment coverage mismatch on "
@@ -1139,6 +1204,9 @@ class Vector(ArrayBase[T]):
         #     parent's borrow entry for the covered slots is deleted
         #     by the releasing branch of ``VectorView.consume``.
         value.consume(operation_name="slice assignment")
+        for skipped_outer_view in skipped_outer_views:
+            skipped_outer_view._consumed = True
+            skipped_outer_view._consumed_by = "slice assignment"
 
         # (8.5) Re-register the LHS as owner of the just-released slots
         #       when slice-assigning onto an outer view (nested return).
@@ -1148,11 +1216,11 @@ class Vector(ArrayBase[T]):
         #       the outer must reclaim them so it can still be
         #       returned to its own parent later.
         if (
-            isinstance(self, VectorView)
+            isinstance(self, VectorView)  # type: ignore[unreachable]
             and lhs_covered is not None
             and self_root.value.type.is_quantum()
         ):
-            for idx in lhs_covered:
+            for idx in lhs_covered:  # type: ignore[unreachable]
                 key = (f"const:{idx}",)
                 if self_root._borrowed_indices.get(key) is None:
                     self_root._borrowed_indices[key] = self
@@ -1463,9 +1531,10 @@ class Matrix(ArrayBase[T]):
 
     value: ArrayValue = dataclasses.field(default=None)  # type: ignore
     _shape: tuple[int | UInt, int | UInt] = dataclasses.field(default=(0, 0))
-    _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
-        default_factory=dict
-    )
+    _borrowed_indices: dict[
+        tuple[str, ...],
+        "tuple[UInt, ...] | ArrayBase[T]",
+    ] = dataclasses.field(default_factory=dict)
 
     def __getitem__(self, index: tuple[int | UInt, int | UInt]) -> T:
         """Get element at the given (row, col) index."""
@@ -1506,9 +1575,10 @@ class Tensor(ArrayBase[T]):
 
     value: ArrayValue = dataclasses.field(default=None)  # type: ignore
     _shape: tuple[int | UInt, ...] = dataclasses.field(default_factory=tuple)
-    _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
-        default_factory=dict
-    )
+    _borrowed_indices: dict[
+        tuple[str, ...],
+        "tuple[UInt, ...] | ArrayBase[T]",
+    ] = dataclasses.field(default_factory=dict)
 
     def __getitem__(self, index: tuple[int | UInt, ...]) -> T:
         """Get element at the given indices."""

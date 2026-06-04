@@ -28,7 +28,7 @@ from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 from .exceptions import QamomileQuriPartsTranspileError
 
 if TYPE_CHECKING:
-    from quri_parts.circuit import (
+    from quri_parts.circuit import (  # type: ignore[import-not-found]
         LinearMappedUnboundParametricQuantumCircuit,
         Parameter,
     )
@@ -56,7 +56,7 @@ def _to_linear_form(angle: Any) -> dict[Any, float]:
         ``CONST``) to ``float`` coefficients.
     """
     if isinstance(angle, (int, float)):
-        from quri_parts.circuit import CONST
+        from quri_parts.circuit import CONST  # type: ignore[import-not-found]
 
         return {CONST: float(angle)}
     if isinstance(angle, dict):
@@ -70,7 +70,7 @@ def _is_pure_const(form: dict[Any, float]) -> bool:
     Used by ``combine_symbolic`` to detect linear-only multiplication and
     division: ``param * scalar`` is allowed, ``param * param`` is not.
     """
-    from quri_parts.circuit import CONST
+    from quri_parts.circuit import CONST  # type: ignore[import-not-found]
 
     return all(k is CONST for k in form)
 
@@ -101,7 +101,7 @@ def _sub_forms(
 
 def _const_value(form: dict[Any, float]) -> float:
     """Extract the CONST coefficient from a CONST-only linear form."""
-    from quri_parts.circuit import CONST
+    from quri_parts.circuit import CONST  # type: ignore[import-not-found]
 
     return form.get(CONST, 0.0)
 
@@ -156,7 +156,7 @@ class QuriPartsGateEmitter:
         The num_clbits parameter is accepted for interface compatibility
         but is not used.
         """
-        import quri_parts.circuit as qp_c
+        import quri_parts.circuit as qp_c  # type: ignore[import-not-found]
 
         circuit = qp_c.LinearMappedUnboundParametricQuantumCircuit(num_qubits)
         self._current_circuit = circuit

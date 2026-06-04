@@ -2209,9 +2209,9 @@ class CircuitAnalyzer:
         for v in params:
             # Drop the ctrl_param_ prefix to recover the wrapped
             # kernel's own parameter name.
-            raw = v.name or ""
-            if raw.startswith(_CTRL_PARAM_PREFIX):
-                raw = raw[len(_CTRL_PARAM_PREFIX) :]
+            raw = v.name or ""  # type: ignore[unreachable]
+            if raw.startswith(_CTRL_PARAM_PREFIX):  # type: ignore[unreachable]
+                raw = raw[len(_CTRL_PARAM_PREFIX) :]  # type: ignore[index]
             pname_raw = raw or "?"
             # Route the parameter name through the same symbolic
             # formatter used by inline gates so Greek-letter names
@@ -2225,7 +2225,7 @@ class CircuitAnalyzer:
             const_val = v.get_const() if hasattr(v, "get_const") else None
             if isinstance(const_val, (int, float)):
                 pval = self._format_parameter(const_val)
-            elif param_values and v.logical_id in param_values:
+            elif param_values and v.logical_id in param_values:  # type: ignore[operator]
                 resolved = param_values[v.logical_id]
                 if isinstance(resolved, (int, float)):
                     pval = self._format_parameter(resolved)
@@ -3540,7 +3540,7 @@ class CircuitAnalyzer:
         c_iter = iter(classical_actuals)
         aligned: list[ValueBase] = []
         for formal in formals:
-            pool = q_iter if isinstance(formal.type, QubitType) else c_iter
+            pool = q_iter if isinstance(formal.type, QubitType) else c_iter  # type: ignore[attr-defined]
             try:
                 aligned.append(next(pool))
             except StopIteration:

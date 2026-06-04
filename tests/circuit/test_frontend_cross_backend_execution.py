@@ -1,0 +1,1141 @@
+"""Cross-backend execution tests for frontend quantum patterns.
+
+This module exercises user-facing frontend constructs through the full
+``transpile -> sample`` and ``transpile -> run`` paths on every supported
+local SDK backend (Qiskit, QURI Parts, CUDA-Q).  Backend emitter tests
+already validate low-level gate matrices; these tests instead pin the
+combinations users can write in qkernels: native gates, qkernel calls,
+broadcasts, controlled calls, composite gates, and Pauli evolution.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+from typing import Any, Literal
+
+import numpy as np
+import pytest
+
+import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.errors import EmitError
+
+Backend = tuple[str, Any, Any]
+SampleMode = Literal["deterministic", "uniform", "bell"]
+
+
+@pytest.fixture(
+    params=[
+        "qiskit",
+        pytest.param("quri_parts", marks=pytest.mark.quri_parts),
+        pytest.param("cudaq", marks=pytest.mark.cudaq),
+    ]
+)
+def backend(request) -> Backend:
+    """Yield ``(name, transpiler, executor)`` for each installed SDK backend."""
+    name = request.param
+    if name == "qiskit":
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        return name, transpiler, transpiler.executor()
+    if name == "quri_parts":
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        transpiler = QuriPartsTranspiler()
+        return name, transpiler, transpiler.executor()
+    if name == "cudaq":
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        transpiler = CudaqTranspiler()
+        return name, transpiler, transpiler.executor()
+    raise AssertionError(f"unknown backend {name}")
+
+
+def _counts(result: Any) -> dict[tuple[int, ...], int]:
+    """Convert backend sample results to a bit-tuple count map.
+
+    Args:
+        result (Any): Qamomile ``SampleResult``-like object whose
+            ``results`` iterable yields ``(bits, count)`` pairs.
+
+    Returns:
+        dict[tuple[int, ...], int]: Counts keyed by kernel-order bit
+        tuples.
+    """
+    counts: dict[tuple[int, ...], int] = {}
+    for bits, count in result.results:
+        bit_tuple = tuple(int(bit) for bit in bits)
+        counts[bit_tuple] = counts.get(bit_tuple, 0) + int(count)
+    return counts
+
+
+def _assert_deterministic(
+    name: str, counts: dict[tuple[int, ...], int], expected: tuple[int, ...]
+) -> None:
+    """Assert all sampled shots equal ``expected``.
+
+    Args:
+        name (str): Backend name for assertion context.
+        counts (dict[tuple[int, ...], int]): Sample counts.
+        expected (tuple[int, ...]): Expected deterministic bit tuple.
+    """
+    assert counts, f"{name}: sampler returned no counts"
+    assert set(counts) == {expected}, (
+        f"{name}: got counts {counts}, expected {expected}"
+    )
+
+
+def _assert_uniform(
+    name: str,
+    counts: dict[tuple[int, ...], int],
+    expected_support: set[tuple[int, ...]],
+    *,
+    shots: int,
+) -> None:
+    """Assert a small uniform distribution has the right support and balance.
+
+    Args:
+        name (str): Backend name for assertion context.
+        counts (dict[tuple[int, ...], int]): Sample counts.
+        expected_support (set[tuple[int, ...]]): Expected support.
+        shots (int): Number of requested shots.
+    """
+    assert set(counts).issubset(expected_support), f"{name}: unexpected counts {counts}"
+    assert set(counts) == expected_support, f"{name}: missing support in {counts}"
+    expected_freq = 1.0 / len(expected_support)
+    for bits in expected_support:
+        freq = counts.get(bits, 0) / shots
+        assert abs(freq - expected_freq) < 0.15, (
+            f"{name}: {bits} frequency {freq:.3f}, expected {expected_freq:.3f}"
+        )
+
+
+def _assert_bell(
+    name: str,
+    counts: dict[tuple[int, ...], int],
+    expected_support: set[tuple[int, ...]],
+    *,
+    shots: int,
+) -> None:
+    """Assert Bell-state sampling has only correlated outcomes.
+
+    Args:
+        name (str): Backend name for assertion context.
+        counts (dict[tuple[int, ...], int]): Sample counts.
+        expected_support (set[tuple[int, ...]]): The two correlated
+            outcomes expected from the Bell-producing circuit.
+        shots (int): Number of requested shots.
+    """
+    assert len(expected_support) == 2
+    assert set(counts).issubset(expected_support), f"{name}: unexpected counts {counts}"
+    assert set(counts) == expected_support, f"{name}: missing Bell support in {counts}"
+    first = next(iter(expected_support))
+    first_freq = counts.get(first, 0) / shots
+    assert 0.35 < first_freq < 0.65, f"{name}: Bell split is imbalanced: {counts}"
+
+
+@qmc.qkernel
+def _flip(q: qmc.Qubit) -> qmc.Qubit:
+    """Flip a qubit for qkernel-call and controlled-call tests."""
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def _hadamard_broadcast(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply a broadcast Hadamard through a helper qkernel."""
+    return qmc.h(q)
+
+
+@qmc.qkernel
+def _h_then_full_reslice(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Mutate a view argument and return a full re-slice of it."""
+    q = qmc.h(q)
+    return q[:]
+
+
+@qmc.qkernel
+def _qft_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply a shape-dependent stdlib composite inside a subkernel."""
+    q = qmc.qft(q)
+    return q
+
+
+@qmc.qkernel
+def _pauli_x_evolve(
+    q: qmc.Vector[qmc.Qubit],
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a Pauli evolution layer for controlled-evolution tests."""
+    return qmc.pauli_evolve(q, ham, gamma)
+
+
+@qmc.composite_gate(name="bell_pair")
+@qmc.qkernel
+def _bell_pair(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Create a Bell pair as a custom composite gate."""
+    q0 = qmc.h(q0)
+    q0, q1 = qmc.cx(q0, q1)
+    return q0, q1
+
+
+@qmc.composite_gate(name="ry_composite")
+@qmc.qkernel
+def _ry_composite(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Apply ``RY`` as a parameterized custom composite gate."""
+    return qmc.ry(q, theta)
+
+
+@qmc.qkernel
+def native_gate_sample() -> qmc.Vector[qmc.Bit]:
+    """Exercise every native gate in one deterministic sample kernel."""
+    q = qmc.qubit_array(4, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.y(q[1])
+    q[1] = qmc.z(q[1])
+    q[1] = qmc.s(q[1])
+    q[1] = qmc.sdg(q[1])
+    q[1] = qmc.t(q[1])
+    q[1] = qmc.tdg(q[1])
+    q[2] = qmc.h(q[2])
+    q[2] = qmc.h(q[2])
+    q[2] = qmc.rx(q[2], math.pi)
+    q[2] = qmc.ry(q[2], math.pi)
+    q[2] = qmc.rz(q[2], math.pi / 7)
+    q[2] = qmc.p(q[2], math.pi / 5)
+    q[0], q[2] = qmc.cx(q[0], q[2])
+    q[0], q[1] = qmc.cz(q[0], q[1])
+    q[0], q[3] = qmc.swap(q[0], q[3])
+    q[1], q[2], q[0] = qmc.ccx(q[1], q[2], q[0])
+    q[1], q[2] = qmc.cp(q[1], q[2], math.pi / 3)
+    q[2], q[3] = qmc.rzz(q[2], q[3], math.pi / 9)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def native_gate_run(obs: qmc.Observable) -> qmc.Float:
+    """Exercise every native gate and return a deterministic expval."""
+    q = qmc.qubit_array(4, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.y(q[1])
+    q[1] = qmc.z(q[1])
+    q[1] = qmc.s(q[1])
+    q[1] = qmc.sdg(q[1])
+    q[1] = qmc.t(q[1])
+    q[1] = qmc.tdg(q[1])
+    q[2] = qmc.h(q[2])
+    q[2] = qmc.h(q[2])
+    q[2] = qmc.rx(q[2], math.pi)
+    q[2] = qmc.ry(q[2], math.pi)
+    q[2] = qmc.rz(q[2], math.pi / 7)
+    q[2] = qmc.p(q[2], math.pi / 5)
+    q[0], q[2] = qmc.cx(q[0], q[2])
+    q[0], q[1] = qmc.cz(q[0], q[1])
+    q[0], q[3] = qmc.swap(q[0], q[3])
+    q[1], q[2], q[0] = qmc.ccx(q[1], q[2], q[0])
+    q[1], q[2] = qmc.cp(q[1], q[2], math.pi / 3)
+    q[2], q[3] = qmc.rzz(q[2], q[3], math.pi / 9)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def qkernel_broadcast_sample() -> qmc.Vector[qmc.Bit]:
+    """Call a helper qkernel that broadcasts over a vector."""
+    q = qmc.qubit_array(2, "q")
+    q = _hadamard_broadcast(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def qkernel_broadcast_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a helper-qkernel broadcast."""
+    q = qmc.qubit_array(2, "q")
+    q = _hadamard_broadcast(q)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def vector_view_full_reslice_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a sub-kernel that returns a full re-slice of a VectorView."""
+    q = qmc.qubit_array(4, "q")
+    evens = q[0:4:2]
+    evens = _h_then_full_reslice(evens)
+    q[0:4:2] = evens
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def vector_view_full_reslice_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a full-re-slice VectorView sub-kernel return."""
+    q = qmc.qubit_array(4, "q")
+    evens = q[0:4:2]
+    evens = _h_then_full_reslice(evens)
+    q[0:4:2] = evens
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_qkernel_sample() -> qmc.Vector[qmc.Bit]:
+    """Apply a controlled qkernel call with a deterministic output."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_flip = qmc.control(_flip)
+    q[0], q[1] = controlled_flip(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_qkernel_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a controlled qkernel call."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_flip = qmc.control(_flip)
+    q[0], q[1] = controlled_flip(q[0], q[1])
+    return qmc.expval(q, obs)
+
+
+def _apply_controlled_native_gate_suite(
+    q: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply every native gate through ``qmc.control`` with fixed output."""
+    q[0] = qmc.x(q[0])
+
+    ch = qmc.control(qmc.h)
+    q[0], q[1] = ch(q[0], q[1])
+    q[0], q[1] = ch(q[0], q[1])
+
+    cx = qmc.control(qmc.x)
+    q[0], q[1] = cx(q[0], q[1])
+
+    cy = qmc.control(qmc.y)
+    q[0], q[2] = cy(q[0], q[2])
+
+    crx = qmc.control(qmc.rx)
+    q[0], q[3] = crx(q[0], q[3], math.pi)
+
+    cry = qmc.control(qmc.ry)
+    q[0], q[4] = cry(q[0], q[4], math.pi)
+
+    for gate in (qmc.z, qmc.s, qmc.sdg, qmc.t, qmc.tdg):
+        controlled_gate = qmc.control(gate)
+        q[0], q[1] = controlled_gate(q[0], q[1])
+
+    cp1 = qmc.control(qmc.p)
+    q[0], q[1] = cp1(q[0], q[1], math.pi / 5)
+
+    crz = qmc.control(qmc.rz)
+    q[0], q[1] = crz(q[0], q[1], math.pi / 7)
+
+    ccx = qmc.control(qmc.cx)
+    q[0], q[1], q[5] = ccx(q[0], q[1], q[5])
+
+    ccz = qmc.control(qmc.cz)
+    q[0], q[1], q[5] = ccz(q[0], q[1], q[5])
+
+    cswap = qmc.control(qmc.swap)
+    q[0], q[4], q[5] = cswap(q[0], q[4], q[5])
+
+    cccx = qmc.control(qmc.ccx)
+    q[0], q[1], q[2], q[3] = cccx(q[0], q[1], q[2], q[3])
+
+    ccp = qmc.control(qmc.cp)
+    q[0], q[1], q[2] = ccp(q[0], q[1], q[2], math.pi / 3)
+
+    crzz = qmc.control(qmc.rzz)
+    q[0], q[4], q[5] = crzz(q[0], q[4], q[5], math.pi / 9)
+    return q
+
+
+@qmc.qkernel
+def controlled_native_gate_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample all native gates wrapped by ``qmc.control``."""
+    q = qmc.qubit_array(6, "q")
+    q = _apply_controlled_native_gate_suite(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_native_gate_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after all native gates wrapped by ``qmc.control``."""
+    q = qmc.qubit_array(6, "q")
+    q = _apply_controlled_native_gate_suite(q)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_power_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a powered controlled native gate with deterministic output."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_x = qmc.control(qmc.x)
+    q[0], q[1] = controlled_x(q[0], q[1], power=2)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_power_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a powered controlled native gate."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_x = qmc.control(qmc.x)
+    q[0], q[1] = controlled_x(q[0], q[1], power=2)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_native_broadcast_target_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a built-in controlled gate broadcast over a VectorView target."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_x = qmc.control(qmc.x)
+    q[0], targets = controlled_x(q[0], q[1:3])
+    q[1:3] = targets
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_native_broadcast_target_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a controlled native broadcast target."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_x = qmc.control(qmc.x)
+    q[0], targets = controlled_x(q[0], q[1:3])
+    q[1:3] = targets
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_qkernel_broadcast_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled qkernel that broadcasts over a VectorView."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_broadcast = qmc.control(_hadamard_broadcast)
+    q[0], targets = controlled_broadcast(q[0], q[1:3])
+    q[1:3] = targets
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_qkernel_broadcast_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a controlled qkernel broadcast."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_broadcast = qmc.control(_hadamard_broadcast)
+    q[0], targets = controlled_broadcast(q[0], q[1:3])
+    q[1:3] = targets
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_stdlib_composite_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample controlled qkernel-backed stdlib QFT use."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_qft = qmc.control(_qft_layer)
+    q[0], targets = controlled_qft(q[0], q[1:3])
+    q[1:3] = targets
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_stdlib_composite_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after controlled stdlib QFT use."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_qft = qmc.control(_qft_layer)
+    q[0], targets = controlled_qft(q[0], q[1:3])
+    q[1:3] = targets
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_composite_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a custom composite gate wrapped by ``qmc.control``."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_bell = qmc.control(_bell_pair)
+    q[0], q[1], q[2] = controlled_bell(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_composite_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a controlled custom composite gate."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_bell = qmc.control(_bell_pair)
+    q[0], q[1], q[2] = controlled_bell(q[0], q[1], q[2])
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_parameterized_composite_sample(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Sample a parameterized custom composite wrapped by ``qmc.control``."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_ry = qmc.control(_ry_composite)
+    q[0], q[1] = controlled_ry(q[0], q[1], theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_parameterized_composite_run(
+    theta: qmc.Float,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval after a controlled parameterized custom composite."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_ry = qmc.control(_ry_composite)
+    q[0], q[1] = controlled_ry(q[0], q[1], theta)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def vector_view_control_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a native controlled gate with a VectorView control prefix."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    controlled_h = qmc.control(qmc.h, num_controls=2)
+    controls, q[2] = controlled_h(q[0:2], q[2])
+    q[0:2] = controls
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def vector_view_control_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a VectorView-control native gate."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    controlled_h = qmc.control(qmc.h, num_controls=2)
+    controls, q[2] = controlled_h(q[0:2], q[2])
+    q[0:2] = controls
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def symbolic_control_indices_sample(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Sample symbolic-control pool selection with bound indices."""
+    q = qmc.qubit_array(4, "q")
+    q[0] = qmc.x(q[0])
+    q[2] = qmc.x(q[2])
+    controlled_x = qmc.control(qmc.x, num_controls=n)
+    q[0:3], q[3] = controlled_x(q[0:3], q[3], control_indices=[0, 2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def symbolic_control_indices_run(n: qmc.UInt, obs: qmc.Observable) -> qmc.Float:
+    """Run expval after symbolic-control pool selection."""
+    q = qmc.qubit_array(4, "q")
+    q[0] = qmc.x(q[0])
+    q[2] = qmc.x(q[2])
+    controlled_x = qmc.control(qmc.x, num_controls=n)
+    q[0:3], q[3] = controlled_x(q[0:3], q[3], control_indices=[0, 2])
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def bound_control_indices_sample(
+    n: qmc.UInt,
+    i: qmc.UInt,
+    j: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Sample bound ``UInt`` control-index entries."""
+    q = qmc.qubit_array(4, "q")
+    q[0] = qmc.x(q[0])
+    q[2] = qmc.x(q[2])
+    controlled_x = qmc.control(qmc.x, num_controls=n)
+    q[0:3], q[3] = controlled_x(q[0:3], q[3], control_indices=[i, j])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def bound_control_indices_run(
+    n: qmc.UInt,
+    i: qmc.UInt,
+    j: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval after bound ``UInt`` control-index entries."""
+    q = qmc.qubit_array(4, "q")
+    q[0] = qmc.x(q[0])
+    q[2] = qmc.x(q[2])
+    controlled_x = qmc.control(qmc.x, num_controls=n)
+    q[0:3], q[3] = controlled_x(q[0:3], q[3], control_indices=[i, j])
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_random_ry_sample(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Sample a randomized-angle controlled ``RY`` gate."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_ry = qmc.control(qmc.ry)
+    q[0], q[1] = controlled_ry(q[0], q[1], theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_random_ry_run(theta: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a randomized-angle controlled ``RY`` gate."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_ry = qmc.control(qmc.ry)
+    q[0], q[1] = controlled_ry(q[0], q[1], theta)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_random_ry_power_sample(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Sample a randomized-angle powered controlled ``RY`` gate."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_ry = qmc.control(qmc.ry)
+    q[0], q[1] = controlled_ry(q[0], q[1], theta, power=2)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_random_ry_power_run(
+    theta: qmc.Float,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval after a randomized-angle powered controlled ``RY`` gate."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_ry = qmc.control(qmc.ry)
+    q[0], q[1] = controlled_ry(q[0], q[1], theta, power=2)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_pauli_evolve_sample(
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Sample a qkernel-backed Pauli evolution wrapped by ``qmc.control``."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_evolve = qmc.control(_pauli_x_evolve)
+    q[0], target = controlled_evolve(q[0], q[1:2], ham=ham, gamma=gamma)
+    q[1:2] = target
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_pauli_evolve_run(
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval after controlled qkernel-backed Pauli evolution."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    controlled_evolve = qmc.control(_pauli_x_evolve)
+    q[0], target = controlled_evolve(q[0], q[1:2], ham=ham, gamma=gamma)
+    q[1:2] = target
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def composite_gate_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a custom composite Bell-pair gate."""
+    q = qmc.qubit_array(2, "q")
+    q[0], q[1] = _bell_pair(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def composite_gate_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a custom composite Bell-pair gate."""
+    q = qmc.qubit_array(2, "q")
+    q[0], q[1] = _bell_pair(q[0], q[1])
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def stdlib_composite_sample() -> qmc.Vector[qmc.Bit]:
+    """Apply QFT then IQFT and sample the restored basis state."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[2] = qmc.x(q[2])
+    q = qmc.qft(q)
+    q = qmc.iqft(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def stdlib_composite_run(obs: qmc.Observable) -> qmc.Float:
+    """Apply QFT then IQFT and run a restored-basis expval."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[2] = qmc.x(q[2])
+    q = qmc.qft(q)
+    q = qmc.iqft(q)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def pauli_evolve_sample(ham: qmc.Observable, gamma: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Sample a Pauli evolution frontend operation at identity angle."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q = qmc.pauli_evolve(q, ham, gamma)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def pauli_evolve_run(
+    ham: qmc.Observable, gamma: qmc.Float, obs: qmc.Observable
+) -> qmc.Float:
+    """Run expval after a Pauli evolution frontend operation."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q = qmc.pauli_evolve(q, ham, gamma)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def sliced_pauli_evolve_sample(
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Sample Pauli evolution on a non-contiguous VectorView."""
+    q = qmc.qubit_array(4, "q")
+    evens = q[0:4:2]
+    evens = qmc.pauli_evolve(evens, ham, gamma)
+    q[0:4:2] = evens
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def sliced_pauli_evolve_run(
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval after Pauli evolution on a non-contiguous VectorView."""
+    q = qmc.qubit_array(4, "q")
+    evens = q[0:4:2]
+    evens = qmc.pauli_evolve(evens, ham, gamma)
+    q[0:4:2] = evens
+    return qmc.expval(q, obs)
+
+
+@dataclasses.dataclass(frozen=True)
+class FrontendExecutionCase:
+    """Describe one frontend pattern with paired sample and run kernels."""
+
+    name: str
+    sample_kernel: qmc.QKernel
+    run_kernel: qmc.QKernel
+    sample_mode: SampleMode
+    expected_bits: tuple[int, ...] | None
+    expected_support: set[tuple[int, ...]]
+    expected_expval: float
+    sample_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
+    run_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
+    unsupported_backends: frozenset[str] = dataclasses.field(default_factory=frozenset)
+
+
+QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED = frozenset({"quri_parts"})
+
+
+FRONTEND_EXECUTION_CASES = [
+    FrontendExecutionCase(
+        name="native-gates",
+        sample_kernel=native_gate_sample,
+        run_kernel=native_gate_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1, 1, 1),
+        expected_support={(1, 1, 1, 1)},
+        expected_expval=-4.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
+    ),
+    FrontendExecutionCase(
+        name="qkernel-broadcast",
+        sample_kernel=qkernel_broadcast_sample,
+        run_kernel=qkernel_broadcast_run,
+        sample_mode="uniform",
+        expected_bits=None,
+        expected_support={(0, 0), (1, 0), (0, 1), (1, 1)},
+        expected_expval=0.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="vector-view-full-reslice",
+        sample_kernel=vector_view_full_reslice_sample,
+        run_kernel=vector_view_full_reslice_run,
+        sample_mode="uniform",
+        expected_bits=None,
+        expected_support={(0, 0, 0, 0), (1, 0, 0, 0), (0, 0, 1, 0), (1, 0, 1, 0)},
+        expected_expval=2.0,
+        run_bindings={
+            "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3),
+        },
+    ),
+    FrontendExecutionCase(
+        name="controlled-qkernel",
+        sample_kernel=controlled_qkernel_sample,
+        run_kernel=controlled_qkernel_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-native-gates",
+        sample_kernel=controlled_native_gate_sample,
+        run_kernel=controlled_native_gate_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1, 1, 0, 1, 1),
+        expected_support={(1, 1, 1, 0, 1, 1)},
+        expected_expval=-4.0,
+        run_bindings={
+            "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3) + qm_o.Z(4) + qm_o.Z(5)
+        },
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="controlled-power",
+        sample_kernel=controlled_power_sample,
+        run_kernel=controlled_power_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=1.0,
+        run_bindings={"obs": qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-native-broadcast-target",
+        sample_kernel=controlled_native_broadcast_target_sample,
+        run_kernel=controlled_native_broadcast_target_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1, 1),
+        expected_support={(1, 1, 1)},
+        expected_expval=-3.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-qkernel-broadcast",
+        sample_kernel=controlled_qkernel_broadcast_sample,
+        run_kernel=controlled_qkernel_broadcast_run,
+        sample_mode="uniform",
+        expected_bits=None,
+        expected_support={(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)},
+        expected_expval=0.0,
+        run_bindings={"obs": qm_o.Z(1) + qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="controlled-stdlib-composite",
+        sample_kernel=controlled_stdlib_composite_sample,
+        run_kernel=controlled_stdlib_composite_run,
+        sample_mode="uniform",
+        expected_bits=None,
+        expected_support={(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)},
+        expected_expval=0.0,
+        run_bindings={"obs": qm_o.Z(1) + qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="controlled-custom-composite",
+        sample_kernel=controlled_composite_sample,
+        run_kernel=controlled_composite_run,
+        sample_mode="bell",
+        expected_bits=None,
+        expected_support={(1, 0, 0), (1, 1, 1)},
+        expected_expval=1.0,
+        run_bindings={"obs": qm_o.Z(1) * qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="controlled-parameterized-composite",
+        sample_kernel=controlled_parameterized_composite_sample,
+        run_kernel=controlled_parameterized_composite_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-1.0,
+        sample_bindings={"theta": math.pi},
+        run_bindings={"theta": math.pi, "obs": qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="vector-view-control",
+        sample_kernel=vector_view_control_sample,
+        run_kernel=vector_view_control_run,
+        sample_mode="uniform",
+        expected_bits=None,
+        expected_support={(1, 1, 0), (1, 1, 1)},
+        expected_expval=0.0,
+        run_bindings={"obs": qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="symbolic-control-indices",
+        sample_kernel=symbolic_control_indices_sample,
+        run_kernel=symbolic_control_indices_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1, 1),
+        expected_support={(1, 0, 1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"n": 2},
+        run_bindings={"n": 2, "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="bound-control-indices",
+        sample_kernel=bound_control_indices_sample,
+        run_kernel=bound_control_indices_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1, 1),
+        expected_support={(1, 0, 1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"n": 2, "i": 0, "j": 2},
+        run_bindings={
+            "n": 2,
+            "i": 0,
+            "j": 2,
+            "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3),
+        },
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="controlled-pauli-evolve",
+        sample_kernel=controlled_pauli_evolve_sample,
+        run_kernel=controlled_pauli_evolve_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-1.0,
+        sample_bindings={"ham": qm_o.X(0), "gamma": math.pi / 2},
+        run_bindings={
+            "ham": qm_o.X(0),
+            "gamma": math.pi / 2,
+            "obs": qm_o.Z(1),
+        },
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
+    ),
+    FrontendExecutionCase(
+        name="sliced-pauli-evolve",
+        sample_kernel=sliced_pauli_evolve_sample,
+        run_kernel=sliced_pauli_evolve_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1, 0),
+        expected_support={(1, 0, 1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"ham": qm_o.X(0) * qm_o.X(1), "gamma": math.pi / 2},
+        run_bindings={
+            "ham": qm_o.X(0) * qm_o.X(1),
+            "gamma": math.pi / 2,
+            "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3),
+        },
+    ),
+    FrontendExecutionCase(
+        name="custom-composite",
+        sample_kernel=composite_gate_sample,
+        run_kernel=composite_gate_run,
+        sample_mode="bell",
+        expected_bits=None,
+        expected_support={(0, 0), (1, 1)},
+        expected_expval=1.0,
+        run_bindings={"obs": qm_o.Z(0) * qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="stdlib-composite",
+        sample_kernel=stdlib_composite_sample,
+        run_kernel=stdlib_composite_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1),
+        expected_support={(1, 0, 1)},
+        expected_expval=-1.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2)},
+    ),
+    FrontendExecutionCase(
+        name="pauli-evolve",
+        sample_kernel=pauli_evolve_sample,
+        run_kernel=pauli_evolve_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"ham": qm_o.Z(0) * qm_o.Z(1), "gamma": 0.0},
+        run_bindings={
+            "ham": qm_o.Z(0) * qm_o.Z(1),
+            "gamma": 0.0,
+            "obs": qm_o.Z(0) + qm_o.Z(1),
+        },
+    ),
+]
+
+
+def _case_id(case: FrontendExecutionCase) -> str:
+    """Return a pytest id for a frontend execution case."""
+    return case.name
+
+
+@pytest.mark.parametrize("case", FRONTEND_EXECUTION_CASES, ids=_case_id)
+def test_frontend_pattern_sample_execution(
+    backend: Backend, case: FrontendExecutionCase
+) -> None:
+    """Sample frontend patterns through every supported SDK backend."""
+    name, transpiler, executor = backend
+    shots = 512
+    if name in case.unsupported_backends:
+        with pytest.raises(EmitError):
+            transpiler.transpile(case.sample_kernel, bindings=case.sample_bindings)
+        return
+    executable = transpiler.transpile(case.sample_kernel, bindings=case.sample_bindings)
+    counts = _counts(executable.sample(executor, shots=shots).result())
+
+    if case.sample_mode == "deterministic":
+        assert case.expected_bits is not None
+        _assert_deterministic(name, counts, case.expected_bits)
+    elif case.sample_mode == "uniform":
+        _assert_uniform(name, counts, case.expected_support, shots=shots)
+    elif case.sample_mode == "bell":
+        _assert_bell(name, counts, case.expected_support, shots=shots)
+    else:  # pragma: no cover - exhaustive guard for future cases.
+        raise AssertionError(f"unknown sample mode {case.sample_mode}")
+
+
+@pytest.mark.parametrize("case", FRONTEND_EXECUTION_CASES, ids=_case_id)
+def test_frontend_pattern_run_execution(
+    backend: Backend, case: FrontendExecutionCase
+) -> None:
+    """Run expval frontend patterns through every supported SDK backend."""
+    name, transpiler, executor = backend
+    if name in case.unsupported_backends:
+        with pytest.raises(EmitError):
+            transpiler.transpile(case.run_kernel, bindings=case.run_bindings)
+        return
+    executable = transpiler.transpile(case.run_kernel, bindings=case.run_bindings)
+    got = executable.run(executor).result()
+
+    assert np.isclose(got, case.expected_expval, atol=1e-5), (
+        f"{name} {case.name}: got {got}, expected {case.expected_expval}"
+    )
+
+
+def test_controlled_parameterized_composite_runtime_parameter(
+    backend: Backend,
+) -> None:
+    """Execute a controlled custom composite with a runtime angle parameter."""
+    name, transpiler, executor = backend
+
+    sample_executable = transpiler.transpile(
+        controlled_parameterized_composite_sample,
+        parameters=["theta"],
+    )
+    sample_counts = _counts(
+        sample_executable.sample(
+            executor,
+            shots=128,
+            bindings={"theta": math.pi},
+        ).result()
+    )
+    _assert_deterministic(name, sample_counts, (1, 1))
+
+    run_executable = transpiler.transpile(
+        controlled_parameterized_composite_run,
+        bindings={"obs": qm_o.Z(1)},
+        parameters=["theta"],
+    )
+    got = run_executable.run(executor, bindings={"theta": math.pi}).result()
+    assert np.isclose(got, -1.0, atol=1e-5), f"{name}: got {got}, expected -1.0"
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_controlled_random_rotation_sample_and_run(backend: Backend, seed: int) -> None:
+    """Check randomized controlled-rotation probabilities and expval."""
+    name, transpiler, executor = backend
+    rng = np.random.default_rng(seed)
+    theta = float(rng.uniform(0.25, math.pi - 0.25))
+    shots = 2048
+
+    sample_executable = transpiler.transpile(
+        controlled_random_ry_sample, bindings={"theta": theta}
+    )
+    counts = _counts(sample_executable.sample(executor, shots=shots).result())
+    assert set(counts).issubset({(1, 0), (1, 1)}), (
+        f"{name}: controlled RY changed the control bit or returned {counts}"
+    )
+    assert set(counts) == {(1, 0), (1, 1)}, (
+        f"{name}: randomized controlled RY missed support in {counts}"
+    )
+    target_one_freq = counts.get((1, 1), 0) / shots
+    expected_target_one_freq = math.sin(theta / 2) ** 2
+    assert abs(target_one_freq - expected_target_one_freq) < 0.08, (
+        f"{name}: seed={seed} theta={theta} target-one frequency "
+        f"{target_one_freq:.3f}, expected {expected_target_one_freq:.3f}"
+    )
+
+    run_executable = transpiler.transpile(
+        controlled_random_ry_run,
+        bindings={"theta": theta, "obs": qm_o.Z(1)},
+    )
+    got = run_executable.run(executor).result()
+    expected = math.cos(theta)
+    assert np.isclose(got, expected, atol=1e-5), (
+        f"{name}: seed={seed} theta={theta} got {got}, expected {expected}"
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_powered_controlled_random_rotation_sample_and_run(
+    backend: Backend,
+    seed: int,
+) -> None:
+    """Check powered randomized controlled-rotation probabilities and expval."""
+    name, transpiler, executor = backend
+    rng = np.random.default_rng(seed)
+    theta = float(rng.uniform(0.15, (math.pi / 2) - 0.15))
+    shots = 2048
+
+    sample_executable = transpiler.transpile(
+        controlled_random_ry_power_sample,
+        bindings={"theta": theta},
+    )
+    counts = _counts(sample_executable.sample(executor, shots=shots).result())
+    assert set(counts).issubset({(1, 0), (1, 1)}), (
+        f"{name}: powered controlled RY changed the control bit or returned {counts}"
+    )
+    assert set(counts) == {(1, 0), (1, 1)}, (
+        f"{name}: powered controlled RY missed support in {counts}"
+    )
+    target_one_freq = counts.get((1, 1), 0) / shots
+    expected_target_one_freq = math.sin(theta) ** 2
+    assert abs(target_one_freq - expected_target_one_freq) < 0.08, (
+        f"{name}: seed={seed} theta={theta} powered target-one frequency "
+        f"{target_one_freq:.3f}, expected {expected_target_one_freq:.3f}"
+    )
+
+    run_executable = transpiler.transpile(
+        controlled_random_ry_power_run,
+        bindings={"theta": theta, "obs": qm_o.Z(1)},
+    )
+    got = run_executable.run(executor).result()
+    expected = math.cos(2 * theta)
+    assert np.isclose(got, expected, atol=1e-5), (
+        f"{name}: seed={seed} theta={theta} got {got}, expected {expected}"
+    )
+
+
+def test_bound_control_indices_duplicate_rejected(backend: Backend) -> None:
+    """Reject ``UInt`` control-index entries that bind to duplicates."""
+    _name, transpiler, _executor = backend
+    with pytest.raises(EmitError, match="duplicate"):
+        transpiler.transpile(
+            bound_control_indices_sample,
+            bindings={"n": 2, "i": 0, "j": 0},
+        )

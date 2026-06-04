@@ -31,7 +31,7 @@
 import math
 
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+from qamomile.circuit.transpiler.errors import EmitError, UnreturnedBorrowError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -193,7 +193,14 @@ vec_target_demo.draw()
 
 # %%
 @qmc.qkernel
-def _phase(q: qmc.Qubit, theta: qmc.Float = math.pi / 2) -> qmc.Qubit:
+def _phase(
+    q: qmc.Qubit,
+    # runtime: ``_create_bound_input`` は ``qmc.Float`` 引数のデフォルトに
+    # 生の ``float`` を受けて定数 ``Float`` handle に wrap する。静的シグネチャは
+    # ハンドル型のままにしておくため、デフォルトリテラルが ``Float`` インスタンス
+    # でないことを ``# type: ignore`` で許容する。
+    theta: qmc.Float = math.pi / 2,  # type: ignore[assignment]
+) -> qmc.Qubit:
     return qmc.rx(q, theta)
 
 
@@ -437,8 +444,10 @@ def controlled_increment_demo(
 ) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, "q")
     q[control_index] = qmc.x(q[control_index])
-    n = q.shape[0]
-    for k in qmc.range(n - 1):
+    # ``q.shape[0]`` は ``int | UInt`` 型なので、`n` パラメータ (狭い
+    # ``qmc.UInt``) に再代入すると型が広がる。ローカル名で受ける。
+    n_shape = q.shape[0]
+    for k in qmc.range(n_shape - 1):
         target_idx = n - 2 - k
         ctrl_main = q[control_index]
         prefix = q[0:target_idx]
@@ -467,10 +476,11 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | 6.4 同じpool量子ビットをtargetに再利用 | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg制御prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 symbolic modeで単一scalar制御 | symbolic | `ValueError` |
+# | 6.7 sub-kernel内の`UInt` sliceに対するcontrolled QFT | concrete | `EmitError` |
 
 
 # %%
-def expect_error(label: str, exc_type: type, body) -> None:
+def expect_error(label: str, exc_type: type[BaseException], body) -> None:
     """``body``が``exc_type``の例外を投げることをassertします。
 
     ヘルパは*想定*の例外クラスだけをcatchします。それ以外の
@@ -649,6 +659,44 @@ expect_error(
     "single scalar control in symbolic mode",
     ValueError,
     case_single_scalar_control_symbolic,
+)
+
+# %% [markdown]
+# (cg-6-7)=
+# ### 6.7 sub-kernel内の`UInt` sliceに対するcontrolled QFT (concrete)
+#
+# 制御対象のsub-kernelが、呼び出し側でサイズの分かっている`Vector[Qubit]`引数全体に`qmc.qft` / `qmc.iqft`を適用する形は使えます。例えば`apply_qft(q)`が`q`全体にQFTを適用するなら、`controlled_qft = qmc.control(apply_qft)`という形は動作します。
+#
+# 一方で、下のようにsub-kernelが古典`UInt`引数を受け取り、その値で`q[:m]`を作ってからQFTを呼ぶ形はまだ未対応です。controlled-Uのemit処理は、parameterizedなsliceを含むcomposite blockをbackend gateへ畳み込むところまで対応していないため、transpile時に`EmitError`になります。
+#
+# Workaround: QFT/IQFTの幅を、controlled call siteで渡すtarget vectorのconcrete shapeから決められる形にします。実用上は、大きなvectorと別の`UInt`長をsub-kernelへ渡すのではなく、QFTしたい範囲そのものをviewとして切り出し、そのview全体にQFTを適用するsub-kernelへ渡してください。
+
+
+# %%
+def case_controlled_qft_over_uint_slice() -> None:
+    @qmc.qkernel
+    def qft_prefix(q: qmc.Vector[qmc.Qubit], m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+        prefix = q[:m]
+        prefix = qmc.qft(prefix)
+        q[:m] = prefix
+        return q
+
+    @qmc.qkernel
+    def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n + 1, "q")
+        q[0] = qmc.x(q[0])
+        controlled_qft = qmc.control(qft_prefix)
+        q[0], targets = controlled_qft(q[0], q[1 : n + 1], n)
+        q[1 : n + 1] = targets
+        return qmc.measure(q)
+
+    transpiler.transpile(kernel, bindings={"n": 2})
+
+
+expect_error(
+    "controlled QFT over a sub-kernel UInt slice",
+    EmitError,
+    case_controlled_qft_over_uint_slice,
 )
 
 # %% [markdown]
