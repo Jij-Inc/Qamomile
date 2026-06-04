@@ -6,7 +6,15 @@ import typing
 from qamomile.circuit.frontend.func_to_block import is_array_type
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
-from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
+from qamomile.circuit.frontend.handle.hamiltonian import Observable
+from qamomile.circuit.frontend.handle.primitives import (
+    Bit,
+    Float,
+    Handle,
+    QFixed,
+    Qubit,
+    UInt,
+)
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
@@ -15,6 +23,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
@@ -152,7 +161,21 @@ def for_loop(
 
 
 def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
-    """Create an appropriate Handle type from a Value using a template."""
+    """Wrap a phi result in the same frontend handle family.
+
+    Args:
+        value (Value): IR phi result value to expose to the traced Python code.
+        template_handle (Handle): Branch handle whose frontend type should be
+            preserved for the merged value.
+
+    Returns:
+        Handle: Frontend handle of the same supported family as
+            ``template_handle``.
+
+    Raises:
+        TypeError: If ``template_handle`` is not a supported phi-merge handle
+            type.
+    """
     if isinstance(template_handle, Qubit):
         return Qubit(value=value)
     elif isinstance(template_handle, UInt):
@@ -161,6 +184,10 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
         return Float(value=value)
     elif isinstance(template_handle, Bit):
         return Bit(value=value)
+    elif isinstance(template_handle, QFixed):
+        return QFixed(value=value)
+    elif isinstance(template_handle, Observable):
+        return Observable(value=value)
     elif isinstance(template_handle, ArrayBase):
         from qamomile.circuit.frontend.handle.array import VectorView
 
@@ -179,9 +206,60 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
         cls = type(template_handle)
         assert isinstance(value, ArrayValue)
         return cls._create_from_value(value=value, shape=template_handle._shape)
-    else:
-        # Fallback: return a generic Handle
-        return Handle(value=value)
+    raise TypeError(
+        "Unsupported Handle type for if-else phi merge: "
+        f"{type(template_handle).__name__}. Add explicit handle wrapping support "
+        "before merging this handle type."
+    )
+
+
+def _copy_qfixed_phi_metadata(
+    phi_output: Value,
+    true_v: Value,
+    false_v: Value,
+) -> Value:
+    """Copy QFixed carrier metadata onto a compatible phi result.
+
+    QFixed is a scalar quantum handle backed by multiple physical qubit
+    carriers recorded in metadata. A merged QFixed can only reuse that metadata
+    when both branches describe the exact same carrier layout; otherwise the
+    frontend cannot represent the condition-dependent carrier set safely.
+
+    Args:
+        phi_output (Value): Newly-created phi result value.
+        true_v (Value): True-branch QFixed value.
+        false_v (Value): False-branch QFixed value.
+
+    Returns:
+        Value: ``phi_output`` with QFixed metadata copied when applicable.
+
+    Raises:
+        TypeError: If either branch lacks QFixed metadata or the branch carrier
+            layouts differ.
+    """
+    if not isinstance(true_v.type, QFixedType):
+        return phi_output
+
+    true_meta = true_v.metadata.qfixed
+    false_meta = false_v.metadata.qfixed
+    if true_meta is None or false_meta is None:
+        raise TypeError(
+            "QFixed if-else phi merge requires QFixed metadata on both branches."
+        )
+    if (
+        true_meta.qubit_uuids != false_meta.qubit_uuids
+        or true_meta.num_bits != false_meta.num_bits
+        or true_meta.int_bits != false_meta.int_bits
+    ):
+        raise TypeError(
+            "QFixed if-else phi merge requires identical carrier qubits and "
+            "fixed-point layout across branches."
+        )
+    return phi_output.with_qfixed_metadata(
+        qubit_uuids=true_meta.qubit_uuids,
+        num_bits=true_meta.num_bits,
+        int_bits=true_meta.int_bits,
+    )
 
 
 def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
@@ -344,6 +422,7 @@ def _create_phi_for_values(
         )
     else:
         phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi_{phi_index}")
+        phi_output = _copy_qfixed_phi_metadata(phi_output, true_v, false_v)
 
     # Create PhiOp and store in IfOperation
     _phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
