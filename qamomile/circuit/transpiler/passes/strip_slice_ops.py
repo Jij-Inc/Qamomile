@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
+from qamomile.circuit.ir.operation.control_flow import ForItemsOperation, ForOperation
 
 from . import Pass
 from .control_flow_visitor import OperationTransformer
@@ -58,7 +59,42 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
         """
 
         class Stripper(OperationTransformer):
+            def transform_operations(
+                self, operations: list[Operation]
+            ) -> list[Operation]:
+                """Transform operations and drop marker-only loop shells.
+
+                Args:
+                    operations (list[Operation]): Operations to rewrite.
+
+                Returns:
+                    list[Operation]: Rewritten operations with slice
+                    markers and newly-empty ``For`` / ``ForItems``
+                    operations removed.
+                """
+                result: list[Operation] = []
+                for op in operations:
+                    transformed = self.transform_operation(op)
+                    if transformed is None:
+                        continue
+                    transformed = self._transform_control_flow(transformed)
+                    if isinstance(transformed, (ForOperation, ForItemsOperation)) and (
+                        not transformed.operations
+                    ):
+                        continue
+                    result.append(transformed)
+                return result
+
             def transform_operation(self, op: Operation) -> Operation | None:
+                """Drop slice marker operations.
+
+                Args:
+                    op (Operation): Operation to inspect.
+
+                Returns:
+                    Operation | None: ``None`` for slice markers, or
+                    ``op`` unchanged otherwise.
+                """
                 if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
                     return None
                 return op

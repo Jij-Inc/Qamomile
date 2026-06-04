@@ -1,6 +1,6 @@
 # Known Limitations
 
-This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover both the call-time specialization fix for issue #392 and the eager qkernel rebind-detection change.
+This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, and the slice/control-flow work tracked by recent controlled-view fixes.
 
 ## Re-trace cost is uncached
 
@@ -75,3 +75,19 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 **Workaround**: refer to the primitives by their qualified path (`qm.measure(...)` / `qmc.qubit_array(...)`) or import the unaliased name. The four syntactic forms accepted by `_is_classical_returning_call` and `_is_quantum_constructor_call` (`Name` and `Attribute` for each of the two names) cover both bare and `<module>.<name>` styles, so unless the importer deliberately renames the symbol the analyzer sees it correctly.
 
 **Future fix**: replace the syntactic-name check with an identity-based one. Each `QKernel` has access to the user function's `__globals__` (and surrounding closure cells), so the analyzer can resolve `call.func.id` to a Python object at decoration time and compare against the canonical `qamomile.circuit.measure` / `qamomile.circuit.expval` / `qamomile.circuit.qubit` / `qamomile.circuit.qubit_array` references. Closure-bound aliases would need a separate pass over the function's `__closure__`. Attribute-form aliases (`obj.measure(...)` where `obj` is not `qm` / `qmc`) remain ambiguous and would either require local type information or a structurally-conservative fall-back.
+
+## Controlled QFT/IQFT over sub-kernel `UInt` slices
+
+**When it bites**: a controlled sub-kernel receives a classical `UInt` argument, forms a prefix slice such as `q[:m]` inside the sub-kernel, and applies `qmc.qft` or `qmc.iqft` to that prefix.
+
+**Why this trade-off was chosen**: a sub-kernel that applies QFT/IQFT to the whole target vector can be specialized from the concrete target size at the controlled call site. The narrower pattern above is different: the composite gate target is a parameterized slice created inside the controlled body. The controlled-U emitter does not yet lower that parameterized sliced composite block into a backend gate while also reflecting the resolved slice width into the target mapping.
+
+**Future fix**: extend controlled-U composite lowering so it can safely resolve sub-kernel parameterized slice widths from bindings and reflect those resolved widths in the backend target mapping.
+
+## Symbolic slice disjointness beyond direct unit-stride intervals
+
+**When it bites**: two symbolic slices on the same root are actually disjoint, but their disjointness cannot be expressed as direct unit-stride root-space intervals.
+
+**Why this trade-off was chosen**: `_symbolic_slices_definitely_disjoint()` only compares direct `slice_step == 1` root slices as half-open intervals, such as `q[:k]` and `q[k:n]`. Strided symbolic slices, nested symbolic affine maps, and more complex symbolic arithmetic are treated conservatively as potentially overlapping.
+
+**Future fix**: add small proof helpers only for shapes that can be proven safely, such as parity partitions or limited affine intervals, without turning the borrow checker into a general symbolic inequality solver.

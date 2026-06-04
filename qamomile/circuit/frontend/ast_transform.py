@@ -1,4 +1,5 @@
 import ast
+import copy
 import enum
 import inspect
 import textwrap
@@ -11,6 +12,7 @@ from qamomile.circuit.frontend.operation.control_flow import (
     emit_if,
     for_items,
     for_loop,
+    should_trace_for_loop,
     while_loop,
 )
 
@@ -920,7 +922,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
     def _transform_for_range(
         self, node: ast.For, flattened_body: list[ast.stmt]
-    ) -> ast.With:
+    ) -> ast.stmt:
         """Transform 'for i in range(...)' to 'with for_loop(...)'.
 
         Supports patterns:
@@ -971,7 +973,21 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
-        return with_stmt
+        return ast.If(
+            test=ast.Call(
+                func=ast.Name(id="should_trace_for_loop", ctx=ast.Load()),
+                args=[
+                    copy.deepcopy(start_arg),
+                    copy.deepcopy(stop_arg),
+                    copy.deepcopy(step_arg),
+                ],
+                keywords=[],
+            ),
+            body=[with_stmt],
+            orelse=[],
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+        )
 
     def _transform_for_items(
         self, node: ast.For, flattened_body: list[ast.stmt]
@@ -1304,6 +1320,7 @@ def transform_control_flow(func: Callable):
         {
             "while_loop": while_loop,
             "for_loop": for_loop,
+            "should_trace_for_loop": should_trace_for_loop,
             "for_items": for_items,
             "emit_if": emit_if,
             "Any": Any,  # For type annotations in generated code

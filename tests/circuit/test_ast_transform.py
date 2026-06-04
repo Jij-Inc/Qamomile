@@ -359,7 +359,22 @@ class TestLoopBackedgeIfLiveness:
 
     @staticmethod
     def _find_loop_body(func_def: ast.FunctionDef) -> list[ast.stmt]:
-        loop_stmt = next(stmt for stmt in func_def.body if isinstance(stmt, ast.With))
+        for stmt in func_def.body:
+            if isinstance(stmt, ast.With):
+                loop_stmt = stmt
+                break
+            if (
+                isinstance(stmt, ast.If)
+                and isinstance(stmt.test, ast.Call)
+                and isinstance(stmt.test.func, ast.Name)
+                and stmt.test.func.id == "should_trace_for_loop"
+            ):
+                loop_stmt = next(
+                    inner for inner in stmt.body if isinstance(inner, ast.With)
+                )
+                break
+        else:
+            raise AssertionError("Expected transformed loop body")
         return loop_stmt.body
 
     @staticmethod

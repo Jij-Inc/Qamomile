@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Sequence
 
+from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.gate import GateOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
     QuantumExecutor,
@@ -27,6 +31,57 @@ if TYPE_CHECKING:
     from quri_parts.circuit import (  # type: ignore[import-not-found]
         ImmutableBoundParametricQuantumCircuit,
     )
+
+
+def _ensure_quri_controlled_block_gate_by_gate_supported(block_value: Any) -> None:
+    """Reject controlled block bodies QURI Parts cannot safely decompose.
+
+    QURI Parts has no backend gate object for controlled sub-circuits and
+    this backend intentionally does not fall back to dense unitary
+    synthesis. The shared gate-by-gate fallback can only emit primitive
+    gates and statically resolved ``ForOperation`` bodies. Everything else
+    must fail before emission so unsupported operations are not silently
+    dropped.
+
+    Args:
+        block_value (Any): Controlled-U block whose body will be emitted
+            through the shared gate-by-gate fallback.
+
+    Raises:
+        EmitError: If the block body contains an operation that QURI Parts
+            cannot safely emit under outer controls without dense unitary
+            synthesis.
+    """
+    _ensure_quri_controlled_operations_gate_by_gate_supported(
+        getattr(block_value, "operations", ())
+    )
+
+
+def _ensure_quri_controlled_operations_gate_by_gate_supported(
+    operations: Sequence[Any],
+) -> None:
+    """Reject operations outside QURI Parts controlled gate-by-gate support.
+
+    Args:
+        operations (Sequence[Any]): Operations from a controlled block body
+            or from a statically unrolled ``ForOperation`` body.
+
+    Raises:
+        EmitError: If any operation cannot be emitted by the shared
+            primitive gate-by-gate controlled fallback.
+    """
+    for op in operations:
+        if isinstance(op, (GateOperation, ReturnOperation)):
+            continue
+        if isinstance(op, ForOperation):
+            _ensure_quri_controlled_operations_gate_by_gate_supported(op.operations)
+            continue
+        raise EmitError(
+            "QURI Parts controlled fallback only supports primitive gate "
+            "bodies and statically resolved for-loops. "
+            f"Unsupported operation: {type(op).__name__}.",
+            operation="ControlledUOperation",
+        )
 
 
 def _create_seeded_qulacs_vector_sampler(seed: int) -> Any:
@@ -109,6 +164,82 @@ class QuriPartsEmitPass(
         # QURI Parts has no native composite gate emitters
         composite_emitters: list[Any] = []
         super().__init__(emitter, bindings, parameters, composite_emitters)  # type: ignore[arg-type]
+
+    def _blockvalue_to_gate(
+        self,
+        block_value: Any,
+        num_qubits: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Return no native gate object for QURI Parts controlled blocks.
+
+        QURI Parts' emitter cannot turn a temporary circuit into a gate
+        object that can be appended and controlled later.  The shared
+        probe would still build a sub-circuit before discovering that
+        ``circuit_to_gate()`` returns ``None``, which can pollute the
+        parent emitter's current-circuit and parameter state.  Skip that
+        probe and let ``_emit_controlled_fallback`` try the shared
+        gate-by-gate decomposition directly.
+
+        Args:
+            block_value (Any): Ignored inner block value.
+            num_qubits (int): Ignored target qubit count.
+            bindings (dict[str, Any]): Ignored local bindings.
+
+        Returns:
+            None: Always signals that the backend-specific fallback must
+            handle the controlled block.
+        """
+        del block_value, num_qubits, bindings
+        return None
+
+    def _emit_controlled_fallback(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        block_value: Any,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit controlled-U fallback through gate-by-gate decomposition.
+
+        QURI Parts does not expose a custom-gate object that can be
+        returned by ``circuit_to_gate`` and then controlled.  Avoid
+        replacing that missing primitive with a dense matrix fallback:
+        full-unitary extraction scales exponentially and can hide shapes
+        that the backend cannot route gate-by-gate.  Instead, delegate to
+        the shared controlled decomposition and surface its ``EmitError``
+        if the block shape is unsupported.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit being emitted.
+            block_value (Any): Inner controlled-U block.
+            num_controls (int): Number of physical control qubits.
+            control_indices (list[int]): Physical control qubits.
+            target_indices (list[int]): Physical target qubits.
+            power (int): Positive power to apply to the inner unitary
+                before controlling it.
+            bindings (dict[str, Any]): Local block bindings.
+
+        Raises:
+            EmitError: If safe gate-by-gate controlled decomposition
+                cannot emit the block.
+        """
+        if not target_indices:
+            return
+        _ensure_quri_controlled_block_gate_by_gate_supported(block_value)
+        super()._emit_controlled_fallback(
+            circuit,
+            block_value,
+            num_controls,
+            control_indices,
+            target_indices,
+            power,
+            bindings,
+        )
 
 
 class QuriPartsExecutor(

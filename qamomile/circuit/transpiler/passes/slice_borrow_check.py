@@ -51,8 +51,11 @@ State shape: a single dict keyed by a 2-tuple
 ArrayValue (after walking the ``slice_of`` chain) and
 ``slot_descriptor`` is ``f"const:<idx>"`` for slots covered by
 compile-time-constant slices.  Symbolic-bound slices (those whose
-bounds remain non-constant post-fold) are not enumerated and are
-left to the frontend trace-time validator.
+bounds remain non-constant post-fold) are not enumerated into
+per-qubit slots; the pass records only an exact ``"sym:<descriptor>"``
+entry so a later SSA-version refresh of the same symbolic slice
+descriptor can update the owner without claiming any new concrete
+range.
 
 Namespacing by root logical_id is required so that borrow /
 consumed state on one register (``a``) does not block access to
@@ -68,6 +71,8 @@ dispatches the two violation messages.
 
 from __future__ import annotations
 
+from typing import Literal, TypeAlias
+
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -75,9 +80,14 @@ from qamomile.circuit.ir.operation import (
     ReturnOperation,
     SliceArrayOperation,
 )
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, CompOp
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+)
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
     HasNestedOps,
     IfOperation,
 )
@@ -86,6 +96,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import (
     SliceBorrowViolationError,
@@ -95,6 +106,10 @@ from qamomile.circuit.transpiler.errors import (
 from . import Pass
 
 BorrowKey = tuple[str, str]
+ConstBoundToken: TypeAlias = tuple[Literal["const"], int]
+ValueBoundToken: TypeAlias = tuple[Literal["value"], str, int]
+MinBoundToken: TypeAlias = tuple[Literal["min"], object, object]
+BoundToken: TypeAlias = ConstBoundToken | ValueBoundToken | MinBoundToken
 
 
 def _root_of(av: ArrayValue) -> ArrayValue:
@@ -192,6 +207,17 @@ validator covers them.
 State = dict[BorrowKey, Owner]
 
 
+class _SnapshotKind:
+    """Classify control-flow snapshots for safe view-refresh decisions."""
+
+    IF_BRANCH = "if_branch"
+    FOR_STATIC_NONZERO = "for_static_nonzero"
+    UNSAFE_CONTROL_BODY = "unsafe_control_body"
+
+
+_SnapshotFrame = tuple[str, State]
+
+
 class SliceBorrowCheckPass(Pass[Block, Block]):
     """Post-fold linearity checker for sliced views and borrow state.
 
@@ -227,9 +253,20 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         # already registered — those changes cannot be propagated
         # out of the body by the current merge logic, so they're
         # rejected up-front.  Empty stack means we're at the top
-        # level; only the innermost frame matters for the per-op
-        # check because nested bodies push their own snapshot.
-        self._outer_snapshot_stack: list[State] = []
+        # level.  Each frame also records whether the body is a
+        # statically non-zero ``For`` loop, which is the only context
+        # where same-slice SSA-version refresh of an outer owner can
+        # safely be accepted without propagating a deletion.
+        self._outer_snapshot_stack: list[_SnapshotFrame] = []
+        # Small expression cache for symbolic slice-bound comparisons.
+        # ``SliceArrayOperation`` normalizes user slices through BinOps
+        # such as ``min(k, n)``, ``x - 0``, ``x + 0`` and ``x // 1``.
+        # The borrow checker does not evaluate symbolic arithmetic in
+        # general, but it needs structurally equal normalized bounds to
+        # compare equal when proving adjacent symbolic intervals
+        # disjoint.  Keys are strict ``(logical_id, version)`` value
+        # identities, values are canonical ``BoundToken`` tuples.
+        self._bound_exprs: dict[tuple[str, int], BoundToken] = {}
 
     @property
     def name(self) -> str:
@@ -262,6 +299,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 f"block, got {input.kind}",
             )
 
+        self._bound_exprs.clear()
         state: State = {}
         self._walk(input.operations, state)
 
@@ -313,9 +351,16 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # terminator is handled by the caller (outer block end).
                 continue
 
-            if isinstance(op, BinOp) or isinstance(op, CompOp):
-                # Pure classical arithmetic on UInts/Floats; no borrow
-                # semantics.
+            if isinstance(op, BinOp):
+                # Pure classical arithmetic has no borrow semantics, but
+                # slice construction uses a few BinOps to normalize bounds.
+                # Record a tiny canonical expression for later symbolic
+                # interval-disjointness checks.
+                self._record_bound_expr(op)
+                continue
+
+            if isinstance(op, CompOp):
+                # Pure classical comparisons; no borrow semantics.
                 continue
 
             if isinstance(op, SliceArrayOperation):
@@ -382,7 +427,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             # — the current merge policy cannot propagate entry
             # deletions out of the body, so cross-body release is
             # unsupported in this revision.
-            self._outer_snapshot_stack.append(dict(state))
+            self._outer_snapshot_stack.append((_SnapshotKind.IF_BRANCH, dict(state)))
             try:
                 true_state = dict(state)
                 self._walk(op.true_operations, true_state)
@@ -433,7 +478,23 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         #    consume, and the body simulation is one iteration, so any
         #    transient ownership swap is dropped to avoid corrupting
         #    the outer state's view of the live slice graph.
-        self._outer_snapshot_stack.append(dict(state))
+        trip_count = (
+            self._static_for_trip_count(op) if isinstance(op, ForOperation) else None
+        )
+        # A same-slice refresh of an outer owner is only safe when this
+        # body is guaranteed to execute at least once.  In that case the
+        # simulated body state is a faithful update of the live owner for
+        # the body-local checks, while the outer merge still keeps the
+        # enclosing state's original owner.  Skippable or branch-like
+        # bodies must stay conservative because rewriting their snapshot
+        # owner would make the post-body state depend on an execution path
+        # that this pass does not model.
+        if isinstance(op, ForOperation) and trip_count is not None and trip_count > 0:
+            snapshot_kind = _SnapshotKind.FOR_STATIC_NONZERO
+        else:
+            snapshot_kind = _SnapshotKind.UNSAFE_CONTROL_BODY
+
+        self._outer_snapshot_stack.append((snapshot_kind, dict(state)))
         try:
             for body in op.nested_op_lists():
                 body_state = dict(state)
@@ -659,6 +720,59 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         for k in to_remove:
             del state[k]
 
+    def _release_keys_for_view(
+        self, view_value: ArrayValue, state: State
+    ) -> list[BorrowKey]:
+        """Find state entries that a slice-assignment release should drop.
+
+        The normal release key is the view's own ``logical_id``.  A
+        nested full-slice handoff may leave the IR borrow state pointing
+        at the skipped outer view while the release operand is the inner
+        view that fully replaced it.  When concrete coverage proves that
+        both owners cover exactly the same root slots, release the stale
+        equivalent owner as well.
+
+        Args:
+            view_value (ArrayValue): Sliced view operand from
+                ``ReleaseSliceViewOperation``.
+            state (State): Current borrow-state map.
+
+        Returns:
+            list[BorrowKey]: State keys that should be removed.
+        """
+        target_logical_id = view_value.logical_id
+        release_keys = {
+            k
+            for k, owner in state.items()
+            if isinstance(owner, ArrayValue) and owner.logical_id == target_logical_id
+        }
+
+        target_coverage = self._collect_view_coverage(view_value)
+        if target_coverage is None:
+            return list(release_keys)
+
+        target_root = _root_of(view_value)
+        equivalent_owner_ids: set[str] = set()
+        for slot in target_coverage:
+            key = _const_key(target_root, slot)
+            owner = state.get(key)
+            if not isinstance(owner, ArrayValue):
+                continue
+            if owner.logical_id == target_logical_id:
+                continue
+            if _root_of(owner).logical_id != target_root.logical_id:
+                continue
+            if self._collect_view_coverage(owner) == target_coverage:
+                equivalent_owner_ids.add(owner.uuid)
+
+        if not equivalent_owner_ids:
+            return list(release_keys)
+
+        for k, owner in state.items():
+            if isinstance(owner, ArrayValue) and owner.uuid in equivalent_owner_ids:
+                release_keys.add(k)
+        return list(release_keys)
+
     def _handle_release(self, view_value: ValueBase, state: State) -> None:
         """Apply a slice-assignment release to ``state``.
 
@@ -671,9 +785,8 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         original registration.
 
         When called from inside a control-flow body, refuses to drop
-        any entry that the enclosing block already owned (the
-        innermost outer snapshot recorded by ``_walk_nested``).  The
-        current loop / branch merge cannot propagate entry deletions
+        any entry that any active enclosing snapshot already owned.
+        The current loop / branch merge cannot propagate entry deletions
         out of the body, so such cross-body releases would leave the
         outer state inconsistent — they are rejected with
         ``SliceBorrowViolationError`` for predictability.
@@ -693,32 +806,28 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         if not isinstance(view_value, ArrayValue):
             return
 
-        target_logical_id = view_value.logical_id
-        outer_snapshot = (
-            self._outer_snapshot_stack[-1] if self._outer_snapshot_stack else None
-        )
+        release_keys = self._release_keys_for_view(view_value, state)
+        offenders = [
+            k
+            for _, snapshot in self._outer_snapshot_stack
+            for k in release_keys
+            if k in snapshot
+        ]
+        if offenders:
+            raise SliceBorrowViolationError(
+                f"Slice assignment inside a control-flow body "
+                f"attempted to release view '{view_value.name}', "
+                f"which was registered by the enclosing block.  "
+                f"Cross-body release is not supported in this "
+                f"revision because the loop / branch merge cannot "
+                f"propagate the deletion to the outer state.  "
+                f"Move the view construction *inside* the body, "
+                f"or perform the slice assignment outside the "
+                f"control-flow region."
+            )
 
-        if outer_snapshot is not None:
-            offenders = [
-                k
-                for k, owner in outer_snapshot.items()
-                if isinstance(owner, ArrayValue)
-                and owner.logical_id == target_logical_id
-            ]
-            if offenders:
-                raise SliceBorrowViolationError(
-                    f"Slice assignment inside a control-flow body "
-                    f"attempted to release view '{view_value.name}', "
-                    f"which was registered by the enclosing block.  "
-                    f"Cross-body release is not supported in this "
-                    f"revision because the loop / branch merge cannot "
-                    f"propagate the deletion to the outer state.  "
-                    f"Move the view construction *inside* the body, "
-                    f"or perform the slice assignment outside the "
-                    f"control-flow region."
-                )
-
-        self._release_by_owner_logical_id(target_logical_id, state)
+        for key in release_keys:
+            state.pop(key, None)
 
     def _guard_drain_against_outer_snapshot(
         self,
@@ -754,17 +863,17 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 tried to drop the outer view.
 
         Raises:
-            SliceBorrowViolationError: If any entry in the innermost
-                outer snapshot is owned by ``drained_view``.
+            SliceBorrowViolationError: If any active outer snapshot
+                owns ``drained_view`` or an equivalent prior version of
+                the same sliced view.
         """
         if not self._outer_snapshot_stack:
             return
-        outer_snapshot = self._outer_snapshot_stack[-1]
-        target_uuid = drained_view.uuid
         offenders = [
             k
-            for k, owner in outer_snapshot.items()
-            if isinstance(owner, ArrayValue) and owner.uuid == target_uuid
+            for _, snapshot in self._outer_snapshot_stack
+            for k, owner in snapshot.items()
+            if self._snapshot_owner_matches_view(owner, drained_view)
         ]
         if not offenders:
             return
@@ -780,6 +889,42 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             f"outer view."
         )
 
+    def _can_body_local_same_coverage_handoff(
+        self,
+        owner: ArrayValue,
+        keys: list[BorrowKey],
+    ) -> bool:
+        """Check whether a same-coverage handoff may rewrite body state.
+
+        Distinct-lineage same-coverage replacement is normally treated
+        as an implicit drain and is rejected inside control-flow bodies.
+        A statically non-zero ``For`` body is the narrow exception:
+        the body definitely executes at least once, and the rewrite is
+        used only while checking that simulated body.  The enclosing
+        state remains conservative after merge.
+
+        Args:
+            owner (ArrayValue): Existing owner that the body-local
+                handoff would replace.
+            keys (list[BorrowKey]): Exact state entries covered by the
+                owner and candidate.
+
+        Returns:
+            bool: ``True`` when every matching active snapshot is a
+                statically non-zero ``For`` body.
+        """
+        matching_kinds: list[str] = []
+        for kind, snapshot in self._outer_snapshot_stack:
+            for key in keys:
+                snapshot_owner = snapshot.get(key)
+                if isinstance(snapshot_owner, ArrayValue) and (
+                    snapshot_owner.uuid == owner.uuid
+                ):
+                    matching_kinds.append(kind)
+        return bool(matching_kinds) and all(
+            kind == _SnapshotKind.FOR_STATIC_NONZERO for kind in matching_kinds
+        )
+
     # ------------------------------------------------------------------
     # Slice registration
     # ------------------------------------------------------------------
@@ -790,9 +935,11 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         """Register covered slots for a sliced ArrayValue if not yet seen.
 
         Walks ``av`` (and any chain through ``slice_of``) to find slice
-        views whose bounds are now concrete; for each such view, bulk
-        registers its covered root-parent slots in ``state`` keyed
-        under ``(root_uuid, f"const:<idx>")`` with the view as the owner.  A view
+        views whose bounds are now concrete; for each concrete view,
+        bulk-registers its covered root-parent slots in ``state`` keyed
+        under ``(root_logical_id, f"const:<idx>")`` with the view as the
+        owner.  Symbolic views use one exact descriptor entry and only
+        support same-lineage forward SSA-version refreshes.  A view
         already present in ``state`` is idempotently skipped.
 
         Args:
@@ -809,30 +956,14 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         if av.slice_of is None:
             return
 
-        # Concrete length required.
-        length = self._const_int(av.shape[0]) if av.shape else None
-        if length is None:
-            return  # Symbolic — skip.
+        new_covered = self._collect_view_coverage(av)
+        if new_covered is None:
+            self._register_symbolic_slice_if_new(av, state)
+            return
 
-        # Walk ``slice_of`` chain composing the affine map.  Start with
-        # the identity map ``(start=0, step=1)`` and apply each parent
-        # frame ``(p_start, p_step)`` on the way up:
-        #   idx_parent = p_start + p_step * idx_current
-        # so ``(start, step)`` accumulate to ``(p_start + p_step * start,
-        # p_step * step)``.  Mirrors :meth:`_collect_view_coverage`;
-        # starting from ``av.slice_start`` directly would double-apply
-        # the innermost frame.
-        root = av
-        root_start = 0
-        root_step = 1
-        while root.slice_of is not None:
-            parent_start = self._const_int(root.slice_start)
-            parent_step = self._const_int(root.slice_step)
-            if parent_start is None or parent_step is None:
-                return
-            root_start = parent_start + parent_step * root_start
-            root_step = parent_step * root_step
-            root = root.slice_of
+        root = _root_of(av)
+
+        self._guard_against_symbolic_root_conflicts(av, root, state)
 
         # Enumerate the exact covered-slot set for this view so that
         # "sequential same-range" slicing (``a = q[0::2]; loop(a); b =
@@ -841,7 +972,6 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         # whose covered sets are identical represent the same logical
         # view — the earlier one's lifetime implicitly ended when the
         # later one was constructed.
-        new_covered: set[int] = {root_start + root_step * j for j in range(length)}
 
         # Collect distinct existing views whose slots intersect this
         # view's coverage, then decide per-view whether to replace
@@ -849,8 +979,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         # as idempotent (same uuid).
         touched_views: dict[str, ArrayValue] = {}
         touched_views_coverage: dict[str, set[int]] = {}
-        for j in range(length):
-            idx = root_start + root_step * j
+        for idx in new_covered:
             key = _const_key(root, idx)
             existing = state.get(key)
             if existing is None:
@@ -882,36 +1011,81 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     self._format_view_registration_conflict(
                         other_view,
                         av,
-                        next(iter(touched_views_coverage[other_uuid])),
+                        min(touched_views_coverage[other_uuid]),
                         root,
                     )
                 )
             if other_full == new_covered:
-                # Same logical view — release all of the old view's
-                # registrations before installing the new one below.
+                # Same coverage has two very different meanings:
+                # a legitimate SSA refresh of the same sliced view, or
+                # a distinct live view that happens to cover the same
+                # slots.  Accept only the former early; the latter keeps
+                # using the existing drain/replacement behavior below.
+                if self._is_forward_same_slice_view_refresh(av, other_view):
+                    refresh_keys = [_const_key(root, slot) for slot in other_full]
+                    self._guard_refresh_against_unsafe_snapshots(
+                        other_view, av, refresh_keys
+                    )
+                    # Refreshing updates the owner identity in place.
+                    # It is not a drain: no slot is released or claimed by
+                    # a different lineage, so later view-internal element
+                    # operands can still pass the existing UUID-chain check.
+                    for old_key in refresh_keys:
+                        existing = state.get(old_key)
+                        if (
+                            isinstance(existing, ArrayValue)
+                            and existing.uuid == other_view.uuid
+                        ):
+                            state[old_key] = av
+                    continue
+
+                # If the lineage is the same but the version did not move
+                # forward, falling through to the old same-coverage drain
+                # would let a stale predecessor replace the current owner.
+                # Reject that explicitly before considering distinct-lineage
+                # compatibility paths such as nested full-slice handoff.
+                if self._same_slice_lineage_and_known_extent(av, other_view):
+                    self._raise_stale_same_slice_replacement(av, other_view, root)
+
+                # Same coverage with a distinct lineage: release all of
+                # the old view's registrations before installing the new
+                # one below.
                 #
-                # NB: this drain fires whenever two views resolve to the
-                # same covered set post-fold, including the (rare,
-                # symbolic-bound) sibling case where ``a = q[lo:hi]``
-                # and ``b = q[lo2:hi2]`` happen to coincide.  We cannot
-                # distinguish the legitimate version-bump / nested
-                # ``inner-equals-outer`` cases from a sibling-with-
-                # identical-coverage purely from ``logical_id`` or
-                # coverage — both nested ``outer[0:full]`` and sibling
-                # views have distinct ``logical_id``s but identical
-                # coverage.  Preserving nested provenance in IR would
-                # require keeping multi-hop ``slice_of`` chains across
-                # ``VectorView._nested_slice`` (which currently
-                # flattens to root) and is tracked as a follow-up.
-                # The frontend catches sibling overlap for concrete
-                # bounds, so this hole is limited to symbolic-bound
-                # views that resolve to coinciding ranges.
+                # Same-lineage forward version bumps refreshed in place
+                # above, and stale same-lineage replacements were
+                # rejected before reaching this branch.  What remains is
+                # a provenance ambiguity: a nested full-slice handoff and
+                # a sibling view whose symbolic bounds folded to the same
+                # slots can both appear as distinct ``logical_id``s with
+                # identical coverage because ``VectorView._nested_slice``
+                # flattens nested ``slice_of`` chains to the root.
+                refresh_keys = [_const_key(root, slot) for slot in other_full]
+                if self._can_body_local_same_coverage_handoff(other_view, refresh_keys):
+                    # In a statically non-zero loop body, a concrete
+                    # full-slice handoff is path-insensitive for the body
+                    # walk: the inner view fully replaces the outer for
+                    # every simulated iteration.  Keep the rewrite local
+                    # to ``body_state``; the outer merge stays
+                    # conservative, and a later top-level release can
+                    # clear the equivalent stale owner by coverage.
+                    for old_key in refresh_keys:
+                        existing = state.get(old_key)
+                        if (
+                            isinstance(existing, ArrayValue)
+                            and existing.uuid == other_view.uuid
+                        ):
+                            state[old_key] = av
+                    continue
                 self._guard_drain_against_outer_snapshot(
                     other_view, av, root, "same-coverage replacement"
                 )
                 for slot in other_full:
                     old_key = _const_key(root, slot)
-                    if state.get(old_key) is other_view:
+                    existing = state.get(old_key)
+                    if (
+                        isinstance(existing, ArrayValue)
+                        and existing.uuid == other_view.uuid
+                    ):
                         del state[old_key]
             elif new_covered.issubset(other_full):
                 # Nested slice: the new view is a strict subset of an
@@ -932,7 +1106,11 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 )
                 for slot in new_covered:
                     old_key = _const_key(root, slot)
-                    if state.get(old_key) is other_view:
+                    existing = state.get(old_key)
+                    if (
+                        isinstance(existing, ArrayValue)
+                        and existing.uuid == other_view.uuid
+                    ):
                         del state[old_key]
             elif other_full.issubset(new_covered):
                 # The existing view is a (nested) inner of ``av``.  This
@@ -972,6 +1150,728 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 isinstance(existing, ArrayValue) and existing.uuid == av.uuid
             ):
                 state[key] = av
+
+    def _register_symbolic_slice_if_new(self, av: ArrayValue, state: State) -> None:
+        """Register or refresh a symbolic slice descriptor exactly.
+
+        Symbolic coverage cannot be enumerated into per-qubit keys, so
+        this path deliberately supports only the narrow case where the
+        exact same sliced ``ArrayValue`` lineage advances to a newer SSA
+        version.  It does not prove arithmetic equivalence between
+        different expressions and does not claim additional concrete
+        slots.
+
+        Args:
+            av (ArrayValue): Sliced view with non-concrete coverage.
+            state (State): Mutable borrow tracker.
+
+        Raises:
+            SliceBorrowViolationError: If a symbolic descriptor is
+                already owned by a different slice lineage, a stale
+                version attempts to replace the current owner, or an
+                unsafe control-flow snapshot would be rewritten.
+        """
+        root = _root_of(av)
+        key = self._symbolic_view_key(root, av)
+        if key is None:
+            return
+
+        self._guard_against_concrete_root_conflicts(av, root, state)
+
+        existing = state.get(key)
+        # A symbolic descriptor is one coarse owner for an unknown slot
+        # set.  Different descriptors on the same root might overlap, so
+        # reject them unless a narrow interval check proves they are
+        # disjoint.  The exact current descriptor is handled below,
+        # where only a forward same-descriptor refresh is accepted.
+        for other_key, owner in state.items():
+            if (
+                other_key == key
+                or other_key[0] != root.logical_id
+                or not other_key[1].startswith("sym:")
+            ):
+                continue
+            if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
+                if self._symbolic_slices_definitely_disjoint(av, owner):
+                    continue
+                raise SliceBorrowViolationError(
+                    f"Symbolic slice view '{av.name}' on '{root.name}' "
+                    f"may overlap live symbolic view '{owner.name}'.  "
+                    f"Only exact forward refresh of the same symbolic "
+                    f"descriptor or provably disjoint symbolic intervals "
+                    f"are supported for symbolic slices."
+                )
+        if existing is None:
+            state[key] = av
+            return
+        if not isinstance(existing, ArrayValue):
+            raise SliceBorrowViolationError(
+                self._format_view_registration_conflict(existing, av, -1, root)
+            )
+        if existing.uuid == av.uuid:
+            return
+        if self._is_forward_same_slice_view_refresh(av, existing):
+            # This is the symbolic counterpart of the concrete refresh
+            # path above: keep the single descriptor key and replace only
+            # the owner version.  No per-qubit slots are inferred.
+            self._guard_refresh_against_unsafe_snapshots(existing, av, [key])
+            state[key] = av
+            return
+        if self._same_slice_lineage(av, existing) and av.version <= existing.version:
+            self._raise_stale_same_slice_replacement(av, existing, root)
+        raise SliceBorrowViolationError(
+            f"Symbolic slice view '{av.name}' has the same descriptor as "
+            f"live view '{existing.name}' on '{root.name}', but it is not "
+            f"a forward SSA-version refresh of that view.  Return or "
+            f"consume the existing view before constructing another view "
+            f"with the same symbolic descriptor."
+        )
+
+    def _symbolic_view_key(
+        self, root: ArrayValue, view: ArrayValue
+    ) -> BorrowKey | None:
+        """Build a borrow key for an exact symbolic slice descriptor.
+
+        Args:
+            root (ArrayValue): Root parent of ``view``.
+            view (ArrayValue): Sliced view whose descriptor cannot be
+                enumerated into concrete slots.
+
+        Returns:
+            BorrowKey | None: A root-namespaced symbolic descriptor key,
+                or ``None`` when the descriptor shape is incomplete.
+        """
+        descriptor = self._slice_descriptor_signature(view)
+        if descriptor is None:
+            return None
+        return (root.logical_id, f"sym:{descriptor!r}")
+
+    def _slice_descriptor_signature(
+        self, view: ArrayValue
+    ) -> (
+        tuple[
+            tuple[
+                tuple[str, int],
+                tuple[str, int],
+                tuple[tuple[str, int], ...],
+            ],
+            ...,
+        ]
+        | None
+    ):
+        """Return an exact symbolic descriptor signature for ``view``.
+
+        The signature intentionally ignores value names and UUIDs.  It
+        records each descriptor operand as ``(logical_id, version)`` so
+        cloned representations of the same SSA value compare equal, but
+        a later SSA version of the same symbolic variable does not.
+
+        Args:
+            view (ArrayValue): Sliced view to describe.
+
+        Returns:
+            tuple[tuple[tuple[str, int], tuple[str, int],
+            tuple[tuple[str, int], ...]], ...] | None: Per-slice-frame
+                descriptor signature, or ``None`` when any required
+                descriptor value is absent.
+        """
+        parts: list[
+            tuple[
+                tuple[str, int],
+                tuple[str, int],
+                tuple[tuple[str, int], ...],
+            ]
+        ] = []
+        cur = view
+        while cur.slice_of is not None:
+            if cur.slice_start is None or cur.slice_step is None:
+                return None
+            start_id = self._value_signature(cur.slice_start)
+            step_id = self._value_signature(cur.slice_step)
+            if start_id is None or step_id is None:
+                return None
+            shape_ids: list[tuple[str, int]] = []
+            for dim in cur.shape:
+                dim_id = self._value_signature(dim)
+                if dim_id is None:
+                    return None
+                shape_ids.append(dim_id)
+            parts.append((start_id, step_id, tuple(shape_ids)))
+            cur = cur.slice_of
+        return tuple(parts)
+
+    @staticmethod
+    def _value_signature(value: ValueBase | None) -> tuple[str, int] | None:
+        """Return a strict SSA identity signature for a descriptor value.
+
+        Args:
+            value (ValueBase | None): Descriptor value to identify.
+
+        Returns:
+            tuple[str, int] | None: ``(logical_id, version)`` for scalar
+                ``Value`` instances, else ``None``.
+        """
+        if not isinstance(value, Value):
+            return None
+        return (value.logical_id, value.version)
+
+    def _record_bound_expr(self, op: BinOp) -> None:
+        """Cache a canonical expression token for a bound-normalizing BinOp.
+
+        The cache is deliberately tiny: it captures identities emitted
+        while lowering slices (``x + 0``, ``x - 0``, ``x // 1``) and
+        canonical ``min`` expressions, plus constant folding for those
+        same operators.  Unsupported arithmetic is left uncached, which
+        makes later symbolic disjointness checks return ``False`` and
+        preserves the conservative overlap behavior.
+
+        Args:
+            op (BinOp): Arithmetic operation encountered while walking
+                the block.
+        """
+        output_sig = self._value_signature(op.output)
+        if output_sig is None:
+            return
+        lhs = self._bound_token(op.lhs)
+        rhs = self._bound_token(op.rhs)
+        if lhs is None or rhs is None:
+            return
+
+        token: BoundToken | None = None
+        if op.kind == BinOpKind.ADD:
+            token = self._canonical_add(lhs, rhs)
+        elif op.kind == BinOpKind.SUB:
+            token = self._canonical_sub(lhs, rhs)
+        elif op.kind == BinOpKind.FLOORDIV:
+            token = self._canonical_floordiv(lhs, rhs)
+        elif op.kind == BinOpKind.MIN:
+            token = self._canonical_min(lhs, rhs, op.output)
+
+        if token is not None:
+            self._bound_exprs[output_sig] = token
+
+    @staticmethod
+    def _is_const_token(token: BoundToken, value: int) -> bool:
+        """Check whether ``token`` is a specific integer constant.
+
+        Args:
+            token (BoundToken): Token to inspect.
+            value (int): Expected integer value.
+
+        Returns:
+            bool: ``True`` when ``token`` is exactly ``("const", value)``.
+        """
+        return len(token) == 2 and token[0] == "const" and token[1] == value
+
+    @staticmethod
+    def _const_token_value(token: BoundToken) -> int | None:
+        """Return the integer value represented by a constant token.
+
+        Args:
+            token (BoundToken): Token to inspect.
+
+        Returns:
+            int | None: Constant integer payload, or ``None`` for a
+                non-constant token.
+        """
+        if len(token) == 2 and token[0] == "const":
+            return int(token[1])
+        return None
+
+    def _canonical_add(self, lhs: BoundToken, rhs: BoundToken) -> BoundToken | None:
+        """Canonicalize a small ``lhs + rhs`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const is not None:
+            return ("const", lhs_const + rhs_const)
+        if self._is_const_token(lhs, 0):
+            return rhs
+        if self._is_const_token(rhs, 0):
+            return lhs
+        return None
+
+    def _canonical_sub(self, lhs: BoundToken, rhs: BoundToken) -> BoundToken | None:
+        """Canonicalize a small ``lhs - rhs`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const is not None:
+            return ("const", lhs_const - rhs_const)
+        if self._is_const_token(rhs, 0):
+            return lhs
+        return None
+
+    def _canonical_floordiv(
+        self, lhs: BoundToken, rhs: BoundToken
+    ) -> BoundToken | None:
+        """Canonicalize a small ``lhs // rhs`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const not in (None, 0):
+            return ("const", lhs_const // rhs_const)
+        if self._is_const_token(rhs, 1):
+            return lhs
+        return None
+
+    def _canonical_min(
+        self, lhs: BoundToken, rhs: BoundToken, output: Value
+    ) -> BoundToken | None:
+        """Canonicalize a small ``min(lhs, rhs)`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+            output (Value): Operation result, used to ensure the
+                ``min(0, x) -> 0`` simplification applies only to
+                non-negative ``UInt`` bounds.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const is not None:
+            return ("const", min(lhs_const, rhs_const))
+        if isinstance(output.type, UIntType) and (
+            self._is_const_token(lhs, 0) or self._is_const_token(rhs, 0)
+        ):
+            return ("const", 0)
+        ordered = sorted((lhs, rhs), key=repr)
+        return ("min", ordered[0], ordered[1])
+
+    def _symbolic_slices_definitely_disjoint(
+        self, left: ArrayValue, right: ArrayValue
+    ) -> bool:
+        """Check a narrow symbolic proof that two sliced views are disjoint.
+
+        This helper intentionally handles only direct, unit-stride
+        root-space intervals.  That covers common partition patterns
+        such as ``q[:k]`` and ``q[k:n]`` without turning the borrow
+        checker into a symbolic inequality solver.  Any unsupported
+        shape returns ``False`` so callers keep the existing
+        conservative overlap response.
+
+        Args:
+            left (ArrayValue): First symbolic sliced view.
+            right (ArrayValue): Second symbolic sliced view.
+
+        Returns:
+            bool: ``True`` when the views have the same root and one
+                interval's end is provably less than or equal to the
+                other's start.
+        """
+        if _root_of(left).logical_id != _root_of(right).logical_id:
+            return False
+        left_bounds = self._direct_unit_stride_interval_bounds(left)
+        right_bounds = self._direct_unit_stride_interval_bounds(right)
+        if left_bounds is None or right_bounds is None:
+            return False
+        left_start, left_end = left_bounds
+        right_start, right_end = right_bounds
+        if left_end is not None and self._bound_leq(left_end, right_start):
+            return True
+        return right_end is not None and self._bound_leq(right_end, left_start)
+
+    def _direct_unit_stride_interval_bounds(
+        self, view: ArrayValue
+    ) -> tuple[BoundToken, BoundToken | None] | None:
+        """Return root-space half-open bounds for a direct unit-stride view.
+
+        The returned pair represents ``[start, end)``.  ``end`` is
+        ``None`` when the shape is known to be symbolic but cannot be
+        written as a bound token this helper can compare.  Only direct
+        slices of the root with ``slice_step == 1`` are accepted; nested
+        symbolic affine maps and strided symbolic ranges stay
+        conservative.
+
+        Args:
+            view (ArrayValue): Sliced view to inspect.
+
+        Returns:
+            tuple[BoundToken, BoundToken | None] | None: ``(start, end)``
+                bound tokens, or ``None`` when this helper cannot model
+                the view.
+        """
+        if view.slice_of is None or view.slice_of.slice_of is not None:
+            return None
+        if not view.shape:
+            return None
+        if self._const_int(view.slice_step) != 1:
+            return None
+        start = self._bound_token(view.slice_start)
+        length = self._bound_token(view.shape[0])
+        if start is None or length is None:
+            return None
+        return start, self._end_bound_token(start, length)
+
+    def _bound_token(self, value: ValueBase | None) -> BoundToken | None:
+        """Represent a slice bound by either a constant or SSA identity.
+
+        Args:
+            value (ValueBase | None): Bound value to encode.
+
+        Returns:
+            BoundToken | None: ``("const", n)`` for integer constants,
+                a cached canonical expression token for known BinOp
+                results, ``("value", logical_id, version)`` for raw
+                symbolic scalar Values, or ``None`` for unsupported
+                values.
+        """
+        const = self._const_int(value)
+        if const is not None:
+            return ("const", const)
+        sig = self._value_signature(value)
+        if sig is None:
+            return None
+        cached = self._bound_exprs.get(sig)
+        if cached is not None:
+            return cached
+        logical_id, version = sig
+        return ("value", logical_id, version)
+
+    @staticmethod
+    def _end_bound_token(
+        start: BoundToken,
+        length: BoundToken,
+    ) -> BoundToken | None:
+        """Return ``start + length`` when it stays in the token language.
+
+        Args:
+            start (BoundToken): Interval start token.
+            length (BoundToken): Interval length token.
+
+        Returns:
+            BoundToken | None: Comparable end token, or ``None`` when
+                computing the end would require symbolic arithmetic
+                beyond identity / constants.
+        """
+        if start[0] == "const" and length[0] == "const":
+            return ("const", int(start[1]) + int(length[1]))
+        if start == ("const", 0):
+            return length
+        if length == ("const", 0):
+            return start
+        return None
+
+    @staticmethod
+    def _bound_leq(
+        left: BoundToken,
+        right: BoundToken,
+    ) -> bool:
+        """Compare two bound tokens when equality or constants prove ``<=``.
+
+        Args:
+            left (BoundToken): Left bound token.
+            right (BoundToken): Right bound token.
+
+        Returns:
+            bool: ``True`` when ``left <= right`` follows from exact
+                token equality or from concrete integer comparison.
+        """
+        if left == right:
+            return True
+        if left[0] == "const" and right[0] == "const":
+            return int(left[1]) <= int(right[1])
+        return False
+
+    def _guard_against_symbolic_root_conflicts(
+        self,
+        av: ArrayValue,
+        root: ArrayValue,
+        state: State,
+    ) -> None:
+        """Reject concrete registration under live symbolic root ownership.
+
+        Args:
+            av (ArrayValue): Concrete-coverage sliced view being
+                registered.
+            root (ArrayValue): Root parent of ``av``.
+            state (State): Mutable borrow tracker.
+
+        Raises:
+            SliceBorrowViolationError: If the same root has a live
+                symbolic descriptor owner whose overlap with ``av``
+                cannot be disproved.
+        """
+        for key, owner in state.items():
+            if key[0] != root.logical_id or not key[1].startswith("sym:"):
+                continue
+            if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
+                raise SliceBorrowViolationError(
+                    f"Slice view '{av.name}' has concrete coverage on "
+                    f"'{root.name}', but live symbolic view "
+                    f"'{owner.name}' on the same root may overlap it.  "
+                    f"Return or consume the symbolic view before "
+                    f"constructing another view on the same root."
+                )
+
+    def _guard_against_concrete_root_conflicts(
+        self,
+        av: ArrayValue,
+        root: ArrayValue,
+        state: State,
+    ) -> None:
+        """Reject symbolic registration under live concrete root ownership.
+
+        Args:
+            av (ArrayValue): Symbolic-coverage sliced view being
+                registered.
+            root (ArrayValue): Root parent of ``av``.
+            state (State): Mutable borrow tracker.
+
+        Raises:
+            SliceBorrowViolationError: If the same root has a live
+                concrete-slot owner whose overlap with ``av`` cannot be
+                disproved.
+        """
+        for key, owner in state.items():
+            if key[0] != root.logical_id or key[1].startswith("sym:"):
+                continue
+            if isinstance(owner, _ConsumedSlotMarker):
+                raise SliceBorrowViolationError(
+                    f"Slice view '{av.name}' has symbolic coverage on "
+                    f"'{root.name}', but concrete slot "
+                    f"'{_slot_descriptor(key)}' was destroyed by a prior "
+                    f"destructive view operation."
+                )
+            if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
+                raise SliceBorrowViolationError(
+                    f"Slice view '{av.name}' has symbolic coverage on "
+                    f"'{root.name}', but live concrete view "
+                    f"'{owner.name}' on the same root may overlap it.  "
+                    f"Return or consume the concrete view before "
+                    f"constructing a symbolic view on the same root."
+                )
+
+    def _same_slice_lineage(self, left: ArrayValue, right: ArrayValue) -> bool:
+        """Check whether two views are versions of the same slice lineage.
+
+        Args:
+            left (ArrayValue): First sliced view.
+            right (ArrayValue): Second sliced view.
+
+        Returns:
+            bool: ``True`` when both values are sliced views with the
+                same view ``logical_id`` and the same root
+                ``logical_id``.
+        """
+        return (
+            left.slice_of is not None
+            and right.slice_of is not None
+            and left.logical_id == right.logical_id
+            and _root_of(left).logical_id == _root_of(right).logical_id
+        )
+
+    def _same_symbolic_slice_descriptor(
+        self, left: ArrayValue, right: ArrayValue
+    ) -> bool:
+        """Check exact symbolic descriptor identity for two slice views.
+
+        Args:
+            left (ArrayValue): First sliced view.
+            right (ArrayValue): Second sliced view.
+
+        Returns:
+            bool: ``True`` when both views have identical slice-chain
+                descriptor signatures based on SSA value identity.
+        """
+        left_sig = self._slice_descriptor_signature(left)
+        right_sig = self._slice_descriptor_signature(right)
+        return left_sig is not None and left_sig == right_sig
+
+    def _same_slice_lineage_and_known_extent(
+        self, left: ArrayValue, right: ArrayValue
+    ) -> bool:
+        """Check whether same-lineage views cover the same known extent.
+
+        Concrete coverage equality is authoritative.  Symbolic
+        descriptor equality is considered only when neither side can be
+        enumerated.
+
+        Args:
+            left (ArrayValue): First sliced view.
+            right (ArrayValue): Second sliced view.
+
+        Returns:
+            bool: ``True`` when the views have the same lineage and
+                either equal concrete coverage or identical symbolic
+                descriptors.
+        """
+        if not self._same_slice_lineage(left, right):
+            return False
+        left_coverage = self._collect_view_coverage(left)
+        right_coverage = self._collect_view_coverage(right)
+        if left_coverage is not None and right_coverage is not None:
+            return left_coverage == right_coverage
+        if left_coverage is None and right_coverage is None:
+            return self._same_symbolic_slice_descriptor(left, right)
+        return False
+
+    def _same_slice_lineage_and_possible_extent(
+        self, left: ArrayValue, right: ArrayValue
+    ) -> bool:
+        """Conservatively match same-lineage views for snapshot guards.
+
+        Args:
+            left (ArrayValue): First sliced view.
+            right (ArrayValue): Second sliced view.
+
+        Returns:
+            bool: ``True`` when exact extent equality is known or one
+                side's extent is symbolic and therefore cannot disprove
+                equality.
+        """
+        if self._same_slice_lineage_and_known_extent(left, right):
+            return True
+        if not self._same_slice_lineage(left, right):
+            return False
+        return (
+            self._collect_view_coverage(left) is None
+            or self._collect_view_coverage(right) is None
+        )
+
+    def _is_forward_same_slice_view_refresh(
+        self, candidate: ArrayValue, owner: ArrayValue
+    ) -> bool:
+        """Check whether ``candidate`` is a safe forward refresh of ``owner``.
+
+        Args:
+            candidate (ArrayValue): New sliced view being registered.
+            owner (ArrayValue): Existing sliced view currently owning
+                the same state entries.
+
+        Returns:
+            bool: ``True`` only for same-lineage views with identical
+                concrete coverage or exact symbolic descriptors where
+                ``candidate.version`` is strictly newer than
+                ``owner.version``.
+        """
+        return (
+            candidate.version > owner.version
+            and self._same_slice_lineage_and_known_extent(candidate, owner)
+        )
+
+    def _snapshot_owner_matches_view(
+        self, owner: Owner | None, view: ArrayValue
+    ) -> bool:
+        """Check whether a snapshot owner refers to ``view`` or its lineage.
+
+        Args:
+            owner (Owner | None): Owner recorded in a control-flow
+                snapshot, or ``None`` when the key was absent from that
+                snapshot.
+            view (ArrayValue): View being refreshed or drained.
+
+        Returns:
+            bool: ``True`` when ``owner`` is the same UUID as ``view``,
+                or when ``view`` is the same-lineage current/later SSA
+                version of ``owner``.
+        """
+        return isinstance(owner, ArrayValue) and (
+            owner.uuid == view.uuid
+            or (
+                view.version >= owner.version
+                and self._same_slice_lineage_and_possible_extent(view, owner)
+            )
+        )
+
+    def _guard_refresh_against_unsafe_snapshots(
+        self,
+        owner: ArrayValue,
+        candidate: ArrayValue,
+        keys: list[BorrowKey],
+    ) -> None:
+        """Reject refreshes that would rewrite unsafe snapshot owners.
+
+        Args:
+            owner (ArrayValue): Existing owner being replaced in
+                ``state``.
+            candidate (ArrayValue): Newer same-lineage view.
+            keys (list[BorrowKey]): Exact state entries that the
+                refresh would rewrite.
+
+        Raises:
+            SliceBorrowViolationError: If any matching active snapshot
+                frame is not a statically non-zero ``For`` body.
+        """
+        matching_kinds: list[str] = []
+        # Scan every active frame, not just the innermost one.  A static
+        # inner ``For`` nested under an ``if`` or runtime loop must not
+        # launder an outer unsafe snapshot into an allowed refresh.
+        for kind, snapshot in self._outer_snapshot_stack:
+            for key in keys:
+                snapshot_owner = snapshot.get(key)
+                if self._snapshot_owner_matches_view(
+                    snapshot_owner, owner
+                ) or self._snapshot_owner_matches_view(snapshot_owner, candidate):
+                    matching_kinds.append(kind)
+        if not matching_kinds:
+            return
+        # Only the all-static-nonzero case is path-insensitive enough to
+        # allow this body-local owner rewrite.  One unsafe match is enough
+        # to reject because the rewritten owner could otherwise be visible
+        # only on some runtime paths.
+        if all(kind == _SnapshotKind.FOR_STATIC_NONZERO for kind in matching_kinds):
+            return
+        root = _root_of(candidate)
+        raise SliceBorrowViolationError(
+            f"Slice construction inside a control-flow body would "
+            f"refresh view '{owner.name}' (registered on '{root.name}' "
+            f"by an enclosing block) to '{candidate.name}', but that "
+            f"enclosing body may be skipped or branch-dependent.  "
+            f"Only statically non-zero for-loop bodies may refresh an "
+            f"outer slice view's SSA version without returning it."
+        )
+
+    @staticmethod
+    def _raise_stale_same_slice_replacement(
+        candidate: ArrayValue,
+        owner: ArrayValue,
+        root: ArrayValue,
+    ) -> None:
+        """Raise for stale or equal-version same-lineage replacement.
+
+        Args:
+            candidate (ArrayValue): New sliced view being registered.
+            owner (ArrayValue): Existing same-lineage owner.
+            root (ArrayValue): Shared root parent ArrayValue.
+
+        Raises:
+            SliceBorrowViolationError: Always raised.
+        """
+        raise SliceBorrowViolationError(
+            f"Slice view '{candidate.name}' on '{root.name}' attempts "
+            f"to replace an equal or newer registered version of the "
+            f"same slice view '{owner.name}'.  Only forward SSA-version "
+            f"refreshes of the same slice descriptor are allowed."
+        )
 
     def _collect_view_coverage(self, view: "ArrayValue") -> set[int] | None:
         """Return the full covered-slot set of ``view`` in root coordinates.
@@ -1073,6 +1973,32 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             if const is not None:
                 return int(const)
         return None
+
+    def _static_for_trip_count(self, op: ForOperation) -> int | None:
+        """Return a statically known ``ForOperation`` trip count.
+
+        Args:
+            op (ForOperation): The loop whose ``start``, ``stop``, and
+                ``step`` operands should be inspected.
+
+        Returns:
+            int | None: The Python ``range`` trip count when all three
+                loop bounds are concrete and the step is non-zero,
+                ``1`` as a positive sentinel when the exact count is
+                too large for ``len(range(...))``, otherwise ``None``.
+        """
+        if len(op.operands) < 3:
+            return None
+        start = self._const_int(op.operands[0])
+        stop = self._const_int(op.operands[1])
+        step = self._const_int(op.operands[2])
+        if start is None or stop is None or step is None or step == 0:
+            return None
+        loop_range = range(start, stop, step)
+        try:
+            return len(loop_range)
+        except OverflowError:
+            return 1 if loop_range else 0
 
     @staticmethod
     def _owner_root_uuid(owner: Owner) -> str | None:
