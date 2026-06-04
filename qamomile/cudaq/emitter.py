@@ -692,6 +692,98 @@ class CudaqKernelEmitter:
         a = self._angle_expr(angle)
         self._emit(f"rz.ctrl({a}, {self._qref(control)}, {self._qref(target)})")
 
+    def emit_multi_controlled_p(
+        self,
+        circuit: CudaqKernelArtifact,
+        control_indices: list[int],
+        target_idx: int,
+        angle: float | Any,
+    ) -> None:
+        """Emit a multi-controlled phase rotation.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            control_indices (list[int]): Physical control qubit indices.
+                If empty, this method emits an ordinary phase gate.
+            target_idx (int): Physical target qubit index.
+            angle (float | Any): Rotation angle or CUDA-Q source expression.
+        """
+        if not control_indices:
+            self.emit_p(circuit, target_idx, angle)
+            return
+        a = self._angle_expr(angle)
+        controls = ", ".join(f"q[{i}]" for i in control_indices)
+        self._emit(f"r1.ctrl({a}, {controls}, q[{target_idx}])")
+
+    def emit_multi_controlled_rx(
+        self,
+        circuit: CudaqKernelArtifact,
+        control_indices: list[int],
+        target_idx: int,
+        angle: float | Any,
+    ) -> None:
+        """Emit a multi-controlled RX rotation.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            control_indices (list[int]): Physical control qubit indices.
+                If empty, this method emits an ordinary RX gate.
+            target_idx (int): Physical target qubit index.
+            angle (float | Any): Rotation angle or CUDA-Q source expression.
+        """
+        if not control_indices:
+            self.emit_rx(circuit, target_idx, angle)
+            return
+        a = self._angle_expr(angle)
+        controls = ", ".join(f"q[{i}]" for i in control_indices)
+        self._emit(f"rx.ctrl({a}, {controls}, q[{target_idx}])")
+
+    def emit_multi_controlled_ry(
+        self,
+        circuit: CudaqKernelArtifact,
+        control_indices: list[int],
+        target_idx: int,
+        angle: float | Any,
+    ) -> None:
+        """Emit a multi-controlled RY rotation.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            control_indices (list[int]): Physical control qubit indices.
+                If empty, this method emits an ordinary RY gate.
+            target_idx (int): Physical target qubit index.
+            angle (float | Any): Rotation angle or CUDA-Q source expression.
+        """
+        if not control_indices:
+            self.emit_ry(circuit, target_idx, angle)
+            return
+        a = self._angle_expr(angle)
+        controls = ", ".join(f"q[{i}]" for i in control_indices)
+        self._emit(f"ry.ctrl({a}, {controls}, q[{target_idx}])")
+
+    def emit_multi_controlled_rz(
+        self,
+        circuit: CudaqKernelArtifact,
+        control_indices: list[int],
+        target_idx: int,
+        angle: float | Any,
+    ) -> None:
+        """Emit a multi-controlled RZ rotation.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            control_indices (list[int]): Physical control qubit indices.
+                If empty, this method emits an ordinary RZ gate.
+            target_idx (int): Physical target qubit index.
+            angle (float | Any): Rotation angle or CUDA-Q source expression.
+        """
+        if not control_indices:
+            self.emit_rz(circuit, target_idx, angle)
+            return
+        a = self._angle_expr(angle)
+        controls = ", ".join(f"q[{i}]" for i in control_indices)
+        self._emit(f"rz.ctrl({a}, {controls}, q[{target_idx}])")
+
     # ------------------------------------------------------------------
     # Measurement
     # ------------------------------------------------------------------
