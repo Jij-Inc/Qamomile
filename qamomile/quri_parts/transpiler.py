@@ -358,9 +358,11 @@ def _quri_circuit_unitary(circuit: Any) -> np.ndarray:
         np.ndarray: Matrix whose columns are the evolved computational
         basis states.
     """
-    from qulacs import QuantumState
+    from qulacs import QuantumState  # type: ignore[import-not-found]
 
-    from quri_parts.qulacs.circuit import convert_circuit
+    from quri_parts.qulacs.circuit import (
+        convert_circuit,  # type: ignore[import-not-found]
+    )
 
     qulacs_circuit = convert_circuit(circuit)
     num_qubits = qulacs_circuit.get_qubit_count()
