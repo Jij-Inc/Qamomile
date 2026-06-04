@@ -83,8 +83,8 @@ def _mock_qkernel(
             ``qmc.x``.
         classical_params: Sequence of ``(name, type)`` tuples for
             classical parameters.  ``type`` must be one of ``Float`` /
-            ``UInt`` / ``float`` / ``int`` (the set
-            ``_params_to_operands`` recognises).
+            ``UInt`` / ``float`` / ``int`` or a scalar union of those
+            types (the set ``_params_to_operands`` recognises).
 
     Returns:
         A ``MagicMock`` with ``.block`` stubbed, ``.input_types`` set to
@@ -251,6 +251,18 @@ class TestControlledGateCall:
         param_val = op.operands[2]
         assert isinstance(param_val, Value)
         assert param_val.get_const() == 0.5
+
+    def test_scalar_union_param_is_not_treated_as_array_param(self):
+        """Scalar union annotations accept raw values instead of hitting array checks."""
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("angle", float | Float),)),
+            num_controls=1,
+        )
+        with trace() as tracer:
+            cg(_make_qubit("ctrl"), _make_qubit("tgt"), angle=0.5)
+        op = tracer.operations[0]
+        assert len(op.operands) == 3
+        assert op.operands[2].get_const() == 0.5
 
     def test_handle_type_param_uses_value_directly(self):
         cg = ControlledGate(

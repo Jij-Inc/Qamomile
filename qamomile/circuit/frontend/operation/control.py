@@ -21,6 +21,7 @@ from typing import (
     get_type_hints,
 )
 
+from qamomile.circuit.frontend.func_to_block import is_array_type
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
 from qamomile.circuit.frontend.tracer import get_current_tracer
@@ -72,6 +73,22 @@ _synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" 
 _synthesized_kernel_cache_strong: dict[Callable[..., Any], Any] = {}
 
 
+def _union_members(param_type: Any) -> tuple[Any, ...]:
+    """Return members when a parameter annotation is a union.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        tuple[Any, ...]: Union member annotations, or an empty tuple
+            when *param_type* is not a union annotation.
+    """
+    origin = get_origin(param_type)
+    if origin in (Union, _types.UnionType):
+        return get_args(param_type)
+    return ()
+
+
 def _array_element_type(param_type: Any) -> Any | None:
     """Return the element handle type for an array annotation.
 
@@ -83,10 +100,45 @@ def _array_element_type(param_type: Any) -> Any | None:
         Any | None: The element handle type when *param_type* is an
             array annotation, or ``None`` for scalar annotations.
     """
+    if not is_array_type(param_type):
+        return None
     args = get_args(param_type)
     if args:
         return args[0]
     return getattr(param_type, "element_type", None)
+
+
+def _is_scalar_classical_param_decl(param_type: Any) -> bool:
+    """Return whether a parameter declaration is scalar classical.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for scalar ``Float`` / ``UInt`` declarations,
+            including scalar union forms such as ``float | Float``.
+    """
+    scalar_types = (Float, float, UInt, int)
+    if param_type in scalar_types:
+        return True
+    members = _union_members(param_type)
+    return bool(members) and all(member in scalar_types for member in members)
+
+
+def _is_uint_param_decl(param_type: Any) -> bool:
+    """Return whether a parameter declaration is integer-like.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for scalar ``UInt`` / ``int`` declarations,
+            including union forms whose members are all integer-like.
+    """
+    if param_type in (UInt, int):
+        return True
+    members = _union_members(param_type)
+    return bool(members) and all(member in (UInt, int) for member in members)
 
 
 def _is_quantum_param_decl(param_type: Any) -> bool:
@@ -114,7 +166,7 @@ def _is_classical_param_decl(param_type: Any) -> bool:
         bool: ``True`` for scalar ``Float`` / ``UInt`` declarations and
             their array forms such as ``Vector[Float]``.
     """
-    if param_type in (Float, float, UInt, int):
+    if _is_scalar_classical_param_decl(param_type):
         return True
     return _array_element_type(param_type) in (Float, float, UInt, int)
 
@@ -380,7 +432,7 @@ class ControlledGate:
                 operands.append(param_value.value)
                 continue
             declared = kernel_input_types[param_name]
-            if declared is UInt or declared is int:
+            if _is_uint_param_decl(declared):
                 # ``bool`` is technically an ``int`` subclass but its
                 # meaning differs; reject explicitly to match the
                 # qkernel decorator's literal-promotion rules.  ``float``
@@ -726,9 +778,7 @@ class ControlledGate:
         extras = sorted(set(sub_kwargs) - set(input_types))
         if extras:
             classical_names = [
-                n
-                for n, decl in input_types.items()
-                if _is_classical_param_decl(decl)
+                n for n, decl in input_types.items() if _is_classical_param_decl(decl)
             ]
             raise TypeError(
                 f"control(): unknown parameter(s) {extras!r}. "
