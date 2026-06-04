@@ -396,7 +396,10 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                     if addr in uuid_to_physical:
                         qubit_map[i] = uuid_to_physical[addr]
                         continue
-                    root_addr_pair = parent_addrs[i] if i < len(parent_addrs) else None
+                    # ``get_element_parent_addresses()`` returns exactly one
+                    # entry per ``get_element_uuids()`` element, so indexing by
+                    # ``i`` here is always in range.
+                    root_addr_pair = parent_addrs[i]
                     if root_addr_pair is not None:
                         root_uuid, root_idx = root_addr_pair
                         root_addr = QubitAddress(root_uuid, root_idx)

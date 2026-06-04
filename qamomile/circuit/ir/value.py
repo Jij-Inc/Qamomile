@@ -254,19 +254,30 @@ class _MetadataValueMixin:
         """Return per-element root ``(array_uuid, index)`` addresses.
 
         Returns:
-            tuple[tuple[str, int] | None, ...]: One entry per tracked element,
-                aligned with ``get_element_uuids()``. Each entry is the
-                element's root ``(array_uuid, index)`` address, or ``None`` for
-                a standalone qubit (recorded with the ``("", -1)`` sentinel) or
-                an element whose root could not be resolved at trace time.
+            tuple[tuple[str, int] | None, ...]: Exactly one entry per element
+                in ``get_element_uuids()`` (same length, same order), so
+                callers can index by element position without a length check.
+                Each entry is the element's root ``(array_uuid, index)``
+                address, or ``None`` for a standalone qubit (recorded with the
+                ``("", -1)`` sentinel), for an element whose root could not be
+                resolved at trace time, or for any element whose parent address
+                was never recorded (e.g. metadata that only set
+                ``element_uuids``).
         """
         if self.metadata.array_runtime is None:
             return ()
         rt = self.metadata.array_runtime
+        # Anchor on ``element_uuids`` length so the result stays aligned with
+        # ``get_element_uuids()`` even when the parallel parent tuples are
+        # absent or shorter (a plain ``zip`` would silently truncate to the
+        # shorter list and break per-position indexing).
         result: list[tuple[str, int] | None] = []
-        for parent_uuid, parent_idx in zip(
-            rt.element_parent_uuids, rt.element_parent_indices
-        ):
+        for i in range(len(rt.element_uuids)):
+            if i >= len(rt.element_parent_uuids) or i >= len(rt.element_parent_indices):
+                result.append(None)
+                continue
+            parent_uuid = rt.element_parent_uuids[i]
+            parent_idx = rt.element_parent_indices[i]
             if parent_uuid == "" or parent_idx < 0:
                 result.append(None)
             else:

@@ -21,6 +21,8 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.serialize import dump_json, load_json
+from qamomile.circuit.ir.types.primitives import QubitType
+from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 
 _EXPVAL_ATOL = 1e-6
@@ -283,3 +285,26 @@ def test_expval_vector_element_root_metadata_round_trips():
     assert r_rt is not None
     assert r_rt.element_parent_uuids == rt.element_parent_uuids
     assert r_rt.element_parent_indices == rt.element_parent_indices
+
+
+def test_get_element_parent_addresses_aligns_with_element_uuids():
+    """The accessor returns one entry per element even with no parent fields set.
+
+    Guards the contract that ``get_element_parent_addresses()`` is aligned with
+    ``get_element_uuids()`` (so callers can index by element position). Metadata
+    that only sets ``element_uuids`` must yield ``None`` per element, not a
+    truncated/empty tuple.
+    """
+    av = ArrayValue(type=QubitType(), name="a", shape=tuple())
+    only_uuids = av.with_array_runtime_metadata(element_uuids=("u0", "u1", "u2"))
+    addrs = only_uuids.get_element_parent_addresses()
+    assert addrs == (None, None, None)
+    assert len(addrs) == len(only_uuids.get_element_uuids())
+
+    # A mix of resolved root, standalone sentinel, and resolved root.
+    mixed = av.with_array_runtime_metadata(
+        element_uuids=("u0", "u1", "u2"),
+        element_parent_uuids=("root", "", "root"),
+        element_parent_indices=(0, -1, 2),
+    )
+    assert mixed.get_element_parent_addresses() == (("root", 0), None, ("root", 2))
