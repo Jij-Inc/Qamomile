@@ -23,6 +23,7 @@
 # We represent a small MaxCut instance as an Ising problem with `BinaryModel.from_ising` and write the QAOA ansatz directly as a `@qkernel`.
 # Then we run that kernel through `CudaqTranspiler` / `CudaqExecutor`.
 # `CudaqExecutor` uses the active CUDA-Q target; by default, CUDA-Q's local CPU simulator is enough for the examples below.
+# Later, we run the same QAOA circuit on the CPU backend (`qpp-cpu`) and GPU backend (`nvidia`) and compare the sampled results and execution time.
 # Along the way, we will inspect the generated CUDA-Q source and compare Qamomile's `STATIC` and `RUNNABLE` CUDA-Q execution modes.
 
 # %%
@@ -33,6 +34,9 @@
 
 # %%
 import os
+import platform
+import subprocess
+import time
 from collections import Counter
 
 import cudaq
@@ -386,71 +390,111 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # The resulting noise-free expectation value at the optimized parameters should also match the sample-mean energy printed earlier within shot noise.
 
 # %% [markdown]
-# ## Choosing CUDA-Q targets
+# ## Choosing CUDA-Q targets: Using the GPU backend
 #
 # `CudaqExecutor()` uses the current CUDA-Q target, while `CudaqExecutor(target=...)` or `CudaqTranspiler.executor(target=...)` selects a target explicitly.
 # The custom executor can be used anywhere `executor` appeared above.
 # Changing the CUDA-Q target does not require re-transpiling the kernel.
 # The `ExecutableProgram` carries the emitted CUDA-Q artifact, while the executor carries the runtime target selection.
-# The list of simulator targets you can select is maintained in CUDA-Q's [Circuit Simulation Backends](https://nvidia.github.io/cuda-quantum/latest/using/backends/simulators.html) documentation.
+# The list of simulator targets you can select is maintained in CUDA-Q's [Circuit Simulation](https://nvidia.github.io/cuda-quantum/latest/using/simulators.html) documentation, and CUDA-Q's [Running on a GPU](https://nvidia.github.io/cuda-quantum/latest/using/basics/run_kernel.html#running-on-a-gpu) section shows the same `qpp-cpu` / `nvidia` target pattern directly.
 #
-# As a concrete local example, we first sample the **same** optimized QAOA `ExecutableProgram` on the default target.
-# Then we switch to CUDA-Q's `density-matrix-cpu` target with a small depolarization noise model.
+# This tutorial also works well in Google Colab.
+# To try the GPU path there, choose a GPU runtime before running the notebook, install the CUDA-Q optional dependency group that matches the runtime, and then run the cells below.
+# CUDA-Q uses `qpp-cpu` as the CPU simulator target and `nvidia` as the local NVIDIA GPU simulator target.
 #
-# The density-matrix simulator is useful when you want CPU-based noisy simulation.
-# CUDA-Q provides `Depolarization1` for single-qubit operations and `Depolarization2` for two-qubit operations.
-# Qamomile's CUDA-Q emitter decomposes each `rzz` into `x.ctrl` / `rz` / `x.ctrl`, so the noise model below applies single-qubit depolarization to the rotation gates and two-qubit depolarization to controlled `x` gates (`num_controls=1`).
-#
-# In CUDA-Q's noise model API, controlled `x` is registered as operator `"x"` with `num_controls=1`; `"x.ctrl"` is not a separate operator name.
-# CUDA-Q stores both the active target and the noise model globally, and calling `cudaq.set_target(...)` clears the current noise model.
-# For a noisy run, set the target first, set the noise model second, then use an executor that does not reapply `target=...` during the call.
-#
-# On a GPU-enabled installation, the same pattern applies to GPU-backed CUDA-Q targets and noisy simulators.
+# As a concrete example, we sample the **same** optimized QAOA `ExecutableProgram` on the CPU and GPU targets.
+# Both runs below are noise-free: we do not install a CUDA-Q noise model, and each target uses the same QAOA circuit and the same parameter vector.
+# We also set the same CUDA-Q random seed before each sampling call.
+# The finite-shot samples are still produced by backend simulators, so we compare the sampled mean energies with a tolerance and plot the energy histograms rather than relying on identical raw shot ordering.
+# We also time the sampling call on each target.
 
 # %%
-default_result = executable.sample(
-    executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-    shots=sample_shots,
-).result()
-noise_probability = 0.02
-noise_model = cudaq.NoiseModel()
-for gate_name in ("h", "rx", "rz"):
-    noise_model.add_all_qubit_channel(
-        gate_name, cudaq.Depolarization1(noise_probability)
-    )
-noise_model.add_all_qubit_channel(
-    "x",
-    cudaq.Depolarization2(noise_probability),
-    num_controls=1,
-)
+benchmark_shots = 512 if docs_test_mode else 100_000
+benchmark_seed = 13
 
-try:
-    cudaq.set_target("density-matrix-cpu")
-    cudaq.set_noise(noise_model)
-    noisy_density_result = executable.sample(
-        executor,
+
+def cpu_backend_info() -> str:
+    processor = platform.processor() or platform.machine() or "unknown processor"
+    if os.path.exists("/proc/cpuinfo"):
+        with open("/proc/cpuinfo", encoding="utf-8") as cpuinfo:
+            for line in cpuinfo:
+                if line.startswith("model name"):
+                    processor = line.split(":", maxsplit=1)[1].strip()
+                    break
+    return f"{processor}; logical CPUs: {os.cpu_count()}"
+
+
+def gpu_backend_info() -> str:
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ):
+        return f"{cudaq.num_available_gpus()} CUDA-Q GPU(s) available"
+
+    names = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    return ", ".join(names) if names else "NVIDIA GPU detected"
+
+
+def timed_qaoa_sample(target_name: str):
+    cudaq.set_target(target_name)
+    cudaq.set_random_seed(benchmark_seed)
+    start = time.perf_counter()
+    result = executable.sample(
+        CudaqExecutor(),
         bindings={"gammas": opt_gammas, "betas": opt_betas},
-        shots=sample_shots,
+        shots=benchmark_shots,
     ).result()
-finally:
-    cudaq.unset_noise()
-    cudaq.reset_target()
+    return result, time.perf_counter() - start
 
-default_decoded = spin_model.decode_from_sampleresult(default_result)
-noisy_density_decoded = spin_model.decode_from_sampleresult(noisy_density_result)
-default_energy = default_decoded.energy_mean()
-noisy_density_energy = noisy_density_decoded.energy_mean()
-print(f"default target mean energy           : {default_energy:+.4f}")
-print(f"density-matrix-cpu noisy mean energy: {noisy_density_energy:+.4f}")
+
+# %%
+# CPU backend (qpp-cpu)
+target_runs = []
+cpu_result, cpu_seconds = timed_qaoa_sample("qpp-cpu")
+cpu_decoded = spin_model.decode_from_sampleresult(cpu_result)
+cpu_energy = cpu_decoded.energy_mean()
+target_runs.append(("qpp-cpu", cpu_decoded, cpu_energy, cpu_seconds, "#2696EB"))
+print("CPU backend target  : qpp-cpu")
+print(f"CPU hardware        : {cpu_backend_info()}")
+print(f"CPU qpp-cpu mean energy: {cpu_energy:+.4f}")
+print(f"CPU qpp-cpu sample time: {cpu_seconds:.4f} s")
+
+# %%
+# GPU backend (nvidia)
+if cudaq.num_available_gpus() > 0 and cudaq.has_target("nvidia"):
+    gpu_result, gpu_seconds = timed_qaoa_sample("nvidia")
+    gpu_decoded = spin_model.decode_from_sampleresult(gpu_result)
+    gpu_energy = gpu_decoded.energy_mean()
+    target_runs.append(("nvidia GPU", gpu_decoded, gpu_energy, gpu_seconds, "#FF8A3D"))
+    print("GPU backend target  : nvidia")
+    print(f"GPU hardware        : {gpu_backend_info()}")
+    print(f"GPU nvidia mean energy: {gpu_energy:+.4f}")
+    print(f"GPU nvidia sample time: {gpu_seconds:.4f} s")
+    print(f"CPU/GPU time ratio    : {cpu_seconds / gpu_seconds:.2f}x")
+else:
+    gpu_decoded = None
+    print(
+        "No NVIDIA GPU was detected. Run this notebook in a Google Colab GPU "
+        "runtime to execute the `nvidia` target."
+    )
+
+cudaq.reset_target()
 
 # %% [markdown]
-# Because both target runs use sampling, we can compare their sampled energy distributions directly.
-# The vertical line in each subplot marks the sample mean energy.
+# When a GPU is available, the CPU and GPU samples should describe the same QAOA output distribution.
+# The helper below visualizes the sampled energy histograms and asserts that the mean energies remain close.
+# The tolerances are deliberately finite-shot tolerances, not exact-equality checks; the common seed makes the comparison reproducible for each backend implementation.
 
 # %%
-
-
 def energy_distribution(decoded_samples):
     counts: Counter[float] = Counter()
     for energy, occ in zip(decoded_samples.energy, decoded_samples.num_occurrences):
@@ -459,17 +503,22 @@ def energy_distribution(decoded_samples):
     return energies, [counts[energy] for energy in energies]
 
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
-for ax, decoded_samples, mean_energy, title, color in [
-    (axes[0], default_decoded, default_energy, "Default target", "#2696EB"),
-    (
-        axes[1],
-        noisy_density_decoded,
-        noisy_density_energy,
-        "density-matrix-cpu with noise",
-        "#FF8A3D",
-    ),
-]:
+if gpu_decoded is not None:
+    energy_delta = abs(cpu_energy - gpu_energy)
+    print(f"mean-energy difference: {energy_delta:.4f}")
+    assert energy_delta < (0.5 if docs_test_mode else 0.15)
+
+fig, axes = plt.subplots(
+    1,
+    len(target_runs),
+    figsize=(5.5 * len(target_runs), 4),
+    sharey=True,
+)
+if len(target_runs) == 1:
+    axes = [axes]
+for ax, (target_name, decoded_samples, mean_energy, elapsed, color) in zip(
+    axes, target_runs
+):
     energies, counts = energy_distribution(decoded_samples)
     ax.bar(energies, counts, width=0.6, color=color)
     ax.axvline(
@@ -480,22 +529,23 @@ for ax, decoded_samples, mean_energy, title, color in [
         label=f"mean = {mean_energy:+.3f}",
     )
     ax.set_xticks(energies)
-    ax.set_title(title)
+    ax.set_title(f"{target_name} ({elapsed:.3f} s)")
     ax.set_xlabel("Ising energy")
     ax.legend()
 
 axes[0].set_ylabel("Frequency")
-fig.suptitle("Sampled energy distributions by CUDA-Q target")
+fig.suptitle(f"QAOA samples by CUDA-Q target ({benchmark_shots} shots)")
 fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## Runtime control flow: `STATIC` vs. `RUNNABLE` artifacts
+# ## When Kernels Include Classical Control Flow: `STATIC` and `RUNNABLE` artifacts
 #
 # Most variational circuits, including the QAOA ansatz above, compile to `ExecutionMode.STATIC`.
 # `STATIC` artifacts have no explicit terminal measurement in the generated CUDA-Q source, so they are compatible with CUDA-Q's `sample` and `observe` APIs.
 #
-# If a Qamomile kernel contains runtime measurement-dependent control flow, such as `if bit:` or `while bit:`, the CUDA-Q backend emits an `ExecutionMode.RUNNABLE` artifact instead.
+# Qamomile quantum kernels are designed with hardware-level execution in mind and can express classical control flow based on mid-circuit measurement results (see [Classical Flow Patterns](../tutorial/07_classical_flow_patterns.ipynb) for details).
+# For this reason, if a quantum kernel contains runtime measurement-dependent control flow, such as `if` branches or `while` loops, the CUDA-Q backend emits an `ExecutionMode.RUNNABLE` artifact instead.
 # `RUNNABLE` artifacts use explicit `mz(...)` measurements in the generated source and execute through `cudaq.run()`.
 # The following tiny feed-forward circuit demonstrates that path.
 
@@ -548,11 +598,12 @@ else:
 # %% [markdown]
 # ## Summary
 #
-# - `CudaqTranspiler().transpile(kernel, bindings=..., parameters=[...])` converts the kernel to a CUDA-Q artifact with inspectable Python source.
-# - `CudaqExecutor` supports both `ExecutableProgram.sample()` for QAOA-style sampling and `executor.estimate(...)` for noise-free expectation values through CUDA-Q's `observe` API.
-# - QAOA-style `STATIC` artifacts can be reused across many runtime parameter vectors without re-transpiling the kernel.
-# - Runtime measurement-dependent control flow is emitted as `ExecutionMode.RUNNABLE` and executed through `cudaq.run()`.
-# - CUDA-Q targets can be selected through `CudaqExecutor(target=...)` or `CudaqTranspiler.executor(target=...)`; the `ExecutableProgram` does not need to be transpiled again.
+# In this tutorial, we transpiled a MaxCut QAOA quantum kernel to the CUDA-Q backend, then exercised sampling, expectation-value estimation, CPU/GPU target selection, and execution of a circuit with classical control flow.
+#
+# - The CUDA-Q artifact emitted by `CudaqTranspiler` keeps inspectable Python source and can be reused with runtime parameters.
+# - The same `ExecutableProgram` can run on the `qpp-cpu` target or the `nvidia` GPU target, with target selection handled by the executor.
+# - `CudaqExecutor` supports both QAOA-style sampling and noise-free expectation values through CUDA-Q's `observe` API.
+# - Kernels with runtime measurement-dependent classical control flow are emitted as `ExecutionMode.RUNNABLE` artifacts and execute through `cudaq.run()`.
 
 # %% [markdown]
 # ### See also

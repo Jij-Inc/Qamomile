@@ -23,6 +23,7 @@
 # 小さなMaxCutインスタンスを`BinaryModel.from_ising`でIsing問題として表し、QAOAアンザッツを`@qkernel`として直接書きます。
 # その量子カーネルを`CudaqTranspiler`/`CudaqExecutor`で実行する流れを見ていきましょう。
 # `CudaqExecutor`はactiveなCUDA-Q targetを使います。既定では、以下の例にはCUDA-QのローカルCPU simulatorだけで十分です。
+# 後半では、同じQAOA回路をCPU backend(`qpp-cpu`)とGPU backend(`nvidia`)で実行し、サンプル結果と実行時間を比較します。
 # その過程で、生成されたCUDA-Qソースを確認し、Qamomileの`STATIC` modeと`RUNNABLE` modeの違いも比較します。
 
 # %%
@@ -33,6 +34,9 @@
 
 # %%
 import os
+import platform
+import subprocess
+import time
 from collections import Counter
 
 import cudaq
@@ -166,7 +170,7 @@ qaoa_ansatz.draw(
 # ## CUDA-Qへのトランスパイル
 #
 # `CudaqTranspiler`は、他のバックエンドと同じように`transpile()`で使えます。
-# 問題構造を決める引数は`bindings`で固定し、`gammas`/`betas`はruntimeパラメータとして残します。
+# 問題構造を決める引数は`bindings`で固定し、`gammas`/`betas`はランタイムパラメータとして残します。
 
 # %%
 transpiler = CudaqTranspiler()
@@ -186,7 +190,7 @@ executable = transpiler.transpile(
 # %% [markdown]
 # `executable.get_first_circuit()`で、QamomileのCUDA-Qバックエンドartifactである`CudaqKernelArtifact`を取り出せます。
 # これは生成された`@cudaq.kernel`関数を包むQamomile側のwrapperであり、CUDA-Q本体のPythonパッケージが提供する型ではありません。
-# artifactは、生成されたCUDA-Q量子カーネルのPythonソース文字列を確認できる形で保持し、$2p$個のQAOA角度(`gammas[0..p-1]`、`betas[0..p-1]`)が名前付きruntimeパラメータとして残っています。
+# artifactは、生成されたCUDA-Q量子カーネルのPythonソース文字列を確認できる形で保持し、$2p$個のQAOA角度(`gammas[0..p-1]`、`betas[0..p-1]`)が名前付きランタイムパラメータとして残っています。
 # `type(...)`、量子ビット数、パラメータ数で確認し、生成されたソースも見てみましょう。
 # このソース文字列は、QamomileがCUDA-Qに渡した内容を正確に確認したい場合に便利です。たとえば、下の`rzz`層のようなゲート分解も確認できます。
 
@@ -196,7 +200,7 @@ assert (
     cudaq_artifact is not None
 )  # transpile()はここで必ず1つの量子セグメントを生成する
 # `num_qubits`と`param_count`は問題設定から一意に決まります。
-# 量子ビット数はグラフのノード数と一致し、runtimeパラメータ数は層ごとに
+# 量子ビット数はグラフのノード数と一致し、ランタイムパラメータ数は層ごとに
 # (gamma | beta)の組が1つずつ、合計2pになります。CUDA-Qのemitパスに
 # 回帰が起きた場合にdocsテストで検知できるようassertします。
 assert cudaq_artifact.num_qubits == num_nodes
@@ -215,9 +219,9 @@ assert "rz(" in cudaq_artifact.source
 print(cudaq_artifact.source)
 
 # %% [markdown]
-# 各runtimeパラメータは、実行時まで未バインドのまま残ります。
+# 各ランタイムパラメータは、実行時まで未バインドのまま残ります。
 # そのため、`gammas`/`betas`のバインドはQamomile側での作り直しではなく、CUDA-Q側でのパラメータ値の更新として扱われます。
-# Ising係数、量子ビット数、層数といった問題構造はコンパイル時に固定され、runtime入力として残るのは変分角度だけです。
+# Ising係数、量子ビット数、層数といった問題構造はコンパイル時に固定され、ランタイム入力として残るのは変分角度だけです。
 
 # %% [markdown]
 # ## `CudaqExecutor`によるQAOAサンプリング
@@ -319,7 +323,7 @@ assert unbound_circuit.execution_mode == ExecutionMode.STATIC
 print(f"artifact type       : {type(unbound_circuit).__name__}")
 print(f"artifact param_count: {unbound_circuit.param_count}")
 
-# CUDA-Qはruntimeパラメータを「artifactに登録された順序のフラットなリスト」
+# CUDA-Qはランタイムパラメータを「artifactに登録された順序のフラットなリスト」
 # として要求します。登録順は回路を出力したときの初出順で決まるため、QAOAでは
 # gammas[0], betas[0], gammas[1], betas[1], ...と層ごとに交互の順になります。
 # 「全gammasのあとに全betas」という順序ではない点に注意してください。
@@ -328,7 +332,7 @@ print(f"artifact param_count: {unbound_circuit.param_count}")
 named_values = {f"gammas[{i}]": opt_gammas[i] for i in range(p)}
 named_values.update({f"betas[{i}]": opt_betas[i] for i in range(p)})
 flat_params = [named_values[name] for name in executable.parameter_names]
-# runtimeパラメータは2p個のQAOA角度のみ。CudaqTranspilerの
+# ランタイムパラメータは2p個のQAOA角度のみ。CudaqTranspilerの
 # パラメータ登録方法が将来変わった場合に検知できるようassertします。
 assert len(executable.parameter_names) == 2 * p
 assert len(flat_params) == 2 * p
@@ -342,7 +346,7 @@ assert np.isfinite(energy_via_estimate)
 
 # %% [markdown]
 # `ExecutableProgram.run(...)`で、期待値を返す量子カーネルを直接実行することもできます。
-# 次の量子カーネルでは、ObservableをQamomileのruntime引数として受け取り、測定ビットではなく`qmc.expval(...)`を返します。
+# 次の量子カーネルでは、ObservableをQamomileのランタイム引数として受け取り、測定ビットではなく`qmc.expval(...)`を返します。
 # この1段高い抽象度の経路でも`CudaqExecutor.estimate`に到達しますが、ObservableとパラメータのbindingsはQamomileの`ExecutableProgram`が管理します。
 
 
@@ -389,71 +393,111 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # また、最適化後パラメータでのこのノイズなし期待値は、先ほど出力した標本平均エネルギーともショットノイズの範囲で一致するはずです。
 
 # %% [markdown]
-# ## CUDA-Q targetの選択
+# ## CUDA-Q targetの選択: GPUバックエンドの利用
 #
 # `CudaqExecutor()`は現在のCUDA-Q targetを使い、`CudaqExecutor(target=...)`または`CudaqTranspiler.executor(target=...)`はtargetを明示的に選択します。
 # 差し替えたexecutorは、上で使った`executor`の位置にそのまま当てはめられます。
 # CUDA-Q targetを変えても、量子カーネルをトランスパイルし直す必要はありません。
-# `ExecutableProgram`が出力済みのCUDA-Q artifactを持ち、executorがruntime targetの選択を持つ、という役割分担になっているためです。
-# 選択できるsimulator targetの一覧は、CUDA-Q公式ドキュメントの[Circuit Simulation Backends](https://nvidia.github.io/cuda-quantum/latest/using/backends/simulators.html)で確認できます。
+# `ExecutableProgram`が出力済みのCUDA-Q artifactを持ち、executorがランタイムtargetの選択を持つ、という役割分担になっているためです。
+# 選択できるsimulator targetの一覧は、CUDA-Q公式ドキュメントの[Circuit Simulation](https://nvidia.github.io/cuda-quantum/latest/using/simulators.html)で確認できます。また、CUDA-Qの[Running on a GPU](https://nvidia.github.io/cuda-quantum/latest/using/basics/run_kernel.html#running-on-a-gpu)セクションでも、同じ`qpp-cpu`/`nvidia` targetの使い分けが紹介されています。
 #
-# ローカルで試せる具体例として、まず既定targetで**同じ**最適化済みQAOA`ExecutableProgram`をサンプリングします。
-# その後で、小さなdepolarization noise modelを有効にしたCUDA-Qの`density-matrix-cpu`targetへ切り替えます。
+# このチュートリアルはGoogle Colabでも実行できます。
+# GPU経路を試すには、ノートブックを実行する前にGPUランタイムを選び、そのランタイムに合うCUDA-Q optional dependency groupをインストールしてください。
+# CUDA-Qでは、CPU simulator targetとして`qpp-cpu`を、ローカルNVIDIA GPU simulator targetとして`nvidia`を使えます。
 #
-# density-matrix simulatorは、CPU上でノイズありシミュレーションを行いたい場合に便利です。
-# CUDA-Qには、1量子ビット操作向けの`Depolarization1`と、2量子ビット操作向けの`Depolarization2`があります。
-# QamomileのCUDA-Q emitterは各`rzz`を`x.ctrl`/`rz`/`x.ctrl`へ分解するため、下のnoise modelでは回転ゲートに1量子ビットdepolarizationを掛け、制御付き`x`ゲート(`num_controls=1`)に2量子ビットdepolarizationを掛けます。
-#
-# CUDA-Qのnoise model APIでは、制御付き`x`はoperator`"x"`に`num_controls=1`を付けて登録します。`"x.ctrl"`という別のoperator名ではありません。
-# CUDA-Qではactiveなtargetとnoise modelがどちらもglobalに保持され、`cudaq.set_target(...)`を呼ぶと現在のnoise modelが消えます。
-# ノイズあり実行では、先にtargetを設定し、その後でnoise modelを設定し、呼び出し中に`target=...`を再適用しないExecutorでサンプリングします。
-#
-# GPU対応インストールでは、GPU backendを持つCUDA-Q targetやノイズ対応simulatorでも同じやり方が使えます。
+# 具体例として、**同じ**最適化済みQAOA`ExecutableProgram`をCPU targetとGPU targetでサンプリングします。
+# ここでの両方の実行はノイズなしです。CUDA-Qのnoise modelは設定せず、同じQAOA回路と同じパラメータベクトルを使います。
+# さらに、それぞれのサンプリング直前に同じCUDA-Q random seedを設定します。
+# 有限ショットのサンプルはbackend simulatorが生成するため、生のショット順序の完全一致ではなく、サンプル平均エネルギーが許容範囲で近いことを確認し、エネルギーhistogramを可視化します。
+# さらに、それぞれのtargetでサンプリングにかかった時間も比較します。
 
 # %%
-default_result = executable.sample(
-    executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-    shots=sample_shots,
-).result()
-noise_probability = 0.02
-noise_model = cudaq.NoiseModel()
-for gate_name in ("h", "rx", "rz"):
-    noise_model.add_all_qubit_channel(
-        gate_name, cudaq.Depolarization1(noise_probability)
-    )
-noise_model.add_all_qubit_channel(
-    "x",
-    cudaq.Depolarization2(noise_probability),
-    num_controls=1,
-)
+benchmark_shots = 512 if docs_test_mode else 100_000
+benchmark_seed = 13
 
-try:
-    cudaq.set_target("density-matrix-cpu")
-    cudaq.set_noise(noise_model)
-    noisy_density_result = executable.sample(
-        executor,
+
+def cpu_backend_info() -> str:
+    processor = platform.processor() or platform.machine() or "unknown processor"
+    if os.path.exists("/proc/cpuinfo"):
+        with open("/proc/cpuinfo", encoding="utf-8") as cpuinfo:
+            for line in cpuinfo:
+                if line.startswith("model name"):
+                    processor = line.split(":", maxsplit=1)[1].strip()
+                    break
+    return f"{processor}; logical CPUs: {os.cpu_count()}"
+
+
+def gpu_backend_info() -> str:
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ):
+        return f"{cudaq.num_available_gpus()} CUDA-Q GPU(s) available"
+
+    names = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    return ", ".join(names) if names else "NVIDIA GPU detected"
+
+
+def timed_qaoa_sample(target_name: str):
+    cudaq.set_target(target_name)
+    cudaq.set_random_seed(benchmark_seed)
+    start = time.perf_counter()
+    result = executable.sample(
+        CudaqExecutor(),
         bindings={"gammas": opt_gammas, "betas": opt_betas},
-        shots=sample_shots,
+        shots=benchmark_shots,
     ).result()
-finally:
-    cudaq.unset_noise()
-    cudaq.reset_target()
+    return result, time.perf_counter() - start
 
-default_decoded = spin_model.decode_from_sampleresult(default_result)
-noisy_density_decoded = spin_model.decode_from_sampleresult(noisy_density_result)
-default_energy = default_decoded.energy_mean()
-noisy_density_energy = noisy_density_decoded.energy_mean()
-print(f"default target mean energy           : {default_energy:+.4f}")
-print(f"density-matrix-cpu noisy mean energy: {noisy_density_energy:+.4f}")
+
+# %%
+# CPU backend (qpp-cpu)
+target_runs = []
+cpu_result, cpu_seconds = timed_qaoa_sample("qpp-cpu")
+cpu_decoded = spin_model.decode_from_sampleresult(cpu_result)
+cpu_energy = cpu_decoded.energy_mean()
+target_runs.append(("qpp-cpu", cpu_decoded, cpu_energy, cpu_seconds, "#2696EB"))
+print("CPU backend target  : qpp-cpu")
+print(f"CPU hardware        : {cpu_backend_info()}")
+print(f"CPU qpp-cpu mean energy: {cpu_energy:+.4f}")
+print(f"CPU qpp-cpu sample time: {cpu_seconds:.4f} s")
+
+# %%
+# GPU backend (nvidia)
+if cudaq.num_available_gpus() > 0 and cudaq.has_target("nvidia"):
+    gpu_result, gpu_seconds = timed_qaoa_sample("nvidia")
+    gpu_decoded = spin_model.decode_from_sampleresult(gpu_result)
+    gpu_energy = gpu_decoded.energy_mean()
+    target_runs.append(("nvidia GPU", gpu_decoded, gpu_energy, gpu_seconds, "#FF8A3D"))
+    print("GPU backend target  : nvidia")
+    print(f"GPU hardware        : {gpu_backend_info()}")
+    print(f"GPU nvidia mean energy: {gpu_energy:+.4f}")
+    print(f"GPU nvidia sample time: {gpu_seconds:.4f} s")
+    print(f"CPU/GPU time ratio    : {cpu_seconds / gpu_seconds:.2f}x")
+else:
+    gpu_decoded = None
+    print(
+        "NVIDIA GPUが検出されませんでした。Google ColabのGPUランタイムで"
+        "このノートブックを実行すると、`nvidia` targetを試せます。"
+    )
+
+cudaq.reset_target()
 
 # %% [markdown]
-# どちらのtarget実行もサンプリングなので、サンプルされたエネルギー分布を直接比較できます。
-# 各subplotの縦線は、標本平均エネルギーを表します。
+# GPUが利用できる場合、CPUとGPUのサンプルは同じQAOA出力分布を表すはずです。
+# 下のヘルパーでは、サンプリングされたエネルギーhistogramを可視化し、平均エネルギーが近いことをassertします。
+# ここでの許容誤差は、完全一致ではなく、有限ショットの乱数を見込んだものです。共通seedにより、backendごとの比較は再現可能になります。
 
 # %%
-
-
 def energy_distribution(decoded_samples):
     counts: Counter[float] = Counter()
     for energy, occ in zip(decoded_samples.energy, decoded_samples.num_occurrences):
@@ -462,17 +506,22 @@ def energy_distribution(decoded_samples):
     return energies, [counts[energy] for energy in energies]
 
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
-for ax, decoded_samples, mean_energy, title, color in [
-    (axes[0], default_decoded, default_energy, "Default target", "#2696EB"),
-    (
-        axes[1],
-        noisy_density_decoded,
-        noisy_density_energy,
-        "density-matrix-cpu with noise",
-        "#FF8A3D",
-    ),
-]:
+if gpu_decoded is not None:
+    energy_delta = abs(cpu_energy - gpu_energy)
+    print(f"mean-energy difference: {energy_delta:.4f}")
+    assert energy_delta < (0.5 if docs_test_mode else 0.15)
+
+fig, axes = plt.subplots(
+    1,
+    len(target_runs),
+    figsize=(5.5 * len(target_runs), 4),
+    sharey=True,
+)
+if len(target_runs) == 1:
+    axes = [axes]
+for ax, (target_name, decoded_samples, mean_energy, elapsed, color) in zip(
+    axes, target_runs
+):
     energies, counts = energy_distribution(decoded_samples)
     ax.bar(energies, counts, width=0.6, color=color)
     ax.axvline(
@@ -483,22 +532,23 @@ for ax, decoded_samples, mean_energy, title, color in [
         label=f"mean = {mean_energy:+.3f}",
     )
     ax.set_xticks(energies)
-    ax.set_title(title)
+    ax.set_title(f"{target_name} ({elapsed:.3f} s)")
     ax.set_xlabel("Ising energy")
     ax.legend()
 
 axes[0].set_ylabel("Frequency")
-fig.suptitle("Sampled energy distributions by CUDA-Q target")
+fig.suptitle(f"QAOA samples by CUDA-Q target ({benchmark_shots} shots)")
 fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## runtime制御フロー: `STATIC` artifactと`RUNNABLE` artifact
+# ## 古典制御フローを含む場合: `STATIC` artifactと`RUNNABLE` artifact
 #
 # 上のQAOAアンザッツを含む多くの変分回路は、`ExecutionMode.STATIC`にコンパイルされます。
 # `STATIC` artifactでは、生成されたCUDA-Qソースに明示的な終端測定は入りません。そのため、CUDA-Qの`sample` APIと`observe` APIに対応しています。
 #
-# Qamomile量子カーネルが`if bit:`や`while bit:`のようなruntime測定依存の制御フローを含む場合、CUDA-Qバックエンドは代わりに`ExecutionMode.RUNNABLE` artifactを出力します。
+# Qamomileの量子カーネルは、ハードウェアレベルの実行を想定し、回路途中の測定結果に基づく古典制御フローを記述することができます（詳しくは[古典制御フローパターン](../tutorial/07_classical_flow_patterns.ipynb)を参照してください）。
+# このため、量子カーネルが`if`分岐や`while`ループのようなランタイム測定依存の制御フローを含む場合、CUDA-Qバックエンドは代わりに`ExecutionMode.RUNNABLE` artifactを出力します。
 # `RUNNABLE` artifactでは、生成されたソースに明示的な`mz(...)`測定が入り、`cudaq.run()`で実行されます。
 # 次の小さなfeed-forward回路で、この経路を確認します。
 
@@ -544,18 +594,22 @@ assert all(value == 1 for value, _ in runnable_sample.results)
 try:
     executor.estimate(runnable_circuit, qm_o.Z(0))
 except TypeError as exc:
-    print(type(exc).__name__, exc)
+    print(
+        type(exc).__name__,
+        "`RUNNABLE` CUDA-Q回路は`observe` APIに対応していません。",
+    )
 else:
     raise AssertionError("RUNNABLE CUDA-Q circuits must reject observe()")
 
 # %% [markdown]
 # ## まとめ
 #
-# - `CudaqTranspiler().transpile(kernel, bindings=..., parameters=[...])`は、カーネルをPythonソースを確認できるCUDA-Q artifactに変換します。
-# - `CudaqExecutor`は、QAOA形式のサンプリングを行う`ExecutableProgram.sample()`と、CUDA-Qの`observe` APIによるノイズなし期待値計算を行う`executor.estimate(...)`の両方をサポートします。
-# - QAOA形式の`STATIC` artifactは、量子カーネルを再トランスパイルせずに、多くのruntimeパラメータベクトルで再利用できます。
-# - runtime測定依存の制御フローは`ExecutionMode.RUNNABLE`として出力され、`cudaq.run()`経由で実行されます。
-# - CUDA-Q targetは`CudaqExecutor(target=...)`または`CudaqTranspiler.executor(target=...)`で選択できます。`ExecutableProgram`をトランスパイルし直す必要はありません。
+# このチュートリアルでは、MaxCut向けのQAOA量子カーネルをCUDA-Q backendへトランスパイルし、サンプリング、期待値計算、CPU/GPU targetの切り替え、古典制御フローを含む回路の実行までを確認しました。
+#
+# - `CudaqTranspiler`が出力するCUDA-Q artifactはPythonソースとして確認でき、ランタイムパラメータを保ったまま再利用できます。
+# - 同じ`ExecutableProgram`を`qpp-cpu`と`nvidia` GPU targetで実行でき、targetの選択はexecutor側で切り替えられます。
+# - `CudaqExecutor`はQAOA形式のサンプリングと、CUDA-Qの`observe` APIを使うノイズなし期待値計算の両方を扱えます。
+# - ランタイム測定依存の古典制御フローを含むカーネルは`ExecutionMode.RUNNABLE`として出力され、`cudaq.run()`経由で実行されます。
 
 # %% [markdown]
 # ### See also
