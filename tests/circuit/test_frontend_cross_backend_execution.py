@@ -19,6 +19,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.errors import EmitError
 
 Backend = tuple[str, Any, Any]
 SampleMode = Literal["deterministic", "uniform", "bell"]
@@ -1113,7 +1114,7 @@ def test_powered_controlled_random_rotation_sample_and_run(
 def test_bound_control_indices_duplicate_rejected(backend: Backend) -> None:
     """Reject ``UInt`` control-index entries that bind to duplicates."""
     _name, transpiler, _executor = backend
-    with pytest.raises(Exception, match="duplicate"):
+    with pytest.raises(EmitError, match="duplicate"):
         transpiler.transpile(
             bound_control_indices_sample,
             bindings={"n": 2, "i": 0, "j": 0},

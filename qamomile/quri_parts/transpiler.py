@@ -6,24 +6,13 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Sequence, cast
+from typing import TYPE_CHECKING, Any, Sequence
 
-import numpy as np
-
-from qamomile.circuit.ir.parameter import ParamKind
-from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
     QuantumExecutor,
 )
 from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
-    _populate_input_qubit_map,
-)
-from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
-    ClbitMap,
-    QubitMap,
-)
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -96,32 +85,6 @@ def _create_seeded_qulacs_vector_sampler(seed: int) -> Any:
     return sampler
 
 
-def _block_has_unbound_runtime_parameters(
-    block_value: Any,
-    bindings: dict[str, Any],
-) -> bool:
-    """Return whether a block still has unbound runtime parameters.
-
-    Args:
-        block_value (Any): Block-like object to inspect.
-        bindings (dict[str, Any]): Local block bindings. A runtime slot
-            with a concrete binding can still be matrix-emitted.
-
-    Returns:
-        bool: True when a runtime parameter slot has no concrete binding
-        or is bound to another symbolic IR value.
-    """
-    for slot in getattr(block_value, "param_slots", ()):
-        if slot.kind != ParamKind.RUNTIME_PARAMETER:
-            continue
-        if slot.name not in bindings:
-            return True
-        bound = bindings[slot.name]
-        if hasattr(bound, "uuid") and hasattr(bound, "type"):
-            return True
-    return False
-
-
 class QuriPartsEmitPass(
     StandardEmitPass["qp_c.LinearMappedUnboundParametricQuantumCircuit"]
 ):
@@ -160,8 +123,8 @@ class QuriPartsEmitPass(
         probe would still build a sub-circuit before discovering that
         ``circuit_to_gate()`` returns ``None``, which can pollute the
         parent emitter's current-circuit and parameter state.  Skip that
-        probe and let ``_emit_controlled_fallback`` choose between dense
-        matrix emission and per-gate decomposition.
+        probe and let ``_emit_controlled_fallback`` try the shared
+        gate-by-gate decomposition directly.
 
         Args:
             block_value (Any): Ignored inner block value.
@@ -185,17 +148,15 @@ class QuriPartsEmitPass(
         power: int,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit controlled-U fallback through matrix or per-gate decomposition.
+        """Emit controlled-U fallback through gate-by-gate decomposition.
 
         QURI Parts does not expose a custom-gate object that can be
-        returned by ``circuit_to_gate`` and then controlled.  For
-        concrete blocks, build the wrapped block as a small QURI circuit,
-        extract its unitary with Qulacs, extend that unitary with the
-        requested control qubits, and append it as one dense matrix gate.
-        If matrix extraction is impossible because the block still
-        carries runtime parameters, fall back to the shared per-gate
-        controlled decomposition; that path preserves parametric gates
-        but still rejects multi-target shapes it cannot route safely.
+        returned by ``circuit_to_gate`` and then controlled.  Avoid
+        replacing that missing primitive with a dense matrix fallback:
+        full-unitary extraction scales exponentially and can hide shapes
+        that the backend cannot route gate-by-gate.  Instead, delegate to
+        the shared controlled decomposition and surface its ``EmitError``
+        if the block shape is unsupported.
 
         Args:
             circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
@@ -209,199 +170,20 @@ class QuriPartsEmitPass(
             bindings (dict[str, Any]): Local block bindings.
 
         Raises:
-            QamomileQuriPartsTranspileError: If both dense matrix
-                extraction and safe per-gate controlled decomposition
-                fail.
+            EmitError: If safe gate-by-gate controlled decomposition
+                cannot emit the block.
         """
         if not target_indices:
             return
-        if _block_has_unbound_runtime_parameters(block_value, bindings):
-            try:
-                super()._emit_controlled_fallback(
-                    circuit,
-                    block_value,
-                    num_controls,
-                    control_indices,
-                    target_indices,
-                    power,
-                    bindings,
-                )
-            except EmitError as fallback_error:
-                raise QamomileQuriPartsTranspileError(
-                    "QURI Parts controlled fallback cannot safely "
-                    "decompose the runtime-parameter block gate-by-gate."
-                ) from fallback_error
-            return
-        try:
-            unitary = self._block_to_unitary(block_value, len(target_indices), bindings)
-        except QamomileQuriPartsTranspileError:
-            try:
-                super()._emit_controlled_fallback(
-                    circuit,
-                    block_value,
-                    num_controls,
-                    control_indices,
-                    target_indices,
-                    power,
-                    bindings,
-                )
-            except EmitError as fallback_error:
-                raise QamomileQuriPartsTranspileError(
-                    "QURI Parts controlled fallback could neither "
-                    "matrix-emit the block nor decompose it gate-by-gate."
-                ) from fallback_error
-            return
-        else:
-            if power > 1:
-                unitary = np.linalg.matrix_power(unitary, power)
-            controlled = _controlled_unitary(unitary, num_controls)
-            circuit.add_UnitaryMatrix_gate(
-                [*control_indices, *target_indices],
-                controlled.tolist(),
-            )
-
-    def _block_to_unitary(
-        self,
-        block_value: Any,
-        num_qubits: int,
-        bindings: dict[str, Any],
-    ) -> np.ndarray:
-        """Convert a concrete inner block to a unitary matrix.
-
-        Args:
-            block_value (Any): Block-like object with ``operations`` and
-                optional ``input_values``.
-            num_qubits (int): Number of local target qubits the block
-                occupies.
-            bindings (dict[str, Any]): Bindings used while emitting the
-                local block.
-
-        Returns:
-            np.ndarray: Dense unitary matrix for the block.
-
-        Raises:
-            QamomileQuriPartsTranspileError: If the block is malformed,
-                still parameterized, or cannot be converted by Qulacs.
-        """
-        if not hasattr(block_value, "operations"):
-            raise QamomileQuriPartsTranspileError(
-                "QURI Parts controlled fallback requires a block with operations."
-            )
-
-        try:
-            local_qubit_map: QubitMap = {}
-            local_clbit_map: ClbitMap = {}
-            if hasattr(block_value, "input_values"):
-                _populate_input_qubit_map(
-                    self,
-                    block_value.input_values,
-                    num_qubits,
-                    bindings,
-                    local_qubit_map,
-                )
-
-            local_qubit_map, local_clbit_map = self._allocator.allocate(
-                block_value.operations,
-                bindings,
-                initial_qubit_map=local_qubit_map,
-                initial_clbit_map=local_clbit_map,
-            )
-
-            sub_circuit = None
-            emitter = cast(QuriPartsGateEmitter, self._emitter)
-            previous_circuit = emitter._current_circuit
-            previous_param_map = dict(emitter._param_map)
-            previous_parameter_map = dict(self._parameter_map)
-            previous_parameter_sources = dict(self._parameter_sources)
-            try:
-                sub_circuit = emitter.create_circuit(num_qubits, 0)
-                self._emit_operations(
-                    sub_circuit,
-                    block_value.operations,
-                    local_qubit_map,
-                    local_clbit_map,
-                    bindings,
-                    force_unroll=True,
-                )
-            finally:
-                emitter._current_circuit = previous_circuit
-                emitter._param_map = previous_param_map
-                self._parameter_map = previous_parameter_map
-                self._parameter_sources = previous_parameter_sources
-            if sub_circuit is None:
-                raise QamomileQuriPartsTranspileError(
-                    "QURI Parts controlled fallback failed to create a sub-circuit."
-                )
-            if sub_circuit.parameter_count:
-                raise QamomileQuriPartsTranspileError(
-                    "QURI Parts controlled fallback cannot matrix-emit a "
-                    "controlled-U block with runtime parameters. Bind the "
-                    "parameters at transpile time."
-                )
-            frozen = sub_circuit.freeze()
-            return _quri_circuit_unitary(frozen)
-        except QamomileQuriPartsTranspileError:
-            raise
-        except Exception as exc:
-            raise QamomileQuriPartsTranspileError(
-                "Failed to matrix-emit a controlled-U block for QURI Parts."
-            ) from exc
-
-
-def _quri_circuit_unitary(circuit: Any) -> np.ndarray:
-    """Return the dense unitary matrix for a concrete QURI circuit.
-
-    Args:
-        circuit (Any): Immutable concrete QURI Parts circuit.
-
-    Returns:
-        np.ndarray: Matrix whose columns are the evolved computational
-        basis states.
-    """
-    from qulacs import QuantumState  # type: ignore[import-not-found]
-
-    from quri_parts.qulacs.circuit import (  # type: ignore[import-not-found]
-        convert_circuit,
-    )
-
-    qulacs_circuit = convert_circuit(circuit)
-    num_qubits = qulacs_circuit.get_qubit_count()
-    dim = 1 << num_qubits
-    unitary = np.zeros((dim, dim), dtype=np.complex128)
-    for basis in range(dim):
-        state = QuantumState(num_qubits)
-        state.set_computational_basis(basis)
-        qulacs_circuit.update_quantum_state(state)
-        unitary[:, basis] = state.get_vector()
-    return unitary
-
-
-def _controlled_unitary(unitary: np.ndarray, num_controls: int) -> np.ndarray:
-    """Build a controlled version of ``unitary`` in Qulacs bit order.
-
-    Args:
-        unitary (np.ndarray): Target-only unitary matrix.
-        num_controls (int): Number of leading control qubits.
-
-    Returns:
-        np.ndarray: Dense matrix over ``controls + targets`` that applies
-        ``unitary`` exactly when all controls are ``|1>``.
-    """
-    target_dim = unitary.shape[0]
-    total_dim = target_dim << num_controls
-    controlled = np.eye(total_dim, dtype=np.complex128)
-    target_mask = target_dim - 1
-    active_control_bits = (1 << num_controls) - 1
-    for in_basis in range(total_dim):
-        control_bits = in_basis & active_control_bits
-        if control_bits != active_control_bits:
-            continue
-        in_target = (in_basis >> num_controls) & target_mask
-        controlled[in_basis, in_basis] = 0.0
-        for out_target in range(target_dim):
-            out_basis = control_bits | (out_target << num_controls)
-            controlled[out_basis, in_basis] = unitary[out_target, in_target]
-    return controlled
+        super()._emit_controlled_fallback(
+            circuit,
+            block_value,
+            num_controls,
+            control_indices,
+            target_indices,
+            power,
+            bindings,
+        )
 
 
 class QuriPartsExecutor(

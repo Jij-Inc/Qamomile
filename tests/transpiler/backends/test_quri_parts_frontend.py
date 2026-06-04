@@ -3528,11 +3528,13 @@ class TestControlledGate:
         assert statevectors_equal(sv, expected)
 
     # -- Double-control (num_controls=2) tests --
-    # QuriParts falls back to dense-matrix emission for multi-controlled
-    # helper kernels that cannot be appended as native controlled gates.
+    # QURI Parts has no native sub-circuit gate object, and this backend
+    # intentionally does not synthesize a dense controlled-unitary matrix.
+    # Multi-control helper kernels therefore fail when the shared
+    # gate-by-gate fallback cannot route them safely.
 
-    def test_controlled_h_double_control_statevector(self):
-        """controlled(H, num_controls=2) matches H on the target when both controls are 1."""
+    def test_controlled_h_double_control_rejects_dense_fallback(self):
+        """controlled(H, num_controls=2) raises instead of using dense fallback."""
 
         @qmc.qkernel
         def h_gate(q: qmc.Qubit) -> qmc.Qubit:
@@ -3549,15 +3551,11 @@ class TestControlledGate:
             q[0], q[1], q[2] = controlled_h2(q[0], q[1], q[2])
             return qmc.measure(q)
 
-        _, circ = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(circ)
-        X = GATE_SPECS["X"].matrix_fn()
-        H = GATE_SPECS["H"].matrix_fn()
-        expected = tensor_product(H, tensor_product(X, X)) @ all_zeros_state(3)
-        assert statevectors_equal(sv, expected)
+        with pytest.raises(EmitError, match="multi-controlled operation"):
+            _transpile_and_get_circuit(circuit)
 
-    def test_controlled_rx_double_control_statevector(self):
-        """controlled(RX, num_controls=2) matches RX on the target when both controls are 1."""
+    def test_controlled_rx_double_control_rejects_dense_fallback(self):
+        """controlled(RX, num_controls=2) raises instead of using dense fallback."""
 
         @qmc.qkernel
         def rx_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
@@ -3574,13 +3572,8 @@ class TestControlledGate:
             q[0], q[1], q[2] = controlled_rx2(q[0], q[1], q[2], theta=theta)
             return qmc.measure(q)
 
-        theta = np.pi / 3
-        _, circ = _transpile_and_get_circuit(circuit, bindings={"theta": theta})
-        sv = _run_statevector(circ)
-        X = GATE_SPECS["X"].matrix_fn()
-        RX = GATE_SPECS["RX"].matrix_fn(theta)
-        expected = tensor_product(RX, tensor_product(X, X)) @ all_zeros_state(3)
-        assert statevectors_equal(sv, expected)
+        with pytest.raises(EmitError, match="multi-controlled operation"):
+            _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 3})
 
 
 class TestCustomCompositeGate:
@@ -6066,8 +6059,8 @@ class TestControlledSubRoutines:
         expected = CP @ state
         assert statevectors_equal(sv, expected)
 
-    def test_controlled_multi_gate_double_control_statevector(self):
-        """controlled(H·X, num_controls=2) matches H then X on the target."""
+    def test_controlled_multi_gate_double_control_rejects_dense_fallback(self):
+        """controlled(H·X, num_controls=2) raises instead of using dense fallback."""
 
         @qmc.qkernel
         def hx_gate(q: qmc.Qubit) -> qmc.Qubit:
@@ -6085,12 +6078,8 @@ class TestControlledSubRoutines:
             q[0], q[1], q[2] = controlled_hx2(q[0], q[1], q[2])
             return qmc.measure(q)
 
-        _, circ = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(circ)
-        X = GATE_SPECS["X"].matrix_fn()
-        H = GATE_SPECS["H"].matrix_fn()
-        expected = tensor_product(X @ H, tensor_product(X, X)) @ all_zeros_state(3)
-        assert statevectors_equal(sv, expected)
+        with pytest.raises(EmitError, match="multi-controlled operation"):
+            _transpile_and_get_circuit(circuit)
 
 
 class TestAllFourBellStates:
