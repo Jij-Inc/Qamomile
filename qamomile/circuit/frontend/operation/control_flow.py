@@ -57,6 +57,11 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     # 2. Evaluate the condition lambda to get the condition expression
     # The lambda returns a Handle (e.g., result of i < n comparison)
     condition_result = cond()
+    condition_value = (
+        condition_result.value
+        if hasattr(condition_result, "value")
+        else condition_result
+    )
 
     # 3. Create a new tracer for capturing body operations
     body_tracer = Tracer()
@@ -77,15 +82,18 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     temp_tracer = Tracer()
     with trace(temp_tracer):
         condition_after = cond()
+    condition_after_value = (
+        condition_after.value if hasattr(condition_after, "value") else condition_after
+    )
 
     # 7. Create WhileOperation with captured body operations
     while_op = WhileOperation(operations=body_tracer.operations)
     # operands[0]: initial condition (checked at loop entry)
-    while_op.operands.append(condition_result)
+    while_op.operands.append(condition_value)
     # operands[1]: loop-carried condition (updated inside body)
     # Only append if the body actually produced a different handle.
     if condition_after is not condition_result:
-        while_op.operands.append(condition_after)
+        while_op.operands.append(condition_after_value)
 
     # 8. Add the WhileOperation to the PARENT tracer (not a local one)
     parent_tracer.add_operation(while_op)

@@ -15,7 +15,7 @@ not produced by the canonical encoder) raises ``ValueError``.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
@@ -236,11 +236,18 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
         raise ValueError("block dict is missing 'value_table' list")
     ctx = _DecodeContext(value_table)
 
-    input_values = [_materialize_as_value(ctx, ref) for ref in d["input_value_refs"]]
-    output_values = [_materialize_as_value(ctx, ref) for ref in d["output_value_refs"]]
-    parameters = {
-        k: _materialize_as_value(ctx, ref) for k, ref in d["parameters"].items()
-    }
+    input_values = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d["input_value_refs"]],
+    )
+    output_values = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d["output_value_refs"]],
+    )
+    parameters = cast(
+        dict[str, Value],
+        {k: ctx.materialize(ref) for k, ref in d["parameters"].items()},
+    )
     param_slots = tuple(_decode_param_slot(s, ctx) for s in d.get("param_slots", ()))
 
     operations = [_decode_operation(op_dict, ctx) for op_dict in d["operations"]]
@@ -1106,7 +1113,11 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         ForItemsOperation: The reconstructed op, including key /
             value identity Values and the recursively-decoded body.
     """
-    operands, results = _operands_results(d, ctx)
+    operands = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d.get("operand_refs", ())],
+    )
+    results = [_materialize_as_value(ctx, ref) for ref in d.get("result_refs", ())]
     key_refs = d.get("key_var_value_refs")
     key_var_values = (
         tuple(_materialize_as_value(ctx, ref) for ref in key_refs)

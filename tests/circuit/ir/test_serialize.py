@@ -24,6 +24,7 @@ from qamomile.circuit.algorithm.basic import (  # noqa: E402
     rx_layer,
     superposition_vector,
 )
+from qamomile.circuit.frontend.func_to_block import func_to_block
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
@@ -109,6 +110,16 @@ def _controlled_phase(
 
 
 @qmc.qkernel
+def _controlled_phase_symbolic_power(
+    ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float, power: qmc.UInt
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Top-level kernel with a controlled-U symbolic power operand."""
+    op = qmc.control(_phase)
+    ctrl, target = op(ctrl, target, theta=theta, power=power)
+    return ctrl, target
+
+
+@qmc.qkernel
 def _symbolic_multi_arg_controlled(
     ctrl_main: qmc.Qubit,
     prefix: qmc.Vector[qmc.Qubit],
@@ -129,6 +140,44 @@ def _symbolic_multi_arg_controlled(
     op = qmc.control(qmc.x, num_controls=nc)
     ctrl_main, prefix, target = op(ctrl_main, prefix, target)
     return ctrl_main, prefix, target
+
+
+@qmc.qkernel
+def _symbolic_control_indices_controlled(
+    pool: qmc.Vector[qmc.Qubit],
+    target: qmc.Qubit,
+    nc: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    """Top-level kernel that embeds ``control_indices`` on SymbolicControlledU."""
+    op = qmc.control(qmc.x, num_controls=nc)
+    pool, target = op(pool, target, control_indices=[0, 1, 3])
+    return pool, target
+
+
+@qmc.qkernel
+def _while_measure_kernel() -> qmc.Bit:
+    """Kernel that exercises a loop-carried measurement condition."""
+    q = qmc.qubit("q")
+    q = qmc.h(q)
+    bit = qmc.measure(q)
+    while bit:
+        q2 = qmc.qubit("q2")
+        q2 = qmc.h(q2)
+        bit = qmc.measure(q2)
+    return bit
+
+
+@qmc.qkernel
+def _for_items_ising_kernel(
+    n_qubits: qmc.UInt,
+    ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Kernel that exercises ForItemsOperation over a DictValue operand."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for (i, j), jij in qmc.items(ising):
+        q[i], q[j] = qmc.rzz(q[i], q[j], gamma * jij)
+    return q
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +255,13 @@ class TestRoundTripIRFeatures:
         op_names = [type(op).__name__ for op in restored.operations]
         assert any(name.endswith("ControlledU") for name in op_names), op_names
 
+    def test_controlled_u_symbolic_power_round_trip(self):
+        """Controlled-U symbolic ``power`` survives both wire formats."""
+        block = _to_affine(_controlled_phase_symbolic_power)
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+
     def test_symbolic_controlled_u_preserves_num_control_args(self):
         """Multi-arg ``SymbolicControlledU`` keeps its operand layout across encode/decode.
 
@@ -233,6 +289,31 @@ class TestRoundTripIRFeatures:
                 op for op in restored.operations if isinstance(op, SymbolicControlledU)
             ]
             assert [op.num_control_args for op in restored_sym] == original_args
+
+    def test_symbolic_controlled_u_preserves_control_indices(self):
+        """``control_indices`` keeps its selected control slots across round-trip."""
+        from qamomile.circuit.ir.operation.gate import SymbolicControlledU
+
+        block = _to_affine(_symbolic_control_indices_controlled)
+        sym_ops = [op for op in block.operations if isinstance(op, SymbolicControlledU)]
+        assert sym_ops, [type(op).__name__ for op in block.operations]
+        original_indices = [
+            tuple(v.get_const() for v in op.control_indices or ()) for op in sym_ops
+        ]
+        assert original_indices == [(0, 1, 3)]
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            restored_sym = [
+                op for op in restored.operations if isinstance(op, SymbolicControlledU)
+            ]
+            restored_indices = [
+                tuple(v.get_const() for v in op.control_indices or ())
+                for op in restored_sym
+            ]
+            assert restored_indices == original_indices
 
     def test_symbolic_controlled_u_legacy_payload_decodes_as_single_pool(self):
         """A payload missing ``num_control_args`` decodes as the legacy form.
@@ -265,6 +346,20 @@ class TestRoundTripIRFeatures:
         """
         block = _to_affine(_loop_kernel)
         assert len(dump_msgpack(block)) <= len(dump_json(block))
+
+    def test_while_operation_round_trip(self):
+        """Loop-carried while conditions survive both wire formats."""
+        block = _to_affine(_while_measure_kernel)
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+
+    def test_for_items_operation_round_trip(self):
+        """Dict-backed ForItemsOperation survives both wire formats."""
+        block = InlinePass().run(func_to_block(_for_items_ising_kernel.func))
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
 
 
 # ---------------------------------------------------------------------------
