@@ -50,8 +50,13 @@ class ResourceEstimate:
             >>> concrete = est.substitute(n=100, p=3)
             >>> print(concrete.qubits)  # 100 (instead of 'n')
         """
-        # Find matching symbols from the parameters dict
-        subs_dict = {}
+        # Find matching symbols from the parameters dict. Typed as
+        # ``dict[Any, Any]`` so the call to ``sp.Expr.subs`` further down
+        # accepts it — sympy's stub requires
+        # ``Mapping[Basic | complex, Expr | complex]`` and ``dict`` /
+        # ``Mapping`` are invariant in the key type, so a narrower
+        # declaration like ``dict[sp.Symbol, int]`` does not type-check.
+        subs_dict: dict[Any, Any] = {}
         for key, val in values.items():
             # Look for symbol in parameters dict
             if key in self.parameters:
@@ -220,7 +225,10 @@ def estimate_resources(
 
     # Substitute dict cardinality and scalar symbols if bindings provided
     if bindings is not None:
-        all_subs: dict[sp.Symbol, int] = {}
+        # ``dict[Any, Any]`` — see the note in ``substitute`` above for
+        # why a narrower declaration would not type-check against
+        # ``sp.Expr.subs`` in sympy's stub.
+        all_subs: dict[Any, Any] = {}
         for key, val in bindings.items():
             if isinstance(val, dict):
                 all_subs[sp.Symbol(f"|{key}|", integer=True, positive=True)] = len(val)

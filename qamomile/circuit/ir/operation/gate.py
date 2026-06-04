@@ -165,10 +165,25 @@ class ControlledUOperation(Operation):
         power: Number of times to apply U (default 1). For QPE this is
             ``2**k``. Symbolic ``Value`` is resolved during constant folding.
         block: The unitary ``Block`` to apply conditionally.
+        num_controls: Number of control qubits. The base declaration exists
+            only so generic code typed against ``ControlledUOperation`` can
+            access ``op.num_controls`` and have a typed contract to read from
+            (``int | Value``). The default ``1`` is a dataclass slot
+            reservation — ``ControlledUOperation`` is never instantiated
+            directly (concrete subclasses are the only producers; see the
+            pattern-match dispatch in
+            ``qamomile/circuit/estimator/qubits_counter.py:262,393`` and
+            ``qamomile/circuit/estimator/gate_counter.py:161``). Every
+            concrete subclass redeclares ``num_controls`` with the correct
+            narrow type and the default it actually wants
+            (``ConcreteControlledU``: ``int = 1`` matches the single-control
+            shape; ``SymbolicControlledU``: a ``UIntType`` ``Value`` placeholder
+            via ``default_factory``).
     """
 
     power: int | Value = 1
     block: Block | None = None
+    num_controls: int | Value = 1
 
     @property
     def is_symbolic_num_controls(self) -> bool:

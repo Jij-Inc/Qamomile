@@ -9,7 +9,7 @@ import griffe
 from .config import ApiGenConfig
 
 
-def format_annotation(annotation: str | griffe.Expression | None) -> str:
+def format_annotation(annotation: str | griffe.Expr | None) -> str:
     """Format a type annotation for display, cleaning up module prefixes."""
     if annotation is None:
         return ""

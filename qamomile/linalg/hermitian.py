@@ -178,7 +178,7 @@ class HermitianMatrix:
             )
         return HermitianMatrix(self._matrix - other._matrix, validate=False)
 
-    def __mul__(self, scalar: int | float | complex) -> HermitianMatrix:
+    def __mul__(self, scalar: int | float | complex | np.number) -> HermitianMatrix:
         """Multiply by a real scalar.
 
         Args:
@@ -195,7 +195,7 @@ class HermitianMatrix:
         if isinstance(scalar, (bool, np.bool_)):
             return NotImplemented
         if not isinstance(scalar, (int, float, complex, np.number)):
-            return NotImplemented
+            return NotImplemented  # type: ignore[unreachable]
         if not is_close_zero(float(scalar.imag)):
             raise TypeError(
                 "HermitianMatrix only supports multiplication by real scalars "
@@ -206,7 +206,7 @@ class HermitianMatrix:
 
     __rmul__ = __mul__
 
-    def __truediv__(self, scalar: int | float | complex) -> HermitianMatrix:
+    def __truediv__(self, scalar: int | float | complex | np.number) -> HermitianMatrix:
         """Divide by a real scalar.
 
         Args:
@@ -225,7 +225,7 @@ class HermitianMatrix:
         if isinstance(scalar, (bool, np.bool_)):
             return NotImplemented
         if not isinstance(scalar, (int, float, complex, np.number)):
-            return NotImplemented
+            return NotImplemented  # type: ignore[unreachable]
         if not is_close_zero(float(scalar.imag)):
             raise TypeError(
                 "HermitianMatrix only supports division by real scalars "

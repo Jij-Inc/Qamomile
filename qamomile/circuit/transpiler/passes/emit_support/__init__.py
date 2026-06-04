@@ -6,6 +6,7 @@ from .condition_resolution import (
     remap_static_phi_outputs,
     resolve_if_condition,
 )
+from .control_flow_emission import resolve_condition_address
 from .loop_analyzer import LoopAnalyzer
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
 from .resource_allocator import ResourceAllocator
@@ -22,6 +23,7 @@ __all__ = [
     "ValueResolver",
     "map_phi_outputs",
     "remap_static_phi_outputs",
+    "resolve_condition_address",
     "resolve_if_condition",
     "resolve_qubit_key",
 ]

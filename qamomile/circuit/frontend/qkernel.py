@@ -797,11 +797,14 @@ class QKernel(Generic[P, R]):
                     )
                     in_view = input_view_metas.get(meta_key)
                     if in_view is not None and in_view._slice_parent is not None:
-                        if not shape:
+                        if shape:
+                            length = shape[0]
+                        elif val.shape:
+                            length = UInt(value=val.shape[0])
+                        else:
                             raise RuntimeError(
                                 f"Slice result '{val.name}' has no shape metadata."
                             )
-                        length = shape[0]
                         new_view = VectorView._wrap_unregistered(
                             parent=in_view._slice_parent,
                             sliced_av=val,

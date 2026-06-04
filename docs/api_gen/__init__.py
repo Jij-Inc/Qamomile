@@ -36,6 +36,10 @@ def _build_registry(
             pkg = griffe.load(full_name)
         except Exception:
             continue
+        # ``griffe.load`` returns ``Object | Alias`` per the stub; for a
+        # subpackage load we always get a ``Module`` back, so narrow here
+        # so the downstream calls (which require ``Module``) type-check.
+        assert isinstance(pkg, griffe.Module)
 
         if name in split_packages:
             _register_module_symbols(registry, pkg, full_name, f"api/{name}/index.md")
@@ -102,6 +106,7 @@ def main(config: ApiGenConfig | None = None) -> None:
             pkg = griffe.load(full_name)
         except Exception:
             continue
+        assert isinstance(pkg, griffe.Module)
         immediate_subs = get_immediate_submodules(pkg, package_dir)
         if len(immediate_subs) > config.split_threshold:
             split_packages.add(name)
@@ -120,6 +125,7 @@ def main(config: ApiGenConfig | None = None) -> None:
         except Exception as e:
             print(f"  ERROR loading {full_name}: {e}")
             continue
+        assert isinstance(pkg, griffe.Module)
 
         if name in split_packages:
             sub_dir = config.output_dir / name

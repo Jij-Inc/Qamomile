@@ -23,7 +23,10 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.gate import MeasureOperation
+from qamomile.circuit.ir.operation.gate import (
+    MeasureOperation,
+    MeasureVectorOperation,
+)
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import ValidationError
@@ -130,12 +133,25 @@ class ValidateWhileContractPass(Pass[Block, Block]):
     ) -> bool:
         """Recursively check whether a value traces back to measurement operations.
 
-        Returns ``True`` if the value is produced by ``MeasureOperation``
-        directly, or by ``IfOperation`` / ``PhiOp`` where every reachable
-        leaf source is itself measurement-backed.
+        Returns ``True`` if the value is produced by ``MeasureOperation`` /
+        ``MeasureVectorOperation`` directly, if it is an element access of a
+        measured ``Vector[Bit]`` (its ``parent_array`` — possibly through a
+        ``slice_of`` view chain — is measurement-backed), or if it is produced
+        by ``IfOperation`` / ``PhiOp`` where every reachable leaf source is
+        itself measurement-backed.
 
         Uses backtracking on ``visiting`` so that the same value can be
         reached from multiple independent phi branches without false negatives.
+
+        Args:
+            value (Value): The IR value to trace.
+            producer_map (dict[str, Operation]): Map from result UUID to the
+                operation that produced it.
+            visiting (set[str] | None): UUIDs on the current DFS path, used to
+                break cycles. Defaults to None (fresh traversal).
+
+        Returns:
+            bool: True if the value is measurement-backed.
         """
         if visiting is None:
             visiting = set()
@@ -144,13 +160,28 @@ class ValidateWhileContractPass(Pass[Block, Block]):
         visiting.add(value.uuid)
 
         producer = producer_map.get(value.uuid)
+
+        if isinstance(producer, (MeasureOperation, MeasureVectorOperation)):
+            visiting.discard(value.uuid)
+            return True
+
+        # Element access of a measured Vector[Bit]: ``s[i]`` where
+        # ``s = qmc.measure(register)``. The element carries its own UUID
+        # (not produced by any op) and points to the measured array via
+        # ``parent_array``; a sliced view (``s[a:b:c][i]``) reaches the root
+        # measured array through the parent's ``slice_of`` chain.
+        parent = getattr(value, "parent_array", None)
+        if parent is not None:
+            cur: Value | None = parent
+            while cur is not None:
+                if self._is_measurement_backed(cur, producer_map, visiting):
+                    visiting.discard(value.uuid)
+                    return True
+                cur = getattr(cur, "slice_of", None)
+
         if producer is None:
             visiting.discard(value.uuid)
             return False
-
-        if isinstance(producer, MeasureOperation):
-            visiting.discard(value.uuid)
-            return True
 
         if isinstance(producer, IfOperation):
             # Find the PhiOp whose output matches this value

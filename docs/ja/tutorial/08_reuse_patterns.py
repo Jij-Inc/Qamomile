@@ -111,7 +111,10 @@ def rotate_first(
 @qmc.qkernel
 def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
-    q = rotate_first(q, 0, 0.5)  # int・floatリテラルをそのまま渡せる
+    # int / float リテラルは runtime で ``qmc.UInt`` / ``qmc.Float`` に
+    # auto-promote されるが、kernel の静的シグネチャは Qamomile ハンドル型を
+    # そのまま要求する。下の ignore はその意図的なギャップを明示するもの。
+    q = rotate_first(q, 0, 0.5)  # type: ignore[arg-type]
     return qmc.measure(q)
 
 

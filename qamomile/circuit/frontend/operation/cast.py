@@ -125,8 +125,8 @@ def _cast_vector_qubit_to_qfixed(
     # symbolic bounds and we cannot enumerate carriers at trace time;
     # cast on such a view is rejected here rather than producing a
     # silently broken QFixed downstream.
-    if isinstance(source, VectorView):
-        covered = source._slice_covered_indices
+    if isinstance(source, VectorView):  # type: ignore[unreachable]
+        covered = source._slice_covered_indices  # type: ignore[unreachable]
         if covered is None:
             raise ValueError(
                 f"cast() on a view with symbolic slice bounds is not "

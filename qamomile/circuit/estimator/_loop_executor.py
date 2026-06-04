@@ -143,7 +143,11 @@ def collect_sample_points(
     """
     points: list[tuple[int, sp.Expr]] = []
     for n_val in range(2, max_n + 1):
-        subs = {param_sym: n_val}
+        # ``dict[Any, Any]`` so ``.subs(subs)`` further down satisfies
+        # sympy's ``Mapping[Basic | complex, Expr | complex]`` signature
+        # (``Mapping`` is invariant in the key type, so a narrower
+        # declaration like ``dict[sp.Symbol, int]`` would not match).
+        subs: dict[Any, Any] = {param_sym: n_val}
         try:
             s = int(start.subs(subs)) if isinstance(start, sp.Expr) else int(start)
             e = int(stop.subs(subs)) if isinstance(stop, sp.Expr) else int(stop)
