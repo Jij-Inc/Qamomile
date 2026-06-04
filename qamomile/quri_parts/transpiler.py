@@ -360,8 +360,8 @@ def _quri_circuit_unitary(circuit: Any) -> np.ndarray:
     """
     from qulacs import QuantumState  # type: ignore[import-not-found]
 
-    from quri_parts.qulacs.circuit import (
-        convert_circuit,  # type: ignore[import-not-found]
+    from quri_parts.qulacs.circuit import (  # type: ignore[import-not-found]
+        convert_circuit,
     )
 
     qulacs_circuit = convert_circuit(circuit)
