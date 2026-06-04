@@ -352,8 +352,77 @@ def _create_phi_for_values(
 
     # Create appropriate Handle type for the merged value
     merged_handle = _create_handle_from_value(phi_output, true_val)
+    _refresh_slice_phi_owner(true_val, false_val, merged_handle)
 
     return phi_output, merged_handle
+
+
+def _slice_view_coverage(view: typing.Any) -> tuple[int, ...] | None:
+    """Return concrete root coverage for a slice view when available.
+
+    Args:
+        view (typing.Any): Candidate ``VectorView`` handle.
+
+    Returns:
+        tuple[int, ...] | None: Concrete root-space slots covered by the view,
+        or ``None`` when ``view`` is not a slice view or its bounds are still
+        symbolic.
+    """
+    from qamomile.circuit.frontend.handle.array import (
+        VectorView,
+        _coverage_from_array_value,
+    )
+
+    if not isinstance(view, VectorView):
+        return None
+    covered = view._slice_covered_indices
+    if covered is not None:
+        return covered
+    return _coverage_from_array_value(view.value)
+
+
+def _refresh_slice_phi_owner(
+    true_val: typing.Any,
+    false_val: typing.Any,
+    merged_handle: typing.Any,
+) -> None:
+    """Transfer same-slice branch ownership to a merged slice phi handle.
+
+    Runtime ``if`` tracing uses branch-local handle copies.  When both branches
+    return the same parent slice lineage, the merged phi view is the handle that
+    should be assignable after the ``if``.  Refreshing the parent borrow table
+    here keeps the frontend owner identity aligned with that merged handle.
+
+    Args:
+        true_val (typing.Any): True-branch value participating in the phi.
+        false_val (typing.Any): False-branch value participating in the phi.
+        merged_handle (typing.Any): Handle wrapping the phi result.
+    """
+    from qamomile.circuit.frontend.handle.array import VectorView
+
+    if not (
+        isinstance(true_val, VectorView)
+        and isinstance(false_val, VectorView)
+        and isinstance(merged_handle, VectorView)
+    ):
+        return
+    if true_val._slice_parent is not false_val._slice_parent:
+        return
+
+    coverage = _slice_view_coverage(merged_handle)
+    if (
+        coverage is None
+        or _slice_view_coverage(true_val) != coverage
+        or _slice_view_coverage(false_val) != coverage
+    ):
+        return
+
+    parent = true_val._slice_parent
+    for idx in coverage:
+        key = (f"const:{idx}",)
+        owner = parent._borrowed_indices.get(key)
+        if isinstance(owner, VectorView) and _slice_view_coverage(owner) == coverage:
+            parent._borrowed_indices[key] = merged_handle
 
 
 def _trace_branch(
@@ -378,6 +447,112 @@ def _trace_branch(
         result = (result,) if result is not None else ()
 
     return tracer, result
+
+
+def _operation_touches_array_element(op: typing.Any, array_value: ArrayValue) -> bool:
+    """Return whether an operation touches an element of an array.
+
+    Element-level updates such as ``qs[0] = qmc.x(qs[0])`` do not replace the
+    outer ``ArrayValue`` handle, but the gate operands/results still carry
+    ``parent_array`` metadata.  ``emit_if`` uses this to avoid eliding an array
+    phi merely because both branch handles still point at the same outer array.
+
+    Args:
+        op (typing.Any): Operation-like object to inspect.  It may be a normal
+            IR operation or a control-flow operation with nested operation lists.
+        array_value (ArrayValue): Array whose element-level usage is being
+            detected.
+
+    Returns:
+        bool: ``True`` if ``op`` or any nested operation reads/writes an element
+        whose ``parent_array`` is ``array_value``; ``False`` otherwise.
+    """
+    values = [*getattr(op, "operands", ()), *getattr(op, "results", ())]
+    for value in values:
+        parent_array = getattr(value, "parent_array", None)
+        if (
+            isinstance(parent_array, ArrayValue)
+            and parent_array.uuid == array_value.uuid
+        ):
+            return True
+
+    nested_op_lists = getattr(op, "nested_op_lists", None)
+    if nested_op_lists is None:
+        return False
+    return any(
+        _operation_touches_array_element(nested_op, array_value)
+        for nested_ops in nested_op_lists()
+        for nested_op in nested_ops
+    )
+
+
+def _branch_touches_array_elements(
+    tracer: Tracer,
+    array_value: ArrayValue,
+) -> bool:
+    """Return whether a traced branch touches elements of an array.
+
+    Args:
+        tracer (Tracer): Branch tracer whose captured operations are inspected.
+        array_value (ArrayValue): Array whose element-level usage is being
+            detected.
+
+    Returns:
+        bool: ``True`` if any captured operation touches an element of
+        ``array_value``; ``False`` otherwise.
+    """
+    return any(
+        _operation_touches_array_element(op, array_value) for op in tracer.operations
+    )
+
+
+def _ir_value_from_handle_like(value: typing.Any) -> Value | None:
+    """Extract the IR value carried by a handle-like object.
+
+    Args:
+        value (typing.Any): Candidate handle or IR value.
+
+    Returns:
+        Value | None: The contained IR ``Value`` when available, otherwise
+        ``None``.
+    """
+    if isinstance(value, Value):
+        return value
+    ir_value = getattr(value, "value", None)
+    if isinstance(ir_value, Value):
+        return ir_value
+    return None
+
+
+def _find_original_handle_for_result(
+    result: typing.Any,
+    variables: list,
+) -> typing.Any | None:
+    """Find the input handle that still owns a pass-through result value.
+
+    ``visit_If`` may return values that were not passed as inputs, such as new
+    locals defined in both branches.  For array no-op phi elision we still want
+    to reuse the original outer handle when the result is merely a branch copy
+    of an existing input array, because that original handle carries live borrow
+    state.  Matching by UUID keeps this independent of the differing input and
+    output variable orders.
+
+    Args:
+        result (typing.Any): Branch result being merged.
+        variables (list): Handles passed into ``emit_if`` as branch inputs.
+
+    Returns:
+        typing.Any | None: The matching original input handle when one exists,
+        otherwise ``None``.
+    """
+    result_value = _ir_value_from_handle_like(result)
+    if result_value is None:
+        return None
+    for variable in variables:
+        variable_value = _ir_value_from_handle_like(variable)
+        if variable_value is not None and variable_value.uuid == result_value.uuid:
+            return variable
+    return None
 
 
 def emit_if(
@@ -455,9 +630,7 @@ def emit_if(
             f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
         )
     merged_results = []
-    for original_val, true_val, false_val in zip(
-        variables, true_result, false_result, strict=True
-    ):
+    for true_val, false_val in zip(true_result, false_result, strict=True):
         if isinstance(true_val, (Handle, Value)):
             if not isinstance(false_val, (Handle, Value)):
                 raise TypeError(
@@ -503,11 +676,17 @@ def emit_if(
                 is_array_handle
                 and isinstance(true_v, ArrayValue)
                 and isinstance(false_v, ArrayValue)
+                and true_v.type.is_quantum()
                 and true_v is false_v
                 and not true_consumed
                 and not false_consumed
+                and not _branch_touches_array_elements(true_tracer, true_v)
+                and not _branch_touches_array_elements(false_tracer, false_v)
             ):
-                merged_results.append(original_val)
+                original_val = _find_original_handle_for_result(true_val, variables)
+                merged_results.append(
+                    original_val if original_val is not None else true_val
+                )
                 continue
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op

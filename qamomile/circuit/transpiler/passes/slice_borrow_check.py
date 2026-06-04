@@ -71,6 +71,8 @@ dispatches the two violation messages.
 
 from __future__ import annotations
 
+from typing import Literal, TypeAlias
+
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -104,7 +106,10 @@ from qamomile.circuit.transpiler.errors import (
 from . import Pass
 
 BorrowKey = tuple[str, str]
-BoundToken = tuple[object, ...]
+ConstBoundToken: TypeAlias = tuple[Literal["const"], int]
+ValueBoundToken: TypeAlias = tuple[Literal["value"], str, int]
+MinBoundToken: TypeAlias = tuple[Literal["min"], object, object]
+BoundToken: TypeAlias = ConstBoundToken | ValueBoundToken | MinBoundToken
 
 
 def _root_of(av: ArrayValue) -> ArrayValue:
@@ -1458,8 +1463,8 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             self._is_const_token(lhs, 0) or self._is_const_token(rhs, 0)
         ):
             return ("const", 0)
-        ordered = tuple(sorted((lhs, rhs), key=repr))
-        return ("min", *ordered)
+        ordered = sorted((lhs, rhs), key=repr)
+        return ("min", ordered[0], ordered[1])
 
     def _symbolic_slices_definitely_disjoint(
         self, left: ArrayValue, right: ArrayValue

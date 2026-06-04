@@ -438,11 +438,7 @@ class ControlledGate:
             Any: Specialized block when specialization data is available,
             otherwise the wrapped qkernel's cached block.
         """
-        from qamomile.circuit.frontend.qkernel import QKernel
-
         qkernel = self._qkernel
-        if not isinstance(qkernel, QKernel):
-            return qkernel.block
         if qkernel._specializing:
             return qkernel.block
         if not all(isinstance(arg, Handle) for arg in sub_args_resolved.values()):

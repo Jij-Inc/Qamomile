@@ -6,7 +6,7 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence, cast
 
 import numpy as np
 
@@ -308,12 +308,13 @@ class QuriPartsEmitPass(
             )
 
             sub_circuit = None
-            previous_circuit = self._emitter._current_circuit
-            previous_param_map = dict(self._emitter._param_map)
+            emitter = cast(QuriPartsGateEmitter, self._emitter)
+            previous_circuit = emitter._current_circuit
+            previous_param_map = dict(emitter._param_map)
             previous_parameter_map = dict(self._parameter_map)
             previous_parameter_sources = dict(self._parameter_sources)
             try:
-                sub_circuit = self._emitter.create_circuit(num_qubits, 0)
+                sub_circuit = emitter.create_circuit(num_qubits, 0)
                 self._emit_operations(
                     sub_circuit,
                     block_value.operations,
@@ -323,8 +324,8 @@ class QuriPartsEmitPass(
                     force_unroll=True,
                 )
             finally:
-                self._emitter._current_circuit = previous_circuit
-                self._emitter._param_map = previous_param_map
+                emitter._current_circuit = previous_circuit
+                emitter._param_map = previous_param_map
                 self._parameter_map = previous_parameter_map
                 self._parameter_sources = previous_parameter_sources
             if sub_circuit is None:

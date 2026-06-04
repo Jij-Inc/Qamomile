@@ -1087,7 +1087,7 @@ class Vector(ArrayBase[T]):
                     outer_chain.append(outer_view)
                     outer_view = outer_view._slice_outer_view
                 can_skip_outer = (
-                    not isinstance(self, VectorView)
+                    not hasattr(self, "_slice_parent")
                     and bool(outer_chain)
                     and chain_matches_full_coverage
                 )

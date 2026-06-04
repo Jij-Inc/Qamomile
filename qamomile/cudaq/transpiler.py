@@ -74,12 +74,15 @@ if TYPE_CHECKING:
     import qamomile.observable as qm_o
 
 
+CudaqControlledQubitMap = dict[str | QubitAddress, int]
+
+
 def _build_block_qubit_map(
     block_value: Any,
     target_indices: list[int],
     emit_pass: Any,
     bindings: dict[str, Any],
-) -> tuple[dict[str, int], dict[str, list[int]]]:
+) -> tuple[CudaqControlledQubitMap, dict[str, list[int]]]:
     """Build a UUID-to-physical-target map for a controlled block.
 
     Seeds the map from block quantum input_values (positionally matching
@@ -114,7 +117,7 @@ def _build_block_qubit_map(
             resolver for shape resolution.
 
     Returns:
-        tuple[dict[str, int], dict[str, list[int]]]: The scalar/per-
+        tuple[CudaqControlledQubitMap, dict[str, list[int]]]: The scalar/per-
             element UUID map and a Vector UUID -> physical slots table.
             Empty maps are returned when ``block_value`` has no quantum
             inputs.
@@ -125,7 +128,7 @@ def _build_block_qubit_map(
             negative, or if the total declared quantum input footprint
             exceeds ``len(target_indices)``.
     """
-    qubit_map: dict[str, int] = {}
+    qubit_map: CudaqControlledQubitMap = {}
     vector_slots: dict[str, list[int]] = {}
 
     if hasattr(block_value, "input_values"):
@@ -198,7 +201,7 @@ def _build_block_qubit_map(
 def _seed_vector_element_uuid(
     operand: Any,
     vector_slots: dict[str, list[int]],
-    qubit_map: dict[str, int],
+    qubit_map: CudaqControlledQubitMap,
     emit_pass: Any,
     bindings: dict[str, Any],
 ) -> None:
@@ -216,8 +219,8 @@ def _seed_vector_element_uuid(
         operand (Any): A gate operand to seed.
         vector_slots (dict[str, list[int]]): Map from ``Vector[Qubit]``
             UUID to one physical target index per logical element.
-        qubit_map (dict[str, int]): UUID-to-physical-target map; mutated
-            in place when the operand is a recognized Vector[Qubit]
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-target map;
+            mutated in place when the operand is a recognized Vector[Qubit]
             element.
         emit_pass (Any): Emit pass whose resolver resolves loop-index
             Values against ``bindings``.
@@ -297,7 +300,7 @@ def _seed_vector_element_uuid(
 
 def _resolve_gate_targets(
     op: GateOperation,
-    qubit_map: dict[str, int],
+    qubit_map: CudaqControlledQubitMap,
 ) -> list[int]:
     """Resolve physical target indices for an inner gate's operands.
 
@@ -307,7 +310,7 @@ def _resolve_gate_targets(
     Args:
         op (GateOperation): The gate operation whose operand targets are
             being resolved.
-        qubit_map (dict[str, int]): UUID-to-physical-target map seeded
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-target map seeded
             by ``_build_block_qubit_map``.
 
     Returns:
@@ -319,6 +322,8 @@ def _resolve_gate_targets(
             back to slot 0 would silently route a multi-target inner gate
             to the wrong physical qubit.
     """
+    gate_type = op.gate_type
+    gate_name = gate_type.name if gate_type is not None else "<unknown>"
     resolved: list[int] = []
     for operand in op.qubit_operands:
         if operand.uuid in qubit_map:
@@ -327,7 +332,7 @@ def _resolve_gate_targets(
             raise EmitError(
                 f"CUDA-Q controlled helper cannot resolve operand "
                 f"{operand.name!r} (uuid {operand.uuid[:8]}) for "
-                f"inner gate {op.gate_type.name}.",
+                f"inner gate {gate_name}.",
                 operation="ControlledUOperation",
             )
     return resolved
@@ -336,7 +341,7 @@ def _resolve_gate_targets(
 def _resolve_cudaq_value_index(
     value: Any,
     vector_slots: dict[str, list[int]],
-    qubit_map: dict[str, int],
+    qubit_map: CudaqControlledQubitMap,
     emit_pass: Any,
     bindings: dict[str, Any],
     *,
@@ -348,8 +353,8 @@ def _resolve_cudaq_value_index(
         value (Any): Scalar or vector-element quantum value.
         vector_slots (dict[str, list[int]]): Vector input/result slot map
             available while walking a controlled block body.
-        qubit_map (dict[str, int]): UUID-to-physical-qubit map, mutated
-            if ``value`` is a vector element that can be seeded lazily.
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map,
+            mutated if ``value`` is a vector element that can be seeded lazily.
         emit_pass (Any): Emit pass whose resolver folds element indices.
         bindings (dict[str, Any]): Current controlled-body bindings.
         operation (str): Operation label for diagnostics.
@@ -374,7 +379,7 @@ def _resolve_cudaq_value_index(
 def _resolve_cudaq_value_indices(
     values: list[Any],
     vector_slots: dict[str, list[int]],
-    qubit_map: dict[str, int],
+    qubit_map: CudaqControlledQubitMap,
     emit_pass: Any,
     bindings: dict[str, Any],
     *,
@@ -385,7 +390,7 @@ def _resolve_cudaq_value_indices(
     Args:
         values (list[Any]): Quantum values to resolve.
         vector_slots (dict[str, list[int]]): Vector slot map.
-        qubit_map (dict[str, int]): UUID-to-physical-qubit map.
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
         emit_pass (Any): Emit pass whose resolver folds element indices.
         bindings (dict[str, Any]): Current controlled-body bindings.
         operation (str): Operation label for diagnostics.
@@ -412,7 +417,7 @@ def _resolve_cudaq_value_indices(
 def _resolve_cudaq_array_slots(
     array_value: Any,
     vector_slots: dict[str, list[int]],
-    qubit_map: dict[str, int],
+    qubit_map: CudaqControlledQubitMap,
     emit_pass: Any,
     bindings: dict[str, Any],
     *,
@@ -424,7 +429,7 @@ def _resolve_cudaq_array_slots(
         array_value (Any): ArrayValue or sliced ArrayValue to resolve.
         vector_slots (dict[str, list[int]]): Vector slot map carried by
             the controlled fallback walker.
-        qubit_map (dict[str, int]): UUID-to-physical-qubit map.
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
         emit_pass (Any): Emit pass whose resolver folds shapes/slices.
         bindings (dict[str, Any]): Current controlled-body bindings.
         operation (str): Operation label for diagnostics.
@@ -480,7 +485,7 @@ def _resolve_cudaq_array_slots(
                 f"for {array_value.name!r}.",
                 operation=operation,
             )
-        slots = []
+        slice_slots: list[int] = []
         for i in range(size):
             parent_idx = start + step * i
             if parent_idx < 0 or parent_idx >= len(parent_slots):
@@ -490,11 +495,11 @@ def _resolve_cudaq_array_slots(
                     f"{array_value.name!r}.",
                     operation=operation,
                 )
-            slots.append(parent_slots[parent_idx])
-        vector_slots[array_value.uuid] = slots
-        if slots:
-            qubit_map.setdefault(array_value.uuid, slots[0])
-        return slots
+            slice_slots.append(parent_slots[parent_idx])
+        vector_slots[array_value.uuid] = slice_slots
+        if slice_slots:
+            qubit_map.setdefault(array_value.uuid, slice_slots[0])
+        return slice_slots
 
     slots: list[int] = []
     for i in range(size):
@@ -992,7 +997,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         num_controls: int,
         control_indices: list[int],
         target_indices: list[int],
-        qubit_map: dict[str, int],
+        qubit_map: CudaqControlledQubitMap,
         vector_slots: dict[str, list[int]],
         emitter: CudaqKernelEmitter,
         bindings: dict[str, Any],
@@ -1109,15 +1114,15 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
     def _propagate_cudaq_gate_results(
         self,
         op: GateOperation,
-        qubit_map: dict[str, int],
+        qubit_map: CudaqControlledQubitMap,
     ) -> None:
         """Propagate physical qubit slots from gate operands to results.
 
         Args:
             op (GateOperation): Gate whose results become fresh SSA
                 versions of its qubit operands.
-            qubit_map (dict[str, int]): UUID-to-physical-target map to
-                update in place.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-target
+                map to update in place.
         """
         qubit_ops = op.qubit_operands
         assert len(op.results) == len(qubit_ops), (
@@ -1386,7 +1391,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         num_controls: int,
         control_indices: list[int],
         target_indices: list[int],
-        qubit_map: dict[str, int],
+        qubit_map: CudaqControlledQubitMap,
         vector_slots: dict[str, list[int]],
         emitter: CudaqKernelEmitter,
         bindings: dict[str, Any],
@@ -1401,7 +1406,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             control_indices (list[int]): Physical outer controls.
             target_indices (list[int]): Fallback target slots from the
                 controlled-U call site.
-            qubit_map (dict[str, int]): UUID-to-physical-qubit map.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
             vector_slots (dict[str, list[int]]): Vector slot map.
             emitter (CudaqKernelEmitter): CUDA-Q source emitter.
             bindings (dict[str, Any]): Current controlled-body bindings.
@@ -1466,7 +1471,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         num_controls: int,
         control_indices: list[int],
         target_indices: list[int],
-        qubit_map: dict[str, int],
+        qubit_map: CudaqControlledQubitMap,
         vector_slots: dict[str, list[int]],
         emitter: CudaqKernelEmitter,
         bindings: dict[str, Any],
@@ -1481,7 +1486,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             control_indices (list[int]): Physical outer controls.
             target_indices (list[int]): Fallback target slots from the
                 controlled-U call site.
-            qubit_map (dict[str, int]): UUID-to-physical-qubit map.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
             vector_slots (dict[str, list[int]]): Vector slot map.
             emitter (CudaqKernelEmitter): CUDA-Q source emitter.
             bindings (dict[str, Any]): Current controlled-body bindings.
@@ -1762,10 +1767,16 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         Raises:
             EmitError: When the gate type is unsupported.
         """
+        gate_type = op.gate_type
+        if gate_type is None:
+            raise EmitError(
+                "CUDA-Q controlled helper cannot emit a gate without a gate type.",
+                operation="ControlledUOperation",
+            )
         angle = self._resolve_angle(op, bindings) if op.theta is not None else None
         self._emit_cudaq_multi_controlled_gate_type(
             circuit,
-            op.gate_type,
+            gate_type,
             emitter,
             control_indices,
             target_indices,
