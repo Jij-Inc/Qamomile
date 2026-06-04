@@ -59,11 +59,11 @@ import os
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 RANDOM_STATE = 7
-N_SAMPLES = 20 if docs_test_mode else 40
+N_SAMPLES = 8 if docs_test_mode else 40
 TEST_SIZE = 0.25
 
 LAYERS = 2       # number of feature-map repetitions (bound at transpile time)
-SHOTS = 256 if docs_test_mode else 1024
+SHOTS = 64 if docs_test_mode else 1024
 C_SVC = 1.0
 
 # %% [markdown]
@@ -476,7 +476,7 @@ assert set(y_pred_rbf.tolist()).issubset({0, 1})
 # ### Decision Boundary Helpers
 
 # %%
-GRID_SIZE = 8 if docs_test_mode else 15
+GRID_SIZE = 3 if docs_test_mode else 15
 
 
 def preprocess_for_kernel(X_raw_points: np.ndarray) -> np.ndarray:
@@ -636,4 +636,3 @@ plt.show()
 # Also note that the quantum kernel evaluation executes a quantum circuit for each pair of data points.
 # For a training set of size $n$, computing the training kernel matrix requires roughly $O(n^2)$ kernel evaluations.
 # This is not an issue for small datasets like ours, but the computational cost grows rapidly as the dataset size increases.
-

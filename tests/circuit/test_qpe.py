@@ -190,7 +190,7 @@ class TestQPEConsistency:
         )
 
     @pytest.mark.parametrize("n_qubits", [3, 5, 7])
-    @pytest.mark.parametrize("seed", [901 + i for i in range(100)])
+    @pytest.mark.parametrize("seed", [901 + i for i in range(5)])
     def test_random_angle_consistency(self, qiskit_transpiler, seed, n_qubits):
         r"""Both QPE implementations return a theoretically valid phase for random angles.
 

@@ -887,7 +887,6 @@ FRONTEND_EXECUTION_CASES = [
         expected_expval=-2.0,
         sample_bindings={"n": 2},
         run_bindings={"n": 2, "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
-        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="bound-control-indices",
@@ -904,7 +903,6 @@ FRONTEND_EXECUTION_CASES = [
             "j": 2,
             "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3),
         },
-        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-pauli-evolve",
