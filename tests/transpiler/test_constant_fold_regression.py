@@ -139,6 +139,35 @@ def variational_classifier(
     return qmc.expval(q, H)
 
 
+@qmc.qkernel
+def controlled_phase_with_inline_neg(
+    q: qmc.Vector[qmc.Qubit],
+    phase: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a controlled phase whose angle is negated inside the helper."""
+    cphase = qmc.control(qmc.p)
+    q[0], q[1] = cphase(q[0], q[1], theta=-phase)
+    return q
+
+
+@qmc.qkernel
+def indexed_controlled_phase_kernel(
+    theta: qmc.Vector[qmc.Float],
+    num_pairs: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Exercise bound array indexing through loop and tail phase sites."""
+    q = qmc.qubit_array(2, "q")
+
+    for pair in qmc.range(num_pairs):
+        even_i = pair + pair
+        q = controlled_phase_with_inline_neg(q, theta[even_i])
+
+    tail_i = num_pairs + num_pairs
+    q = controlled_phase_with_inline_neg(q, theta[tail_i])
+
+    return qmc.measure(q)
+
+
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
@@ -243,6 +272,29 @@ class TestBinOpConstantFolding:
         RX = GATE_SPECS["RX"].matrix_fn(2.0 * beta)
         expected = tensor_product(*([RX] * n)) @ all_zeros_state(n)
         assert statevectors_equal(sv, expected)
+
+    def test_indexed_controlled_phase_transpiles_to_single_circuit(self) -> None:
+        """Bound array phase elements feed controlled helpers as scalars.
+
+        This is the minimal form of the QSVT notebook failure:
+        ``theta[pair + pair]`` is passed into a controlled subkernel
+        inside ``qmc.range(num_pairs)``, and ``theta[num_pairs + num_pairs]``
+        is passed into the same helper after the loop. The helper uses
+        ``theta=-phase`` so both emit-time loop indexing and compile-time
+        tail indexing must resolve array elements before name lookup.
+        """
+        theta = [0.1, 0.2, 0.3]
+        bindings = {
+            "theta": theta,
+            "num_pairs": 1,
+        }
+
+        qc = QiskitTranspiler().to_circuit(
+            indexed_controlled_phase_kernel,
+            bindings=bindings,
+        )
+
+        assert qc.num_qubits == 2
 
 
 # ---------------------------------------------------------------------------

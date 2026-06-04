@@ -18,6 +18,7 @@ deterministic resolution order:
 
 from __future__ import annotations
 
+import numbers
 from typing import Any
 
 
@@ -73,8 +74,96 @@ class ValueResolver:
             if param_name and param_name in self._bindings:
                 return self._bindings[param_name]
 
-        # 4. Bindings by value name
+        # 4. Bound array element.  Array element Values often retain
+        # their parent parameter's display name, so this must run before
+        # the name-keyed fallback below; otherwise ``theta[i]`` resolves
+        # to the whole bound ``theta`` container instead of the scalar
+        # element.
+        indexed = self._resolve_array_element(value)
+        if indexed is not None:
+            return indexed
+
+        # 5. Bindings by value name
         if hasattr(value, "name") and value.name and value.name in self._bindings:
             return self._bindings[value.name]
 
+        return None
+
+    def _resolve_array_element(self, value: Any) -> Any | None:
+        """Resolve a bound array element Value to its Python scalar.
+
+        Args:
+            value (Any): Candidate IR Value. Non-array-element values are
+                ignored.
+
+        Returns:
+            Any | None: The bound array element, or None when the parent
+            container or any index is not compile-time resolvable.
+        """
+        parent = getattr(value, "parent_array", None)
+        indices = getattr(value, "element_indices", None)
+        if parent is None or not indices:
+            return None
+
+        container = self._resolve_array_container(parent)
+        if container is None:
+            return None
+
+        for idx_value in indices:
+            idx = self._resolve_index(idx_value)
+            if idx is None:
+                return None
+            try:
+                container = container[idx]
+            except (IndexError, KeyError, TypeError):
+                return None
+        return container
+
+    def _resolve_array_container(self, parent: Any) -> Any | None:
+        """Resolve the Python container bound to an ArrayValue.
+
+        Args:
+            parent (Any): The parent ArrayValue for an element access.
+
+        Returns:
+            Any | None: The bound container, or None when unbound.
+        """
+        if hasattr(parent, "is_parameter") and parent.is_parameter():
+            param_name = parent.parameter_name()
+            if param_name and param_name in self._bindings:
+                return self._bindings[param_name]
+        if hasattr(parent, "uuid") and parent.uuid in self._bindings:
+            return self._bindings[parent.uuid]
+        if getattr(parent, "name", None) and parent.name in self._bindings:
+            return self._bindings[parent.name]
+        return None
+
+    def _resolve_index(self, value: Any) -> int | None:
+        """Resolve an array index Value to an int.
+
+        Args:
+            value (Any): Candidate index Value.
+
+        Returns:
+            int | None: The resolved index, or None when unresolved or
+            non-numeric.
+        """
+        resolved = self.resolve(value)
+        if isinstance(resolved, bool):
+            return int(resolved)
+        if isinstance(resolved, numbers.Integral):
+            return int(resolved)
+        if isinstance(resolved, numbers.Real):
+            return int(resolved)
+        if hasattr(resolved, "item"):
+            try:
+                item = resolved.item()
+            except (TypeError, ValueError):
+                return None
+            if isinstance(item, bool):
+                return int(item)
+            if isinstance(item, numbers.Integral):
+                return int(item)
+            if isinstance(item, numbers.Real):
+                return int(item)
         return None

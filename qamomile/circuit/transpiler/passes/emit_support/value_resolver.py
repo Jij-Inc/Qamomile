@@ -308,12 +308,15 @@ class ValueResolver:
         4. ``value.uuid`` is in ``bindings`` — return that. This is where
            emit-time-computed intermediates (``evaluate_binop`` /
            ``evaluate_classical_predicate`` results) and phi aliases live.
-        5. ``value.name`` is in ``bindings`` — return that. This is where
+        5. (When ``index_array=True``) ``value`` is an array element with
+           a resolvable parent in ``bindings`` — index into it.  This runs
+           before the display-name fallback because element Values may keep
+           their parent array's name (e.g. ``theta[i]`` still named
+           ``"theta"``).
+        6. ``value.name`` is in ``bindings`` — return that. This is where
            kernel parameters and loop iteration variables live. NOT a
            reliable channel for auto-generated tmp names like
            ``"uint_tmp"`` — those are intentionally written by UUID only.
-        6. (When ``index_array=True``) ``value`` is an array element with
-           a resolvable parent in ``bindings`` — index into it.
 
         Args:
             value: The IR Value (or already-concrete Python scalar) to
@@ -344,7 +347,19 @@ class ValueResolver:
         #    on Value UUID).
         if value.uuid in bindings:
             return bindings[value.uuid]
-        # 5. User-parameter compat path: a non-empty Value name that
+        # 5. Array-element access via parent_array (opt-in).  Keep this
+        # before the name fallback because element Values can share the
+        # parent array's display name; otherwise ``theta[i]`` resolves to
+        # the whole bound ``theta`` container.
+        if (
+            index_array
+            and getattr(value, "parent_array", None) is not None
+            and getattr(value, "element_indices", None)
+        ):
+            indexed = self._index_into_array(value, bindings)
+            if indexed is not None:
+                return indexed
+        # 6. User-parameter compat path: a non-empty Value name that
         #    matches a binding entry. Reaches here for:
         #      - kernel parameters whose ``is_parameter()`` flag was
         #        dropped during a transform (e.g. some inline/substitute
@@ -359,13 +374,6 @@ class ValueResolver:
         #    transforms, which is a separate, larger refactor.
         if getattr(value, "name", None) and value.name in bindings:
             return bindings[value.name]
-        # 6. Array-element access via parent_array (opt-in).
-        if (
-            index_array
-            and getattr(value, "parent_array", None) is not None
-            and getattr(value, "element_indices", None)
-        ):
-            return self._index_into_array(value, bindings)
         return None
 
     def resolve_operand_for_binding(
@@ -379,7 +387,7 @@ class ValueResolver:
         param operand at the call site must resolve to a value to seed the
         callee's parameter bindings.
         """
-        return self.lookup_in_bindings(operand, bindings)
+        return self.lookup_in_bindings(operand, bindings, index_array=True)
 
     def bind_block_params(
         self,
