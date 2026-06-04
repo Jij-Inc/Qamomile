@@ -118,6 +118,99 @@ def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
     return value
 
 
+def _const_int(value: Value | None) -> int | None:
+    """Return a compile-time integer constant from an IR value.
+
+    Args:
+        value (Value | None): IR value that may carry a constant.
+
+    Returns:
+        int | None: The integer constant when available and coercible,
+        otherwise ``None``.
+    """
+    if value is None:
+        return None
+    const = value.get_const()
+    if const is None:
+        return None
+    try:
+        return int(const)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_full_reslice_of_input(
+    output: ArrayValue,
+    formal_input: ArrayValue,
+) -> bool:
+    """Check whether ``output`` is only full-sliced from ``formal_input``.
+
+    The call-result wrapper uses this for the narrow case where a
+    sub-kernel receives a ``VectorView`` and returns ``view[:]`` (or an
+    equivalent chain of full re-slices).  Such an output is semantically
+    the same caller-side view after a new SSA version, even though the
+    callee's sliced ``ArrayValue`` points at the formal input lineage.
+
+    Args:
+        output (ArrayValue): Callee output array value.
+        formal_input (ArrayValue): Callee formal input array value.
+
+    Returns:
+        bool: ``True`` if every slice from ``output`` back to the
+        matching formal input is ``0:len:1`` with concrete lengths.
+    """
+    current = output
+    saw_slice = False
+    while current.slice_of is not None:
+        saw_slice = True
+        parent = current.slice_of
+        start = _const_int(current.slice_start)
+        step = _const_int(current.slice_step)
+        length = _const_int(current.shape[0] if current.shape else None)
+        parent_length = _const_int(parent.shape[0] if parent.shape else None)
+        if (
+            start != 0
+            or step != 1
+            or length is None
+            or parent_length is None
+            or length != parent_length
+        ):
+            return False
+        current = parent
+
+    return saw_slice and current.logical_id == formal_input.logical_id
+
+
+def _view_result_value_for_full_reslice(
+    callee_output: ArrayValue,
+    input_view: Vector[Any],
+) -> ArrayValue:
+    """Build the caller-side array value for a full re-sliced view output.
+
+    Args:
+        callee_output (ArrayValue): The formal-lineage output produced by
+            the callee block.
+        input_view (Vector[Any]): The caller-side view argument whose
+            coverage is being preserved.
+
+    Returns:
+        ArrayValue: A fresh SSA version that keeps the caller view's
+        slice metadata while using the callee output's display metadata.
+    """
+    source = input_view.value
+    return ArrayValue(
+        type=callee_output.type,
+        name=callee_output.name,
+        version=source.version + 1,
+        metadata=callee_output.metadata,
+        logical_id=source.logical_id,
+        shape=source.shape,
+        slice_of=source.slice_of,
+        slice_start=source.slice_start,
+        slice_step=source.slice_step,
+    )
+
+
 def _handle_types_equal(a: Any, b: Any) -> bool:
     """Compare two Handle type annotations, including generic aliases."""
     a_cls = getattr(a, "__origin__", a)
@@ -496,7 +589,7 @@ class QKernel(Generic[P, R]):
                 )
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
-        inputs_map = {}
+        inputs_map: dict[str, Value] = {}
         # Track borrow provenance for input-derived quantum scalar handles.
         # After the call, return values with matching logical_id will have
         # their parent/indices restored so that borrow-return validation
@@ -589,6 +682,8 @@ class QKernel(Generic[P, R]):
         # so emit a forward-ref CallBlockOperation that gets back-patched
         # once the build completes.  Skipping ``self.block`` here is what
         # breaks the otherwise-infinite re-trace loop.
+        block_ir_for_call: Block | None = None
+        formal_input_views: dict[str, tuple[ArrayValue, VectorView[Any]]] = {}
         if self._block_building:
             call_op = self._emit_self_call_forward_ref(inputs_map)
         else:
@@ -619,6 +714,19 @@ class QKernel(Generic[P, R]):
             if block_ir is None:
                 block_ir = self.block
 
+            block_ir_for_call = block_ir
+            for label, formal_input in zip(block_ir.label_args, block_ir.input_values):
+                actual_handle = bound_args.arguments.get(label)
+                if (
+                    isinstance(actual_handle, VectorView)
+                    and isinstance(formal_input, ArrayValue)
+                    and actual_handle._should_enforce_linear()
+                ):
+                    formal_input_views[formal_input.logical_id] = (
+                        formal_input,
+                        actual_handle,
+                    )
+
             # Create the Call operation
             call_op = block_ir.call(**inputs_map)
 
@@ -633,7 +741,9 @@ class QKernel(Generic[P, R]):
             )
 
         wrapped_results: list[Any] = []
-        for val, handle_type in zip(results, self.output_types):
+        for result_idx, (val, handle_type) in enumerate(
+            zip(results, self.output_types)
+        ):
             if is_array_type(handle_type):
                 # Use _create_from_value to avoid __post_init__ side effects
                 actual_class = cast(
@@ -642,6 +752,23 @@ class QKernel(Generic[P, R]):
                 )
                 # Extract shape from ArrayValue if available
                 assert isinstance(val, ArrayValue)
+                # A callee may return a full re-slice of a view
+                # argument, e.g. ``return q[0:q.shape[0]]``.  The raw
+                # block output then points at the callee's formal input
+                # lineage, so exact caller-side metadata matching below
+                # would miss it and wrap the result as a plain
+                # ``Vector``.  When the slice chain is concretely
+                # ``0:len:1`` all the way back to a formal input that
+                # was supplied by a caller ``VectorView``, rewrite only
+                # this call result to the caller view's next SSA version.
+                # Partial or symbolic re-slices intentionally keep the
+                # previous behavior.
+                if block_ir_for_call is not None and val.slice_of is not None:
+                    for formal_input, input_view in formal_input_views.values():
+                        if _is_full_reslice_of_input(val, formal_input):
+                            val = _view_result_value_for_full_reslice(val, input_view)
+                            call_op.results[result_idx] = val
+                            break
                 if val.shape:
                     shape = tuple(UInt(value=dim_val) for dim_val in val.shape)
                 else:
@@ -670,7 +797,14 @@ class QKernel(Generic[P, R]):
                     )
                     in_view = input_view_metas.get(meta_key)
                     if in_view is not None and in_view._slice_parent is not None:
-                        length = shape[0] if shape else val.shape[0]
+                        if shape:
+                            length = shape[0]
+                        elif val.shape:
+                            length = UInt(value=val.shape[0])
+                        else:
+                            raise RuntimeError(
+                                f"Slice result '{val.name}' has no shape metadata."
+                            )
                         new_view = VectorView._wrap_unregistered(
                             parent=in_view._slice_parent,
                             sliced_av=val,

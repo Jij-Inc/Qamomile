@@ -36,7 +36,7 @@ uv run ruff check qamomile/
 uv run ruff format qamomile/
 
 # Type checking with zuban
-uv run zuban qamomile/
+uv run zuban check qamomile/
 
 # Build documentation (from docs/en or docs/ja directory)
 jupyter-book build .

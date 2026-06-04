@@ -436,10 +436,25 @@ logits, feats, q_out = hybrid_model(xb)
 loss = criterion(logits, yb)
 loss.backward()
 
-print("feature_extractor first conv grad mean:",
-      hybrid_model.feature_extractor[0].weight.grad.abs().mean().item())
+# ``loss.backward()`` で ``.grad`` が populate されるので、torch の stub で
+# ``Tensor | None`` と宣言された ``.grad`` を ``assert`` で narrow する。
+# ``nn.Sequential.__getitem__`` は torch の stub 上 ``Tensor | None | Module``
+# を返す (整数 index と slice の両方を受けるため) ので、まず ``nn.Module`` に
+# narrow してから ``.weight`` を取り出す。
+first_conv = hybrid_model.feature_extractor[0]
+assert isinstance(first_conv, torch.nn.Module)
+first_conv_weight = first_conv.weight  # type: ignore[union-attr]
+assert first_conv_weight.grad is not None
+quantum_grad = hybrid_model.qlayer.weights.grad
+assert quantum_grad is not None
+print(
+    "feature_extractor first conv grad mean:",
+    # zuban は stub 上 Tensor の ``.grad.abs()`` チェーンを "Tensor not
+    # callable" と判定するが、runtime 側は通常の ``Tensor.abs`` メソッド呼び出し。
+    first_conv_weight.grad.abs().mean().item(),  # type: ignore[operator]
+)
 print("quantum weights grad mean:",
-      hybrid_model.qlayer.weights.grad.abs().mean().item())
+      quantum_grad.abs().mean().item())
 
 optimizer.zero_grad()
 
@@ -505,9 +520,12 @@ for i in range(n_show):
         ha="center", va="bottom", fontsize=7, color=color,
         clip_on=False,
     )
+    # ``Tensor.item()`` は torch の stub 上は ``int | float | bool`` を返す
+    # ことになっていて、整数型 tensor でも狭い型に narrow されない。実行時の
+    # 値は常に ``int`` のクラスラベルなので、リスト index 用に明示 cast する。
     axes[2].text(
         28 * i + 14, 29,
-        CLASS_NAMES[y_test[i].item()],
+        CLASS_NAMES[int(y_test[i].item())],
         ha="center", va="top", fontsize=7,
         clip_on=False,
     )

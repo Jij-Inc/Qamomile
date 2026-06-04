@@ -3076,6 +3076,7 @@ class TestNestedControlledUCrossSDK:
                 "nested ControlledUOperation" in message
                 or "multi-controlled operation" in message
                 or "controlled-U" in message
+                or "Unsupported operation: ConcreteControlledU" in message
             )
             return
 
@@ -3130,25 +3131,19 @@ class TestNestedControlledUQiskit:
 
 
 class TestControlledVectorSubArgQuriPartsLoudError:
-    """QURI Parts raises ``EmitError`` instead of silently miscompiling.
+    """QURI Parts rejects unsupported multi-target controlled blocks.
 
-    The base ``emit_controlled_fallback`` per-gate decomposer used by
-    QURI Parts only routes each inner-block gate to
-    ``target_indices[0]``, so a multi-target controlled custom gate
-    (e.g. ``controlled`` around a sub-kernel that takes a
-    ``Vector[Qubit]`` and touches multiple slots) would have all
-    inner gates land on slot 0 -- a silent miscompile.  After the
-    loud-error guard in :func:`emit_controlled_fallback`, that shape
-    raises ``EmitError`` at transpile time instead.  ``SWAP``-only
-    inner blocks stay supported because the SWAP branch in
-    ``emit_controlled_gate`` explicitly reads both
-    ``target_indices[0]`` and ``target_indices[1]``.
+    QURI Parts cannot convert a sub-circuit to a reusable controlled
+    custom-gate object. Its backend-specific fallback intentionally
+    avoids dense unitary synthesis, so multi-target custom blocks must
+    fail loudly instead of falling back to the base per-gate decomposer,
+    whose target-index mapping is intentionally too narrow for this
+    shape.
     """
 
     def test_quri_parts_rejects_multi_target_custom_gate(self):
-        """``controlled(vector_sub)`` on QURI Parts raises ``EmitError``."""
+        """``controlled(vector_sub)`` on QURI Parts raises a clear error."""
         pytest.importorskip("quri_parts")
-        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.quri_parts import QuriPartsTranspiler
 
         @qmc.qkernel
@@ -3166,21 +3161,20 @@ class TestControlledVectorSubArgQuriPartsLoudError:
             return qmc.measure(qs)
 
         t = QuriPartsTranspiler()
-        with pytest.raises(EmitError, match=r"multi-target inner block"):
+        with pytest.raises(EmitError, match="multi-target inner block"):
             t.transpile(kernel)
 
 
 class TestControlledVectorSubArgQiskitEquivalence:
     """Strict expval equivalence for the new Vector sub-arg path.
 
-    Only Qiskit is exercised: its controlled-U emit path constructs
-    a native controlled custom gate, so the multi-target sub-kernel
-    Vector ``RY(theta) ⊗ RY(theta)`` ends up being applied correctly
-    when the control is on.  QURI Parts now raises ``EmitError`` on
-    the same shape (see :class:`TestControlledVectorSubArgQuriPartsLoudError`
-    above), where it used to silently miscompile -- so on that
-    backend the user gets a clear failure at transpile time instead
-    of an incorrect circuit at sample time.
+    Only Qiskit is exercised here: its controlled-U emit path
+    constructs a native controlled custom gate, so the multi-target
+    sub-kernel Vector ``RY(theta) ⊗ RY(theta)`` ends up being applied
+    correctly when the control is on.  QURI Parts has a separate
+    matrix-fallback smoke test above; this stricter statevector
+    equivalence stays Qiskit-specific because it relies on Qiskit's
+    ``Statevector`` helper for the oracle.
     """
 
     @pytest.fixture(autouse=True)

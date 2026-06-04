@@ -394,7 +394,7 @@ class ValueResolver:
         param_inputs = [
             iv
             for iv in block_value.input_values
-            if hasattr(iv, "type") and iv.type.is_classical()
+            if hasattr(iv, "type") and (iv.type.is_classical() or iv.type.is_object())
         ]
         for i, operand in enumerate(param_operands):
             if i >= len(param_inputs):

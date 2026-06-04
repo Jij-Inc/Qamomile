@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 def expval(
-    qubits: Vector[Qubit] | tuple[Qubit, ...],
+    qubits: Qubit | Vector[Qubit] | tuple[Qubit, ...],
     hamiltonian: Observable,
 ) -> Float:
     """Compute the expectation value of an observable on a quantum state.
@@ -37,14 +37,14 @@ def expval(
     trace time and post-fold in the IR.
 
     Args:
-        qubits (Vector[Qubit] | tuple[Qubit, ...]): The quantum
-            register (or tuple of individual qubits) holding the
-            prepared state.  When a ``Vector`` is passed all
-            previously-borrowed elements must have been returned (the
-            strict-return policy is enforced by ``consume`` here).
-            When a slice view (``VectorView``) is passed its covered
-            parent slots become consumed-slot markers so the parent
-            cannot reuse them later.
+        qubits (Qubit | Vector[Qubit] | tuple[Qubit, ...]): The quantum
+            register holding the prepared state. A single ``Qubit``
+            handle is accepted for 1-qubit observables. When a
+            ``Vector`` is passed all previously-borrowed elements must
+            have been returned (the strict-return policy is enforced
+            by ``consume`` here). When a slice view (``VectorView``)
+            is passed its covered parent slots become consumed-slot
+            markers so the parent cannot reuse them later.
         hamiltonian (Observable): The Observable parameter
             representing the Hamiltonian.  The actual
             ``qamomile.observable.Hamiltonian`` is provided via
@@ -111,9 +111,9 @@ def expval(
         #
         # We only call this on ``Vector`` (which is an ``ArrayBase``
         # subclass and has ``_check_no_consumed_slots``).  A bare
-        # ``Qubit`` handle — supported for back-compat even though the
-        # public type signature requires ``Vector | tuple`` — cannot
-        # carry consumed-slot markers and is skipped.
+        # ``Qubit`` handle — accepted by the public signature for
+        # 1-qubit observables — cannot carry consumed-slot markers and
+        # is skipped.
         if isinstance(qubits, Vector):
             qubits._check_no_consumed_slots("expval")
         # Destructive consume: validates outstanding borrows, marks

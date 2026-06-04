@@ -1,0 +1,49 @@
+name: Zuban
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+jobs:
+  zuban-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -eux
+          uv sync --frozen --group dev
+
+      - name: Type check with zuban
+        shell: bash
+        run: |
+          set -eux
+          uv run zuban check qamomile/
+          # docs/ is type-clean in this PR (see the docs-side fixes
+          # already landed), but the CI gate is intentionally limited
+          # to qamomile/ for now so future docs edits don't accidentally
+          # break the type-check job. Re-enable by switching the line
+          # above to ``uv run zuban check qamomile/ docs/`` once the
+          # docs-side discipline is established.
