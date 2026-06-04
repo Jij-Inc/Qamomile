@@ -170,6 +170,70 @@ class TestSymbolicEndToEnd:
     pattern is BinOp-inside-loop, which the QAOA tests below exercise.
     """
 
+    def test_controlled_gate_before_runtime_param_sample_and_expval(self):
+        """Controlled gate before a runtime parametric gate samples and estimates."""
+        import qamomile.observable as qm_o
+
+        @qmc.qkernel
+        def sample_kernel(
+            theta: qmc.Float,
+            gamma: qmc.Float,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.h(q[0])
+            cry = qmc.control(qmc.ry)
+            q[0], q[1] = cry(q[0], q[1], angle=theta)
+            q[0], q[1] = qmc.rzz(q[0], q[1], gamma)
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def expval_kernel(
+            theta: qmc.Float,
+            gamma: qmc.Float,
+            obs: qmc.Observable,
+        ) -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.h(q[0])
+            cry = qmc.control(qmc.ry)
+            q[0], q[1] = cry(q[0], q[1], angle=theta)
+            q[0], q[1] = qmc.rzz(q[0], q[1], gamma)
+            return qmc.expval(q, obs)
+
+        theta = 0.3
+        gamma = 0.7
+        transpiler = QuriPartsTranspiler()
+
+        sample_exe = transpiler.transpile(
+            sample_kernel,
+            bindings={"theta": theta},
+            parameters=["gamma"],
+        )
+        sample_result = sample_exe.sample(
+            transpiler.executor(),
+            shots=128,
+            bindings={"gamma": gamma},
+        ).result()
+
+        assert sum(count for _, count in sample_result.results) == 128
+        assert all(len(value) == 2 for value, _ in sample_result.results)
+
+        obs = qm_o.Z(1)
+        expval_exe = transpiler.transpile(
+            expval_kernel,
+            bindings={"theta": theta, "obs": obs},
+            parameters=["gamma"],
+        )
+        expval = expval_exe.run(
+            transpiler.executor(),
+            bindings={"gamma": gamma},
+        ).result()
+
+        # q1 is |0> on the control-off branch and RY(theta)|0> on the
+        # control-on branch. RZZ is diagonal and commutes with Z(1), so
+        # <Z1> = (1 + cos(theta)) / 2.
+        expected = (1.0 + np.cos(theta)) / 2.0
+        assert np.isclose(expval, expected, atol=1e-8, rtol=0.0)
+
     def test_rx_with_param_times_const_in_items_loop(self):
         """Inside qmc.items, rx(q, theta * c) survives emission and binds."""
 

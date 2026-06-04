@@ -14,10 +14,15 @@ whether ``cudaq.sample()`` / ``cudaq.observe()`` / ``cudaq.get_state()``
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    CompositeGateType,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -34,8 +39,9 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -51,6 +57,9 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     resolve_condition_address,
     resolve_if_condition,
 )
+from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
+    _resolve_gamma,
+)
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -65,18 +74,22 @@ if TYPE_CHECKING:
     import qamomile.observable as qm_o
 
 
+CudaqControlledQubitMap = dict[str | QubitAddress, int]
+
+
 def _build_block_qubit_map(
     block_value: Any,
     target_indices: list[int],
     emit_pass: Any,
     bindings: dict[str, Any],
-) -> dict[str, int]:
+) -> tuple[CudaqControlledQubitMap, dict[str, list[int]]]:
     """Build a UUID-to-physical-target map for a controlled block.
 
     Seeds the map from block quantum input_values (positionally matching
-    ``target_indices``), then propagates through all GateOperations so
-    that SSA result versions inherit the same physical target as their
-    operands.
+    ``target_indices``). Gate bodies are deliberately not pre-walked
+    here: element operands inside a ``ForOperation`` may use the loop
+    variable as their index, and that index is only concrete after the
+    loop emission path binds the current iteration value.
 
     Scalar ``Qubit`` inputs map one UUID -> one physical target;
     ``Vector[Qubit]`` inputs (``ArrayValue`` carrying a quantum element
@@ -87,14 +100,14 @@ def _build_block_qubit_map(
     redesign) work the same way as single-vector ones did under the
     old single-``Vector`` enforcement.  The element UUIDs themselves
     are unknown at seed time — they are created during the inner
-    kernel's tracing — so the body walk below also resolves any operand
-    whose ``parent_array`` matches a registered vector and seeds
-    ``qubit_map`` with the per-element UUID lazily.
+    kernel's tracing — so the controlled body emitter resolves operands
+    whose ``parent_array`` matches a registered vector lazily, using the
+    current loop-local bindings.
 
     Args:
         block_value (Any): Inner block whose ``input_values`` and
-            ``operations`` are walked. Missing attributes are treated as
-            an empty seed source.
+            shape metadata are inspected. Missing attributes are treated
+            as an empty seed source.
         target_indices (list[int]): Physical target indices the inner
             block's quantum inputs map onto, in declaration order.
         emit_pass (Any): The emit pass driving the conversion.  Used
@@ -104,9 +117,10 @@ def _build_block_qubit_map(
             resolver for shape resolution.
 
     Returns:
-        dict[str, int]: Mapping from operand UUID (per-element or
-            scalar) to physical target index. Empty when ``block_value``
-            has no quantum inputs.
+        tuple[CudaqControlledQubitMap, dict[str, list[int]]]: The scalar/per-
+            element UUID map and a Vector UUID -> physical slots table.
+            Empty maps are returned when ``block_value`` has no quantum
+            inputs.
 
     Raises:
         EmitError: If a ``Vector[Qubit]`` input length cannot be
@@ -114,13 +128,8 @@ def _build_block_qubit_map(
             negative, or if the total declared quantum input footprint
             exceeds ``len(target_indices)``.
     """
-    from qamomile.circuit.ir.value import ArrayValue
-
-    qubit_map: dict[str, int] = {}
-    # ``Vector[Qubit]`` input UUID -> ``(start_index_in_target_indices,
-    # length)`` so the body walk below can map each per-element operand
-    # back to its physical target.
-    vector_inputs: dict[str, tuple[int, int]] = {}
+    qubit_map: CudaqControlledQubitMap = {}
+    vector_slots: dict[str, list[int]] = {}
 
     if hasattr(block_value, "input_values"):
         quantum_inputs = [
@@ -174,198 +183,339 @@ def _build_block_qubit_map(
         for iv in quantum_inputs:
             if isinstance(iv, ArrayValue):
                 length = resolved_lengths[iv.uuid]
-                vector_inputs[iv.uuid] = (qubit_idx, length)
+                slots = target_indices[qubit_idx : qubit_idx + length]
+                vector_slots[iv.uuid] = slots
                 # Also store the base UUID for any downstream lookup
                 # that addresses the array as a whole.
-                if qubit_idx < len(target_indices) and length > 0:
-                    qubit_map[iv.uuid] = target_indices[qubit_idx]
+                if slots:
+                    qubit_map[iv.uuid] = slots[0]
                 qubit_idx += length
             else:
                 if qubit_idx < len(target_indices):
                     qubit_map[iv.uuid] = target_indices[qubit_idx]
                 qubit_idx += 1
 
-    # Walk all operations once to:
-    #   (a) seed each per-element operand UUID of a Vector[Qubit] input,
-    #   (b) propagate SSA so result versions inherit operand targets.
-    #
-    # Descend into every nested op list a control-flow op exposes
-    # through the :class:`HasNestedOps` protocol (``ForOperation`` /
-    # ``IfOperation`` / ``WhileOperation`` / ``ForItemsOperation``) so
-    # gates inside a loop or branch are visited too.  Without the
-    # recursion a non-constant element index inside a ``for`` body
-    # would silently bypass :func:`_seed_vector_element_uuid` and
-    # bubble up as a downstream "Missing qubit mapping ..." assertion
-    # instead of the :class:`EmitError` that helper is supposed to
-    # raise.
-    from qamomile.circuit.ir.operation.control_flow import HasNestedOps
-
-    def _walk(ops: Any) -> None:
-        for op in ops:
-            if isinstance(op, GateOperation):
-                for operand in op.qubit_operands:
-                    _seed_vector_element_uuid(
-                        operand, vector_inputs, target_indices, qubit_map
-                    )
-                for i, result in enumerate(op.results):
-                    if hasattr(result, "type") and result.type.is_quantum():
-                        if i < len(op.qubit_operands):
-                            operand = op.qubit_operands[i]
-                            if operand.uuid in qubit_map:
-                                qubit_map[result.uuid] = qubit_map[operand.uuid]
-            if isinstance(op, HasNestedOps):
-                for nested in op.nested_op_lists():
-                    _walk(nested)
-
-    if hasattr(block_value, "operations"):
-        _walk(block_value.operations)
-
-    return qubit_map
+    return qubit_map, vector_slots
 
 
 def _seed_vector_element_uuid(
     operand: Any,
-    vector_inputs: dict[str, tuple[int, int]],
-    target_indices: list[int],
-    qubit_map: dict[str, int],
+    vector_slots: dict[str, list[int]],
+    qubit_map: CudaqControlledQubitMap,
+    emit_pass: Any,
+    bindings: dict[str, Any],
 ) -> None:
     """Seed ``qubit_map`` with a Vector[Qubit] element operand's UUID.
 
     Resolves an ``operand`` that addresses an element of a ``Vector[Qubit]``
     input (i.e., ``operand.parent_array`` matches a registered vector
-    and ``operand.element_indices[0]`` is a constant) to its physical
-    target via ``vector_inputs`` and stores it under ``operand.uuid``.
+    and ``operand.element_indices[0]`` resolves under ``bindings``) to
+    its physical target via ``vector_slots`` and stores it under
+    ``operand.uuid``.
     Non-element operands (scalar ``Qubit`` inputs already seeded by
-    ``_build_block_qubit_map``) are skipped silently.  Elements whose
-    index is **not** a compile-time constant raise ``EmitError``:
-    the CUDA-Q per-gate fallback this helper feeds cannot synthesise
-    a per-element qubit map without a constant index, so the
-    limitation is surfaced loudly here instead of degenerating into
-    a downstream "Missing qubit mapping ..." assertion.
+    ``_build_block_qubit_map``) are skipped silently.
 
     Args:
         operand (Any): A gate operand to seed.
-        vector_inputs (dict[str, tuple[int, int]]): Map from
-            ``Vector[Qubit]`` input UUID to ``(start_offset, length)``
-            in ``target_indices``.
-        target_indices (list[int]): The physical target index list the
-            inner block's quantum inputs map onto.
-        qubit_map (dict[str, int]): UUID-to-physical-target map; mutated
-            in place when the operand is a recognized Vector[Qubit]
+        vector_slots (dict[str, list[int]]): Map from ``Vector[Qubit]``
+            UUID to one physical target index per logical element.
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-target map;
+            mutated in place when the operand is a recognized Vector[Qubit]
             element.
+        emit_pass (Any): Emit pass whose resolver resolves loop-index
+            Values against ``bindings``.
+        bindings (dict[str, Any]): Current controlled-body bindings,
+            including loop-local values when emitting an unrolled loop.
 
     Raises:
         EmitError: Raised in three situations, all of which would
             otherwise degenerate into a downstream "Missing qubit
             mapping ..." assertion in ``_emit_cudaq_controlled_ops``.
             (1) A Vector[Qubit] element addressed by the inner block
-            uses a non-constant element index (e.g. a loop variable
-            that was not folded by the surrounding ``bindings``); the
-            CUDA-Q controlled-U fallback needs a constant slot here.
+            uses an element index that cannot be resolved under the
+            current bindings.
             (2) The element index is outside the declared Vector
-            length (``elem_idx < 0`` or ``elem_idx >= length``); the
+            length (``elem_idx < 0`` or ``elem_idx >= len(slots)``); the
             inner block addresses a slot past what the controlled-U
-            was wired up with.  (3) The resolved physical slot
-            ``start + elem_idx`` falls outside ``target_indices``.
-            ``_build_block_qubit_map`` already constrains
-            ``start + length`` to fit, so this third case only
-            triggers on a corrupted ``vector_inputs`` table or an
-            unexpected mismatch between ``target_indices`` and the
-            inner block's declared inputs — both internal-invariant
-            violations rather than user-facing miscompiles, but
-            surfacing them loudly beats a silent ``IndexError``.
+            was wired up with.
     """
     parent = getattr(operand, "parent_array", None)
     if parent is None:
         return
-    if parent.uuid not in vector_inputs:
+    if parent.uuid not in vector_slots:
         return
     indices = tuple(getattr(operand, "element_indices", ()))
     if not indices:
         return
     idx_val = indices[0]
-    if not idx_val.is_constant():
+    if idx_val.is_constant():
+        elem_idx = int(idx_val.get_const())
+    else:
+        resolved = emit_pass._resolver.resolve_int_value(idx_val, bindings)
+        if resolved is None:
+            resolved_value = emit_pass._resolver.resolve_classical_value(
+                idx_val, bindings
+            )
+            if resolved_value is not None:
+                resolved = int(resolved_value)
+        if resolved is None:
+            # Silently skipping leaves the element's UUID unmapped in
+            # ``qubit_map``, which later trips a hard ``AssertionError``
+            # in ``_emit_cudaq_controlled_ops`` ("Missing qubit mapping
+            # ...") when the inner block addresses the element with a
+            # symbolic loop variable.  Fail loudly here with the actual
+            # limitation instead so the user can act on it.
+            raise EmitError(
+                f"CUDA-Q controlled helper: a ``Vector[Qubit]`` element "
+                f"of {parent.name!r} (uuid {parent.uuid[:8]}) is indexed "
+                f"by a value that cannot be resolved under the current "
+                f"bindings. Bind the loop bounds or index values before "
+                f"transpilation.",
+                operation="ControlledUOperation",
+            )
+        elem_idx = int(resolved)
+    slots = vector_slots[parent.uuid]
+    if elem_idx < 0 or elem_idx >= len(slots):
         # Silently skipping leaves the element's UUID unmapped in
         # ``qubit_map``, which later trips a hard ``AssertionError``
         # in ``_emit_cudaq_controlled_ops`` ("Missing qubit mapping
-        # ...") when the inner block addresses the element with a
-        # symbolic loop variable.  Fail loudly here with the actual
-        # limitation instead so the user can act on it.
-        raise EmitError(
-            f"CUDA-Q controlled helper: a ``Vector[Qubit]`` element "
-            f"of {parent.name!r} (uuid {parent.uuid[:8]}) is indexed "
-            f"by a non-constant value (e.g. a loop variable) inside "
-            f"the wrapped block.  The per-gate fallback used by the "
-            f"CUDA-Q controlled-U emit path needs a compile-time-"
-            f"constant element index to seed the per-element qubit "
-            f"map.  Either bind the surrounding loop bounds so the "
-            f"index folds to a constant, or transpile this kernel on "
-            f"a backend that emits the controlled block as a single "
-            f"native gate (Qiskit does so via ``circuit_to_gate``).",
-            operation="ControlledUOperation",
-        )
-    elem_idx = int(idx_val.get_const())
-    start, length = vector_inputs[parent.uuid]
-    if elem_idx < 0 or elem_idx >= length:
-        # Same fail-loudly rationale as the non-constant-index branch
-        # above: silently returning leaves ``operand.uuid`` unseeded
-        # and the inner block's gate addressing this element later
-        # trips ``_emit_cudaq_controlled_ops``'s "Missing qubit
-        # mapping ..." assertion with no clue about the root cause.
+        # ...") when the inner block addresses an out-of-range slot.
+        # Fail loudly here with the actual limitation instead so the
+        # user can act on it.
         raise EmitError(
             f"CUDA-Q controlled helper: Vector[Qubit] element index "
             f"{elem_idx} is outside the declared length of "
-            f"{parent.name!r} (uuid {parent.uuid[:8]}, [0, {length})).  "
-            f"This usually means the inner controlled block addresses "
-            f"an element past the slice the controlled-U was wired up "
-            f"with.  Check that the wrapped block's ``Vector[Qubit]`` "
-            f"inputs are sized to match the actual targets you pass at "
-            f"the call site.",
+            f"{parent.name!r} (uuid {parent.uuid[:8]}, [0, "
+            f"{len(slots)})).  This usually means the inner controlled "
+            f"block addresses an element past the slice the "
+            f"controlled-U was wired up with.",
             operation="ControlledUOperation",
         )
-    slot = start + elem_idx
-    if slot < 0 or slot >= len(target_indices):
-        raise EmitError(
-            f"CUDA-Q controlled helper: Vector[Qubit] element index "
-            f"{elem_idx} resolves to physical slot {slot}, outside the "
-            f"available target range [0, {len(target_indices)}).",
-            operation="ControlledUOperation",
-        )
-    qubit_map.setdefault(operand.uuid, target_indices[slot])
+    # A loop body reuses the same IR Value UUID for ``q[i]`` while each
+    # unrolled iteration binds ``i`` to a different concrete slot.  Use
+    # assignment rather than ``setdefault`` so the current iteration's
+    # binding controls where the gate is emitted.
+    qubit_map[operand.uuid] = slots[elem_idx]
 
 
 def _resolve_gate_targets(
     op: GateOperation,
-    qubit_map: dict[str, int],
-    fallback_targets: list[int],
+    qubit_map: CudaqControlledQubitMap,
 ) -> list[int]:
     """Resolve physical target indices for an inner gate's operands.
 
     For each quantum operand of the gate, looks up the corresponding
-    physical target via ``qubit_map``.  Falls back to ``fallback_targets``
-    if no mapping is found.
+    physical target via ``qubit_map``.
 
     Args:
         op (GateOperation): The gate operation whose operand targets are
             being resolved.
-        qubit_map (dict[str, int]): UUID-to-physical-target map seeded
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-target map seeded
             by ``_build_block_qubit_map``.
-        fallback_targets (list[int]): Default physical targets used when
-            no operand resolves through ``qubit_map``.
 
     Returns:
         list[int]: Per-operand physical target indices in
-            ``op.qubit_operands`` order, or ``fallback_targets`` when no
-            operand resolved through the map (matches prior behavior so
-            unrelated controlled callers keep working).
+            ``op.qubit_operands`` order.
+
+    Raises:
+        EmitError: If any operand is absent from ``qubit_map``. Falling
+            back to slot 0 would silently route a multi-target inner gate
+            to the wrong physical qubit.
     """
+    gate_type = op.gate_type
+    gate_name = gate_type.name if gate_type is not None else "<unknown>"
     resolved: list[int] = []
     for operand in op.qubit_operands:
         if operand.uuid in qubit_map:
             resolved.append(qubit_map[operand.uuid])
-        elif fallback_targets:
-            resolved.append(fallback_targets[0])
-    return resolved if resolved else fallback_targets
+        else:
+            raise EmitError(
+                f"CUDA-Q controlled helper cannot resolve operand "
+                f"{operand.name!r} (uuid {operand.uuid[:8]}) for "
+                f"inner gate {gate_name}.",
+                operation="ControlledUOperation",
+            )
+    return resolved
+
+
+def _resolve_cudaq_value_index(
+    value: Any,
+    vector_slots: dict[str, list[int]],
+    qubit_map: CudaqControlledQubitMap,
+    emit_pass: Any,
+    bindings: dict[str, Any],
+    *,
+    operation: str,
+) -> int:
+    """Resolve one quantum Value to a CUDA-Q physical qubit index.
+
+    Args:
+        value (Any): Scalar or vector-element quantum value.
+        vector_slots (dict[str, list[int]]): Vector input/result slot map
+            available while walking a controlled block body.
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map,
+            mutated if ``value`` is a vector element that can be seeded lazily.
+        emit_pass (Any): Emit pass whose resolver folds element indices.
+        bindings (dict[str, Any]): Current controlled-body bindings.
+        operation (str): Operation label for diagnostics.
+
+    Returns:
+        int: Physical qubit index.
+
+    Raises:
+        EmitError: If the value cannot be resolved under the current maps
+            and bindings.
+    """
+    _seed_vector_element_uuid(value, vector_slots, qubit_map, emit_pass, bindings)
+    if value.uuid in qubit_map:
+        return qubit_map[value.uuid]
+    raise EmitError(
+        f"CUDA-Q controlled helper cannot resolve quantum value "
+        f"{value.name!r} (uuid {value.uuid[:8]}) for {operation}.",
+        operation=operation,
+    )
+
+
+def _resolve_cudaq_value_indices(
+    values: list[Any],
+    vector_slots: dict[str, list[int]],
+    qubit_map: CudaqControlledQubitMap,
+    emit_pass: Any,
+    bindings: dict[str, Any],
+    *,
+    operation: str,
+) -> list[int]:
+    """Resolve a list of quantum values to physical CUDA-Q indices.
+
+    Args:
+        values (list[Any]): Quantum values to resolve.
+        vector_slots (dict[str, list[int]]): Vector slot map.
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
+        emit_pass (Any): Emit pass whose resolver folds element indices.
+        bindings (dict[str, Any]): Current controlled-body bindings.
+        operation (str): Operation label for diagnostics.
+
+    Returns:
+        list[int]: Physical qubit indices in input order.
+
+    Raises:
+        EmitError: If any value cannot be resolved.
+    """
+    return [
+        _resolve_cudaq_value_index(
+            value,
+            vector_slots,
+            qubit_map,
+            emit_pass,
+            bindings,
+            operation=operation,
+        )
+        for value in values
+    ]
+
+
+def _resolve_cudaq_array_slots(
+    array_value: Any,
+    vector_slots: dict[str, list[int]],
+    qubit_map: CudaqControlledQubitMap,
+    emit_pass: Any,
+    bindings: dict[str, Any],
+    *,
+    operation: str,
+) -> list[int]:
+    """Resolve a Vector[Qubit] value to physical CUDA-Q slots.
+
+    Args:
+        array_value (Any): ArrayValue or sliced ArrayValue to resolve.
+        vector_slots (dict[str, list[int]]): Vector slot map carried by
+            the controlled fallback walker.
+        qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
+        emit_pass (Any): Emit pass whose resolver folds shapes/slices.
+        bindings (dict[str, Any]): Current controlled-body bindings.
+        operation (str): Operation label for diagnostics.
+
+    Returns:
+        list[int]: Physical qubit slots covered by ``array_value``.
+
+    Raises:
+        EmitError: If ``array_value`` is not an ArrayValue, its length
+            cannot be resolved, or any element has no physical slot.
+    """
+    if not isinstance(array_value, ArrayValue):
+        raise EmitError(
+            f"CUDA-Q controlled helper expected Vector[Qubit] for "
+            f"{operation}, got {type(array_value).__name__}.",
+            operation=operation,
+        )
+    if array_value.uuid in vector_slots:
+        return list(vector_slots[array_value.uuid])
+    if not array_value.shape:
+        raise EmitError(
+            f"CUDA-Q controlled helper cannot resolve lengthless "
+            f"Vector[Qubit] {array_value.name!r}.",
+            operation=operation,
+        )
+    size = emit_pass._resolver.resolve_int_value(array_value.shape[0], bindings)
+    if size is None:
+        raise EmitError(
+            f"CUDA-Q controlled helper cannot resolve Vector[Qubit] "
+            f"length for {array_value.name!r}.",
+            operation=operation,
+        )
+    if array_value.is_slice():
+        if array_value.slice_of is None:
+            raise EmitError(
+                f"CUDA-Q controlled helper found malformed slice "
+                f"{array_value.name!r} without a parent array.",
+                operation=operation,
+            )
+        parent_slots = _resolve_cudaq_array_slots(
+            array_value.slice_of,
+            vector_slots,
+            qubit_map,
+            emit_pass,
+            bindings,
+            operation=operation,
+        )
+        start = emit_pass._resolver.resolve_int_value(array_value.slice_start, bindings)
+        step = emit_pass._resolver.resolve_int_value(array_value.slice_step, bindings)
+        if start is None or step is None:
+            raise EmitError(
+                f"CUDA-Q controlled helper cannot resolve slice bounds "
+                f"for {array_value.name!r}.",
+                operation=operation,
+            )
+        slice_slots: list[int] = []
+        for i in range(size):
+            parent_idx = start + step * i
+            if parent_idx < 0 or parent_idx >= len(parent_slots):
+                raise EmitError(
+                    f"CUDA-Q controlled helper slice index {parent_idx} "
+                    f"is outside parent length {len(parent_slots)} for "
+                    f"{array_value.name!r}.",
+                    operation=operation,
+                )
+            slice_slots.append(parent_slots[parent_idx])
+        vector_slots[array_value.uuid] = slice_slots
+        if slice_slots:
+            qubit_map.setdefault(array_value.uuid, slice_slots[0])
+        return slice_slots
+
+    slots: list[int] = []
+    for i in range(size):
+        addr = QubitAddress(array_value.uuid, i)
+        if addr in qubit_map:
+            slots.append(qubit_map[addr])
+            continue
+        raise EmitError(
+            f"CUDA-Q controlled helper cannot resolve element {i} "
+            f"of Vector[Qubit] {array_value.name!r}.",
+            operation=operation,
+        )
+    vector_slots[array_value.uuid] = slots
+    if slots:
+        qubit_map.setdefault(array_value.uuid, slots[0])
+    return slots
 
 
 @dataclasses.dataclass
@@ -847,15 +997,17 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         num_controls: int,
         control_indices: list[int],
         target_indices: list[int],
-        qubit_map: dict[str, int],
+        qubit_map: CudaqControlledQubitMap,
+        vector_slots: dict[str, list[int]],
         emitter: CudaqKernelEmitter,
         bindings: dict[str, Any],
     ) -> None:
         """Recursively emit controlled operations with operand-to-target mapping.
 
-        Handles ``GateOperation`` via the CUDA-Q multi-control path,
+        Handles primitive gates via the CUDA-Q multi-control path,
+        composite/Pauli evolution operations by controlled decomposition,
         ``ReturnOperation`` by skipping, and ``ForOperation`` by unrolling
-        compile-time resolvable loops (single-control only).
+        compile-time resolvable loops.
 
         Args:
             circuit: The CUDA-Q kernel artifact being built.
@@ -864,6 +1016,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             control_indices: Physical indices of control qubits.
             target_indices: Physical indices of target qubits.
             qubit_map: Mutable UUID-to-physical-target map for SSA tracking.
+            vector_slots: Mutable ArrayValue UUID-to-physical-slots map
+                used for Vector[Qubit] operands and results.
             emitter: The CUDA-Q kernel emitter.
             bindings: Parameter bindings.
 
@@ -874,9 +1028,15 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             if isinstance(op, ReturnOperation):
                 continue
             if isinstance(op, GateOperation):
-                gate_target_indices = _resolve_gate_targets(
-                    op, qubit_map, target_indices
-                )
+                for operand in op.qubit_operands:
+                    _seed_vector_element_uuid(
+                        operand,
+                        vector_slots,
+                        qubit_map,
+                        self,
+                        bindings,
+                    )
+                gate_target_indices = _resolve_gate_targets(op, qubit_map)
                 self._emit_cudaq_multi_controlled_gate(
                     circuit,
                     op,
@@ -885,24 +1045,35 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                     gate_target_indices,
                     bindings,
                 )
-                # Propagate SSA: results inherit operand's physical target.
-                qubit_ops = op.qubit_operands
-                assert len(op.results) == len(qubit_ops), (
-                    f"[For DEVELOPER] GateOperation must have equal qubit operands/results, "
-                    f"got {len(qubit_ops)} qubit operands and {len(op.results)} results."
-                    f"There must be a bug."
-                )
-                for operand, result in zip(qubit_ops, op.results, strict=True):
-                    assert result.type.is_quantum(), (
-                        "[For DEVELOPER] GateOperation result must be quantum. "
-                        "There must be a bug."
-                    )
-                    assert operand.uuid in qubit_map, (
-                        f"Missing qubit mapping for operand {operand.uuid} in controlled helper."
-                    )
-                    qubit_map[result.uuid] = qubit_map[operand.uuid]
+                self._propagate_cudaq_gate_results(op, qubit_map)
                 continue
-            if isinstance(op, ForOperation) and num_controls == 1:
+            if isinstance(op, CompositeGateOperation):
+                self._emit_cudaq_controlled_composite(
+                    circuit,
+                    op,
+                    num_controls,
+                    control_indices,
+                    target_indices,
+                    qubit_map,
+                    vector_slots,
+                    emitter,
+                    bindings,
+                )
+                continue
+            if isinstance(op, PauliEvolveOp):
+                self._emit_cudaq_controlled_pauli_evolve(
+                    circuit,
+                    op,
+                    num_controls,
+                    control_indices,
+                    target_indices,
+                    qubit_map,
+                    vector_slots,
+                    emitter,
+                    bindings,
+                )
+                continue
+            if isinstance(op, ForOperation):
                 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
                     resolve_loop_bounds,
                 )
@@ -923,6 +1094,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                             control_indices,
                             target_indices,
                             qubit_map,
+                            vector_slots,
                             emitter,
                             loop_bindings,
                         )
@@ -935,36 +1107,519 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 continue
             raise EmitError(
                 f"Unsupported operation {type(op).__name__} in "
-                f"CUDA-Q controlled block body. Only GateOperation "
-                f"is supported in helper kernels.",
+                f"CUDA-Q controlled block body.",
                 operation="ControlledUOperation",
             )
 
-    def _emit_cudaq_multi_controlled_gate(
+    def _propagate_cudaq_gate_results(
+        self,
+        op: GateOperation,
+        qubit_map: CudaqControlledQubitMap,
+    ) -> None:
+        """Propagate physical qubit slots from gate operands to results.
+
+        Args:
+            op (GateOperation): Gate whose results become fresh SSA
+                versions of its qubit operands.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-target
+                map to update in place.
+        """
+        qubit_ops = op.qubit_operands
+        assert len(op.results) == len(qubit_ops), (
+            f"[For DEVELOPER] GateOperation must have equal qubit operands/results, "
+            f"got {len(qubit_ops)} qubit operands and {len(op.results)} results."
+            f"There must be a bug."
+        )
+        for operand, result in zip(qubit_ops, op.results, strict=True):
+            assert result.type.is_quantum(), (
+                "[For DEVELOPER] GateOperation result must be quantum. "
+                "There must be a bug."
+            )
+            assert operand.uuid in qubit_map, (
+                f"Missing qubit mapping for operand {operand.uuid} in controlled helper."
+            )
+            qubit_map[result.uuid] = qubit_map[operand.uuid]
+
+    def _emit_cudaq_controlled_h(
         self,
         circuit: CudaqKernelArtifact,
-        op: GateOperation,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        target_idx: int,
+    ) -> None:
+        """Emit a controlled Hadamard with one or more controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Physical control qubit indices.
+            target_idx (int): Physical target qubit index.
+        """
+        if not control_indices:
+            emitter.emit_h(circuit, target_idx)
+            return
+        emitter.emit_ry(circuit, target_idx, math.pi / 4)
+        emitter.emit_multi_controlled_x(circuit, control_indices, target_idx)
+        emitter.emit_ry(circuit, target_idx, -math.pi / 4)
+
+    def _emit_cudaq_controlled_y(
+        self,
+        circuit: CudaqKernelArtifact,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        target_idx: int,
+    ) -> None:
+        """Emit a controlled Pauli-Y with one or more controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Physical control qubit indices.
+            target_idx (int): Physical target qubit index.
+        """
+        if not control_indices:
+            emitter.emit_y(circuit, target_idx)
+            return
+        emitter.emit_sdg(circuit, target_idx)
+        emitter.emit_multi_controlled_x(circuit, control_indices, target_idx)
+        emitter.emit_s(circuit, target_idx)
+
+    def _emit_cudaq_controlled_z(
+        self,
+        circuit: CudaqKernelArtifact,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        target_idx: int,
+    ) -> None:
+        """Emit a controlled Pauli-Z with one or more controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Physical control qubit indices.
+            target_idx (int): Physical target qubit index.
+        """
+        if not control_indices:
+            emitter.emit_z(circuit, target_idx)
+            return
+        emitter.emit_h(circuit, target_idx)
+        emitter.emit_multi_controlled_x(circuit, control_indices, target_idx)
+        emitter.emit_h(circuit, target_idx)
+
+    def _emit_cudaq_controlled_swap(
+        self,
+        circuit: CudaqKernelArtifact,
         emitter: CudaqKernelEmitter,
         control_indices: list[int],
         target_indices: list[int],
-        bindings: dict[str, Any],
     ) -> None:
-        """Emit a single multi-controlled gate via CUDA-Q native multi-control.
-
-        CUDA-Q natively supports multi-controlled X via
-        ``kernel.cx([controls], target)``.  Other gate types are
-        decomposed into multi-controlled X plus single-qubit rotations
-        using standard conjugation identities, or raise ``EmitError``
-        when no decomposition is available.
+        """Emit a controlled SWAP with one or more controls.
 
         Args:
-            circuit: The CUDA-Q kernel artifact being built.
-            op: The gate operation to emit with controls.
-            emitter: The CUDA-Q kernel emitter.
-            control_indices: Physical indices of control qubits.
-            target_indices: Physical indices of target qubits (resolved
-                per-gate by the caller).
-            bindings: Parameter bindings.
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Physical control qubit indices.
+            target_indices (list[int]): Two physical target qubit indices.
+
+        Raises:
+            EmitError: If fewer than two target qubits are supplied.
+        """
+        if len(target_indices) < 2:
+            raise EmitError(
+                "Controlled-SWAP requires at least 2 target qubits.",
+                operation="ControlledGate",
+            )
+        tgt_a = target_indices[0]
+        tgt_b = target_indices[1]
+        if not control_indices:
+            emitter.emit_swap(circuit, tgt_a, tgt_b)
+            return
+        emitter.emit_cx(circuit, tgt_b, tgt_a)
+        emitter.emit_multi_controlled_x(circuit, control_indices + [tgt_a], tgt_b)
+        emitter.emit_cx(circuit, tgt_b, tgt_a)
+
+    def _emit_cudaq_controlled_cp(
+        self,
+        circuit: CudaqKernelArtifact,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        target_indices: list[int],
+        angle: Any,
+    ) -> None:
+        """Emit a controlled controlled-phase operation.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Outer physical controls.
+            target_indices (list[int]): Inner CP control and target.
+            angle (Any): Phase angle.
+
+        Raises:
+            EmitError: If fewer than two target qubits are supplied.
+        """
+        if len(target_indices) < 2:
+            raise EmitError(
+                "Controlled-CP requires at least 2 target qubits "
+                "(inner control + inner target).",
+                operation="ControlledGate",
+            )
+        inner_control = target_indices[0]
+        inner_target = target_indices[1]
+        if not control_indices:
+            emitter.emit_cp(circuit, inner_control, inner_target, angle)
+            return
+        emitter.emit_multi_controlled_p(
+            circuit,
+            control_indices + [inner_control],
+            inner_target,
+            angle,
+        )
+
+    def _emit_cudaq_controlled_rzz(
+        self,
+        circuit: CudaqKernelArtifact,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        target_indices: list[int],
+        angle: Any,
+    ) -> None:
+        """Emit a controlled RZZ rotation.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Physical control qubit indices.
+            target_indices (list[int]): Two physical RZZ operands.
+            angle (Any): Rotation angle.
+
+        Raises:
+            EmitError: If fewer than two target qubits are supplied.
+        """
+        if len(target_indices) < 2:
+            raise EmitError(
+                "Controlled-RZZ requires at least 2 target qubits.",
+                operation="ControlledGate",
+            )
+        q0 = target_indices[0]
+        q1 = target_indices[1]
+        if not control_indices:
+            emitter.emit_rzz(circuit, q0, q1, angle)
+            return
+        emitter.emit_cx(circuit, q0, q1)
+        emitter.emit_multi_controlled_rz(circuit, control_indices, q1, angle)
+        emitter.emit_cx(circuit, q0, q1)
+
+    def _emit_cudaq_controlled_qft(
+        self,
+        circuit: CudaqKernelArtifact,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        qubit_indices: list[int],
+    ) -> None:
+        """Emit a controlled QFT decomposition.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Outer physical controls.
+            qubit_indices (list[int]): QFT target qubits.
+        """
+        n = len(qubit_indices)
+        for j in range(n - 1, -1, -1):
+            self._emit_cudaq_controlled_h(
+                circuit, emitter, control_indices, qubit_indices[j]
+            )
+            for k in range(j - 1, -1, -1):
+                angle = math.pi / (2 ** (j - k))
+                self._emit_cudaq_controlled_cp(
+                    circuit,
+                    emitter,
+                    control_indices,
+                    [qubit_indices[j], qubit_indices[k]],
+                    angle,
+                )
+        for j in range(n // 2):
+            self._emit_cudaq_controlled_swap(
+                circuit,
+                emitter,
+                control_indices,
+                [qubit_indices[j], qubit_indices[n - 1 - j]],
+            )
+
+    def _emit_cudaq_controlled_iqft(
+        self,
+        circuit: CudaqKernelArtifact,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        qubit_indices: list[int],
+    ) -> None:
+        """Emit a controlled inverse-QFT decomposition.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Outer physical controls.
+            qubit_indices (list[int]): IQFT target qubits.
+        """
+        n = len(qubit_indices)
+        for j in range(n // 2):
+            self._emit_cudaq_controlled_swap(
+                circuit,
+                emitter,
+                control_indices,
+                [qubit_indices[j], qubit_indices[n - 1 - j]],
+            )
+        for j in range(n):
+            for k in range(j):
+                angle = -math.pi / (2 ** (j - k))
+                self._emit_cudaq_controlled_cp(
+                    circuit,
+                    emitter,
+                    control_indices,
+                    [qubit_indices[j], qubit_indices[k]],
+                    angle,
+                )
+            self._emit_cudaq_controlled_h(
+                circuit, emitter, control_indices, qubit_indices[j]
+            )
+
+    def _emit_cudaq_controlled_composite(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: CompositeGateOperation,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        qubit_map: CudaqControlledQubitMap,
+        vector_slots: dict[str, list[int]],
+        emitter: CudaqKernelEmitter,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a CompositeGateOperation under outer controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (CompositeGateOperation): Composite op inside the controlled
+                block.
+            num_controls (int): Number of outer controls.
+            control_indices (list[int]): Physical outer controls.
+            target_indices (list[int]): Fallback target slots from the
+                controlled-U call site.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
+            vector_slots (dict[str, list[int]]): Vector slot map.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            bindings (dict[str, Any]): Current controlled-body bindings.
+
+        Raises:
+            EmitError: If the composite type cannot be decomposed by the
+                CUDA-Q controlled fallback.
+        """
+        del num_controls, target_indices
+        qubit_indices = _resolve_cudaq_value_indices(
+            op.control_qubits + op.target_qubits,
+            vector_slots,
+            qubit_map,
+            self,
+            bindings,
+            operation=f"CompositeGateOperation[{op.gate_type.name}]",
+        )
+        if op.gate_type == CompositeGateType.QFT:
+            self._emit_cudaq_controlled_qft(
+                circuit, emitter, control_indices, qubit_indices
+            )
+        elif op.gate_type == CompositeGateType.IQFT:
+            self._emit_cudaq_controlled_iqft(
+                circuit, emitter, control_indices, qubit_indices
+            )
+        elif op.gate_type == CompositeGateType.CUSTOM and op.implementation is not None:
+            local_bindings = self._resolver.bind_block_params(
+                op.implementation,
+                op.parameters,
+                bindings,
+            )
+            local_qubit_map, local_vector_slots = _build_block_qubit_map(
+                op.implementation,
+                qubit_indices,
+                self,
+                local_bindings,
+            )
+            self._emit_cudaq_controlled_ops(
+                circuit,
+                op.implementation.operations,
+                len(control_indices),
+                control_indices,
+                qubit_indices,
+                local_qubit_map,
+                local_vector_slots,
+                emitter,
+                local_bindings,
+            )
+        else:
+            raise EmitError(
+                f"Unsupported composite gate {op.gate_type.name} in "
+                f"CUDA-Q controlled block body.",
+                operation="ControlledUOperation",
+            )
+        for result, phys in zip(op.results, qubit_indices, strict=False):
+            qubit_map[result.uuid] = phys
+
+    def _emit_cudaq_controlled_pauli_evolve(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: PauliEvolveOp,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        qubit_map: CudaqControlledQubitMap,
+        vector_slots: dict[str, list[int]],
+        emitter: CudaqKernelEmitter,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit Pauli evolution under outer controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (PauliEvolveOp): Pauli evolution op inside the controlled
+                block.
+            num_controls (int): Number of outer controls.
+            control_indices (list[int]): Physical outer controls.
+            target_indices (list[int]): Fallback target slots from the
+                controlled-U call site.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
+            vector_slots (dict[str, list[int]]): Vector slot map.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            bindings (dict[str, Any]): Current controlled-body bindings.
+
+        Raises:
+            EmitError: If the Hamiltonian, gamma, or target vector cannot
+                be resolved.
+        """
+        del num_controls, target_indices
+        import qamomile.observable as qm_o
+
+        hamiltonian = self._resolver.resolve_bound_value(op.observable, bindings)
+        if not isinstance(hamiltonian, qm_o.Hamiltonian):
+            raise EmitError(
+                f"PauliEvolveOp requires a Hamiltonian binding. "
+                f"Observable '{op.observable.name}' not found or not a Hamiltonian.",
+                operation="PauliEvolveOp",
+            )
+        gamma = _resolve_gamma(self, op, bindings)
+        if gamma is None:
+            raise EmitError(
+                "Cannot resolve gamma parameter for PauliEvolveOp. "
+                "gamma must be a concrete float binding or a declared "
+                "parameter (scalar or array element).",
+                operation="PauliEvolveOp",
+            )
+        qubit_indices = _resolve_cudaq_array_slots(
+            op.qubits,
+            vector_slots,
+            qubit_map,
+            self,
+            bindings,
+            operation="PauliEvolveOp",
+        )
+        if len(qubit_indices) != hamiltonian.num_qubits:
+            raise EmitError(
+                f"PauliEvolveOp qubit count mismatch: qubit register has "
+                f"{len(qubit_indices)} qubits but Hamiltonian acts on "
+                f"{hamiltonian.num_qubits} qubits.",
+                operation="PauliEvolveOp",
+            )
+        for operators, coeff in hamiltonian:
+            if abs(coeff.imag) > 1e-10:
+                raise EmitError(
+                    f"PauliEvolveOp requires a Hermitian Hamiltonian "
+                    f"(real coefficients), but found complex coefficient "
+                    f"{coeff} on term {operators}.",
+                    operation="PauliEvolveOp",
+                )
+            if abs(coeff) < 1e-15 or len(operators) == 0:
+                continue
+            angle: Any
+            if isinstance(gamma, (int, float)):
+                angle = 2.0 * float(coeff.real * gamma)
+            else:
+                angle = (2.0 * float(coeff.real)) * gamma
+            term_qubits = [qubit_indices[item.index] for item in operators]
+            paulis = [item.pauli for item in operators]
+            for qi, pauli in zip(term_qubits, paulis):
+                if pauli == qm_o.Pauli.X:
+                    self._emit_cudaq_controlled_h(circuit, emitter, control_indices, qi)
+                elif pauli == qm_o.Pauli.Y:
+                    self._emit_cudaq_multi_controlled_gate_type(
+                        circuit,
+                        GateOperationType.SDG,
+                        emitter,
+                        control_indices,
+                        [qi],
+                        None,
+                    )
+                    self._emit_cudaq_controlled_h(circuit, emitter, control_indices, qi)
+            if len(term_qubits) == 1:
+                emitter.emit_multi_controlled_rz(
+                    circuit, control_indices, term_qubits[0], angle
+                )
+            else:
+                for step in range(len(term_qubits) - 1):
+                    self._emit_cudaq_multi_controlled_gate_type(
+                        circuit,
+                        GateOperationType.CX,
+                        emitter,
+                        control_indices,
+                        [term_qubits[step], term_qubits[step + 1]],
+                        None,
+                    )
+                emitter.emit_multi_controlled_rz(
+                    circuit, control_indices, term_qubits[-1], angle
+                )
+                for step in range(len(term_qubits) - 2, -1, -1):
+                    self._emit_cudaq_multi_controlled_gate_type(
+                        circuit,
+                        GateOperationType.CX,
+                        emitter,
+                        control_indices,
+                        [term_qubits[step], term_qubits[step + 1]],
+                        None,
+                    )
+            for qi, pauli in reversed(list(zip(term_qubits, paulis))):
+                if pauli == qm_o.Pauli.X:
+                    self._emit_cudaq_controlled_h(circuit, emitter, control_indices, qi)
+                elif pauli == qm_o.Pauli.Y:
+                    self._emit_cudaq_controlled_h(circuit, emitter, control_indices, qi)
+                    self._emit_cudaq_multi_controlled_gate_type(
+                        circuit,
+                        GateOperationType.S,
+                        emitter,
+                        control_indices,
+                        [qi],
+                        None,
+                    )
+        vector_slots[op.evolved_qubits.uuid] = list(qubit_indices)
+        if qubit_indices:
+            qubit_map.setdefault(op.evolved_qubits.uuid, qubit_indices[0])
+
+    def _emit_cudaq_multi_controlled_gate_type(
+        self,
+        circuit: CudaqKernelArtifact,
+        gate_type: GateOperationType,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        target_indices: list[int],
+        angle: Any,
+    ) -> None:
+        """Emit one primitive gate type under zero or more controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            gate_type (GateOperationType): Primitive gate kind to emit.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Physical control qubit indices.
+            target_indices (list[int]): Physical target qubit indices.
+            angle (Any): Rotation angle for parametric gates, or None
+                for fixed gates.
 
         Raises:
             EmitError: When the gate type is unsupported for multi-control.
@@ -973,19 +1628,60 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             return
 
         target_idx = target_indices[0]
-        gate_type = op.gate_type
 
-        # Multi-controlled X: native CUDA-Q cx with list of controls
+        if gate_type == GateOperationType.H:
+            self._emit_cudaq_controlled_h(circuit, emitter, control_indices, target_idx)
+            return
         if gate_type == GateOperationType.X:
-            emitter.emit_multi_controlled_x(
-                circuit,
-                control_indices,
-                target_idx,
+            if control_indices:
+                emitter.emit_multi_controlled_x(circuit, control_indices, target_idx)
+            else:
+                emitter.emit_x(circuit, target_idx)
+            return
+        if gate_type == GateOperationType.Y:
+            self._emit_cudaq_controlled_y(circuit, emitter, control_indices, target_idx)
+            return
+        if gate_type == GateOperationType.Z:
+            self._emit_cudaq_controlled_z(circuit, emitter, control_indices, target_idx)
+            return
+        if gate_type == GateOperationType.S:
+            emitter.emit_multi_controlled_p(
+                circuit, control_indices, target_idx, math.pi / 2
             )
             return
-
-        # Multi-controlled CX normalization: treat inner control as extra
-        # control, inner target as the final X target.
+        if gate_type == GateOperationType.SDG:
+            emitter.emit_multi_controlled_p(
+                circuit, control_indices, target_idx, -math.pi / 2
+            )
+            return
+        if gate_type == GateOperationType.T:
+            emitter.emit_multi_controlled_p(
+                circuit, control_indices, target_idx, math.pi / 4
+            )
+            return
+        if gate_type == GateOperationType.TDG:
+            emitter.emit_multi_controlled_p(
+                circuit, control_indices, target_idx, -math.pi / 4
+            )
+            return
+        if gate_type == GateOperationType.P:
+            emitter.emit_multi_controlled_p(circuit, control_indices, target_idx, angle)
+            return
+        if gate_type == GateOperationType.RX:
+            emitter.emit_multi_controlled_rx(
+                circuit, control_indices, target_idx, angle
+            )
+            return
+        if gate_type == GateOperationType.RY:
+            emitter.emit_multi_controlled_ry(
+                circuit, control_indices, target_idx, angle
+            )
+            return
+        if gate_type == GateOperationType.RZ:
+            emitter.emit_multi_controlled_rz(
+                circuit, control_indices, target_idx, angle
+            )
+            return
         if gate_type == GateOperationType.CX:
             if len(target_indices) < 2:
                 raise EmitError(
@@ -1001,47 +1697,90 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 inner_target,
             )
             return
-
-        # Multi-controlled SWAP (Fredkin):
-        #   CNOT(b, a) -> MC-X(ctrls + [a], b) -> CNOT(b, a)
-        if gate_type == GateOperationType.SWAP:
+        if gate_type == GateOperationType.CZ:
             if len(target_indices) < 2:
                 raise EmitError(
-                    "Controlled-SWAP requires at least 2 target qubits.",
+                    "Controlled-CZ requires at least 2 target qubits "
+                    "(inner control + inner target).",
                     operation="ControlledGate",
                 )
-            tgt_a = target_indices[0]
-            tgt_b = target_indices[1]
-            emitter.emit_cx(circuit, tgt_b, tgt_a)
+            self._emit_cudaq_controlled_z(
+                circuit,
+                emitter,
+                control_indices + [target_indices[0]],
+                target_indices[1],
+            )
+            return
+        if gate_type == GateOperationType.SWAP:
+            self._emit_cudaq_controlled_swap(
+                circuit, emitter, control_indices, target_indices
+            )
+            return
+        if gate_type == GateOperationType.CP:
+            self._emit_cudaq_controlled_cp(
+                circuit, emitter, control_indices, target_indices, angle
+            )
+            return
+        if gate_type == GateOperationType.RZZ:
+            self._emit_cudaq_controlled_rzz(
+                circuit, emitter, control_indices, target_indices, angle
+            )
+            return
+        if gate_type == GateOperationType.TOFFOLI:
+            if len(target_indices) < 3:
+                raise EmitError(
+                    "Controlled-Toffoli requires at least 3 target qubits.",
+                    operation="ControlledGate",
+                )
             emitter.emit_multi_controlled_x(
                 circuit,
-                control_indices + [tgt_a],
-                tgt_b,
-            )
-            emitter.emit_cx(circuit, tgt_b, tgt_a)
-            return
-
-        # Single-control: fall back to existing controlled-gate emitters
-        if len(control_indices) == 1:
-            from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
-                emit_controlled_gate,
-            )
-
-            emit_controlled_gate(
-                self,
-                circuit,
-                op,
-                control_indices[0],
-                target_indices,
-                bindings,
+                control_indices + [target_indices[0], target_indices[1]],
+                target_indices[2],
             )
             return
 
         raise EmitError(
             f"Unsupported gate type {gate_type!r} in CUDA-Q multi-controlled "
-            f"block decomposition. Only X and SWAP are natively supported "
-            f"with multiple controls.",
+            f"block decomposition.",
             operation="ControlledGate",
+        )
+
+    def _emit_cudaq_multi_controlled_gate(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: GateOperation,
+        emitter: CudaqKernelEmitter,
+        control_indices: list[int],
+        target_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a GateOperation under zero or more outer controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (GateOperation): Inner primitive gate.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            control_indices (list[int]): Physical outer controls.
+            target_indices (list[int]): Resolved physical gate operands.
+            bindings (dict[str, Any]): Current controlled-body bindings.
+
+        Raises:
+            EmitError: When the gate type is unsupported.
+        """
+        gate_type = op.gate_type
+        if gate_type is None:
+            raise EmitError(
+                "CUDA-Q controlled helper cannot emit a gate without a gate type.",
+                operation="ControlledUOperation",
+            )
+        angle = self._resolve_angle(op, bindings) if op.theta is not None else None
+        self._emit_cudaq_multi_controlled_gate_type(
+            circuit,
+            gate_type,
+            emitter,
+            control_indices,
+            target_indices,
+            angle,
         )
 
 
