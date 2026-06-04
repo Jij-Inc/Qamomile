@@ -122,10 +122,15 @@
 
 # %%
 import math
+import os
 
 import qamomile.circuit as qmc
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+default_shots = 64 if docs_test_mode else 256
+superposition_shots = 512 if docs_test_mode else 2000
 
 transpiler = QiskitTranspiler()
 
@@ -151,7 +156,7 @@ def _sample_first_bit(
     bindings: dict[str, object] | None = None,
     parameters: list[str] | None = None,
     runtime_bindings: dict[str, object] | None = None,
-    shots: int = 256,
+    shots: int = default_shots,
 ) -> dict[int, int]:
     """Compile and run a kernel, returning the 0/1 counts of the first bit."""
     executable = transpiler.transpile(
@@ -311,6 +316,11 @@ bitflip_cases = [
     ("X on data[1]", 1),
     ("X on data[2]", 2),
 ]
+if docs_test_mode:
+    bitflip_cases = [
+        ("no error", 3),
+        ("X on data[1]", 1),
+    ]
 
 print("3-qubit bit-flip code: logical |1>")
 for label, error_pos in bitflip_cases:
@@ -343,14 +353,12 @@ for label, error_pos in bitflip_cases:
         bindings={"error_pos": error_pos},
         parameters=["theta"],
         runtime_bindings={"theta": math.pi / 3},
-        shots=2000,
+        shots=superposition_shots,
     )
     total = counts[0] + counts[1]
     print(f"  {label:14s}: P(data[0]=1) = {counts[1] / total:.3f}")
-    # Target probability sin^2(pi/6) = 0.25. With 2000 shots the standard
-    # error is < 0.01, so a 5% window is safely outside shot noise.
-    assert abs(counts[1] / total - 0.25) < 0.05
-    assert total == 2000
+    assert abs(counts[1] / total - 0.25) < (0.08 if docs_test_mode else 0.05)
+    assert total == superposition_shots
 
 # %% [markdown]
 # ### 2.8 Limitation: Powerless Against Phase Errors
@@ -481,6 +489,11 @@ phaseflip_cases = [
     ("Z on data[1]", 1),
     ("Z on data[2]", 2),
 ]
+if docs_test_mode:
+    phaseflip_cases = [
+        ("no error", 3),
+        ("Z on data[1]", 1),
+    ]
 
 print("3-qubit phase-flip code: logical |0_L> = |+++>")
 for label, error_pos in phaseflip_cases:
@@ -648,6 +661,10 @@ shor_cases = [
     ("Y", 2, 4),
     ("Z", 3, 8),
 ]
+if docs_test_mode:
+    shor_cases = [
+        ("Y", 2, 4),
+    ]
 
 print("Shor 9-qubit code: logical |1>")
 print(f"  {'error':6s} | {'pos':5s} | P(q[0]=1)")
