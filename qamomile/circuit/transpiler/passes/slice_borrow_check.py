@@ -78,7 +78,11 @@ from qamomile.circuit.ir.operation import (
     ReturnOperation,
     SliceArrayOperation,
 )
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, CompOp
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+)
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -90,6 +94,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import (
     SliceBorrowViolationError,
@@ -99,6 +104,7 @@ from qamomile.circuit.transpiler.errors import (
 from . import Pass
 
 BorrowKey = tuple[str, str]
+BoundToken = tuple[object, ...]
 
 
 def _root_of(av: ArrayValue) -> ArrayValue:
@@ -247,6 +253,15 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         # where same-slice SSA-version refresh of an outer owner can
         # safely be accepted without propagating a deletion.
         self._outer_snapshot_stack: list[_SnapshotFrame] = []
+        # Small expression cache for symbolic slice-bound comparisons.
+        # ``SliceArrayOperation`` normalizes user slices through BinOps
+        # such as ``min(k, n)``, ``x - 0``, ``x + 0`` and ``x // 1``.
+        # The borrow checker does not evaluate symbolic arithmetic in
+        # general, but it needs structurally equal normalized bounds to
+        # compare equal when proving adjacent symbolic intervals
+        # disjoint.  Keys are strict ``(logical_id, version)`` value
+        # identities, values are canonical ``BoundToken`` tuples.
+        self._bound_exprs: dict[tuple[str, int], BoundToken] = {}
 
     @property
     def name(self) -> str:
@@ -279,6 +294,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 f"block, got {input.kind}",
             )
 
+        self._bound_exprs.clear()
         state: State = {}
         self._walk(input.operations, state)
 
@@ -330,9 +346,16 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # terminator is handled by the caller (outer block end).
                 continue
 
-            if isinstance(op, BinOp) or isinstance(op, CompOp):
-                # Pure classical arithmetic on UInts/Floats; no borrow
-                # semantics.
+            if isinstance(op, BinOp):
+                # Pure classical arithmetic has no borrow semantics, but
+                # slice construction uses a few BinOps to normalize bounds.
+                # Record a tiny canonical expression for later symbolic
+                # interval-disjointness checks.
+                self._record_bound_expr(op)
+                continue
+
+            if isinstance(op, CompOp):
+                # Pure classical comparisons; no borrow semantics.
                 continue
 
             if isinstance(op, SliceArrayOperation):
@@ -1152,12 +1175,10 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
 
         existing = state.get(key)
         # A symbolic descriptor is one coarse owner for an unknown slot
-        # set.  Different descriptors on the same root might overlap, and
-        # this pass intentionally does not solve symbolic interval
-        # disjointness.  Reject other descriptors unless they already
-        # point at the same ArrayValue; the exact current descriptor is
-        # handled below, where only a forward same-descriptor refresh is
-        # accepted.
+        # set.  Different descriptors on the same root might overlap, so
+        # reject them unless a narrow interval check proves they are
+        # disjoint.  The exact current descriptor is handled below,
+        # where only a forward same-descriptor refresh is accepted.
         for other_key, owner in state.items():
             if (
                 other_key == key
@@ -1166,11 +1187,14 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             ):
                 continue
             if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
+                if self._symbolic_slices_definitely_disjoint(av, owner):
+                    continue
                 raise SliceBorrowViolationError(
                     f"Symbolic slice view '{av.name}' on '{root.name}' "
                     f"may overlap live symbolic view '{owner.name}'.  "
                     f"Only exact forward refresh of the same symbolic "
-                    f"descriptor is supported for symbolic slices."
+                    f"descriptor or provably disjoint symbolic intervals "
+                    f"are supported for symbolic slices."
                 )
         if existing is None:
             state[key] = av
@@ -1285,6 +1309,292 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         if not isinstance(value, Value):
             return None
         return (value.logical_id, value.version)
+
+    def _record_bound_expr(self, op: BinOp) -> None:
+        """Cache a canonical expression token for a bound-normalizing BinOp.
+
+        The cache is deliberately tiny: it captures identities emitted
+        while lowering slices (``x + 0``, ``x - 0``, ``x // 1``) and
+        canonical ``min`` expressions, plus constant folding for those
+        same operators.  Unsupported arithmetic is left uncached, which
+        makes later symbolic disjointness checks return ``False`` and
+        preserves the conservative overlap behavior.
+
+        Args:
+            op (BinOp): Arithmetic operation encountered while walking
+                the block.
+        """
+        output_sig = self._value_signature(op.output)
+        if output_sig is None:
+            return
+        lhs = self._bound_token(op.lhs)
+        rhs = self._bound_token(op.rhs)
+        if lhs is None or rhs is None:
+            return
+
+        token: BoundToken | None = None
+        if op.kind == BinOpKind.ADD:
+            token = self._canonical_add(lhs, rhs)
+        elif op.kind == BinOpKind.SUB:
+            token = self._canonical_sub(lhs, rhs)
+        elif op.kind == BinOpKind.FLOORDIV:
+            token = self._canonical_floordiv(lhs, rhs)
+        elif op.kind == BinOpKind.MIN:
+            token = self._canonical_min(lhs, rhs, op.output)
+
+        if token is not None:
+            self._bound_exprs[output_sig] = token
+
+    @staticmethod
+    def _is_const_token(token: BoundToken, value: int) -> bool:
+        """Check whether ``token`` is a specific integer constant.
+
+        Args:
+            token (BoundToken): Token to inspect.
+            value (int): Expected integer value.
+
+        Returns:
+            bool: ``True`` when ``token`` is exactly ``("const", value)``.
+        """
+        return len(token) == 2 and token[0] == "const" and token[1] == value
+
+    @staticmethod
+    def _const_token_value(token: BoundToken) -> int | None:
+        """Return the integer value represented by a constant token.
+
+        Args:
+            token (BoundToken): Token to inspect.
+
+        Returns:
+            int | None: Constant integer payload, or ``None`` for a
+                non-constant token.
+        """
+        if len(token) == 2 and token[0] == "const":
+            return int(token[1])
+        return None
+
+    def _canonical_add(self, lhs: BoundToken, rhs: BoundToken) -> BoundToken | None:
+        """Canonicalize a small ``lhs + rhs`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const is not None:
+            return ("const", lhs_const + rhs_const)
+        if self._is_const_token(lhs, 0):
+            return rhs
+        if self._is_const_token(rhs, 0):
+            return lhs
+        return None
+
+    def _canonical_sub(self, lhs: BoundToken, rhs: BoundToken) -> BoundToken | None:
+        """Canonicalize a small ``lhs - rhs`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const is not None:
+            return ("const", lhs_const - rhs_const)
+        if self._is_const_token(rhs, 0):
+            return lhs
+        return None
+
+    def _canonical_floordiv(
+        self, lhs: BoundToken, rhs: BoundToken
+    ) -> BoundToken | None:
+        """Canonicalize a small ``lhs // rhs`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const not in (None, 0):
+            return ("const", lhs_const // rhs_const)
+        if self._is_const_token(rhs, 1):
+            return lhs
+        return None
+
+    def _canonical_min(
+        self, lhs: BoundToken, rhs: BoundToken, output: Value
+    ) -> BoundToken | None:
+        """Canonicalize a small ``min(lhs, rhs)`` expression.
+
+        Args:
+            lhs (BoundToken): Left operand token.
+            rhs (BoundToken): Right operand token.
+            output (Value): Operation result, used to ensure the
+                ``min(0, x) -> 0`` simplification applies only to
+                non-negative ``UInt`` bounds.
+
+        Returns:
+            BoundToken | None: Simplified token, or ``None`` when this
+                expression is outside the supported slice-bound subset.
+        """
+        lhs_const = self._const_token_value(lhs)
+        rhs_const = self._const_token_value(rhs)
+        if lhs_const is not None and rhs_const is not None:
+            return ("const", min(lhs_const, rhs_const))
+        if isinstance(output.type, UIntType) and (
+            self._is_const_token(lhs, 0) or self._is_const_token(rhs, 0)
+        ):
+            return ("const", 0)
+        ordered = tuple(sorted((lhs, rhs), key=repr))
+        return ("min", *ordered)
+
+    def _symbolic_slices_definitely_disjoint(
+        self, left: ArrayValue, right: ArrayValue
+    ) -> bool:
+        """Check a narrow symbolic proof that two sliced views are disjoint.
+
+        This helper intentionally handles only direct, unit-stride
+        root-space intervals.  That covers common partition patterns
+        such as ``q[:k]`` and ``q[k:n]`` without turning the borrow
+        checker into a symbolic inequality solver.  Any unsupported
+        shape returns ``False`` so callers keep the existing
+        conservative overlap response.
+
+        Args:
+            left (ArrayValue): First symbolic sliced view.
+            right (ArrayValue): Second symbolic sliced view.
+
+        Returns:
+            bool: ``True`` when the views have the same root and one
+                interval's end is provably less than or equal to the
+                other's start.
+        """
+        if _root_of(left).logical_id != _root_of(right).logical_id:
+            return False
+        left_bounds = self._direct_unit_stride_interval_bounds(left)
+        right_bounds = self._direct_unit_stride_interval_bounds(right)
+        if left_bounds is None or right_bounds is None:
+            return False
+        left_start, left_end = left_bounds
+        right_start, right_end = right_bounds
+        if left_end is not None and self._bound_leq(left_end, right_start):
+            return True
+        return right_end is not None and self._bound_leq(right_end, left_start)
+
+    def _direct_unit_stride_interval_bounds(
+        self, view: ArrayValue
+    ) -> tuple[BoundToken, BoundToken | None] | None:
+        """Return root-space half-open bounds for a direct unit-stride view.
+
+        The returned pair represents ``[start, end)``.  ``end`` is
+        ``None`` when the shape is known to be symbolic but cannot be
+        written as a bound token this helper can compare.  Only direct
+        slices of the root with ``slice_step == 1`` are accepted; nested
+        symbolic affine maps and strided symbolic ranges stay
+        conservative.
+
+        Args:
+            view (ArrayValue): Sliced view to inspect.
+
+        Returns:
+            tuple[BoundToken, BoundToken | None] | None: ``(start, end)``
+                bound tokens, or ``None`` when this helper cannot model
+                the view.
+        """
+        if view.slice_of is None or view.slice_of.slice_of is not None:
+            return None
+        if not view.shape:
+            return None
+        if self._const_int(view.slice_step) != 1:
+            return None
+        start = self._bound_token(view.slice_start)
+        length = self._bound_token(view.shape[0])
+        if start is None or length is None:
+            return None
+        return start, self._end_bound_token(start, length)
+
+    def _bound_token(self, value: ValueBase | None) -> BoundToken | None:
+        """Represent a slice bound by either a constant or SSA identity.
+
+        Args:
+            value (ValueBase | None): Bound value to encode.
+
+        Returns:
+            BoundToken | None: ``("const", n)`` for integer constants,
+                a cached canonical expression token for known BinOp
+                results, ``("value", logical_id, version)`` for raw
+                symbolic scalar Values, or ``None`` for unsupported
+                values.
+        """
+        const = self._const_int(value)
+        if const is not None:
+            return ("const", const)
+        sig = self._value_signature(value)
+        if sig is None:
+            return None
+        cached = self._bound_exprs.get(sig)
+        if cached is not None:
+            return cached
+        logical_id, version = sig
+        return ("value", logical_id, version)
+
+    @staticmethod
+    def _end_bound_token(
+        start: BoundToken,
+        length: BoundToken,
+    ) -> BoundToken | None:
+        """Return ``start + length`` when it stays in the token language.
+
+        Args:
+            start (BoundToken): Interval start token.
+            length (BoundToken): Interval length token.
+
+        Returns:
+            BoundToken | None: Comparable end token, or ``None`` when
+                computing the end would require symbolic arithmetic
+                beyond identity / constants.
+        """
+        if start[0] == "const" and length[0] == "const":
+            return ("const", int(start[1]) + int(length[1]))
+        if start == ("const", 0):
+            return length
+        if length == ("const", 0):
+            return start
+        return None
+
+    @staticmethod
+    def _bound_leq(
+        left: BoundToken,
+        right: BoundToken,
+    ) -> bool:
+        """Compare two bound tokens when equality or constants prove ``<=``.
+
+        Args:
+            left (BoundToken): Left bound token.
+            right (BoundToken): Right bound token.
+
+        Returns:
+            bool: ``True`` when ``left <= right`` follows from exact
+                token equality or from concrete integer comparison.
+        """
+        if left == right:
+            return True
+        if left[0] == "const" and right[0] == "const":
+            return int(left[1]) <= int(right[1])
+        return False
 
     def _guard_against_symbolic_root_conflicts(
         self,

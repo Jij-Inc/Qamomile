@@ -1043,6 +1043,29 @@ class TestPostFoldLinearity:
         exe = transpiler.transpile(circuit, bindings={"num": 4, "lo": 2, "hi": 4})
         assert exe is not None
 
+    def test_runtime_symbolic_adjacent_slices_pass_borrow_check(self):
+        """``q[:k]`` and ``q[k:4]`` are accepted as adjacent symbolic intervals."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit(k: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            left = q[:k]
+            right = q[k:4]
+            q[:k] = left
+            q[k:4] = right
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        block = transpiler.to_block(circuit, parameters=["k"])
+        block = transpiler.resolve_parameter_shapes(block, bindings={})
+        block = transpiler.inline(block)
+        block = transpiler.affine_validate(block)
+        block = transpiler.partial_eval(block)
+
+        assert transpiler.slice_borrow_check(block) is block
+
     def test_direct_access_before_view_use_is_caught(self):
         """Alias is caught even when the direct parent access precedes the view use.
 
@@ -1396,6 +1419,86 @@ class TestSameSliceVersionRefresh:
 
         with pytest.raises(SliceBorrowViolationError, match="may overlap"):
             checker._register_slice_bulk_borrow_if_new(changed, state)
+
+    def test_symbolic_adjacent_prefix_suffix_descriptors_are_allowed(self):
+        """Adjacent symbolic unit-stride intervals on the same root are disjoint."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        n = _uint_value("n")
+        k = _uint_value("k")
+        root = _qubit_array("q", n)
+        prefix = _slice_array(
+            root,
+            "prefix",
+            _uint_value("zero", 0),
+            _uint_value("one", 1),
+            k,
+        )
+        suffix = _slice_array(
+            root,
+            "suffix",
+            k,
+            _uint_value("one", 1),
+            _uint_value("n_minus_k"),
+        )
+
+        checker._register_slice_bulk_borrow_if_new(prefix, state)
+        checker._register_slice_bulk_borrow_if_new(suffix, state)
+
+        assert {owner.uuid for owner in state.values()} == {prefix.uuid, suffix.uuid}
+
+    def test_symbolic_adjacent_suffix_prefix_descriptors_are_allowed(self):
+        """The symbolic disjointness proof is independent of registration order."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        n = _uint_value("n")
+        k = _uint_value("k")
+        root = _qubit_array("q", n)
+        prefix = _slice_array(
+            root,
+            "prefix",
+            _uint_value("zero", 0),
+            _uint_value("one", 1),
+            k,
+        )
+        suffix = _slice_array(
+            root,
+            "suffix",
+            k,
+            _uint_value("one", 1),
+            _uint_value("n_minus_k"),
+        )
+
+        checker._register_slice_bulk_borrow_if_new(suffix, state)
+        checker._register_slice_bulk_borrow_if_new(prefix, state)
+
+        assert {owner.uuid for owner in state.values()} == {prefix.uuid, suffix.uuid}
+
+    def test_symbolic_strided_disjointness_stays_conservative(self):
+        """Parity-style symbolic strides still require a future proof helper."""
+        checker = SliceBorrowCheckPass()
+        state = {}
+        n = _uint_value("n")
+        root = _qubit_array("q", n)
+        evens = _slice_array(
+            root,
+            "evens",
+            _uint_value("zero", 0),
+            _uint_value("two", 2),
+            n,
+        )
+        odds = _slice_array(
+            root,
+            "odds",
+            _uint_value("one", 1),
+            _uint_value("two", 2),
+            n,
+        )
+
+        checker._register_slice_bulk_borrow_if_new(evens, state)
+
+        with pytest.raises(SliceBorrowViolationError, match="may overlap"):
+            checker._register_slice_bulk_borrow_if_new(odds, state)
 
     def test_symbolic_recomputed_descriptor_is_rejected(self):
         """A new slice lineage with the same symbolic descriptor is not a refresh."""
