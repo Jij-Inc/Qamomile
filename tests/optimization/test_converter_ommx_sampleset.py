@@ -143,29 +143,19 @@ def test_fqaoa_converter_does_not_mutate_caller_instance():
     """FQAOAConverter must not mutate the caller's ommx Instance either."""
     from qamomile.optimization.fqaoa import FQAOAConverter
 
-    # FQAOA expects an OMMX instance with a fermion-counting structure.
-    # Use a minimal binary instance — FQAOA does not enforce structure at
-    # construction time beyond degree<=2.
-    n_sites = 2
-    n_orbitals = 2
-    dvs = []
-    for site in range(n_sites):
-        for orb in range(n_orbitals):
-            dv = ommx.v1.DecisionVariable.binary(
-                site * n_orbitals + orb,
-                name="x",
-                subscripts=[site, orb],
-            )
-            dvs.append(dv)
+    # FQAOA accepts an integer optimization problem with linear equality
+    # constraints; num_fermions is derived from the constraint structure.
+    z0 = ommx.v1.DecisionVariable.integer(0, lower=0, upper=2, name="z0")
+    z1 = ommx.v1.DecisionVariable.integer(1, lower=0, upper=2, name="z1")
     instance = ommx.v1.Instance.from_components(
-        decision_variables=dvs,
-        objective=sum(dvs[i] * dvs[i + 1] for i in range(len(dvs) - 1)),
-        constraints=[],
+        decision_variables=[z0, z1],
+        objective=z0 * z1,
+        constraints=[(z0 + z1 == 2).set_id(0).add_name("sum")],
         sense=ommx.v1.Instance.MINIMIZE,
     )
 
     snapshot = instance.to_bytes()
-    FQAOAConverter(instance, num_fermions=1)
+    FQAOAConverter(instance)
 
     assert instance.to_bytes() == snapshot, (
         "FQAOAConverter mutated the caller's ommx.v1.Instance; "
@@ -343,28 +333,22 @@ def test_fqaoa_decode_to_ommx_sampleset_round_trip(seed: int):
     from qamomile.optimization.fqaoa import FQAOAConverter
 
     rng = np.random.default_rng(seed)
-    n_sites = 2
-    n_orbitals = 2
-    dvs = []
-    for site in range(n_sites):
-        for orb in range(n_orbitals):
-            dvs.append(
-                ommx.v1.DecisionVariable.binary(
-                    site * n_orbitals + orb,
-                    name="x",
-                    subscripts=[site, orb],
-                )
-            )
-    weights = rng.uniform(-1.0, 1.0, len(dvs))
+    n = 2
+    upper = 2
+    dvs = [
+        ommx.v1.DecisionVariable.integer(i, lower=0, upper=upper, name=f"z{i}")
+        for i in range(n)
+    ]
+    weights = rng.uniform(-1.0, 1.0, n)
     obj = sum(float(w) * dv for w, dv in zip(weights, dvs))
     instance = ommx.v1.Instance.from_components(
         decision_variables=dvs,
         objective=obj,
-        constraints=[],
+        constraints=[(sum(dvs) == upper).set_id(0).add_name("sum")],
         sense=ommx.v1.Instance.MINIMIZE,
     )
 
-    converter = FQAOAConverter(instance, num_fermions=1)
+    converter = FQAOAConverter(instance)
     transpiler = QiskitTranspiler()
     executable = converter.transpile(transpiler, p=1)
     bindings = {
@@ -378,17 +362,22 @@ def test_fqaoa_decode_to_ommx_sampleset_round_trip(seed: int):
     sample_set = converter.decode(result)
     assert isinstance(sample_set, ommx.v1.SampleSet)
 
-    # Every OMMX-reported objective must match a manual evaluation on the
-    # decoded bitstring — confirms FQAOA's stored self.instance is the
-    # right one for evaluate_samples and that DV indices line up.
+    # Every OMMX-reported objective must match a manual evaluation of the
+    # encoded objective on the decoded bitstring — confirms FQAOA's stored
+    # self.instance (the unary-encoded binary instance) is the one used by
+    # evaluate_samples and that the encoded DV indices line up.
+    n_binary = converter.num_qubits
+    encoded_obj = converter.instance.objective
     summary = sample_set.summary
     for sid in sample_set.sample_ids:
         sol = sample_set.get(sid)
-        bits = [
-            int(round(sol.decision_variables_df.loc[i, "value"]))
-            for i in range(len(dvs))
-        ]
-        manual = sum(float(w) * b for w, b in zip(weights, bits))
+        state = ommx.v1.State(
+            {
+                i: float(round(sol.decision_variables_df.loc[i, "value"]))
+                for i in range(n_binary)
+            }
+        )
+        manual = encoded_obj.evaluate(state)
         assert summary.loc[sid, "objective"] == pytest.approx(manual, abs=1e-9)
 
 

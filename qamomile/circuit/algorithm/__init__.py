@@ -15,6 +15,9 @@ from .fqaoa import (
     givens_rotation,
     givens_rotations,
     hopping_gate,
+    hubo_cost_layer,
+    hubo_fqaoa_layers,
+    hubo_fqaoa_state,
     initial_occupations,
     mixer_layer,
 )
@@ -60,6 +63,9 @@ __all__ = [
     "cost_layer",
     "fqaoa_layers",
     "fqaoa_state",
+    "hubo_cost_layer",
+    "hubo_fqaoa_layers",
+    "hubo_fqaoa_state",
     # State preparation
     "computational_basis_state",
     "MottonenAmplitudeEncoding",

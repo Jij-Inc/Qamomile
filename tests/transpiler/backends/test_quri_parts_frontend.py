@@ -5540,7 +5540,7 @@ class TestFQAOAIntegration:
             q = qmc.qubit_array(2, "q")
             for i in qmc.range(2):
                 q[i] = qmc.h(q[i])
-            q = cost_layer(q, gamma, linear_, quad_)
+            q = cost_layer(quad_, linear_, q, gamma)
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(
@@ -5613,7 +5613,7 @@ class TestFQAOAIntegration:
             quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = cost_layer(q, gamma, linear, quad)
+            q = cost_layer(quad, linear, q, gamma)
             return qmc.measure(q)
 
         linear = {0: 0.5, 1: -0.3}
@@ -5686,8 +5686,8 @@ class TestFQAOAIntegration:
         ) -> qmc.Vector[qmc.Bit]:
             q = fqaoa_state(
                 p,
-                linear,
                 quad,
+                linear,
                 n,
                 n_f,
                 givens_ij,
