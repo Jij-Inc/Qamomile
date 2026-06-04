@@ -57,6 +57,10 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     resolve_condition_address,
     resolve_if_condition,
 )
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _bind_block_inputs,
+    _bind_quantum_input_shapes,
+)
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
 )
@@ -628,6 +632,46 @@ def _validate_controlled_helper_unitary_ops(
                 _validate_controlled_helper_unitary_ops(nested, bindings)
 
 
+def _validate_adjoint_helper_ops(
+    operations: Sequence[Operation],
+    bindings: dict[str, Any],
+) -> None:
+    """Validate that a CUDA-Q adjoint helper can be emitted safely.
+
+    Args:
+        operations (Sequence[Operation]): Operations in the helper block
+            or in a nested control-flow body.
+        bindings (dict[str, Any]): Emit-time bindings used to decide
+            whether ``if`` conditions are compile-time constants.
+
+    Raises:
+        EmitError: If the adjoint target contains non-unitary operations or
+            nested controlled-kernel synthesis that CUDA-Q 0.14.x aborts on
+            when wrapped in ``cudaq.adjoint``.
+    """
+    _validate_controlled_helper_unitary_ops(operations, bindings)
+    for op in operations:
+        if isinstance(op, ControlledUOperation):
+            raise EmitError(
+                "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "
+                "controlled-kernel synthesis on CUDA-Q 0.14.x; falling back "
+                "to Qamomile inverse decomposition.",
+                operation="CompositeGateOperation",
+            )
+        if isinstance(op, IfOperation):
+            resolved_condition = resolve_if_condition(op.condition, bindings)
+            if resolved_condition is None:
+                continue
+            selected_ops = (
+                op.true_operations if resolved_condition else op.false_operations
+            )
+            _validate_adjoint_helper_ops(selected_ops, bindings)
+            continue
+        if isinstance(op, HasNestedOps):
+            for nested in op.nested_op_lists():
+                _validate_adjoint_helper_ops(nested, bindings)
+
+
 def _build_helper_qubit_map(
     block_value: Any,
     target_slots: list[int],
@@ -915,6 +959,147 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 Defaults to None.
         """
         return None
+
+    def _emit_custom_composite(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: Any,
+        impl: Any,
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit custom composites, preferring CUDA-Q adjoint for inverse blocks.
+
+        Args:
+            circuit (CudaqKernelArtifact): CUDA-Q kernel artifact being
+                emitted.
+            op (Any): Composite gate operation.
+            impl (Any): Qamomile fallback implementation block.
+            qubit_indices (list[int]): Physical target qubit indices.
+            bindings (dict[str, Any]): Active emit bindings.
+        """
+        inverse_source_block = getattr(op, "inverse_source_block", None)
+        if inverse_source_block is not None:
+            try:
+                self._emit_adjoint_helper(
+                    circuit,
+                    inverse_source_block,
+                    getattr(op, "operands", None),
+                    qubit_indices,
+                    bindings,
+                )
+                return
+            except EmitError:
+                pass
+
+        super()._emit_custom_composite(circuit, op, impl, qubit_indices, bindings)
+
+    def _emit_adjoint_helper(
+        self,
+        circuit: CudaqKernelArtifact,
+        block_value: Any,
+        input_operands: list[Any] | None,
+        target_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit ``cudaq.adjoint`` for a nested source block.
+
+        Args:
+            circuit (CudaqKernelArtifact): CUDA-Q kernel artifact being
+                emitted.
+            block_value (Any): Source block whose inverse should be
+                emitted by CUDA-Q.
+            input_operands (list[Any] | None): Call-site operands used to
+                bind block inputs. Defaults to None.
+            target_indices (list[int]): Physical target qubit indices for
+                the adjoint call.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If the block cannot be emitted as a CUDA-Q pure
+                device helper.
+        """
+        if not hasattr(block_value, "operations"):
+            raise EmitError(
+                "Cannot emit CUDA-Q adjoint: block has no operations.",
+                operation="CompositeGateOperation",
+            )
+
+        _validate_adjoint_helper_ops(block_value.operations, bindings)
+
+        local_qubit_map: QubitMap = {}
+        local_bindings = _bind_block_inputs(
+            self,
+            block_value,
+            input_operands,
+            len(target_indices),
+            bindings,
+            local_qubit_map,
+        )
+        quantum_operands = self._quantum_input_operands(block_value, input_operands)
+        _bind_quantum_input_shapes(
+            self,
+            block_value,
+            quantum_operands,
+            bindings,
+            local_bindings,
+        )
+
+        helper_targets = list(range(len(target_indices)))
+        helper_qubit_map = _build_helper_qubit_map(
+            block_value,
+            helper_targets,
+            self,
+            local_bindings,
+        )
+        emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
+
+        def emit_body() -> None:
+            """Emit the adjoint helper body into the helper source."""
+            self._emit_operations(
+                circuit,
+                block_value.operations,
+                helper_qubit_map,
+                {},
+                local_bindings,
+                force_unroll=True,
+            )
+
+        helper_name, uses_thetas = emitter.build_adjoint_helper(
+            len(target_indices),
+            emit_body,
+        )
+        emitter.emit_adjoint_kernel_call(
+            circuit,
+            helper_name,
+            target_indices,
+            uses_thetas,
+        )
+
+    def _quantum_input_operands(
+        self,
+        block_value: Any,
+        input_operands: list[Any] | None,
+    ) -> list[Any]:
+        """Return call-site operands corresponding to quantum inputs.
+
+        Args:
+            block_value (Any): Block whose ``input_values`` define the
+                formal quantum/classical input split.
+            input_operands (list[Any] | None): Call-site operands. Defaults
+                to None.
+
+        Returns:
+            list[Any]: Operands paired with formal quantum inputs.
+        """
+        if input_operands is None or not hasattr(block_value, "input_values"):
+            return []
+        quantum_input_count = sum(
+            1
+            for input_value in block_value.input_values
+            if hasattr(input_value, "type") and input_value.type.is_quantum()
+        )
+        return list(input_operands[:quantum_input_count])
 
     def _emit_controlled_fallback(
         self,

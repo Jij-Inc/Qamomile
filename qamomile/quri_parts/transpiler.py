@@ -6,7 +6,9 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence, cast
+
+import numpy as np
 
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperation
@@ -17,6 +19,10 @@ from qamomile.circuit.transpiler.executable import (
     QuantumExecutor,
 )
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _bind_block_inputs,
+    _populate_input_qubit_map,
+)
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -34,14 +40,12 @@ if TYPE_CHECKING:
 
 
 def _ensure_quri_controlled_block_gate_by_gate_supported(block_value: Any) -> None:
-    """Reject controlled block bodies QURI Parts cannot safely decompose.
+    """Reject controlled block bodies QURI Parts cannot decompose gate-by-gate.
 
-    QURI Parts has no backend gate object for controlled sub-circuits and
-    this backend intentionally does not fall back to dense unitary
-    synthesis. The shared gate-by-gate fallback can only emit primitive
-    gates and statically resolved ``ForOperation`` bodies. Everything else
-    must fail before emission so unsupported operations are not silently
-    dropped.
+    QURI Parts has no backend gate object for controlled sub-circuits.
+    The shared gate-by-gate fallback can only emit primitive gates and
+    statically resolved ``ForOperation`` bodies. Everything else must fail
+    before emission so unsupported operations are not silently dropped.
 
     Args:
         block_value (Any): Controlled-U block whose body will be emitted
@@ -170,6 +174,7 @@ class QuriPartsEmitPass(
         block_value: Any,
         num_qubits: int,
         bindings: dict[str, Any],
+        input_operands: list[Any] | None = None,
     ) -> None:
         """Return no native gate object for QURI Parts controlled blocks.
 
@@ -185,12 +190,14 @@ class QuriPartsEmitPass(
             block_value (Any): Ignored inner block value.
             num_qubits (int): Ignored target qubit count.
             bindings (dict[str, Any]): Ignored local bindings.
+            input_operands (list[Any] | None): Ignored call-site
+                operands. Defaults to None.
 
         Returns:
             None: Always signals that the backend-specific fallback must
             handle the controlled block.
         """
-        del block_value, num_qubits, bindings
+        del block_value, num_qubits, bindings, input_operands
         return None
 
     def _emit_controlled_fallback(
@@ -203,15 +210,15 @@ class QuriPartsEmitPass(
         power: int,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit controlled-U fallback through gate-by-gate decomposition.
+        """Emit controlled-U fallback through QURI Parts-specific paths.
 
         QURI Parts does not expose a custom-gate object that can be
-        returned by ``circuit_to_gate`` and then controlled.  Avoid
-        replacing that missing primitive with a dense matrix fallback:
-        full-unitary extraction scales exponentially and can hide shapes
-        that the backend cannot route gate-by-gate.  Instead, delegate to
-        the shared controlled decomposition and surface its ``EmitError``
-        if the block shape is unsupported.
+        returned by ``circuit_to_gate`` and then controlled.  Single-target
+        blocks use the shared primitive gate-by-gate decomposition.  A
+        single-control, multi-target block cannot be routed by that shared
+        path, so this backend materializes the small local block as a dense
+        unitary, wraps it with one control, and appends it as a
+        ``UnitaryMatrix`` gate.
 
         Args:
             circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
@@ -226,9 +233,19 @@ class QuriPartsEmitPass(
 
         Raises:
             EmitError: If safe gate-by-gate controlled decomposition
-                cannot emit the block.
+                cannot emit the block and dense fallback is unavailable.
         """
         if not target_indices:
+            return
+        if len(target_indices) > 1 and self._try_emit_controlled_dense_matrix(
+            circuit,
+            block_value,
+            num_controls,
+            control_indices,
+            target_indices,
+            power,
+            bindings,
+        ):
             return
         _ensure_quri_controlled_block_gate_by_gate_supported(block_value)
         super()._emit_controlled_fallback(
@@ -241,6 +258,459 @@ class QuriPartsEmitPass(
             bindings,
         )
 
+    def _try_emit_controlled_dense_matrix(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        block_value: Any,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+    ) -> bool:
+        """Try emitting a single-control block as a dense matrix gate.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit.
+            block_value (Any): Controlled-U body to materialize.
+            num_controls (int): Number of control qubits requested by the
+                IR operation.
+            control_indices (list[int]): Parent-circuit control qubits.
+            target_indices (list[int]): Parent-circuit target qubits.
+            power (int): Positive power applied to the body before adding
+                the control.
+            bindings (dict[str, Any]): Local block bindings.
+
+        Returns:
+            bool: True if a dense controlled matrix was appended. False if
+                the caller should fall back to the shared gate-by-gate path.
+        """
+        if num_controls != 1 or len(control_indices) != 1:
+            return False
+        if not hasattr(block_value, "operations"):
+            return False
+
+        emitter = cast(QuriPartsGateEmitter, self._emitter)
+        saved_circuit = emitter._current_circuit
+        saved_param_map = dict(emitter._param_map)
+        try:
+            local_qubit_map, local_clbit_map, local_bindings = (
+                self._prepare_local_block_maps(
+                    block_value,
+                    None,
+                    len(target_indices),
+                    bindings,
+                )
+            )
+            local_qubit_map, local_clbit_map = self._allocator.allocate(
+                block_value.operations,
+                local_bindings,
+                initial_qubit_map=local_qubit_map,
+                initial_clbit_map=local_clbit_map,
+            )
+            qubit_count = (
+                max(local_qubit_map.values()) + 1
+                if local_qubit_map
+                else len(target_indices)
+            )
+            if qubit_count != len(target_indices):
+                return False
+
+            sub_circuit = self._emitter.create_circuit(qubit_count, 0)
+            self._emit_operations(
+                sub_circuit,
+                block_value.operations,
+                local_qubit_map,
+                local_clbit_map,
+                local_bindings,
+                force_unroll=True,
+            )
+            unitary = self._circuit_unitary(sub_circuit)
+            if power > 1:
+                unitary = np.linalg.matrix_power(unitary, power)
+            controlled = self._controlled_unitary_matrix(unitary, num_controls)
+
+            from quri_parts.circuit import (
+                UnitaryMatrix,  # type: ignore[import-not-found]
+            )
+
+            circuit.add_gate(
+                UnitaryMatrix(
+                    [*control_indices, *target_indices],
+                    controlled.tolist(),
+                )
+            )
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            IndexError,
+            RuntimeError,
+            ImportError,
+        ):
+            return False
+        finally:
+            emitter._current_circuit = saved_circuit
+            emitter._param_map = saved_param_map
+
+        return True
+
+    def _circuit_unitary(self, circuit: Any) -> np.ndarray:
+        """Materialize a non-parametric QURI Parts circuit as a unitary.
+
+        Args:
+            circuit (Any): QURI Parts circuit whose gates contain no
+                unresolved runtime parameters.
+
+        Returns:
+            np.ndarray: Dense unitary matrix in QURI Parts' local
+                little-endian basis order.
+
+        Raises:
+            ImportError: If quri-parts-qulacs or qulacs is unavailable.
+            RuntimeError: If QURI Parts or qulacs rejects the circuit.
+        """
+        import qulacs  # type: ignore[import-not-found]
+
+        from quri_parts.qulacs.circuit import (  # type: ignore[import-not-found]
+            convert_circuit,
+        )
+
+        converted = convert_circuit(circuit)
+        dimension = 2**circuit.qubit_count
+        unitary = np.empty((dimension, dimension), dtype=np.complex128)
+        for basis in range(dimension):
+            state = qulacs.QuantumState(circuit.qubit_count)
+            state.set_computational_basis(basis)
+            converted.update_quantum_state(state)
+            unitary[:, basis] = state.get_vector()
+        return unitary
+
+    def _controlled_unitary_matrix(
+        self,
+        unitary: np.ndarray,
+        num_controls: int,
+    ) -> np.ndarray:
+        """Build a dense controlled-unitary matrix.
+
+        Args:
+            unitary (np.ndarray): Target-only unitary matrix in little-endian
+                basis order.
+            num_controls (int): Number of leading local control qubits.
+
+        Returns:
+            np.ndarray: Matrix that applies ``unitary`` when all controls
+                are one and identity otherwise.
+        """
+        target_dimension = unitary.shape[0]
+        control_dimension = 2**num_controls
+        controlled_dimension = control_dimension * target_dimension
+        controlled = np.eye(controlled_dimension, dtype=np.complex128)
+        active_control = control_dimension - 1
+
+        for target_in in range(target_dimension):
+            in_index = target_in * control_dimension + active_control
+            controlled[:, in_index] = 0.0
+            for target_out in range(target_dimension):
+                out_index = target_out * control_dimension + active_control
+                controlled[out_index, in_index] = unitary[target_out, target_in]
+        return controlled
+
+    def _emit_custom_composite(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        op: Any,
+        impl: Any,
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a custom composite operation into a QURI Parts circuit.
+
+        QURI Parts has no reusable gate object with call-site qubit
+        remapping, so normal custom composites are emitted inline. For
+        ``inverse(qkernel)`` composites, a non-parametric source block can
+        still use QURI Parts' own ``inverse_circuit`` helper before being
+        remapped and appended to the parent circuit.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit.
+            op (Any): Composite operation being emitted.
+            impl (Any): Qamomile fallback implementation block.
+            qubit_indices (list[int]): Parent-circuit qubit indices for
+                the composite operation.
+            bindings (dict[str, Any]): Active compile-time and runtime
+                parameter bindings.
+        """
+        inverse_source_block = getattr(op, "inverse_source_block", None)
+        if inverse_source_block is not None and self._try_emit_backend_inverse(
+            circuit,
+            inverse_source_block,
+            getattr(op, "operands", None),
+            qubit_indices,
+            bindings,
+        ):
+            return
+
+        self._emit_block_inline(
+            circuit,
+            impl,
+            getattr(op, "operands", None),
+            qubit_indices,
+            bindings,
+        )
+
+    def _try_emit_backend_inverse(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        block_value: Any,
+        input_operands: list[Any] | None,
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> bool:
+        """Try emitting ``block_value`` via QURI Parts' circuit inverse.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit to append into on success.
+            block_value (Any): Source block whose inverse should be emitted.
+            input_operands (list[Any] | None): Call-site operands used to
+                bind the source block inputs.
+            qubit_indices (list[int]): Parent-circuit qubits occupied by
+                the source block.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Returns:
+            bool: True when backend-native inversion was emitted, False
+                when the caller should fall back to the Qamomile inverse
+                implementation block.
+        """
+        if not hasattr(block_value, "operations"):
+            return False
+
+        try:
+            local_qubit_map, local_clbit_map, local_bindings = (
+                self._prepare_local_block_maps(
+                    block_value,
+                    input_operands,
+                    len(qubit_indices),
+                    bindings,
+                )
+            )
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            IndexError,
+            RuntimeError,
+        ):
+            return False
+
+        emitter = cast(QuriPartsGateEmitter, self._emitter)
+        saved_circuit = emitter._current_circuit
+        saved_param_map = dict(emitter._param_map)
+        try:
+            local_qubit_map, local_clbit_map = self._allocator.allocate(
+                block_value.operations,
+                local_bindings,
+                initial_qubit_map=local_qubit_map,
+                initial_clbit_map=local_clbit_map,
+            )
+            qubit_count = (
+                max(local_qubit_map.values()) + 1
+                if local_qubit_map
+                else len(qubit_indices)
+            )
+            if qubit_count > len(qubit_indices):
+                return False
+
+            sub_circuit = self._emitter.create_circuit(qubit_count, 0)
+            self._emit_operations(
+                sub_circuit,
+                block_value.operations,
+                local_qubit_map,
+                local_clbit_map,
+                local_bindings,
+                force_unroll=True,
+            )
+            inverse_circuit = self._emitter.gate_inverse(sub_circuit)
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            IndexError,
+            RuntimeError,
+        ):
+            return False
+        finally:
+            emitter._current_circuit = saved_circuit
+            emitter._param_map = saved_param_map
+
+        if inverse_circuit is None:
+            return False
+
+        try:
+            self._append_remapped_circuit(circuit, inverse_circuit, qubit_indices)
+        except (AttributeError, TypeError, ValueError, IndexError, RuntimeError):
+            return False
+        return True
+
+    def _emit_block_inline(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        block_value: Any,
+        input_operands: list[Any] | None,
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a nested implementation block directly into ``circuit``.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit.
+            block_value (Any): Implementation block to emit.
+            input_operands (list[Any] | None): Call-site operands used to
+                bind the block inputs.
+            qubit_indices (list[int]): Parent-circuit qubits occupied by
+                the nested block.
+            bindings (dict[str, Any]): Active emit bindings.
+        """
+        if not hasattr(block_value, "operations"):
+            return
+
+        local_qubit_map, local_clbit_map, local_bindings = (
+            self._prepare_local_block_maps(
+                block_value,
+                input_operands,
+                len(qubit_indices),
+                bindings,
+                parent_qubits=qubit_indices,
+            )
+        )
+        self._emit_operations(
+            circuit,
+            block_value.operations,
+            local_qubit_map,
+            local_clbit_map,
+            local_bindings,
+            force_unroll=True,
+        )
+
+    def _prepare_local_block_maps(
+        self,
+        block_value: Any,
+        input_operands: list[Any] | None,
+        num_qubits: int,
+        bindings: dict[str, Any],
+        parent_qubits: list[int] | None = None,
+    ) -> tuple[dict[Any, int], dict[Any, int], dict[str, Any]]:
+        """Prepare local value maps for nested QURI Parts block emission.
+
+        Args:
+            block_value (Any): Nested block whose inputs should be mapped.
+            input_operands (list[Any] | None): Call-site operands used to
+                bind quantum and classical block inputs.
+            num_qubits (int): Local qubit width of the nested operation.
+            bindings (dict[str, Any]): Active emit bindings.
+            parent_qubits (list[int] | None): Optional parent-circuit
+                qubit indices used to remap local addresses. Defaults to
+                None, leaving addresses in local ``0..num_qubits-1`` form.
+
+        Returns:
+            tuple[dict[Any, int], dict[Any, int], dict[str, Any]]: Local
+                qubit map, local classical-bit map, and nested bindings.
+        """
+        local_qubit_map: dict[Any, int] = {}
+        local_clbit_map: dict[Any, int] = {}
+        local_bindings = _bind_block_inputs(
+            self,
+            block_value,
+            input_operands,
+            num_qubits,
+            bindings,
+            local_qubit_map,
+        )
+        if hasattr(block_value, "input_values"):
+            _populate_input_qubit_map(
+                self,
+                block_value.input_values,
+                num_qubits,
+                local_bindings,
+                local_qubit_map,
+            )
+
+        if parent_qubits is not None:
+            local_qubit_map = {
+                address: parent_qubits[local_index]
+                for address, local_index in local_qubit_map.items()
+            }
+
+        return local_qubit_map, local_clbit_map, local_bindings
+
+    def _append_remapped_circuit(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        source_circuit: Any,
+        qubit_indices: list[int],
+    ) -> None:
+        """Append ``source_circuit`` gates after remapping their qubits.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit.
+            source_circuit (Any): Non-parametric QURI Parts circuit whose
+                gates should be appended.
+            qubit_indices (list[int]): Parent-circuit qubits corresponding
+                to local qubit indices in ``source_circuit``.
+
+        Raises:
+            AttributeError: If ``source_circuit`` does not expose gates.
+            IndexError: If a gate references a local qubit outside
+                ``qubit_indices``.
+            TypeError: If QURI Parts rejects a rebuilt gate.
+            ValueError: If QURI Parts rejects a rebuilt gate.
+        """
+        remapped_gates = [
+            self._remap_gate(gate, qubit_indices) for gate in source_circuit.gates
+        ]
+        for gate in remapped_gates:
+            circuit.add_gate(gate)
+
+    def _remap_gate(self, gate: Any, qubit_indices: list[int]) -> Any:
+        """Rebuild a QURI Parts gate with parent-circuit qubit indices.
+
+        Args:
+            gate (Any): QURI Parts ``QuantumGate`` from a local circuit.
+            qubit_indices (list[int]): Parent-circuit qubits corresponding
+                to local qubit indices.
+
+        Returns:
+            Any: Rebuilt QURI Parts ``QuantumGate`` with remapped target and
+                control indices.
+
+        Raises:
+            IndexError: If ``gate`` references a local qubit outside
+                ``qubit_indices``.
+            TypeError: If QURI Parts rejects the rebuilt gate.
+            ValueError: If QURI Parts rejects the rebuilt gate.
+        """
+        from quri_parts.circuit import QuantumGate  # type: ignore[import-not-found]
+
+        return QuantumGate(
+            name=gate.name,
+            target_indices=tuple(qubit_indices[index] for index in gate.target_indices),
+            control_indices=tuple(
+                qubit_indices[index] for index in gate.control_indices
+            ),
+            classical_indices=gate.classical_indices,
+            params=gate.params,
+            pauli_ids=gate.pauli_ids,
+            unitary_matrix=gate.unitary_matrix,
+        )
 
 class QuriPartsExecutor(
     QuantumExecutor["qp_c.LinearMappedUnboundParametricQuantumCircuit"]

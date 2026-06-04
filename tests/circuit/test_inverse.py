@@ -1244,7 +1244,13 @@ def test_inverse_controlled_concrete_operation() -> None:
     assert isinstance(ctrl_ops[0], ConcreteControlledU)
     assert ctrl_ops[0].block is not None
     assert ctrl_ops[0].block.name == "_phase_layer_inverse"
-    assert any(isinstance(op, BinOp) for op in ctrl_ops[0].block.operations)
+    inverse_gates = [
+        op for op in ctrl_ops[0].block.operations if isinstance(op, GateOperation)
+    ]
+    assert len(inverse_gates) == 1
+    assert inverse_gates[0].gate_type is GateOperationType.RZ
+    assert inverse_gates[0].theta.is_constant()
+    assert inverse_gates[0].theta.get_const() == pytest.approx(-0.25)
 
 
 def test_inverse_controlled_concrete_roundtrip_statevector(qiskit_transpiler) -> None:
@@ -1446,6 +1452,80 @@ def test_inverse_qkernel_prefers_qiskit_backend_inverse(qiskit_transpiler) -> No
 
     assert len(quantum_ops) == 1
     assert quantum_ops[0].name.endswith("_dg")
+
+
+def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None:
+    """inverse(qkernel) uses QURI Parts inverse_circuit when available."""
+    pytest.importorskip("quri_parts")
+    pytest.importorskip("quri_parts.qulacs")
+
+    import quri_parts.circuit as qp_c
+
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    original_inverse_circuit = qp_c.inverse_circuit
+    inverse_calls = []
+
+    def inverse_circuit_spy(circuit):
+        """Record backend inverse calls while preserving QURI Parts behavior."""
+        inverse_calls.append(circuit)
+        return original_inverse_circuit(circuit)
+
+    monkeypatch.setattr(qp_c, "inverse_circuit", inverse_circuit_spy)
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs[1] = _inverse_layer(qs[1], 0.37)
+        qs[1] = qmc.inverse(_inverse_layer)(qs[1], 0.37)
+        return qmc.measure(qs)
+
+    transpiler = QuriPartsTranspiler()
+    executable = transpiler.transpile(circuit)
+    gates = executable.compiled_quantum[0].circuit.gates
+
+    assert len(inverse_calls) == 1
+    assert [(gate.name, gate.target_indices) for gate in gates] == [
+        ("H", (1,)),
+        ("RZ", (1,)),
+        ("RZ", (1,)),
+        ("H", (1,)),
+    ]
+
+
+def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
+    """inverse(qkernel) uses CUDA-Q cudaq.adjoint when available."""
+    cudaq = pytest.importorskip("cudaq")
+
+    from qamomile.cudaq import CudaqTranspiler
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs[1] = _inverse_layer(qs[1], rotation_angle)
+        qs[1] = qmc.inverse(_inverse_layer)(qs[1], rotation_angle)
+        return qmc.measure(qs)
+
+    transpiler = CudaqTranspiler()
+    executable = transpiler.transpile(circuit, parameters=["rotation_angle"])
+    quantum_step = executable.compiled_quantum[0]
+    cudaq_circuit = quantum_step.circuit
+
+    assert "def _qamomile_adjoint_0(t0: cudaq.qubit, thetas: list[float]):" in (
+        cudaq_circuit.source
+    )
+    assert "cudaq.adjoint(_qamomile_adjoint_0, q[1], thetas)" in cudaq_circuit.source
+
+    bound = transpiler.executor().bind_parameters(
+        cudaq_circuit,
+        {"rotation_angle": 0.37},
+        quantum_step.parameter_metadata,
+    )
+    statevector = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
+    expected = np.zeros(4, dtype=complex)
+    expected[0] = 1.0
+
+    assert np.allclose(statevector, expected, atol=1e-8)
 
 
 def test_inverse_nested_qkernel_call_transpiles_to_identity(qiskit_transpiler) -> None:

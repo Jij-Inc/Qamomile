@@ -658,15 +658,32 @@ class QuriPartsGateEmitter:
         return None
 
     def gate_inverse(self, gate: Any) -> Any:
-        """Return None because QURI Parts lacks reusable inverse gates.
+        """Return the inverse of a non-parametric QURI Parts circuit.
 
         Args:
-            gate (Any): Ignored reusable gate placeholder.
+            gate (Any): Candidate QURI Parts circuit to invert. Parametric
+                circuits are accepted only when they contain no unresolved
+                parametric gates.
 
         Returns:
-            Any: Always None.
+            Any: Inverted QURI Parts circuit when ``inverse_circuit`` can
+                handle ``gate``; otherwise None so callers can fall back to
+                Qamomile-level decomposition.
         """
-        return None
+        if gate is None:
+            return None
+
+        try:
+            import quri_parts.circuit as qp_c  # type: ignore[import-not-found]
+
+            return qp_c.inverse_circuit(gate)
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+        ):
+            return None
 
     # Control flow support - not supported by QURI Parts
     def supports_for_loop(self) -> bool:
