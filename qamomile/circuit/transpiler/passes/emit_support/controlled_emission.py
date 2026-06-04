@@ -14,7 +14,6 @@ overrides (e.g. CudaqEmitPass) are respected.
 from __future__ import annotations
 
 import math
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
@@ -36,45 +35,6 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
 
 if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
-
-
-def _preserve_emitter_circuit_context(emitter: Any) -> Any:
-    """Preserve backend emitter circuit state when the emitter supports it.
-
-    Args:
-        emitter (Any): Backend gate emitter used by the active emit pass.
-            Emitters with circuit-bound parameter state can expose
-            ``preserve_circuit_context()`` to save and restore that state
-            while generic code probes sub-circuit construction.
-
-    Returns:
-        Any: A context manager. It restores emitter state on exit when the
-            emitter provides ``preserve_circuit_context()``, otherwise it is
-            a no-op context manager.
-    """
-    preserve = getattr(emitter, "preserve_circuit_context", None)
-    if callable(preserve):
-        return preserve()
-    return nullcontext()
-
-
-def _restore_parameter_cache(
-    emit_pass: "StandardEmitPass",
-    parameter_map: dict[str, Any],
-    parameter_sources: dict[str, str],
-) -> None:
-    """Restore backend parameter cache after failed sub-circuit probing.
-
-    Args:
-        emit_pass (StandardEmitPass): Emit pass whose parameter metadata
-            cache should be restored.
-        parameter_map (dict[str, Any]): Snapshot of backend parameters keyed
-            by parameter name.
-        parameter_sources (dict[str, str]): Snapshot of IR source refs keyed
-            by parameter name.
-    """
-    emit_pass._parameter_map = parameter_map
-    emit_pass._parameter_sources = parameter_sources
 
 
 def emit_controlled_powers(
@@ -1081,9 +1041,6 @@ def blockvalue_to_gate(
     if not hasattr(block_value, "operations"):
         return None
 
-    saved_parameter_map = emit_pass._parameter_map.copy()
-    saved_parameter_sources = emit_pass._parameter_sources.copy()
-
     try:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
@@ -1107,32 +1064,22 @@ def blockvalue_to_gate(
         qubit_count = (
             max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
         )
-        with _preserve_emitter_circuit_context(emit_pass._emitter):
-            sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
+        sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
 
-            emit_pass._emit_operations(
-                sub_circuit,
-                block_value.operations,
-                local_qubit_map,
-                local_clbit_map,
-                bindings,
-                force_unroll=True,
-            )
+        emit_pass._emit_operations(
+            sub_circuit,
+            block_value.operations,
+            local_qubit_map,
+            local_clbit_map,
+            bindings,
+            force_unroll=True,
+        )
 
-            gate = emit_pass._emitter.circuit_to_gate(sub_circuit, "U")
-
-        if gate is None:
-            _restore_parameter_cache(
-                emit_pass, saved_parameter_map, saved_parameter_sources
-            )
-        return gate
+        return emit_pass._emitter.circuit_to_gate(sub_circuit, "U")
 
     except (AttributeError, TypeError, ValueError, KeyError, IndexError, RuntimeError):
         import logging
 
-        _restore_parameter_cache(
-            emit_pass, saved_parameter_map, saved_parameter_sources
-        )
         logging.getLogger(__name__).debug(
             "blockvalue_to_gate: falling back to gate-by-gate decomposition",
             exc_info=True,

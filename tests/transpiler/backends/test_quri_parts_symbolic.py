@@ -232,7 +232,7 @@ class TestSymbolicEndToEnd:
         # control-on branch. RZZ is diagonal and commutes with Z(1), so
         # <Z1> = (1 + cos(theta)) / 2.
         expected = (1.0 + np.cos(theta)) / 2.0
-        assert np.isclose(expval, expected, atol=1e-8)
+        assert np.isclose(expval, expected, atol=1e-8, rtol=0.0)
 
     def test_rx_with_param_times_const_in_items_loop(self):
         """Inside qmc.items, rx(q, theta * c) survives emission and binds."""

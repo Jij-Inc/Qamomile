@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
@@ -126,26 +124,6 @@ class QuriPartsGateEmitter:
         self._current_circuit: "LinearMappedUnboundParametricQuantumCircuit | None" = (
             None
         )
-
-    @contextmanager
-    def preserve_circuit_context(self) -> Iterator[None]:
-        """Preserve the active circuit and parameter map during nested emission.
-
-        Generic controlled-gate emission probes a wrapped block by creating a
-        sub-circuit. QURI Parts parameters belong to the circuit that creates
-        them, so the probe must not leave ``_current_circuit`` or
-        ``_param_map`` pointing at the temporary sub-circuit after fallback.
-
-        Yields:
-            None: Control while nested sub-circuit construction runs.
-        """
-        saved_circuit = self._current_circuit
-        saved_param_map = self._param_map.copy()
-        try:
-            yield
-        finally:
-            self._current_circuit = saved_circuit
-            self._param_map = saved_param_map
 
     def create_circuit(
         self, num_qubits: int, num_clbits: int
