@@ -51,7 +51,7 @@ TUTORIAL_PATTERNS = [
 # and should be skipped when those dependencies are not installed.
 OPTIONAL_SKIP_MODULES: dict[str, tuple[str, ...]] = {
     "vqe_for_hydrogen": ("openfermion",),
-    "cudaq_support": ("cudaq"),
+    "cudaq_support": ("cudaq",),
     "qsci": ("quri_parts",),
     "quri_parts_support": ("quri_parts.qulacs",),
     "hybrid_qnn": ("torch",),
