@@ -5551,11 +5551,12 @@ class TestFQAOAIntegration:
         assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-10)
 
     def test_givens_rotation_gate_count(self):
-        """Givens rotation contains the two explicit outer CNOT gates.
+        """Givens rotation contains explicit and decomposed CNOT gates.
 
         Structure: CX + controlled-RY + CX.
-        QuriParts now emits controlled-RY without decomposing it into
-        additional CNOT gates, leaving only the two explicit outer CNOTs.
+        QURI Parts emits controlled-RY through its gate decomposition,
+        so the circuit contains the two explicit outer CNOTs plus two
+        CNOTs from the CRY decomposition.
         """
 
         @qmc.qkernel
@@ -5567,7 +5568,7 @@ class TestFQAOAIntegration:
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": 2, "theta": 0.5})
         gates = _get_gates(circ)
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
-        assert len(cx_gates) == 2
+        assert len(cx_gates) == 4
         # All CNOT gates operate on qubits 0 and 1
         for g in cx_gates:
             assert set(g.target_indices + g.control_indices) == {0, 1}

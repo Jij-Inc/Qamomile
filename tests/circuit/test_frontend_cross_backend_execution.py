@@ -744,6 +744,10 @@ class FrontendExecutionCase:
     expected_expval: float
     sample_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
     run_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
+    unsupported_backends: frozenset[str] = dataclasses.field(default_factory=frozenset)
+
+
+QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED = frozenset({"quri_parts"})
 
 
 FRONTEND_EXECUTION_CASES = [
@@ -800,6 +804,7 @@ FRONTEND_EXECUTION_CASES = [
         run_bindings={
             "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3) + qm_o.Z(4) + qm_o.Z(5)
         },
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-power",
@@ -830,6 +835,7 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)},
         expected_expval=0.0,
         run_bindings={"obs": qm_o.Z(1) + qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-stdlib-composite",
@@ -840,6 +846,7 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)},
         expected_expval=0.0,
         run_bindings={"obs": qm_o.Z(1) + qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-custom-composite",
@@ -850,6 +857,7 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 0, 0), (1, 1, 1)},
         expected_expval=1.0,
         run_bindings={"obs": qm_o.Z(1) * qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-parameterized-composite",
@@ -871,6 +879,7 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 1, 0), (1, 1, 1)},
         expected_expval=0.0,
         run_bindings={"obs": qm_o.Z(2)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="symbolic-control-indices",
@@ -882,6 +891,7 @@ FRONTEND_EXECUTION_CASES = [
         expected_expval=-2.0,
         sample_bindings={"n": 2},
         run_bindings={"n": 2, "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="bound-control-indices",
@@ -898,6 +908,7 @@ FRONTEND_EXECUTION_CASES = [
             "j": 2,
             "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3),
         },
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-pauli-evolve",
@@ -913,6 +924,7 @@ FRONTEND_EXECUTION_CASES = [
             "gamma": math.pi / 2,
             "obs": qm_o.Z(1),
         },
+        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="sliced-pauli-evolve",
@@ -979,6 +991,10 @@ def test_frontend_pattern_sample_execution(
     """Sample frontend patterns through every supported SDK backend."""
     name, transpiler, executor = backend
     shots = 512
+    if name in case.unsupported_backends:
+        with pytest.raises(EmitError):
+            transpiler.transpile(case.sample_kernel, bindings=case.sample_bindings)
+        return
     executable = transpiler.transpile(case.sample_kernel, bindings=case.sample_bindings)
     counts = _counts(executable.sample(executor, shots=shots).result())
 
@@ -999,6 +1015,10 @@ def test_frontend_pattern_run_execution(
 ) -> None:
     """Run expval frontend patterns through every supported SDK backend."""
     name, transpiler, executor = backend
+    if name in case.unsupported_backends:
+        with pytest.raises(EmitError):
+            transpiler.transpile(case.run_kernel, bindings=case.run_bindings)
+        return
     executable = transpiler.transpile(case.run_kernel, bindings=case.run_bindings)
     got = executable.run(executor).result()
 
