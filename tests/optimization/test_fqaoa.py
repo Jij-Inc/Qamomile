@@ -78,6 +78,30 @@ def test_get_fqaoa_ansatz_transpile(simple_problem):
     assert len(circuit.parameters) == 4
 
 
+@pytest.mark.quri_parts
+def test_fqaoa_quri_parts_runtime_parameter_sampling(simple_problem):
+    """FQAOA sampling binds runtime gammas and betas on QURI Parts."""
+    pytest.importorskip("quri_parts")
+    pytest.importorskip("quri_parts.qulacs")
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
+    transpiler = QuriPartsTranspiler()
+    executable = fqaoa_converter.transpile(transpiler, p=1)
+
+    result = executable.sample(
+        transpiler.executor(),
+        shots=32,
+        bindings={"gammas": [0.2], "betas": [0.4]},
+    ).result()
+
+    assert sum(count for _, count in result.results) == 32
+    assert all(len(value) == fqaoa_converter.num_qubits for value, _ in result.results)
+    assert all(
+        sum(value) == fqaoa_converter.num_fermions for value, _ in result.results
+    )
+
+
 @pytest.mark.parametrize(
     "instance_data",
     [

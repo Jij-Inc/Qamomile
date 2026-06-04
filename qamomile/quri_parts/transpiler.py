@@ -9,7 +9,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.ir.operation.control_flow import ForOperation
-from qamomile.circuit.ir.operation.gate import GateOperation
+from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
+    ControlledUOperation,
+    GateOperation,
+    GateOperationType,
+)
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
@@ -17,6 +22,18 @@ from qamomile.circuit.transpiler.executable import (
     QuantumExecutor,
 )
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.emit_support import (
+    QubitAddress,
+    QubitMap,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _bind_quantum_input_shapes,
+    _expand_quantum_operands_to_phys,
+    _map_controlled_u_results,
+    _populate_input_qubit_map,
+    emit_controlled_gate,
+    resolve_power,
+)
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -33,52 +50,327 @@ if TYPE_CHECKING:
     )
 
 
-def _ensure_quri_controlled_block_gate_by_gate_supported(block_value: Any) -> None:
-    """Reject controlled block bodies QURI Parts cannot safely decompose.
-
-    QURI Parts has no backend gate object for controlled sub-circuits and
-    this backend intentionally does not fall back to dense unitary
-    synthesis. The shared gate-by-gate fallback can only emit primitive
-    gates and statically resolved ``ForOperation`` bodies. Everything else
-    must fail before emission so unsupported operations are not silently
-    dropped.
+def _build_quri_controlled_qubit_map(
+    emit_pass: StandardEmitPass[Any],
+    block_value: Any,
+    target_indices: list[int],
+    bindings: dict[str, Any],
+) -> QubitMap:
+    """Build a block-local qubit map backed by actual QURI target slots.
 
     Args:
-        block_value (Any): Controlled-U block whose body will be emitted
-            through the shared gate-by-gate fallback.
+        emit_pass (StandardEmitPass[Any]): Emit pass used to resolve
+            symbolic vector shapes.
+        block_value (Any): Inner block whose quantum inputs are mapped.
+        target_indices (list[int]): Physical QURI Parts qubit indices
+            supplied as the controlled-U target operands.
+        bindings (dict[str, Any]): Bindings used while resolving vector
+            input shapes.
+
+    Returns:
+        QubitMap: Mapping from the inner block's formal quantum inputs to
+            the parent circuit's physical QURI Parts qubit indices.
 
     Raises:
-        EmitError: If the block body contains an operation that QURI Parts
-            cannot safely emit under outer controls without dense unitary
-            synthesis.
+        EmitError: If the shared input-mapping helper cannot resolve or
+            fit the block's quantum input footprint.
     """
-    _ensure_quri_controlled_operations_gate_by_gate_supported(
-        getattr(block_value, "operations", ())
+    local_map: QubitMap = {}
+    _populate_input_qubit_map(
+        emit_pass,
+        getattr(block_value, "input_values", []),
+        len(target_indices),
+        bindings,
+        local_map,
+    )
+    return {address: target_indices[slot] for address, slot in local_map.items()}
+
+
+def _resolve_quri_gate_targets(
+    emit_pass: StandardEmitPass[Any],
+    op: GateOperation,
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> list[int]:
+    """Resolve a gate operation's quantum operands to physical qubits.
+
+    Args:
+        emit_pass (StandardEmitPass[Any]): Emit pass whose resolver maps
+            IR values to QURI Parts physical qubit indices.
+        op (GateOperation): Gate operation being emitted under controls.
+        qubit_map (QubitMap): Current block-local qubit map.
+        bindings (dict[str, Any]): Bindings used for array/slice
+            resolution.
+
+    Returns:
+        list[int]: Physical target qubit indices in operand order.
+
+    Raises:
+        EmitError: If any gate operand cannot be resolved.
+    """
+    target_indices: list[int] = []
+    for operand in op.qubit_operands:
+        index = emit_pass._resolver.resolve_qubit_index(operand, qubit_map, bindings)
+        if index is None:
+            raise EmitError(
+                f"QURI Parts controlled fallback cannot resolve gate "
+                f"operand {operand.name!r} to a physical qubit.",
+                operation="ControlledUOperation",
+            )
+        target_indices.append(index)
+    return target_indices
+
+
+def _propagate_quri_gate_results(
+    op: GateOperation,
+    target_indices: list[int],
+    qubit_map: QubitMap,
+) -> None:
+    """Propagate gate result values to their unchanged physical slots.
+
+    Args:
+        op (GateOperation): Gate operation whose results were just
+            emitted.
+        target_indices (list[int]): Physical qubit indices resolved from
+            ``op.qubit_operands``.
+        qubit_map (QubitMap): Mutable block-local qubit map to update.
+    """
+    quantum_results = [result for result in op.results if result.type.is_quantum()]
+    for result, index in zip(quantum_results, target_indices):
+        qubit_map[QubitAddress(result.uuid)] = index
+
+
+def _emit_quri_controlled_gate(
+    emit_pass: StandardEmitPass[Any],
+    circuit: Any,
+    op: GateOperation,
+    control_indices: list[int],
+    target_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Emit one QURI Parts gate under accumulated controls.
+
+    Args:
+        emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
+        circuit (Any): QURI Parts circuit being built.
+        op (GateOperation): Primitive gate operation to emit.
+        control_indices (list[int]): Accumulated physical control qubits.
+        target_indices (list[int]): Physical target qubits for ``op``.
+        bindings (dict[str, Any]): Bindings used to resolve gate angles.
+
+    Raises:
+        EmitError: If the accumulated controls require decomposition that
+            this QURI Parts fallback intentionally leaves to a follow-up PR.
+    """
+    if not control_indices:
+        raise EmitError(
+            "QURI Parts controlled fallback requires at least one control.",
+            operation="ControlledUOperation",
+        )
+
+    if len(control_indices) == 1:
+        if op.gate_type == GateOperationType.CX:
+            if len(target_indices) < 2:
+                raise EmitError(
+                    "Controlled-CX requires two target qubits.",
+                    operation="ControlledUOperation",
+                )
+            emit_pass._emitter.emit_toffoli(
+                circuit,
+                control_indices[0],
+                target_indices[0],
+                target_indices[1],
+            )
+            return
+        emit_controlled_gate(
+            emit_pass,
+            circuit,
+            op,
+            control_indices[0],
+            target_indices,
+            bindings,
+        )
+        return
+
+    if (
+        len(control_indices) == 2
+        and op.gate_type == GateOperationType.X
+        and len(target_indices) == 1
+    ):
+        emit_pass._emitter.emit_toffoli(
+            circuit,
+            control_indices[0],
+            control_indices[1],
+            target_indices[0],
+        )
+        return
+
+    raise EmitError(
+        "Cannot emit QURI Parts controlled-U: recursive controlled fallback "
+        "reached a multi-controlled operation that requires decomposition "
+        "not implemented in this PR "
+        f"(controls={control_indices}, gate={op.gate_type!r}).",
+        operation="ControlledUOperation",
     )
 
 
-def _ensure_quri_controlled_operations_gate_by_gate_supported(
-    operations: Sequence[Any],
+def _emit_quri_nested_controlled_u(
+    emit_pass: StandardEmitPass[Any],
+    circuit: Any,
+    op: ControlledUOperation,
+    outer_control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
 ) -> None:
-    """Reject operations outside QURI Parts controlled gate-by-gate support.
+    """Emit a nested controlled-U by flattening controls at emit time.
 
     Args:
-        operations (Sequence[Any]): Operations from a controlled block body
-            or from a statically unrolled ``ForOperation`` body.
+        emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
+        circuit (Any): QURI Parts circuit being built.
+        op (ControlledUOperation): Nested controlled-U operation from the
+            block currently being walked.
+        outer_control_indices (list[int]): Controls accumulated from
+            enclosing controlled-U operations.
+        qubit_map (QubitMap): Current block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible inside the current
+            block.
 
     Raises:
-        EmitError: If any operation cannot be emitted by the shared
-            primitive gate-by-gate controlled fallback.
+        EmitError: If the nested op is symbolic, lacks a block, or cannot
+            be lowered by the guarded recursive fallback.
+    """
+    if not isinstance(op, ConcreteControlledU):
+        raise EmitError(
+            "QURI Parts recursive controlled fallback only supports "
+            "concrete nested ControlledUOperation values.",
+            operation="ControlledUOperation",
+        )
+    if op.block is None:
+        raise EmitError(
+            "QURI Parts recursive controlled fallback cannot emit a nested "
+            "ControlledUOperation without an inner block.",
+            operation="ControlledUOperation",
+        )
+
+    nested_controls = [
+        index
+        for operand in op.control_operands
+        for index in _expand_quantum_operands_to_phys(
+            emit_pass, operand, qubit_map, bindings
+        )
+    ]
+    remaining_operands = op.operands[op.num_controls :]
+    target_qubit_operands = [
+        operand for operand in remaining_operands if operand.type.is_quantum()
+    ]
+    param_operands = [
+        operand
+        for operand in remaining_operands
+        if operand.type.is_classical() or operand.type.is_object()
+    ]
+    target_index_groups = [
+        _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
+        for operand in target_qubit_operands
+    ]
+    target_indices = [index for group in target_index_groups for index in group]
+    local_bindings = emit_pass._resolver.bind_block_params(
+        op.block, param_operands, bindings
+    )
+    _bind_quantum_input_shapes(
+        emit_pass, op.block, target_qubit_operands, bindings, local_bindings
+    )
+    inner_qubit_map = _build_quri_controlled_qubit_map(
+        emit_pass, op.block, target_indices, local_bindings
+    )
+    effective_controls = outer_control_indices + nested_controls
+    power = resolve_power(emit_pass, op, bindings)
+    for _ in range(power):
+        _emit_quri_controlled_operations(
+            emit_pass,
+            circuit,
+            op.block.operations,
+            effective_controls,
+            inner_qubit_map,
+            local_bindings,
+        )
+    _map_controlled_u_results(
+        op,
+        op.num_controls,
+        nested_controls,
+        target_qubit_operands,
+        target_index_groups,
+        qubit_map,
+    )
+
+
+def _emit_quri_controlled_operations(
+    emit_pass: StandardEmitPass[Any],
+    circuit: Any,
+    operations: Sequence[Any],
+    control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Recursively emit QURI Parts operations under accumulated controls.
+
+    Args:
+        emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
+        circuit (Any): QURI Parts circuit being built.
+        operations (Sequence[Any]): Block operations to walk.
+        control_indices (list[int]): Accumulated physical controls.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible in this block.
+
+    Raises:
+        EmitError: If an operation cannot be emitted by the guarded QURI
+            Parts recursive fallback.
     """
     for op in operations:
-        if isinstance(op, (GateOperation, ReturnOperation)):
+        if isinstance(op, ReturnOperation):
+            continue
+        if isinstance(op, GateOperation):
+            target_indices = _resolve_quri_gate_targets(
+                emit_pass, op, qubit_map, bindings
+            )
+            _emit_quri_controlled_gate(
+                emit_pass, circuit, op, control_indices, target_indices, bindings
+            )
+            _propagate_quri_gate_results(op, target_indices, qubit_map)
+            continue
+        if isinstance(op, ControlledUOperation):
+            _emit_quri_nested_controlled_u(
+                emit_pass, circuit, op, control_indices, qubit_map, bindings
+            )
             continue
         if isinstance(op, ForOperation):
-            _ensure_quri_controlled_operations_gate_by_gate_supported(op.operations)
+            from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+                _bind_loop_var,
+                resolve_loop_bounds,
+            )
+
+            start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
+            if start is None or stop is None or step is None:
+                raise EmitError(
+                    "Cannot resolve ForOperation bounds in QURI Parts "
+                    "recursive controlled fallback.",
+                    operation="ControlledUOperation",
+                )
+            for i in range(start, stop, step):
+                loop_bindings = bindings.copy()
+                _bind_loop_var(loop_bindings, op, i)
+                _emit_quri_controlled_operations(
+                    emit_pass,
+                    circuit,
+                    op.operations,
+                    control_indices,
+                    qubit_map,
+                    loop_bindings,
+                )
             continue
         raise EmitError(
-            "QURI Parts controlled fallback only supports primitive gate "
-            "bodies and statically resolved for-loops. "
+            "QURI Parts recursive controlled fallback only supports "
+            "primitive gates, nested ControlledUOperation values, "
+            "ReturnOperation, and statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",
         )
@@ -230,16 +522,30 @@ class QuriPartsEmitPass(
         """
         if not target_indices:
             return
-        _ensure_quri_controlled_block_gate_by_gate_supported(block_value)
-        super()._emit_controlled_fallback(
-            circuit,
-            block_value,
-            num_controls,
-            control_indices,
-            target_indices,
-            power,
-            bindings,
+        if not hasattr(block_value, "operations"):
+            raise EmitError(
+                "Cannot emit QURI Parts controlled fallback: block has no operations.",
+                operation="ControlledUOperation",
+            )
+        if num_controls != len(control_indices):
+            raise EmitError(
+                "QURI Parts controlled fallback received inconsistent "
+                f"control metadata: num_controls={num_controls}, "
+                f"control_indices={control_indices!r}.",
+                operation="ControlledUOperation",
+            )
+        qubit_map = _build_quri_controlled_qubit_map(
+            self, block_value, target_indices, bindings
         )
+        for _ in range(power):
+            _emit_quri_controlled_operations(
+                self,
+                circuit,
+                block_value.operations,
+                control_indices,
+                qubit_map,
+                bindings,
+            )
 
 
 class QuriPartsExecutor(
