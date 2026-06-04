@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # ---
-# tags: [アルゴリズム, 化学, シミュレーション]
+# tags: [algorithm, chemistry, simulation]
 # ---
 #
 # # 多次元量子フーリエ変換によるナノシート物質特性推定: 2次元パターン処理のケーススタディ
@@ -24,7 +24,21 @@
 # しかしこれまでの量子フーリエ変換は、任意のグリッド点に対する入力に対応しておらず、その適用範囲に限界がありました。
 # そこで本記事では、[Sampei et al. (2025)](https://pubs.rsc.org/en/content/articlelanding/2025/cp/d4cp04399e) により提案された、任意グリッド点数の入力に対する多次元量子フーリエ変換の実装についてまとめました。
 # 多次元量子フーリエ変換実装を通して、Qamomileの使い方を学ぶことができます。
-#
+
+# %%
+# Install the latest Qamomile through pip! 
+# # !pip install qamomile
+
+# %%
+import matplotlib.pyplot as plt
+import numpy as np
+import qamomile.circuit as qmc
+from qamomile.circuit.algorithm import amplitude_encoding
+from qamomile.circuit.stdlib.qft import QFT
+from qamomile.circuit.transpiler.job import SampleResult
+from qamomile.qiskit import QiskitTranspiler
+
+# %% [markdown]
 # ## 背景
 #
 # ### 問題: ナノシート材料の特性評価
@@ -45,7 +59,7 @@
 # ### 多次元 QFT
 #
 # QFT は、Shor のアルゴリズムや量子位相推定のコア技術としてよく知られています。
-# この QFT の重要な改良手法として、[Pfeffer 2023](https://arxiv.org/abs/2301.13835) が挙げられます。
+# この QFT の重要な改良手法として、[Pfeffer (2023)](https://arxiv.org/abs/2301.13835) が挙げられます。
 # この研究では、既知の QFT 回路をベースに、多次元 QFT を実現する効率的な回路を導出しました。
 #
 # ```{figure} assets/multidimensional_qft_01.png
@@ -57,7 +71,6 @@
 #
 # 上図の initialize($\vert v \rangle$)は、入力データに応じて量子状態を初期化するサブルーチンを表しています。
 # 量子状態を初期化する手法にはいくつかありますが、以降に示す実装では [Möttönen の振幅エンコーディング](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/algorithm/mottonen-amplitude-encoding/) を用いています。
-# [Pfeffer 2023](https://arxiv.org/abs/2301.13835) では古典的な行・列分解にヒントを得て、$d$ 次元配列に対して $d$ 個の1次元 QFT をテンソル積構造で並列実行することで、$M=(2^n)^d$ の配列に対して $\mathcal{O} (\log^2 (M)/d)$ の計算量を達成しました。
 # しかしこの手法は、各次元サイズが $N_i = 2^{n_i}$ でなければならないという制限がありました。
 # そこで、[Sampei et al. (2025)](https://pubs.rsc.org/en/content/articlelanding/2025/cp/d4cp04399e)ではこの制限を解消する手法を提案しました。
 # Qamomileには、1次元 QFT が標準で備わっています。
@@ -94,26 +107,10 @@
 # ## Qamomileによる実装
 #
 # Qamomileを用いて、多次元QFTのための量子回路を実装しましょう。
-# まずは必要なライブラリのインストール・インポートを行います。
-
-# %%
-# Install the latest Qamomile through pip! 
-# # !pip install qamomile
-
-# %%
-import matplotlib.pyplot as plt
-import numpy as np
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm import amplitude_encoding
-from qamomile.circuit.frontend.handle import Vector
-from qamomile.circuit.stdlib.qft import QFT
-from qamomile.circuit.transpiler.job import SampleResult
-from qamomile.qiskit import QiskitTranspiler
-
-# %% [markdown]
+#
 # ### 入力の作成
 #
-# 続いて、入力データを作成しましょう。
+# 入力データを作成しましょう。
 # ここでは、次のような仮想的な周期データを用いることにします。
 
 # %%
@@ -194,8 +191,6 @@ w2d = wx[:, None] * wy[None, :]
 # 窓関数の概形を描画してみましょう。
 
 # %%
-w2dmin = np.min(w2d)
-w2dmax = np.max(w2d)
 im3 = plt.pcolor(w2d, cmap="plasma")
 cbar = plt.colorbar(im3)
 cbar.set_label("Flat top function", fontsize=14)
@@ -258,8 +253,8 @@ def compute_prob(result: SampleResult) -> np.ndarray:
     prob = np.zeros(f_padding.shape)
     total = sum(c for _, c in result.results)
     for bits, count in result.results:
-        kx = sum([2 ** i * bits[i] for i in range(Nqx)])
-        ky = sum([2 ** i * bits[i+Nqx] for i in range(Nqy)])
+        kx = sum(bits[i] << (Nqx - 1 - i) for i in range(Nqx))
+        ky = sum(bits[Nqx + i] << (Nqy - 1 - i) for i in range(Nqy))
         prob[kx, ky] += count / total
     return prob
 
