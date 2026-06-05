@@ -83,11 +83,14 @@ def controlled_modular_increment(
     n = q.shape[0]
     for k in qmc.range(n):
         target_index = n - 1 - k
-        mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-        prefix = q[0:target_index]
         target = q[target_index]
-        control, prefix, target = mcx(control, prefix, target)
-        q[0:target_index] = prefix
+        if target_index == 0:
+            control, target = qmc.cx(control, target)
+        else:
+            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
+            prefix = q[0:target_index]
+            control, prefix, target = mcx(control, prefix, target)
+            q[0:target_index] = prefix
         q[target_index] = target
     return control, q
 
@@ -114,11 +117,14 @@ def controlled_modular_decrement(
     """
     n = q.shape[0]
     for target_index in qmc.range(n):
-        mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-        prefix = q[0:target_index]
         target = q[target_index]
-        control, prefix, target = mcx(control, prefix, target)
-        q[0:target_index] = prefix
+        if target_index == 0:
+            control, target = qmc.cx(control, target)
+        else:
+            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
+            prefix = q[0:target_index]
+            control, prefix, target = mcx(control, prefix, target)
+            q[0:target_index] = prefix
         q[target_index] = target
     return control, q
 
@@ -150,13 +156,16 @@ def controlled_modular_increment_by_index(
     """
     for k in qmc.range(num_system):
         target_index = num_system - 1 - k
-        mcx = qmc.control(qmc.x, num_controls=target_index + 1)
         control = q[control_index]
-        prefix = q[0:target_index]
         target = q[target_index]
-        control, prefix, target = mcx(control, prefix, target)
+        if target_index == 0:
+            control, target = qmc.cx(control, target)
+        else:
+            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
+            prefix = q[0:target_index]
+            control, prefix, target = mcx(control, prefix, target)
+            q[0:target_index] = prefix
         q[control_index] = control
-        q[0:target_index] = prefix
         q[target_index] = target
     return q
 
@@ -187,13 +196,16 @@ def controlled_modular_decrement_by_index(
         qmc.Vector[qmc.Qubit]: Updated shared register.
     """
     for target_index in qmc.range(num_system):
-        mcx = qmc.control(qmc.x, num_controls=target_index + 1)
         control = q[control_index]
-        prefix = q[0:target_index]
         target = q[target_index]
-        control, prefix, target = mcx(control, prefix, target)
+        if target_index == 0:
+            control, target = qmc.cx(control, target)
+        else:
+            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
+            prefix = q[0:target_index]
+            control, prefix, target = mcx(control, prefix, target)
+            q[0:target_index] = prefix
         q[control_index] = control
-        q[0:target_index] = prefix
         q[target_index] = target
     return q
 
