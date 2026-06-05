@@ -9,6 +9,7 @@ pytestmark = pytest.mark.quri_parts
 # Skip entire module if QURI Parts circuit support is not installed.
 pytest.importorskip("quri_parts.circuit")
 
+import qamomile.circuit as qmc  # noqa: E402
 from qamomile.quri_parts import (  # noqa: E402
     QuriPartsGateEmitter,
 )
@@ -201,3 +202,36 @@ class TestQuriPartsTranspiler:
         # Custom sampler can be passed to executor
         executor = transpiler.executor(sampler=None, estimator=None)
         assert executor is not None
+
+    def test_controlled_cp_with_runtime_parameter_transpiles(self) -> None:
+        """Controlled CP fallback preserves a symbolic QURI Parts angle."""
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def cp_layer(
+            control: qmc.Qubit,
+            target: qmc.Qubit,
+            theta: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            """Apply a symbolic controlled-phase body."""
+            control, target = qmc.cp(control, target, theta)
+            return control, target
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            """Apply a controlled CP body with a runtime angle."""
+            qs = qmc.qubit_array(3, "qs")
+            qs[0], qs[1], qs[2] = qmc.control(cp_layer)(
+                qs[0],
+                qs[1],
+                qs[2],
+                theta=theta,
+            )
+            return qmc.measure(qs)
+
+        transpiler = QuriPartsTranspiler()
+        executable = transpiler.transpile(circuit, parameters=["theta"])
+        quri_circuit = executable.compiled_quantum[0].circuit
+
+        assert quri_circuit.parameter_count == 1
+        assert len(quri_circuit.gates) > 0

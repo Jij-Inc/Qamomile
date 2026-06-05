@@ -6,6 +6,7 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
+from numbers import Real
 from typing import TYPE_CHECKING, Any, Sequence, cast
 
 import numpy as np
@@ -152,16 +153,18 @@ def _scale_quri_angle(angle: Any, factor: float) -> Any:
 
     Args:
         angle (Any): Angle resolved by the active QURI Parts emitter.
-            Concrete numeric values and linear-combination dictionaries are
-            supported.
+            Concrete numeric values, linear-combination dictionaries, and
+            single QURI Parts parameter atoms are supported.
         factor (float): Scale factor to apply to every angle coefficient.
 
     Returns:
         Any: Scaled angle in the same representation.
     """
+    if isinstance(angle, Real):
+        return float(angle) * factor
     if isinstance(angle, dict):
         return {key: value * factor for key, value in angle.items()}
-    return angle * factor
+    return {angle: factor}
 
 
 def _emit_quri_c3x_matrix(
