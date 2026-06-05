@@ -91,3 +91,28 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 **Why this trade-off was chosen**: `_symbolic_slices_definitely_disjoint()` only compares direct `slice_step == 1` root slices as half-open intervals, such as `q[:k]` and `q[k:n]`. Strided symbolic slices, nested symbolic affine maps, and more complex symbolic arithmetic are treated conservatively as potentially overlapping.
 
 **Future fix**: add small proof helpers only for shapes that can be proven safely, such as parity partitions or limited affine intervals, without turning the borrow checker into a general symbolic inequality solver.
+
+## Tuple-form expval metadata cannot encode symbolic root indices
+
+**When it bites**: an inlined helper packs a qubit into tuple-form expval metadata, and the caller-side replacement is an element of a symbolic slice, such as `q[j:j+1][0]` where `j` is a `qmc.range(...)` loop variable. Conceptually, the shape is a scalar helper called on an element whose root index is still symbolic:
+
+```python
+@qmc.qkernel
+def helper(q: qmc.Qubit, obs: qmc.Observable) -> qmc.Float:
+    return qmc.expval((q,), obs)
+
+@qmc.qkernel
+def caller(obs: qmc.Observable) -> qmc.Float:
+    q = qmc.qubit_array(4, "q")
+    for j in qmc.range(4):
+        view = q[j : j + 1]
+        # The desired metadata root address for view[0] is (q.uuid, j),
+        # but the current metadata can only store integer indices.
+        helper(view[0], obs)
+```
+
+The concrete-index cases (`q[1]`, `q[1::2]`, or a slice bound that has already been resolved from compile-time bindings) are not affected. The limitation is about values that still carry a symbolic affine index when `ValueSubstitutor._substitute_metadata()` runs. The regression pin is an IR-level `xfail` rather than a backend execution test because current qkernel control-flow / expval composition hits other frontend and execution constraints before this metadata representation gap can be isolated cleanly.
+
+**Why this trade-off was chosen**: `ArrayRuntimeMetadata.element_parent_uuids` and `element_parent_indices` currently encode a root address as `(array_uuid: str, index: int)`. During inline substitution, `_substitute_metadata()` can promote a standalone sentinel `("", -1)` to a real root address only when `resolve_root_qubit_address()` can reduce the caller-side element to a constant root index. For `q[j:j+1][0]`, the desired root address is conceptually `(q.uuid, j)`, but `j` is a symbolic `Value`, not an `int`. Storing the slice view UUID plus local index, or leaving the standalone sentinel in place, is the only representable state today. The known gap is pinned by `tests/transpiler/test_value_mapping.py::TestArrayRuntimeMetadataSymbolicRootLimitations::test_scalar_inline_metadata_cannot_promote_symbolic_slice_parent`, which is marked `xfail(strict=True)` until metadata can represent symbolic affine root indices.
+
+**Future fix**: extend array-runtime metadata to carry a symbolic affine root expression, for example `(root_uuid, offset_value, stride_value, local_index_value)` or an equivalent small expression tree, and teach emit-time qubit-map construction to resolve that expression with the same binding resolver used for runtime slice chains. Once that exists, the xfail test should be flipped to a normal passing test and this limitation entry can be removed.
