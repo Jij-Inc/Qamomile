@@ -63,6 +63,22 @@ description: docs/en/配下の英語ドキュメント(.py jupytext形式)をdoc
   - 原文 "so you can analyze how resources scale" → × 「スケーリングを解析できます」 → ○ 「スケーリングの解析が容易です」
 - 原文に暗黙的な情報（時点、前提条件など）がある場合は、読者のために補足してよい。
   - 例: 「量子フーリエ変換（QFT）や…が含まれます」→「**現在**量子フーリエ変換（QFT）や…が含まれます」
+- APIやConverterを主語にした英文は、直訳で「〜は…を実装します」と書くと不自然になりやすい。読者ができることを主語にして訳す。
+  - × 「`FooConverter`は、問題に対してFoo Encodingを実装します」
+  - ○ 「`FooConverter`を使うと、問題にFoo Encodingを適用できます」
+  - ○ 「`FooConverter`は、問題にFoo Encodingを適用するためのAPIです」
+- user-facing docsでは、内部実装の語をそのまま前面に出さない。特に「束縛する」「address resolution」「path」「fallback」のような語は、読者から見える挙動に言い換える。
+  - × 「`qmc.expval`がobservableを正しい物理量子ビットに束縛するようになりました」
+  - ○ 「`Vector`要素に対する`qmc.expval`の挙動を修正しました」
+  - × 「conditionのaddress resolutionを修正しました」
+  - ○ 「測定結果を使う条件分岐が正しいclassical bitアドレスへloweringされるようになりました」
+- release noteのバグ修正では、内部語よりも読者に見える症状と結果を優先する。必要以上に細かいbackend分岐や実装経路をoverviewに入れず、詳細は本文の該当bulletへ寄せる。
+- 量子ビット数削減・高速化・再現性などの効果は、原文の "can" / "may" / "can reduce" などの限定を保つ。常に成り立つように読める断定にしない。
+- release noteでは、一般語としての「コンパイル」はなるべく避ける。Qamomileの変換処理が焦点なら「トランスパイル時」、より広い現象なら「エラーになることがありました」「扱えるようになりました」のように具体的な症状や結果で書く。
+- "less brittle"や"more robust"を機械的に「壊れにくい」と訳さない。修正の意図に応じて「サポート範囲を広げました」「より多くのケースを扱えるようになりました」「挙動を修正しました」のように、読者に見える変化を書く。
+- 機能改善は「扱います」よりも「扱えるようになりました」「できるようになりました」を優先する。既存機能の説明なら「扱います」でもよいが、release noteで「now support」「can now」などの差分を表す場合は改善後の可能性を明示する。
+  - × 「より多くの`qmc.control(...)`パターンをend-to-endで扱います」
+  - ○ 「より多くの`qmc.control(...)`パターンをend-to-endで扱えるようになりました」
 
 ### 6. コードブロックとコメント
 
