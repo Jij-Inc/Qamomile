@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.frontend.composite_gate import CompositeGate
@@ -840,39 +840,207 @@ class _BlockInverter:
             value_map (dict[str, ValueBase]): UUID-keyed current-value map.
 
         Returns:
-            list[Operation]: A single inverse block operation representing
-                the forward source block.
+            list[Operation]: Forward source-block operations cloned into
+                the current inverse construction site.
 
         Raises:
-            NotImplementedError: If the inverse op lacks the source or
-                fallback block needed to reconstruct the forward operation.
+            NotImplementedError: If the inverse op lacks the source block
+                needed to reconstruct the forward operation.
         """
-        if op.source_block is None or op.implementation_block is None:
+        if op.source_block is None:
             raise NotImplementedError(
                 "inverse() cannot invert an InverseBlockOperation without "
-                "both source and implementation blocks."
+                "a source block."
             )
-        current_qubits = [
-            _as_value(_substitute_value(result, value_map), "inverse block result")
-            for result in op.results
+        self._reject_unsupported_control_flow(op.source_block.operations)
+        current_controls = [
+            _as_value(
+                _substitute_value(result, value_map),
+                "inverse block control result",
+            )
+            for result in op.results[: op.num_control_qubits]
         ]
-        mapped_params = [
-            _as_value(_substitute_value(param, value_map), "inverse block parameter")
-            for param in op.parameters
+        current_targets = [
+            _as_value(
+                _substitute_value(result, value_map),
+                "inverse block target result",
+            )
+            for result in op.results[op.num_control_qubits :]
         ]
-        new_results = [qubit.next_version() for qubit in current_qubits]
-        forward_op = InverseBlockOperation(
-            operands=[*current_qubits, *mapped_params],
-            results=new_results,
-            num_control_qubits=op.num_control_qubits,
-            num_target_qubits=op.num_target_qubits,
-            custom_name=f"{op.name}_inverse",
-            source_block=op.implementation_block,
-            implementation_block=op.source_block,
+        mapped_params = [_substitute_value(param, value_map) for param in op.parameters]
+        if len(current_targets) != len(op.target_qubits) or len(
+            op.source_block.output_values
+        ) != len(op.target_qubits):
+            raise TypeError(
+                "inverse() cannot restore an InverseBlockOperation whose "
+                "source block outputs do not match its stored target operands."
+            )
+
+        local_map = dict(value_map)
+        self._bind_forward_block_inputs(
+            op.source_block,
+            current_targets,
+            mapped_params,
+            local_map,
         )
-        for operand, result in zip(op.control_qubits + op.target_qubits, new_results):
+        operations = self._clone_forward_operations(
+            op.source_block.operations, local_map
+        )
+
+        for operand, result in zip(op.control_qubits, current_controls):
             value_map[operand.uuid] = result
-        return [forward_op]
+
+        for output, operand in zip(op.source_block.output_values, op.target_qubits):
+            resolved = _substitute_value(output, local_map)
+            value_map[operand.uuid] = resolved
+            if isinstance(operand, ArrayValue) and isinstance(resolved, ArrayValue):
+                for operand_dim, resolved_dim in zip(operand.shape, resolved.shape):
+                    if operand_dim.uuid != resolved_dim.uuid:
+                        value_map[operand_dim.uuid] = resolved_dim
+        return operations
+
+    def _bind_forward_block_inputs(
+        self,
+        block: Block,
+        quantum_operands: Sequence[ValueBase],
+        parameter_operands: Sequence[ValueBase],
+        value_map: dict[str, ValueBase],
+    ) -> None:
+        """Bind a forward source block to inverse-of-inverse operands.
+
+        Args:
+            block (Block): Source block being restored.
+            quantum_operands (Sequence[ValueBase]): Current target quantum
+                values that feed the source block.
+            parameter_operands (Sequence[ValueBase]): Classical/object
+                operands for the source block.
+            value_map (dict[str, ValueBase]): Local mapping to mutate.
+
+        Returns:
+            None.
+
+        Raises:
+            TypeError: If the stored inverse block operands no longer match
+                the source block input contract.
+        """
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        parameter_inputs = [
+            value for value in block.input_values if not value.type.is_quantum()
+        ]
+        if len(quantum_inputs) != len(quantum_operands) or len(parameter_inputs) != len(
+            parameter_operands
+        ):
+            raise TypeError(
+                "inverse() cannot restore an InverseBlockOperation whose "
+                "source block inputs do not match its stored operands."
+            )
+
+        for block_input, operand in [
+            *zip(quantum_inputs, quantum_operands),
+            *zip(parameter_inputs, parameter_operands),
+        ]:
+            resolved = _substitute_value(operand, value_map)
+            value_map[block_input.uuid] = resolved
+            if isinstance(block_input, ArrayValue) and isinstance(resolved, ArrayValue):
+                for block_dim, operand_dim in zip(block_input.shape, resolved.shape):
+                    value_map[block_dim.uuid] = _substitute_value(
+                        operand_dim,
+                        value_map,
+                    )
+
+    def _clone_forward_operations(
+        self,
+        operations: list[Operation],
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Clone forward operations into the current inverse construction.
+
+        Args:
+            operations (list[Operation]): Source-block operations in
+                forward order.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: Cloned forward operations.
+        """
+        cloned: list[Operation] = []
+        for op in operations:
+            if isinstance(op, ReturnOperation):
+                continue
+            if isinstance(op, (IfOperation, WhileOperation, ForItemsOperation)):
+                raise NotImplementedError(
+                    f"inverse() does not support {type(op).__name__} yet."
+                )
+            if isinstance(op, ForOperation):
+                cloned.append(self._clone_forward_for(op, value_map))
+                continue
+            cloned.append(self._clone_forward_operation(op, value_map))
+        return cloned
+
+    def _clone_forward_operation(
+        self,
+        op: Operation,
+        value_map: dict[str, ValueBase],
+    ) -> Operation:
+        """Clone one forward operation and advance the local value map.
+
+        Args:
+            op (Operation): Source operation to clone.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            Operation: Cloned operation with substituted operands and fresh
+                results.
+        """
+        result_map = _operation_result_map(op, value_map)
+        substitutor = ValueSubstitutor({**value_map, **result_map}, transitive=True)
+        cloned = substitutor.substitute_operation(op)
+        value_map.update(result_map)
+        return cloned
+
+    def _clone_forward_for(
+        self,
+        op: ForOperation,
+        value_map: dict[str, ValueBase],
+    ) -> ForOperation:
+        """Clone a forward compile-time range loop.
+
+        Args:
+            op (ForOperation): Source loop operation to clone.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            ForOperation: Cloned loop with its body cloned in forward order.
+
+        Raises:
+            TypeError: If the loop variable cannot be represented as a
+                scalar IR value.
+        """
+        body_map = dict(value_map)
+        loop_var_value = None
+        if op.loop_var_value is not None:
+            loop_var_value = _as_value(
+                _fresh_result_value(op.loop_var_value, value_map),
+                "forward loop variable",
+            )
+            body_map[op.loop_var_value.uuid] = loop_var_value
+
+        body = self._clone_forward_operations(op.operations, body_map)
+        for uuid in value_map:
+            if uuid in body_map:
+                value_map[uuid] = body_map[uuid]
+
+        cloned = dataclasses.replace(
+            op,
+            loop_var_value=loop_var_value,
+            operations=body,
+        )
+        substitutor = ValueSubstitutor(value_map, transitive=True)
+        result = substitutor.substitute_operation(cloned)
+        assert isinstance(result, ForOperation)
+        return result
 
     def _invert_pauli_evolve(
         self,

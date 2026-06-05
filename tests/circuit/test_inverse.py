@@ -1124,6 +1124,33 @@ def test_inverse_qkernel_atomic_inverse_accepts_dict_parameter() -> None:
     assert isinstance(inverse_op.operands[1], DictValue)
 
 
+def test_inverse_of_inverse_restores_source_operations() -> None:
+    """inverse() cancels a nested inverse block back to its source body."""
+
+    @qmc.qkernel
+    def inverse_layer(rotation_angle: qmc.Float, q: qmc.Qubit) -> qmc.Qubit:
+        q = qmc.inverse(_inverse_layer)(q, rotation_angle)
+        return q
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Qubit:
+        q = qmc.qubit("q")
+        q = qmc.inverse(inverse_layer)(rotation_angle, q)
+        return q
+
+    block = circuit.build(parameters=["rotation_angle"])
+    implementation = _single_inverse_implementation(block)
+
+    assert not any(
+        isinstance(op, InverseBlockOperation) for op in implementation.operations
+    )
+    gates = [op for op in implementation.operations if isinstance(op, GateOperation)]
+    assert [gate.gate_type for gate in gates] == [
+        GateOperationType.H,
+        GateOperationType.RZ,
+    ]
+
+
 def test_inverse_qkernel_rejects_vector_for_scalar_input() -> None:
     """inverse(qkernel) rejects shape-mismatched quantum inputs."""
 
