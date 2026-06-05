@@ -21,6 +21,7 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueMetadata,
+    remap_value_metadata_references,
 )
 
 
@@ -48,81 +49,11 @@ class UUIDRemapper:
         return self._logical_id_remap
 
     def _clone_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
-        """Clone metadata UUID references through this remapper.
-
-        Args:
-            metadata (ValueMetadata): Metadata bundle attached to the
-                value being cloned.
-
-        Returns:
-            ValueMetadata: Metadata with UUID-bearing metadata and
-                logical-id references rewritten where clone mappings
-                already exist.
-        """
-        new_cast = metadata.cast
-        if new_cast is not None:
-            new_cast = CastMetadata(
-                source_uuid=self._uuid_remap.get(
-                    new_cast.source_uuid, new_cast.source_uuid
-                ),
-                qubit_uuids=tuple(
-                    self._uuid_remap.get(uuid, uuid) for uuid in new_cast.qubit_uuids
-                ),
-                source_logical_id=(
-                    self._logical_id_remap.get(
-                        new_cast.source_logical_id,
-                        new_cast.source_logical_id,
-                    )
-                    if new_cast.source_logical_id is not None
-                    else None
-                ),
-                qubit_logical_ids=tuple(
-                    self._logical_id_remap.get(logical_id, logical_id)
-                    for logical_id in new_cast.qubit_logical_ids
-                ),
-            )
-
-        new_qfixed = metadata.qfixed
-        if new_qfixed is not None:
-            new_qfixed = QFixedMetadata(
-                qubit_uuids=tuple(
-                    self._uuid_remap.get(uuid, uuid) for uuid in new_qfixed.qubit_uuids
-                ),
-                num_bits=new_qfixed.num_bits,
-                int_bits=new_qfixed.int_bits,
-            )
-
-        new_array_rt = metadata.array_runtime
-        if new_array_rt is not None:
-            new_array_rt = ArrayRuntimeMetadata(
-                const_array=new_array_rt.const_array,
-                element_uuids=tuple(
-                    self._uuid_remap.get(uuid, uuid)
-                    for uuid in new_array_rt.element_uuids
-                ),
-                element_logical_ids=tuple(
-                    self._logical_id_remap.get(logical_id, logical_id)
-                    for logical_id in new_array_rt.element_logical_ids
-                ),
-                element_parent_uuids=tuple(
-                    self._uuid_remap.get(uuid, uuid) if uuid else uuid
-                    for uuid in new_array_rt.element_parent_uuids
-                ),
-                element_parent_indices=new_array_rt.element_parent_indices,
-            )
-
-        if (
-            new_cast == metadata.cast
-            and new_qfixed == metadata.qfixed
-            and new_array_rt == metadata.array_runtime
-        ):
-            return metadata
-
-        return dataclasses.replace(
+        """Clone metadata UUID references through this remapper."""
+        return remap_value_metadata_references(
             metadata,
-            cast=new_cast,
-            qfixed=new_qfixed,
-            array_runtime=new_array_rt,
+            lambda uuid: self._uuid_remap.get(uuid, uuid),
+            lambda logical_id: self._logical_id_remap.get(logical_id, logical_id),
         )
 
     def clone_operations(self, operations: list[Operation]) -> list[Operation]:
