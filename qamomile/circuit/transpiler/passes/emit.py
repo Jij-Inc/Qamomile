@@ -11,7 +11,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.executable import (
     CompiledClassicalSegment,
     CompiledExpvalSegment,
@@ -305,23 +305,30 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         ``qubits[i]``. When ``qubits_value`` is a sliced view
         (``expval(q[1::2], Z(0))``), the view's ``slice_of`` chain is
         walked so Pauli index i resolves to the root parent's
-        ``start + step * i``-th physical qubit. The caller then feeds
-        this mapping into ``hamiltonian.remap_qubits(...)`` which
-        rewrites observable qubit indices to physical-space indices in
-        one go.
+        ``start + step * i``-th physical qubit. For a tuple of Vector
+        elements whose own UUIDs are not registered in the quantum
+        segment (e.g. an ungated ancilla, or a gate/composite result),
+        the flat UUID lookup misses and i falls back to the element's
+        root ``(array_uuid, index)`` address captured at trace time,
+        which the root array's ``QInitOperation`` always registers. The
+        caller then feeds this mapping into ``hamiltonian.remap_qubits(...)``
+        which rewrites observable qubit indices to physical-space
+        indices in one go.
 
         Args:
-            qubits_value: The Value representing the qubit tuple /
-                array / view to evaluate the observable over.
-            quantum_segment_index: Index of the quantum segment whose
+            qubits_value (Value | None): The Value representing the qubit
+                tuple / array / view to evaluate the observable over.
+                ``None`` yields an empty map.
+            quantum_segment_index (int): Index of the quantum segment whose
                 compiled ``qubit_map`` supplies the physical qubit
                 positions.
-            compiled_quantum: List of already compiled quantum segments.
+            compiled_quantum (list[CompiledQuantumSegment[T]]): Already
+                compiled quantum segments.
 
         Returns:
-            Dict mapping Pauli index -> physical qubit index. Empty
-            when the segment index is invalid or when no entry
-            resolved.
+            dict[int, int]: Mapping from Pauli index to physical qubit
+                index. Empty when the segment index is invalid or when no
+                entry resolved.
         """
         from qamomile.circuit.ir.value import ArrayValue
 
@@ -374,10 +381,30 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                 # Non-view case: match legacy direct element_uuid lookup
                 # so arrays whose elements were registered under explicit
                 # UUIDs (e.g. tuple-packed expval qubits) still resolve.
+                #
+                # On a miss, fall back to the element's root
+                # ``(root_uuid, index)`` address captured at trace time: the
+                # root array's QInitOperation always registers that composite
+                # key, so this resolves a Vector element whose own (per-version)
+                # UUID was never registered in the quantum segment -- e.g. an
+                # ungated ancilla, or an element that is a gate/composite
+                # result.  Standalone qubits carry the ``("", -1)`` sentinel
+                # (``None`` here) and stay on the flat-lookup path above.
+                parent_addrs = qubits_value.get_element_parent_addresses()
                 for i, qubit_uuid in enumerate(qubits_value.get_element_uuids()):
                     addr = QubitAddress(qubit_uuid)
                     if addr in uuid_to_physical:
                         qubit_map[i] = uuid_to_physical[addr]
+                        continue
+                    # ``get_element_parent_addresses()`` returns exactly one
+                    # entry per ``get_element_uuids()`` element, so indexing by
+                    # ``i`` here is always in range.
+                    root_addr_pair = parent_addrs[i]
+                    if root_addr_pair is not None:
+                        root_uuid, root_idx = root_addr_pair
+                        root_addr = QubitAddress(root_uuid, root_idx)
+                        if root_addr in uuid_to_physical:
+                            qubit_map[i] = uuid_to_physical[root_addr]
             else:
                 # View case: enumerate by view length (via element_uuids
                 # or shape) and look up each position in the root's
@@ -398,6 +425,20 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                 addr = QubitAddress(qubits_value.uuid)
                 if addr in uuid_to_physical:
                     qubit_map[0] = uuid_to_physical[addr]
+                else:
+                    # Bare single ``Qubit`` operand (``expval(q, H)`` without an
+                    # enclosing tuple). When it is a Vector element whose own
+                    # UUID was never registered (e.g. an ungated ancilla passed
+                    # as ``expval(anc[0], H)``), fall back to its root
+                    # ``(root_uuid, index)`` address. Unlike the tuple form, the
+                    # bare element Value keeps its ``parent_array`` into emit, so
+                    # it is resolved directly here without trace-time capture.
+                    resolved = resolve_root_qubit_address(qubits_value)
+                    if resolved is not None:
+                        root_uuid, root_idx = resolved
+                        root_addr = QubitAddress(root_uuid, root_idx)
+                        if root_addr in uuid_to_physical:
+                            qubit_map[0] = uuid_to_physical[root_addr]
 
         return qubit_map
 
