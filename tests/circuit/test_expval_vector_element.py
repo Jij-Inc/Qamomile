@@ -813,6 +813,39 @@ def _scalar_x_helper(q: qmc.Qubit, obs: qmc.Observable) -> qmc.Float:
 
 
 @qmc.qkernel
+def _scalar_identity_helper(q: qmc.Qubit, obs: qmc.Observable) -> qmc.Float:
+    """Evaluate an unchanged scalar helper argument.
+
+    Args:
+        q (qmc.Qubit): Scalar qubit argument supplied by the caller.
+        obs (qmc.Observable): Observable to evaluate against the scalar qubit.
+
+    Returns:
+        qmc.Float: Expectation value for the unchanged scalar qubit.
+    """
+    return qmc.expval((q,), obs)
+
+
+@qmc.qkernel
+def _scalar_pair_identity_helper(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Evaluate unchanged scalar helper arguments as a tuple.
+
+    Args:
+        q0 (qmc.Qubit): First scalar qubit argument supplied by the caller.
+        q1 (qmc.Qubit): Second scalar qubit argument supplied by the caller.
+        obs (qmc.Observable): Observable to evaluate against the tuple.
+
+    Returns:
+        qmc.Float: Expectation value for the unchanged scalar tuple.
+    """
+    return qmc.expval((q0, q1), obs)
+
+
+@qmc.qkernel
 def _scalar_ry_helper(
     q: qmc.Qubit,
     theta: qmc.Float,
@@ -875,6 +908,38 @@ def _deterministic_scalar_qkernel(obs: qmc.Observable) -> qmc.Float:
     """
     q = qmc.qubit_array(3, "q")
     return _scalar_x_helper(q[1], obs)
+
+
+@qmc.qkernel
+def _deterministic_scalar_identity_qkernel(obs: qmc.Observable) -> qmc.Float:
+    """Evaluate an unchanged inlined scalar argument.
+
+    Args:
+        obs (qmc.Observable): Observable to evaluate on the selected qubit.
+
+    Returns:
+        qmc.Float: Expectation value for the inlined scalar argument.
+    """
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    return _scalar_identity_helper(q[1], obs)
+
+
+@qmc.qkernel
+def _deterministic_scalar_pair_identity_qkernel(
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Evaluate unchanged inlined scalar arguments in tuple form.
+
+    Args:
+        obs (qmc.Observable): Observable to evaluate on the selected tuple slot.
+
+    Returns:
+        qmc.Float: Expectation value for the first inlined scalar argument.
+    """
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    return _scalar_pair_identity_helper(q[1], q[0], obs)
 
 
 @qmc.qkernel
@@ -1053,6 +1118,7 @@ DETERMINISTIC_INLINE_CASES: tuple[tuple[str, qmc.QKernel, int, float], ...] = (
     ("qkernel", _deterministic_qkernel, 1, -1.0),
     ("native_gate", _deterministic_native_gate, 2, -1.0),
     ("scalar_qkernel", _deterministic_scalar_qkernel, 1, -1.0),
+    ("scalar_identity_qkernel", _deterministic_scalar_identity_qkernel, 1, 1.0),
     ("broadcast", _deterministic_broadcast, 2, -1.0),
     ("view_broadcast", _deterministic_view_broadcast, 1, -1.0),
     ("composite_gate", _deterministic_composite_gate, 2, -1.0),
@@ -1075,6 +1141,17 @@ def test_tuple_expval_inline_frontend_patterns_deterministic(
     value, qubit_map = _expval_with_qubit_map(backend, kernel, {"obs": qm_o.Z(0)})
     assert qubit_map == {0: expected_physical}, case_name
     assert math.isclose(value, expected, abs_tol=_EXPVAL_ATOL), case_name
+
+
+def test_tuple_expval_inline_scalar_pair_identity(backend):
+    """Tuple metadata roots are rewritten for unchanged scalar arguments."""
+    value, qubit_map = _expval_with_qubit_map(
+        backend,
+        _deterministic_scalar_pair_identity_qkernel,
+        {"obs": qm_o.Z(0)},
+    )
+    assert qubit_map == {0: 1, 1: 0}
+    assert math.isclose(value, 1.0, abs_tol=_EXPVAL_ATOL)
 
 
 RANDOM_INLINE_CASES: tuple[

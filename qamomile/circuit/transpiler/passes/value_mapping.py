@@ -22,6 +22,7 @@ from qamomile.circuit.ir.value import (
     ValueBase,
     ValueMetadata,
     remap_value_metadata_references,
+    resolve_root_qubit_address,
 )
 
 
@@ -441,6 +442,8 @@ class ValueSubstitutor:
             array_rt_changed = False
             element_uuids = list(new_array_rt.element_uuids)
             element_logical_ids = list(new_array_rt.element_logical_ids)
+            element_parent_uuids = list(new_array_rt.element_parent_uuids)
+            element_parent_indices = list(new_array_rt.element_parent_indices)
             for i, element_uuid in enumerate(element_uuids):
                 mapped = self._mapped_value_for_uuid(element_uuid)
                 if mapped is not None and mapped.uuid != element_uuid:
@@ -448,9 +451,22 @@ class ValueSubstitutor:
                     if i < len(element_logical_ids):
                         element_logical_ids[i] = mapped.logical_id
                     array_rt_changed = True
+                if (
+                    isinstance(mapped, Value)
+                    and i < len(element_parent_uuids)
+                    and i < len(element_parent_indices)
+                ):
+                    root_addr = resolve_root_qubit_address(mapped)
+                    if root_addr is not None:
+                        root_uuid, root_index = root_addr
+                        if (
+                            root_uuid != element_parent_uuids[i]
+                            or root_index != element_parent_indices[i]
+                        ):
+                            element_parent_uuids[i] = root_uuid
+                            element_parent_indices[i] = root_index
+                            array_rt_changed = True
 
-            element_parent_uuids = list(new_array_rt.element_parent_uuids)
-            element_parent_indices = list(new_array_rt.element_parent_indices)
             for i, parent_uuid in enumerate(element_parent_uuids):
                 if (
                     not parent_uuid
