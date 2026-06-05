@@ -14,6 +14,8 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueMetadata,
+    remap_value_metadata_references,
 )
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
@@ -42,6 +44,14 @@ class UUIDRemapper:
     def logical_id_remap(self) -> dict[str, str]:
         """Get the mapping from old logical_ids to new logical_ids."""
         return self._logical_id_remap
+
+    def _clone_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
+        """Clone metadata UUID references through this remapper."""
+        return remap_value_metadata_references(
+            metadata,
+            lambda uuid: self._uuid_remap.get(uuid, uuid),
+            lambda logical_id: self._logical_id_remap.get(logical_id, logical_id),
+        )
 
     def clone_operations(self, operations: list[Operation]) -> list[Operation]:
         """Clone a list of operations with fresh UUIDs."""
@@ -208,6 +218,10 @@ class UUIDRemapper:
                 uuid=new_uuid,
                 logical_id=new_logical_id,
             )
+
+        new_metadata = self._clone_metadata(value.metadata)
+        if new_metadata is not value.metadata:
+            cloned = dataclasses.replace(cast(Any, cloned), metadata=new_metadata)
 
         self._value_cache[old_uuid] = cloned
         return cloned

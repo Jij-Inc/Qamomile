@@ -99,6 +99,83 @@ class ValueMetadata:
     dict_runtime: DictRuntimeMetadata | None = None
 
 
+def remap_value_metadata_references(
+    metadata: ValueMetadata,
+    remap_uuid: typing.Callable[[str], str],
+    remap_logical_id: typing.Callable[[str], str],
+) -> ValueMetadata:
+    """Rewrite UUID and logical-id references inside ``ValueMetadata``.
+
+    Args:
+        metadata (ValueMetadata): Metadata bundle to rewrite.
+        remap_uuid (Callable[[str], str]): Function that maps a referenced
+            Value UUID to its replacement UUID.
+        remap_logical_id (Callable[[str], str]): Function that maps a
+            referenced Value logical ID to its replacement logical ID.
+
+    Returns:
+        ValueMetadata: Metadata with UUID-bearing sections rewritten.
+            Sections that do not carry Value references are preserved.
+    """
+    new_cast = metadata.cast
+    if new_cast is not None:
+        new_cast = CastMetadata(
+            source_uuid=remap_uuid(new_cast.source_uuid),
+            qubit_uuids=tuple(remap_uuid(uuid) for uuid in new_cast.qubit_uuids),
+            source_logical_id=(
+                remap_logical_id(new_cast.source_logical_id)
+                if new_cast.source_logical_id is not None
+                else None
+            ),
+            qubit_logical_ids=tuple(
+                remap_logical_id(logical_id)
+                for logical_id in new_cast.qubit_logical_ids
+            ),
+        )
+
+    new_qfixed = metadata.qfixed
+    if new_qfixed is not None:
+        new_qfixed = QFixedMetadata(
+            qubit_uuids=tuple(remap_uuid(uuid) for uuid in new_qfixed.qubit_uuids),
+            num_bits=new_qfixed.num_bits,
+            int_bits=new_qfixed.int_bits,
+        )
+
+    new_array_rt = metadata.array_runtime
+    if new_array_rt is not None:
+        new_array_rt = ArrayRuntimeMetadata(
+            const_array=new_array_rt.const_array,
+            element_uuids=tuple(
+                remap_uuid(uuid) for uuid in new_array_rt.element_uuids
+            ),
+            element_logical_ids=tuple(
+                remap_logical_id(logical_id)
+                for logical_id in new_array_rt.element_logical_ids
+            ),
+            # Empty parent UUID is a sentinel for standalone or unresolved
+            # elements, not a Value UUID, so keep it unchanged.
+            element_parent_uuids=tuple(
+                remap_uuid(uuid) if uuid else uuid
+                for uuid in new_array_rt.element_parent_uuids
+            ),
+            element_parent_indices=new_array_rt.element_parent_indices,
+        )
+
+    if (
+        new_cast == metadata.cast
+        and new_qfixed == metadata.qfixed
+        and new_array_rt == metadata.array_runtime
+    ):
+        return metadata
+
+    return dataclasses.replace(
+        metadata,
+        cast=new_cast,
+        qfixed=new_qfixed,
+        array_runtime=new_array_rt,
+    )
+
+
 @typing.runtime_checkable
 class ValueBase(typing.Protocol):
     """Protocol for IR values with typed metadata.
