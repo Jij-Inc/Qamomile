@@ -25,6 +25,7 @@ from qamomile.circuit.algorithm.basic import (  # noqa: E402
     superposition_vector,
 )
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.canonical import content_hash
 from qamomile.circuit.ir.operation import (
     GateOperation,
     GateOperationType,
@@ -91,6 +92,28 @@ def _measure_kernel(q: qmc.Qubit) -> qmc.Bit:
 def _inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     """Kernel that emits a first-class inverse block operation."""
     q = qmc.inverse(_scalar_gate)(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_inner(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Single nested helper for inverse source-block serialization."""
+    q = qmc.rx(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_outer(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Outer helper that leaves a CallBlockOperation before inline."""
+    q = qmc.h(q)
+    q = _nested_inverse_inner(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Kernel whose inverse source block contains a nested call."""
+    q = qmc.inverse(_nested_inverse_outer)(q, theta)
     return q
 
 
@@ -197,6 +220,30 @@ class TestRoundTripStructure:
         assert inverse_ops[0].source_block.name == "_scalar_gate"
         assert inverse_ops[0].implementation_block is not None
         assert inverse_ops[0].implementation_block.name.endswith("_inverse")
+
+    def test_inverse_block_nested_blocks_are_inlined(self):
+        """Nested inverse source and fallback blocks can serialize and hash."""
+        block = _to_affine(_nested_inverse_kernel)
+        inverse_op = next(
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        )
+
+        assert inverse_op.source_block is not None
+        assert inverse_op.implementation_block is not None
+        assert inverse_op.source_block.kind is BlockKind.AFFINE
+        assert inverse_op.implementation_block.kind is BlockKind.AFFINE
+        assert not any(
+            isinstance(op, CallBlockOperation)
+            for op in inverse_op.source_block.operations
+        )
+        assert not any(
+            isinstance(op, CallBlockOperation)
+            for op in inverse_op.implementation_block.operations
+        )
+
+        restored = load_json(dump_json(block))
+        assert load_msgpack(dump_msgpack(block)).kind == block.kind
+        assert content_hash(restored) == content_hash(block)
 
     def test_input_value_types_preserved(self):
         """Input Value types match across the round-trip."""

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Sequence, cast
 
 import numpy as np
 
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     InverseBlockOperation,
@@ -32,6 +33,9 @@ from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.emit_support import (
     QubitAddress,
     QubitMap,
+)
+from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    evaluate_binop,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_and_populate_block_inputs,
@@ -663,6 +667,9 @@ def _emit_quri_controlled_operations(
     """
     for op in operations:
         if isinstance(op, ReturnOperation):
+            continue
+        if isinstance(op, BinOp):
+            evaluate_binop(emit_pass, op, bindings)
             continue
         if isinstance(op, GateOperation):
             target_indices = _resolve_quri_gate_targets(

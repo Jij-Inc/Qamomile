@@ -146,10 +146,11 @@ class QiskitGateEmitter:
     ) -> "Gate | None":
         """Convert circuit to a reusable gate."""
         from qiskit.circuit.exceptions import CircuitError
+        from qiskit.exceptions import QiskitError
 
         try:
             return circuit.to_gate(label=name)
-        except (CircuitError, ValueError, TypeError):
+        except (CircuitError, QiskitError, ValueError, TypeError):
             return None
 
     def append_gate(
@@ -179,10 +180,11 @@ class QiskitGateEmitter:
             Any: Inverse Qiskit gate, or None when inversion fails.
         """
         from qiskit.circuit.exceptions import CircuitError
+        from qiskit.exceptions import QiskitError
 
         try:
             return gate.inverse()
-        except (CircuitError, ValueError, TypeError, AttributeError):
+        except (CircuitError, QiskitError, ValueError, TypeError, AttributeError):
             return None
 
     # Control flow support

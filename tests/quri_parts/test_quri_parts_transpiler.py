@@ -235,3 +235,35 @@ class TestQuriPartsTranspiler:
 
         assert quri_circuit.parameter_count == 1
         assert len(quri_circuit.gates) > 0
+
+    def test_controlled_inverse_with_runtime_parameter_transpiles(self) -> None:
+        """Controlled inverse fallback evaluates symbolic angle negation."""
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def phase_layer(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            """Apply a runtime phase rotation."""
+            q = qmc.rz(q, theta)
+            return q
+
+        @qmc.qkernel
+        def inverse_body(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            """Apply an inverse runtime phase inside a controlled body."""
+            q = qmc.inverse(phase_layer)(q, theta)
+            return q
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            """Apply a controlled inverse body with a runtime angle."""
+            qs = qmc.qubit_array(2, "qs")
+            qs[0] = qmc.x(qs[0])
+            controlled = qmc.control(inverse_body)
+            qs[0], qs[1] = controlled(qs[0], qs[1], theta)
+            return qmc.measure(qs)
+
+        transpiler = QuriPartsTranspiler()
+        executable = transpiler.transpile(circuit, parameters=["theta"])
+        quri_circuit = executable.compiled_quantum[0].circuit
+
+        assert quri_circuit.parameter_count == 1
+        assert len(quri_circuit.gates) > 0

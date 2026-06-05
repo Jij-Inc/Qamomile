@@ -18,7 +18,10 @@ import math
 from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    RuntimeClassicalExpr,
+)
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -57,6 +60,9 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ValueResolver,
     resolve_condition_address,
     resolve_if_condition,
+)
+from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    evaluate_binop,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_block_inputs,
@@ -659,6 +665,12 @@ def _validate_adjoint_helper_ops(
                 "to Qamomile inverse decomposition.",
                 operation="CompositeGateOperation",
             )
+        if (
+            isinstance(op, CompositeGateOperation)
+            and op.implementation_block is not None
+        ):
+            _validate_adjoint_helper_ops(op.implementation_block.operations, bindings)
+            continue
         if isinstance(op, IfOperation):
             resolved_condition = resolve_if_condition(op.condition, bindings)
             if resolved_condition is None:
@@ -1249,6 +1261,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         """
         for op in operations:
             if isinstance(op, ReturnOperation):
+                continue
+            if isinstance(op, BinOp):
+                evaluate_binop(self, op, bindings)
                 continue
             if isinstance(op, GateOperation):
                 for operand in op.qubit_operands:

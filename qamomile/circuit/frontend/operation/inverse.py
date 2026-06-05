@@ -1286,13 +1286,13 @@ class InverseGate:
             for binding in quantum_bindings
         ]
         parameter_values = [
-            _as_value(binding.active_handle.value, "inverse qkernel parameter")
+            binding.active_handle.value
             for binding in bindings
             if not binding.is_quantum
         ]
         result_values = [value.next_version() for value in quantum_values]
         op = InverseBlockOperation(
-            operands=[*quantum_values, *parameter_values],
+            operands=cast(list[Value], [*quantum_values, *parameter_values]),
             results=result_values,
             num_control_qubits=0,
             num_target_qubits=len(quantum_values),

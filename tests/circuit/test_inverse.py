@@ -25,7 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import DictValue, Value
 from qamomile.circuit.stdlib import IQFT, QFT
 from tests.circuit.conftest import run_statevector
 
@@ -147,6 +147,27 @@ def _inverse_call_then_gate_layer(q: qmc.Qubit) -> qmc.Qubit:
     """Apply a nested call followed by a gate for inverse tests."""
     q = _inverse_inner_call_layer(q)
     q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def _inverse_runtime_inner_call_layer(
+    q: qmc.Qubit,
+    rotation_angle: qmc.Float,
+) -> qmc.Qubit:
+    """Apply a runtime rotation inside a nested inverse helper."""
+    q = qmc.rx(q, rotation_angle)
+    return q
+
+
+@qmc.qkernel
+def _inverse_runtime_call_then_gate_layer(
+    q: qmc.Qubit,
+    rotation_angle: qmc.Float,
+) -> qmc.Qubit:
+    """Apply a gate and a nested runtime-parameter helper."""
+    q = qmc.h(q)
+    q = _inverse_runtime_inner_call_layer(q, rotation_angle)
     return q
 
 
@@ -1026,6 +1047,33 @@ def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
     ]
 
 
+def test_inverse_qkernel_atomic_inverse_accepts_dict_parameter() -> None:
+    """inverse(qkernel) preserves DictValue operands for emit-time binding."""
+
+    @qmc.qkernel
+    def dict_parameter_layer(
+        q: qmc.Qubit,
+        angles: qmc.Dict[qmc.UInt, qmc.Float],
+    ) -> qmc.Qubit:
+        """Accept a dict parameter while remaining a unitary scalar qkernel."""
+        del angles
+        q = qmc.h(q)
+        return q
+
+    @qmc.qkernel
+    def circuit(angles: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Qubit:
+        q = qmc.qubit("q")
+        q = qmc.inverse(dict_parameter_layer)(q, angles)
+        return q
+
+    block = circuit.build()
+    inverse_op = next(
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
+    )
+
+    assert isinstance(inverse_op.operands[1], DictValue)
+
+
 def test_inverse_qkernel_rejects_vector_for_scalar_input() -> None:
     """inverse(qkernel) rejects shape-mismatched quantum inputs."""
 
@@ -1506,6 +1554,35 @@ def test_inverse_qkernel_prefers_qiskit_backend_inverse(qiskit_transpiler) -> No
     assert quantum_ops[0].name.endswith("_dg")
 
 
+def test_qiskit_emitter_falls_back_on_qiskit_error() -> None:
+    """Qiskit reusable-gate probes return None on QiskitError."""
+    pytest.importorskip("qiskit")
+
+    from qiskit.exceptions import QiskitError
+
+    from qamomile.qiskit.emitter import QiskitGateEmitter
+
+    class BadCircuit:
+        """Raise a QiskitError from circuit_to_gate."""
+
+        def to_gate(self, label: str) -> None:
+            """Reject reusable conversion like a Qiskit circuit."""
+            del label
+            raise QiskitError("cannot convert")
+
+    class BadGate:
+        """Raise a QiskitError from gate_inverse."""
+
+        def inverse(self) -> None:
+            """Reject inversion like a Qiskit gate."""
+            raise QiskitError("cannot invert")
+
+    emitter = QiskitGateEmitter()
+
+    assert emitter.circuit_to_gate(BadCircuit()) is None
+    assert emitter.gate_inverse(BadGate()) is None
+
+
 def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None:
     """inverse(qkernel) uses QURI Parts inverse_circuit when available."""
     pytest.importorskip("quri_parts")
@@ -1578,6 +1655,27 @@ def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
     expected[0] = 1.0
 
     assert np.allclose(statevector, expected, atol=1e-8)
+
+
+def test_inverse_cudaq_adjoint_inlines_nested_source_block() -> None:
+    """CUDA-Q adjoint helpers include nested qkernel call bodies."""
+    pytest.importorskip("cudaq")
+
+    from qamomile.cudaq import CudaqTranspiler
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.inverse(_inverse_runtime_call_then_gate_layer)(q, rotation_angle)
+        return qmc.measure(q)
+
+    executable = CudaqTranspiler().transpile(circuit, parameters=["rotation_angle"])
+    source = executable.compiled_quantum[0].circuit.source
+
+    assert "def _qamomile_adjoint_0(t0: cudaq.qubit, thetas: list[float]):" in source
+    assert "h(t0)" in source
+    assert "rx(thetas[0], t0)" in source
+    assert "cudaq.adjoint(_qamomile_adjoint_0, q[0], thetas)" in source
 
 
 def test_inverse_nested_qkernel_call_transpiles_to_identity(qiskit_transpiler) -> None:
