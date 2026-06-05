@@ -451,8 +451,8 @@ class TestManualConstruction:
                 array_runtime=ArrayRuntimeMetadata(
                     element_uuids=(e0.uuid, e1.uuid),
                     element_logical_ids=(e0.logical_id, e1.logical_id),
-                    element_parent_uuids=("parent-array", None),
-                    element_parent_indices=(2, None),
+                    element_parent_uuids=("parent-array", ""),
+                    element_parent_indices=(2, -1),
                 ),
             ),
         )
@@ -470,9 +470,9 @@ class TestManualConstruction:
         assert restored_arr.metadata.array_runtime.element_uuids == (e0.uuid, e1.uuid)
         assert restored_arr.metadata.array_runtime.element_parent_uuids == (
             "parent-array",
-            None,
+            "",
         )
-        assert restored_arr.metadata.array_runtime.element_parent_indices == (2, None)
+        assert restored_arr.metadata.array_runtime.element_parent_indices == (2, -1)
 
     def test_scalar_metadata_round_trip(self):
         """``ScalarMetadata`` parameter_name / const_value round-trip."""

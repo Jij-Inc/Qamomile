@@ -73,7 +73,7 @@ class UUIDRemapper:
                     for logical_id in array_rt.element_logical_ids
                 ),
                 element_parent_uuids=tuple(
-                    self._uuid_remap.get(uuid, uuid) if uuid is not None else None
+                    self._uuid_remap.get(uuid, uuid) if uuid else uuid
                     for uuid in array_rt.element_parent_uuids
                 ),
                 element_parent_indices=array_rt.element_parent_indices,
@@ -417,9 +417,9 @@ class ValueSubstitutor:
         element_parent_indices = list(array_rt.element_parent_indices)
         for i, parent_uuid in enumerate(element_parent_uuids):
             if (
-                parent_uuid is None
+                not parent_uuid
                 or i >= len(element_parent_indices)
-                or element_parent_indices[i] is None
+                or element_parent_indices[i] < 0
             ):
                 continue
 
@@ -496,7 +496,7 @@ class ValueSubstitutor:
                 if element_uuid in self._value_map:
                     return True
             for parent_uuid in array_rt.element_parent_uuids:
-                if parent_uuid is not None and parent_uuid in self._value_map:
+                if parent_uuid and parent_uuid in self._value_map:
                     return True
         return False
 

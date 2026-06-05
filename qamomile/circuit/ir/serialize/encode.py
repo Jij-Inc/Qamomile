@@ -426,8 +426,9 @@ def _encode_array_runtime_metadata(
     Returns:
         dict[str, Any] | None: ``None`` when absent; else dict form
             with ``const_array`` (Python data, possibly numpy
-            wrapper), and UUID-string lists for element UUIDs /
-            logical_ids / root parent references.
+            wrapper), UUID-string lists for element UUIDs /
+            logical_ids, and the parallel per-element root
+            ``(array_uuid, index)`` lists.
     """
     if m is None:
         return None

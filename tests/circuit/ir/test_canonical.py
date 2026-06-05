@@ -463,8 +463,8 @@ class TestMetadataUUIDRewrite:
                 array_runtime=ArrayRuntimeMetadata(
                     element_uuids=(e0.uuid, e1.uuid),
                     element_logical_ids=(e0.logical_id, e1.logical_id),
-                    element_parent_uuids=(parent.uuid, None),
-                    element_parent_indices=(1, None),
+                    element_parent_uuids=(parent.uuid, ""),
+                    element_parent_indices=(1, -1),
                 ),
             ),
         )
@@ -483,9 +483,9 @@ class TestMetadataUUIDRewrite:
         )
         assert carr.metadata.array_runtime.element_parent_uuids == (
             cparent.uuid,
-            None,
+            "",
         )
-        assert carr.metadata.array_runtime.element_parent_indices == (1, None)
+        assert carr.metadata.array_runtime.element_parent_indices == (1, -1)
 
     def test_scalar_metadata_preserved_verbatim(self):
         """ScalarMetadata (no UUID refs) carries through unchanged."""
