@@ -57,9 +57,6 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     resolve_condition_address,
     resolve_if_condition,
 )
-from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
-    _strip_slice_markers_for_nested_emit,
-)
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
 )
@@ -959,7 +956,6 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 operation="ControlledUOperation",
             )
 
-        block_value = _strip_slice_markers_for_nested_emit(block_value)
         _validate_controlled_helper_unitary_ops(block_value.operations, bindings)
 
         helper_targets = list(range(len(target_indices)))

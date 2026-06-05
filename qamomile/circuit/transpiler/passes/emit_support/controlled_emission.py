@@ -13,11 +13,16 @@ overrides (e.g. CudaqEmitPass) are respected.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import TYPE_CHECKING, Any
 
-from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -434,6 +439,7 @@ def emit_controlled_u_with_symbolic_indices(
     _bind_quantum_input_shapes(
         emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
+    block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     num_targets = len(target_indices)
     unitary_gate = emit_pass._blockvalue_to_gate(
@@ -591,6 +597,7 @@ def emit_controlled_u_multi_arg(
     _bind_quantum_input_shapes(
         emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
+    block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     num_targets = len(target_indices)
     unitary_gate = emit_pass._blockvalue_to_gate(
@@ -752,6 +759,7 @@ def emit_controlled_u(
     _bind_quantum_input_shapes(
         emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
+    block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     power_value = resolve_power(emit_pass, op, bindings)
     if _should_emit_single_target_block_per_vector_element(
@@ -938,6 +946,8 @@ def emit_controlled_fallback(
             ``_build_block_qubit_map`` override) bypass this check by
             replacing the method outright.
     """
+    block_value = _prepare_nested_block_for_emit(block_value, bindings)
+
     if num_controls > 1:
         raise EmitError(
             f"Cannot decompose multi-controlled operation "
@@ -1006,6 +1016,7 @@ def emit_custom_composite(
 ) -> None:
     """Emit a custom composite gate with implementation."""
     num_qubits = len(qubit_indices)
+    impl = _prepare_nested_block_for_emit(impl, bindings)
     custom_gate = emit_pass._blockvalue_to_gate(impl, num_qubits, bindings)
 
     if custom_gate is not None:
@@ -1073,7 +1084,7 @@ def blockvalue_to_gate(
     if not hasattr(block_value, "operations"):
         return None
 
-    block_value = _strip_slice_markers_for_nested_emit(block_value)
+    block_value = _prepare_nested_block_for_emit(block_value, bindings)
 
     try:
         local_qubit_map: QubitMap = {}
@@ -1121,33 +1132,85 @@ def blockvalue_to_gate(
         return None
 
 
-def _strip_slice_markers_for_nested_emit(block_value: Any) -> Any:
-    """Remove slice marker operations from a nested block before emit.
+def _contains_slice_markers(operations: list[Operation]) -> bool:
+    """Return whether ``operations`` contains slice borrow markers.
+
+    Args:
+        operations (list[Operation]): Operations to inspect recursively,
+            including control-flow children and nested block-valued
+            operations.
+
+    Returns:
+        bool: ``True`` when a ``SliceArrayOperation`` or
+        ``ReleaseSliceViewOperation`` is present; otherwise ``False``.
+    """
+    for op in operations:
+        if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
+            return True
+        if isinstance(op, HasNestedOps):
+            if any(_contains_slice_markers(nested) for nested in op.nested_op_lists()):
+                return True
+        nested_block = getattr(op, "block", None)
+        if isinstance(nested_block, Block) and _contains_slice_markers(
+            nested_block.operations
+        ):
+            return True
+        implementation_block = getattr(op, "implementation_block", None)
+        if isinstance(implementation_block, Block) and _contains_slice_markers(
+            implementation_block.operations
+        ):
+            return True
+    return False
+
+
+def _prepare_nested_block_for_emit(block_value: Any, bindings: dict[str, Any]) -> Any:
+    """Run nested-block slice checks and remove emit-only markers.
 
     Top-level blocks pass through ``SliceBorrowCheckPass`` and
     ``StripSliceArrayOpsPass`` before segmentation and emission, but a
     ``ControlledUOperation`` or custom composite carries its inner
     ``Block`` as an operation field rather than as regular control-flow
     children. Generic pass visitors therefore do not descend into that
-    nested block. Apply the same marker-stripping invariant here before
-    converting the nested block into a backend gate.
+    nested block. Apply the same invariant here before any nested block
+    with slice markers is converted to a backend gate or emitted through
+    a fallback path.
 
     Args:
         block_value (Any): Candidate nested block to normalize.
+        bindings (dict[str, Any]): Compile-time bindings visible inside
+            the nested block.
 
     Returns:
-        Any: ``block_value`` with ``SliceArrayOperation`` and
-        ``ReleaseSliceViewOperation`` markers removed when it is a
-        ``Block``; otherwise the original object unchanged.
+        Any: ``block_value`` after ``SliceBorrowCheckPass`` and marker
+        stripping when it is a ``Block`` containing slice markers; otherwise
+        the original object unchanged.
+
+    Raises:
+        ValidationError: If ``SliceBorrowCheckPass`` rejects the block
+            stage.
+        SliceBorrowViolationError: If nested slice borrows violate the
+            same linearity rules enforced for top-level blocks.
     """
     if not isinstance(block_value, Block):
         return block_value
+    if not _contains_slice_markers(block_value.operations):
+        return block_value
 
+    from qamomile.circuit.transpiler.passes.constant_fold import (
+        ConstantFoldingPass,
+    )
+    from qamomile.circuit.transpiler.passes.slice_borrow_check import (
+        SliceBorrowCheckPass,
+    )
     from qamomile.circuit.transpiler.passes.strip_slice_ops import (
         StripSliceArrayOpsPass,
     )
 
-    return StripSliceArrayOpsPass().run(block_value)
+    if block_value.kind == BlockKind.TRACED:
+        block_value = dataclasses.replace(block_value, kind=BlockKind.HIERARCHICAL)
+    folded = ConstantFoldingPass(bindings, strip_slice_ops=False).run(block_value)
+    checked = SliceBorrowCheckPass().run(folded)
+    return StripSliceArrayOpsPass().run(checked)
 
 
 def _populate_input_qubit_map(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
 from typing import Any, cast
 
 import numpy as np
@@ -107,35 +106,6 @@ def _controlled_shift_expval_kernel(
     return qmc.expval(q, hamiltonian)
 
 
-def _qiskit_transpiler() -> Any:
-    """Return a Qiskit transpiler or skip when Qiskit is unavailable."""
-    pytest.importorskip("qiskit")
-    from qamomile.qiskit import QiskitTranspiler
-
-    return QiskitTranspiler()
-
-
-def _quri_parts_transpiler() -> Any:
-    """Return a QURI Parts transpiler or skip when QURI Parts is unavailable."""
-    pytest.importorskip("quri_parts.qulacs")
-    from qamomile.quri_parts import QuriPartsTranspiler
-
-    return QuriPartsTranspiler()
-
-
-def _cudaq_transpiler() -> Any:
-    """Return a CUDA-Q transpiler or skip when CUDA-Q is unavailable."""
-    pytest.importorskip("cudaq")
-    from qamomile.cudaq import CudaqTranspiler
-
-    return CudaqTranspiler()
-
-
-_BACKENDS: list[Any] = [
-    pytest.param(_qiskit_transpiler, id="qiskit"),
-    pytest.param(_quri_parts_transpiler, marks=pytest.mark.quri_parts, id="quri_parts"),
-    pytest.param(_cudaq_transpiler, marks=pytest.mark.cudaq, id="cudaq"),
-]
 _SIZES = [1, 2, 3, 5]
 _SEEDS = [0, 1, 2, 42]
 _CASES = [
@@ -232,8 +202,8 @@ def _expval_if_supported(
     kernel: Any,
     bindings: dict[str, Any],
     backend_name: str,
-) -> float | None:
-    """Return expval or ``None`` for known backend limitations."""
+) -> float:
+    """Return expval or mark a known backend limitation explicitly."""
     try:
         return _expval(transpiler, kernel, bindings)
     except TypeError as exc:
@@ -241,82 +211,165 @@ def _expval_if_supported(
             backend_name == "cudaq"
             and "cudaq.observe() is not supported for runtime control flow" in str(exc)
         ):
-            return None
+            pytest.xfail(
+                "CUDA-Q observe() does not support the runtime control flow "
+                "used by controlled modular arithmetic yet."
+            )
         raise
 
 
-@pytest.mark.parametrize("transpiler_factory", _BACKENDS)
-@pytest.mark.parametrize("n", _SIZES)
-@pytest.mark.parametrize("seed", _SEEDS)
-def test_modular_arithmetic_cross_backend_sample_and_expval(
-    transpiler_factory: Callable[[], Any],
+def _bindings_for_case(
     n: int,
-    seed: int,
+    bits: list[int],
+    direction: str,
+    mode: str,
+    enabled: int | None,
+    hamiltonian: qm_o.Hamiltonian,
+) -> tuple[dict[str, Any], dict[str, Any], Any, Any]:
+    """Build sample and expval inputs for one modular arithmetic case."""
+    direction_id = 0 if direction == "plus" else 1
+    if mode == "controlled":
+        if enabled is None:
+            raise ValueError("controlled modular arithmetic cases require enabled")
+        sample_bindings = {
+            "n": n,
+            "bits": bits,
+            "direction": direction_id,
+            "enabled": enabled,
+        }
+        return (
+            sample_bindings,
+            sample_bindings | {"hamiltonian": hamiltonian},
+            _controlled_shift_sample_kernel,
+            _controlled_shift_expval_kernel,
+        )
+
+    sample_bindings = {"n": n, "bits": bits, "direction": direction_id}
+    return (
+        sample_bindings,
+        sample_bindings | {"hamiltonian": hamiltonian},
+        _shift_sample_kernel,
+        _shift_expval_kernel,
+    )
+
+
+def _run_shift_case(
+    transpiler: Any,
+    backend_name: str,
+    n: int,
+    bits: list[int],
+    direction: str,
+    mode: str,
+    enabled: int | None,
+    coeffs: list[float],
+    shots: int,
 ) -> None:
-    """Execute primitive shifts and qmc.control-created shifts where supported."""
-    transpiler = transpiler_factory()
-    backend_name = _backend_name(transpiler)
+    """Execute sample and expval assertions for one concrete case."""
+    hamiltonian = _z_hamiltonian(coeffs)
+    expected = _expected_bits(bits, direction, enabled)
+    sample_bindings, expval_bindings, sample_kernel, expval_kernel = _bindings_for_case(
+        n, bits, direction, mode, enabled, hamiltonian
+    )
+    context = (
+        f"{transpiler.__class__.__name__} n={n} "
+        f"direction={direction} mode={mode} enabled={enabled}"
+    )
+
+    sample_results = _sample(transpiler, sample_kernel, sample_bindings, shots)
+    observed = _expval_if_supported(
+        transpiler,
+        expval_kernel,
+        expval_bindings,
+        backend_name,
+    )
+
+    _assert_deterministic(sample_results, expected, shots, context=context)
+    assert np.isclose(observed, _exact_z_expval(coeffs, expected), atol=1e-8), (
+        f"{context}: expval={observed}, expected={_exact_z_expval(coeffs, expected)}"
+    )
+
+
+def _skip_unsupported_backend_case(backend_name: str, n: int, mode: str) -> None:
+    """Skip modular arithmetic cases outside a backend's current support."""
     if backend_name == "quri_parts" and n > 2:
         pytest.skip(
             "QURI Parts cannot emit the multi-controlled X gates required "
             "for modular registers larger than two qubits yet."
         )
+    if backend_name == "quri_parts" and mode == "controlled" and n > 1:
+        pytest.skip(
+            "QURI Parts cannot yet recursively emit the BinOp-bearing loop body "
+            "generated by controlled modular shifts for multi-qubit registers."
+        )
+
+
+@pytest.mark.parametrize("n", _SIZES)
+@pytest.mark.parametrize("seed", _SEEDS)
+@pytest.mark.parametrize(("direction", "mode"), _CASES)
+def test_modular_arithmetic_cross_backend_sample_and_expval(
+    sdk_transpiler: Any,
+    n: int,
+    seed: int,
+    direction: str,
+    mode: str,
+) -> None:
+    """Execute seeded primitive shifts and qmc.control-created shifts."""
+    transpiler = sdk_transpiler
+    backend_name = _backend_name(transpiler)
+    _skip_unsupported_backend_case(backend_name, n, mode)
 
     rng = np.random.default_rng(seed)
-    shots = 32
+    bits = _random_bits(rng, n)
+    enabled = int(rng.integers(0, 2)) if mode == "controlled" else None
+    coeffs = rng.uniform(-1.0, 1.0, size=n).tolist()
+    _run_shift_case(
+        transpiler,
+        backend_name,
+        n,
+        bits,
+        direction,
+        mode,
+        enabled,
+        coeffs,
+        shots=32,
+    )
 
-    for direction, mode in _CASES:
-        # QURI Parts cannot yet recursively emit the BinOp-bearing loop body
-        # generated by controlled modular shifts for multi-qubit registers.
-        if backend_name == "quri_parts" and mode == "controlled" and n > 1:
-            continue
 
-        bits = _random_bits(rng, n)
-        enabled = int(rng.integers(0, 2)) if mode == "controlled" else None
-        expected = _expected_bits(bits, direction, enabled)
-        coeffs = rng.uniform(-1.0, 1.0, size=len(expected)).tolist()
-        hamiltonian = _z_hamiltonian(coeffs)
-        direction_id = 0 if direction == "plus" else 1
-        context = (
-            f"{transpiler.__class__.__name__} n={n} seed={seed} "
-            f"direction={direction} mode={mode}"
-        )
+_BOUNDARY_CASES = [
+    ("plus", "plain", None, "ones"),
+    ("minus", "plain", None, "zeros"),
+    ("plus", "controlled", 0, "ones"),
+    ("plus", "controlled", 1, "ones"),
+    ("minus", "controlled", 0, "zeros"),
+    ("minus", "controlled", 1, "zeros"),
+]
 
-        if mode == "controlled":
-            sample_bindings = {
-                "n": n,
-                "bits": bits,
-                "direction": direction_id,
-                "enabled": enabled,
-            }
-            expval_bindings = sample_bindings | {"hamiltonian": hamiltonian}
-            sample_results = _sample(
-                transpiler, _controlled_shift_sample_kernel, sample_bindings, shots
-            )
-            observed = _expval_if_supported(
-                transpiler,
-                _controlled_shift_expval_kernel,
-                expval_bindings,
-                backend_name,
-            )
-        else:
-            sample_bindings = {"n": n, "bits": bits, "direction": direction_id}
-            expval_bindings = sample_bindings | {"hamiltonian": hamiltonian}
-            sample_results = _sample(
-                transpiler, _shift_sample_kernel, sample_bindings, shots
-            )
-            observed = _expval_if_supported(
-                transpiler,
-                _shift_expval_kernel,
-                expval_bindings,
-                backend_name,
-            )
 
-        _assert_deterministic(sample_results, expected, shots, context=context)
-        if observed is None:
-            continue
+@pytest.mark.parametrize("n", _SIZES)
+@pytest.mark.parametrize(("direction", "mode", "enabled", "pattern"), _BOUNDARY_CASES)
+def test_modular_arithmetic_wraparound_and_control_boundaries(
+    sdk_transpiler: Any,
+    n: int,
+    direction: str,
+    mode: str,
+    enabled: int | None,
+    pattern: str,
+) -> None:
+    """Exercise wrap-around and both controlled enabled states explicitly."""
+    transpiler = sdk_transpiler
+    backend_name = _backend_name(transpiler)
+    _skip_unsupported_backend_case(backend_name, n, mode)
 
-        assert np.isclose(observed, _exact_z_expval(coeffs, expected), atol=1e-8), (
-            f"{context}: expval={observed}, expected="
-            f"{_exact_z_expval(coeffs, expected)}"
-        )
+    bits = [1] * n if pattern == "ones" else [0] * n
+    coeffs = [((-1.0) ** index) * (index + 1) / (n + 1) for index in range(n)]
+    _run_shift_case(
+        transpiler,
+        backend_name,
+        n,
+        bits,
+        direction,
+        mode,
+        enabled,
+        coeffs,
+        shots=32,
+    )

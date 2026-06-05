@@ -23,6 +23,34 @@ def qiskit_transpiler():
     return QiskitTranspiler()
 
 
+@pytest.fixture(
+    params=[
+        pytest.param("qiskit", id="qiskit"),
+        pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
+        pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
+    ]
+)
+def sdk_transpiler(request):
+    """Return a supported SDK transpiler or skip when unavailable."""
+    backend = request.param
+    if backend == "qiskit":
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+    if backend == "quri_parts":
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        return QuriPartsTranspiler()
+    if backend == "cudaq":
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        return CudaqTranspiler()
+    raise AssertionError(f"Unsupported SDK backend fixture value: {backend}")
+
+
 @pytest.fixture
 def seeded_executor(qiskit_transpiler):
     """Executor with fixed seed for reproducible sampling."""

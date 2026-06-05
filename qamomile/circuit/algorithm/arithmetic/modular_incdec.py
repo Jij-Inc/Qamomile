@@ -22,11 +22,7 @@ def modular_increment(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     for k in qmc.range(1, n):
         target_index = n - k
         mcx = qmc.control(qmc.x, num_controls=target_index)
-        controls = q[0:target_index]
-        target = q[target_index]
-        controls, target = mcx(controls, target)
-        q[0:target_index] = controls
-        q[target_index] = target
+        q[0:target_index], q[target_index] = mcx(q[0:target_index], q[target_index])
     q[0] = qmc.x(q[0])
     return q
 
@@ -48,11 +44,7 @@ def modular_decrement(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     q[0] = qmc.x(q[0])
     for target_index in qmc.range(1, n):
         mcx = qmc.control(qmc.x, num_controls=target_index)
-        controls = q[0:target_index]
-        target = q[target_index]
-        controls, target = mcx(controls, target)
-        q[0:target_index] = controls
-        q[target_index] = target
+        q[0:target_index], q[target_index] = mcx(q[0:target_index], q[target_index])
     return q
 
 
