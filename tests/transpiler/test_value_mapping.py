@@ -26,7 +26,13 @@ from qamomile.circuit.ir.types.primitives import (
     QubitType,
     UIntType,
 )
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    CastMetadata,
+    QFixedMetadata,
+    Value,
+    ValueMetadata,
+)
 from qamomile.circuit.transpiler.passes.value_mapping import (
     UUIDRemapper,
     ValueSubstitutor,
@@ -56,6 +62,78 @@ def _make_array_value(
 ) -> ArrayValue:
     """Create an ArrayValue with the given shape dimension Values."""
     return ArrayValue(type=type_cls(), name=name, shape=shape_vals)
+
+
+# ===========================================================================
+# Metadata UUID cloning
+# ===========================================================================
+
+
+class TestUUIDRemapperMetadataCloning:
+    """Tests that UUIDRemapper clones UUID references in ValueMetadata."""
+
+    def test_cast_metadata_uuid_references_are_cloned(self) -> None:
+        """Cast source and qubit references follow cloned Values."""
+        source = _make_value("source")
+        qubit = _make_value("q", QubitType)
+        carrier = Value(
+            type=UIntType(),
+            name="cast",
+            metadata=ValueMetadata(
+                cast=CastMetadata(
+                    source_uuid=source.uuid,
+                    source_logical_id=source.logical_id,
+                    qubit_uuids=(qubit.uuid,),
+                    qubit_logical_ids=(qubit.logical_id,),
+                ),
+            ),
+        )
+
+        remapper = UUIDRemapper()
+        cloned_source = remapper.clone_value(source)
+        cloned_qubit = remapper.clone_value(qubit)
+        cloned_carrier = remapper.clone_value(carrier)
+
+        assert isinstance(cloned_carrier, Value)
+        assert cloned_carrier.metadata.cast is not None
+        assert cloned_carrier.metadata.cast.source_uuid == cloned_source.uuid
+        assert cloned_carrier.metadata.cast.source_logical_id == (
+            cloned_source.logical_id
+        )
+        assert cloned_carrier.metadata.cast.qubit_uuids == (cloned_qubit.uuid,)
+        assert cloned_carrier.metadata.cast.qubit_logical_ids == (
+            cloned_qubit.logical_id,
+        )
+
+    def test_qfixed_metadata_qubit_references_are_cloned(self) -> None:
+        """QFixed carrier qubit references follow cloned Values."""
+        q0 = _make_value("q0", QubitType)
+        q1 = _make_value("q1", QubitType)
+        qfixed = Value(
+            type=UIntType(),
+            name="qfixed",
+            metadata=ValueMetadata(
+                qfixed=QFixedMetadata(
+                    qubit_uuids=(q0.uuid, q1.uuid),
+                    num_bits=2,
+                    int_bits=0,
+                ),
+            ),
+        )
+
+        remapper = UUIDRemapper()
+        cloned_q0 = remapper.clone_value(q0)
+        cloned_q1 = remapper.clone_value(q1)
+        cloned_qfixed = remapper.clone_value(qfixed)
+
+        assert isinstance(cloned_qfixed, Value)
+        assert cloned_qfixed.metadata.qfixed is not None
+        assert cloned_qfixed.metadata.qfixed.qubit_uuids == (
+            cloned_q0.uuid,
+            cloned_q1.uuid,
+        )
+        assert cloned_qfixed.metadata.qfixed.num_bits == 2
+        assert cloned_qfixed.metadata.qfixed.int_bits == 0
 
 
 # ===========================================================================
