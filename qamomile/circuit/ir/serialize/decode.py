@@ -483,6 +483,8 @@ def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
         const_array=_decode_payload(d.get("const_array")),
         element_uuids=tuple(d.get("element_uuids", ())),
         element_logical_ids=tuple(d.get("element_logical_ids", ())),
+        element_parent_uuids=tuple(d.get("element_parent_uuids", ())),
+        element_parent_indices=tuple(d.get("element_parent_indices", ())),
     )
 
 
