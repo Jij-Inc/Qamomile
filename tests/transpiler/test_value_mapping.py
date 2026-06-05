@@ -27,6 +27,7 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
 )
 from qamomile.circuit.ir.value import (
+    ArrayRuntimeMetadata,
     ArrayValue,
     CastMetadata,
     QFixedMetadata,
@@ -190,6 +191,67 @@ class TestUUIDRemapperMetadataCloning:
         assert result.metadata.qfixed.qubit_uuids == (new_q0.uuid, new_q1.uuid)
         assert result.metadata.qfixed.num_bits == 2
         assert result.metadata.qfixed.int_bits == 0
+
+
+class TestArrayRuntimeMetadataSymbolicRootLimitations:
+    """Known limitations around symbolic root-address metadata."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=("ArrayRuntimeMetadata cannot encode symbolic affine root indices yet."),
+    )
+    def test_scalar_inline_metadata_cannot_promote_symbolic_slice_parent(
+        self,
+    ) -> None:
+        """Scalar tuple metadata cannot promote ``q[j:j+1][0]`` to root ``q[j]``.
+
+        A scalar helper traces ``expval((q,), obs)`` with standalone-qubit
+        metadata, encoded as the ``("", -1)`` sentinel.  After inlining, that
+        scalar may map to an element of a caller-side symbolic slice such as
+        ``q[j:j+1][0]``.  The current metadata can only store integer root
+        indices, so it cannot represent the desired root address ``(q.uuid,
+        j)`` and leaves the sentinel in place.
+        """
+        root = _make_array_value("q")
+        loop_index = _make_value("j")
+        one = _make_const_value("one", 1)
+        zero = _make_const_value("zero", 0)
+        symbolic_view = ArrayValue(
+            type=QubitType(),
+            name="q[j:j+1]",
+            slice_of=root,
+            slice_start=loop_index,
+            slice_step=one,
+        )
+        callee_scalar = _make_value("callee_q", QubitType)
+        caller_element = Value(
+            type=QubitType(),
+            name="q[j]",
+            parent_array=symbolic_view,
+            element_indices=(zero,),
+        )
+        tuple_operand = ArrayValue(
+            type=QubitType(),
+            name="expval_qubits",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_uuids=(callee_scalar.uuid,),
+                    element_logical_ids=(callee_scalar.logical_id,),
+                    element_parent_uuids=("",),
+                    element_parent_indices=(-1,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor(
+            {callee_scalar.uuid: caller_element}
+        ).substitute_value(tuple_operand)
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == (caller_element.uuid,)
+        assert result.metadata.array_runtime.element_parent_uuids == (root.uuid,)
+        assert result.metadata.array_runtime.element_parent_indices == (loop_index,)
 
 
 # ===========================================================================
