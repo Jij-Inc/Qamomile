@@ -581,6 +581,14 @@ class _Canonicalizer:
                     self._remap_logical_id(lid)
                     for lid in new_array_rt.element_logical_ids
                 ),
+                # Parent UUIDs reference the root array Value, so they remap
+                # through the same table. The ``""`` standalone-qubit sentinel
+                # is not a Value reference and is left untouched.
+                element_parent_uuids=tuple(
+                    self._remap_uuid(u) if u else u
+                    for u in new_array_rt.element_parent_uuids
+                ),
+                element_parent_indices=new_array_rt.element_parent_indices,
             )
 
         return ValueMetadata(
@@ -706,7 +714,9 @@ def _metadata_token(metadata: ValueMetadata) -> str:
         parts.append(
             f"array_runtime(const={_token(metadata.array_runtime.const_array)},"
             f"elem_uuids={_token(list(metadata.array_runtime.element_uuids))},"
-            f"elem_lids={_token(list(metadata.array_runtime.element_logical_ids))})"
+            f"elem_lids={_token(list(metadata.array_runtime.element_logical_ids))},"
+            f"elem_par_uuids={_token(list(metadata.array_runtime.element_parent_uuids))},"
+            f"elem_par_idxs={_token(list(metadata.array_runtime.element_parent_indices))})"
         )
     if metadata.dict_runtime is not None:
         # ``bound_data`` is stored as tuple-of-pairs in the Mapping's
