@@ -536,6 +536,14 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     """
     # Not an array element (e.g. a standalone qubit / scalar): there is no
     # root array to address against.
+    #
+    # ``parent_array`` and ``element_indices`` are always set together -- an
+    # array-element access sets both, and ``next_version`` copies both -- so a
+    # fully-formed element has both and a non-element has neither; the
+    # "only one set" case does not normally arise. ``or`` (not ``and``) is still
+    # the right guard because BOTH are needed below (``element_indices[0]`` for
+    # the index, ``parent_array`` to walk to the root), so we bail to None if
+    # either is missing rather than risk an IndexError / None-walk.
     if value.parent_array is None or not value.element_indices:
         return None
     idx_value = value.element_indices[0]
