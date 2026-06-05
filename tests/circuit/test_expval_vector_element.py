@@ -255,8 +255,10 @@ def test_controlled_u_result_vector_element(backend, seed):
     fallback.
     """
     rng = np.random.default_rng(seed)
-    for theta in [0.0, math.pi, 2.0 * math.pi, float(rng.uniform(0, 2 * math.pi))]:
-        got = _expval(backend, _cry_result_ancilla, {"theta": theta, "obs": qm_o.Z(0)})
+    obs = qm_o.Z(0)
+    angles = [0.0, math.pi, 2.0 * math.pi, float(rng.uniform(0, 2 * math.pi))]
+    for theta in angles:
+        got = _expval(backend, _cry_result_ancilla, {"theta": theta, "obs": obs})
         assert math.isclose(got, math.cos(theta), abs_tol=_EXPVAL_ATOL), (
             f"theta={theta}"
         )

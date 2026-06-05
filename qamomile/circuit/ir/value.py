@@ -278,13 +278,16 @@ class _MetadataValueMixin:
         # by element position. ``zip`` would instead stop at the shortest tuple
         # and return fewer (or zero) entries for any value whose parent tuples
         # were never set, silently misaligning the result with element_uuids.
+        # Defensive only: an element is "past the recorded parent info" once its
+        # index reaches the SHORTER of the two parent tuples. In practice the
+        # parent tuples are equal length to element_uuids (expval sets all three
+        # together), so this never triggers at the real call site -- it only
+        # keeps the result aligned with element_uuids for any value whose parent
+        # info was never recorded (those positions become None).
+        n_parent = min(len(rt.element_parent_uuids), len(rt.element_parent_indices))
         result: list[tuple[str, int] | None] = []
         for i in range(len(rt.element_uuids)):
-            # Defensive only: reachable solely if the parent tuples are shorter
-            # than element_uuids (a value whose parent info was never recorded,
-            # not produced at the expval call site). Such an element has no
-            # known root address -> None.
-            if i >= len(rt.element_parent_uuids) or i >= len(rt.element_parent_indices):
+            if i >= n_parent:
                 result.append(None)
                 continue
             parent_uuid = rt.element_parent_uuids[i]
