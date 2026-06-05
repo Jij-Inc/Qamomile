@@ -180,6 +180,24 @@ def _for_items_ising_kernel(
     return q
 
 
+@qmc.qkernel
+def _slice_assignment_kernel() -> qmc.Vector[qmc.Bit]:
+    """Kernel that exercises literal slice assignment markers."""
+    q = qmc.qubit_array(4, name="q")
+    q[1::2] = qmc.h(q[1::2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _nested_slice_assignment_kernel() -> qmc.Vector[qmc.Bit]:
+    """Kernel that exercises nested slice views and releases."""
+    q = qmc.qubit_array(8, name="q")
+    evens = q[0::2]
+    evens[0:2] = qmc.x(evens[0:2])
+    q[0::2] = evens
+    return qmc.measure(q)
+
+
 # ---------------------------------------------------------------------------
 # Smoke + structure preservation
 # ---------------------------------------------------------------------------
@@ -357,6 +375,24 @@ class TestRoundTripIRFeatures:
     def test_for_items_operation_round_trip(self):
         """Dict-backed ForItemsOperation survives both wire formats."""
         block = InlinePass().run(func_to_block(_for_items_ising_kernel.func))
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            _slice_assignment_kernel,
+            _nested_slice_assignment_kernel,
+        ],
+    )
+    def test_slice_view_operations_round_trip(self, kernel: qmc.QKernel):
+        """Frontend slice views survive both wire formats."""
+        block = _to_affine(kernel)
+        op_names = [type(op).__name__ for op in block.operations]
+        assert "SliceArrayOperation" in op_names
+        assert "ReleaseSliceViewOperation" in op_names
+
         original = to_dict(block)
         assert to_dict(load_json(dump_json(block))) == original
         assert to_dict(load_msgpack(dump_msgpack(block))) == original

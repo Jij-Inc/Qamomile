@@ -57,6 +57,10 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
@@ -1079,6 +1083,52 @@ def _decode_phi(d: dict[str, Any], ctx: _DecodeContext) -> PhiOp:
     return PhiOp(operands=operands, results=results)
 
 
+def _decode_slice_array(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> SliceArrayOperation:
+    """Decode :class:`SliceArrayOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        SliceArrayOperation: The reconstructed slice view marker.
+    """
+    operands = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d.get("operand_refs", ())],
+    )
+    results = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d.get("result_refs", ())],
+    )
+    return SliceArrayOperation(operands=operands, results=results)
+
+
+def _decode_release_slice_view(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> ReleaseSliceViewOperation:
+    """Decode :class:`ReleaseSliceViewOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        ReleaseSliceViewOperation: The reconstructed release marker.
+    """
+    operands = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d.get("operand_refs", ())],
+    )
+    results = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d.get("result_refs", ())],
+    )
+    return ReleaseSliceViewOperation(operands=operands, results=results)
+
+
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
     """Decode :class:`ForOperation`.
 
@@ -1375,6 +1425,8 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "NotOp": _decode_notop,
     "RuntimeClassicalExpr": _decode_runtime_classical,
     "PhiOp": _decode_phi,
+    "SliceArrayOperation": _decode_slice_array,
+    "ReleaseSliceViewOperation": _decode_release_slice_view,
     "ForOperation": _decode_for,
     "ForItemsOperation": _decode_for_items,
     "WhileOperation": _decode_while,

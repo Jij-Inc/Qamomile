@@ -52,6 +52,10 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.parameter import ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
@@ -952,6 +956,34 @@ def _encode_phi(op: PhiOp, ctx: _EncodeContext) -> dict[str, Any]:
     return _base_op_dict("PhiOp", op)
 
 
+def _encode_slice_array(op: SliceArrayOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`SliceArrayOperation`.
+
+    Args:
+        op (SliceArrayOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("SliceArrayOperation", op)
+
+
+def _encode_release_slice_view(
+    op: ReleaseSliceViewOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`ReleaseSliceViewOperation`.
+
+    Args:
+        op (ReleaseSliceViewOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("ReleaseSliceViewOperation", op)
+
+
 def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`ForOperation`.
 
@@ -1199,6 +1231,8 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     NotOp: _encode_notop,
     RuntimeClassicalExpr: _encode_runtime_classical,
     PhiOp: _encode_phi,
+    SliceArrayOperation: _encode_slice_array,
+    ReleaseSliceViewOperation: _encode_release_slice_view,
     ForOperation: _encode_for,
     ForItemsOperation: _encode_for_items,
     WhileOperation: _encode_while,
