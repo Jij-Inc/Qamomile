@@ -12,6 +12,7 @@ from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
+    InverseBlockOperation,
     ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import ForOperation
@@ -25,6 +26,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.stdlib import IQFT, QFT
 from tests.circuit.conftest import run_statevector
 
 _HAS_QISKIT = True
@@ -971,16 +973,16 @@ def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
         return q
 
     block = circuit.build(parameters=["rotation_angle"])
-    composites = [
-        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    inverse_ops = [
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
     ]
 
-    assert len(composites) == 1
-    assert composites[0].inverse_source_block is _inverse_layer.block
-    assert composites[0].implementation_block is not None
+    assert len(inverse_ops) == 1
+    assert inverse_ops[0].source_block is _inverse_layer.block
+    assert inverse_ops[0].implementation_block is not None
     gates = [
         op
-        for op in composites[0].implementation_block.operations
+        for op in inverse_ops[0].implementation_block.operations
         if isinstance(op, GateOperation)
     ]
     assert [gate.gate_type for gate in gates] == [
@@ -1033,23 +1035,23 @@ def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:
 
     block = circuit.build(parameters=["rotation_angle"])
     call_ops = [op for op in block.operations if isinstance(op, CallBlockOperation)]
-    composites = [
-        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    inverse_ops = [
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
     ]
 
     assert len(call_ops) == 1
-    assert len(composites) == 1
-    assert composites[0].inverse_source_block is _inverse_layer.block
-    assert composites[0].implementation_block is not None
+    assert len(inverse_ops) == 1
+    assert inverse_ops[0].source_block is _inverse_layer.block
+    assert inverse_ops[0].implementation_block is not None
 
     angle_ops = [
         op
-        for op in composites[0].implementation_block.operations
+        for op in inverse_ops[0].implementation_block.operations
         if isinstance(op, BinOp) and op.kind is BinOpKind.MUL
     ]
     gates = [
         op
-        for op in composites[0].implementation_block.operations
+        for op in inverse_ops[0].implementation_block.operations
         if isinstance(op, GateOperation)
     ]
     assert len(angle_ops) == 1
@@ -1063,6 +1065,23 @@ def test_inverse_qft_function_maps_to_iqft() -> None:
     """inverse(qft) returns iqft directly."""
     assert qmc.inverse(qmc.qft) is qmc.iqft
     assert qmc.inverse(qmc.iqft) is qmc.qft
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        pytest.param(QFT(2), id="qft-instance"),
+        pytest.param(IQFT(2), id="iqft-instance"),
+        pytest.param(_custom_composite_gate, id="custom-composite"),
+        pytest.param(_stub_composite_gate, id="stub-composite"),
+    ],
+)
+def test_inverse_rejects_direct_composite_gate_instances(
+    gate: qmc.CompositeGate,
+) -> None:
+    """inverse() rejects direct CompositeGate instances with guidance."""
+    with pytest.raises(TypeError, match="direct CompositeGate instances"):
+        qmc.inverse(gate)
 
 
 def test_inverse_qft_emits_iqft_composite() -> None:
@@ -1229,15 +1248,15 @@ def test_inverse_controlled_concrete_operation() -> None:
         return ctrl, target
 
     block = circuit.build()
-    composites = [
-        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    inverse_ops = [
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
     ]
 
-    assert len(composites) == 1
-    assert composites[0].implementation_block is not None
+    assert len(inverse_ops) == 1
+    assert inverse_ops[0].implementation_block is not None
     ctrl_ops = [
         op
-        for op in composites[0].implementation_block.operations
+        for op in inverse_ops[0].implementation_block.operations
         if isinstance(op, ControlledUOperation)
     ]
     assert len(ctrl_ops) == 1
@@ -1367,26 +1386,24 @@ def test_inverse_custom_composite_gate_inverts_implementation() -> None:
         return q
 
     block = circuit.build()
-    composites = [
-        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    inverse_ops = [
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
     ]
 
-    assert len(composites) == 1
-    outer = composites[0]
-    assert outer.inverse_source_block is _inverse_custom_composite_layer.block
+    assert len(inverse_ops) == 1
+    outer = inverse_ops[0]
+    assert outer.source_block is _inverse_custom_composite_layer.block
     assert outer.implementation_block is not None
-    inner_composites = [
+    inner_inverse_ops = [
         op
         for op in outer.implementation_block.operations
-        if isinstance(op, CompositeGateOperation)
+        if isinstance(op, InverseBlockOperation)
     ]
-    assert len(inner_composites) == 1
-    assert inner_composites[0].gate_type is CompositeGateType.CUSTOM
-    assert inner_composites[0].custom_name == "custom_h_inverse"
-    assert inner_composites[0].has_implementation
-    assert inner_composites[0].inverse_source_block is _custom_composite_impl.block
-    assert inner_composites[0].implementation_block is not None
-    assert inner_composites[0].implementation_block.name.endswith("_inverse")
+    assert len(inner_inverse_ops) == 1
+    assert inner_inverse_ops[0].custom_name == "custom_h_inverse"
+    assert inner_inverse_ops[0].source_block is _custom_composite_impl.block
+    assert inner_inverse_ops[0].implementation_block is not None
+    assert inner_inverse_ops[0].implementation_block.name.endswith("_inverse")
 
 
 def test_inverse_stub_composite_gate_builds_opaque_inverse() -> None:
@@ -1399,12 +1416,12 @@ def test_inverse_stub_composite_gate_builds_opaque_inverse() -> None:
         return q
 
     block = circuit.build()
-    composites = [
-        op for op in block.operations if isinstance(op, CompositeGateOperation)
+    inverse_ops = [
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
     ]
 
-    assert len(composites) == 1
-    outer = composites[0]
+    assert len(inverse_ops) == 1
+    outer = inverse_ops[0]
     assert outer.implementation_block is not None
     inner_composites = [
         op

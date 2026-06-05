@@ -14,7 +14,10 @@ from sympy import Sum
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -169,6 +172,13 @@ def _count_from_operations(
                     num_controls,
                 )
 
+            case InverseBlockOperation():
+                count = count + _handle_inverse_block(
+                    op,
+                    resolver,
+                    num_controls,
+                )
+
             case PauliEvolveOp():
                 count = count + _handle_pauli_evolve(op, bindings)
 
@@ -285,6 +295,54 @@ def _handle_composite(
 
     # error
     raise ValueError(res.error_message)
+
+
+def _handle_inverse_block(
+    op: InverseBlockOperation,
+    resolver: ExprResolver,
+    num_controls: int | sp.Expr,
+) -> GateCount:
+    """Count an inverse block through its fallback implementation.
+
+    Args:
+        op (InverseBlockOperation): Inverse block operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+        num_controls (int | sp.Expr): Number of controls already applied by
+            the enclosing traversal.
+
+    Returns:
+        GateCount: Gate count for the inverse implementation block.
+
+    Raises:
+        ValueError: If the inverse operation has no implementation block.
+    """
+    impl = op.implementation_block
+    if not isinstance(impl, Block):
+        raise ValueError(
+            f"Cannot estimate resources for InverseBlockOperation "
+            f"'{op.name}': no implementation block is available."
+        )
+
+    extra: dict[str, sp.Expr] = {}
+    actual_operands = [*op.target_qubits, *op.parameters]
+    for idx, formal in enumerate(impl.input_values):
+        if idx < len(actual_operands):
+            actual = actual_operands[idx]
+            extra[formal.uuid] = resolver.resolve(actual)
+
+    ctx = resolver.context
+    ctx.update(extra)
+    child = ExprResolver(
+        block=impl,
+        context=ctx,
+        loop_var_names=resolver.loop_var_names,
+        parent_blocks=[],
+    )
+    return _count_from_operations(
+        impl.operations,
+        child,
+        num_controls + op.num_control_qubits,
+    )
 
 
 # ------------------------------------------------------------------ #

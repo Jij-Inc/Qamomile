@@ -3,6 +3,7 @@ from .classical_ops import DecodeQFixedOperation
 from .composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
+    InverseBlockOperation,
     ResourceMetadata,
 )
 from .control_flow import ForItemsOperation, HasNestedOps
@@ -25,6 +26,7 @@ __all__ = [
     "Operation",
     "ReturnOperation",
     "CompositeGateOperation",
+    "InverseBlockOperation",
     "CompositeGateType",
     "ResourceMetadata",
     "GateOperation",

@@ -25,7 +25,11 @@ from qamomile.circuit.algorithm.basic import (  # noqa: E402
     superposition_vector,
 )
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation import (
+    GateOperation,
+    GateOperationType,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
@@ -81,6 +85,13 @@ def _measure_kernel(q: qmc.Qubit) -> qmc.Bit:
     """Kernel that exercises a measurement-derived classical bit."""
     q = qmc.h(q)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Kernel that emits a first-class inverse block operation."""
+    q = qmc.inverse(_scalar_gate)(q, theta)
+    return q
 
 
 @qmc.qkernel
@@ -172,6 +183,22 @@ class TestRoundTripStructure:
             assert original.kind == restored_slot.kind
             assert original.ndim == restored_slot.ndim
             assert isinstance(restored_slot.type, type(original.type))
+
+    def test_inverse_block_round_trip_preserves_source_and_fallback(self):
+        """InverseBlockOperation persists its source and fallback blocks."""
+        block = _to_affine(_inverse_kernel)
+        restored = load_json(dump_json(block))
+        inverse_ops = [
+            op
+            for op in restored.operations
+            if isinstance(op, InverseBlockOperation)
+        ]
+
+        assert len(inverse_ops) == 1
+        assert inverse_ops[0].source_block is not None
+        assert inverse_ops[0].source_block.name == "_scalar_gate"
+        assert inverse_ops[0].implementation_block is not None
+        assert inverse_ops[0].implementation_block.name.endswith("_inverse")
 
     def test_input_value_types_preserved(self):
         """Input Value types match across the round-trip."""

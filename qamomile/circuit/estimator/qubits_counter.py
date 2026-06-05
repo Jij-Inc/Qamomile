@@ -13,7 +13,10 @@ import sympy as sp
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -203,6 +206,29 @@ def _count_composite_split(
     return total_alloc, False
 
 
+def _count_inverse_block_split(
+    op: InverseBlockOperation,
+    resolver: ExprResolver,
+) -> tuple[sp.Expr, bool]:
+    """Count reusable qubits from an inverse block implementation.
+
+    Args:
+        op (InverseBlockOperation): Inverse block operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+
+    Returns:
+        tuple[sp.Expr, bool]: Allocation count and whether it is reusable
+            across loop iterations.
+    """
+    impl = op.implementation_block
+    impl_alloc: sp.Expr = sp.Integer(0)
+    if isinstance(impl, Block):
+        impl_alloc = _count_from_operations(impl.operations, resolver)
+        if _is_clean_call(impl):
+            return impl_alloc, True
+    return impl_alloc, False
+
+
 def _count_composite_total(
     op: CompositeGateOperation,
     resolver: ExprResolver,
@@ -216,6 +242,26 @@ def _count_composite_total(
     if op.resource_metadata is not None:
         count += sp.Integer(op.resource_metadata.ancilla_qubits)
     return count
+
+
+def _count_inverse_block_total(
+    op: InverseBlockOperation,
+    resolver: ExprResolver,
+) -> sp.Expr:
+    """Count qubits from an inverse block implementation.
+
+    Args:
+        op (InverseBlockOperation): Inverse block operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+
+    Returns:
+        sp.Expr: Total additional qubit allocation required by the fallback
+            implementation block.
+    """
+    impl = op.implementation_block
+    if isinstance(impl, Block):
+        return _count_from_operations(impl.operations, resolver)
+    return sp.Integer(0)
 
 
 # ------------------------------------------------------------------ #
@@ -271,6 +317,13 @@ def _count_loop_body_split(
 
             case CompositeGateOperation():
                 alloc, is_reusable = _count_composite_split(op, resolver)
+                if is_reusable:
+                    reusable = sp.Max(reusable, alloc)
+                else:
+                    persistent += alloc  # type: ignore
+
+            case InverseBlockOperation():
+                alloc, is_reusable = _count_inverse_block_split(op, resolver)
                 if is_reusable:
                     reusable = sp.Max(reusable, alloc)
                 else:
@@ -404,6 +457,9 @@ def _count_from_operations(
 
             case CompositeGateOperation():
                 count += _count_composite_total(op, resolver)  # type: ignore
+
+            case InverseBlockOperation():
+                count += _count_inverse_block_total(op, resolver)  # type: ignore
 
             case PauliEvolveOp():
                 # PauliEvolveOp operates in-place; no new qubits.

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.composite_gate import InverseBlockOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -1020,22 +1021,6 @@ def emit_custom_composite(
         bindings (dict[str, Any]): Active emit bindings.
     """
     num_qubits = len(qubit_indices)
-    if getattr(op, "inverse_source_block", None) is not None:
-        source_gate = emit_pass._blockvalue_to_gate(
-            op.inverse_source_block,
-            num_qubits,
-            bindings,
-            input_operands=op.operands,
-        )
-        if source_gate is not None:
-            inverse_gate = emit_pass._emitter.gate_inverse(source_gate)
-            if inverse_gate is not None and _gate_matches_qubit_count(
-                inverse_gate,
-                num_qubits,
-            ):
-                emit_pass._emitter.append_gate(circuit, inverse_gate, qubit_indices)
-                return
-
     custom_gate = emit_pass._blockvalue_to_gate(
         impl,
         num_qubits,
@@ -1075,6 +1060,251 @@ def emit_custom_composite(
                 local_bindings,
                 force_unroll=True,
             )
+
+
+def emit_inverse_block(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: InverseBlockOperation,
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a first-class inverse block operation.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (InverseBlockOperation): Inverse block operation to emit.
+        qubit_map (QubitMap): Current quantum value to physical qubit map.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Raises:
+        EmitError: If an inverse block has missing blocks, unresolved qubit
+            operands, or no available native/fallback emission path.
+    """
+    all_qubits = op.control_qubits + op.target_qubits
+    qubit_indices: list[int] = []
+    for q in all_qubits:
+        result = emit_pass._resolver.resolve_qubit_index_detailed(
+            q, qubit_map, bindings
+        )
+        if not result.success or result.index is None:
+            raise EmitError(
+                f"Cannot resolve qubit operand '{q.name}' for inverse block "
+                f"{op.name}. "
+                f"{result.failure_details or 'Qubit not found in qubit_map.'}",
+                operation="InverseBlockOperation",
+            )
+        qubit_indices.append(result.index)
+
+    control_indices = qubit_indices[: op.num_control_qubits]
+    target_indices = qubit_indices[op.num_control_qubits :]
+    emit_inverse_block_at_indices(
+        emit_pass,
+        circuit,
+        op,
+        control_indices,
+        target_indices,
+        bindings,
+    )
+    for result, qubit_index in zip(op.results, qubit_indices):
+        qubit_map[QubitAddress(result.uuid)] = qubit_index
+
+
+def emit_inverse_block_at_indices(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: InverseBlockOperation,
+    control_indices: list[int],
+    target_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Emit an inverse block after physical qubits have been resolved.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (InverseBlockOperation): Inverse block operation to emit.
+        control_indices (list[int]): Physical control qubits.
+        target_indices (list[int]): Physical target qubits.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Raises:
+        EmitError: If required source/fallback blocks are missing or no
+            emission path can represent the operation.
+    """
+    if op.source_block is None or op.implementation_block is None:
+        raise EmitError(
+            "Cannot emit inverse block without both source and implementation blocks.",
+            operation="InverseBlockOperation",
+        )
+    if len(target_indices) != op.num_target_qubits:
+        raise EmitError(
+            "Inverse block target count does not match resolved qubits: "
+            f"expected {op.num_target_qubits}, got {len(target_indices)}.",
+            operation="InverseBlockOperation",
+        )
+
+    input_operands = [*op.target_qubits, *op.parameters]
+    source_gate = emit_pass._blockvalue_to_gate(
+        op.source_block,
+        len(target_indices),
+        bindings,
+        input_operands=input_operands,
+    )
+    if source_gate is not None:
+        inverse_gate = emit_pass._emitter.gate_inverse(source_gate)
+        if inverse_gate is not None:
+            if control_indices:
+                inverse_gate = emit_pass._emitter.gate_controlled(
+                    inverse_gate,
+                    len(control_indices),
+                )
+            if inverse_gate is not None and _gate_matches_qubit_count(
+                inverse_gate,
+                len(control_indices) + len(target_indices),
+            ):
+                emit_pass._emitter.append_gate(
+                    circuit,
+                    inverse_gate,
+                    [*control_indices, *target_indices],
+                )
+                return
+
+    fallback_gate = emit_pass._blockvalue_to_gate(
+        op.implementation_block,
+        len(target_indices),
+        bindings,
+        input_operands=input_operands,
+    )
+    if fallback_gate is not None:
+        if control_indices:
+            fallback_gate = emit_pass._emitter.gate_controlled(
+                fallback_gate,
+                len(control_indices),
+            )
+        if fallback_gate is not None and _gate_matches_qubit_count(
+            fallback_gate,
+            len(control_indices) + len(target_indices),
+        ):
+            emit_pass._emitter.append_gate(
+                circuit,
+                fallback_gate,
+                [*control_indices, *target_indices],
+            )
+            return
+
+    if control_indices:
+        local_bindings = _bind_inverse_block_inputs(
+            emit_pass,
+            op,
+            len(target_indices),
+            bindings,
+        )
+        emit_pass._emit_controlled_fallback(
+            circuit,
+            op.implementation_block,
+            len(control_indices),
+            control_indices,
+            target_indices,
+            1,
+            local_bindings,
+        )
+        return
+
+    _emit_inverse_block_inline(
+        emit_pass,
+        circuit,
+        op.implementation_block,
+        op,
+        target_indices,
+        bindings,
+    )
+
+
+def _bind_inverse_block_inputs(
+    emit_pass: "StandardEmitPass",
+    op: InverseBlockOperation,
+    num_qubits: int,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind inverse block formal inputs to call-site operands.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        op (InverseBlockOperation): Inverse block operation being emitted.
+        num_qubits (int): Number of target qubits available to the fallback.
+        bindings (dict[str, Any]): Parent emit bindings.
+
+    Returns:
+        dict[str, Any]: Local bindings for the fallback implementation.
+
+    Raises:
+        EmitError: If the inverse operation has no fallback implementation
+            block.
+    """
+    if op.implementation_block is None:
+        raise EmitError(
+            "Cannot bind inverse block inputs without an implementation block.",
+            operation="InverseBlockOperation",
+        )
+    local_qubit_map: QubitMap = {}
+    return _bind_block_inputs(
+        emit_pass,
+        op.implementation_block,
+        [*op.target_qubits, *op.parameters],
+        num_qubits,
+        bindings,
+        local_qubit_map,
+    )
+
+
+def _emit_inverse_block_inline(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    impl: Any,
+    op: InverseBlockOperation,
+    target_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Inline an inverse fallback implementation into the parent circuit.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        impl (Any): Fallback inverse implementation block.
+        op (InverseBlockOperation): Inverse block operation being emitted.
+        target_indices (list[int]): Physical target qubits.
+        bindings (dict[str, Any]): Local bindings for ``impl``.
+    """
+    local_qubit_map: QubitMap = {}
+    local_clbit_map: ClbitMap = {}
+    local_bindings = _bind_block_inputs(
+        emit_pass,
+        impl,
+        [*op.target_qubits, *op.parameters],
+        len(target_indices),
+        bindings,
+        local_qubit_map,
+    )
+    if hasattr(impl, "input_values"):
+        quantum_inputs = [
+            value
+            for value in impl.input_values
+            if hasattr(value, "type") and value.type.is_quantum()
+        ]
+        for input_val, qubit_index in zip(quantum_inputs, target_indices):
+            local_qubit_map[QubitAddress(input_val.uuid)] = qubit_index
+
+    if hasattr(impl, "operations"):
+        emit_pass._emit_operations(
+            circuit,
+            impl.operations,
+            local_qubit_map,
+            local_clbit_map,
+            local_bindings,
+            force_unroll=True,
+        )
 
 
 def blockvalue_to_gate(

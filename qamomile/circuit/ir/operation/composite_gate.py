@@ -94,8 +94,6 @@ class CompositeGateOperation(Operation):
         custom_name: Name for CUSTOM gate types (used for identification)
         resource_metadata: Optional resource estimation metadata
         has_implementation: Whether this operation has an implementation Block
-        inverse_source_block: Original implementation Block whose backend-native
-            inverse may be emitted before falling back to `implementation_block`.
         composite_gate_instance: Optional reference to the CompositeGate class instance
             that created this operation (for accessing _decompose() at emit time)
         strategy_name: Optional name of the decomposition strategy to use.
@@ -109,7 +107,6 @@ class CompositeGateOperation(Operation):
     resource_metadata: ResourceMetadata | None = None
     has_implementation: bool = True
     implementation_block: Block | None = None
-    inverse_source_block: Block | None = None
     composite_gate_instance: Any = None  # Reference to CompositeGate instance
     strategy_name: str | None = None  # Selected decomposition strategy
 
@@ -176,4 +173,112 @@ class CompositeGateOperation(Operation):
     @property
     def operation_kind(self) -> OperationKind:
         """Return the operation kind (always QUANTUM)."""
+        return OperationKind.QUANTUM
+
+
+@dataclasses.dataclass
+class InverseBlockOperation(Operation):
+    """Represent an inverse qkernel/block as a first-class IR operation.
+
+    The operation stores both the original forward block and a Qamomile-built
+    inverse implementation block. Emitters may use ``source_block`` with a
+    backend-native inverse/adjoint primitive, then fall back to
+    ``implementation_block`` when native inversion is unavailable.
+
+    Operands are ordered as control qubits, target qubits, then
+    classical/object parameters. Results are control qubits followed by
+    target qubits after the inverse operation.
+
+    Attributes:
+        num_control_qubits (int): Number of leading control operands and
+            pass-through control results.
+        num_target_qubits (int): Number of target operands after controls
+            and target quantum results.
+        custom_name (str): Human-readable inverse operation name.
+        source_block (Block): Forward block whose inverse should be emitted.
+        implementation_block (Block): Fallback block that already contains
+            the gate-by-gate inverse implementation.
+    """
+
+    num_control_qubits: int = 0
+    num_target_qubits: int = 0
+    custom_name: str = ""
+    source_block: Block | None = None
+    implementation_block: Block | None = None
+
+    @property
+    def control_qubits(self) -> list["Value"]:
+        """Return control quantum operands.
+
+        Returns:
+            list[Value]: Leading control operands.
+        """
+        return list(self.operands[: self.num_control_qubits])
+
+    @property
+    def target_qubits(self) -> list["Value"]:
+        """Return target quantum operands.
+
+        Returns:
+            list[Value]: Leading quantum operands consumed by the inverse
+                operation.
+        """
+        start = self.num_control_qubits
+        end = start + self.num_target_qubits
+        return list(self.operands[start:end])
+
+    @property
+    def parameters(self) -> list["Value"]:
+        """Return classical/object parameter operands.
+
+        Returns:
+            list[Value]: Operands after ``num_target_qubits``.
+        """
+        start = self.num_control_qubits + self.num_target_qubits
+        return list(self.operands[start:])
+
+    @property
+    def name(self) -> str:
+        """Return a human-readable inverse operation name.
+
+        Returns:
+            str: Explicit custom name, or ``"inverse"`` when unnamed.
+        """
+        return self.custom_name or "inverse"
+
+    @property
+    def signature(self) -> Signature:
+        """Return the operation signature.
+
+        Returns:
+            Signature: Signature with source/fallback block hints, target
+                qubit operands, parameter operands, and target qubit results.
+        """
+        operand_hints: list[ParamHint | None] = [
+            ParamHint("source", BlockType()),
+            ParamHint("implementation", BlockType()),
+        ]
+        for i in range(self.num_control_qubits):
+            operand_hints.append(ParamHint(f"control_{i}", QubitType()))
+        for i in range(self.num_target_qubits):
+            operand_hints.append(ParamHint(f"target_{i}", QubitType()))
+        for i, param in enumerate(self.parameters):
+            operand_hints.append(ParamHint(f"param_{i}", param.type))
+
+        result_hints = [
+            ParamHint(f"control_out_{i}", QubitType())
+            for i in range(self.num_control_qubits)
+        ] + [
+            ParamHint(f"target_out_{i}", QubitType())
+            for i in range(self.num_target_qubits)
+        ]
+        return Signature(operands=operand_hints, results=result_hints)
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Return the operation kind.
+
+        Returns:
+            OperationKind: Always ``OperationKind.QUANTUM``.
+        """
         return OperationKind.QUANTUM

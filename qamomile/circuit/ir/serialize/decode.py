@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation import (
     ForItemsOperation,
     GateOperation,
     GateOperationType,
+    InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -1300,11 +1301,6 @@ def _decode_composite_gate(
         if d.get("implementation_block") is not None
         else None
     )
-    inverse_source = (
-        _decode_block(d["inverse_source_block"])
-        if d.get("inverse_source_block") is not None
-        else None
-    )
     return CompositeGateOperation(
         operands=operands,
         results=results,
@@ -1315,9 +1311,41 @@ def _decode_composite_gate(
         resource_metadata=_decode_resource_metadata(d.get("resource_metadata")),
         has_implementation=bool(d.get("has_implementation", True)),
         implementation_block=implementation,
-        inverse_source_block=inverse_source,
         composite_gate_instance=None,
         strategy_name=d.get("strategy_name"),
+    )
+
+
+def _decode_inverse_block(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> InverseBlockOperation:
+    """Decode :class:`InverseBlockOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        InverseBlockOperation: The reconstructed inverse block op with its
+            source and fallback blocks.
+    """
+    operands, results = _operands_results(d, ctx)
+    source_block = (
+        _decode_block(d["source_block"]) if d.get("source_block") is not None else None
+    )
+    implementation_block = (
+        _decode_block(d["implementation_block"])
+        if d.get("implementation_block") is not None
+        else None
+    )
+    return InverseBlockOperation(
+        operands=operands,
+        results=results,
+        num_control_qubits=int(d.get("num_control_qubits", 0)),
+        num_target_qubits=int(d.get("num_target_qubits", 0)),
+        custom_name=d.get("custom_name", ""),
+        source_block=source_block,
+        implementation_block=implementation_block,
     )
 
 
@@ -1375,4 +1403,5 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
     "CompositeGateOperation": _decode_composite_gate,
+    "InverseBlockOperation": _decode_inverse_block,
 }

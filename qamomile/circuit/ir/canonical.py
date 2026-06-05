@@ -52,7 +52,10 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.types.primitives import ValueType
@@ -209,8 +212,9 @@ class _Canonicalizer:
     """Walker that assigns deterministic UUIDs by traversal order.
 
     A single ``_Canonicalizer`` covers one ``canonicalize`` invocation
-    and may recurse into nested Blocks (currently only via
-    ``CompositeGateOperation.implementation_block``). A shared counter
+    and may recurse into nested Blocks (for example via
+    ``CompositeGateOperation.implementation_block`` and
+    ``InverseBlockOperation`` source/fallback blocks). A shared counter
     across nested Blocks guarantees no UUID string collisions within
     the returned canonical tree.
     """
@@ -301,16 +305,14 @@ class _Canonicalizer:
     def canonical_block(self, block: Block) -> Block:
         """Return a canonical clone of ``block``.
 
-        Sub-Blocks reached via ``CompositeGateOperation`` are
+        Sub-Blocks reached via nested operation fields are
         canonicalized through the same Canonicalizer instance and are
         cached by Python ``id`` so repeated references share a single
         canonical Block.
 
         Args:
             block (Block): The IR Block to canonicalize. Sub-Blocks
-                reachable from this Block (via
-                ``CompositeGateOperation.implementation_block``) are
-                canonicalized recursively.
+                reachable from this Block are canonicalized recursively.
 
         Returns:
             Block: A new Block with canonical UUIDs and rewritten
@@ -354,7 +356,7 @@ class _Canonicalizer:
         so subclass-extra Value fields (e.g., ``ControlledU.power``,
         ``ForOperation.loop_var_value``) are rewritten consistently.
         Recurses into nested control-flow ops via ``HasNestedOps`` and
-        into ``CompositeGateOperation.implementation_block``.
+        into nested operation Blocks.
 
         Args:
             op (Operation): The Operation to canonicalize.
@@ -402,12 +404,13 @@ class _Canonicalizer:
         ):
             sub = self.canonical_block(new_op.implementation_block)
             new_op = dataclasses.replace(new_op, implementation_block=sub)
-        if (
-            isinstance(new_op, CompositeGateOperation)
-            and new_op.inverse_source_block is not None
-        ):
-            sub = self.canonical_block(new_op.inverse_source_block)
-            new_op = dataclasses.replace(new_op, inverse_source_block=sub)
+        if isinstance(new_op, InverseBlockOperation):
+            if new_op.source_block is not None:
+                sub = self.canonical_block(new_op.source_block)
+                new_op = dataclasses.replace(new_op, source_block=sub)
+            if new_op.implementation_block is not None:
+                sub = self.canonical_block(new_op.implementation_block)
+                new_op = dataclasses.replace(new_op, implementation_block=sub)
 
         # ControlledUOperation carries the unitary as a nested ``block``
         # field. Canonicalize it through the same canonicalizer so UUIDs
@@ -789,8 +792,11 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
             # Nested block's values participate in the same canonical
             # universe; recurse to ensure they are declared too.
             _collect_from_subblock(op.implementation_block, visit)
-        if op.inverse_source_block is not None:
-            _collect_from_subblock(op.inverse_source_block, visit)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            _collect_from_subblock(op.source_block, visit)
+        if op.implementation_block is not None:
+            _collect_from_subblock(op.implementation_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
 
@@ -798,7 +804,9 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
 def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """Walk the Values declared inside a nested Block.
 
-    Used for ``CompositeGateOperation.implementation_block`` and
+    Used for nested operation Blocks such as
+    ``CompositeGateOperation.implementation_block``,
+    ``InverseBlockOperation.source_block``, and
     ``ControlledUOperation.block``. Mirrors the top-level
     ``_collect_values`` walk order so declarations remain
     deterministic.
@@ -830,12 +838,11 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         # CompositeGateOperation extras: opaque Python references that
         # do not reflect IR-level structure.
         "composite_gate_instance",
-        # Nested-Block fields. Both ``implementation_block``
-        # (CompositeGateOperation) and ``block`` (ControlledUOperation)
-        # are emitted separately by ``_emit_operation`` so they are not
-        # rendered through ``repr`` here.
+        # Nested-Block fields. These are emitted separately by
+        # ``_emit_operation`` so they are not rendered through ``repr``
+        # here.
         "implementation_block",
-        "inverse_source_block",
+        "source_block",
         "block",
     }
 )
@@ -957,9 +964,13 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
         out.append(f"{pad}{_INLINE_INDENT}implementation:")
         _emit_block(op.implementation_block, out, indent + 2)
-    if isinstance(op, CompositeGateOperation) and op.inverse_source_block is not None:
-        out.append(f"{pad}{_INLINE_INDENT}inverse_source:")
-        _emit_block(op.inverse_source_block, out, indent + 2)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            out.append(f"{pad}{_INLINE_INDENT}source:")
+            _emit_block(op.source_block, out, indent + 2)
+        if op.implementation_block is not None:
+            out.append(f"{pad}{_INLINE_INDENT}implementation:")
+            _emit_block(op.implementation_block, out, indent + 2)
 
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")

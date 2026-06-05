@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation import (
     ControlledUOperation,
     ForItemsOperation,
     GateOperation,
+    InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -228,6 +229,8 @@ def _format_flat_op(op: Operation) -> str:
         return _format_controlled(op)
     if isinstance(op, CompositeGateOperation):
         return _format_composite(op)
+    if isinstance(op, InverseBlockOperation):
+        return _format_inverse_block(op)
     if isinstance(op, MeasureOperation):
         return _format_measure(op, "measure")
     if isinstance(op, MeasureVectorOperation):
@@ -327,6 +330,11 @@ def _format_controlled(op: ControlledUOperation) -> str:
 def _format_composite(op: CompositeGateOperation) -> str:
     args = ", ".join(_format_value(v) for v in op.operands)
     return f"{_format_results(op.results)} = composite {op.name}({args})"
+
+
+def _format_inverse_block(op: InverseBlockOperation) -> str:
+    args = ", ".join(_format_value(v) for v in op.operands)
+    return f"{_format_results(op.results)} = inverse {op.name}({args})"
 
 
 def _format_measure(op: Operation, mnemonic: str) -> str:

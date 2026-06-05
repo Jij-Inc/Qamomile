@@ -23,6 +23,7 @@ from qamomile.circuit.ir.operation import (
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
+    InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -207,6 +208,7 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
     Covers operands, results, subclass-extra Value fields (via
     ``all_input_values``), nested control-flow op bodies, and nested
     Blocks inside ``CompositeGateOperation`` /
+    ``InverseBlockOperation`` /
     ``ControlledUOperation``.
 
     Args:
@@ -227,8 +229,11 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
     if isinstance(op, CompositeGateOperation):
         if op.implementation_block is not None:
             _walk_block_values(op.implementation_block, ctx)
-        if op.inverse_source_block is not None:
-            _walk_block_values(op.inverse_source_block, ctx)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            _walk_block_values(op.source_block, ctx)
+        if op.implementation_block is not None:
+            _walk_block_values(op.implementation_block, ctx)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _walk_block_values(op.block, ctx)
 
@@ -1146,14 +1151,37 @@ def _encode_composite_gate(
         if op.implementation_block is not None
         else None
     )
-    d["inverse_source_block"] = (
-        _encode_block(op.inverse_source_block, ctx)
-        if op.inverse_source_block is not None
-        else None
-    )
     # ``composite_gate_instance`` is an opaque Python callable; it is
     # intentionally not serialized. The receiver reconstructs the gate
     # from the implementation block (or via a registry, future work).
+    return d
+
+
+def _encode_inverse_block(
+    op: InverseBlockOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`InverseBlockOperation`.
+
+    Args:
+        op (InverseBlockOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus control / target counts, custom
+            name, source block, and fallback implementation block.
+    """
+    d = _base_op_dict("InverseBlockOperation", op)
+    d["num_control_qubits"] = op.num_control_qubits
+    d["num_target_qubits"] = op.num_target_qubits
+    d["custom_name"] = op.custom_name
+    d["source_block"] = (
+        _encode_block(op.source_block, ctx) if op.source_block is not None else None
+    )
+    d["implementation_block"] = (
+        _encode_block(op.implementation_block, ctx)
+        if op.implementation_block is not None
+        else None
+    )
     return d
 
 
@@ -1211,4 +1239,5 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
     CompositeGateOperation: _encode_composite_gate,
+    InverseBlockOperation: _encode_inverse_block,
 }

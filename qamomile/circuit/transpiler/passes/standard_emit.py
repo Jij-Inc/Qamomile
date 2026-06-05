@@ -27,7 +27,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -72,6 +75,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     blockvalue_to_gate,
     emit_controlled_fallback,
     emit_controlled_u,
+    emit_inverse_block,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
 from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import (
@@ -236,6 +240,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, CompositeGateOperation):
                 emit_composite_gate(self, circuit, op, qubit_map, bindings)
+            elif isinstance(op, InverseBlockOperation):
+                self._emit_inverse_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
@@ -334,6 +340,27 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any],
     ) -> None:
         emit_pauli_evolve(self, circuit, op, qubit_map, bindings)
+
+    def _emit_inverse_block(
+        self,
+        circuit: T,
+        op: InverseBlockOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a first-class inverse block operation.
+
+        Args:
+            circuit (T): Backend circuit being built.
+            op (InverseBlockOperation): Inverse block operation to emit.
+            qubit_map (QubitMap): Current quantum value to physical qubit map.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If neither backend-native inverse emission nor the
+                fallback implementation can be emitted.
+        """
+        emit_inverse_block(self, circuit, op, qubit_map, bindings)
 
     def _emit_runtime_classical_expr(
         self,

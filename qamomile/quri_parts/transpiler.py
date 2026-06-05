@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING, Any, Sequence, cast
 
 import numpy as np
 
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -198,7 +201,7 @@ def _emit_quri_controlled_gate(
     """Emit one QURI Parts gate under accumulated controls.
 
     Args:
-        emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
+        emit_pass (Any): QURI Parts emit pass.
         circuit (Any): QURI Parts circuit being built.
         op (GateOperation): Primitive gate operation to emit.
         control_indices (list[int]): Accumulated physical control qubits.
@@ -367,6 +370,116 @@ def _map_quri_composite_results(
     target_indices = [index for group in target_index_groups for index in group]
     for result, index in zip(target_results, target_indices):
         qubit_map[QubitAddress(result.uuid)] = index
+
+
+def _map_quri_inverse_results(
+    op: InverseBlockOperation,
+    control_index_groups: list[list[int]],
+    target_index_groups: list[list[int]],
+    qubit_map: QubitMap,
+) -> None:
+    """Map inverse result values back to their physical qubits.
+
+    Args:
+        op (InverseBlockOperation): Inverse operation that was emitted.
+        control_index_groups (list[list[int]]): Physical qubits for each
+            inverse control operand.
+        target_index_groups (list[list[int]]): Physical qubits for each
+            inverse target operand.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+    """
+    qubit_indices = [
+        index
+        for group in [*control_index_groups, *target_index_groups]
+        for index in group
+    ]
+    for result, index in zip(op.results, qubit_indices):
+        qubit_map[QubitAddress(result.uuid)] = index
+
+
+def _emit_quri_inverse_operation(
+    emit_pass: Any,
+    circuit: Any,
+    op: InverseBlockOperation,
+    outer_control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit an inverse operation under accumulated QURI Parts controls.
+
+    Args:
+        emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
+        circuit (Any): QURI Parts circuit being built.
+        op (InverseBlockOperation): Inverse operation from the current block.
+        outer_control_indices (list[int]): Controls accumulated from
+            enclosing controlled-U operations.
+        qubit_map (QubitMap): Current block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible inside the current block.
+
+    Raises:
+        EmitError: If the inverse operation has no source/fallback block or
+            cannot be emitted by native inverse or recursive fallback.
+    """
+    if op.source_block is None or op.implementation_block is None:
+        raise EmitError(
+            "QURI Parts cannot emit an inverse block without both source and "
+            "implementation blocks.",
+            operation="InverseBlockOperation",
+        )
+
+    control_index_groups = [
+        _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
+        for operand in op.control_qubits
+    ]
+    target_index_groups = [
+        _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
+        for operand in op.target_qubits
+    ]
+    local_controls = [index for group in control_index_groups for index in group]
+    target_indices = [index for group in target_index_groups for index in group]
+    input_operands = [*op.target_qubits, *op.parameters]
+    effective_controls = outer_control_indices + local_controls
+
+    if not effective_controls and emit_pass._try_emit_backend_inverse(
+        circuit,
+        op.source_block,
+        input_operands,
+        target_indices,
+        bindings,
+    ):
+        _map_quri_inverse_results(
+            op, control_index_groups, target_index_groups, qubit_map
+        )
+        return
+
+    if effective_controls:
+        local_qubit_map, _local_clbit_map, local_bindings = (
+            emit_pass._prepare_local_block_maps(
+                op.implementation_block,
+                input_operands,
+                len(target_indices),
+                bindings,
+                parent_qubits=target_indices,
+            )
+        )
+        _emit_quri_controlled_operations(
+            emit_pass,
+            circuit,
+            op.implementation_block.operations,
+            effective_controls,
+            local_qubit_map,
+            local_bindings,
+        )
+    else:
+        emit_pass._emit_block_inline(
+            circuit,
+            op.implementation_block,
+            input_operands,
+            target_indices,
+            bindings,
+        )
+
+    _map_quri_inverse_results(op, control_index_groups, target_index_groups, qubit_map)
 
 
 def _emit_quri_composite_operation(
@@ -569,6 +682,11 @@ def _emit_quri_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
             continue
+        if isinstance(op, InverseBlockOperation):
+            _emit_quri_inverse_operation(
+                emit_pass, circuit, op, control_indices, qubit_map, bindings
+            )
+            continue
         if isinstance(op, ForOperation):
             from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
                 _bind_loop_var,
@@ -597,8 +715,8 @@ def _emit_quri_controlled_operations(
         raise EmitError(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
-            "CompositeGateOperation values, ReturnOperation, and statically "
-            "resolved ForOperation bodies. "
+            "CompositeGateOperation values, InverseBlockOperation values, "
+            "ReturnOperation, and statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",
         )
@@ -787,10 +905,7 @@ class QuriPartsEmitPass(
         """Emit a custom composite operation into a QURI Parts circuit.
 
         QURI Parts has no reusable gate object with call-site qubit
-        remapping, so normal custom composites are emitted inline. For
-        ``inverse(qkernel)`` composites, a non-parametric source block can
-        still use QURI Parts' own ``inverse_circuit`` helper before being
-        remapped and appended to the parent circuit.
+        remapping, so custom composites are emitted inline.
 
         Args:
             circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
@@ -802,16 +917,6 @@ class QuriPartsEmitPass(
             bindings (dict[str, Any]): Active compile-time and runtime
                 parameter bindings.
         """
-        inverse_source_block = getattr(op, "inverse_source_block", None)
-        if inverse_source_block is not None and self._try_emit_backend_inverse(
-            circuit,
-            inverse_source_block,
-            getattr(op, "operands", None),
-            qubit_indices,
-            bindings,
-        ):
-            return
-
         self._emit_block_inline(
             circuit,
             impl,
@@ -819,6 +924,27 @@ class QuriPartsEmitPass(
             qubit_indices,
             bindings,
         )
+
+    def _emit_inverse_block(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        op: InverseBlockOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a first-class inverse block into a QURI Parts circuit.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parent QURI Parts circuit.
+            op (InverseBlockOperation): Inverse block operation to emit.
+            qubit_map (QubitMap): Current quantum value to physical qubit map.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If native inversion and fallback emission both fail.
+        """
+        _emit_quri_inverse_operation(self, circuit, op, [], qubit_map, bindings)
 
     def _try_emit_backend_inverse(
         self,

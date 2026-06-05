@@ -16,7 +16,10 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -744,6 +747,38 @@ class CircuitAnalyzer:
                     map_block_results(
                         qubit_operands, qubit_results, logical_id_remap, param_values
                     )
+                elif (
+                    isinstance(op, InverseBlockOperation)
+                    and self.expand_composite
+                    and op.implementation_block is not None
+                ):
+                    block_value = op.implementation_block
+                    new_remap = dict(logical_id_remap)
+                    actual_inputs = self._align_actuals_to_formals(
+                        block_value.input_values,
+                        quantum_actuals=list(op.target_qubits),
+                        classical_actuals=list(op.parameters),
+                    )
+                    new_remap, child_param_values = self._build_block_value_mappings(
+                        block_value,
+                        actual_inputs,
+                        new_remap,
+                        param_values,
+                        qubit_map=qubit_map,
+                    )
+                    build_chains(
+                        block_value.operations,
+                        new_remap,
+                        depth + 1,
+                        child_param_values,
+                    )
+                    qubit_operands = list(op.control_qubits) + list(op.target_qubits)
+                    qubit_results = [
+                        v for v in op.results if isinstance(v.type, QubitType)
+                    ]
+                    map_block_results(
+                        qubit_operands, qubit_results, logical_id_remap, param_values
+                    )
 
                 elif isinstance(op, ForOperation):
                     start, stop, step = self._evaluate_loop_range(op, param_values)
@@ -1000,6 +1035,22 @@ class CircuitAnalyzer:
                 )
                 result.append(node)
                 continue
+            if (
+                isinstance(op, InverseBlockOperation)
+                and self.expand_composite
+                and op.implementation_block is not None
+            ):
+                node = self._build_vinline_block(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                )
+                result.append(node)
+                continue
 
             # Generic: GateOperation, CallBlock/ControlledU/CompositeGate (box mode),
             # MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation
@@ -1012,6 +1063,7 @@ class CircuitAnalyzer:
                     MeasureVectorOperation,
                     MeasureQFixedOperation,
                     CompositeGateOperation,
+                    InverseBlockOperation,
                     ControlledUOperation,
                 ),
             ):
@@ -1145,6 +1197,25 @@ class CircuitAnalyzer:
 
         if isinstance(op, CompositeGateOperation):
             label = op.name.upper()
+            box_width = self._estimate_block_label_box_width(label)
+            qubit_indices = []
+            for qval in list(op.control_qubits) + list(op.target_qubits):
+                indices = self._resolve_operand_to_qubit_indices(
+                    qval, qubit_map, logical_id_remap, param_values
+                )
+                if indices is not None:
+                    qubit_indices.extend(indices)
+            return VGate(
+                node_key=node_key,
+                label=label,
+                qubit_indices=qubit_indices,
+                estimated_width=box_width,
+                kind=VGateKind.COMPOSITE_BOX,
+                box_width=box_width,
+            )
+
+        if isinstance(op, InverseBlockOperation):
+            label = f"{op.name.upper()}^-1"
             box_width = self._estimate_block_label_box_width(label)
             qubit_indices = []
             for qval in list(op.control_qubits) + list(op.target_qubits):
@@ -1329,7 +1400,12 @@ class CircuitAnalyzer:
 
     def _build_vinline_block(
         self,
-        op: CallBlockOperation | ControlledUOperation | CompositeGateOperation,
+        op: (
+            CallBlockOperation
+            | ControlledUOperation
+            | CompositeGateOperation
+            | InverseBlockOperation
+        ),
         node_key: tuple,
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str],
@@ -1402,6 +1478,22 @@ class CircuitAnalyzer:
             # ``op.target_qubits`` is already quantum-only and
             # ``op.parameters`` is classical-only, so we feed them
             # directly into the formal-order interleaver.
+            actual_inputs = self._align_actuals_to_formals(
+                block_value.input_values,
+                quantum_actuals=list(op.target_qubits),
+                classical_actuals=list(op.parameters),
+            )
+            block_name = op.name
+        elif isinstance(op, InverseBlockOperation):
+            block_value = op.implementation_block
+            assert isinstance(block_value, Block)
+            affected_qubits = []
+            for operand in list(op.control_qubits) + list(op.target_qubits):
+                indices = self._resolve_operand_to_qubit_indices(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if indices is not None:
+                    affected_qubits.extend(indices)
             actual_inputs = self._align_actuals_to_formals(
                 block_value.input_values,
                 quantum_actuals=list(op.target_qubits),
@@ -1971,7 +2063,7 @@ class CircuitAnalyzer:
         """
         if isinstance(op, (GateOperation, CallBlockOperation, ControlledUOperation)):
             return list(op.operands)
-        if isinstance(op, CompositeGateOperation):
+        if isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
             return list(op.control_qubits) + list(op.target_qubits)
         if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
             return list(op.operands[:1])
@@ -2672,6 +2764,7 @@ class CircuitAnalyzer:
                     CallBlockOperation,
                     ControlledUOperation,
                     CompositeGateOperation,
+                    InverseBlockOperation,
                 ),
             ):
                 continue
@@ -3503,7 +3596,7 @@ class CircuitAnalyzer:
         positionally three times.  Callers that already have their
         actuals split into quantum and classical pools (typically
         ``ControlledUOperation.target_operands`` partitioned by
-        ``QubitType`` or ``CompositeGateOperation.target_qubits`` +
+        ``QubitType`` or composite/inverse target qubits plus
         ``parameters``) must therefore weave them back into the
         formals' declared order before handing them off, otherwise
         a sub-signature like ``def sub(theta, q: Vector[Qubit])``
@@ -4029,8 +4122,8 @@ class CircuitAnalyzer:
         """Format a non-qubit parameter operand for folded body expressions.
 
         Applies numeric evaluation and TeX symbolic formatting consistently
-        for CallBlockOperation, ControlledUOperation, and CompositeGateOperation
-        expression branches.
+        for CallBlockOperation, ControlledUOperation, CompositeGateOperation,
+        and InverseBlockOperation expression branches.
 
         Args:
             operand: Non-qubit Value to format.
@@ -4264,7 +4357,7 @@ class CircuitAnalyzer:
             args_str = ",".join(qubit_parts + param_parts)
             return f"{prefix}{result_str} = {block_name}({args_str})"
 
-        elif isinstance(op, CompositeGateOperation):
+        elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
             block_name = op.name or "composite"
             qubit_parts: list[str] = []
             param_parts: list[str] = []

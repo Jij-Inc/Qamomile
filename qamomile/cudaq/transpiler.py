@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassical
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
+    InverseBlockOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -968,7 +969,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> None:
-        """Emit custom composites, preferring CUDA-Q adjoint for inverse blocks.
+        """Emit custom composites through the shared fallback path.
 
         Args:
             circuit (CudaqKernelArtifact): CUDA-Q kernel artifact being
@@ -978,21 +979,53 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             qubit_indices (list[int]): Physical target qubit indices.
             bindings (dict[str, Any]): Active emit bindings.
         """
-        inverse_source_block = getattr(op, "inverse_source_block", None)
-        if inverse_source_block is not None:
-            try:
-                self._emit_adjoint_helper(
-                    circuit,
-                    inverse_source_block,
-                    getattr(op, "operands", None),
-                    qubit_indices,
-                    bindings,
-                )
-                return
-            except EmitError:
-                pass
-
         super()._emit_custom_composite(circuit, op, impl, qubit_indices, bindings)
+
+    def _emit_inverse_block(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: InverseBlockOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a first-class inverse block into CUDA-Q.
+
+        Args:
+            circuit (CudaqKernelArtifact): CUDA-Q kernel artifact being
+                emitted.
+            op (InverseBlockOperation): Inverse block operation to emit.
+            qubit_map (QubitMap): Current quantum value to physical qubit map.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If neither CUDA-Q adjoint nor the shared fallback can
+                emit the inverse operation.
+        """
+        if op.num_control_qubits == 0 and op.source_block is not None:
+            target_indices: list[int] = []
+            for operand in op.target_qubits:
+                result = self._resolver.resolve_qubit_index_detailed(
+                    operand, qubit_map, bindings
+                )
+                if not result.success or result.index is None:
+                    break
+                target_indices.append(result.index)
+            if len(target_indices) == op.num_target_qubits:
+                try:
+                    self._emit_adjoint_helper(
+                        circuit,
+                        op.source_block,
+                        [*op.target_qubits, *op.parameters],
+                        target_indices,
+                        bindings,
+                    )
+                    for result, qubit_index in zip(op.results, target_indices):
+                        qubit_map[QubitAddress(result.uuid)] = qubit_index
+                    return
+                except EmitError:
+                    pass
+
+        super()._emit_inverse_block(circuit, op, qubit_map, bindings)
 
     def _emit_adjoint_helper(
         self,
@@ -1022,7 +1055,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         if not hasattr(block_value, "operations"):
             raise EmitError(
                 "Cannot emit CUDA-Q adjoint: block has no operations.",
-                operation="CompositeGateOperation",
+                operation="InverseBlockOperation",
             )
 
         _validate_adjoint_helper_ops(block_value.operations, bindings)
@@ -1242,6 +1275,19 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 continue
             if isinstance(op, CompositeGateOperation):
                 self._emit_cudaq_controlled_composite(
+                    circuit,
+                    op,
+                    num_controls,
+                    control_indices,
+                    target_indices,
+                    qubit_map,
+                    vector_slots,
+                    emitter,
+                    bindings,
+                )
+                continue
+            if isinstance(op, InverseBlockOperation):
+                self._emit_cudaq_controlled_inverse(
                     circuit,
                     op,
                     num_controls,
@@ -1656,6 +1702,98 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             )
         for result, phys in zip(op.results, qubit_indices, strict=False):
             qubit_map[result.uuid] = phys
+
+    def _emit_cudaq_controlled_inverse(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: InverseBlockOperation,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        qubit_map: CudaqControlledQubitMap,
+        vector_slots: dict[str, list[int]],
+        emitter: CudaqKernelEmitter,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit an inverse block under outer CUDA-Q controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (InverseBlockOperation): Inverse op inside the controlled
+                block.
+            num_controls (int): Number of outer controls.
+            control_indices (list[int]): Physical outer controls.
+            target_indices (list[int]): Fallback target slots from the
+                controlled-U call site.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
+            vector_slots (dict[str, list[int]]): Vector slot map.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            bindings (dict[str, Any]): Current controlled-body bindings.
+
+        Raises:
+            EmitError: If the inverse fallback implementation is missing or
+                cannot be emitted under controls.
+        """
+        del num_controls, target_indices
+        impl = op.implementation_block
+        if impl is None:
+            raise EmitError(
+                "CUDA-Q controlled fallback cannot emit an inverse block "
+                "without an implementation block.",
+                operation="InverseBlockOperation",
+            )
+
+        local_controls = _resolve_cudaq_value_indices(
+            op.control_qubits,
+            vector_slots,
+            qubit_map,
+            self,
+            bindings,
+            operation="InverseBlockOperation",
+        )
+        inverse_targets = _resolve_cudaq_value_indices(
+            op.target_qubits,
+            vector_slots,
+            qubit_map,
+            self,
+            bindings,
+            operation="InverseBlockOperation",
+        )
+        local_bindings = self._resolver.bind_block_params(
+            impl,
+            op.parameters,
+            bindings,
+        )
+        _bind_quantum_input_shapes(
+            self,
+            impl,
+            op.target_qubits,
+            bindings,
+            local_bindings,
+        )
+        local_qubit_map, local_vector_slots = _build_block_qubit_map(
+            impl,
+            inverse_targets,
+            self,
+            local_bindings,
+        )
+        effective_controls = control_indices + local_controls
+        self._emit_cudaq_controlled_ops(
+            circuit,
+            impl.operations,
+            len(effective_controls),
+            effective_controls,
+            inverse_targets,
+            local_qubit_map,
+            local_vector_slots,
+            emitter,
+            local_bindings,
+        )
+        for result, qubit_index in zip(
+            op.results,
+            [*local_controls, *inverse_targets],
+        ):
+            qubit_map[result.uuid] = qubit_index
 
     def _emit_cudaq_controlled_pauli_evolve(
         self,

@@ -383,12 +383,6 @@ class InlinePass(Pass[Block, Block]):
         ):
             return False
 
-        # Inverse composites keep the original source block so emit can
-        # prefer a backend-native inverse before falling back to the
-        # already-inverted implementation block.
-        if op.inverse_source_block is not None:
-            return False
-
         # Custom gates with implementations should be inlined
         return op.has_implementation and op.implementation is not None
 
