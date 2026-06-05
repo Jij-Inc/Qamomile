@@ -663,7 +663,7 @@ def _validate_adjoint_helper_ops(
                 "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "
                 "controlled-kernel synthesis on CUDA-Q 0.14.x; falling back "
                 "to Qamomile inverse decomposition.",
-                operation="CompositeGateOperation",
+                operation="InverseBlockOperation",
             )
         if (
             isinstance(op, CompositeGateOperation)
