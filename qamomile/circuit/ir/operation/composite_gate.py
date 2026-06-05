@@ -220,21 +220,27 @@ class InverseBlockOperation(Operation):
         """Return target quantum operands.
 
         Returns:
-            list[Value]: Leading quantum operands consumed by the inverse
-                operation.
+            list[Value]: Quantum operands consumed by the inverse operation
+                after control operands. A vector operand counts as one
+                operand here even though ``num_target_qubits`` stores its
+                scalar backend width.
         """
         start = self.num_control_qubits
-        end = start + self.num_target_qubits
-        return list(self.operands[start:end])
+        targets: list["Value"] = []
+        for operand in self.operands[start:]:
+            if not operand.type.is_quantum():
+                break
+            targets.append(operand)
+        return targets
 
     @property
     def parameters(self) -> list["Value"]:
         """Return classical/object parameter operands.
 
         Returns:
-            list[Value]: Operands after ``num_target_qubits``.
+            list[Value]: Non-quantum operands after the quantum targets.
         """
-        start = self.num_control_qubits + self.num_target_qubits
+        start = self.num_control_qubits + len(self.target_qubits)
         return list(self.operands[start:])
 
     @property
@@ -260,17 +266,14 @@ class InverseBlockOperation(Operation):
         ]
         for i in range(self.num_control_qubits):
             operand_hints.append(ParamHint(f"control_{i}", QubitType()))
-        for i in range(self.num_target_qubits):
-            operand_hints.append(ParamHint(f"target_{i}", QubitType()))
+        for i, target in enumerate(self.target_qubits):
+            operand_hints.append(ParamHint(f"target_{i}", target.type))
         for i, param in enumerate(self.parameters):
             operand_hints.append(ParamHint(f"param_{i}", param.type))
 
         result_hints = [
-            ParamHint(f"control_out_{i}", QubitType())
-            for i in range(self.num_control_qubits)
-        ] + [
-            ParamHint(f"target_out_{i}", QubitType())
-            for i in range(self.num_target_qubits)
+            ParamHint(f"result_{i}", result.type)
+            for i, result in enumerate(self.results)
         ]
         return Signature(operands=operand_hints, results=result_hints)
 

@@ -31,6 +31,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.value import ArrayValue
 
 from ._catalog import (
     classify_controlled_u,
@@ -324,10 +325,22 @@ def _handle_inverse_block(
         )
 
     extra: dict[str, sp.Expr] = {}
-    actual_operands = [*op.target_qubits, *op.parameters]
-    for idx, formal in enumerate(impl.input_values):
-        if idx < len(actual_operands):
-            actual = actual_operands[idx]
+    quantum_actuals = iter(op.target_qubits)
+    parameter_actuals = iter(op.parameters)
+    for formal in impl.input_values:
+        if formal.type.is_quantum():
+            actual = next(quantum_actuals, None)
+            if (
+                isinstance(formal, ArrayValue)
+                and isinstance(actual, ArrayValue)
+                and formal.shape
+                and actual.shape
+            ):
+                extra[formal.shape[0].uuid] = resolver.resolve(actual.shape[0])
+            continue
+
+        actual = next(parameter_actuals, None)
+        if actual is not None:
             extra[formal.uuid] = resolver.resolve(actual)
 
     ctx = resolver.context

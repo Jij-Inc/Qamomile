@@ -7,6 +7,9 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.estimator import count_gates
+from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
@@ -25,6 +28,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import DictValue, Value
 from qamomile.circuit.stdlib import IQFT, QFT
 from tests.circuit.conftest import run_statevector
@@ -169,6 +173,17 @@ def _inverse_runtime_call_then_gate_layer(
     q = qmc.h(q)
     q = _inverse_runtime_inner_call_layer(q, rotation_angle)
     return q
+
+
+@qmc.qkernel
+def _inverse_vector_layer(
+    qs: qmc.Vector[qmc.Qubit],
+    rotation_angle: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a vector layer used to verify atomic inverse emission."""
+    for idx in qmc.range(qs.shape[0]):
+        qs[idx] = qmc.rx(qs[idx], rotation_angle)
+    return qs
 
 
 @qmc.qkernel
@@ -365,6 +380,33 @@ def _inverse_stub_composite_layer(q: qmc.Qubit) -> qmc.Qubit:
     """Apply a stub composite gate for inverse tests."""
     (q,) = _stub_composite_gate(q)
     return q
+
+
+def _emit_native_qpe_marker(q: qmc.Qubit) -> qmc.Qubit:
+    """Emit a synthetic native QPE composite marker for inverse tests."""
+    result = q.value.next_version()
+    op = CompositeGateOperation(
+        operands=[q.value],
+        results=[result],
+        gate_type=CompositeGateType.QPE,
+        num_control_qubits=0,
+        num_target_qubits=1,
+        custom_name="qpe",
+        has_implementation=False,
+    )
+    get_current_tracer().add_operation(op)
+    return qmc.Qubit(result)
+
+
+def _single_inverse_implementation(block: Block) -> Block:
+    """Return the only inverse implementation block in a test block."""
+    inverse_ops = [
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
+    ]
+
+    assert len(inverse_ops) == 1
+    assert inverse_ops[0].implementation_block is not None
+    return inverse_ops[0].implementation_block
 
 
 def _angle_from_case(angle_case: float | tuple[str, int]) -> float:
@@ -1188,6 +1230,89 @@ def test_inverse_qft_emits_iqft_composite() -> None:
     ]
 
 
+def test_inverse_qft_rejects_strategy_without_iqft_counterpart(monkeypatch) -> None:
+    """inverse(qkernel) rejects QFT strategies missing on IQFT."""
+    monkeypatch.setitem(QFT._strategies, "qft_only", QFT._strategies["standard"])
+
+    @qmc.qkernel
+    def qft_only_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        q0, q1 = QFT(2)(qs[0], qs[1], strategy="qft_only")
+        qs[0] = q0
+        qs[1] = q1
+        return qs
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Qubit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = qmc.inverse(qft_only_layer)(qs)
+        return qs
+
+    with pytest.raises(NotImplementedError, match="IQFT does not define"):
+        circuit.build()
+
+
+def test_inverse_rejects_native_qpe_composite_marker() -> None:
+    """inverse(qkernel) rejects native QPE composites without an inverse."""
+
+    @qmc.qkernel
+    def qpe_marker_layer(q: qmc.Qubit) -> qmc.Qubit:
+        q = _emit_native_qpe_marker(q)
+        return q
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        q = qmc.qubit("q")
+        q = qmc.inverse(qpe_marker_layer)(q)
+        return q
+
+    with pytest.raises(NotImplementedError, match="native CompositeGateOperation"):
+        circuit.build()
+
+
+def test_inverse_gate_counter_binds_mixed_inputs_by_formal_order() -> None:
+    """Gate counting binds classical inverse inputs despite quantum-first IR."""
+    repetition_count = Value(type=UIntType(), name="repetition_count")
+    formal_q = Value(type=QubitType(), name="formal_q")
+    target_q = Value(type=QubitType(), name="target_q")
+    controlled_block = Block(
+        name="controlled",
+        input_values=[target_q],
+        output_values=[target_q],
+        kind=BlockKind.AFFINE,
+    )
+    controlled_result = formal_q.next_version()
+    impl = Block(
+        name="impl",
+        input_values=[repetition_count, formal_q],
+        output_values=[controlled_result],
+        operations=[
+            SymbolicControlledU(
+                operands=[formal_q],
+                results=[controlled_result],
+                block=controlled_block,
+                num_controls=repetition_count,
+                num_control_args=0,
+            )
+        ],
+        kind=BlockKind.AFFINE,
+    )
+    actual_q = Value(type=QubitType(), name="actual_q")
+    actual_n = Value(type=UIntType(), name="repetition_count")
+    inverse_op = InverseBlockOperation(
+        operands=[actual_q, actual_n],
+        results=[actual_q.next_version()],
+        num_target_qubits=1,
+        implementation_block=impl,
+    )
+    block = Block(operations=[inverse_op], kind=BlockKind.AFFINE)
+
+    counts = count_gates(block)
+    count_expr = str(counts.two_qubit)
+
+    assert "repetition_count" in count_expr
+    assert "actual_q" not in count_expr
+
+
 def test_inverse_for_operation_reverses_constant_range() -> None:
     """inverse(qkernel) reverses constant ForOperation bounds."""
 
@@ -1197,7 +1322,7 @@ def test_inverse_for_operation_reverses_constant_range() -> None:
         qs = qmc.inverse(_inverse_loop_layer)(qs)
         return qs
 
-    block = circuit.build()
+    block = _single_inverse_implementation(circuit.build())
     loops = [op for op in block.operations if isinstance(op, ForOperation)]
 
     assert len(loops) == 1
@@ -1309,11 +1434,46 @@ def test_inverse_pauli_evolve_negates_evolution_time() -> None:
         qs = qmc.inverse(_inverse_pauli_evolve_layer)(qs, observable, 0.25)
         return qs
 
-    block = circuit.build()
+    block = _single_inverse_implementation(circuit.build())
     evolves = [op for op in block.operations if isinstance(op, PauliEvolveOp)]
 
     assert len(evolves) == 1
     assert evolves[0].gamma.get_const() == -0.25
+
+
+def test_inverse_pauli_evolve_matches_manual_negative_time(qiskit_transpiler) -> None:
+    """inverse(pauli_evolve) executes like pauli_evolve with negative time."""
+    observable = qm_o.Hamiltonian()
+    observable.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 0.5)
+
+    @qmc.qkernel
+    def inverse_circuit(
+        observable: qmc.Observable,
+        gamma: qmc.Float,
+    ) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(1, "qs")
+        qs = qmc.inverse(_inverse_pauli_evolve_layer)(qs, observable, gamma)
+        return qmc.measure(qs)
+
+    @qmc.qkernel
+    def manual_circuit(
+        observable: qmc.Observable,
+        gamma: qmc.Float,
+    ) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(1, "qs")
+        qs = qmc.pauli_evolve(qs, observable, -gamma)
+        return qmc.measure(qs)
+
+    inverse_qc = qiskit_transpiler.to_circuit(
+        inverse_circuit,
+        bindings={"observable": observable, "gamma": 0.25},
+    )
+    manual_qc = qiskit_transpiler.to_circuit(
+        manual_circuit,
+        bindings={"observable": observable, "gamma": 0.25},
+    )
+
+    assert np.allclose(run_statevector(inverse_qc), run_statevector(manual_qc))
 
 
 def test_inverse_controlled_concrete_operation() -> None:
@@ -1393,7 +1553,7 @@ def test_inverse_controlled_symbolic_operation() -> None:
         )
         return controls, target
 
-    block = circuit.build()
+    block = _single_inverse_implementation(circuit.build())
     ctrl_ops = [op for op in block.operations if isinstance(op, ControlledUOperation)]
 
     assert len(ctrl_ops) == 1
@@ -1417,7 +1577,7 @@ def test_inverse_controlled_index_operation() -> None:
         )
         return controls, target
 
-    block = circuit.build()
+    block = _single_inverse_implementation(circuit.build())
     ctrl_ops = [op for op in block.operations if isinstance(op, ControlledUOperation)]
 
     assert len(ctrl_ops) == 1
@@ -1447,16 +1607,25 @@ def test_inverse_controlled_index_substitutes_symbolic_fields() -> None:
         )
         return controls, target
 
-    block = circuit.build(parameters=["control_count", "control_index"])
+    top_block = circuit.build(parameters=["control_count", "control_index"])
+    inverse_ops = [
+        op for op in top_block.operations if isinstance(op, InverseBlockOperation)
+    ]
+    assert len(inverse_ops) == 1
+
+    block = _single_inverse_implementation(top_block)
     ctrl_ops = [op for op in block.operations if isinstance(op, ControlledUOperation)]
-    block_inputs = {value.name: value for value in block.input_values}
+    block_inputs = {value.name: value for value in top_block.input_values}
+    impl_inputs = {value.name: value for value in block.input_values}
 
     assert len(ctrl_ops) == 1
     assert isinstance(ctrl_ops[0], SymbolicControlledU)
+    assert inverse_ops[0].parameters[0].uuid == block_inputs["control_count"].uuid
+    assert inverse_ops[0].parameters[1].uuid == block_inputs["control_index"].uuid
     assert isinstance(ctrl_ops[0].num_controls, Value)
-    assert ctrl_ops[0].num_controls.uuid == block_inputs["control_count"].uuid
+    assert ctrl_ops[0].num_controls.uuid == impl_inputs["control_count"].uuid
     assert ctrl_ops[0].control_indices is not None
-    assert ctrl_ops[0].control_indices[0].uuid == block_inputs["control_index"].uuid
+    assert ctrl_ops[0].control_indices[0].uuid == impl_inputs["control_index"].uuid
 
 
 def test_inverse_custom_composite_gate_inverts_implementation() -> None:
@@ -1554,6 +1723,28 @@ def test_inverse_qkernel_prefers_qiskit_backend_inverse(qiskit_transpiler) -> No
     assert quantum_ops[0].name.endswith("_dg")
 
 
+def test_inverse_vector_qkernel_prefers_qiskit_backend_inverse(
+    qiskit_transpiler,
+) -> None:
+    """inverse(qkernel) keeps Vector inputs atomic for Qiskit inversion."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = qmc.inverse(_inverse_vector_layer)(qs, 0.37)
+        return qmc.measure(qs)
+
+    qc = qiskit_transpiler.to_circuit(circuit)
+    quantum_ops = [
+        instruction.operation
+        for instruction in qc.data
+        if instruction.operation.name != "measure"
+    ]
+
+    assert len(quantum_ops) == 1
+    assert quantum_ops[0].name.endswith("_dg")
+
+
 def test_qiskit_emitter_falls_back_on_qiskit_error() -> None:
     """Qiskit reusable-gate probes return None on QiskitError."""
     pytest.importorskip("qiskit")
@@ -1620,6 +1811,48 @@ def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None
         ("RZ", (1,)),
         ("H", (1,)),
     ]
+    assert [gate.params for gate in gates] == [
+        (),
+        (0.37,),
+        (-0.37,),
+        (),
+    ]
+
+
+def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None:
+    """inverse(qkernel) keeps Vector inputs atomic for QURI Parts inversion."""
+    pytest.importorskip("quri_parts")
+    pytest.importorskip("quri_parts.qulacs")
+
+    import quri_parts.circuit as qp_c
+
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    original_inverse_circuit = qp_c.inverse_circuit
+    inverse_calls = []
+
+    def inverse_circuit_spy(circuit):
+        """Record backend inverse calls while preserving QURI Parts behavior."""
+        inverse_calls.append(circuit)
+        return original_inverse_circuit(circuit)
+
+    monkeypatch.setattr(qp_c, "inverse_circuit", inverse_circuit_spy)
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = qmc.inverse(_inverse_vector_layer)(qs, 0.37)
+        return qmc.measure(qs)
+
+    transpiler = QuriPartsTranspiler()
+    executable = transpiler.transpile(circuit)
+    gates = executable.compiled_quantum[0].circuit.gates
+
+    assert len(inverse_calls) == 1
+    assert [(gate.name, gate.target_indices, gate.params) for gate in gates] == [
+        ("RX", (1,), (-0.37,)),
+        ("RX", (0,), (-0.37,)),
+    ]
 
 
 def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
@@ -1644,6 +1877,44 @@ def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
         cudaq_circuit.source
     )
     assert "cudaq.adjoint(_qamomile_adjoint_0, q[1], thetas)" in cudaq_circuit.source
+
+    bound = transpiler.executor().bind_parameters(
+        cudaq_circuit,
+        {"rotation_angle": 0.37},
+        quantum_step.parameter_metadata,
+    )
+    statevector = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
+    expected = np.zeros(4, dtype=complex)
+    expected[0] = 1.0
+
+    assert np.allclose(statevector, expected, atol=1e-8)
+
+
+def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
+    """inverse(qkernel) keeps Vector inputs atomic for CUDA-Q adjoint."""
+    cudaq = pytest.importorskip("cudaq")
+
+    from qamomile.cudaq import CudaqTranspiler
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = _inverse_vector_layer(qs, rotation_angle)
+        qs = qmc.inverse(_inverse_vector_layer)(qs, rotation_angle)
+        return qmc.measure(qs)
+
+    transpiler = CudaqTranspiler()
+    executable = transpiler.transpile(circuit, parameters=["rotation_angle"])
+    quantum_step = executable.compiled_quantum[0]
+    cudaq_circuit = quantum_step.circuit
+
+    assert (
+        "def _qamomile_adjoint_0(t0: cudaq.qubit, t1: cudaq.qubit, "
+        "thetas: list[float]):"
+    ) in cudaq_circuit.source
+    assert (
+        "cudaq.adjoint(_qamomile_adjoint_0, q[0], q[1], thetas)" in cudaq_circuit.source
+    )
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,

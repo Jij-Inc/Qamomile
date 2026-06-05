@@ -350,6 +350,27 @@ class GateEmitter(Protocol[T]):
         """
         ...
 
+    def supports_reusable_gates(self) -> bool:
+        """Return whether ``circuit_to_gate`` can produce reusable gates.
+
+        Returns:
+            bool: True when the backend can convert emitted sub-circuits to
+                reusable gate objects. Defaults to False so emit paths can
+                avoid building throwaway sub-circuits for backends that only
+                support inline fallback emission.
+        """
+        return False
+
+    def supports_gate_inverse(self) -> bool:
+        """Return whether reusable gates can be inverted natively.
+
+        Returns:
+            bool: True when ``gate_inverse`` can return a backend-native
+                inverse for gates produced by ``circuit_to_gate``. Defaults
+                to False.
+        """
+        return False
+
     @abstractmethod
     def append_gate(
         self,

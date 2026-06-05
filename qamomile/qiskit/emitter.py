@@ -153,6 +153,14 @@ class QiskitGateEmitter:
         except (CircuitError, QiskitError, ValueError, TypeError):
             return None
 
+    def supports_reusable_gates(self) -> bool:
+        """Return whether Qiskit can convert circuits to reusable gates.
+
+        Returns:
+            bool: Always True for Qiskit's ``QuantumCircuit.to_gate`` path.
+        """
+        return True
+
     def append_gate(
         self,
         circuit: "QuantumCircuit",
@@ -186,6 +194,14 @@ class QiskitGateEmitter:
             return gate.inverse()
         except (CircuitError, QiskitError, ValueError, TypeError, AttributeError):
             return None
+
+    def supports_gate_inverse(self) -> bool:
+        """Return whether Qiskit reusable gates can be inverted natively.
+
+        Returns:
+            bool: Always True for Qiskit's ``Gate.inverse`` path.
+        """
+        return True
 
     # Control flow support
     def supports_for_loop(self) -> bool:

@@ -42,6 +42,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
     _map_controlled_u_results,
+    _map_inverse_block_results,
     _populate_input_qubit_map,
     emit_controlled_gate,
     resolve_power,
@@ -379,31 +380,6 @@ def _map_quri_composite_results(
         qubit_map[QubitAddress(result.uuid)] = index
 
 
-def _map_quri_inverse_results(
-    op: InverseBlockOperation,
-    control_index_groups: list[list[int]],
-    target_index_groups: list[list[int]],
-    qubit_map: QubitMap,
-) -> None:
-    """Map inverse result values back to their physical qubits.
-
-    Args:
-        op (InverseBlockOperation): Inverse operation that was emitted.
-        control_index_groups (list[list[int]]): Physical qubits for each
-            inverse control operand.
-        target_index_groups (list[list[int]]): Physical qubits for each
-            inverse target operand.
-        qubit_map (QubitMap): Mutable block-local qubit map.
-    """
-    qubit_indices = [
-        index
-        for group in [*control_index_groups, *target_index_groups]
-        for index in group
-    ]
-    for result, index in zip(op.results, qubit_indices):
-        qubit_map[QubitAddress(result.uuid)] = index
-
-
 def _emit_quri_inverse_operation(
     emit_pass: Any,
     circuit: Any,
@@ -454,7 +430,7 @@ def _emit_quri_inverse_operation(
         target_indices,
         bindings,
     ):
-        _map_quri_inverse_results(
+        _map_inverse_block_results(
             op, control_index_groups, target_index_groups, qubit_map
         )
         return
@@ -486,7 +462,7 @@ def _emit_quri_inverse_operation(
             bindings,
         )
 
-    _map_quri_inverse_results(op, control_index_groups, target_index_groups, qubit_map)
+    _map_inverse_block_results(op, control_index_groups, target_index_groups, qubit_map)
 
 
 def _emit_quri_composite_operation(

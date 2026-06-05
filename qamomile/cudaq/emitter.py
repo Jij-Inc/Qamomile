@@ -912,6 +912,14 @@ class CudaqKernelEmitter:
         """No-op: not supported by CUDA-Q codegen path."""
         return None
 
+    def supports_reusable_gates(self) -> bool:
+        """Return False because CUDA-Q source emission has no reusable gate path.
+
+        Returns:
+            bool: Always False.
+        """
+        return False
+
     def append_gate(
         self, circuit: CudaqKernelArtifact, gate: Any, qubits: list[int]
     ) -> None:
@@ -936,6 +944,14 @@ class CudaqKernelEmitter:
             Any: Always None.
         """
         return None
+
+    def supports_gate_inverse(self) -> bool:
+        """Return False because CUDA-Q uses dedicated adjoint helper emission.
+
+        Returns:
+            bool: Always False.
+        """
+        return False
 
     # ------------------------------------------------------------------
     # Multi-controlled gate emission

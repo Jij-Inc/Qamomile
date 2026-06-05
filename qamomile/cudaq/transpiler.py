@@ -67,6 +67,8 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_block_inputs,
     _bind_quantum_input_shapes,
+    _expand_quantum_operands_to_phys,
+    _map_inverse_block_results,
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
@@ -1014,14 +1016,23 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 emit the inverse operation.
         """
         if op.num_control_qubits == 0 and op.source_block is not None:
-            target_indices: list[int] = []
-            for operand in op.target_qubits:
-                result = self._resolver.resolve_qubit_index_detailed(
-                    operand, qubit_map, bindings
-                )
-                if not result.success or result.index is None:
-                    break
-                target_indices.append(result.index)
+            try:
+                target_index_groups = [
+                    _expand_quantum_operands_to_phys(
+                        self,
+                        operand,
+                        qubit_map,
+                        bindings,
+                        operation="InverseBlockOperation",
+                    )
+                    for operand in op.target_qubits
+                ]
+                target_indices = [
+                    index for group in target_index_groups for index in group
+                ]
+            except EmitError:
+                target_index_groups = []
+                target_indices = []
             if len(target_indices) == op.num_target_qubits:
                 try:
                     self._emit_adjoint_helper(
@@ -1031,8 +1042,12 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                         target_indices,
                         bindings,
                     )
-                    for result, qubit_index in zip(op.results, target_indices):
-                        qubit_map[QubitAddress(result.uuid)] = qubit_index
+                    _map_inverse_block_results(
+                        op,
+                        [],
+                        target_index_groups,
+                        qubit_map,
+                    )
                     return
                 except EmitError:
                     pass

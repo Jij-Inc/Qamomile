@@ -184,6 +184,26 @@ def _as_value(value: ValueBase, context: str) -> Value:
     raise TypeError(f"{context} requires a Value, got {type(value).__name__}.")
 
 
+def _static_quantum_width(value: ValueBase) -> int | None:
+    """Return the compile-time scalar qubit width of a quantum value.
+
+    Args:
+        value (ValueBase): Scalar qubit or ``Vector[Qubit]`` value.
+
+    Returns:
+        int | None: Number of scalar qubits represented by ``value`` when
+            statically known, or None for unresolved vector lengths.
+    """
+    if isinstance(value, ArrayValue):
+        if not value.shape:
+            return None
+        dim = value.shape[0]
+        if not dim.is_constant():
+            return None
+        return int(dim.get_const())
+    return 1
+
+
 def _fresh_result_value(
     value: ValueBase,
     value_map: dict[str, ValueBase],
@@ -741,7 +761,11 @@ class _BlockInverter:
             implementation_block = None
             has_implementation = False
             if strategy_name is not None and IQFT.get_strategy(strategy_name) is None:
-                strategy_name = None
+                raise NotImplementedError(
+                    "inverse() cannot invert QFT with strategy "
+                    f"{strategy_name!r} because IQFT does not define the "
+                    "same strategy."
+                )
         elif op.gate_type is CompositeGateType.IQFT:
             from qamomile.circuit.stdlib.qft import QFT
 
@@ -750,7 +774,11 @@ class _BlockInverter:
             implementation_block = None
             has_implementation = False
             if strategy_name is not None and QFT.get_strategy(strategy_name) is None:
-                strategy_name = None
+                raise NotImplementedError(
+                    "inverse() cannot invert IQFT with strategy "
+                    f"{strategy_name!r} because QFT does not define the "
+                    "same strategy."
+                )
         elif op.implementation is not None:
             gate_type = CompositeGateType.CUSTOM
             source_block = op.implementation
@@ -758,6 +786,12 @@ class _BlockInverter:
             has_implementation = True
             resource_metadata = None
             custom_name = f"{op.name}_inverse"
+        elif op.gate_type is not CompositeGateType.CUSTOM:
+            raise NotImplementedError(
+                "inverse() cannot invert native CompositeGateOperation "
+                f"{op.gate_type.value!r}. Use an explicit inverse operation "
+                "or provide an implementation block."
+            )
         else:
             gate_type = CompositeGateType.CUSTOM
             source_block = None
@@ -1253,13 +1287,11 @@ class InverseGate:
             bindings (list[_InputBinding]): Prepared call-site bindings.
 
         Returns:
-            bool: True when every quantum input is scalar. Vector inputs
-            still use the existing gate-by-gate inverse fallback because
-                InverseBlockOperation operands are scalar-qubit oriented at
-                emit time.
+            bool: True when every quantum input has a statically known
+                scalar qubit width.
         """
         return all(
-            not isinstance(binding.active_handle.value, ArrayValue)
+            _static_quantum_width(binding.active_handle.value) is not None
             for binding in bindings
             if binding.is_quantum
         )
@@ -1285,6 +1317,11 @@ class InverseGate:
             _as_value(binding.active_handle.value, "inverse qkernel input")
             for binding in quantum_bindings
         ]
+        target_width = sum(
+            width
+            for value in quantum_values
+            if (width := _static_quantum_width(value)) is not None
+        )
         parameter_values = [
             binding.active_handle.value
             for binding in bindings
@@ -1295,7 +1332,7 @@ class InverseGate:
             operands=cast(list[Value], [*quantum_values, *parameter_values]),
             results=result_values,
             num_control_qubits=0,
-            num_target_qubits=len(quantum_values),
+            num_target_qubits=target_width,
             custom_name=f"{block.name}_inverse",
             source_block=block,
             implementation_block=inverse_block,

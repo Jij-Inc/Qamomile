@@ -1075,23 +1075,29 @@ def emit_inverse_block(
         EmitError: If an inverse block has missing blocks, unresolved qubit
             operands, or no available native/fallback emission path.
     """
-    all_qubits = op.control_qubits + op.target_qubits
-    qubit_indices: list[int] = []
-    for q in all_qubits:
-        result = emit_pass._resolver.resolve_qubit_index_detailed(
-            q, qubit_map, bindings
+    control_index_groups = [
+        _expand_quantum_operands_to_phys(
+            emit_pass,
+            operand,
+            qubit_map,
+            bindings,
+            operation="InverseBlockOperation",
         )
-        if not result.success or result.index is None:
-            raise EmitError(
-                f"Cannot resolve qubit operand '{q.name}' for inverse block "
-                f"{op.name}. "
-                f"{result.failure_details or 'Qubit not found in qubit_map.'}",
-                operation="InverseBlockOperation",
-            )
-        qubit_indices.append(result.index)
+        for operand in op.control_qubits
+    ]
+    target_index_groups = [
+        _expand_quantum_operands_to_phys(
+            emit_pass,
+            operand,
+            qubit_map,
+            bindings,
+            operation="InverseBlockOperation",
+        )
+        for operand in op.target_qubits
+    ]
 
-    control_indices = qubit_indices[: op.num_control_qubits]
-    target_indices = qubit_indices[op.num_control_qubits :]
+    control_indices = [index for group in control_index_groups for index in group]
+    target_indices = [index for group in target_index_groups for index in group]
     emit_inverse_block_at_indices(
         emit_pass,
         circuit,
@@ -1100,8 +1106,12 @@ def emit_inverse_block(
         target_indices,
         bindings,
     )
-    for result, qubit_index in zip(op.results, qubit_indices):
-        qubit_map[QubitAddress(result.uuid)] = qubit_index
+    _map_inverse_block_results(
+        op,
+        control_index_groups,
+        target_index_groups,
+        qubit_map,
+    )
 
 
 def emit_inverse_block_at_indices(
@@ -1139,11 +1149,17 @@ def emit_inverse_block_at_indices(
         )
 
     input_operands = [*op.target_qubits, *op.parameters]
-    source_gate = emit_pass._blockvalue_to_gate(
-        op.source_block,
-        len(target_indices),
-        bindings,
-        input_operands=input_operands,
+    can_build_reusable_gate = _emitter_supports_reusable_gates(emit_pass._emitter)
+    source_gate = (
+        emit_pass._blockvalue_to_gate(
+            op.source_block,
+            len(target_indices),
+            bindings,
+            input_operands=input_operands,
+        )
+        if can_build_reusable_gate
+        and _emitter_supports_gate_inverse(emit_pass._emitter)
+        else None
     )
     if source_gate is not None:
         inverse_gate = emit_pass._emitter.gate_inverse(source_gate)
@@ -1164,11 +1180,15 @@ def emit_inverse_block_at_indices(
                 )
                 return
 
-    fallback_gate = emit_pass._blockvalue_to_gate(
-        op.implementation_block,
-        len(target_indices),
-        bindings,
-        input_operands=input_operands,
+    fallback_gate = (
+        emit_pass._blockvalue_to_gate(
+            op.implementation_block,
+            len(target_indices),
+            bindings,
+            input_operands=input_operands,
+        )
+        if can_build_reusable_gate
+        else None
     )
     if fallback_gate is not None:
         if control_indices:
@@ -1293,6 +1313,32 @@ def _emit_inverse_block_inline(
             local_bindings,
             force_unroll=True,
         )
+
+
+def _emitter_supports_reusable_gates(emitter: Any) -> bool:
+    """Return whether an emitter can build reusable gates.
+
+    Args:
+        emitter (Any): Backend gate emitter.
+
+    Returns:
+        bool: True when ``emitter`` advertises reusable-gate support.
+    """
+    supports = getattr(emitter, "supports_reusable_gates", None)
+    return bool(supports()) if callable(supports) else False
+
+
+def _emitter_supports_gate_inverse(emitter: Any) -> bool:
+    """Return whether an emitter can invert reusable gates.
+
+    Args:
+        emitter (Any): Backend gate emitter.
+
+    Returns:
+        bool: True when ``emitter`` advertises reusable-gate inversion.
+    """
+    supports = getattr(emitter, "supports_gate_inverse", None)
+    return bool(supports()) if callable(supports) else False
 
 
 def blockvalue_to_gate(
@@ -1986,3 +2032,39 @@ def _map_controlled_u_results(
         else:
             if indices:
                 qubit_map[QubitAddress(result.uuid)] = indices[0]
+
+
+def _map_inverse_block_results(
+    op: InverseBlockOperation,
+    control_index_groups: list[list[int]],
+    target_index_groups: list[list[int]],
+    qubit_map: QubitMap,
+) -> None:
+    """Map inverse-block result values to physical qubits.
+
+    Args:
+        op (InverseBlockOperation): Inverse operation that was emitted.
+        control_index_groups (list[list[int]]): Physical qubits for each
+            control operand.
+        target_index_groups (list[list[int]]): Physical qubits for each
+            target operand, preserving scalar/vector operand grouping.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    control_results = op.results[: op.num_control_qubits]
+    for result, indices in zip(control_results, control_index_groups):
+        if indices:
+            qubit_map[QubitAddress(result.uuid)] = indices[0]
+
+    target_results = [
+        r for r in op.results[op.num_control_qubits :] if r.type.is_quantum()
+    ]
+    for result, indices in zip(target_results, target_index_groups):
+        if isinstance(result, ArrayValue):
+            for i, phys in enumerate(indices):
+                qubit_map[QubitAddress(result.uuid, i)] = phys
+            if indices:
+                qubit_map[QubitAddress(result.uuid)] = indices[0]
+        elif indices:
+            qubit_map[QubitAddress(result.uuid)] = indices[0]
