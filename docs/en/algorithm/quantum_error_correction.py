@@ -125,7 +125,7 @@ import math
 import os
 
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.job import SampleResult
+from qamomile.circuit import SampleResult
 from qamomile.qiskit import QiskitTranspiler
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"

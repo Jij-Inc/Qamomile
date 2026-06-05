@@ -52,6 +52,16 @@ from .frontend.qkernel import QKernel, qkernel
 # Standard library circuits
 from .stdlib import iqft, qft, qpe
 
+# Execution result / job types (return values of ExecutableProgram.sample / run)
+from .transpiler.job import (
+    ExpvalJob,
+    Job,
+    JobStatus,
+    RunJob,
+    SampleJob,
+    SampleResult,
+)
+
 if TYPE_CHECKING:
     from .visualization import DEFAULT_STYLE, CircuitStyle, MatplotlibDrawer
 
@@ -127,6 +137,13 @@ __all__ = [
     "iqft",
     "qft",
     "QKernel",
+    # Job / result types
+    "Job",
+    "JobStatus",
+    "SampleResult",
+    "SampleJob",
+    "RunJob",
+    "ExpvalJob",
     # Visualization (lazy-loaded)
     "MatplotlibDrawer",
     "CircuitStyle",
