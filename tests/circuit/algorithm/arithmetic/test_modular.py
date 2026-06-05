@@ -11,14 +11,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.arithmetic import (
-    controlled_modular_decrement,
-    controlled_modular_decrement_by_index,
-    controlled_modular_increment,
-    controlled_modular_increment_by_index,
-    modular_decrement,
-    modular_increment,
-)
+from qamomile.circuit.arithmetic import modular_decrement, modular_increment
 
 
 @qmc.qkernel
@@ -74,7 +67,7 @@ def _controlled_shift_sample_kernel(
     direction: qmc.UInt,
     enabled: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
-    """Prepare a basis state, apply a controlled shift, and measure."""
+    """Apply a qmc.control-created modular shift and measure the register."""
     q = qmc.qubit_array(n, name="q")
     q = _prepare_basis_prefix(q, bits, n)
     control = qmc.qubit(name="control")
@@ -82,9 +75,11 @@ def _controlled_shift_sample_kernel(
         control = qmc.x(control)
 
     if direction == qmc.uint(0):
-        control, q = controlled_modular_increment(control, q)
+        controlled_shift = qmc.control(modular_increment, num_controls=1)
+        control, q = controlled_shift(control, q)
     else:
-        control, q = controlled_modular_decrement(control, q)
+        controlled_shift = qmc.control(modular_decrement, num_controls=1)
+        control, q = controlled_shift(control, q)
     return qmc.measure(q)
 
 
@@ -96,7 +91,7 @@ def _controlled_shift_expval_kernel(
     enabled: qmc.UInt,
     hamiltonian: qmc.Observable,
 ) -> qmc.Float:
-    """Prepare a controlled shifted basis state and return an expval."""
+    """Apply a qmc.control-created modular shift and return an expval."""
     q = qmc.qubit_array(n, name="q")
     q = _prepare_basis_prefix(q, bits, n)
     control = qmc.qubit(name="control")
@@ -104,50 +99,11 @@ def _controlled_shift_expval_kernel(
         control = qmc.x(control)
 
     if direction == qmc.uint(0):
-        control, q = controlled_modular_increment(control, q)
+        controlled_shift = qmc.control(modular_increment, num_controls=1)
+        control, q = controlled_shift(control, q)
     else:
-        control, q = controlled_modular_decrement(control, q)
-    return qmc.expval(q, hamiltonian)
-
-
-@qmc.qkernel
-def _combined_controlled_shift_sample_kernel(
-    n: qmc.UInt,
-    bits: qmc.Vector[qmc.UInt],
-    direction: qmc.UInt,
-    enabled: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:
-    """Apply the controlled shift when control and system share one register."""
-    q = qmc.qubit_array(n + 1, name="q")
-    q = _prepare_basis_prefix(q, bits, n)
-    if enabled == qmc.uint(1):
-        q[n] = qmc.x(q[n])
-
-    if direction == qmc.uint(0):
-        q = controlled_modular_increment_by_index(q, n, n)
-    else:
-        q = controlled_modular_decrement_by_index(q, n, n)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _combined_controlled_shift_expval_kernel(
-    n: qmc.UInt,
-    bits: qmc.Vector[qmc.UInt],
-    direction: qmc.UInt,
-    enabled: qmc.UInt,
-    hamiltonian: qmc.Observable,
-) -> qmc.Float:
-    """Apply indexed controlled shift and return a diagonal expval."""
-    q = qmc.qubit_array(n + 1, name="q")
-    q = _prepare_basis_prefix(q, bits, n)
-    if enabled == qmc.uint(1):
-        q[n] = qmc.x(q[n])
-
-    if direction == qmc.uint(0):
-        q = controlled_modular_increment_by_index(q, n, n)
-    else:
-        q = controlled_modular_decrement_by_index(q, n, n)
+        controlled_shift = qmc.control(modular_decrement, num_controls=1)
+        control, q = controlled_shift(control, q)
     return qmc.expval(q, hamiltonian)
 
 
@@ -187,8 +143,6 @@ _CASES = [
     ("minus", "plain"),
     ("plus", "controlled"),
     ("minus", "controlled"),
-    ("plus", "indexed"),
-    ("minus", "indexed"),
 ]
 
 
@@ -219,14 +173,8 @@ def _shift_bits(bits: list[int], direction: str) -> list[int]:
 
 
 def _expected_bits(bits: list[int], direction: str, enabled: int | None) -> list[int]:
-    """Return expected system/control measurement bits."""
-    shifted = _shift_bits(bits, direction) if enabled is None or enabled else bits
-    return shifted
-
-
-def _expected_combined_bits(bits: list[int], direction: str, enabled: int) -> list[int]:
-    """Return expected bits for a shared system/control register."""
-    return _expected_bits(bits, direction, enabled) + [enabled]
+    """Return expected system measurement bits."""
+    return _shift_bits(bits, direction) if enabled is None or enabled else bits
 
 
 def _z_hamiltonian(coeffs: list[float]) -> qm_o.Hamiltonian:
@@ -305,7 +253,7 @@ def test_modular_arithmetic_cross_backend_sample_and_expval(
     n: int,
     seed: int,
 ) -> None:
-    """Execute shift variants through each backend-supported path."""
+    """Execute primitive shifts and qmc.control-created shifts where supported."""
     transpiler = transpiler_factory()
     backend_name = _backend_name(transpiler)
     if backend_name == "quri_parts" and n > 2:
@@ -319,10 +267,8 @@ def test_modular_arithmetic_cross_backend_sample_and_expval(
 
     for direction, mode in _CASES:
         bits = _random_bits(rng, n)
-        enabled = int(rng.integers(0, 2)) if mode != "plain" else None
+        enabled = int(rng.integers(0, 2)) if mode == "controlled" else None
         expected = _expected_bits(bits, direction, enabled)
-        if mode == "indexed":
-            expected = _expected_combined_bits(bits, direction, int(enabled))
         coeffs = rng.uniform(-1.0, 1.0, size=len(expected)).tolist()
         hamiltonian = _z_hamiltonian(coeffs)
         direction_id = 0 if direction == "plus" else 1
@@ -345,26 +291,6 @@ def test_modular_arithmetic_cross_backend_sample_and_expval(
             observed = _expval_if_supported(
                 transpiler,
                 _controlled_shift_expval_kernel,
-                expval_bindings,
-                backend_name,
-            )
-        elif mode == "indexed":
-            sample_bindings = {
-                "n": n,
-                "bits": bits,
-                "direction": direction_id,
-                "enabled": enabled,
-            }
-            expval_bindings = sample_bindings | {"hamiltonian": hamiltonian}
-            sample_results = _sample(
-                transpiler,
-                _combined_controlled_shift_sample_kernel,
-                sample_bindings,
-                shots,
-            )
-            observed = _expval_if_supported(
-                transpiler,
-                _combined_controlled_shift_expval_kernel,
                 expval_bindings,
                 backend_name,
             )

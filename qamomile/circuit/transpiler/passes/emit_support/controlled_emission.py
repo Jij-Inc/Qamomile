@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
@@ -1072,6 +1073,8 @@ def blockvalue_to_gate(
     if not hasattr(block_value, "operations"):
         return None
 
+    block_value = _strip_slice_markers_for_nested_emit(block_value)
+
     try:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
@@ -1116,6 +1119,35 @@ def blockvalue_to_gate(
             exc_info=True,
         )
         return None
+
+
+def _strip_slice_markers_for_nested_emit(block_value: Any) -> Any:
+    """Remove slice marker operations from a nested block before emit.
+
+    Top-level blocks pass through ``SliceBorrowCheckPass`` and
+    ``StripSliceArrayOpsPass`` before segmentation and emission, but a
+    ``ControlledUOperation`` or custom composite carries its inner
+    ``Block`` as an operation field rather than as regular control-flow
+    children. Generic pass visitors therefore do not descend into that
+    nested block. Apply the same marker-stripping invariant here before
+    converting the nested block into a backend gate.
+
+    Args:
+        block_value (Any): Candidate nested block to normalize.
+
+    Returns:
+        Any: ``block_value`` with ``SliceArrayOperation`` and
+        ``ReleaseSliceViewOperation`` markers removed when it is a
+        ``Block``; otherwise the original object unchanged.
+    """
+    if not isinstance(block_value, Block):
+        return block_value
+
+    from qamomile.circuit.transpiler.passes.strip_slice_ops import (
+        StripSliceArrayOpsPass,
+    )
+
+    return StripSliceArrayOpsPass().run(block_value)
 
 
 def _populate_input_qubit_map(

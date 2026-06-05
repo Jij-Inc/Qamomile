@@ -19,17 +19,15 @@ def modular_increment(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         qmc.Vector[qmc.Qubit]: Updated qubit register.
     """
     n = q.shape[0]
-    for k in qmc.range(n):
-        target_index = n - 1 - k
-        if target_index == 0:
-            q[target_index] = qmc.x(q[target_index])
-        else:
-            mcx = qmc.control(qmc.x, num_controls=target_index)
-            controls = q[0:target_index]
-            target = q[target_index]
-            controls, target = mcx(controls, target)
-            q[0:target_index] = controls
-            q[target_index] = target
+    for k in qmc.range(1, n):
+        target_index = n - k
+        mcx = qmc.control(qmc.x, num_controls=target_index)
+        controls = q[0:target_index]
+        target = q[target_index]
+        controls, target = mcx(controls, target)
+        q[0:target_index] = controls
+        q[target_index] = target
+    q[0] = qmc.x(q[0])
     return q
 
 
@@ -47,174 +45,18 @@ def modular_decrement(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         qmc.Vector[qmc.Qubit]: Updated qubit register.
     """
     n = q.shape[0]
-    for target_index in qmc.range(n):
-        if target_index == 0:
-            q[target_index] = qmc.x(q[target_index])
-        else:
-            mcx = qmc.control(qmc.x, num_controls=target_index)
-            controls = q[0:target_index]
-            target = q[target_index]
-            controls, target = mcx(controls, target)
-            q[0:target_index] = controls
-            q[target_index] = target
-    return q
-
-
-@qmc.qkernel
-def controlled_modular_increment(
-    control: qmc.Qubit,
-    q: qmc.Vector[qmc.Qubit],
-) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
-    """Apply controlled modular increment to a target register.
-
-    The target vector is interpreted in little-endian order: ``q[0]`` is
-    the least-significant bit of the encoded integer. When ``control`` is
-    ``|1>``, the target maps as ``|j> -> |j + 1 mod 2^n>``; when
-    ``control`` is ``|0>``, the target is unchanged.
-
-    Args:
-        control (qmc.Qubit): External control qubit.
-        q (qmc.Vector[qmc.Qubit]): Target qubit register.
-
-    Returns:
-        tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]: Updated control qubit
-        and target register.
-    """
-    n = q.shape[0]
-    for k in qmc.range(n):
-        target_index = n - 1 - k
+    q[0] = qmc.x(q[0])
+    for target_index in qmc.range(1, n):
+        mcx = qmc.control(qmc.x, num_controls=target_index)
+        controls = q[0:target_index]
         target = q[target_index]
-        if target_index == 0:
-            control, target = qmc.cx(control, target)
-        else:
-            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-            prefix = q[0:target_index]
-            control, prefix, target = mcx(control, prefix, target)
-            q[0:target_index] = prefix
-        q[target_index] = target
-    return control, q
-
-
-@qmc.qkernel
-def controlled_modular_decrement(
-    control: qmc.Qubit,
-    q: qmc.Vector[qmc.Qubit],
-) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
-    """Apply controlled modular decrement to a target register.
-
-    The target vector is interpreted in little-endian order: ``q[0]`` is
-    the least-significant bit of the encoded integer. When ``control`` is
-    ``|1>``, the target maps as ``|j> -> |j - 1 mod 2^n>``; when
-    ``control`` is ``|0>``, the target is unchanged.
-
-    Args:
-        control (qmc.Qubit): External control qubit.
-        q (qmc.Vector[qmc.Qubit]): Target qubit register.
-
-    Returns:
-        tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]: Updated control qubit
-        and target register.
-    """
-    n = q.shape[0]
-    for target_index in qmc.range(n):
-        target = q[target_index]
-        if target_index == 0:
-            control, target = qmc.cx(control, target)
-        else:
-            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-            prefix = q[0:target_index]
-            control, prefix, target = mcx(control, prefix, target)
-            q[0:target_index] = prefix
-        q[target_index] = target
-    return control, q
-
-
-@qmc.qkernel
-def controlled_modular_increment_by_index(
-    q: qmc.Vector[qmc.Qubit],
-    control_index: qmc.UInt,
-    num_system: qmc.UInt,
-) -> qmc.Vector[qmc.Qubit]:
-    """Apply controlled modular increment inside a shared register.
-
-    The layout is ``q[0:num_system]`` for the little-endian system
-    register and ``q[control_index]`` for the external control qubit.
-    When the control qubit is ``|1>``, the system maps as
-    ``|j> -> |j + 1 mod 2^num_system>``; when it is ``|0>``, the
-    system is unchanged.
-
-    Args:
-        q (qmc.Vector[qmc.Qubit]): Register containing both the system
-            qubits and the external control qubit.
-        control_index (qmc.UInt): Index of the external control qubit
-            in ``q``. It is expected to be outside ``q[0:num_system]``.
-        num_system (qmc.UInt): Number of system qubits at the front of
-            ``q``.
-
-    Returns:
-        qmc.Vector[qmc.Qubit]: Updated shared register.
-    """
-    for k in qmc.range(num_system):
-        target_index = num_system - 1 - k
-        control = q[control_index]
-        target = q[target_index]
-        if target_index == 0:
-            control, target = qmc.cx(control, target)
-        else:
-            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-            prefix = q[0:target_index]
-            control, prefix, target = mcx(control, prefix, target)
-            q[0:target_index] = prefix
-        q[control_index] = control
-        q[target_index] = target
-    return q
-
-
-@qmc.qkernel
-def controlled_modular_decrement_by_index(
-    q: qmc.Vector[qmc.Qubit],
-    control_index: qmc.UInt,
-    num_system: qmc.UInt,
-) -> qmc.Vector[qmc.Qubit]:
-    """Apply controlled modular decrement inside a shared register.
-
-    The layout is ``q[0:num_system]`` for the little-endian system
-    register and ``q[control_index]`` for the external control qubit.
-    When the control qubit is ``|1>``, the system maps as
-    ``|j> -> |j - 1 mod 2^num_system>``; when it is ``|0>``, the
-    system is unchanged.
-
-    Args:
-        q (qmc.Vector[qmc.Qubit]): Register containing both the system
-            qubits and the external control qubit.
-        control_index (qmc.UInt): Index of the external control qubit
-            in ``q``. It is expected to be outside ``q[0:num_system]``.
-        num_system (qmc.UInt): Number of system qubits at the front of
-            ``q``.
-
-    Returns:
-        qmc.Vector[qmc.Qubit]: Updated shared register.
-    """
-    for target_index in qmc.range(num_system):
-        control = q[control_index]
-        target = q[target_index]
-        if target_index == 0:
-            control, target = qmc.cx(control, target)
-        else:
-            mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-            prefix = q[0:target_index]
-            control, prefix, target = mcx(control, prefix, target)
-            q[0:target_index] = prefix
-        q[control_index] = control
+        controls, target = mcx(controls, target)
+        q[0:target_index] = controls
         q[target_index] = target
     return q
 
 
 __all__ = [
-    "controlled_modular_decrement",
-    "controlled_modular_decrement_by_index",
-    "controlled_modular_increment",
-    "controlled_modular_increment_by_index",
     "modular_decrement",
     "modular_increment",
 ]

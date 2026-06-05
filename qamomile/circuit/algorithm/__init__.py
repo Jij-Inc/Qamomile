@@ -1,10 +1,6 @@
 """Algorithm building blocks for quantum circuits."""
 
 from .arithmetic import (
-    controlled_modular_decrement,
-    controlled_modular_decrement_by_index,
-    controlled_modular_increment,
-    controlled_modular_increment_by_index,
     modular_decrement,
     modular_increment,
 )
@@ -47,10 +43,6 @@ __all__ = [
     # Arithmetic
     "modular_increment",
     "modular_decrement",
-    "controlled_modular_increment",
-    "controlled_modular_decrement",
-    "controlled_modular_increment_by_index",
-    "controlled_modular_decrement_by_index",
     # QAOA
     "ising_cost",
     "x_mixer",
