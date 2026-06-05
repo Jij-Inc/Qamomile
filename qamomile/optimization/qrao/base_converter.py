@@ -12,7 +12,7 @@ from typing import Generic, TypeVar
 import ommx.v1
 
 import qamomile.observable as qm_o
-from qamomile.circuit import SampleResult
+from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinarySampleSet
 from qamomile.optimization.converter import MathematicalProblemConverter
 
