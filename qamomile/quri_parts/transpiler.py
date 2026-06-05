@@ -31,6 +31,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _expand_quantum_operands_to_phys,
     _map_controlled_u_results,
     _populate_input_qubit_map,
+    _strip_slice_markers_for_nested_emit,
     emit_controlled_gate,
     resolve_power,
 )
@@ -534,6 +535,7 @@ class QuriPartsEmitPass(
                 f"control_indices={control_indices!r}.",
                 operation="ControlledUOperation",
             )
+        block_value = _strip_slice_markers_for_nested_emit(block_value)
         qubit_map = _build_quri_controlled_qubit_map(
             self, block_value, target_indices, bindings
         )
