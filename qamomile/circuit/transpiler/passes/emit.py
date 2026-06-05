@@ -11,7 +11,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.executable import (
     CompiledClassicalSegment,
     CompiledExpvalSegment,
@@ -425,6 +425,20 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                 addr = QubitAddress(qubits_value.uuid)
                 if addr in uuid_to_physical:
                     qubit_map[0] = uuid_to_physical[addr]
+                else:
+                    # Bare single ``Qubit`` operand (``expval(q, H)`` without an
+                    # enclosing tuple). When it is a Vector element whose own
+                    # UUID was never registered (e.g. an ungated ancilla passed
+                    # as ``expval(anc[0], H)``), fall back to its root
+                    # ``(root_uuid, index)`` address. Unlike the tuple form, the
+                    # bare element Value keeps its ``parent_array`` into emit, so
+                    # it is resolved directly here without trace-time capture.
+                    resolved = resolve_root_qubit_address(qubits_value)
+                    if resolved is not None:
+                        root_uuid, root_idx = resolved
+                        root_addr = QubitAddress(root_uuid, root_idx)
+                        if root_addr in uuid_to_physical:
+                            qubit_map[0] = uuid_to_physical[root_addr]
 
         return qubit_map
 

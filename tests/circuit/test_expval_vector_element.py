@@ -119,6 +119,28 @@ def _gated_vec_ancilla(obs: qmc.Observable) -> qmc.Float:
 
 
 @qmc.qkernel
+def _bare_ungated_vec_ancilla(obs: qmc.Observable) -> qmc.Float:
+    """Ungated Vector-element ancilla passed as a bare ``Qubit`` (no tuple).
+
+    Same as the tuple case but ``expval(anc[0], obs)`` is called without an
+    enclosing tuple, exercising the single-Value branch of ``_build_qubit_map``.
+    """
+    clock = qmc.qubit_array(2, name="clock")
+    clock[0] = qmc.x(clock[0])
+    clock[1] = qmc.x(clock[1])
+    anc_vec = qmc.qubit_array(1, name="anc")
+    return qmc.expval(anc_vec[0], obs)  # bare Qubit, no tuple
+
+
+@qmc.qkernel
+def _bare_gated_vec_ancilla(obs: qmc.Observable) -> qmc.Float:
+    """Vector-element ancilla ``reg[1]`` gated to ``|1>``, passed as a bare ``Qubit``."""
+    reg = qmc.qubit_array(2, name="reg")
+    reg[1] = qmc.x(reg[1])
+    return qmc.expval(reg[1], obs)  # bare Qubit, no tuple
+
+
+@qmc.qkernel
 def _qft_result_element(obs: qmc.Observable) -> qmc.Float:
     """Observe one element of the Vector returned by a ``qft`` CompositeGate."""
     q = qmc.qubit_array(3, name="q")
@@ -193,6 +215,23 @@ def test_gated_vector_element_ancilla_is_minus_one(backend):
     directions, not to ``clock[0]``.
     """
     got = _expval(backend, _gated_vec_ancilla, {"obs": qm_o.Z(0)})
+    assert math.isclose(got, -1.0, abs_tol=_EXPVAL_ATOL)
+
+
+def test_bare_ungated_vector_element_ancilla_is_plus_one(backend):
+    """``expval(anc[0], Z(0))`` (bare Qubit, no tuple) binds to the ancilla -> +1.
+
+    The bare single-Qubit form goes through the single-Value branch of
+    ``_build_qubit_map``; before the fix it missed the root-address fallback and
+    returned ``-1`` (bound to a ``|1>`` clock qubit).
+    """
+    got = _expval(backend, _bare_ungated_vec_ancilla, {"obs": qm_o.Z(0)})
+    assert math.isclose(got, 1.0, abs_tol=_EXPVAL_ATOL)
+
+
+def test_bare_gated_vector_element_ancilla_is_minus_one(backend):
+    """``expval(reg[1], Z(0))`` (bare Qubit) where ``reg[1] = |1>`` -> -1."""
+    got = _expval(backend, _bare_gated_vec_ancilla, {"obs": qm_o.Z(0)})
     assert math.isclose(got, -1.0, abs_tol=_EXPVAL_ATOL)
 
 
