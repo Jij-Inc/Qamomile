@@ -267,17 +267,32 @@ class _MetadataValueMixin:
         if self.metadata.array_runtime is None:
             return ()
         rt = self.metadata.array_runtime
-        # Anchor on ``element_uuids`` length so the result stays aligned with
-        # ``get_element_uuids()`` even when the parallel parent tuples are
-        # absent or shorter (a plain ``zip`` would silently truncate to the
-        # shorter list and break per-position indexing).
+        # ``element_uuids`` / ``element_parent_uuids`` / ``element_parent_indices``
+        # are PARALLEL tuples: position i in each describes the same element i.
+        # The only code that populates the two parent tuples (``expval()``'s
+        # tuple lowering) always sets all three together, so at the sole call
+        # site they are equal length. We deliberately iterate by
+        # ``len(element_uuids)`` instead of ``zip``-ing the parent tuples so the
+        # result is ALWAYS one entry per element and stays index-aligned with
+        # ``get_element_uuids()`` -- the caller (``_build_qubit_map``) indexes it
+        # by element position. ``zip`` would instead stop at the shortest tuple
+        # and return fewer (or zero) entries for any value whose parent tuples
+        # were never set, silently misaligning the result with element_uuids.
         result: list[tuple[str, int] | None] = []
         for i in range(len(rt.element_uuids)):
+            # Defensive only: reachable solely if the parent tuples are shorter
+            # than element_uuids (a value whose parent info was never recorded,
+            # not produced at the expval call site). Such an element has no
+            # known root address -> None.
             if i >= len(rt.element_parent_uuids) or i >= len(rt.element_parent_indices):
                 result.append(None)
                 continue
             parent_uuid = rt.element_parent_uuids[i]
             parent_idx = rt.element_parent_indices[i]
+            # ``("", -1)`` is the sentinel written by ``expval()`` for a
+            # standalone qubit (no array parent) or an element whose root could
+            # not be resolved at trace time; decode it back to ``None`` so the
+            # caller skips the root-address fallback for that position.
             if parent_uuid == "" or parent_idx < 0:
                 result.append(None)
             else:
@@ -519,14 +534,26 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
             (those cases are deferred to the emit-time resolver, which has
             bindings available).
     """
+    # Not an array element (e.g. a standalone qubit / scalar): there is no
+    # root array to address against.
     if value.parent_array is None or not value.element_indices:
         return None
     idx_value = value.element_indices[0]
+    # A non-constant (symbolic / loop-variable) index cannot be pinned to a
+    # fixed physical slot at this stage. Return None to DEFER it to the
+    # emit-time resolver, which has the bindings to resolve it -- guessing here
+    # would silently bind to the wrong qubit.
     if not idx_value.is_constant():
         return None
     idx = int(typing.cast(int, idx_value.get_const()))
+    # Walk the ``slice_of`` chain root-ward. Each strided view contributes the
+    # affine map ``parent_index = start + step * local_index``; composing them
+    # rewrites a (possibly nested) view element into the underlying root array's
+    # own index space, so the result matches the composite key QInit registered.
     parent: ArrayValue | None = value.parent_array
     while parent is not None and parent.slice_of is not None:
+        # Same constant-only restriction as the element index: a view whose
+        # bounds are symbolic is deferred (None), not guessed.
         if (
             parent.slice_start is None
             or parent.slice_step is None

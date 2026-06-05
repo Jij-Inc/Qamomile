@@ -101,6 +101,11 @@ def expval(
         # qubit has no ``parent_array`` and resolves to ``None``; it is recorded
         # with the ``("", -1)`` sentinel so emit falls back to the flat UUID
         # lookup that already resolves standalone qubits.
+        # We must resolve the root address HERE (at trace time) because the
+        # pseudo-ArrayValue below flattens the elements into bare UUID tuples and
+        # drops their ``parent_array`` -- emit could not chain-walk later. (The
+        # non-tuple branch keeps the real element Value, so it resolves at emit
+        # instead; see ``_build_qubit_map``.)
         parent_addrs = [resolve_root_qubit_address(v) for v in qubit_values]
         qubits_value = ArrayValue(
             type=qubit_values[0].type,
@@ -109,6 +114,11 @@ def expval(
         ).with_array_runtime_metadata(
             element_uuids=tuple(q.uuid for q in qubit_values),
             element_logical_ids=tuple(q.logical_id for q in qubit_values),
+            # Encode each resolved root as (uuid, idx); ``None`` (standalone
+            # qubit, or unresolved element) becomes the ``("", -1)`` sentinel
+            # that ``get_element_parent_addresses()`` decodes back to ``None``.
+            # Kept as two parallel tuples (not one tuple of pairs) so they ride
+            # the existing ArrayRuntimeMetadata serialize / canonical paths.
             element_parent_uuids=tuple(
                 addr[0] if addr is not None else "" for addr in parent_addrs
             ),
