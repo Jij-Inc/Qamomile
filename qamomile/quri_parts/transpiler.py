@@ -33,7 +33,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     QubitMap,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
-    _bind_block_inputs,
+    _bind_and_populate_block_inputs,
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
     _map_controlled_u_results,
@@ -544,9 +544,7 @@ def _emit_quri_composite_operation(
         inner_qubit_map,
         local_bindings,
     )
-    _map_quri_composite_results(
-        op, composite_controls, target_index_groups, qubit_map
-    )
+    _map_quri_composite_results(op, composite_controls, target_index_groups, qubit_map)
 
 
 def _emit_quri_nested_controlled_u(
@@ -1110,28 +1108,16 @@ class QuriPartsEmitPass(
         """
         local_qubit_map: dict[Any, int] = {}
         local_clbit_map: dict[Any, int] = {}
-        local_bindings = _bind_block_inputs(
+        local_bindings = _bind_and_populate_block_inputs(
             self,
             block_value,
             input_operands,
             num_qubits,
             bindings,
             local_qubit_map,
+            parent_qubits=parent_qubits,
+            operation_name="InverseBlockOperation",
         )
-        if hasattr(block_value, "input_values"):
-            _populate_input_qubit_map(
-                self,
-                block_value.input_values,
-                num_qubits,
-                local_bindings,
-                local_qubit_map,
-            )
-
-        if parent_qubits is not None:
-            local_qubit_map = {
-                address: parent_qubits[local_index]
-                for address, local_index in local_qubit_map.items()
-            }
 
         return local_qubit_map, local_clbit_map, local_bindings
 
@@ -1195,6 +1181,7 @@ class QuriPartsEmitPass(
             pauli_ids=gate.pauli_ids,
             unitary_matrix=gate.unitary_matrix,
         )
+
 
 class QuriPartsExecutor(
     QuantumExecutor["qp_c.LinearMappedUnboundParametricQuantumCircuit"]

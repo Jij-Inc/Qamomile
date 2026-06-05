@@ -1033,23 +1033,16 @@ def emit_custom_composite(
     else:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
-        local_bindings = _bind_block_inputs(
+        local_bindings = _bind_and_populate_block_inputs(
             emit_pass,
             impl,
             op.operands,
             num_qubits,
             bindings,
             local_qubit_map,
+            parent_qubits=qubit_indices,
+            operation_name="CompositeGateOperation",
         )
-
-        if hasattr(impl, "input_values"):
-            quantum_inputs = [
-                value
-                for value in impl.input_values
-                if hasattr(value, "type") and value.type.is_quantum()
-            ]
-            for input_val, qubit_index in zip(quantum_inputs, qubit_indices):
-                local_qubit_map[QubitAddress(input_val.uuid)] = qubit_index
 
         if hasattr(impl, "operations"):
             emit_pass._emit_operations(
@@ -1249,13 +1242,14 @@ def _bind_inverse_block_inputs(
             operation="InverseBlockOperation",
         )
     local_qubit_map: QubitMap = {}
-    return _bind_block_inputs(
+    return _bind_and_populate_block_inputs(
         emit_pass,
         op.implementation_block,
         [*op.target_qubits, *op.parameters],
         num_qubits,
         bindings,
         local_qubit_map,
+        operation_name="InverseBlockOperation",
     )
 
 
@@ -1279,22 +1273,16 @@ def _emit_inverse_block_inline(
     """
     local_qubit_map: QubitMap = {}
     local_clbit_map: ClbitMap = {}
-    local_bindings = _bind_block_inputs(
+    local_bindings = _bind_and_populate_block_inputs(
         emit_pass,
         impl,
         [*op.target_qubits, *op.parameters],
         len(target_indices),
         bindings,
         local_qubit_map,
+        parent_qubits=target_indices,
+        operation_name="InverseBlockOperation",
     )
-    if hasattr(impl, "input_values"):
-        quantum_inputs = [
-            value
-            for value in impl.input_values
-            if hasattr(value, "type") and value.type.is_quantum()
-        ]
-        for input_val, qubit_index in zip(quantum_inputs, target_indices):
-            local_qubit_map[QubitAddress(input_val.uuid)] = qubit_index
 
     if hasattr(impl, "operations"):
         emit_pass._emit_operations(
@@ -1342,11 +1330,10 @@ def blockvalue_to_gate(
             resolving ``Vector[Qubit]`` input shapes.
         input_operands (list[Any] | None): Optional call-site operands
             corresponding to `block_value.input_values`. Quantum operands
-            determine how many formal quantum inputs are paired with the
-            call-site qubit positions, but their objects are not otherwise
-            inspected for mapping; classical operands are resolved into
-            local bindings before the nested block is emitted. Defaults to
-            None.
+            propagate actual ``Vector[Qubit]`` shapes into the nested
+            block before the vector-aware input qubit map is populated;
+            classical operands are resolved into local bindings before the
+            nested block is emitted. Defaults to None.
 
     Returns:
         Any: A backend gate object produced by
@@ -1361,23 +1348,15 @@ def blockvalue_to_gate(
     try:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
-        local_bindings = _bind_block_inputs(
+        local_bindings = _bind_and_populate_block_inputs(
             emit_pass,
             block_value,
             input_operands,
             num_qubits,
             bindings,
             local_qubit_map,
+            operation_name="ControlledUOperation",
         )
-
-        if hasattr(block_value, "input_values") and input_operands is None:
-            _populate_input_qubit_map(
-                emit_pass,
-                block_value.input_values,
-                num_qubits,
-                local_bindings,
-                local_qubit_map,
-            )
 
         local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
             block_value.operations,
@@ -1416,24 +1395,19 @@ def _bind_block_inputs(
     emit_pass: "StandardEmitPass",
     block_value: Any,
     input_operands: list[Any] | None,
-    num_qubits: int,
     bindings: dict[str, Any],
-    qubit_map: QubitMap,
 ) -> dict[str, Any]:
-    """Bind nested block inputs to call-site operands for emission.
+    """Bind nested block classical inputs to call-site operands.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
         block_value (Any): Nested block whose inputs are being emitted.
         input_operands (list[Any] | None): Call-site operands. Quantum
-            operands are used only to pair formal quantum inputs with
-            positional call-site qubit indices; classical operands are
-            resolved into local bindings. When None, no direct binding is
-            performed.
-        num_qubits (int): Total qubits available for the nested block.
+            operands are skipped here; callers should handle them through
+            ``_bind_quantum_input_shapes`` and ``_populate_input_qubit_map``.
+            Classical operands are resolved into local bindings. When None,
+            no direct binding is performed.
         bindings (dict[str, Any]): Parent emit bindings.
-        qubit_map (QubitMap): Local qubit map to populate for quantum
-            inputs.
 
     Returns:
         dict[str, Any]: Local bindings for nested emission.
@@ -1452,12 +1426,8 @@ def _bind_block_inputs(
         for formal in block_value.input_values
         if not (hasattr(formal, "type") and formal.type.is_quantum())
     ]
-    quantum_operands = list(input_operands[: len(quantum_inputs)])
     classical_operands = list(input_operands[len(quantum_inputs) :])
 
-    quantum_pairs = []
-    for formal, actual in zip(quantum_inputs, quantum_operands):
-        quantum_pairs.append((formal, actual))
     for formal, actual in zip(classical_inputs, classical_operands):
         if hasattr(formal, "uuid"):
             local_bindings[formal.uuid] = _resolve_call_operand(
@@ -1466,13 +1436,128 @@ def _bind_block_inputs(
                 bindings,
             )
 
-    for formal, qubit_index in zip(
-        (pair[0] for pair in quantum_pairs), range(num_qubits)
-    ):
-        if hasattr(formal, "type") and formal.type.is_quantum():
-            qubit_map[QubitAddress(formal.uuid)] = qubit_index
-
     return local_bindings
+
+
+def _bind_and_populate_block_inputs(
+    emit_pass: "StandardEmitPass",
+    block_value: Any,
+    input_operands: list[Any] | None,
+    num_qubits: int,
+    bindings: dict[str, Any],
+    qubit_map: QubitMap,
+    parent_qubits: list[int] | None = None,
+    operation_name: str = "ControlledUOperation",
+) -> dict[str, Any]:
+    """Bind nested block inputs and populate its quantum input map.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        block_value (Any): Nested block whose inputs are being emitted.
+        input_operands (list[Any] | None): Call-site operands. Quantum
+            operands are used to propagate ``Vector[Qubit]`` shapes;
+            classical operands are resolved into local bindings. Defaults
+            to None.
+        num_qubits (int): Local qubit width available to ``block_value``.
+        bindings (dict[str, Any]): Parent emit bindings.
+        qubit_map (QubitMap): Local qubit map to mutate with scalar and
+            per-element quantum input addresses.
+        parent_qubits (list[int] | None): Optional parent-circuit physical
+            qubits used to remap the local ``0..num_qubits-1`` indices after
+            population. Defaults to None.
+        operation_name (str): Operation label used in emitted errors.
+            Defaults to ``"ControlledUOperation"``.
+
+    Returns:
+        dict[str, Any]: Local bindings for nested emission.
+
+    Raises:
+        EmitError: If vector inputs cannot fit in ``num_qubits`` or a local
+            populated qubit index cannot be remapped to ``parent_qubits``.
+    """
+    local_bindings = _bind_block_inputs(
+        emit_pass,
+        block_value,
+        input_operands,
+        bindings,
+    )
+    quantum_operands = _quantum_input_operands(block_value, input_operands)
+    _bind_quantum_input_shapes(
+        emit_pass,
+        block_value,
+        quantum_operands,
+        bindings,
+        local_bindings,
+    )
+    if hasattr(block_value, "input_values"):
+        _populate_input_qubit_map(
+            emit_pass,
+            block_value.input_values,
+            num_qubits,
+            local_bindings,
+            qubit_map,
+        )
+    if parent_qubits is not None:
+        _remap_local_qubit_map(
+            qubit_map,
+            parent_qubits,
+            operation_name,
+        )
+    return local_bindings
+
+
+def _quantum_input_operands(
+    block_value: Any,
+    input_operands: list[Any] | None,
+) -> list[Any]:
+    """Return call-site operands that correspond to quantum block inputs.
+
+    Args:
+        block_value (Any): Block whose ``input_values`` define the formal
+            quantum/classical input split.
+        input_operands (list[Any] | None): Call-site operands. Defaults to
+            None.
+
+    Returns:
+        list[Any]: Quantum operands paired with formal quantum inputs in
+            declaration order.
+    """
+    if input_operands is None or not hasattr(block_value, "input_values"):
+        return []
+    quantum_input_count = sum(
+        1
+        for input_value in block_value.input_values
+        if hasattr(input_value, "type") and input_value.type.is_quantum()
+    )
+    return list(input_operands[:quantum_input_count])
+
+
+def _remap_local_qubit_map(
+    qubit_map: QubitMap,
+    parent_qubits: list[int],
+    operation_name: str,
+) -> None:
+    """Remap local block input qubit slots to parent physical qubits.
+
+    Args:
+        qubit_map (QubitMap): Map populated with local ``0..n-1`` slots.
+            Mutated in place to parent-circuit physical qubit indices.
+        parent_qubits (list[int]): Parent physical qubits indexed by local
+            slot.
+        operation_name (str): Operation label used in emitted errors.
+
+    Raises:
+        EmitError: If a local slot falls outside ``parent_qubits``.
+    """
+    for address, local_index in list(qubit_map.items()):
+        if local_index < 0 or local_index >= len(parent_qubits):
+            raise EmitError(
+                f"{operation_name}: local input qubit index {local_index} "
+                f"cannot be remapped through {len(parent_qubits)} parent "
+                f"qubit(s).",
+                operation=operation_name,
+            )
+        qubit_map[address] = parent_qubits[local_index]
 
 
 def _gate_matches_qubit_count(gate: Any, num_qubits: int) -> bool:

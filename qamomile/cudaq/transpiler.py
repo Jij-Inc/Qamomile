@@ -1060,14 +1060,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 
         _validate_adjoint_helper_ops(block_value.operations, bindings)
 
-        local_qubit_map: QubitMap = {}
         local_bindings = _bind_block_inputs(
             self,
             block_value,
             input_operands,
-            len(target_indices),
             bindings,
-            local_qubit_map,
         )
         quantum_operands = self._quantum_input_operands(block_value, input_operands)
         _bind_quantum_input_shapes(

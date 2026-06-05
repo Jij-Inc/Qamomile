@@ -304,6 +304,18 @@ _custom_composite_gate = qmc.composite_gate(name="custom_h")(_custom_composite_i
 
 
 @qmc.qkernel
+def _inverse_vector_param_layer(
+    qs: qmc.Vector[qmc.Qubit],
+    rotation_angle: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a vector layer with a classical parameter."""
+    qs[0] = qmc.h(qs[0])
+    qs[1] = qmc.rz(qs[1], rotation_angle)
+    qs[0], qs[2] = qmc.cx(qs[0], qs[2])
+    return qs
+
+
+@qmc.qkernel
 def _inverse_custom_composite_layer(q: qmc.Qubit) -> qmc.Qubit:
     """Apply a custom composite gate for inverse tests."""
     (q,) = _custom_composite_gate(q)
@@ -801,6 +813,28 @@ def _custom_composite_qkernel_roundtrip_kernel() -> qmc.QKernel:
     return circuit
 
 
+def _vector_param_qkernel_roundtrip_kernel() -> qmc.QKernel:
+    """Build a vector qkernel inverse roundtrip with a classical parameter.
+
+    Returns:
+        qmc.QKernel: Kernel that samples zero after a vector layer and its
+            inverse are applied.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs[0] = qmc.x(qs[0])
+        qs[2] = qmc.x(qs[2])
+        qs = _inverse_vector_param_layer(qs, 0.41)
+        qs = qmc.inverse(_inverse_vector_param_layer)(qs, 0.41)
+        qs[0] = qmc.x(qs[0])
+        qs[2] = qmc.x(qs[2])
+        return qmc.measure(qs)
+
+    return circuit
+
+
 def _vector_loop_qkernel_roundtrip_kernel() -> qmc.QKernel:
     """Build a Vector-loop qkernel inverse roundtrip kernel.
 
@@ -824,6 +858,7 @@ QKERNEL_ROUNDTRIP_CASES = [
     pytest.param(_controlled_qkernel_roundtrip_kernel, 2, id="controlled"),
     pytest.param(_controlled_native_roundtrip_kernel, 2, id="controlled-native"),
     pytest.param(_custom_composite_qkernel_roundtrip_kernel, 1, id="custom-composite"),
+    pytest.param(_vector_param_qkernel_roundtrip_kernel, 3, id="vector-param"),
     pytest.param(_vector_loop_qkernel_roundtrip_kernel, 3, id="vector-loop"),
 ]
 

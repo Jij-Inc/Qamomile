@@ -189,9 +189,7 @@ class TestRoundTripStructure:
         block = _to_affine(_inverse_kernel)
         restored = load_json(dump_json(block))
         inverse_ops = [
-            op
-            for op in restored.operations
-            if isinstance(op, InverseBlockOperation)
+            op for op in restored.operations if isinstance(op, InverseBlockOperation)
         ]
 
         assert len(inverse_ops) == 1
