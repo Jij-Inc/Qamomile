@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING
 
 import ommx.v1
 
 import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, VarType
-
-if TYPE_CHECKING:
-    from qamomile.circuit.transpiler.job import SampleResult
 
 
 class MathematicalProblemConverter(abc.ABC):
