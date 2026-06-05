@@ -441,20 +441,28 @@ def _sum_z_hamiltonian(num_qubits: int) -> qm_o.Hamiltonian:
     return hamiltonian
 
 
-def _assert_all_zero_samples(sample_result: object, width: int) -> None:
+def _assert_all_zero_samples(
+    sample_result: object,
+    width: int,
+    expected_shots: int,
+) -> None:
     """Assert that every sampled bitstring is all zero.
 
     Args:
         sample_result (object): Backend sample result exposing a `results`
             iterable of `(bitstring, count)` pairs.
         width (int): Expected bitstring width.
+        expected_shots (int): Expected total number of sampled shots.
 
     Returns:
         None.
     """
     expected_bits: object = (0,) * width
     expected_values = {0, expected_bits} if width == 1 else {expected_bits}
-    for value, count in sample_result.results:  # type: ignore[attr-defined]
+    results = list(sample_result.results)  # type: ignore[attr-defined]
+    assert results
+    assert sum(count for _, count in results) == expected_shots
+    for value, count in results:
         assert count > 0
         assert value in expected_values
 
@@ -1004,7 +1012,7 @@ def test_inverse_native_unary_scalar_roundtrip_cross_backend(
     )
     sample_result = executable.sample(transpiler.executor(), shots=32).result()
 
-    _assert_all_zero_samples(sample_result, 1)
+    _assert_all_zero_samples(sample_result, 1, 32)
 
 
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
@@ -1022,7 +1030,7 @@ def test_inverse_native_unary_vector_broadcast_roundtrip_cross_backend(
     )
     sample_result = executable.sample(transpiler.executor(), shots=32).result()
 
-    _assert_all_zero_samples(sample_result, 3)
+    _assert_all_zero_samples(sample_result, 3, 32)
 
 
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
@@ -1040,7 +1048,7 @@ def test_inverse_native_unary_vector_view_broadcast_roundtrip_cross_backend(
     )
     sample_result = executable.sample(transpiler.executor(), shots=32).result()
 
-    _assert_all_zero_samples(sample_result, 5)
+    _assert_all_zero_samples(sample_result, 5, 32)
 
 
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
@@ -1057,7 +1065,7 @@ def test_inverse_native_multi_qubit_roundtrip_cross_backend(
     sample_result = executable.sample(transpiler.executor(), shots=32).result()
     width = 3 if gate_name in THREE_QUBIT_NATIVE_GATES else 2
 
-    _assert_all_zero_samples(sample_result, width)
+    _assert_all_zero_samples(sample_result, width, 32)
 
 
 def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
@@ -1928,6 +1936,47 @@ def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
     assert np.allclose(statevector, expected, atol=1e-8)
 
 
+def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
+    """CUDA-Q inverse-of-inverse falls back before nested adjoint emission."""
+    cudaq = pytest.importorskip("cudaq")
+
+    from qamomile.cudaq import CudaqTranspiler
+
+    @qmc.qkernel
+    def inverse_layer(rotation_angle: qmc.Float, q: qmc.Qubit) -> qmc.Qubit:
+        q = qmc.inverse(_inverse_layer)(q, rotation_angle)
+        return q
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = inverse_layer(rotation_angle, q)
+        q = qmc.inverse(inverse_layer)(rotation_angle, q)
+        return qmc.measure(q)
+
+    transpiler = CudaqTranspiler()
+    executable = transpiler.transpile(circuit, parameters=["rotation_angle"])
+    quantum_step = executable.compiled_quantum[0]
+    cudaq_circuit = quantum_step.circuit
+
+    helper_source, _entry_source = cudaq_circuit.source.split(
+        "@cudaq.kernel\ndef _qamomile_kernel",
+        maxsplit=1,
+    )
+    assert "cudaq.adjoint(" not in helper_source
+
+    bound = transpiler.executor().bind_parameters(
+        cudaq_circuit,
+        {"rotation_angle": 0.37},
+        quantum_step.parameter_metadata,
+    )
+    statevector = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
+    expected = np.zeros(2, dtype=complex)
+    expected[0] = 1.0
+
+    assert np.allclose(statevector, expected, atol=1e-8)
+
+
 def test_inverse_cudaq_adjoint_inlines_nested_source_block() -> None:
     """CUDA-Q adjoint helpers include nested qkernel call bodies."""
     pytest.importorskip("cudaq")
@@ -1977,7 +2026,7 @@ def test_inverse_allowed_qkernel_roundtrip_cross_backend(
     executable = transpiler.transpile(kernel_factory())
     sample_result = executable.sample(transpiler.executor(), shots=32).result()
 
-    _assert_all_zero_samples(sample_result, width)
+    _assert_all_zero_samples(sample_result, width, 32)
 
 
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
@@ -2002,7 +2051,7 @@ def test_inverse_roundtrip_cross_backend_sampling_and_expval(
         shots=64,
         bindings={"rotation_angle": rotation_angle},
     ).result()
-    _assert_all_zero_samples(sample_result, num_qubits)
+    _assert_all_zero_samples(sample_result, num_qubits, 64)
 
     expval_kernel = _inverse_roundtrip_expval_kernel(num_qubits)
     observable = _sum_z_hamiltonian(num_qubits)

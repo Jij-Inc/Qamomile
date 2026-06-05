@@ -1050,6 +1050,9 @@ class _BlockInverter:
         if op.loop_var_value is not None:
             body_map[op.loop_var_value.uuid] = loop_var
         inverse_body = self._invert_operations(op.operations, body_map)
+        for uuid in value_map:
+            if uuid in body_map:
+                value_map[uuid] = body_map[uuid]
         return [
             ForOperation(
                 # Match control_flow._value_to_ir_value: Python range sentinels

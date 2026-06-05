@@ -69,6 +69,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
     _map_inverse_block_results,
+    _quantum_input_operands,
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
@@ -667,6 +668,13 @@ def _validate_adjoint_helper_ops(
                 "to Qamomile inverse decomposition.",
                 operation="InverseBlockOperation",
             )
+        if isinstance(op, InverseBlockOperation):
+            raise EmitError(
+                "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "
+                "inverse-kernel synthesis on CUDA-Q 0.14.x; falling back "
+                "to Qamomile inverse decomposition.",
+                operation="InverseBlockOperation",
+            )
         if (
             isinstance(op, CompositeGateOperation)
             and op.implementation_block is not None
@@ -1093,7 +1101,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             input_operands,
             bindings,
         )
-        quantum_operands = self._quantum_input_operands(block_value, input_operands)
+        quantum_operands = _quantum_input_operands(block_value, input_operands)
         _bind_quantum_input_shapes(
             self,
             block_value,
@@ -1132,31 +1140,6 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             target_indices,
             uses_thetas,
         )
-
-    def _quantum_input_operands(
-        self,
-        block_value: Any,
-        input_operands: list[Any] | None,
-    ) -> list[Any]:
-        """Return call-site operands corresponding to quantum inputs.
-
-        Args:
-            block_value (Any): Block whose ``input_values`` define the
-                formal quantum/classical input split.
-            input_operands (list[Any] | None): Call-site operands. Defaults
-                to None.
-
-        Returns:
-            list[Any]: Operands paired with formal quantum inputs.
-        """
-        if input_operands is None or not hasattr(block_value, "input_values"):
-            return []
-        quantum_input_count = sum(
-            1
-            for input_value in block_value.input_values
-            if hasattr(input_value, "type") and input_value.type.is_quantum()
-        )
-        return list(input_operands[:quantum_input_count])
 
     def _emit_controlled_fallback(
         self,
@@ -1770,22 +1753,56 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 operation="InverseBlockOperation",
             )
 
-        local_controls = _resolve_cudaq_value_indices(
-            op.control_qubits,
-            vector_slots,
-            qubit_map,
-            self,
-            bindings,
-            operation="InverseBlockOperation",
-        )
-        inverse_targets = _resolve_cudaq_value_indices(
-            op.target_qubits,
-            vector_slots,
-            qubit_map,
-            self,
-            bindings,
-            operation="InverseBlockOperation",
-        )
+        control_groups = [
+            (
+                _resolve_cudaq_array_slots(
+                    operand,
+                    vector_slots,
+                    qubit_map,
+                    self,
+                    bindings,
+                    operation="InverseBlockOperation",
+                )
+                if isinstance(operand, ArrayValue)
+                else [
+                    _resolve_cudaq_value_index(
+                        operand,
+                        vector_slots,
+                        qubit_map,
+                        self,
+                        bindings,
+                        operation="InverseBlockOperation",
+                    )
+                ]
+            )
+            for operand in op.control_qubits
+        ]
+        target_groups = [
+            (
+                _resolve_cudaq_array_slots(
+                    operand,
+                    vector_slots,
+                    qubit_map,
+                    self,
+                    bindings,
+                    operation="InverseBlockOperation",
+                )
+                if isinstance(operand, ArrayValue)
+                else [
+                    _resolve_cudaq_value_index(
+                        operand,
+                        vector_slots,
+                        qubit_map,
+                        self,
+                        bindings,
+                        operation="InverseBlockOperation",
+                    )
+                ]
+            )
+            for operand in op.target_qubits
+        ]
+        local_controls = [index for group in control_groups for index in group]
+        inverse_targets = [index for group in target_groups for index in group]
         local_bindings = self._resolver.bind_block_params(
             impl,
             op.parameters,
@@ -1816,11 +1833,28 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             emitter,
             local_bindings,
         )
-        for result, qubit_index in zip(
-            op.results,
-            [*local_controls, *inverse_targets],
+        for result, indices in zip(
+            op.results[: op.num_control_qubits],
+            control_groups,
+            strict=False,
         ):
-            qubit_map[result.uuid] = qubit_index
+            if indices:
+                qubit_map[result.uuid] = indices[0]
+
+        target_results = [
+            result
+            for result in op.results[op.num_control_qubits :]
+            if result.type.is_quantum()
+        ]
+        for result, indices in zip(target_results, target_groups, strict=False):
+            if isinstance(result, ArrayValue):
+                vector_slots[result.uuid] = list(indices)
+                for i, phys in enumerate(indices):
+                    qubit_map[QubitAddress(result.uuid, i)] = phys
+                if indices:
+                    qubit_map[result.uuid] = indices[0]
+            elif indices:
+                qubit_map[result.uuid] = indices[0]
 
     def _emit_cudaq_controlled_pauli_evolve(
         self,
