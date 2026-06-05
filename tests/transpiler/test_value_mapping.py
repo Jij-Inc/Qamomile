@@ -135,6 +135,62 @@ class TestUUIDRemapperMetadataCloning:
         assert cloned_qfixed.metadata.qfixed.num_bits == 2
         assert cloned_qfixed.metadata.qfixed.int_bits == 0
 
+    def test_cast_metadata_uuid_references_are_substituted(self) -> None:
+        """Cast metadata references follow substituted Values."""
+        old_source = _make_value("old_source")
+        new_source = _make_value("new_source")
+        old_qubit = _make_value("old_q", QubitType)
+        new_qubit = _make_value("new_q", QubitType)
+        carrier = Value(
+            type=UIntType(),
+            name="cast",
+            metadata=ValueMetadata(
+                cast=CastMetadata(
+                    source_uuid=old_source.uuid,
+                    source_logical_id=old_source.logical_id,
+                    qubit_uuids=(old_qubit.uuid,),
+                    qubit_logical_ids=(old_qubit.logical_id,),
+                ),
+            ),
+        )
+
+        sub = ValueSubstitutor({old_source.uuid: new_source, old_qubit.uuid: new_qubit})
+        result = sub.substitute_value(carrier)
+
+        assert isinstance(result, Value)
+        assert result.metadata.cast is not None
+        assert result.metadata.cast.source_uuid == new_source.uuid
+        assert result.metadata.cast.source_logical_id == new_source.logical_id
+        assert result.metadata.cast.qubit_uuids == (new_qubit.uuid,)
+        assert result.metadata.cast.qubit_logical_ids == (new_qubit.logical_id,)
+
+    def test_qfixed_metadata_qubit_references_are_substituted(self) -> None:
+        """QFixed metadata references follow substituted Values."""
+        old_q0 = _make_value("old_q0", QubitType)
+        new_q0 = _make_value("new_q0", QubitType)
+        old_q1 = _make_value("old_q1", QubitType)
+        new_q1 = _make_value("new_q1", QubitType)
+        qfixed = Value(
+            type=UIntType(),
+            name="qfixed",
+            metadata=ValueMetadata(
+                qfixed=QFixedMetadata(
+                    qubit_uuids=(old_q0.uuid, old_q1.uuid),
+                    num_bits=2,
+                    int_bits=0,
+                ),
+            ),
+        )
+
+        sub = ValueSubstitutor({old_q0.uuid: new_q0, old_q1.uuid: new_q1})
+        result = sub.substitute_value(qfixed)
+
+        assert isinstance(result, Value)
+        assert result.metadata.qfixed is not None
+        assert result.metadata.qfixed.qubit_uuids == (new_q0.uuid, new_q1.uuid)
+        assert result.metadata.qfixed.num_bits == 2
+        assert result.metadata.qfixed.int_bits == 0
+
 
 # ===========================================================================
 # Bug #5: ArrayValue.shape cloning and substitution

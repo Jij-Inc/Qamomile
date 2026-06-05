@@ -112,9 +112,9 @@ class UUIDRemapper:
             )
 
         if (
-            new_cast is metadata.cast
-            and new_qfixed is metadata.qfixed
-            and new_array_rt is metadata.array_runtime
+            new_cast == metadata.cast
+            and new_qfixed == metadata.qfixed
+            and new_array_rt == metadata.array_runtime
         ):
             return metadata
 
@@ -429,11 +429,11 @@ class ValueSubstitutor:
 
         return current.uuid, resolved_index
 
-    def _substitute_array_runtime_metadata(
+    def _substitute_metadata(
         self,
         metadata: ValueMetadata,
     ) -> tuple[ValueMetadata, bool]:
-        """Rewrite array-runtime UUID references through the value map.
+        """Rewrite metadata UUID references through the value map.
 
         Args:
             metadata (ValueMetadata): Metadata bundle owned by the value
@@ -443,46 +443,116 @@ class ValueSubstitutor:
             tuple[ValueMetadata, bool]: The rewritten metadata and a flag
                 indicating whether any UUID/index reference changed.
         """
-        array_rt = metadata.array_runtime
-        if array_rt is None:
-            return metadata, False
-
         changed = False
-        element_uuids = list(array_rt.element_uuids)
-        element_logical_ids = list(array_rt.element_logical_ids)
-        for i, element_uuid in enumerate(element_uuids):
-            mapped = self._mapped_value_for_uuid(element_uuid)
-            if mapped is not None and mapped.uuid != element_uuid:
-                element_uuids[i] = mapped.uuid
-                if i < len(element_logical_ids):
-                    element_logical_ids[i] = mapped.logical_id
+
+        new_cast = metadata.cast
+        if new_cast is not None:
+            cast_changed = False
+            source_uuid = new_cast.source_uuid
+            source_logical_id = new_cast.source_logical_id
+            mapped_source = self._mapped_value_for_uuid(source_uuid)
+            if mapped_source is not None:
+                if mapped_source.uuid != source_uuid:
+                    source_uuid = mapped_source.uuid
+                    cast_changed = True
+                if (
+                    source_logical_id is not None
+                    and mapped_source.logical_id != source_logical_id
+                ):
+                    source_logical_id = mapped_source.logical_id
+                    cast_changed = True
+
+            qubit_uuids = list(new_cast.qubit_uuids)
+            qubit_logical_ids = list(new_cast.qubit_logical_ids)
+            for i, qubit_uuid in enumerate(qubit_uuids):
+                mapped_qubit = self._mapped_value_for_uuid(qubit_uuid)
+                if mapped_qubit is None:
+                    continue
+                if mapped_qubit.uuid != qubit_uuid:
+                    qubit_uuids[i] = mapped_qubit.uuid
+                    cast_changed = True
+                if (
+                    i < len(qubit_logical_ids)
+                    and mapped_qubit.logical_id != qubit_logical_ids[i]
+                ):
+                    qubit_logical_ids[i] = mapped_qubit.logical_id
+                    cast_changed = True
+
+            if cast_changed:
+                new_cast = CastMetadata(
+                    source_uuid=source_uuid,
+                    qubit_uuids=tuple(qubit_uuids),
+                    source_logical_id=source_logical_id,
+                    qubit_logical_ids=tuple(qubit_logical_ids),
+                )
                 changed = True
 
-        element_parent_uuids = list(array_rt.element_parent_uuids)
-        element_parent_indices = list(array_rt.element_parent_indices)
-        for i, parent_uuid in enumerate(element_parent_uuids):
-            if (
-                not parent_uuid
-                or i >= len(element_parent_indices)
-                or element_parent_indices[i] < 0
-            ):
-                continue
+        new_qfixed = metadata.qfixed
+        if new_qfixed is not None:
+            qfixed_changed = False
+            qubit_uuids = list(new_qfixed.qubit_uuids)
+            for i, qubit_uuid in enumerate(qubit_uuids):
+                mapped_qubit = self._mapped_value_for_uuid(qubit_uuid)
+                if mapped_qubit is not None and mapped_qubit.uuid != qubit_uuid:
+                    qubit_uuids[i] = mapped_qubit.uuid
+                    qfixed_changed = True
 
-            mapped_parent = self._mapped_value_for_uuid(parent_uuid)
-            if not isinstance(mapped_parent, ArrayValue):
-                continue
+            if qfixed_changed:
+                new_qfixed = QFixedMetadata(
+                    qubit_uuids=tuple(qubit_uuids),
+                    num_bits=new_qfixed.num_bits,
+                    int_bits=new_qfixed.int_bits,
+                )
+                changed = True
 
-            substituted_parent = self.substitute_value(mapped_parent)
-            if isinstance(substituted_parent, ArrayValue):
-                mapped_parent = substituted_parent
+        new_array_rt = metadata.array_runtime
+        if new_array_rt is not None:
+            array_rt_changed = False
+            element_uuids = list(new_array_rt.element_uuids)
+            element_logical_ids = list(new_array_rt.element_logical_ids)
+            for i, element_uuid in enumerate(element_uuids):
+                mapped = self._mapped_value_for_uuid(element_uuid)
+                if mapped is not None and mapped.uuid != element_uuid:
+                    element_uuids[i] = mapped.uuid
+                    if i < len(element_logical_ids):
+                        element_logical_ids[i] = mapped.logical_id
+                    array_rt_changed = True
 
-            root_uuid, root_index = self._resolve_array_runtime_parent(
-                mapped_parent,
-                int(element_parent_indices[i]),
-            )
-            if root_uuid != parent_uuid or root_index != element_parent_indices[i]:
-                element_parent_uuids[i] = root_uuid
-                element_parent_indices[i] = root_index
+            element_parent_uuids = list(new_array_rt.element_parent_uuids)
+            element_parent_indices = list(new_array_rt.element_parent_indices)
+            for i, parent_uuid in enumerate(element_parent_uuids):
+                if (
+                    not parent_uuid
+                    or i >= len(element_parent_indices)
+                    or element_parent_indices[i] < 0
+                ):
+                    continue
+
+                mapped_parent = self._mapped_value_for_uuid(parent_uuid)
+                if not isinstance(mapped_parent, ArrayValue):
+                    continue
+
+                substituted_parent = self.substitute_value(mapped_parent)
+                if isinstance(substituted_parent, ArrayValue):
+                    mapped_parent = substituted_parent
+
+                root_uuid, root_index = self._resolve_array_runtime_parent(
+                    mapped_parent,
+                    int(element_parent_indices[i]),
+                )
+                if root_uuid != parent_uuid or root_index != element_parent_indices[i]:
+                    element_parent_uuids[i] = root_uuid
+                    element_parent_indices[i] = root_index
+                    array_rt_changed = True
+
+            if array_rt_changed:
+                new_array_rt = ArrayRuntimeMetadata(
+                    const_array=new_array_rt.const_array,
+                    element_uuids=tuple(element_uuids),
+                    element_logical_ids=tuple(element_logical_ids),
+                    element_parent_uuids=tuple(element_parent_uuids),
+                    element_parent_indices=tuple(element_parent_indices),
+                )
                 changed = True
 
         if not changed:
@@ -491,13 +561,9 @@ class ValueSubstitutor:
         return (
             dataclasses.replace(
                 metadata,
-                array_runtime=ArrayRuntimeMetadata(
-                    const_array=array_rt.const_array,
-                    element_uuids=tuple(element_uuids),
-                    element_logical_ids=tuple(element_logical_ids),
-                    element_parent_uuids=tuple(element_parent_uuids),
-                    element_parent_indices=tuple(element_parent_indices),
-                ),
+                cast=new_cast,
+                qfixed=new_qfixed,
+                array_runtime=new_array_rt,
             ),
             True,
         )
@@ -535,6 +601,18 @@ class ValueSubstitutor:
                 return True
             if v.slice_step is not None and v.slice_step.uuid in self._value_map:
                 return True
+        cast_meta = v.metadata.cast
+        if cast_meta is not None:
+            if cast_meta.source_uuid in self._value_map:
+                return True
+            for qubit_uuid in cast_meta.qubit_uuids:
+                if qubit_uuid in self._value_map:
+                    return True
+        qfixed_meta = v.metadata.qfixed
+        if qfixed_meta is not None:
+            for qubit_uuid in qfixed_meta.qubit_uuids:
+                if qubit_uuid in self._value_map:
+                    return True
         array_rt = v.metadata.array_runtime
         if array_rt is not None:
             for element_uuid in array_rt.element_uuids:
@@ -575,9 +653,7 @@ class ValueSubstitutor:
                 new_indices_list.append(idx)
             new_element_indices = tuple(new_indices_list)
 
-        new_metadata, metadata_changed = self._substitute_array_runtime_metadata(
-            v.metadata
-        )
+        new_metadata, metadata_changed = self._substitute_metadata(v.metadata)
 
         if isinstance(v, ArrayValue):
             new_shape: tuple[Value, ...] = v.shape
@@ -809,9 +885,7 @@ class ValueSubstitutor:
                 if slice_meta_changed:
                     changed = True
 
-            new_metadata, metadata_changed = self._substitute_array_runtime_metadata(
-                v.metadata
-            )
+            new_metadata, metadata_changed = self._substitute_metadata(v.metadata)
             if metadata_changed:
                 changed = True
 
