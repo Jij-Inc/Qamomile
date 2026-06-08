@@ -6,7 +6,6 @@ from pathlib import Path
 
 BEGIN_MARKER = "# --- API Reference (auto-generated) ---"
 END_MARKER = "# --- End API Reference ---"
-TOC_EXCLUDED_FILES = {"circuit/arithmetic"}
 
 
 def build_toc_entries(
@@ -27,18 +26,12 @@ def build_toc_entries(
     for name in subpackages:
         if name in split_packages:
             lines.append(f"        - file: api/{name}/index")
-            sub_files = [
-                sub_file
-                for sub_file in split_data.get(name, [])
-                if f"{name}/{sub_file}" not in TOC_EXCLUDED_FILES
-            ]
+            sub_files = split_data.get(name, [])
             if sub_files:
                 lines.append("          children:")
                 for sub_file in sub_files:
                     lines.append(f"            - file: api/{name}/{sub_file}")
         else:
-            if name in TOC_EXCLUDED_FILES:
-                continue
             lines.append(f"        - file: api/{name}")
     lines.append(END_MARKER)
     return lines

@@ -10,7 +10,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.arithmetic import modular_decrement, modular_increment
+from qamomile.circuit import modular_decrement, modular_increment
 
 
 @qmc.qkernel
