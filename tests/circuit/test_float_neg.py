@@ -148,6 +148,83 @@ def test_vector_float_element_helper_transpiles_with_bindings():
     assert sum(count for _value, count in result.results) == 16
 
 
+@pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed")
+def test_vector_float_slice_element_helper_transpiles_with_bindings():
+    """A sliced ``Vector[qmc.Float]`` element resolves through ``-angle / 2``."""
+
+    @qmc.qkernel
+    def circuit(slopes_p: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(1, name="qs")
+        view = slopes_p[1:3]
+        qs[0] = qmc.ry(qs[0], -view[0] / 2)
+        return qmc.measure(qs)
+
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(
+        circuit, bindings={"slopes_p": np.array([0.1, 0.3, 0.5])}
+    )
+    ry_angles = [
+        float(instruction.operation.params[0])
+        for instruction in exe.quantum_circuit.data
+        if instruction.operation.name == "ry"
+    ]
+
+    assert ry_angles == pytest.approx([-0.15])
+
+
+class TestVectorFloatSliceElementRegression:
+    """Sliced bound ``Vector[qmc.Float]`` elements compile and execute."""
+
+    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    def test_sliced_vector_float_element_expval_runs(self, transpiler_factory):
+        """A main-regression slice element emits the expected rotation angle.
+
+        The user-facing pattern is ``view = slopes_p[1:3]`` followed by
+        ``-view[0] / 2``. On main, the sliced element does not resolve to
+        the root bound value before transpilation; this test pins the
+        fixed path by executing the emitted circuit on every available
+        SDK backend.
+        """
+
+        @qmc.qkernel
+        def circuit(slopes_p: qmc.Vector[qmc.Float], obs: qmc.Observable) -> qmc.Float:
+            qs = qmc.qubit_array(1, name="qs")
+            view = slopes_p[1:3]
+            qs[0] = qmc.ry(qs[0], -view[0] / 2)
+            return qmc.expval(qs, obs)
+
+        slopes = np.array([0.1, 0.3, 0.5])
+        expected = math.cos(-0.15)
+        obs = qm_o.Hamiltonian.zero(num_qubits=1) + qm_o.Z(0)
+        transpiler = transpiler_factory()
+        exe = transpiler.transpile(circuit, bindings={"slopes_p": slopes, "obs": obs})
+        got = exe.run(transpiler.executor()).result()
+
+        assert np.isclose(got, expected, atol=1e-6), (
+            f"[{transpiler_factory.__name__}] expected <Z>={expected}, got {got}"
+        )
+
+    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    def test_sliced_vector_float_element_sampling_runs(self, transpiler_factory):
+        """The same slice-element regression deterministically samples all-zero."""
+
+        @qmc.qkernel
+        def circuit(slopes_p: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(1, name="qs")
+            view = slopes_p[1:3]
+            qs[0] = qmc.ry(qs[0], -view[0] / 2)
+            return qmc.measure(qs)
+
+        transpiler = transpiler_factory()
+        exe = transpiler.transpile(
+            circuit, bindings={"slopes_p": np.array([0.1, 0.0, 0.5])}
+        )
+        result = exe.sample(transpiler.executor(), shots=64).result()
+
+        assert sum(count for _value, count in result.results) == 64
+        assert result.results == [((0,), 64)]
+
+
 class TestNegCancelsRotation:
     """``ry(theta)`` followed by ``ry(-theta)`` is the identity."""
 
