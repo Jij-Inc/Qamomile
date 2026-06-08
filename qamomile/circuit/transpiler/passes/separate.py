@@ -279,6 +279,17 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             v.uuid for v in block.output_values if isinstance(v, ValueBase)
         }
 
+        # Absorbable set: top-level classical ops that may be folded into the
+        # surrounding quantum segment. An op qualifies only when its results
+        # are consumed exclusively by quantum / hybrid ops, or by other
+        # absorbable classical ops that themselves ultimately feed quantum —
+        # never by a classical sink (a classical-segment op, a measurement-
+        # derived op, or a block output). Computing this transitively is what
+        # makes a chain like ``(phase * 2) - 1`` feeding a gate fully
+        # absorbable while a value read back by later classical work stays in
+        # its own classical segment.
+        self._absorbable_op_ids = self._compute_absorbable(block.operations)
+
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
 
@@ -373,26 +384,17 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             # ``MultipleQuantumSegmentsError`` for valid pure-quantum
             # kernels (e.g. a symbolic multi-control phase inside a loop).
             #
-            # Two guards keep the absorption safe:
-            #   * ``not _is_measurement_tainted`` — measurement-derived
-            #     classical ops are either ``RuntimeClassicalExpr`` (absorbed
-            #     above) or genuine post-processing (e.g.
-            #     ``DecodeQFixedOperation``) that must stay classical.
-            #   * ``_feeds_quantum`` — the op's result must actually be needed
-            #     by a quantum gate. A classical op whose result feeds only
-            #     later classical steps stays in its own classical segment;
-            #     absorbing it into a quantum segment would drop its value
-            #     (quantum segments never run classical ops).
-            #   * ``not _produces_block_output`` — even a gate-feeding op must
-            #     stay classical when its result is also a block output, so the
-            #     executor runs it and the returned value is surfaced rather
-            #     than silently dropped.
+            # ``_absorbable_op_ids`` (computed in :meth:`_compute_absorbable`)
+            # holds exactly the ops for which absorption is safe: non-measurement
+            # classical ops whose results are consumed *only* by quantum/hybrid
+            # ops (directly or through other absorbed classical ops) and are not
+            # block outputs. Ops read back by a classical segment or returned
+            # stay classical so the executor runs them; if that forces a split
+            # the user gets an explicit error rather than a dropped value.
             if (
                 op_kind == OperationKind.CLASSICAL
                 and current_kind == OperationKind.QUANTUM
-                and not self._is_measurement_tainted(op)
-                and self._feeds_quantum(op)
-                and not self._produces_block_output(op)
+                and id(op) in self._absorbable_op_ids
             ):
                 current_ops.append(op)
                 continue
@@ -548,6 +550,117 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         outputs = self._block_output_uuids
         for v in op.results:
             if isinstance(v, ValueBase) and v.uuid in outputs:
+                return True
+        return False
+
+    def _compute_absorbable(self, operations: list[Operation]) -> set[int]:
+        """Compute the set of classical ops safe to fold into a quantum segment.
+
+        A top-level classical op is *absorbable* when it is non-measurement,
+        feeds a quantum gate, is not a block output, and — transitively — every
+        consumer of its results is a quantum / hybrid op or another absorbable
+        classical op. This greatest-fixpoint keeps a chain of gate-angle
+        expressions (e.g. ``(phase * 2) - 1``) absorbable while refusing to
+        absorb a value that is also read back by later classical work or
+        returned, which would be dropped by the (classical-op-free) quantum
+        segment at execution time.
+
+        Args:
+            operations (list[Operation]): Top-level operations of the block.
+
+        Returns:
+            set[int]: ``id()`` of every top-level classical op that may be
+                absorbed into the surrounding quantum segment.
+        """
+
+        class ConsumerCollector(ControlFlowVisitor):
+            """Map each value UUID to the operations that read it."""
+
+            def __init__(self) -> None:
+                """Initialize the empty consumer map."""
+                self.consumers: dict[str, list[Operation]] = {}
+
+            def visit_operation(self, op: Operation) -> None:
+                """Record ``op`` as a consumer of each of its input values.
+
+                Args:
+                    op (Operation): The operation being visited.
+
+                Returns:
+                    None: Mutates ``self.consumers`` in place.
+                """
+                for v in op.all_input_values():
+                    if isinstance(v, ValueBase):
+                        self.consumers.setdefault(v.uuid, []).append(op)
+
+        collector = ConsumerCollector()
+        collector.visit_operations(operations)
+        consumers = collector.consumers
+
+        # Seed candidates: non-measurement, quantum-feeding, non-output
+        # top-level classical ops.
+        absorbable: set[int] = {
+            id(op)
+            for op in operations
+            if op.operation_kind == OperationKind.CLASSICAL
+            and not self._is_measurement_tainted(op)
+            and self._feeds_quantum(op)
+            and not self._produces_block_output(op)
+        }
+
+        # Iteratively drop any candidate that has a result consumed by a
+        # classical sink — a consumer that is neither a quantum/hybrid op nor a
+        # (still-)absorbable classical op. Removing one op can disqualify the
+        # ops feeding it, so iterate to a fixpoint.
+        changed = True
+        while changed:
+            changed = False
+            for op in operations:
+                if id(op) not in absorbable:
+                    continue
+                if self._has_classical_sink(op, consumers, absorbable):
+                    absorbable.discard(id(op))
+                    changed = True
+        return absorbable
+
+    def _has_classical_sink(
+        self,
+        op: Operation,
+        consumers: dict[str, list[Operation]],
+        absorbable: set[int],
+    ) -> bool:
+        """Return whether any result of ``op`` is read by a classical sink.
+
+        A classical sink is a consumer that is neither a quantum / hybrid
+        operation nor a currently-absorbable classical op — i.e. an op that
+        will run in a classical segment (measurement post-processing, a
+        non-absorbable classical expression, classical control flow) and would
+        therefore fail to read a value buried in a quantum segment.
+
+        Args:
+            op (Operation): The candidate op whose results are checked.
+            consumers (dict[str, list[Operation]]): Map from value UUID to the
+                operations that read it.
+            absorbable (set[int]): ``id()`` of ops still considered absorbable
+                in the current fixpoint iteration.
+
+        Returns:
+            bool: ``True`` if some result of ``op`` is consumed by a classical
+                sink, ``False`` otherwise.
+        """
+        for result in op.results:
+            if not isinstance(result, ValueBase):
+                continue
+            for consumer in consumers.get(result.uuid, ()):
+                if consumer is op:
+                    continue
+                if self._effective_kind(consumer) in (
+                    OperationKind.QUANTUM,
+                    OperationKind.HYBRID,
+                ):
+                    continue
+                if id(consumer) in absorbable:
+                    continue
                 return True
         return False
 

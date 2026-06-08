@@ -20,6 +20,7 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
 Backend = tuple[str, Any, Any]
 SampleMode = Literal["deterministic", "uniform", "bell"]
@@ -812,6 +813,28 @@ def classical_output_after_quantum_run(phase: qmc.Float) -> qmc.Float:
     return phase * 2.0
 
 
+# --- Regression: a value feeding both a gate and later classical work ---
+#
+# ``t = phase * 2`` here feeds a quantum gate (``rx``) *and* a later classical
+# computation (``t + 1``, a block output). Absorbing ``t`` into the quantum
+# segment would let the later classical segment read a value that never executed
+# (the quantum segment runs no classical ops), silently miscompiling. The
+# absorbable-set fixpoint refuses to absorb ``t``, so the kernel raises an
+# explicit ``MultipleQuantumSegmentsError`` instead of producing a wrong result.
+
+
+@qmc.qkernel
+def value_feeding_gate_and_classical_run(
+    phase: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Float]:
+    """Use a parameter expression as both a gate angle and a classical output."""
+    q = qmc.qubit_array(1, "q")
+    q[0] = qmc.x(q[0])
+    angle = phase * 2.0
+    q[0] = qmc.rx(q[0], angle)
+    return qmc.measure(q), angle + 1.0
+
+
 @dataclasses.dataclass(frozen=True)
 class FrontendExecutionCase:
     """Describe one frontend pattern with paired sample and run kernels."""
@@ -1315,3 +1338,19 @@ def test_classical_output_after_quantum_op_is_preserved(backend: Backend) -> Non
     got = executable.run(executor, bindings={"phase": 3.0}).result()
     assert got is not None, f"{name}: classical output was dropped (got None)"
     assert np.isclose(got, 6.0, atol=1e-8), f"{name}: got {got}, expected 6.0"
+
+
+def test_value_feeding_gate_and_classical_is_not_miscompiled(
+    backend: Backend,
+) -> None:
+    """A value used by both a gate and later classical work is not absorbed.
+
+    Guards the absorbable-set fixpoint: a classical op whose result feeds a
+    quantum gate but is also read by a later classical computation must not be
+    folded into the quantum segment (which would let the later classical segment
+    read a value that never executed). The kernel must raise an explicit
+    ``MultipleQuantumSegmentsError`` rather than silently miscompiling.
+    """
+    _name, transpiler, _executor = backend
+    with pytest.raises(MultipleQuantumSegmentsError):
+        transpiler.transpile(value_feeding_gate_and_classical_run, parameters=["phase"])
