@@ -163,10 +163,15 @@ class MathematicalProblemConverter(abc.ABC):
 
         Subclasses must implement this method to build the appropriate
         Hamiltonian for their specific algorithm (e.g., Pauli-Z for QAOA,
-        QRAC-encoded for QRAO).
+        QRAC-encoded for QRAO). Oracle-based converters that do not use a cost
+        Hamiltonian (e.g., ``GASConverter``) should raise ``NotImplementedError``.
 
         Returns:
             qm_o.Hamiltonian: The cost Hamiltonian.
+
+        Raises:
+            NotImplementedError: If the converter does not expose a cost
+            Hamiltonian.
         """
         ...
 
