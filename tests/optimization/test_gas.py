@@ -244,6 +244,35 @@ def test_post_init_keeps_all_zero_real_model_unchanged():
 
 
 # ---------------------------------------------------------------------------
+# _align_precision (backend-independent)
+# ---------------------------------------------------------------------------
+
+
+def test_align_precision_auto_detects_four_digits():
+    """_align_precision infers 4 decimals from the finest meaningful value."""
+    aligned = GASConverter._align_precision(
+        [0.0, 0.1234, 2.1000000000000005, 0.30000000000000004]
+    )
+    assert aligned == [0.0, 0.1234, 2.1, 0.3]
+
+
+def test_align_precision_auto_detects_finest_meaningful_digits():
+    """_align_precision infers 4 decimals while suppressing floating-point tails."""
+    aligned = GASConverter._align_precision(
+        [0.0, 1.2345, 2.1000000000000005, 0.30000000000000004]
+    )
+    assert aligned == [0.0, 1.2345, 2.1, 0.3]
+
+
+def test_align_precision_snaps_integer_like_float_noise():
+    """_align_precision snaps near-integer float artifacts to exact integers."""
+    aligned = GASConverter._align_precision(
+        [4.000000000000005, -0.9999999999999998, -1.0000000000000002]
+    )
+    assert aligned == [4.0, -1.0, -1.0]
+
+
+# ---------------------------------------------------------------------------
 # _detect_eps (backend-independent)
 # ---------------------------------------------------------------------------
 
@@ -422,6 +451,20 @@ def test_approximate_real_valued_model_auto_vs_explicit_both_integer():
     )
     assert _all_integer(approx_auto)
     assert _all_integer(approx_explicit)
+
+
+def test_approximate_real_valued_model_auto_quantization_stays_float_exact_int():
+    """Auto quantization keeps integer-valued coefficients exactly representable in float.
+
+    Repeating-decimal coefficients can otherwise push the greedy precision very high,
+    which may exceed exact integer representation in float-backed storage.
+    """
+    model = BinaryModel.from_hubo({(0,): 1 / 3, (1,): -2 / 3}, constant=0.1)
+    approx = GASConverter.approximate_real_valued_model(model)
+
+    vals = [float(approx.constant)] + [float(v) for v in approx.coefficients.values()]
+    assert all(v.is_integer() for v in vals)
+    assert all(abs(v) <= 2**53 for v in vals)
 
 
 # ---------------------------------------------------------------------------
