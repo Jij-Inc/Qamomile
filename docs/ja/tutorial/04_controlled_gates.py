@@ -31,7 +31,7 @@
 import math
 
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.errors import EmitError, UnreturnedBorrowError
+from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -464,9 +464,9 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 
 # %% [markdown]
 # (cg-6)=
-# ## 6. 動かないパターン
+# ## 6. rejectされるパターンとedge case
 #
-# 本章ではrejectされる呼び出し形を1つずつ見ていきます。
+# 本章ではrejectされる呼び出し形を1つずつ見ていきます。最後に、nested blockをgateへ変換できるbackend(Qiskitなど)でsupportedな、sliced-QFTのconcrete caseもregression例として確認します。
 #
 # | ケース | モード | 例外 |
 # | --- | --- | --- |
@@ -476,7 +476,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | 6.4 同じpool量子ビットをtargetに再利用 | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg制御prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 symbolic modeで単一scalar制御 | symbolic | `ValueError` |
-# | 6.7 sub-kernel内の`UInt` sliceに対するcontrolled QFT | concrete | `EmitError` |
+# | 6.7 sub-kernel内の`UInt` sliceに対するcontrolled QFT | concrete | block-to-gate変換が成功する場合はsupported |
 
 
 # %%
@@ -667,9 +667,7 @@ expect_error(
 #
 # 制御対象のsub-kernelが、呼び出し側でサイズの分かっている`Vector[Qubit]`引数全体に`qmc.qft` / `qmc.iqft`を適用する形は使えます。例えば`apply_qft(q)`が`q`全体にQFTを適用するなら、`controlled_qft = qmc.control(apply_qft)`という形は動作します。
 #
-# 一方で、下のようにsub-kernelが古典`UInt`引数を受け取り、その値で`q[:m]`を作ってからQFTを呼ぶ形はまだ未対応です。controlled-Uのemit処理は、parameterizedなsliceを含むcomposite blockをbackend gateへ畳み込むところまで対応していないため、transpile時に`EmitError`になります。
-#
-# Workaround: QFT/IQFTの幅を、controlled call siteで渡すtarget vectorのconcrete shapeから決められる形にします。実用上は、大きなvectorと別の`UInt`長をsub-kernelへ渡すのではなく、QFTしたい範囲そのものをviewとして切り出し、そのview全体にQFTを適用するsub-kernelへ渡してください。
+# 下のようにsub-kernelが古典`UInt`引数を受け取り、その値で`q[:m]`を作ってからQFTを呼ぶ、より狭い形もQiskit-backedな経路では動作します。Qamomileはborrow checkの後、nested controlled block内のslice markerを取り除くため、block-to-gate変換が成功するcontrolled-U emitterはsliced composite blockをlowerできます。一方で、block-to-gate変換を持たないbackendでは、このmulti-target fallbackをまだrejectすることがあります。
 
 
 # %%
@@ -693,11 +691,7 @@ def case_controlled_qft_over_uint_slice() -> None:
     transpiler.transpile(kernel, bindings={"n": 2})
 
 
-expect_error(
-    "controlled QFT over a sub-kernel UInt slice",
-    EmitError,
-    case_controlled_qft_over_uint_slice,
-)
+case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=
