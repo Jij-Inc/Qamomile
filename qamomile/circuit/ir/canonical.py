@@ -57,15 +57,13 @@ from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
-    ArrayRuntimeMetadata,
     ArrayValue,
-    CastMetadata,
     DictValue,
-    QFixedMetadata,
     TupleValue,
     Value,
     ValueBase,
     ValueMetadata,
+    remap_value_metadata_references,
 )
 
 _SUPPORTED_KINDS = frozenset({BlockKind.AFFINE, BlockKind.ANALYZED})
@@ -524,62 +522,11 @@ class _Canonicalizer:
         return cloned
 
     def _canonical_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
-        """Rewrite UUID and logical_id references inside ValueMetadata.
-
-        ``ScalarMetadata`` and ``DictRuntimeMetadata`` carry no UUID
-        references; ``CastMetadata``, ``QFixedMetadata``, and
-        ``ArrayRuntimeMetadata`` do and are rewritten through the
-        active remap tables.
-
-        Args:
-            metadata (ValueMetadata): Original metadata bundle.
-
-        Returns:
-            ValueMetadata: A new bundle with rewritten UUID / logical_id
-                references and untouched scalar / dict-runtime sections.
-        """
-        new_cast = metadata.cast
-        if new_cast is not None:
-            new_cast = CastMetadata(
-                source_uuid=self._remap_uuid(new_cast.source_uuid),
-                qubit_uuids=tuple(self._remap_uuid(u) for u in new_cast.qubit_uuids),
-                source_logical_id=(
-                    self._remap_logical_id(new_cast.source_logical_id)
-                    if new_cast.source_logical_id is not None
-                    else None
-                ),
-                qubit_logical_ids=tuple(
-                    self._remap_logical_id(lid) for lid in new_cast.qubit_logical_ids
-                ),
-            )
-
-        new_qfixed = metadata.qfixed
-        if new_qfixed is not None:
-            new_qfixed = QFixedMetadata(
-                qubit_uuids=tuple(self._remap_uuid(u) for u in new_qfixed.qubit_uuids),
-                num_bits=new_qfixed.num_bits,
-                int_bits=new_qfixed.int_bits,
-            )
-
-        new_array_rt = metadata.array_runtime
-        if new_array_rt is not None:
-            new_array_rt = ArrayRuntimeMetadata(
-                const_array=new_array_rt.const_array,
-                element_uuids=tuple(
-                    self._remap_uuid(u) for u in new_array_rt.element_uuids
-                ),
-                element_logical_ids=tuple(
-                    self._remap_logical_id(lid)
-                    for lid in new_array_rt.element_logical_ids
-                ),
-            )
-
-        return ValueMetadata(
-            scalar=metadata.scalar,
-            cast=new_cast,
-            qfixed=new_qfixed,
-            array_runtime=new_array_rt,
-            dict_runtime=metadata.dict_runtime,
+        """Rewrite UUID and logical_id references inside ValueMetadata."""
+        return remap_value_metadata_references(
+            metadata,
+            self._remap_uuid,
+            self._remap_logical_id,
         )
 
 
@@ -697,7 +644,9 @@ def _metadata_token(metadata: ValueMetadata) -> str:
         parts.append(
             f"array_runtime(const={_token(metadata.array_runtime.const_array)},"
             f"elem_uuids={_token(list(metadata.array_runtime.element_uuids))},"
-            f"elem_lids={_token(list(metadata.array_runtime.element_logical_ids))})"
+            f"elem_lids={_token(list(metadata.array_runtime.element_logical_ids))},"
+            f"elem_par_uuids={_token(list(metadata.array_runtime.element_parent_uuids))},"
+            f"elem_par_idxs={_token(list(metadata.array_runtime.element_parent_indices))})"
         )
     if metadata.dict_runtime is not None:
         # ``bound_data`` is stored as tuple-of-pairs in the Mapping's

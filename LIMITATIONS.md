@@ -1,6 +1,6 @@
 # Known Limitations
 
-This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover both the call-time specialization fix for issue #392 and the eager qkernel rebind-detection change.
+This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, and the slice/control-flow work tracked by recent controlled-view fixes.
 
 ## Re-trace cost is uncached
 
@@ -75,3 +75,44 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 **Workaround**: refer to the primitives by their qualified path (`qm.measure(...)` / `qmc.qubit_array(...)`) or import the unaliased name. The four syntactic forms accepted by `_is_classical_returning_call` and `_is_quantum_constructor_call` (`Name` and `Attribute` for each of the two names) cover both bare and `<module>.<name>` styles, so unless the importer deliberately renames the symbol the analyzer sees it correctly.
 
 **Future fix**: replace the syntactic-name check with an identity-based one. Each `QKernel` has access to the user function's `__globals__` (and surrounding closure cells), so the analyzer can resolve `call.func.id` to a Python object at decoration time and compare against the canonical `qamomile.circuit.measure` / `qamomile.circuit.expval` / `qamomile.circuit.qubit` / `qamomile.circuit.qubit_array` references. Closure-bound aliases would need a separate pass over the function's `__closure__`. Attribute-form aliases (`obj.measure(...)` where `obj` is not `qm` / `qmc`) remain ambiguous and would either require local type information or a structurally-conservative fall-back.
+
+## Controlled QFT/IQFT over sub-kernel `UInt` slices
+
+**When it bites**: a controlled sub-kernel receives a classical `UInt` argument, forms a prefix slice such as `q[:m]` inside the sub-kernel, and applies `qmc.qft` or `qmc.iqft` to that prefix.
+
+**Why this trade-off was chosen**: a sub-kernel that applies QFT/IQFT to the whole target vector can be specialized from the concrete target size at the controlled call site. The narrower pattern above is different: the composite gate target is a parameterized slice created inside the controlled body. The controlled-U emitter does not yet lower that parameterized sliced composite block into a backend gate while also reflecting the resolved slice width into the target mapping.
+
+**Future fix**: extend controlled-U composite lowering so it can safely resolve sub-kernel parameterized slice widths from bindings and reflect those resolved widths in the backend target mapping.
+
+## Symbolic slice disjointness beyond direct unit-stride intervals
+
+**When it bites**: two symbolic slices on the same root are actually disjoint, but their disjointness cannot be expressed as direct unit-stride root-space intervals.
+
+**Why this trade-off was chosen**: `_symbolic_slices_definitely_disjoint()` only compares direct `slice_step == 1` root slices as half-open intervals, such as `q[:k]` and `q[k:n]`. Strided symbolic slices, nested symbolic affine maps, and more complex symbolic arithmetic are treated conservatively as potentially overlapping.
+
+**Future fix**: add small proof helpers only for shapes that can be proven safely, such as parity partitions or limited affine intervals, without turning the borrow checker into a general symbolic inequality solver.
+
+## Tuple-form expval metadata cannot encode symbolic root indices
+
+**When it bites**: an inlined helper packs a qubit into tuple-form expval metadata, and the caller-side replacement is an element of a symbolic slice, such as `q[j:j+1][0]` where `j` is a `qmc.range(...)` loop variable. Conceptually, the shape is a scalar helper called on an element whose root index is still symbolic:
+
+```python
+@qmc.qkernel
+def helper(q: qmc.Qubit, obs: qmc.Observable) -> qmc.Float:
+    return qmc.expval((q,), obs)
+
+@qmc.qkernel
+def caller(obs: qmc.Observable) -> qmc.Float:
+    q = qmc.qubit_array(4, "q")
+    for j in qmc.range(4):
+        view = q[j : j + 1]
+        # The desired metadata root address for view[0] is (q.uuid, j),
+        # but the current metadata can only store integer indices.
+        helper(view[0], obs)
+```
+
+The concrete-index cases (`q[1]`, `q[1::2]`, or a slice bound that has already been resolved from compile-time bindings) are not affected. The limitation is about values that still carry a symbolic affine index when `ValueSubstitutor._substitute_metadata()` runs. The regression pin is an IR-level `xfail` rather than a backend execution test because current qkernel control-flow / expval composition hits other frontend and execution constraints before this metadata representation gap can be isolated cleanly.
+
+**Why this trade-off was chosen**: `ArrayRuntimeMetadata.element_parent_uuids` and `element_parent_indices` currently encode a root address as `(array_uuid: str, index: int)`. During inline substitution, `_substitute_metadata()` can promote a standalone sentinel `("", -1)` to a real root address only when `resolve_root_qubit_address()` can reduce the caller-side element to a constant root index. For `q[j:j+1][0]`, the desired root address is conceptually `(q.uuid, j)`, but `j` is a symbolic `Value`, not an `int`. Storing the slice view UUID plus local index, or leaving the standalone sentinel in place, is the only representable state today. The known gap is pinned by `tests/transpiler/test_value_mapping.py::TestArrayRuntimeMetadataSymbolicRootLimitations::test_scalar_inline_metadata_cannot_promote_symbolic_slice_parent`, which is marked `xfail(strict=True)` until metadata can represent symbolic affine root indices.
+
+**Future fix**: extend array-runtime metadata to carry a symbolic affine root expression, for example `(root_uuid, offset_value, stride_value, local_index_value)` or an equivalent small expression tree, and teach emit-time qubit-map construction to resolve that expression with the same binding resolver used for runtime slice chains. Once that exists, the xfail test should be flipped to a normal passing test and this limitation entry can be removed.

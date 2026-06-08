@@ -308,6 +308,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 if isinstance(r, ValueBase):
                     sub_r = substitutor.substitute_value(r)
                     if sub_r is not r:
+                        assert isinstance(sub_r, Value)
                         new_results[i] = sub_r
                         results_changed = True
 

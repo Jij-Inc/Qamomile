@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import qamomile.observable as qm_o
 
 if TYPE_CHECKING:
-    from quri_parts.core.operator import Operator
+    from quri_parts.core.operator import Operator  # type: ignore[import-not-found]
 
 # Threshold for treating a coefficient as zero.
 # Matches the tolerance used in qamomile.qiskit.observable for consistency.
@@ -37,7 +37,11 @@ def hamiltonian_to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
         operator = hamiltonian_to_quri_operator(H)
         ```
     """
-    from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
+    from quri_parts.core.operator import (  # type: ignore[import-not-found]
+        PAULI_IDENTITY,
+        Operator,
+        pauli_label,
+    )
 
     pauli_id_map = {
         qm_o.Pauli.X: 1,

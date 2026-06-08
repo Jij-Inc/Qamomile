@@ -9,12 +9,13 @@ description: docs/en/配下の英語ドキュメント(.py jupytext形式)をdoc
 
 ## ワークフロー
 
-1. `docs/en/`側の対象`.py`ファイルを読む
-2. `docs/ja/`側に対応するディレクトリがなければ作成
-3. 以下の翻訳ルールに従って`.py`ファイルを翻訳・作成
-4. `uv run jupytext --to notebook <作成した.py>`で`.ipynb`を生成
-5. 必要に応じて`docs/ja/myst.yml`のtocに追加
-6. 対応する`index.md`がなければ作成
+0. `docs/README.md`を読む。docs build/testの最新ルールはそこをsource of truthにする。
+1. `docs/en/`側の対象`.py`ファイルを読む。
+2. `docs/ja/`側に対応するディレクトリがなければ作成する。
+3. 以下の翻訳ルールに従って`.py`ファイルを翻訳・作成する。**既存のMarkdown構造、見出し階層、セル順、コードブロック、表、リストは原則としてEN側と同じ形に保つ。翻訳時にskeletonを当て直したり、ページ構成を再設計したりしない。**
+4. 対応する`.ipynb`を更新する。安全に実行できる通常ページなら`./docs/build.sh page-build docs/ja/<section>/<file>.py`を使い、`.py`→`.ipynb`同期、notebook実行、JA docs buildをまとめて行う。API keyやremote side effectが必要なページでは、必要なcredentialがない限り実行せず、`uv run jupytext --to ipynb --update docs/ja/<section>/<file>.py`でpaired notebookだけ同期する。
+5. 既存の通常セクション（`tutorial/`、`algorithm/`、`usage/`、`integration/`）へ翻訳を追加・更新するだけなら、`docs/ja/myst.yml`は触らない。TOCは`pattern: <section>/*.ipynb`で自動発見される。`myst.yml`を更新するのは、新しいトップレベルsectionや、release notesのように明示`children`で管理されている例外だけ。
+6. 対応する`index.md`は、JA側に存在しない新しいsectionを作る場合や、新規翻訳ページを読者に見せるためsection indexの記事リスト更新が必要な場合だけ作成・更新する。
 
 > **既訳がある場合（更新・差分再翻訳）**: 対象ファイルがすでに`docs/ja/`に存在する場合は、新規翻訳ではなく更新になる。その場合はステップ3の前に **ルール10** に従って「EN側が前回同期から何を変えたか」を全部洗い出すこと。新しく足されたセクションだけを訳して、その変更が前方の表・intro・まとめに与えた波及を訳し漏らすと、JA内部で矛盾が残る。
 
@@ -62,6 +63,22 @@ description: docs/en/配下の英語ドキュメント(.py jupytext形式)をdoc
   - 原文 "so you can analyze how resources scale" → × 「スケーリングを解析できます」 → ○ 「スケーリングの解析が容易です」
 - 原文に暗黙的な情報（時点、前提条件など）がある場合は、読者のために補足してよい。
   - 例: 「量子フーリエ変換（QFT）や…が含まれます」→「**現在**量子フーリエ変換（QFT）や…が含まれます」
+- APIやConverterを主語にした英文は、直訳で「〜は…を実装します」と書くと不自然になりやすい。読者ができることを主語にして訳す。
+  - × 「`FooConverter`は、問題に対してFoo Encodingを実装します」
+  - ○ 「`FooConverter`を使うと、問題にFoo Encodingを適用できます」
+  - ○ 「`FooConverter`は、問題にFoo Encodingを適用するためのAPIです」
+- user-facing docsでは、内部実装の語をそのまま前面に出さない。特に「束縛する」「address resolution」「path」「fallback」のような語は、読者から見える挙動に言い換える。
+  - × 「`qmc.expval`がobservableを正しい物理量子ビットに束縛するようになりました」
+  - ○ 「`Vector`要素に対する`qmc.expval`の挙動を修正しました」
+  - × 「conditionのaddress resolutionを修正しました」
+  - ○ 「測定結果を使う条件分岐が正しいclassical bitアドレスへloweringされるようになりました」
+- release noteのバグ修正では、内部語よりも読者に見える症状と結果を優先する。必要以上に細かいbackend分岐や実装経路をoverviewに入れず、詳細は本文の該当bulletへ寄せる。
+- 量子ビット数削減・高速化・再現性などの効果は、原文の "can" / "may" / "can reduce" などの限定を保つ。常に成り立つように読める断定にしない。
+- release noteでは、一般語としての「コンパイル」はなるべく避ける。Qamomileの変換処理が焦点なら「トランスパイル時」、より広い現象なら「エラーになることがありました」「扱えるようになりました」のように具体的な症状や結果で書く。
+- "less brittle"や"more robust"を機械的に「壊れにくい」と訳さない。修正の意図に応じて「サポート範囲を広げました」「より多くのケースを扱えるようになりました」「挙動を修正しました」のように、読者に見える変化を書く。
+- 機能改善は「扱います」よりも「扱えるようになりました」「できるようになりました」を優先する。既存機能の説明なら「扱います」でもよいが、release noteで「now support」「can now」などの差分を表す場合は改善後の可能性を明示する。
+  - × 「より多くの`qmc.control(...)`パターンをend-to-endで扱います」
+  - ○ 「より多くの`qmc.control(...)`パターンをend-to-endで扱えるようになりました」
 
 ### 6. コードブロックとコメント
 
