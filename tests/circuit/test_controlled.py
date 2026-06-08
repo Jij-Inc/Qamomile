@@ -26,6 +26,7 @@ from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import (
     EmitError,
     QubitConsumedError,
+    SliceBorrowViolationError,
 )
 from tests.transpiler.gate_test_specs import (
     all_zeros_state,
@@ -3796,6 +3797,123 @@ class TestControlledVectorSubArgFollowUpOps:
         t = QiskitTranspiler()
         exe = t.transpile(kernel)
         assert exe.get_first_circuit().num_qubits == 6
+
+    def test_nested_controlled_slice_borrow_violation_is_checked(self):
+        """Nested controlled blocks run slice-borrow validation before emit."""
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            _prepare_nested_block_for_emit,
+        )
+
+        @qmc.qkernel
+        def bad_sliced_block(
+            q: qmc.Vector[qmc.Qubit], lo: qmc.UInt, hi: qmc.UInt
+        ) -> qmc.Vector[qmc.Qubit]:
+            lo2 = lo + 0
+            region = q[lo2:hi]
+            q[lo2] = qmc.h(q[lo2])
+            region[0] = qmc.x(region[0])
+            return q
+
+        with pytest.raises(SliceBorrowViolationError):
+            _prepare_nested_block_for_emit(bad_sliced_block.block, {"lo": 0, "hi": 2})
+
+    def test_controlled_slice_fallback_strips_markers(self, monkeypatch):
+        """Base controlled fallback receives a slice-normalized nested block."""
+        from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            region = q[0:1]
+            region[0] = qmc.x(region[0])
+            q[0:1] = region
+            return q
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            controlled_x = qmc.control(sliced_x, num_controls=1)
+            q[0], target = controlled_x(q[0], q[1:2])
+            q[1:2] = target
+            return qmc.measure(q)
+
+        monkeypatch.setattr(
+            StandardEmitPass,
+            "_blockvalue_to_gate",
+            lambda self, block_value, num_qubits, bindings: None,
+        )
+
+        t = QiskitTranspiler()
+        exe = t.transpile(kernel)
+        result = exe.sample(t.executor(), shots=32).result()
+        assert _counts_dict(result.results) == {(1, 1): 32}
+
+    def test_controlled_powers_fallback_strips_markers(self):
+        """Controlled-power fallback normalizes sliced nested blocks."""
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            emit_controlled_powers,
+        )
+
+        @qmc.qkernel
+        def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            region = q[0:1]
+            region[0] = qmc.x(region[0])
+            q[0:1] = region
+            return q
+
+        class FakeEmitter:
+            """Collect controlled X gates emitted by the fallback path."""
+
+            def emit_cx(self, circuit: list[tuple[str, int, int]], c: int, t: int):
+                """Record a controlled-X emission."""
+                circuit.append(("cx", c, t))
+
+        class FakeEmitPass:
+            """Force controlled-power emission through the fallback path."""
+
+            _emitter = FakeEmitter()
+
+            def _blockvalue_to_gate(self, block_value, num_qubits, bindings):
+                """Return no gate so the fallback receives ``block_value``."""
+                del block_value, num_qubits, bindings
+                return None
+
+        circuit: list[tuple[str, int, int]] = []
+        emit_controlled_powers(
+            FakeEmitPass(),
+            circuit,
+            sliced_x.block,
+            counting_indices=[0],
+            target_indices=[1],
+            bindings={},
+        )
+
+        assert circuit == [("cx", 0, 1)]
+
+    def test_controlled_slice_normalization_cross_backend(self, sdk_transpiler):
+        """Execute sliced controlled sub-kernels on each SDK backend."""
+
+        @qmc.qkernel
+        def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            region = q[0:1]
+            region[0] = qmc.x(region[0])
+            q[0:1] = region
+            return q
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            controlled_x = qmc.control(sliced_x, num_controls=1)
+            q[0], target = controlled_x(q[0], q[1:2])
+            q[1:2] = target
+            return qmc.measure(q)
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(kernel)
+        result = exe.sample(transpiler.executor(), shots=32).result()
+        assert _counts_dict(result.results) == {(1, 1): 32}
 
 
 class TestSymbolicMultiArgControl:
