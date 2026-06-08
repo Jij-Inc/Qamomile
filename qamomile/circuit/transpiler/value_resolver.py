@@ -20,7 +20,10 @@ deterministic resolution order:
 
 from __future__ import annotations
 
+import numbers
 from typing import Any
+
+import numpy as np
 
 
 class ValueResolver:
@@ -143,4 +146,32 @@ class ValueResolver:
                 container = container[int(index)]
             except (IndexError, KeyError, TypeError, ValueError):
                 return None
-        return container
+        return _normalize_bound_scalar(container)
+
+
+def _normalize_bound_scalar(value: Any) -> Any:
+    """Normalize NumPy-style scalar values to Python primitives.
+
+    Args:
+        value (Any): The value resolved from a compile-time container.
+
+    Returns:
+        Any: A Python ``bool``, ``int``, or ``float`` for numeric scalar
+            inputs, or the original value for non-numeric objects.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        return float(value)
+    if isinstance(value, np.generic):
+        item = value.item()
+        if isinstance(item, bool):
+            return item
+        if isinstance(item, numbers.Integral):
+            return int(item)
+        if isinstance(item, numbers.Real):
+            return float(item)
+        return item
+    return value
