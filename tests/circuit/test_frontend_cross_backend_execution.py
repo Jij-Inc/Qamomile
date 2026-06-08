@@ -1549,8 +1549,8 @@ def test_nested_classical_chain_in_loop_sample_and_run(
 ) -> None:
     """A classical chain split across a loop boundary must not split segments.
 
-    Regression for the absorbable-set fixpoint's ownership-aware classification:
-    a top-level parameter expression (``base = phase * 2``) whose next chain link
+    Regression for the absorbable-set analysis covering nested classical ops: a
+    top-level parameter expression (``base = phase * 2``) whose next chain link
     (``angle = base + 1``) lives inside a ``qmc.range`` body must still be
     absorbed into the single quantum segment. Both qubits end up in
     ``rx(2 * phase + 1) |0>``, checked on the sample and expval paths.
