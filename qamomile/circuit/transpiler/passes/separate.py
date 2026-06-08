@@ -627,9 +627,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             for op in operations:
                 if id(op) not in absorbable:
                     continue
-                if self._has_classical_sink(
-                    op, consumers, absorbable, top_level_owner
-                ):
+                if self._has_classical_sink(op, consumers, absorbable, top_level_owner):
                     absorbable.discard(id(op))
                     changed = True
         return absorbable
