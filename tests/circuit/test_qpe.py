@@ -2,6 +2,7 @@
 
 import math
 import random
+from typing import Any
 
 import numpy as np
 import pytest
@@ -94,7 +95,17 @@ def _fallback_qpe_phase(
     counting: qmc.Vector[qmc.Qubit],
     theta: qmc.Float,
 ) -> QFixed:
-    """Emit a block-free QPE composite operation for fallback emission tests."""
+    """Emit a block-free QPE composite operation for fallback emission tests.
+
+    Args:
+        target (qmc.Qubit): Eigenstate qubit consumed as the QPE target.
+        counting (qmc.Vector[qmc.Qubit]): Three-qubit counting register.
+        theta (qmc.Float): Phase angle operand passed through composite
+            fallback phase extraction.
+
+    Returns:
+        QFixed: Fixed-point phase register produced from the counting qubits.
+    """
     counting_handles = [counting[i] for i in range(3)]
     counting_operands = [handle.value for handle in counting_handles]
     target_operand = target.value
@@ -147,6 +158,14 @@ def _fallback_qpe_phase(
 
 @qmc.qkernel
 def fallback_qpe_vector_view_phase(gammas: qmc.Vector[qmc.Float]) -> qmc.Float:
+    """Estimate a phase selected from a sliced Vector parameter.
+
+    Args:
+        gammas (qmc.Vector[qmc.Float]): Compile-time-bound phase angle vector.
+
+    Returns:
+        qmc.Float: Decoded QPE phase estimate.
+    """
     gammas_view = gammas[1:3]
     q_phase = qmc.qubit_array(3, name="phase_reg")
     target = qmc.qubit(name="target")
@@ -155,8 +174,13 @@ def fallback_qpe_vector_view_phase(gammas: qmc.Vector[qmc.Float]) -> qmc.Float:
     return qmc.measure(phase_q)
 
 
-def _assert_fallback_qpe_vector_view_phase(transpiler) -> None:
-    """Assert fallback QPE resolves and executes a VectorView phase operand."""
+def _assert_fallback_qpe_vector_view_phase(transpiler: Any) -> None:
+    """Assert fallback QPE resolves and executes a VectorView phase operand.
+
+    Args:
+        transpiler (Any): Backend transpiler exposing ``transpile`` and
+            ``executor`` methods.
+    """
     executable = transpiler.transpile(
         fallback_qpe_vector_view_phase,
         bindings={"gammas": np.array([math.pi / 4, math.pi / 2, math.pi])},

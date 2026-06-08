@@ -1,5 +1,7 @@
 """Tests for the CompositeGate API."""
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -1326,13 +1328,27 @@ class TestQPEPhaseExtraction:
     """Regression tests for QPE fallback phase operand resolution."""
 
     @staticmethod
-    def _emit_pass():
-        """Create the minimal emit-pass facade needed by phase extraction."""
+    def _emit_pass() -> Any:
+        """Create the minimal emit-pass facade needed by phase extraction.
+
+        Returns:
+            Any: Object exposing the ``_resolver`` attribute consumed by
+                ``extract_phase_from_params``.
+        """
         return type("EmitPassStub", (), {"_resolver": ValueResolver()})()
 
     @staticmethod
-    def _qpe_op(phase_operand):
-        """Create a block-free QPE operation with one phase operand."""
+    def _qpe_op(phase_operand: Value) -> CompositeGateOperation:
+        """Create a block-free QPE operation with one phase operand.
+
+        Args:
+            phase_operand (Value): Classical phase operand to place after the
+                target qubit operand.
+
+        Returns:
+            CompositeGateOperation: QPE operation that exercises manual
+                fallback phase extraction.
+        """
         target = Value(type=QubitType(), name="target")
         return CompositeGateOperation(
             operands=[target, phase_operand],
