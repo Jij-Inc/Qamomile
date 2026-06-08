@@ -458,7 +458,8 @@ class ResourceAllocator:
 
         # Array element (e.g., sizes[0]): delegate to the emit value resolver
         # so bound containers and VectorView slices follow the same lookup
-        # rules as other emit-time value resolution paths.
+        # rules as other emit-time value resolution paths.  Resolver refusal
+        # is final here; symbolic array-element sizes must stay unresolved.
         if size_val.parent_array is not None and size_val.element_indices:
             return self._coerce_nonnegative_integral_size(
                 self._resolver.resolve_bound_value(size_val, bindings)
