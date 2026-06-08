@@ -453,16 +453,6 @@ class ResourceAllocator:
                 ValueResolver().resolve_bound_value(size_val, bindings)
             )
 
-        # Legacy shape-dimension fallback.  Most parameter shape dimensions are
-        # resolved as constants or by the {name}_dim{i} pattern below, but some
-        # older IR paths may still carry parent_array without element indices.
-        if size_val.parent_array is not None:
-            array_name = size_val.parent_array.name
-            if array_name in bindings:
-                array_data = bindings[array_name]
-                if hasattr(array_data, "__len__"):
-                    return len(array_data)
-
         # Check by name, then uuid in bindings
         if size_val.name and size_val.name in bindings:
             bound = bindings[size_val.name]
