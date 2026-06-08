@@ -18,7 +18,7 @@ import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import QamomileCompileError
+from qamomile.circuit.transpiler.errors import EmitError, QamomileCompileError
 from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
     ResourceAllocator,
 )
@@ -563,6 +563,30 @@ class TestDynamicArraySizeResolution:
 
         assert len(qubit_map) == 5
         assert clbit_map == {}
+
+    def test_allocator_runtime_parameter_vector_element_size_stays_unresolved(self):
+        """Test that runtime parameter array elements are not indexed."""
+        dim = Value(type=UIntType(), name="dim_0").with_const(1)
+        parent = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(dim,),
+        )
+        idx = Value(type=UIntType(), name="idx_0").with_const(0)
+        size = Value(
+            type=UIntType(),
+            name="sizes[0]",
+            parent_array=parent,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator(parameters={"sizes"})
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate(
+                [QInitOperation([], [q])],
+                bindings={"sizes": np.array([5], dtype=np.uint64)},
+            )
 
 
 class TestNestedArrayAccess:

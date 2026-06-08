@@ -115,7 +115,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self._composite_emitters = composite_emitters or []
 
         # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
-        self._allocator = ResourceAllocator()
+        self._allocator = ResourceAllocator(self.parameters)
         self._loop_analyzer = LoopAnalyzer()
         self._decomposer = CompositeDecomposer()
 
