@@ -293,6 +293,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
+        # Parameter-expression classical ops (the gate-angle expressions this
+        # work absorbs) that appear before / outside the quantum segment. They
+        # are held here and prepended to the quantum segment once it starts, so
+        # they end up computed inside the quantum circuit regardless of where
+        # the user wrote them — never stranded in a classical prep segment.
+        pending_absorbable: list[Operation] = []
 
         for op in block.operations:
             # Skip ReturnOperation - it's a terminal operation handled separately
@@ -342,6 +348,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 # Note: we stay in QUANTUM mode to accumulate consecutive measurements
                 if current_kind != OperationKind.QUANTUM:
                     current_kind = OperationKind.QUANTUM
+                if pending_absorbable:
+                    current_ops.extend(pending_absorbable)
+                    pending_absorbable = []
                 current_ops.append(op)
 
                 # Create boundary for tracking quantum-classical transition
@@ -352,6 +361,31 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                     value_ref=op.results[0].uuid if op.results else "",
                 )
                 self._boundaries.append(boundary)
+                continue
+
+            # Non-measurement parameter / structural classical ops (the
+            # gate-angle expressions this segmentation work exists for) belong
+            # in the quantum segment regardless of where they appear. Without
+            # this, an interleaved op forces a spurious
+            # quantum→classical→quantum split (``MultipleQuantumSegmentsError``)
+            # and an op written *before* the quantum segment (e.g. ``angle =
+            # -phase`` computed before ``qmc.qubit_array``) is stranded in a
+            # classical prep segment, where the backend has no gate to attach
+            # the parameter expression to and silently emits a zero angle.
+            # ``_absorbable_op_ids`` (from :meth:`_compute_absorbable`) holds
+            # exactly the ops safe to absorb: non-measurement classical ops
+            # whose results flow only to quantum ops (directly or through other
+            # absorbable classical ops) and are not block outputs. When already
+            # inside the quantum segment we append directly; otherwise we hold
+            # the op and prepend it when the quantum segment starts. Ops read
+            # back by a classical segment or returned are *not* in the set, so
+            # they stay classical (an explicit error rather than a dropped
+            # value if that forces a split).
+            if op_kind == OperationKind.CLASSICAL and id(op) in self._absorbable_op_ids:
+                if current_kind == OperationKind.QUANTUM:
+                    current_ops.append(op)
+                else:
+                    pending_absorbable.append(op)
                 continue
 
             if current_kind is None:
@@ -374,32 +408,6 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 current_ops.append(op)
                 continue
 
-            # Parameter / structural classical ops that are *not* derived
-            # from a measurement (e.g. a gate-angle expression like
-            # ``theta=-phase`` over a runtime parameter, which constant
-            # folding cannot collapse because ``phase`` stays symbolic) must
-            # not split the surrounding quantum region. They are emit-time
-            # foldable into a backend parameter expression and belong with
-            # the gate they feed. Without this carve-out such an op forces a
-            # spurious quantum→classical→quantum boundary, raising
-            # ``MultipleQuantumSegmentsError`` for valid pure-quantum
-            # kernels (e.g. a symbolic multi-control phase inside a loop).
-            #
-            # ``_absorbable_op_ids`` (computed in :meth:`_compute_absorbable`)
-            # holds exactly the ops for which absorption is safe: non-measurement
-            # classical ops whose results are consumed *only* by quantum/hybrid
-            # ops (directly or through other absorbed classical ops) and are not
-            # block outputs. Ops read back by a classical segment or returned
-            # stay classical so the executor runs them; if that forces a split
-            # the user gets an explicit error rather than a dropped value.
-            if (
-                op_kind == OperationKind.CLASSICAL
-                and current_kind == OperationKind.QUANTUM
-                and id(op) in self._absorbable_op_ids
-            ):
-                current_ops.append(op)
-                continue
-
             if op_kind != current_kind and op_kind in (
                 OperationKind.QUANTUM,
                 OperationKind.CLASSICAL,
@@ -411,7 +419,25 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                     current_ops = []
                 current_kind = op_kind
 
+            # Entering (or continuing) the quantum segment: pull in any held
+            # parameter-expression ops so they are computed inside the quantum
+            # circuit, ahead of the gate that consumes them.
+            if current_kind == OperationKind.QUANTUM and pending_absorbable:
+                current_ops.extend(pending_absorbable)
+                pending_absorbable = []
+
             current_ops.append(op)
+
+        # Drain any held parameter-expression ops. They are normally emptied
+        # when the quantum segment started; a non-empty remainder here means a
+        # malformed multi-quantum stream (rejected downstream by the
+        # single-quantum-segment strategy), so fold them into the final segment
+        # rather than dropping them.
+        if pending_absorbable:
+            if current_kind is None:
+                current_kind = OperationKind.QUANTUM
+            current_ops.extend(pending_absorbable)
+            pending_absorbable = []
 
         # Flush final segment
         if current_ops:

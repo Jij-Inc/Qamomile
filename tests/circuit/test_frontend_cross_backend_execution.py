@@ -763,6 +763,37 @@ def interleaved_param_expr_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Flo
     return qmc.expval(q, obs)
 
 
+# --- Regression: parameter-expression angle computed before quantum init ---
+#
+# ``angle = -phase`` is computed before ``qmc.qubit_array`` (before any quantum
+# op). Its ``BinOp`` lands before the quantum segment, so a position-naive
+# absorption (only firing while already inside the quantum segment) would leave
+# it stranded in a classical prep segment, where the backend has no gate to bind
+# the parameter expression to and silently emits a zero angle. The segmentation
+# holds such a leading parameter-expression op and prepends it to the quantum
+# segment, so the gate gets the real angle regardless of where it was written.
+
+
+@qmc.qkernel
+def pre_init_param_expr_sample(phase: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Sample ``rx(q, -phase)`` whose angle is computed before qubit_array."""
+    angle = -phase
+    q = qmc.qubit_array(1, "q")
+    q[0] = qmc.x(q[0])
+    q[0] = qmc.rx(q[0], angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def pre_init_param_expr_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+    """Run expval of ``rx(q, -phase)`` whose angle is computed before init."""
+    angle = -phase
+    q = qmc.qubit_array(1, "q")
+    q[0] = qmc.x(q[0])
+    q[0] = qmc.rx(q[0], angle)
+    return qmc.expval(q, obs)
+
+
 # --- Regression: reported symbolic multi-control phase inside a loop ---
 #
 # The originally reported case (a QSVT / block-encoding circuit): a symbolic
@@ -1342,6 +1373,51 @@ def test_interleaved_param_expr_angle_sample_and_run(
 
         got = run_executable.run(executor, bindings={"phase": phase}).result()
         # <Y> on rx(-phase)|1> is -sin(phase); a dropped sign would flip it.
+        expected_expval = -math.sin(phase)
+        assert np.isclose(got, expected_expval, atol=1e-5), (
+            f"{name}: seed={seed} phase={phase} got {got}, expected {expected_expval}"
+        )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_pre_init_param_expr_angle_sample_and_run(backend: Backend, seed: int) -> None:
+    """A gate-angle expression computed before quantum init must still apply.
+
+    Regression for the silent miscompile where ``angle = -phase`` written before
+    ``qmc.qubit_array`` was stranded in a classical prep segment and the gate
+    received a zero angle. Checks the negated angle is applied with the correct
+    sign on both the sample and expval paths, identical to the interleaved case.
+    """
+    name, transpiler, executor = backend
+    rng = np.random.default_rng(seed)
+    angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
+    shots = 2048
+
+    sample_executable = transpiler.transpile(
+        pre_init_param_expr_sample, parameters=["phase"]
+    )
+    run_executable = transpiler.transpile(
+        pre_init_param_expr_run,
+        bindings={"obs": qm_o.Y(0)},
+        parameters=["phase"],
+    )
+
+    for phase in angles:
+        counts = _counts(
+            sample_executable.sample(
+                executor, shots=shots, bindings={"phase": phase}
+            ).result()
+        )
+        # State is rx(-phase)|1>, so P(measure 1) = cos^2(phase / 2).
+        expected_one_freq = math.cos(phase / 2) ** 2
+        one_freq = counts.get((1,), 0) / shots
+        assert abs(one_freq - expected_one_freq) < 0.06, (
+            f"{name}: seed={seed} phase={phase} one-frequency "
+            f"{one_freq:.3f}, expected {expected_one_freq:.3f}"
+        )
+
+        got = run_executable.run(executor, bindings={"phase": phase}).result()
+        # <Y> on rx(-phase)|1> is -sin(phase); a zero angle would give 0.
         expected_expval = -math.sin(phase)
         assert np.isclose(got, expected_expval, atol=1e-5), (
             f"{name}: seed={seed} phase={phase} got {got}, expected {expected_expval}"
