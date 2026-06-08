@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.frontend.handle import QFixed
+from qamomile.circuit.frontend.handle import QFixed, Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
@@ -113,7 +113,12 @@ def _fallback_qpe_phase(
     target_result = target_operand.next_version()
 
     for i, handle in enumerate(counting_handles):
-        counting[i] = handle
+        counting[i] = Qubit(
+            value=counting_results[i],
+            parent=handle.parent,
+            indices=handle.indices,
+            name=handle.name,
+        )
 
     op = CompositeGateOperation(
         operands=[*counting_operands, target_operand, theta.value],

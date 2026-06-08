@@ -1328,14 +1328,22 @@ class TestQPEPhaseExtraction:
     """Regression tests for QPE fallback phase operand resolution."""
 
     @staticmethod
-    def _emit_pass() -> Any:
+    def _emit_pass(parameters: set[str] | None = None) -> Any:
         """Create the minimal emit-pass facade needed by phase extraction.
+
+        Args:
+            parameters (set[str] | None): Runtime parameter names that the
+                resolver must keep symbolic. Defaults to ``None``.
 
         Returns:
             Any: Object exposing the ``_resolver`` attribute consumed by
                 ``extract_phase_from_params``.
         """
-        return type("EmitPassStub", (), {"_resolver": ValueResolver()})()
+        return type(
+            "EmitPassStub",
+            (),
+            {"_resolver": ValueResolver(parameters=parameters)},
+        )()
 
     @staticmethod
     def _qpe_op(phase_operand: Value) -> CompositeGateOperation:
@@ -1476,6 +1484,28 @@ class TestQPEPhaseExtraction:
             self._emit_pass(),
             self._qpe_op(phase_operand),
             {"gammas": np.array([0.125, 0.25])},
+        )
+
+        assert phase is None
+
+    def test_extract_phase_leaves_runtime_parameter_array_unresolved(self):
+        """QPE fallback phase extraction preserves runtime parameter arrays."""
+        parent = ArrayValue(
+            type=FloatType(),
+            name="theta",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.375])
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(parameters={"theta"}),
+            self._qpe_op(phase_operand),
+            {"theta": np.array([0.125, 0.25])},
         )
 
         assert phase is None

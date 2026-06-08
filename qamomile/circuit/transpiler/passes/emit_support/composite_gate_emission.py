@@ -359,6 +359,9 @@ def extract_phase_from_params(
 ) -> float | None:
     """Extract a concrete phase parameter from a QPE operation.
 
+    Scans operands at index 1 and later, returning the first classical operand
+    that resolves to a numeric scalar. Later phase-like operands are ignored.
+
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose resolver
             should resolve bound scalar and array-element operands.
@@ -392,6 +395,10 @@ def _resolve_phase_operand(
     bindings: dict[str, Any],
 ) -> float | None:
     """Resolve a QPE phase operand to a concrete float.
+
+    Symbolic array indices or slice bounds return ``None`` and preserve the
+    existing manual-QPE fallback behavior, where no phase kickback gates are
+    emitted when no concrete phase can be extracted.
 
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose resolver
@@ -447,6 +454,9 @@ def _resolve_array_element_from_root(
             operation="CompositeGateOperation[QPE]",
         )
     except EmitError:
+        return None
+
+    if root.name in emit_pass._resolver.parameters:
         return None
 
     container = bindings.get(root.name)
