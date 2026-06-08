@@ -106,6 +106,17 @@ def _controlled_shift_expval_kernel(
     return qmc.expval(q, hamiltonian)
 
 
+@qmc.qkernel
+def _zero_length_shift_kernel(direction: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Apply a modular shift to an empty register and measure it."""
+    q = qmc.qubit_array(0, name="q")
+    if direction == qmc.uint(0):
+        q = modular_increment(q)
+    else:
+        q = modular_decrement(q)
+    return qmc.measure(q)
+
+
 _SIZES = [1, 2, 3, 5]
 _SEEDS = [0, 1, 2, 42]
 _CASES = [
@@ -114,18 +125,6 @@ _CASES = [
     ("plus", "controlled"),
     ("minus", "controlled"),
 ]
-
-
-def _backend_name(transpiler: Any) -> str:
-    """Return a stable test backend label for ``transpiler``."""
-    module = transpiler.__class__.__module__
-    if ".quri_parts." in module:
-        return "quri_parts"
-    if ".cudaq." in module:
-        return "cudaq"
-    if ".qiskit." in module:
-        return "qiskit"
-    return module
 
 
 def _random_bits(rng: np.random.Generator, n: int) -> list[int]:
@@ -202,20 +201,15 @@ def _expval_if_supported(
     kernel: Any,
     bindings: dict[str, Any],
     backend_name: str,
+    mode: str,
 ) -> float:
     """Return expval or mark a known backend limitation explicitly."""
-    try:
-        return _expval(transpiler, kernel, bindings)
-    except TypeError as exc:
-        if (
-            backend_name == "cudaq"
-            and "cudaq.observe() is not supported for runtime control flow" in str(exc)
-        ):
-            pytest.xfail(
-                "CUDA-Q observe() does not support the runtime control flow "
-                "used by controlled modular arithmetic yet."
-            )
-        raise
+    if backend_name == "cudaq" and mode == "controlled":
+        pytest.xfail(
+            "CUDA-Q observe() does not support the runtime control flow "
+            "used by controlled modular arithmetic yet."
+        )
+    return _expval(transpiler, kernel, bindings)
 
 
 def _bindings_for_case(
@@ -281,6 +275,7 @@ def _run_shift_case(
         expval_kernel,
         expval_bindings,
         backend_name,
+        mode,
     )
 
     _assert_deterministic(sample_results, expected, shots, context=context)
@@ -314,8 +309,8 @@ def test_modular_arithmetic_cross_backend_sample_and_expval(
     mode: str,
 ) -> None:
     """Execute seeded primitive shifts and qmc.control-created shifts."""
-    transpiler = sdk_transpiler
-    backend_name = _backend_name(transpiler)
+    transpiler = sdk_transpiler.transpiler
+    backend_name = sdk_transpiler.backend_name
     _skip_unsupported_backend_case(backend_name, n, mode)
 
     rng = np.random.default_rng(seed)
@@ -356,8 +351,8 @@ def test_modular_arithmetic_wraparound_and_control_boundaries(
     pattern: str,
 ) -> None:
     """Exercise wrap-around and both controlled enabled states explicitly."""
-    transpiler = sdk_transpiler
-    backend_name = _backend_name(transpiler)
+    transpiler = sdk_transpiler.transpiler
+    backend_name = sdk_transpiler.backend_name
     _skip_unsupported_backend_case(backend_name, n, mode)
 
     bits = [1] * n if pattern == "ones" else [0] * n
@@ -373,3 +368,17 @@ def test_modular_arithmetic_wraparound_and_control_boundaries(
         coeffs,
         shots=32,
     )
+
+
+@pytest.mark.parametrize("direction", ["plus", "minus"])
+def test_modular_arithmetic_zero_length_register_raises_value_error(
+    sdk_transpiler: Any,
+    direction: str,
+) -> None:
+    """Reject empty-register modular shifts with a clear error."""
+    direction_id = 0 if direction == "plus" else 1
+    with pytest.raises(ValueError, match="zero-length register"):
+        sdk_transpiler.transpiler.transpile(
+            _zero_length_shift_kernel,
+            bindings={"direction": direction_id},
+        )

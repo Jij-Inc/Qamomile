@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -12,6 +13,14 @@ if TYPE_CHECKING:
 
 
 _SIMULATOR_SEED = 901
+
+
+@dataclass(frozen=True)
+class SdkTranspilerCase:
+    """Bundle a backend label with its transpiler instance."""
+
+    backend_name: str
+    transpiler: Any
 
 
 @pytest.fixture
@@ -37,17 +46,17 @@ def sdk_transpiler(request):
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
-        return QiskitTranspiler()
+        return SdkTranspilerCase(backend, QiskitTranspiler())
     if backend == "quri_parts":
         pytest.importorskip("quri_parts.qulacs")
         from qamomile.quri_parts import QuriPartsTranspiler
 
-        return QuriPartsTranspiler()
+        return SdkTranspilerCase(backend, QuriPartsTranspiler())
     if backend == "cudaq":
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
-        return CudaqTranspiler()
+        return SdkTranspilerCase(backend, CudaqTranspiler())
     raise AssertionError(f"Unsupported SDK backend fixture value: {backend}")
 
 

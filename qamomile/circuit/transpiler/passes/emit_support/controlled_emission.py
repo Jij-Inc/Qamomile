@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
@@ -54,6 +54,7 @@ def emit_controlled_powers(
 ) -> None:
     """Emit controlled-U^(2^k) operations."""
     num_targets = len(target_indices)
+    block_value = _prepare_nested_block_for_emit(block_value, bindings)
     unitary_gate = emit_pass._blockvalue_to_gate(block_value, num_targets, bindings)
 
     if unitary_gate is not None:
@@ -1132,7 +1133,10 @@ def blockvalue_to_gate(
         return None
 
 
-def _contains_slice_markers(operations: list[Operation]) -> bool:
+def _contains_slice_markers(
+    operations: list[Operation],
+    _seen: set[int] | None = None,
+) -> bool:
     """Return whether ``operations`` contains slice borrow markers.
 
     Args:
@@ -1144,26 +1148,37 @@ def _contains_slice_markers(operations: list[Operation]) -> bool:
         bool: ``True`` when a ``SliceArrayOperation`` or
         ``ReleaseSliceViewOperation`` is present; otherwise ``False``.
     """
+    seen = _seen if _seen is not None else set()
     for op in operations:
         if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
             return True
         if isinstance(op, HasNestedOps):
-            if any(_contains_slice_markers(nested) for nested in op.nested_op_lists()):
+            if any(
+                _contains_slice_markers(nested, seen) for nested in op.nested_op_lists()
+            ):
                 return True
         nested_block = getattr(op, "block", None)
-        if isinstance(nested_block, Block) and _contains_slice_markers(
-            nested_block.operations
-        ):
-            return True
+        if isinstance(nested_block, Block):
+            block_id = id(nested_block)
+            if block_id not in seen:
+                seen.add(block_id)
+                if _contains_slice_markers(nested_block.operations, seen):
+                    return True
         implementation_block = getattr(op, "implementation_block", None)
-        if isinstance(implementation_block, Block) and _contains_slice_markers(
-            implementation_block.operations
-        ):
-            return True
+        if isinstance(implementation_block, Block):
+            block_id = id(implementation_block)
+            if block_id not in seen:
+                seen.add(block_id)
+                if _contains_slice_markers(implementation_block.operations, seen):
+                    return True
     return False
 
 
-def _prepare_nested_block_for_emit(block_value: Any, bindings: dict[str, Any]) -> Any:
+def _prepare_nested_block_for_emit(
+    block_value: Any,
+    bindings: dict[str, Any],
+    _seen: set[int] | None = None,
+) -> Any:
     """Run nested-block slice checks and remove emit-only markers.
 
     Top-level blocks pass through ``SliceBorrowCheckPass`` and
@@ -1186,6 +1201,8 @@ def _prepare_nested_block_for_emit(block_value: Any, bindings: dict[str, Any]) -
         the original object unchanged.
 
     Raises:
+        EmitError: If the marker-bearing block is already past the stages
+            that can be safely checked.
         ValidationError: If ``SliceBorrowCheckPass`` rejects the block
             stage.
         SliceBorrowViolationError: If nested slice borrows violate the
@@ -1193,24 +1210,139 @@ def _prepare_nested_block_for_emit(block_value: Any, bindings: dict[str, Any]) -
     """
     if not isinstance(block_value, Block):
         return block_value
-    if not _contains_slice_markers(block_value.operations):
+
+    seen = _seen if _seen is not None else set()
+    block_id = id(block_value)
+    if block_id in seen:
         return block_value
+    seen.add(block_id)
 
-    from qamomile.circuit.transpiler.passes.constant_fold import (
-        ConstantFoldingPass,
-    )
-    from qamomile.circuit.transpiler.passes.slice_borrow_check import (
-        SliceBorrowCheckPass,
-    )
-    from qamomile.circuit.transpiler.passes.strip_slice_ops import (
-        StripSliceArrayOpsPass,
-    )
+    try:
+        block_value = _prepare_nested_operation_blocks(block_value, bindings, seen)
+        if not _contains_slice_markers(block_value.operations, seen):
+            return block_value
 
-    if block_value.kind == BlockKind.TRACED:
-        block_value = dataclasses.replace(block_value, kind=BlockKind.HIERARCHICAL)
-    folded = ConstantFoldingPass(bindings, strip_slice_ops=False).run(block_value)
-    checked = SliceBorrowCheckPass().run(folded)
-    return StripSliceArrayOpsPass().run(checked)
+        from qamomile.circuit.transpiler.passes.constant_fold import (
+            ConstantFoldingPass,
+        )
+        from qamomile.circuit.transpiler.passes.slice_borrow_check import (
+            SliceBorrowCheckPass,
+        )
+        from qamomile.circuit.transpiler.passes.strip_slice_ops import (
+            StripSliceArrayOpsPass,
+        )
+
+        if block_value.kind == BlockKind.TRACED:
+            block_value = dataclasses.replace(block_value, kind=BlockKind.HIERARCHICAL)
+        elif block_value.kind not in (BlockKind.HIERARCHICAL, BlockKind.AFFINE):
+            raise EmitError(
+                f"Cannot normalize nested slice markers in {block_value.kind} block "
+                f"{block_value.name!r}; slice markers must be checked before "
+                f"analysis and emit.",
+                operation="SliceArrayOperation",
+            )
+        folded = ConstantFoldingPass(bindings, strip_slice_ops=False).run(block_value)
+        checked = SliceBorrowCheckPass().run(folded)
+        return StripSliceArrayOpsPass().run(checked)
+    finally:
+        seen.remove(block_id)
+
+
+def _prepare_nested_operation_blocks(
+    block_value: Block,
+    bindings: dict[str, Any],
+    seen: set[int],
+) -> Block:
+    """Normalize block-valued operation fields inside ``block_value``.
+
+    Args:
+        block_value (Block): Parent block whose operations may carry
+            nested ``block`` or ``implementation_block`` attributes.
+        bindings (dict[str, Any]): Bindings visible while normalizing
+            nested block-valued attributes.
+        seen (set[int]): Identity set used to avoid following cyclic
+            block references repeatedly.
+
+    Returns:
+        Block: ``block_value`` with any normalized nested block fields
+        reattached to their owning operations.
+    """
+    new_ops, changed = _prepare_nested_operation_list_blocks(
+        block_value.operations,
+        bindings,
+        seen,
+    )
+    if not changed:
+        return block_value
+    return dataclasses.replace(block_value, operations=new_ops)
+
+
+def _prepare_nested_operation_list_blocks(
+    operations: list[Operation],
+    bindings: dict[str, Any],
+    seen: set[int],
+) -> tuple[list[Operation], bool]:
+    """Normalize block-valued fields in an operation list.
+
+    Args:
+        operations (list[Operation]): Operations to inspect.
+        bindings (dict[str, Any]): Bindings visible to nested blocks.
+        seen (set[int]): Identity set used as a recursion guard.
+
+    Returns:
+        tuple[list[Operation], bool]: Rewritten operations and whether
+        any operation changed.
+    """
+    new_ops: list[Operation] = []
+    changed = False
+    for op in operations:
+        new_op = _prepare_nested_operation_block_fields(op, bindings, seen)
+        if new_op is not op:
+            changed = True
+        if isinstance(new_op, HasNestedOps):
+            nested_lists: list[list[Operation]] = []
+            nested_changed = False
+            for nested in new_op.nested_op_lists():
+                new_nested, did_change = _prepare_nested_operation_list_blocks(
+                    nested,
+                    bindings,
+                    seen,
+                )
+                nested_lists.append(new_nested)
+                nested_changed = nested_changed or did_change
+            if nested_changed:
+                new_op = new_op.rebuild_nested(nested_lists)
+                changed = True
+        new_ops.append(new_op)
+    return new_ops, changed
+
+
+def _prepare_nested_operation_block_fields(
+    op: Operation,
+    bindings: dict[str, Any],
+    seen: set[int],
+) -> Operation:
+    """Normalize ``block`` and ``implementation_block`` fields on ``op``.
+
+    Args:
+        op (Operation): Operation to inspect.
+        bindings (dict[str, Any]): Bindings visible to nested blocks.
+        seen (set[int]): Identity set used as a recursion guard.
+
+    Returns:
+        Operation: ``op`` with normalized nested block fields when
+        needed; otherwise ``op`` unchanged.
+    """
+    updates: dict[str, Block] = {}
+    for attr in ("block", "implementation_block"):
+        nested = getattr(op, attr, None)
+        if isinstance(nested, Block):
+            normalized = _prepare_nested_block_for_emit(nested, bindings, seen)
+            if normalized is not nested:
+                updates[attr] = normalized
+    if not updates:
+        return op
+    return dataclasses.replace(cast(Any, op), **updates)
 
 
 def _populate_input_qubit_map(

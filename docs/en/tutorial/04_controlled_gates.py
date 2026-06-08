@@ -585,7 +585,8 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # asserting the expected exception with a small `expect_error`
 # helper. It ends with a concrete sliced-QFT case that is supported
 # and worth keeping as a regression example for nested controlled
-# emission.
+# emission on backends that can convert the nested block to a gate
+# (Qiskit in this tutorial).
 #
 # | Case | Mode | Exception |
 # | --- | --- | --- |
@@ -595,7 +596,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | 6.4 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg control prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 single scalar control in symbolic mode | symbolic | `ValueError` |
-# | 6.7 controlled QFT over a sub-kernel `UInt` slice | concrete | supported |
+# | 6.7 controlled QFT over a sub-kernel `UInt` slice | concrete | supported when block-to-gate conversion succeeds |
 
 
 # %%
@@ -819,11 +820,13 @@ expect_error(
 # For example, `controlled_qft = qmc.control(apply_qft)` works
 # when `apply_qft(q)` applies QFT to all of `q`.
 #
-# The same now holds for the narrower pattern below: the wrapped
-# sub-kernel receives a classical `UInt` argument and uses it to
-# form a `q[:m]` slice before calling QFT. Qamomile strips the slice
-# marker inside the nested controlled block after borrow checking,
-# so the controlled-U emitter can lower the sliced composite block.
+# The same now holds for the narrower Qiskit-backed pattern below:
+# the wrapped sub-kernel receives a classical `UInt` argument and uses
+# it to form a `q[:m]` slice before calling QFT. Qamomile strips the
+# slice marker inside the nested controlled block after borrow
+# checking, so a controlled-U emitter whose block-to-gate conversion
+# succeeds can lower the sliced composite block. Backends without
+# block-to-gate conversion may still reject this multi-target fallback.
 
 
 # %%
