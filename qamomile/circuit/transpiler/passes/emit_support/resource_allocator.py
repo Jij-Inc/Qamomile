@@ -64,6 +64,24 @@ class ResourceAllocator:
         self._next_qubit_index: int = 0
         self._next_clbit_index: int = 0
 
+    @staticmethod
+    def _coerce_integral_size(value: Any) -> int | None:
+        """Coerce a non-boolean integral value to a Python int.
+
+        Args:
+            value (Any): Candidate structural size value resolved from IR
+                constants, compile-time bindings, or bound array elements.
+
+        Returns:
+            int | None: The coerced integer size, or None when ``value`` is
+                not an integral numeric value or is a boolean.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, numbers.Integral):
+            return int(cast(Any, value))
+        return None
+
     def allocate(
         self,
         operations: list[Operation],
@@ -408,11 +426,23 @@ class ResourceAllocator:
         size_val: "Value",
         bindings: dict[str, Any],
     ) -> int | None:
-        """Resolve a size Value to a concrete integer."""
+        """Resolve a size Value to a concrete integer.
+
+        Args:
+            size_val (Value): IR value used as a qubit-array size.
+                Constants, bound scalar values, shape-dimension values, and
+                array-element values are supported when compile-time concrete.
+            bindings (dict[str, Any]): Compile-time bindings available to the
+                emit pass, keyed by parameter names or value UUIDs.
+
+        Returns:
+            int | None: Concrete integer size, or None when the value cannot
+                be resolved at allocation time.
+        """
         import re
 
         if size_val.is_constant():
-            return int(size_val.get_const())
+            return self._coerce_integral_size(size_val.get_const())
 
         # Array element (e.g., sizes[0]): use the element value as the
         # requested size.  Do not use the parent container length here;
@@ -435,15 +465,15 @@ class ResourceAllocator:
         # Check by name, then uuid in bindings
         if size_val.name and size_val.name in bindings:
             bound = bindings[size_val.name]
-            if isinstance(bound, (int, float)):
-                return int(bound)
+            if (size := self._coerce_integral_size(bound)) is not None:
+                return size
             if hasattr(bound, "__len__"):
                 return len(bound)
 
         if size_val.uuid in bindings:
             bound = bindings[size_val.uuid]
-            if isinstance(bound, (int, float)):
-                return int(bound)
+            if (size := self._coerce_integral_size(bound)) is not None:
+                return size
 
         # Dimension naming pattern (e.g., "hi_dim0" -> array "hi", dimension 0).
         # Handles cases where parent_array is None after inlining.
@@ -481,10 +511,10 @@ class ResourceAllocator:
                 None when the parent container or any element index is not
                 compile-time concrete.
         """
-        parent = value.parent_array
-        if parent is None:
-            return None
-
+        assert value.parent_array is not None and value.element_indices, (
+            "_resolve_bound_array_element expects an array-element value, "
+            "not a whole-array shape dimension."
+        )
         root_parent, indices = self._resolve_array_element_indices(value)
         if root_parent is None or indices is None:
             return None
@@ -505,9 +535,7 @@ class ResourceAllocator:
             except (IndexError, KeyError, TypeError):
                 return None
 
-        if isinstance(container, numbers.Real):
-            return int(cast(Any, container))
-        return None
+        return self._coerce_integral_size(container)
 
     def _resolve_array_element_indices(
         self,
@@ -535,6 +563,9 @@ class ResourceAllocator:
                 return None, None
             indices.append(int(cast(Any, idx_val.get_const())))
 
+        # VectorView is represented as a one-dimensional slice over the
+        # leading axis.  Any remaining indices belong to nested elements and
+        # pass through unchanged after the leading index is remapped.
         root_index = indices[0]
         while True:
             if parent.slice_of is None:

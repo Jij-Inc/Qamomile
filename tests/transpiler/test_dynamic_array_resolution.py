@@ -18,6 +18,7 @@ import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
     ResourceAllocator,
 )
@@ -53,10 +54,33 @@ def kernel_matrix_size(
 
 
 @qmc.qkernel
+def kernel_size_from_uint_scalar(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a bound UInt scalar.
+
+    Args:
+        n (qmc.UInt): Compile-time bound scalar that determines the
+            qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(n, name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def kernel_size_from_uint_element(
     sizes: qmc.Vector[qmc.UInt],
 ) -> qmc.Vector[qmc.Bit]:
-    """Kernel with qubit array sized by a bound UInt vector element."""
+    """Measure a qubit array sized by a bound UInt vector element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose first
+            element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
     q = qmc.qubit_array(sizes[0], name="q")
     return qmc.measure(q)
 
@@ -65,8 +89,69 @@ def kernel_size_from_uint_element(
 def kernel_size_from_uint_slice_element(
     sizes: qmc.Vector[qmc.UInt],
 ) -> qmc.Vector[qmc.Bit]:
-    """Kernel with qubit array sized by a bound UInt vector-view element."""
+    """Measure a qubit array sized by a bound UInt vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose sliced
+            view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
     q = qmc.qubit_array(sizes[1:3][0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_default_start_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a default-start vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose
+            default-start sliced view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[:3][0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_default_stop_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a default-stop vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose
+            default-stop sliced view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[1:][0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_symbolic_uint_element(
+    sizes: qmc.Vector[qmc.UInt],
+    i: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a symbolic UInt vector index.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector indexed by a
+            runtime symbolic parameter.
+        i (qmc.UInt): Runtime symbolic index into ``sizes``.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[i], name="q")
     return qmc.measure(q)
 
 
@@ -161,7 +246,19 @@ def kernel_qaoa(
     ]
 )
 def sdk_backend(request) -> Backend:
-    """Yield an installed SDK backend for cross-backend execution."""
+    """Yield an installed SDK backend for cross-backend execution.
+
+    Args:
+        request (pytest.FixtureRequest): Parametrized pytest request whose
+            value selects the backend name.
+
+    Returns:
+        Backend: Tuple of backend name, transpiler, and executor. Optional
+            SDK dependencies are skipped with ``pytest.importorskip``.
+
+    Raises:
+        AssertionError: If the fixture parameter is not a known backend name.
+    """
     name = request.param
     if name == "qiskit":
         pytest.importorskip("qiskit")
@@ -186,7 +283,15 @@ def sdk_backend(request) -> Backend:
 
 
 def _counts(result: Any) -> dict[tuple[int, ...], int]:
-    """Convert a sample result into counts keyed by bit tuples."""
+    """Convert a sample result into counts keyed by bit tuples.
+
+    Args:
+        result (Any): Backend sample result exposing ``results`` as
+            bitstring/count pairs.
+
+    Returns:
+        dict[tuple[int, ...], int]: Counts keyed by integer bit tuples.
+    """
     counts: dict[tuple[int, ...], int] = {}
     for bits, count in result.results:
         bit_tuple = tuple(int(bit) for bit in bits)
@@ -201,7 +306,19 @@ def _assert_all_zero_counts(
     width: int,
     shots: int,
 ) -> None:
-    """Assert that deterministic all-zero sampling returned every shot."""
+    """Assert that deterministic all-zero sampling returned every shot.
+
+    Args:
+        name (str): Backend name used in the assertion message.
+        counts (dict[tuple[int, ...], int]): Observed counts keyed by bit
+            tuples.
+        width (int): Expected bitstring width.
+        shots (int): Expected total shot count for the all-zero outcome.
+
+    Raises:
+        AssertionError: If the counts contain any non-zero outcome or an
+            unexpected shot count.
+    """
     expected = tuple(0 for _ in range(width))
     assert counts == {expected: shots}, f"{name}: unexpected counts {counts}"
 
@@ -249,6 +366,21 @@ class TestDynamicArraySizeResolution:
         for bitstring, _count in result.results:
             assert len(bitstring) == 3
 
+    def test_qubit_array_size_from_numpy_uint_scalar(self):
+        """Test that NumPy integer scalar sizes resolve from bindings."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_scalar,
+            bindings={"n": np.uint64(5)},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
     def test_qubit_array_size_from_bound_uint_vector_element(self):
         """Test that a bound UInt vector-element size executes deterministically."""
         transpiler = QiskitTranspiler()
@@ -279,20 +411,101 @@ class TestDynamicArraySizeResolution:
         counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
         _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
 
-    def test_bound_uint_vector_view_element_executes_on_sdk_backends(
+    @pytest.mark.parametrize(
+        ("kernel", "sizes", "width"),
+        [
+            (
+                kernel_size_from_uint_default_start_slice_element,
+                np.array([5, 7, 11], dtype=np.uint64),
+                5,
+            ),
+            (
+                kernel_size_from_uint_default_stop_slice_element,
+                np.array([2, 5, 7], dtype=np.uint64),
+                5,
+            ),
+        ],
+    )
+    def test_qubit_array_size_from_implicit_bound_vector_view_element(
+        self,
+        kernel: Any,
+        sizes: np.ndarray,
+        width: int,
+    ):
+        """Test that implicit slice bounds resolve for vector-view elements."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(kernel, bindings={"sizes": sizes})
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == width
+        assert circuit.num_clbits == width
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=width, shots=16)
+
+    @pytest.mark.parametrize(
+        ("kernel", "sizes", "width"),
+        [
+            (
+                kernel_size_from_uint_element,
+                np.array([5], dtype=np.uint64),
+                5,
+            ),
+            (
+                kernel_size_from_uint_slice_element,
+                np.array([2, 5, 7], dtype=np.uint64),
+                5,
+            ),
+        ],
+    )
+    def test_bound_uint_vector_element_executes_on_sdk_backends(
         self,
         sdk_backend: Backend,
+        kernel: Any,
+        sizes: np.ndarray,
+        width: int,
     ):
-        """Test sliced UInt vector-element size allocation on every SDK backend."""
+        """Test UInt vector-element size allocation on every SDK backend."""
         name, transpiler, executor = sdk_backend
 
         executable = transpiler.transpile(
-            kernel_size_from_uint_slice_element,
-            bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64)},
+            kernel,
+            bindings={"sizes": sizes},
         )
         counts = _counts(executable.sample(executor, shots=16).result())
 
-        _assert_all_zero_counts(name, counts, width=5, shots=16)
+        _assert_all_zero_counts(name, counts, width=width, shots=16)
+
+    def test_symbolic_uint_vector_element_size_raises(self):
+        """Test that symbolic element indices do not fall back to array length."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_symbolic_uint_element,
+                bindings={"sizes": np.array([2, 5], dtype=np.uint64)},
+                parameters=["i"],
+            )
+
+    def test_non_integral_vector_element_size_raises(self):
+        """Test that non-integral element sizes are not silently truncated."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_uint_element,
+                bindings={"sizes": np.array([5.5], dtype=np.float64)},
+            )
+
+    def test_bool_vector_element_size_raises(self):
+        """Test that boolean element sizes are not coerced to one or zero."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_uint_element,
+                bindings={"sizes": np.array([True], dtype=np.bool_)},
+            )
 
     def test_allocator_size_from_const_uint_vector_element(self):
         """Test that const-array metadata resolves an array element size."""
