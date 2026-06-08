@@ -22,6 +22,11 @@ from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.analyze import (
+    build_dependency_graph,
+    find_measurement_derived_values,
+    find_measurement_results,
+)
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
 from qamomile.circuit.transpiler.segments import (
@@ -235,6 +240,34 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         segments: list[Segment] = []
         self._boundaries: list[HybridBoundary] = []
 
+        # Measurement-taint set: every value transitively derived from a
+        # measurement result. Computed with the same dataflow utilities as
+        # ``AnalyzePass`` / ``ClassicalLoweringPass`` so the three passes
+        # agree on what "measurement-derived" means. Used below to decide
+        # whether a classical op interleaved in a quantum region is a
+        # genuine post-measurement computation (must split off into its own
+        # classical segment) or a parameter / structural expression that
+        # merely feeds a quantum gate (can stay in the quantum segment).
+        dependency_graph = build_dependency_graph(block.operations)
+        measurement_uuids = find_measurement_results(block.operations)
+        self._measurement_tainted = find_measurement_derived_values(
+            dependency_graph, measurement_uuids
+        )
+
+        # Quantum-needed set: every value transitively required to compute
+        # the operands of a quantum / hybrid operation. A non-measurement
+        # classical op may only be absorbed into a quantum segment when its
+        # result feeds a quantum gate (directly or through a chain of other
+        # classical expressions). A classical op whose result is *not* needed
+        # by any quantum op — e.g. a block output or a value consumed only by
+        # downstream classical post-processing — must stay in its own
+        # classical segment so the executor actually runs it and the
+        # orchestrator can surface its result; absorbing it into a quantum
+        # segment would silently drop its value.
+        self._quantum_needed = self._compute_quantum_needed(
+            block.operations, dependency_graph
+        )
+
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
 
@@ -318,6 +351,36 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 current_ops.append(op)
                 continue
 
+            # Parameter / structural classical ops that are *not* derived
+            # from a measurement (e.g. a gate-angle expression like
+            # ``theta=-phase`` over a runtime parameter, which constant
+            # folding cannot collapse because ``phase`` stays symbolic) must
+            # not split the surrounding quantum region. They are emit-time
+            # foldable into a backend parameter expression and belong with
+            # the gate they feed. Without this carve-out such an op forces a
+            # spurious quantum→classical→quantum boundary, raising
+            # ``MultipleQuantumSegmentsError`` for valid pure-quantum
+            # kernels (e.g. a symbolic multi-control phase inside a loop).
+            #
+            # Two guards keep the absorption safe:
+            #   * ``not _is_measurement_tainted`` — measurement-derived
+            #     classical ops are either ``RuntimeClassicalExpr`` (absorbed
+            #     above) or genuine post-processing (e.g.
+            #     ``DecodeQFixedOperation``) that must stay classical.
+            #   * ``_feeds_quantum`` — the op's result must actually be needed
+            #     by a quantum gate. A classical op whose result is a block
+            #     output or feeds only later classical steps stays in its own
+            #     classical segment; absorbing it into a quantum segment would
+            #     drop its value (quantum segments never run classical ops).
+            if (
+                op_kind == OperationKind.CLASSICAL
+                and current_kind == OperationKind.QUANTUM
+                and not self._is_measurement_tainted(op)
+                and self._feeds_quantum(op)
+            ):
+                current_ops.append(op)
+                continue
+
             if op_kind != current_kind and op_kind in (
                 OperationKind.QUANTUM,
                 OperationKind.CLASSICAL,
@@ -340,6 +403,117 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         self._compute_segment_io(segments, block)
 
         return segments
+
+    def _compute_quantum_needed(
+        self,
+        operations: list[Operation],
+        dependency_graph: dict[str, set[str]],
+    ) -> set[str]:
+        """Collect every value required to compute a quantum op's inputs.
+
+        Seeds from the input values of every quantum / hybrid operation
+        (walked recursively through control flow) and back-propagates through
+        ``dependency_graph`` so that a chain of classical expressions feeding
+        a gate angle (e.g. ``(phase * 2) - 1``) is fully covered, not just the
+        expression directly wired to the gate.
+
+        Args:
+            operations (list[Operation]): Top-level operations of the block.
+            dependency_graph (dict[str, set[str]]): ``result_uuid ->
+                set(operand_uuid, ...)`` as produced by
+                ``build_dependency_graph``.
+
+        Returns:
+            set[str]: UUIDs of all values transitively needed by a quantum or
+                hybrid operation.
+        """
+
+        class QuantumInputCollector(ControlFlowVisitor):
+            """Collect input-value UUIDs of every quantum / hybrid operation."""
+
+            def __init__(self) -> None:
+                """Initialize the empty input-UUID accumulator."""
+                self.inputs: set[str] = set()
+
+            def visit_operation(self, op: Operation) -> None:
+                """Record the input-value UUIDs of a quantum / hybrid op.
+
+                Args:
+                    op (Operation): The operation being visited.
+
+                Returns:
+                    None: Mutates ``self.inputs`` in place.
+                """
+                if op.operation_kind in (
+                    OperationKind.QUANTUM,
+                    OperationKind.HYBRID,
+                ):
+                    for v in op.all_input_values():
+                        if isinstance(v, ValueBase):
+                            self.inputs.add(v.uuid)
+
+        collector = QuantumInputCollector()
+        collector.visit_operations(operations)
+
+        needed: set[str] = set()
+        worklist = list(collector.inputs)
+        while worklist:
+            current = worklist.pop()
+            if current in needed:
+                continue
+            needed.add(current)
+            for dep in dependency_graph.get(current, ()):
+                if dep not in needed:
+                    worklist.append(dep)
+        return needed
+
+    def _is_measurement_tainted(self, op: Operation) -> bool:
+        """Return whether ``op`` participates in the measurement dataflow.
+
+        An operation is measurement-tainted when any of its input values or
+        results is transitively derived from a measurement result (per the
+        taint set computed in :meth:`_build_segments_list`). Such ops are
+        genuine classical post-processing and must be kept in their own
+        classical segment; non-tainted classical ops are parameter /
+        structural expressions that can stay inside a quantum segment.
+
+        Args:
+            op (Operation): The operation to classify.
+
+        Returns:
+            bool: ``True`` if any input value or result UUID is in the
+                measurement-taint set, ``False`` otherwise.
+        """
+        tainted = self._measurement_tainted
+        for v in op.results:
+            if isinstance(v, ValueBase) and v.uuid in tainted:
+                return True
+        for v in op.all_input_values():
+            if isinstance(v, ValueBase) and v.uuid in tainted:
+                return True
+        return False
+
+    def _feeds_quantum(self, op: Operation) -> bool:
+        """Return whether ``op``'s result is needed by a quantum operation.
+
+        Checks the quantum-needed set computed in
+        :meth:`_build_segments_list`. Only classical ops that feed a quantum
+        gate (directly or through a chain of other classical expressions) may
+        be absorbed into a quantum segment; ops whose results are block
+        outputs or feed only classical post-processing must stay classical.
+
+        Args:
+            op (Operation): The operation to classify.
+
+        Returns:
+            bool: ``True`` if any result UUID is in the quantum-needed set,
+                ``False`` otherwise.
+        """
+        needed = self._quantum_needed
+        for v in op.results:
+            if isinstance(v, ValueBase) and v.uuid in needed:
+                return True
+        return False
 
     def _effective_kind(self, op: Operation) -> OperationKind:
         """Determine the effective kind of an operation.

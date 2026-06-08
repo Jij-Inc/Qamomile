@@ -731,6 +731,87 @@ def sliced_pauli_evolve_run(
     return qmc.expval(q, obs)
 
 
+# --- Regression: parameter-expression gate angle must not split segments ---
+#
+# A gate angle that is an *expression* over a runtime parameter (e.g.
+# ``theta=-phase``) lowers to a classical ``BinOp`` that constant folding
+# cannot collapse while ``phase`` stays symbolic. When such an op is
+# interleaved between quantum operations the segmentation pass used to flush
+# the quantum region and start a new one, producing a spurious
+# ``MultipleQuantumSegmentsError`` even though the kernel has no
+# measurement-dependent control flow. These kernels reproduce that shape
+# (a quantum op precedes the negated-angle gate so the ``BinOp`` is genuinely
+# interleaved) and check both sample and expval paths across backends.
+
+
+@qmc.qkernel
+def interleaved_param_expr_sample(phase: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Sample ``rx(q, -phase)`` interleaved after a quantum op."""
+    q = qmc.qubit_array(1, "q")
+    q[0] = qmc.x(q[0])
+    q[0] = qmc.rx(q[0], -phase)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def interleaved_param_expr_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+    """Run expval of ``rx(q, -phase)`` interleaved after a quantum op."""
+    q = qmc.qubit_array(1, "q")
+    q[0] = qmc.x(q[0])
+    q[0] = qmc.rx(q[0], -phase)
+    return qmc.expval(q, obs)
+
+
+# --- Regression: reported symbolic multi-control phase inside a loop ---
+#
+# The originally reported case (a QSVT / block-encoding circuit): a symbolic
+# multi-control ``qmc.control(qmc.p, num_controls=<symbolic>)`` driven by a
+# negated runtime angle inside a ``qmc.range`` loop. With ``num_controls`` =
+# ``n - 1`` = 1 here, the operation is equivalent to a single concrete
+# ``qmc.cp``; the test asserts the two transpile and execute to the same
+# expectation value, which only holds once the spurious segment split is
+# fixed.
+
+
+@qmc.qkernel
+def symbolic_mc_phase_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+    """Run expval of a symbolic multi-control phase with a negated angle."""
+    q = qmc.qubit_array(2, "q")
+    for i in qmc.range(2):
+        q[i] = qmc.h(q[i])
+    num_signal = qmc.uint(2)
+    cphase = qmc.control(qmc.p, num_controls=num_signal - 1)
+    q[0:1], q[1] = cphase(q[0:1], q[1], theta=-phase)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def cp_phase_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+    """Concrete ``qmc.cp`` equivalent of :func:`symbolic_mc_phase_run`."""
+    q = qmc.qubit_array(2, "q")
+    for i in qmc.range(2):
+        q[i] = qmc.h(q[i])
+    q[0], q[1] = qmc.cp(q[0], q[1], -phase)
+    return qmc.expval(q, obs)
+
+
+# --- Regression: a classical output computed after a quantum op is preserved ---
+#
+# The segment carve-out above only absorbs a non-measurement classical op into
+# the quantum segment when its result feeds a quantum gate. A classical
+# parameter expression that is instead a *block output* (and feeds no gate)
+# must remain a real classical segment so the executor runs it and the
+# orchestrator surfaces its value — absorbing it would silently return ``None``.
+
+
+@qmc.qkernel
+def classical_output_after_quantum_run(phase: qmc.Float) -> qmc.Float:
+    """Return a parameter expression computed after an unrelated quantum op."""
+    q = qmc.qubit_array(1, "q")
+    q[0] = qmc.x(q[0])
+    return phase * 2.0
+
+
 @dataclasses.dataclass(frozen=True)
 class FrontendExecutionCase:
     """Describe one frontend pattern with paired sample and run kernels."""
@@ -1135,3 +1216,102 @@ def test_bound_control_indices_duplicate_rejected(backend: Backend) -> None:
             bound_control_indices_sample,
             bindings={"n": 2, "i": 0, "j": 0},
         )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_interleaved_param_expr_angle_sample_and_run(
+    backend: Backend, seed: int
+) -> None:
+    """A runtime-parameter angle expression must not split quantum segments.
+
+    Regression for the spurious ``MultipleQuantumSegmentsError`` raised when a
+    gate-angle expression (``rx(q, -phase)``) over a runtime parameter is
+    interleaved between quantum operations. Checks the negated angle is applied
+    with the correct sign on both the sample and expval paths.
+    """
+    name, transpiler, executor = backend
+    rng = np.random.default_rng(seed)
+    # Include boundary angles (0, pi, 2*pi) alongside a random one.
+    angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
+    shots = 4096
+
+    sample_executable = transpiler.transpile(
+        interleaved_param_expr_sample, parameters=["phase"]
+    )
+    run_executable = transpiler.transpile(
+        interleaved_param_expr_run,
+        bindings={"obs": qm_o.Y(0)},
+        parameters=["phase"],
+    )
+
+    for phase in angles:
+        counts = _counts(
+            sample_executable.sample(
+                executor, shots=shots, bindings={"phase": phase}
+            ).result()
+        )
+        # State is rx(-phase)|1>, so P(measure 1) = cos^2(phase / 2).
+        expected_one_freq = math.cos(phase / 2) ** 2
+        one_freq = counts.get((1,), 0) / shots
+        assert abs(one_freq - expected_one_freq) < 0.06, (
+            f"{name}: seed={seed} phase={phase} one-frequency "
+            f"{one_freq:.3f}, expected {expected_one_freq:.3f}"
+        )
+
+        got = run_executable.run(executor, bindings={"phase": phase}).result()
+        # <Y> on rx(-phase)|1> is -sin(phase); a dropped sign would flip it.
+        expected_expval = -math.sin(phase)
+        assert np.isclose(got, expected_expval, atol=1e-5), (
+            f"{name}: seed={seed} phase={phase} got {got}, expected {expected_expval}"
+        )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_symbolic_multi_control_phase_in_loop_matches_cp(
+    backend: Backend, seed: int
+) -> None:
+    """Reported symbolic multi-control phase in a loop matches its cp equivalent.
+
+    Regression for the originally reported QSVT / block-encoding failure: a
+    symbolic-count multi-control phase with a negated runtime angle inside a
+    ``qmc.range`` loop must transpile to a single quantum segment and produce
+    the same expectation value as the concrete ``qmc.cp`` circuit.
+    """
+    name, transpiler, executor = backend
+    rng = np.random.default_rng(seed)
+    obs = qm_o.X(0) * qm_o.X(1)
+    angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
+
+    symbolic_executable = transpiler.transpile(
+        symbolic_mc_phase_run, bindings={"obs": obs}, parameters=["phase"]
+    )
+    cp_executable = transpiler.transpile(
+        cp_phase_run, bindings={"obs": obs}, parameters=["phase"]
+    )
+
+    for phase in angles:
+        symbolic_value = symbolic_executable.run(
+            executor, bindings={"phase": phase}
+        ).result()
+        cp_value = cp_executable.run(executor, bindings={"phase": phase}).result()
+        assert np.isclose(symbolic_value, cp_value, atol=1e-8), (
+            f"{name}: seed={seed} phase={phase} symbolic {symbolic_value} != "
+            f"cp {cp_value}"
+        )
+
+
+def test_classical_output_after_quantum_op_is_preserved(backend: Backend) -> None:
+    """A classical block output computed after a quantum op must be returned.
+
+    Guards the segmentation carve-out: a non-measurement classical op whose
+    result is a block output (and feeds no gate) must stay in its own classical
+    segment so the executor runs it, rather than being absorbed into the quantum
+    segment and silently dropped (returning ``None``).
+    """
+    name, transpiler, executor = backend
+    executable = transpiler.transpile(
+        classical_output_after_quantum_run, parameters=["phase"]
+    )
+    got = executable.run(executor, bindings={"phase": 3.0}).result()
+    assert got is not None, f"{name}: classical output was dropped (got None)"
+    assert np.isclose(got, 6.0, atol=1e-8), f"{name}: got {got}, expected 6.0"
