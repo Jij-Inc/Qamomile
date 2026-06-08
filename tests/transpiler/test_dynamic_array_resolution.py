@@ -9,10 +9,21 @@ These tests verify that the transpiler correctly handles:
 These tests were added to prevent regression of bugs fixed in the emit pass.
 """
 
+from typing import Any
+
 import numpy as np
+import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+    ResourceAllocator,
+)
 from qamomile.qiskit.transpiler import QiskitTranspiler
+
+Backend = tuple[str, Any, Any]
 
 # ==============================================================================
 # Kernel definitions at module level (required for inspect.getsource to work)
@@ -38,6 +49,24 @@ def kernel_matrix_size(
     """Kernel with qubit array sized by matrix dimension."""
     n = edges.shape[0]
     q = qmc.qubit_array(n, name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Kernel with qubit array sized by a bound UInt vector element."""
+    q = qmc.qubit_array(sizes[0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Kernel with qubit array sized by a bound UInt vector-view element."""
+    q = qmc.qubit_array(sizes[1:3][0], name="q")
     return qmc.measure(q)
 
 
@@ -124,6 +153,59 @@ def kernel_qaoa(
     return qmc.measure(q)
 
 
+@pytest.fixture(
+    params=[
+        "qiskit",
+        pytest.param("quri_parts", marks=pytest.mark.quri_parts),
+        pytest.param("cudaq", marks=pytest.mark.cudaq),
+    ]
+)
+def sdk_backend(request) -> Backend:
+    """Yield an installed SDK backend for cross-backend execution."""
+    name = request.param
+    if name == "qiskit":
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        return name, transpiler, transpiler.executor()
+    if name == "quri_parts":
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        transpiler = QuriPartsTranspiler()
+        return name, transpiler, transpiler.executor()
+    if name == "cudaq":
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        transpiler = CudaqTranspiler()
+        return name, transpiler, transpiler.executor()
+    raise AssertionError(f"Unknown backend: {name}")
+
+
+def _counts(result: Any) -> dict[tuple[int, ...], int]:
+    """Convert a sample result into counts keyed by bit tuples."""
+    counts: dict[tuple[int, ...], int] = {}
+    for bits, count in result.results:
+        bit_tuple = tuple(int(bit) for bit in bits)
+        counts[bit_tuple] = counts.get(bit_tuple, 0) + int(count)
+    return counts
+
+
+def _assert_all_zero_counts(
+    name: str,
+    counts: dict[tuple[int, ...], int],
+    *,
+    width: int,
+    shots: int,
+) -> None:
+    """Assert that deterministic all-zero sampling returned every shot."""
+    expected = tuple(0 for _ in range(width))
+    assert counts == {expected: shots}, f"{name}: unexpected counts {counts}"
+
+
 # ==============================================================================
 # Test classes
 # ==============================================================================
@@ -166,6 +248,108 @@ class TestDynamicArraySizeResolution:
         assert result is not None
         for bitstring, _count in result.results:
             assert len(bitstring) == 3
+
+    def test_qubit_array_size_from_bound_uint_vector_element(self):
+        """Test that a bound UInt vector-element size executes deterministically."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_element,
+            bindings={"sizes": np.array([5], dtype=np.uint64)},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
+    def test_qubit_array_size_from_bound_uint_vector_view_element(self):
+        """Test that a bound UInt vector-view size executes deterministically."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_slice_element,
+            bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64)},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
+    def test_bound_uint_vector_view_element_executes_on_sdk_backends(
+        self,
+        sdk_backend: Backend,
+    ):
+        """Test sliced UInt vector-element size allocation on every SDK backend."""
+        name, transpiler, executor = sdk_backend
+
+        executable = transpiler.transpile(
+            kernel_size_from_uint_slice_element,
+            bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64)},
+        )
+        counts = _counts(executable.sample(executor, shots=16).result())
+
+        _assert_all_zero_counts(name, counts, width=5, shots=16)
+
+    def test_allocator_size_from_const_uint_vector_element(self):
+        """Test that const-array metadata resolves an array element size."""
+        dim = Value(type=UIntType(), name="dim_0").with_const(1)
+        parent = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(dim,),
+        ).with_array_runtime_metadata(const_array=(5,))
+        idx = Value(type=UIntType(), name="idx_0").with_const(0)
+        size = Value(
+            type=UIntType(),
+            name="sizes[0]",
+            parent_array=parent,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        qubit_map, clbit_map = allocator.allocate([QInitOperation([], [q])])
+
+        assert len(qubit_map) == 5
+        assert clbit_map == {}
+
+    def test_allocator_size_from_const_uint_vector_view_element(self):
+        """Test that a const-array VectorView element resolves through its root."""
+        root_dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        root = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(root_dim,),
+        ).with_array_runtime_metadata(const_array=(2, 5, 7))
+        view_dim = Value(type=UIntType(), name="view_dim_0").with_const(2)
+        start = Value(type=UIntType(), name="slice_start").with_const(1)
+        step = Value(type=UIntType(), name="slice_step").with_const(1)
+        view = ArrayValue(
+            type=UIntType(),
+            name="sizes_slice",
+            shape=(view_dim,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        idx = Value(type=UIntType(), name="idx_0").with_const(0)
+        size = Value(
+            type=UIntType(),
+            name="sizes_slice[0]",
+            parent_array=view,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        qubit_map, clbit_map = allocator.allocate([QInitOperation([], [q])])
+
+        assert len(qubit_map) == 5
+        assert clbit_map == {}
 
 
 class TestNestedArrayAccess:

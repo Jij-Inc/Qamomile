@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import numbers
+from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
@@ -413,7 +414,17 @@ class ResourceAllocator:
         if size_val.is_constant():
             return int(size_val.get_const())
 
-        # Value with parent_array (e.g., hi.shape[0])
+        # Array element (e.g., sizes[0]): use the element value as the
+        # requested size.  Do not use the parent container length here;
+        # ``qmc.qubit_array(sizes[0])`` with ``sizes=[5]`` means five
+        # qubits, not one qubit.
+        if size_val.parent_array is not None and size_val.element_indices:
+            return self._resolve_bound_array_element(size_val, bindings)
+
+        # Whole array dimension value (e.g., hi.shape[0]): use the parent
+        # container length.  This is intentionally separate from the
+        # element branch above so array values and array-element values
+        # cannot be confused.
         if size_val.parent_array is not None:
             array_name = size_val.parent_array.name
             if array_name in bindings:
@@ -450,6 +461,95 @@ class ResourceAllocator:
                         return len(array_data)
 
         return None
+
+    def _resolve_bound_array_element(
+        self,
+        value: "Value",
+        bindings: dict[str, Any],
+    ) -> int | None:
+        """Resolve a bound array element to an integer size.
+
+        Args:
+            value (Value): Array-element value whose ``parent_array`` and
+                ``element_indices`` identify the container slot to resolve.
+            bindings (dict[str, Any]): Compile-time bindings keyed by array
+                name or UUID. Used before falling back to const-array
+                metadata on the parent.
+
+        Returns:
+            int | None: The resolved element converted to ``int``. Returns
+                None when the parent container or any element index is not
+                compile-time concrete.
+        """
+        parent = value.parent_array
+        if parent is None:
+            return None
+
+        root_parent, indices = self._resolve_array_element_indices(value)
+        if root_parent is None or indices is None:
+            return None
+
+        container = None
+        if root_parent.name in bindings:
+            container = bindings[root_parent.name]
+        elif root_parent.uuid in bindings:
+            container = bindings[root_parent.uuid]
+        else:
+            container = root_parent.get_const_array()
+        if container is None:
+            return None
+
+        for idx in indices:
+            try:
+                container = container[idx]
+            except (IndexError, KeyError, TypeError):
+                return None
+
+        if isinstance(container, numbers.Real):
+            return int(cast(Any, container))
+        return None
+
+    def _resolve_array_element_indices(
+        self,
+        value: "Value",
+    ) -> tuple[ArrayValue | None, tuple[int, ...] | None]:
+        """Resolve an array element to root container indices.
+
+        Args:
+            value (Value): Array-element value whose parent may be either a
+                root ``ArrayValue`` or a sliced ``ArrayValue`` view.
+
+        Returns:
+            tuple[ArrayValue | None, tuple[int, ...] | None]: The root
+                container and concrete indices to use against that container.
+                Returns ``(None, None)`` when any element index or slice bound
+                is symbolic and cannot be resolved at allocation time.
+        """
+        parent = value.parent_array
+        if parent is None or not value.element_indices:
+            return None, None
+
+        indices: list[int] = []
+        for idx_val in value.element_indices:
+            if not idx_val.is_constant():
+                return None, None
+            indices.append(int(cast(Any, idx_val.get_const())))
+
+        root_index = indices[0]
+        while True:
+            if parent.slice_of is None:
+                return parent, (root_index, *indices[1:])
+            if (
+                parent.slice_start is None
+                or parent.slice_step is None
+                or not parent.slice_start.is_constant()
+                or not parent.slice_step.is_constant()
+            ):
+                return None, None
+            start = int(cast(Any, parent.slice_start.get_const()))
+            step = int(cast(Any, parent.slice_step.get_const()))
+            root_index = start + step * root_index
+            parent = parent.slice_of
 
     def _allocate_gate(
         self,
