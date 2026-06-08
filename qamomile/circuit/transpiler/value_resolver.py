@@ -25,6 +25,8 @@ from typing import Any
 
 import numpy as np
 
+from qamomile.circuit.ir.value import ArrayValue
+
 
 class ValueResolver:
     """Resolve IR Values to concrete Python values.
@@ -121,14 +123,22 @@ class ValueResolver:
         """
         parent_array = getattr(value, "parent_array", None)
         element_indices = getattr(value, "element_indices", None)
-        if parent_array is None or not element_indices:
+        # Only array-element Values have both an ArrayValue parent and
+        # element indices. Plain scalar Values should fall through to the
+        # later parameter/name lookup rules instead of being treated as
+        # failed array accesses.
+        if not isinstance(parent_array, ArrayValue) or not element_indices:
             return None
 
-        container = None
-        get_const_array = getattr(parent_array, "get_const_array", None)
-        if callable(get_const_array):
-            container = get_const_array()
+        # Prefer const_array metadata because bound Vector inputs created
+        # by the frontend keep their compile-time payload on the ArrayValue
+        # itself. Since parent_array is an ArrayValue here, get_const_array
+        # is part of the IR contract and should be called directly.
+        container = parent_array.get_const_array()
         if container is None:
+            # Fall back to explicit bindings for callers that resolve an
+            # element Value against a separate binding map instead of an
+            # ArrayValue carrying const_array metadata.
             parent_name = getattr(parent_array, "name", None)
             parent_uuid = getattr(parent_array, "uuid", None)
             if parent_name in self._bindings:
@@ -136,15 +146,23 @@ class ValueResolver:
             elif parent_uuid in self._bindings:
                 container = self._bindings[parent_uuid]
         if container is None:
+            # No compile-time source exists, so the element must remain
+            # symbolic. Returning None lets the caller preserve that state
+            # rather than inventing a placeholder value.
             return None
 
         for index_value in element_indices:
+            # Every index must be concrete before we can safely index the
+            # Python container. Symbolic indices intentionally stop
+            # resolution here to avoid silently selecting the wrong element.
             index = self.resolve(index_value)
             if index is None:
                 return None
             try:
                 container = container[int(index)]
             except (IndexError, KeyError, TypeError, ValueError):
+                # Shape/type mismatches mean this Value is not resolvable
+                # from the available compile-time data.
                 return None
         return _normalize_bound_scalar(container)
 
@@ -159,6 +177,8 @@ def _normalize_bound_scalar(value: Any) -> Any:
         Any: A Python ``bool``, ``int``, or ``float`` for numeric scalar
             inputs, or the original value for non-numeric objects.
     """
+    # bool is an Integral subclass, so preserve it before the integer
+    # branch. This keeps Bit values from becoming 0/1 integers.
     if isinstance(value, bool):
         return value
     if isinstance(value, numbers.Integral):
@@ -166,6 +186,10 @@ def _normalize_bound_scalar(value: Any) -> Any:
     if isinstance(value, numbers.Real):
         return float(value)
     if isinstance(value, np.generic):
+        # NumPy scalar arrays return np.generic instances on indexing.
+        # Convert only scalar NumPy values; arbitrary object-array
+        # payloads should pass through unchanged unless item() itself
+        # unwraps a NumPy scalar into a Python primitive.
         item = value.item()
         if isinstance(item, bool):
             return item
