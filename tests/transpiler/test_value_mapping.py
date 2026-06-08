@@ -303,6 +303,31 @@ class TestArrayRuntimeMetadataSymbolicParentSubstitution:
         )
         assert result.metadata.array_runtime.element_parent_indices == (1,)
 
+    def test_parent_metadata_without_element_uuids_is_preserved(self) -> None:
+        """Parent provenance can be substituted without element UUIDs."""
+        old_parent = _make_array_value("old_parent")
+        new_parent = _make_array_value("new_parent")
+        carrier = ArrayValue(
+            type=QubitType(),
+            name="parent_only",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_parent_uuids=(old_parent.uuid,),
+                    element_parent_indices=(2,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor({old_parent.uuid: new_parent}).substitute_value(
+            carrier
+        )
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == ()
+        assert result.metadata.array_runtime.element_parent_uuids == (new_parent.uuid,)
+        assert result.metadata.array_runtime.element_parent_indices == (2,)
+
 
 # ===========================================================================
 # Bug #5: ArrayValue.shape cloning and substitution

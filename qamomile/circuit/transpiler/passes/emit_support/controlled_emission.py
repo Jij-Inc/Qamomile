@@ -18,7 +18,10 @@ from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-from qamomile.circuit.ir.operation.composite_gate import InverseBlockOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -121,6 +124,44 @@ def emit_controlled_operations(
                 "backend that can convert the inner block to a native "
                 "controlled gate, or flatten the controls explicitly.",
                 operation="ControlledUOperation",
+            )
+        elif isinstance(op, CompositeGateOperation):
+            qubit_count = op.num_control_qubits + op.num_target_qubits
+            if len(target_indices) < qubit_count:
+                raise EmitError(
+                    "CompositeGateOperation target count does not match "
+                    "controlled block targets: "
+                    f"expected at least {qubit_count}, got {len(target_indices)}.",
+                    operation="CompositeGateOperation",
+                )
+            emit_controlled_composite_at_indices(
+                emit_pass,
+                circuit,
+                op,
+                [control_idx],
+                target_indices[:qubit_count],
+                bindings,
+            )
+        elif isinstance(op, InverseBlockOperation):
+            qubit_count = op.num_control_qubits + op.num_target_qubits
+            if len(target_indices) < qubit_count:
+                raise EmitError(
+                    "InverseBlockOperation target count does not match "
+                    "controlled block targets: "
+                    f"expected at least {qubit_count}, got {len(target_indices)}.",
+                    operation="InverseBlockOperation",
+                )
+            inner_controls = target_indices[: op.num_control_qubits]
+            inner_targets = target_indices[
+                op.num_control_qubits : op.num_control_qubits + op.num_target_qubits
+            ]
+            emit_inverse_block_at_indices(
+                emit_pass,
+                circuit,
+                op,
+                [control_idx, *inner_controls],
+                inner_targets,
+                bindings,
             )
         elif isinstance(op, ForOperation):
             start = (
@@ -1056,6 +1097,86 @@ def emit_custom_composite(
             )
 
 
+def emit_controlled_composite_at_indices(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: CompositeGateOperation,
+    control_indices: list[int],
+    qubit_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a composite gate under already-resolved outer controls.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (CompositeGateOperation): Composite operation to emit.
+        control_indices (list[int]): Physical outer control qubits.
+        qubit_indices (list[int]): Physical qubits occupied by ``op``'s
+            own control and target operands.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Returns:
+        None.
+
+    Raises:
+        EmitError: If the composite has no implementation block or the
+            fallback cannot represent the controlled composite.
+    """
+    impl = op.implementation
+    if impl is None:
+        raise EmitError(
+            "Cannot emit controlled composite without an implementation block.",
+            operation="CompositeGateOperation",
+        )
+
+    num_qubits = len(qubit_indices)
+    custom_gate = emit_pass._blockvalue_to_gate(
+        impl,
+        num_qubits,
+        bindings,
+        input_operands=op.operands,
+        operation_name="CompositeGateOperation",
+    )
+    if custom_gate is not None:
+        controlled_gate = custom_gate
+        if control_indices:
+            controlled_gate = emit_pass._emitter.gate_controlled(
+                custom_gate,
+                len(control_indices),
+            )
+        if controlled_gate is not None and _gate_matches_qubit_count(
+            controlled_gate,
+            len(control_indices) + num_qubits,
+        ):
+            emit_pass._emitter.append_gate(
+                circuit,
+                controlled_gate,
+                [*control_indices, *qubit_indices],
+            )
+            return
+
+    local_qubit_map: QubitMap = {}
+    local_bindings = _bind_and_populate_block_inputs(
+        emit_pass,
+        impl,
+        op.operands,
+        num_qubits,
+        bindings,
+        local_qubit_map,
+        operation_name="CompositeGateOperation",
+    )
+    emit_pass._emit_controlled_fallback(
+        circuit,
+        impl,
+        len(control_indices),
+        control_indices,
+        qubit_indices,
+        1,
+        local_bindings,
+    )
+
+
 def emit_inverse_block(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -1620,11 +1741,11 @@ def _gate_matches_qubit_count(gate: Any, num_qubits: int) -> bool:
         num_qubits (int): Number of qubits supplied by the call site.
 
     Returns:
-        bool: True when the backend does not expose a qubit-count field or
-            when the field matches `num_qubits`.
+        bool: True when the backend exposes a qubit-count field and the
+            field matches `num_qubits`.
     """
     gate_num_qubits = getattr(gate, "num_qubits", None)
-    return gate_num_qubits is None or gate_num_qubits == num_qubits
+    return gate_num_qubits == num_qubits
 
 
 def _resolve_call_operand(

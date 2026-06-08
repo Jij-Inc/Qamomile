@@ -304,7 +304,14 @@ class ValueSubstitutor:
             parent_uuids: list[str] = []
             parent_indices: list[int] = []
             should_write_parent_metadata = False
-            for i, replacement in enumerate(element_replacements):
+            parent_count = max(
+                len(element_replacements),
+                len(new_array_rt.element_parent_uuids),
+            )
+            for i in range(parent_count):
+                replacement = (
+                    element_replacements[i] if i < len(element_replacements) else None
+                )
                 root_addr = (
                     resolve_root_qubit_address(replacement)
                     if isinstance(replacement, Value)

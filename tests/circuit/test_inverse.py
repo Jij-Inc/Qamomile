@@ -213,6 +213,19 @@ def _inverse_loop_with_tail_layer(
 
 
 @qmc.qkernel
+def _inverse_nested_loop_layer(
+    q: qmc.Qubit,
+    rotation_angle: qmc.Float,
+) -> qmc.Qubit:
+    """Apply nested loops over one carried qubit wire."""
+    for _i in qmc.range(2):
+        q = qmc.rx(q, rotation_angle)
+        for _j in qmc.range(2):
+            q = qmc.rz(q, rotation_angle)
+    return q
+
+
+@qmc.qkernel
 def _inverse_branch_layer(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
     """Apply a conditional layer used to verify unsupported IfOperation."""
     if flag:
@@ -1543,6 +1556,64 @@ def test_inverse_for_operation_with_surrounding_gates_transpiles_to_identity(
     expected[0] = 1.0
 
     assert np.allclose(statevector, expected, atol=1e-8)
+
+
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+def test_inverse_nested_for_operation_roundtrip_cross_backend(
+    transpiler_factory,
+) -> None:
+    """Nested loop inverse preserves the carried qubit wire across backends."""
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = _inverse_nested_loop_layer(q, rotation_angle)
+        q = qmc.inverse(_inverse_nested_loop_layer)(q, rotation_angle)
+        return qmc.measure(q)
+
+    transpiler = transpiler_factory()
+    executable = transpiler.transpile(circuit, parameters=["rotation_angle"])
+    sample_result = executable.sample(
+        transpiler.executor(),
+        shots=32,
+        bindings={"rotation_angle": 0.37},
+    ).result()
+
+    _assert_all_zero_samples(sample_result, 1, 32)
+
+
+def test_inverse_qft_copies_resource_metadata() -> None:
+    """QFT/IQFT inversion should not share mutable resource metadata."""
+    q = Value(type=QubitType(), name="q")
+    q_after = q.next_version()
+    metadata = ResourceMetadata(
+        custom_metadata={"strategy": {"name": "test"}},
+        total_gates=1,
+    )
+    op = CompositeGateOperation(
+        operands=[q],
+        results=[q_after],
+        gate_type=CompositeGateType.QFT,
+        num_target_qubits=1,
+        resource_metadata=metadata,
+        has_implementation=False,
+    )
+    block = Block(
+        name="qft_layer",
+        input_values=[q],
+        output_values=[q_after],
+        operations=[op],
+        kind=BlockKind.HIERARCHICAL,
+    )
+
+    inverted = _BlockInverter().invert_block(block)
+    inverse_op = inverted.operations[0]
+
+    assert isinstance(inverse_op, CompositeGateOperation)
+    assert inverse_op.resource_metadata is not metadata
+    assert inverse_op.resource_metadata is not None
+    inverse_op.resource_metadata.custom_metadata["strategy"]["name"] = "mutated"
+    assert metadata.custom_metadata["strategy"]["name"] == "test"
 
 
 def test_inverse_if_operation_raises() -> None:

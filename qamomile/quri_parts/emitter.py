@@ -658,12 +658,12 @@ class QuriPartsGateEmitter:
         return None
 
     def gate_inverse(self, gate: Any) -> Any:
-        """Return the inverse of a non-parametric QURI Parts circuit.
+        """Return the inverse of a concrete QURI Parts circuit.
 
         Args:
-            gate (Any): Candidate QURI Parts circuit to invert. Parametric
-                circuits are accepted only when they contain no unresolved
-                parametric gates.
+            gate (Any): Candidate QURI Parts circuit to invert. Runtime
+                parametric circuits are expected to fall back to Qamomile's
+                gate-by-gate inverse implementation.
 
         Returns:
             Any: Inverted QURI Parts circuit when ``inverse_circuit`` can

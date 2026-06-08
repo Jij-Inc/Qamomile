@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import inspect
 from collections.abc import Callable, Sequence
@@ -312,7 +313,7 @@ def _copy_resource_metadata(
         return None
     return dataclasses.replace(
         resource_metadata,
-        custom_metadata=dict(resource_metadata.custom_metadata),
+        custom_metadata=copy.deepcopy(resource_metadata.custom_metadata),
     )
 
 
@@ -781,7 +782,7 @@ class _BlockInverter:
         custom_name = op.custom_name
         implementation_block = op.implementation_block
         has_implementation = op.has_implementation
-        resource_metadata = op.resource_metadata
+        resource_metadata = _copy_resource_metadata(op.resource_metadata)
         strategy_name = op.strategy_name
         source_block = None
 
@@ -829,7 +830,6 @@ class _BlockInverter:
             source_block = None
             implementation_block = None
             has_implementation = False
-            resource_metadata = _copy_resource_metadata(op.resource_metadata)
             custom_name = _inverse_stub_name(op.name)
 
         if source_block is not None and implementation_block is not None:
@@ -1123,9 +1123,7 @@ class _BlockInverter:
             body_map[op.loop_var_value.uuid] = loop_var_value
 
         body = self._clone_forward_operations(op.operations, body_map)
-        for uuid in value_map:
-            if uuid in body_map:
-                value_map[uuid] = body_map[uuid]
+        self._merge_loop_body_map(value_map, body_map)
 
         cloned = dataclasses.replace(
             op,
@@ -1313,9 +1311,7 @@ class _BlockInverter:
         if op.loop_var_value is not None:
             body_map[op.loop_var_value.uuid] = loop_var
         inverse_body = self._invert_operations(op.operations, body_map)
-        for uuid in value_map:
-            if uuid in body_map:
-                value_map[uuid] = body_map[uuid]
+        self._merge_loop_body_map(value_map, body_map)
         return [
             ForOperation(
                 # Match control_flow._value_to_ir_value: Python range sentinels
@@ -1330,6 +1326,24 @@ class _BlockInverter:
                 operations=inverse_body,
             )
         ]
+
+    def _merge_loop_body_map(
+        self,
+        value_map: dict[str, ValueBase],
+        body_map: dict[str, ValueBase],
+    ) -> None:
+        """Propagate loop-body substitutions back to the surrounding scope.
+
+        Args:
+            value_map (dict[str, ValueBase]): Surrounding UUID-keyed value
+                map to update.
+            body_map (dict[str, ValueBase]): Loop-body map after cloning or
+                inverting the body.
+
+        Returns:
+            None.
+        """
+        value_map.update(body_map)
 
     def _resolve_range_constants(
         self,
