@@ -428,6 +428,21 @@ def _single_inverse_implementation(block: Block) -> Block:
     return inverse_ops[0].implementation_block
 
 
+def test_inverse_block_operation_rejects_interleaved_parameters() -> None:
+    """InverseBlockOperation rejects quantum targets after parameters."""
+    q0 = Value(type=QubitType(), name="q0")
+    parameter = Value(type=UIntType(), name="theta")
+    q1 = Value(type=QubitType(), name="q1")
+
+    with pytest.raises(ValueError, match="quantum target operands must precede"):
+        InverseBlockOperation(
+            operands=[q0, parameter, q1],
+            results=[q0.next_version(), q1.next_version()],
+            num_control_qubits=0,
+            num_target_qubits=2,
+        )
+
+
 def _angle_from_case(angle_case: float | tuple[str, int]) -> float:
     """Return a deterministic angle for a boundary or seeded-random case.
 

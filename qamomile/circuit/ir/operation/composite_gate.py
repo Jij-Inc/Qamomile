@@ -185,15 +185,18 @@ class InverseBlockOperation(Operation):
     backend-native inverse/adjoint primitive, then fall back to
     ``implementation_block`` when native inversion is unavailable.
 
-    Operands are ordered as control qubits, target qubits, then
-    classical/object parameters. Results are control qubits followed by
-    target qubits after the inverse operation.
+    Operands are ordered as control qubits, target quantum operands, then
+    classical/object parameters. Results mirror the quantum operand layout:
+    control results first, then one target result per target operand. Vector
+    target operands therefore count as one operand/result while contributing
+    their scalar width to ``num_target_qubits``.
 
     Attributes:
         num_control_qubits (int): Number of leading control operands and
             pass-through control results.
-        num_target_qubits (int): Number of target operands after controls
-            and target quantum results.
+        num_target_qubits (int): Scalar qubit width occupied by target
+            operands at emit time. Vector operands count by static scalar
+            width here but still produce one vector result operand.
         custom_name (str): Human-readable inverse operation name.
         source_block (Block): Forward block whose inverse should be emitted.
         implementation_block (Block): Fallback block that already contains
@@ -205,6 +208,35 @@ class InverseBlockOperation(Operation):
     custom_name: str = ""
     source_block: Block | None = None
     implementation_block: Block | None = None
+
+    def __post_init__(self) -> None:
+        """Validate inverse-block operand layout invariants.
+
+        Raises:
+            ValueError: If control operands are not quantum values, or if a
+                quantum target operand appears after a non-quantum parameter.
+        """
+        if self.num_control_qubits < 0 or self.num_target_qubits < 0:
+            raise ValueError("inverse block qubit counts must be non-negative.")
+        if self.num_control_qubits > len(self.operands):
+            raise ValueError(
+                "inverse block control count exceeds the number of operands."
+            )
+
+        for operand in self.operands[: self.num_control_qubits]:
+            if not operand.type.is_quantum():
+                raise ValueError("inverse block control operands must be quantum.")
+
+        seen_parameter = False
+        for operand in self.operands[self.num_control_qubits :]:
+            if operand.type.is_quantum():
+                if seen_parameter:
+                    raise ValueError(
+                        "inverse block quantum target operands must precede "
+                        "classical/object parameters."
+                    )
+            else:
+                seen_parameter = True
 
     @property
     def control_qubits(self) -> list["Value"]:

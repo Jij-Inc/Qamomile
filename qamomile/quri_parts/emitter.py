@@ -657,6 +657,18 @@ class QuriPartsGateEmitter:
         """
         return None
 
+    def supports_gate_inverse(self) -> bool:
+        """Report QURI Parts circuit inverse support.
+
+        Returns:
+            bool: True because ``gate_inverse`` can invert concrete
+            QURI Parts circuits. The backend still reports no reusable
+            gate support, so inverse blocks normally use the
+            transpiler-level native path rather than the shared
+            ``blockvalue_to_gate`` path.
+        """
+        return True
+
     def gate_inverse(self, gate: Any) -> Any:
         """Return the inverse of a concrete QURI Parts circuit.
 

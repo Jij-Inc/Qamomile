@@ -105,5 +105,7 @@ from __future__ import annotations
 # still read old, field-less v1 payloads) rather than a schema bump;
 # the version stays at 1.  The same pattern now also applies to the
 # ``num_control_args`` field added alongside the multi-arg control
-# prefix.
+# prefix. New operation tags such as ``InverseBlockOperation`` are also
+# additive: old loaders fail loudly on the unknown tag, while v1 readers
+# that know the tag can still read older payloads.
 SCHEMA_VERSION: int = 1

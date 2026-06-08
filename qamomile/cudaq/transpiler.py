@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     RuntimeClassicalExpr,
 )
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -661,6 +662,13 @@ def _validate_adjoint_helper_ops(
     """
     _validate_controlled_helper_unitary_ops(operations, bindings)
     for op in operations:
+        if isinstance(op, CallBlockOperation):
+            raise EmitError(
+                "CUDA-Q cudaq.adjoint helper kernels cannot contain residual "
+                "nested qkernel calls; falling back to Qamomile inverse "
+                "decomposition.",
+                operation="InverseBlockOperation",
+            )
         if isinstance(op, ControlledUOperation):
             raise EmitError(
                 "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "

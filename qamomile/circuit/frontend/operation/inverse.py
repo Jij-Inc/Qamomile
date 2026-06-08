@@ -98,7 +98,7 @@ def _normalize_zero(value: float) -> float:
     Returns:
         float: `0.0` when `value` is either signed zero, otherwise `value`.
     """
-    return 0.0 if value == 0.0 else value
+    return abs(value) if value == 0.0 else value
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1650,6 +1650,9 @@ class InverseGate:
             _as_value(binding.active_handle.value, "inverse qkernel input")
             for binding in quantum_bindings
         ]
+        # `InverseBlockOperation` stores the scalar backend width separately
+        # from operand/results lists: a Vector[Qubit] contributes many scalar
+        # qubits here but remains a single operand/result value.
         target_width = sum(
             width
             for value in quantum_values
@@ -1798,6 +1801,10 @@ def inverse(target: QKernel | Callable[..., Any]) -> Any:
     Raises:
         TypeError: If `target` cannot be interpreted as a gate-like
             callable, or if a `CompositeGate` instance is passed directly.
+        NotImplementedError: If an inverted kernel uses unsupported
+            operations such as `if`/`while`/`for items` control flow,
+            `QInit`, or a `ForOperation` whose bounds are not compile-time
+            constants when the inverse wrapper is traced.
 
     Example:
         >>> import qamomile.circuit as qmc
