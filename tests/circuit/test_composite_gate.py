@@ -19,7 +19,11 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types import FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
+    emit_iqft_with_strategy,
+    emit_qft_with_strategy,
+    emit_qpe_manual,
     extract_phase_from_params,
 )
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
@@ -1366,6 +1370,48 @@ class TestQPEPhaseExtraction:
             has_implementation=False,
         )
 
+    @staticmethod
+    def _typed_op(gate_type: CompositeGateType) -> CompositeGateOperation:
+        """Create a minimal operation with the requested composite gate type.
+
+        Args:
+            gate_type (CompositeGateType): Composite gate type to assign.
+
+        Returns:
+            CompositeGateOperation: Block-free composite operation for direct
+                helper validation tests.
+        """
+        target = Value(type=QubitType(), name="target")
+        phase = Value(type=FloatType(), name="phase").with_const(0.25)
+        return CompositeGateOperation(
+            operands=[target, phase],
+            results=[],
+            gate_type=gate_type,
+            num_target_qubits=1,
+            has_implementation=False,
+        )
+
+    @staticmethod
+    def _qpe_op_with_params(params: list[Value]) -> CompositeGateOperation:
+        """Create a block-free QPE operation with explicit parameter operands.
+
+        Args:
+            params (list[Value]): Classical parameter operands to append after
+                the target qubit operand.
+
+        Returns:
+            CompositeGateOperation: QPE operation with the supplied parameter
+                operands.
+        """
+        target = Value(type=QubitType(), name="target")
+        return CompositeGateOperation(
+            operands=[target, *params],
+            results=[],
+            gate_type=CompositeGateType.QPE,
+            num_target_qubits=1,
+            has_implementation=False,
+        )
+
     def test_extract_phase_from_bound_array_element(self):
         """QPE fallback phase extraction reads a bound array element."""
         parent = ArrayValue(type=FloatType(), name="theta")
@@ -1531,6 +1577,64 @@ class TestQPEPhaseExtraction:
         )
 
         assert phase is None
+
+    def test_extract_phase_rejects_multiple_concrete_parameters(self):
+        """QPE fallback phase extraction rejects ambiguous numeric params."""
+        first = Value(type=FloatType(), name="first").with_const(0.125)
+        second = Value(type=FloatType(), name="second").with_const(0.25)
+
+        with pytest.raises(EmitError, match="multiple numeric parameters"):
+            extract_phase_from_params(
+                self._emit_pass(),
+                self._qpe_op_with_params([first, second]),
+                {},
+            )
+
+    def test_extract_phase_rejects_non_qpe_operations(self):
+        """QPE phase extraction rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports QPE"):
+            extract_phase_from_params(
+                self._emit_pass(), self._typed_op(CompositeGateType.QFT), {}
+            )
+
+    def test_extract_phase_rejects_non_composite_operations(self):
+        """QPE phase extraction rejects non-composite operations."""
+        result = Value(type=QubitType(), name="q")
+        non_composite_op: Any = QInitOperation(operands=[], results=[result])
+
+        with pytest.raises(EmitError, match="only supports QPE"):
+            extract_phase_from_params(self._emit_pass(), non_composite_op, {})
+
+    def test_emit_qpe_manual_rejects_non_qpe_operations(self):
+        """Manual QPE emission rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports QPE"):
+            emit_qpe_manual(
+                self._emit_pass(),
+                None,
+                self._typed_op(CompositeGateType.QFT),
+                [],
+                {},
+            )
+
+    def test_emit_qft_with_strategy_rejects_non_qft_operations(self):
+        """QFT strategy emission rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports QFT"):
+            emit_qft_with_strategy(
+                self._emit_pass(),
+                None,
+                self._typed_op(CompositeGateType.IQFT),
+                [],
+            )
+
+    def test_emit_iqft_with_strategy_rejects_non_iqft_operations(self):
+        """IQFT strategy emission rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports IQFT"):
+            emit_iqft_with_strategy(
+                self._emit_pass(),
+                None,
+                self._typed_op(CompositeGateType.QFT),
+                [],
+            )
 
 
 class TestVectorQubitParamRejection:
