@@ -597,6 +597,15 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         collector.visit_operations(operations)
         consumers = collector.consumers
 
+        # Map every op (nested or top-level) to its top-level ancestor. A
+        # consumer's segment is decided by the top-level op that contains it:
+        # an op nested inside a quantum-effective control-flow body (e.g. a
+        # ``BinOp`` inside ``qmc.range``) rides in the quantum segment, not a
+        # classical one. Classifying a nested consumer by its own kind would
+        # wrongly treat such a chain link as a classical sink and reject a
+        # valid pure-quantum nested angle expression.
+        top_level_owner = self._build_top_level_owner(operations)
+
         # Seed candidates: non-measurement, quantum-feeding, non-output
         # top-level classical ops.
         absorbable: set[int] = {
@@ -618,24 +627,70 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             for op in operations:
                 if id(op) not in absorbable:
                     continue
-                if self._has_classical_sink(op, consumers, absorbable):
+                if self._has_classical_sink(
+                    op, consumers, absorbable, top_level_owner
+                ):
                     absorbable.discard(id(op))
                     changed = True
         return absorbable
+
+    def _build_top_level_owner(
+        self, operations: list[Operation]
+    ) -> dict[int, Operation]:
+        """Map every operation to the top-level operation that contains it.
+
+        Walks each top-level op and, recursively, the bodies of any nested
+        control-flow op, recording the top-level ancestor for every
+        descendant. A top-level op maps to itself. Used to decide which
+        segment a (possibly nested) consumer executes in.
+
+        Args:
+            operations (list[Operation]): Top-level operations of the block.
+
+        Returns:
+            dict[int, Operation]: ``id(op) -> top-level ancestor op`` for every
+                op reachable from ``operations`` (including the top-level ops
+                themselves).
+        """
+        owner: dict[int, Operation] = {}
+
+        def record(op: Operation, top: Operation) -> None:
+            """Record ``top`` as the top-level owner of ``op`` and its descendants.
+
+            Args:
+                op (Operation): The current (possibly nested) operation.
+                top (Operation): The top-level ancestor of ``op``.
+
+            Returns:
+                None: Mutates the enclosing ``owner`` map in place.
+            """
+            owner[id(op)] = top
+            if isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    for inner in body:
+                        record(inner, top)
+
+        for op in operations:
+            record(op, op)
+        return owner
 
     def _has_classical_sink(
         self,
         op: Operation,
         consumers: dict[str, list[Operation]],
         absorbable: set[int],
+        top_level_owner: dict[int, Operation],
     ) -> bool:
         """Return whether any result of ``op`` is read by a classical sink.
 
-        A classical sink is a consumer that is neither a quantum / hybrid
-        operation nor a currently-absorbable classical op — i.e. an op that
-        will run in a classical segment (measurement post-processing, a
-        non-absorbable classical expression, classical control flow) and would
-        therefore fail to read a value buried in a quantum segment.
+        A classical sink is a consumer that will run in a classical segment
+        (measurement post-processing, a non-absorbable classical expression,
+        classical control flow) and would therefore fail to read a value buried
+        in a quantum segment. The segment a consumer runs in is decided by its
+        top-level ancestor: a consumer nested inside a quantum/hybrid-effective
+        control-flow body rides in the quantum segment (not a sink), and a
+        top-level absorbable classical op joins the quantum segment too. Only
+        consumers owned by a genuinely classical top-level op are sinks.
 
         Args:
             op (Operation): The candidate op whose results are checked.
@@ -643,6 +698,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 operations that read it.
             absorbable (set[int]): ``id()`` of ops still considered absorbable
                 in the current fixpoint iteration.
+            top_level_owner (dict[int, Operation]): Map from ``id(op)`` to the
+                top-level op that contains it, as built by
+                :meth:`_build_top_level_owner`.
 
         Returns:
             bool: ``True`` if some result of ``op`` is consumed by a classical
@@ -654,12 +712,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             for consumer in consumers.get(result.uuid, ()):
                 if consumer is op:
                     continue
-                if self._effective_kind(consumer) in (
+                owner = top_level_owner.get(id(consumer), consumer)
+                if self._effective_kind(owner) in (
                     OperationKind.QUANTUM,
                     OperationKind.HYBRID,
                 ):
                     continue
-                if id(consumer) in absorbable:
+                if id(owner) in absorbable:
                     continue
                 return True
         return False

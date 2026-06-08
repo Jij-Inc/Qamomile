@@ -835,6 +835,41 @@ def value_feeding_gate_and_classical_run(
     return qmc.measure(q), angle + 1.0
 
 
+# --- Regression: a classical chain split across a control-flow boundary ---
+#
+# ``base = phase * 2`` is a top-level classical op, but the next link of the
+# chain (``angle = base + 1``) lives inside the ``qmc.range`` loop body. The
+# absorbable-set fixpoint classifies a consumer by the top-level op that
+# contains it: the nested ``angle = base + 1`` rides in the (quantum-effective)
+# loop's segment, so ``base`` is still absorbed rather than being treated as
+# feeding a classical sink. Without that ownership-aware classification the
+# kernel spuriously raised ``MultipleQuantumSegmentsError``. The loop index is
+# used so the loop unrolls and the kernel actually executes; both qubits end up
+# in state ``rx(2 * phase + 1) |0>``.
+
+
+@qmc.qkernel
+def nested_classical_chain_sample(phase: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Sample a nested classical chain (`base` top-level, `angle` in a loop)."""
+    q = qmc.qubit_array(2, "q")
+    base = phase * 2.0
+    for i in qmc.range(2):
+        angle = base + 1.0
+        q[i] = qmc.rx(q[i], angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def nested_classical_chain_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+    """Run expval of a nested classical chain split across a loop boundary."""
+    q = qmc.qubit_array(2, "q")
+    base = phase * 2.0
+    for i in qmc.range(2):
+        angle = base + 1.0
+        q[i] = qmc.rx(q[i], angle)
+    return qmc.expval(q, obs)
+
+
 @dataclasses.dataclass(frozen=True)
 class FrontendExecutionCase:
     """Describe one frontend pattern with paired sample and run kernels."""
@@ -1354,3 +1389,53 @@ def test_value_feeding_gate_and_classical_is_not_miscompiled(
     _name, transpiler, _executor = backend
     with pytest.raises(MultipleQuantumSegmentsError):
         transpiler.transpile(value_feeding_gate_and_classical_run, parameters=["phase"])
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_nested_classical_chain_in_loop_sample_and_run(
+    backend: Backend, seed: int
+) -> None:
+    """A classical chain split across a loop boundary must not split segments.
+
+    Regression for the absorbable-set fixpoint's ownership-aware classification:
+    a top-level parameter expression (``base = phase * 2``) whose next chain link
+    (``angle = base + 1``) lives inside a ``qmc.range`` body must still be
+    absorbed into the single quantum segment. Both qubits end up in
+    ``rx(2 * phase + 1) |0>``, checked on the sample and expval paths.
+    """
+    name, transpiler, executor = backend
+    rng = np.random.default_rng(seed)
+    angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
+    shots = 2048
+
+    sample_executable = transpiler.transpile(
+        nested_classical_chain_sample, parameters=["phase"]
+    )
+    run_executable = transpiler.transpile(
+        nested_classical_chain_run,
+        bindings={"obs": qm_o.Y(0) + qm_o.Y(1)},
+        parameters=["phase"],
+    )
+
+    for phase in angles:
+        effective = 2.0 * phase + 1.0
+        counts = _counts(
+            sample_executable.sample(
+                executor, shots=shots, bindings={"phase": phase}
+            ).result()
+        )
+        # Each qubit is rx(2*phase + 1)|0>, so P(qubit == 1) = sin^2(effective/2).
+        expected_one_freq = math.sin(effective / 2) ** 2
+        for qubit in range(2):
+            one_freq = sum(c for bits, c in counts.items() if bits[qubit] == 1) / shots
+            assert abs(one_freq - expected_one_freq) < 0.06, (
+                f"{name}: seed={seed} phase={phase} qubit={qubit} one-frequency "
+                f"{one_freq:.3f}, expected {expected_one_freq:.3f}"
+            )
+
+        got = run_executable.run(executor, bindings={"phase": phase}).result()
+        # <Y> on rx(theta)|0> is -sin(theta); summed over the two qubits.
+        expected_expval = 2.0 * (-math.sin(effective))
+        assert np.isclose(got, expected_expval, atol=1e-5), (
+            f"{name}: seed={seed} phase={phase} got {got}, expected {expected_expval}"
+        )
