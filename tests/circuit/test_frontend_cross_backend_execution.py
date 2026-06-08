@@ -160,6 +160,18 @@ def _h_then_full_reslice(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
+def _rx_with_angle(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Apply RX(theta) through a helper qkernel."""
+    return qmc.rx(q, angle=theta)
+
+
+@qmc.qkernel
+def _phase_gate_for_view_qpe(q: qmc.Qubit, theta: float) -> qmc.Qubit:
+    """Apply a phase gate for QPE controlled-U regression tests."""
+    return qmc.p(q, theta)
+
+
+@qmc.qkernel
 def _qft_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     """Apply a shape-dependent stdlib composite inside a subkernel."""
     q = qmc.qft(q)
@@ -278,6 +290,42 @@ def vector_view_full_reslice_run(obs: qmc.Observable) -> qmc.Float:
     evens = _h_then_full_reslice(evens)
     q[0:4:2] = evens
     return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def vector_view_value_element_sample(
+    values: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Sample after passing ``values[1:3][0]`` to a helper qkernel."""
+    q = qmc.qubit_array(1, "q")
+    view = values[1:3]
+    q[0] = _rx_with_angle(q[0], view[0])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def vector_view_value_element_run(
+    values: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval after passing ``values[1:3][0]`` to a helper qkernel."""
+    q = qmc.qubit_array(1, "q")
+    view = values[1:3]
+    q[0] = _rx_with_angle(q[0], view[0])
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def vector_view_qpe_parameter_sample(
+    gammas: qmc.Vector[qmc.Float],
+) -> qmc.Float:
+    """Sample QPE after binding controlled-U theta from a VectorView element."""
+    counting = qmc.qubit_array(3, name="counting")
+    target = qmc.qubit(name="target")
+    target = qmc.x(target)
+    view = gammas[1:3]
+    phase = qmc.qpe(target, counting, _phase_gate_for_view_qpe, theta=view[0])
+    return qmc.measure(phase)
 
 
 @qmc.qkernel
@@ -784,6 +832,20 @@ FRONTEND_EXECUTION_CASES = [
         },
     ),
     FrontendExecutionCase(
+        name="vector-view-value-element-helper",
+        sample_kernel=vector_view_value_element_sample,
+        run_kernel=vector_view_value_element_run,
+        sample_mode="deterministic",
+        expected_bits=(1,),
+        expected_support={(1,)},
+        expected_expval=-1.0,
+        sample_bindings={"values": np.array([0.0, math.pi, 0.0])},
+        run_bindings={
+            "values": np.array([0.0, math.pi, 0.0]),
+            "obs": qm_o.Z(0),
+        },
+    ),
+    FrontendExecutionCase(
         name="controlled-qkernel",
         sample_kernel=controlled_qkernel_sample,
         run_kernel=controlled_qkernel_run,
@@ -1021,6 +1083,26 @@ def test_frontend_pattern_run_execution(
     assert np.isclose(got, case.expected_expval, atol=1e-5), (
         f"{name} {case.name}: got {got}, expected {case.expected_expval}"
     )
+
+
+def test_vector_view_qpe_controlled_u_parameter_sample(backend: Backend) -> None:
+    """Execute QPE with controlled-U theta bound from ``gammas[1:3][0]``."""
+    name, transpiler, executor = backend
+    shots = 32
+    executable = transpiler.transpile(
+        vector_view_qpe_parameter_sample,
+        bindings={"gammas": np.array([math.pi / 4, math.pi / 2, math.pi])},
+    )
+
+    result = executable.sample(executor, shots=shots).result()
+
+    total = 0
+    for value, count in result.results:
+        assert value == pytest.approx(0.25), (
+            f"{name}: expected phase 0.25, got {value} (count={count})"
+        )
+        total += count
+    assert total == shots, f"{name}: expected {shots} shots, got {total}"
 
 
 def test_controlled_parameterized_composite_runtime_parameter(
