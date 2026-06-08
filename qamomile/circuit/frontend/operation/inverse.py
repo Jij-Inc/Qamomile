@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 from collections.abc import Callable, Sequence
+from numbers import Real
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.frontend.composite_gate import CompositeGate
@@ -87,6 +88,18 @@ _ROTATION_GATES: frozenset[GateOperationType] = frozenset(
 )
 
 
+def _normalize_zero(value: float) -> float:
+    """Normalize signed floating zero to positive zero.
+
+    Args:
+        value (float): Floating-point value to normalize.
+
+    Returns:
+        float: `0.0` when `value` is either signed zero, otherwise `value`.
+    """
+    return 0.0 if value == 0.0 else value
+
+
 @dataclasses.dataclass(frozen=True)
 class _InverseRotationCallable:
     """Apply the inverse of a native rotation gate callable.
@@ -120,7 +133,10 @@ class _InverseRotationCallable:
         """
         signature = inspect.signature(self.rotation_callable)
         bound = signature.bind(*args, **kwargs)
-        bound.arguments[self.angle_param] = -bound.arguments[self.angle_param]
+        negated = -bound.arguments[self.angle_param]
+        if isinstance(negated, Real):
+            negated = _normalize_zero(float(negated))
+        bound.arguments[self.angle_param] = negated
         return self.rotation_callable(*bound.args, **bound.kwargs)
 
 
@@ -231,7 +247,7 @@ def _const_float(name: str, value: float) -> Value:
     Returns:
         Value: A `FloatType` value carrying `value` as metadata.
     """
-    return Value(type=FloatType(), name=name).with_const(value)
+    return Value(type=FloatType(), name=name).with_const(_normalize_zero(value))
 
 
 def _const_uint(name: str, value: int) -> Value:
@@ -345,12 +361,20 @@ class _BlockInverter:
         """Initialize an empty recursion guard."""
         self._active_blocks: set[int] = set()
 
-    def invert_block(self, block: Block) -> Block:
+    def invert_block(
+        self,
+        block: Block,
+        extra_value_map: dict[str, ValueBase] | None = None,
+    ) -> Block:
         """Create a standalone inverse block.
 
         Args:
             block (Block): Block to invert. Its quantum outputs must be
                 pass-through versions of its quantum inputs.
+            extra_value_map (dict[str, ValueBase] | None): Optional
+                UUID-keyed substitutions for auxiliary values such as
+                call-site-resolved vector shape dimensions. Defaults to
+                None.
 
         Returns:
             Block: A hierarchical block containing the inverse operations.
@@ -364,6 +388,8 @@ class _BlockInverter:
         value_map: dict[str, ValueBase] = {
             value.uuid: value for value in block.input_values
         }
+        if extra_value_map is not None:
+            value_map.update(extra_value_map)
         self._seed_output_values(block, value_map)
         operations = self._invert_block_operations(block, value_map)
         output_values = [
@@ -446,8 +472,7 @@ class _BlockInverter:
 
         Raises:
             TypeError: If any output is non-quantum or does not correspond
-                to a quantum input with the same logical identity and output
-                position.
+                to exactly one quantum input.
         """
         quantum_inputs = [
             value for value in block.input_values if value.type.is_quantum()
@@ -458,16 +483,22 @@ class _BlockInverter:
                 "inverse() can only invert kernels whose quantum outputs "
                 "preserve every quantum input."
             )
-        for input_value, output in zip(quantum_inputs, quantum_outputs):
-            if output.logical_id != input_value.logical_id:
-                raise TypeError(
-                    "inverse() can only invert kernels whose quantum outputs "
-                    "preserve the input order."
-                )
+        output_logical_ids = [output.logical_id for output in quantum_outputs]
+        input_logical_ids = [input_value.logical_id for input_value in quantum_inputs]
+        if set(output_logical_ids) != set(input_logical_ids) or len(
+            output_logical_ids
+        ) != len(set(output_logical_ids)):
+            raise TypeError(
+                "inverse() can only invert kernels whose quantum outputs "
+                "preserve the logical identity of every input quantum value."
+            )
         quantum_inputs_by_logical_id = {
             value.logical_id: value for value in quantum_inputs
         }
-        for output in quantum_outputs:
+        positional_values = [
+            value_map[input_value.uuid] for input_value in quantum_inputs
+        ]
+        for output, positional_value in zip(quantum_outputs, positional_values):
             if not output.type.is_quantum():
                 raise TypeError(
                     "inverse() can only invert kernels whose outputs are "
@@ -479,8 +510,8 @@ class _BlockInverter:
                     "inverse() can only invert kernels whose quantum outputs "
                     "preserve the logical identity of an input quantum value."
                 )
-            if output.uuid not in value_map:
-                value_map[output.uuid] = value_map[input_value.uuid]
+            value_map[input_value.uuid] = positional_value
+            value_map[output.uuid] = positional_value
 
     def _invert_block_operations(
         self,
@@ -1451,17 +1482,31 @@ class InverseGate:
             name=active.name,
         )
 
-    def _can_emit_atomic_inverse(self, bindings: list[_InputBinding]) -> bool:
+    def _can_emit_atomic_inverse(
+        self,
+        block: Block,
+        bindings: list[_InputBinding],
+    ) -> bool:
         """Return whether this inverse call can stay atomic until emit.
 
         Args:
+            block (Block): Wrapped qkernel block.
             bindings (list[_InputBinding]): Prepared call-site bindings.
 
         Returns:
             bool: True when every quantum input has a statically known
-                scalar qubit width.
+                scalar qubit width and the inverse result order matches the
+                wrapped input order.
         """
-        return all(
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        quantum_outputs = list(block.output_values)
+        preserves_output_order = len(quantum_inputs) == len(quantum_outputs) and all(
+            input_value.logical_id == output.logical_id
+            for input_value, output in zip(quantum_inputs, quantum_outputs)
+        )
+        return preserves_output_order and all(
             _static_quantum_width(binding.active_handle.value) is not None
             for binding in bindings
             if binding.is_quantum
@@ -1482,7 +1527,18 @@ class InverseGate:
             Any: Quantum output handle, or a tuple of handles when the
                 wrapped kernel has multiple quantum inputs.
         """
-        inverse_block = _BlockInverter().invert_block(block)
+        shape_value_map: dict[str, ValueBase] = {}
+        for binding in bindings:
+            if isinstance(binding.block_input, ArrayValue) and isinstance(
+                binding.active_handle.value,
+                ArrayValue,
+            ):
+                for block_dim, actual_dim in zip(
+                    binding.block_input.shape,
+                    binding.active_handle.value.shape,
+                ):
+                    shape_value_map[block_dim.uuid] = actual_dim
+        inverse_block = _BlockInverter().invert_block(block, shape_value_map)
         quantum_bindings = [binding for binding in bindings if binding.is_quantum]
         quantum_values = [
             _as_value(binding.active_handle.value, "inverse qkernel input")
@@ -1532,7 +1588,7 @@ class InverseGate:
         bound_args = self._bind_arguments(*args, **kwargs)
         block = self._select_block(bound_args.arguments)
         bindings = self._prepare_inputs(block, bound_args.arguments)
-        if self._can_emit_atomic_inverse(bindings):
+        if self._can_emit_atomic_inverse(block, bindings):
             return self._emit_atomic_inverse(block, bindings)
 
         value_map = self._initial_value_map(bindings)

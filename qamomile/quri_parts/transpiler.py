@@ -793,6 +793,7 @@ class QuriPartsEmitPass(
         num_qubits: int,
         bindings: dict[str, Any],
         input_operands: list[Any] | None = None,
+        operation_name: str = "ControlledUOperation",
     ) -> None:
         """Return no native gate object for QURI Parts controlled blocks.
 
@@ -810,6 +811,8 @@ class QuriPartsEmitPass(
             bindings (dict[str, Any]): Ignored local bindings.
             input_operands (list[Any] | None): Ignored call-site
                 operands. Defaults to None.
+            operation_name (str): Ignored diagnostic operation name.
+                Defaults to ``"ControlledUOperation"``.
 
         Returns:
             None: Always signals that the backend-specific fallback must

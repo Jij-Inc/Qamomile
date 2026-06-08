@@ -966,6 +966,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         num_qubits: int,
         bindings: dict[str, Any],
         input_operands: list[Any] | None = None,
+        operation_name: str = "ControlledUOperation",
     ) -> None:
         """No-op: CUDA-Q codegen does not support sub-circuit gate conversion.
 
@@ -980,6 +981,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             bindings (dict[str, Any]): Ignored emit bindings.
             input_operands (list[Any] | None): Ignored call-site operands.
                 Defaults to None.
+            operation_name (str): Ignored diagnostic operation name.
+                Defaults to ``"ControlledUOperation"``.
         """
         return None
 

@@ -31,6 +31,8 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import DictValue, Value
 from qamomile.circuit.stdlib import IQFT, QFT
+from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+from qamomile.circuit.visualization.style import CircuitStyle
 from tests.circuit.conftest import run_statevector
 
 _HAS_QISKIT = True
@@ -924,11 +926,36 @@ def _vector_loop_qkernel_roundtrip_kernel() -> qmc.QKernel:
     return circuit
 
 
+def _generic_vector_qkernel_roundtrip_kernel() -> qmc.QKernel:
+    """Build a size-generic Vector qkernel inverse roundtrip kernel.
+
+    Returns:
+        qmc.QKernel: Kernel that samples all-zero after a generic vector
+            layer and its inverse are applied.
+    """
+
+    @qmc.qkernel
+    def layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply a broadcast gate to a symbolic-width vector."""
+        qs = qmc.h(qs)
+        return qs
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = layer(qs)
+        qs = qmc.inverse(layer)(qs)
+        return qmc.measure(qs)
+
+    return circuit
+
+
 QKERNEL_ROUNDTRIP_CASES = [
     pytest.param(_fixed_scalar_qkernel_roundtrip_kernel, 1, id="scalar-layer"),
     pytest.param(_controlled_qkernel_roundtrip_kernel, 2, id="controlled"),
     pytest.param(_controlled_native_roundtrip_kernel, 2, id="controlled-native"),
     pytest.param(_custom_composite_qkernel_roundtrip_kernel, 1, id="custom-composite"),
+    pytest.param(_generic_vector_qkernel_roundtrip_kernel, 3, id="generic-vector"),
     pytest.param(_vector_param_qkernel_roundtrip_kernel, 3, id="vector-param"),
     pytest.param(_vector_loop_qkernel_roundtrip_kernel, 3, id="vector-loop"),
 ]
@@ -1164,8 +1191,8 @@ def test_inverse_qkernel_rejects_vector_for_scalar_input() -> None:
         circuit.build()
 
 
-def test_inverse_qkernel_rejects_reordered_quantum_outputs() -> None:
-    """inverse(qkernel) rejects kernels that only reorder output wires."""
+def test_inverse_qkernel_allows_reordered_quantum_outputs(qiskit_transpiler) -> None:
+    """inverse(qkernel) treats pure output reordering as a wire permutation."""
 
     @qmc.qkernel
     def reorder(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
@@ -1173,14 +1200,56 @@ def test_inverse_qkernel_rejects_reordered_quantum_outputs() -> None:
         return b, a
 
     @qmc.qkernel
-    def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
+    def circuit() -> tuple[qmc.Bit, qmc.Bit]:
         a = qmc.qubit("a")
         b = qmc.qubit("b")
+        a = qmc.x(a)
         a, b = qmc.inverse(reorder)(a, b)
-        return a, b
+        return qmc.measure(a), qmc.measure(b)
 
-    with pytest.raises(TypeError, match="preserve the input order"):
-        circuit.build()
+    executable = qiskit_transpiler.transpile(circuit)
+    sample_result = executable.sample(qiskit_transpiler.executor(), shots=32).result()
+
+    assert sample_result.results == [((False, True), 32)]
+
+
+def test_inverse_qkernel_builds_symbolic_vector_broadcast_inverse() -> None:
+    """inverse(qkernel) specializes symmetric Vector broadcast loop bounds."""
+
+    @qmc.qkernel
+    def layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply a broadcast gate to a symbolic-width vector."""
+        qs = qmc.h(qs)
+        return qs
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Qubit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = qmc.inverse(layer)(qs)
+        return qs
+
+    implementation = _single_inverse_implementation(circuit.build())
+    loops = [op for op in implementation.operations if isinstance(op, ForOperation)]
+
+    assert len(loops) == 1
+    assert [operand.get_const() for operand in loops[0].operands] == [2, -1, -1]
+
+
+def test_inverse_rotation_normalizes_signed_zero() -> None:
+    """inverse(rotation) stores positive zero for zero-angle inverses."""
+
+    @qmc.qkernel
+    def direct_native() -> qmc.Qubit:
+        a = qmc.qubit("a")
+        a = qmc.inverse(qmc.rz)(a, 0.0)
+        return a
+
+    block = direct_native.build()
+    gates = [op for op in block.operations if isinstance(op, GateOperation)]
+    assert gates[0].theta is not None
+    theta = gates[0].theta.get_const()
+    assert theta == 0.0
+    assert math.copysign(1.0, float(theta)) == 1.0
 
 
 def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:
@@ -1219,6 +1288,32 @@ def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:
         GateOperationType.RZ,
         GateOperationType.H,
     ]
+
+
+def test_inverse_block_visual_label_uses_source_name() -> None:
+    """InverseBlockOperation visualization labels the source block inverse."""
+
+    q = Value(type=QubitType(), name="q")
+    source = Block(
+        name="sub",
+        input_values=[q],
+        output_values=[q],
+        operations=[],
+        kind=BlockKind.HIERARCHICAL,
+    )
+    op = InverseBlockOperation(
+        operands=[q],
+        results=[q.next_version()],
+        num_target_qubits=1,
+        custom_name="sub_inverse",
+        source_block=source,
+        implementation_block=source,
+    )
+    analyzer = CircuitAnalyzer(Block(), CircuitStyle())
+
+    gate = analyzer._build_vgate(op, ("inverse",), {}, {}, {})
+
+    assert gate.label == "SUB^-1"
 
 
 def test_inverse_qft_function_maps_to_iqft() -> None:

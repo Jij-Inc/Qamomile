@@ -11,6 +11,7 @@ pytest.importorskip("quri_parts.circuit")
 
 import qamomile.circuit as qmc  # noqa: E402
 from qamomile.quri_parts import (  # noqa: E402
+    QuriPartsExecutor,
     QuriPartsGateEmitter,
 )
 
@@ -267,3 +268,40 @@ class TestQuriPartsTranspiler:
 
         assert quri_circuit.parameter_count == 1
         assert len(quri_circuit.gates) > 0
+
+    def test_controlled_toffoli_matrix_path_executes(self) -> None:
+        """Controlled-Toffoli fallback flips only the intended target qubit."""
+        pytest.importorskip("quri_parts.qulacs")
+
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def toffoli_layer(
+            left: qmc.Qubit,
+            right: qmc.Qubit,
+            target: qmc.Qubit,
+        ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+            """Apply a Toffoli gate inside a controlled body."""
+            left, right, target = qmc.ccx(left, right, target)
+            return left, right, target
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            """Prepare three controls and apply a controlled Toffoli."""
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            qs[0], qs[1], qs[2], qs[3] = qmc.control(toffoli_layer)(
+                qs[0],
+                qs[1],
+                qs[2],
+                qs[3],
+            )
+            return qmc.measure(qs)
+
+        transpiler = QuriPartsTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(QuriPartsExecutor(seed=123), shots=16).result()
+
+        assert result.results == [((True, True, True, True), 16)]

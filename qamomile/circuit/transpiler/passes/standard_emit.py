@@ -460,6 +460,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         num_qubits: int,
         bindings: dict[str, Any],
         input_operands: list[Any] | None = None,
+        operation_name: str = "ControlledUOperation",
     ) -> Any:
         """Convert a nested block into a reusable backend gate.
 
@@ -470,6 +471,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bindings (dict[str, Any]): Active emit bindings.
             input_operands (list[Any] | None): Optional call-site operands
                 used to bind block inputs. Defaults to None.
+            operation_name (str): Operation name used in diagnostics when
+                input binding fails. Defaults to ``"ControlledUOperation"``.
 
         Returns:
             Any: Backend gate object, or None when conversion fails.
@@ -480,6 +483,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             num_qubits,
             bindings,
             input_operands=input_operands,
+            operation_name=operation_name,
         )
 
     # ------------------------------------------------------------------

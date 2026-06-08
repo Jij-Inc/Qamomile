@@ -1026,6 +1026,7 @@ def emit_custom_composite(
         num_qubits,
         bindings,
         input_operands=op.operands,
+        operation_name="CompositeGateOperation",
     )
 
     if custom_gate is not None and _gate_matches_qubit_count(custom_gate, num_qubits):
@@ -1156,6 +1157,7 @@ def emit_inverse_block_at_indices(
             len(target_indices),
             bindings,
             input_operands=input_operands,
+            operation_name="InverseBlockOperation",
         )
         if can_build_reusable_gate
         and _emitter_supports_gate_inverse(emit_pass._emitter)
@@ -1186,6 +1188,7 @@ def emit_inverse_block_at_indices(
             len(target_indices),
             bindings,
             input_operands=input_operands,
+            operation_name="InverseBlockOperation",
         )
         if can_build_reusable_gate
         else None
@@ -1347,6 +1350,7 @@ def blockvalue_to_gate(
     num_qubits: int,
     bindings: dict[str, Any],
     input_operands: list[Any] | None = None,
+    operation_name: str = "ControlledUOperation",
 ) -> Any:
     """Convert a Block to a backend gate.
 
@@ -1380,6 +1384,8 @@ def blockvalue_to_gate(
             block before the vector-aware input qubit map is populated;
             classical operands are resolved into local bindings before the
             nested block is emitted. Defaults to None.
+        operation_name (str): Operation name used in diagnostics when
+            input binding fails. Defaults to ``"ControlledUOperation"``.
 
     Returns:
         Any: A backend gate object produced by
@@ -1401,7 +1407,7 @@ def blockvalue_to_gate(
             num_qubits,
             bindings,
             local_qubit_map,
-            operation_name="ControlledUOperation",
+            operation_name=operation_name,
         )
 
         local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(

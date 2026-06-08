@@ -1215,7 +1215,8 @@ class CircuitAnalyzer:
             )
 
         if isinstance(op, InverseBlockOperation):
-            label = f"{op.name.upper()}^-1"
+            base_name = op.source_block.name if op.source_block is not None else op.name
+            label = f"{base_name.upper()}^-1"
             box_width = self._estimate_block_label_box_width(label)
             qubit_indices = []
             for qval in list(op.control_qubits) + list(op.target_qubits):
