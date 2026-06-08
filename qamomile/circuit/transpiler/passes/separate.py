@@ -388,6 +388,36 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                     pending_absorbable.append(op)
                 continue
 
+            # A non-absorbable, non-measurement classical op whose result is an
+            # input to a quantum / hybrid op (a gate angle, or a controlled-gate
+            # structural parameter) cannot be placed under the single-quantum-
+            # segment model: it is *not* absorbable because it is also read by
+            # classical work or returned as a block output, so it must stay in a
+            # classical segment — but then the quantum op reads a value the
+            # classical segment never threads into the circuit and the backend
+            # silently emits a zero/garbage parameter. (When the op sits between
+            # quantum ops this also manifests as a spurious extra quantum
+            # segment; before the quantum region it produces a legal C→Q plan
+            # with a stranded value, so the multi-segment check alone misses
+            # it.) Reject explicitly here so the user gets an error instead of a
+            # wrong result. Measurement-derived ops are handled separately
+            # (``RuntimeClassicalExpr`` / mid-circuit measurement) and excluded.
+            if (
+                op_kind == OperationKind.CLASSICAL
+                and not isinstance(op, RuntimeClassicalExpr)
+                and not self._is_measurement_tainted(op)
+                and self._feeds_quantum(op)
+            ):
+                raise MultipleQuantumSegmentsError(
+                    "A classical value used as a quantum gate parameter is also "
+                    "consumed by classical work or returned as a block output, so "
+                    "it cannot be absorbed into the single quantum segment (it "
+                    "would otherwise be stranded in a classical segment and the "
+                    "gate would silently receive a zero parameter). Compute the "
+                    "value so it flows only to quantum gates, or restructure the "
+                    "kernel so the classical consumer does not share it."
+                )
+
             if current_kind is None:
                 current_kind = op_kind
 

@@ -866,6 +866,25 @@ def value_feeding_gate_and_classical_run(
     return qmc.measure(q), angle + 1.0
 
 
+@qmc.qkernel
+def pre_init_gate_and_classical_run(
+    phase: qmc.Float, obs: qmc.Observable
+) -> tuple[qmc.Float, qmc.Float]:
+    """Use a value as a gate angle and a classical output, computed before init.
+
+    Same dual-use as ``value_feeding_gate_and_classical_run`` but the value is
+    built before ``qmc.qubit_array``, so it lands before the quantum segment.
+    That produces a legal C->Q->Expval plan (no quantum-segment split), so the
+    stranded gate parameter must be caught by an explicit check rather than the
+    multiple-segments error.
+    """
+    angle = phase * 2.0
+    out = angle + 1.0
+    q = qmc.qubit_array(1, "q")
+    q[0] = qmc.rx(q[0], angle)
+    return qmc.expval(q, obs), out
+
+
 # --- Regression: a classical chain split across a control-flow boundary ---
 #
 # ``base = phase * 2`` is a top-level classical op, but the next link of the
@@ -1504,6 +1523,24 @@ def test_nested_classical_output_is_not_miscompiled(backend: Backend) -> None:
     _name, transpiler, _executor = backend
     with pytest.raises(MultipleQuantumSegmentsError):
         transpiler.transpile(nested_classical_output_run, parameters=["phase"])
+
+
+def test_pre_init_gate_and_classical_is_not_miscompiled(backend: Backend) -> None:
+    """A dual-use value built before quantum init must not silently miscompile.
+
+    A value used as both a gate angle and a classical output, computed before
+    ``qmc.qubit_array``, yields a legal C->Q->Expval plan (no quantum-segment
+    split), so it is not caught by the multiple-segments error. The gate would
+    otherwise receive a stranded zero parameter, so the transpiler must reject
+    it explicitly instead of returning a wrong result.
+    """
+    _name, transpiler, _executor = backend
+    with pytest.raises(MultipleQuantumSegmentsError):
+        transpiler.transpile(
+            pre_init_gate_and_classical_run,
+            bindings={"obs": qm_o.Y(0)},
+            parameters=["phase"],
+        )
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
