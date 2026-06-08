@@ -2273,6 +2273,26 @@ def test_inverse_nested_qkernel_call_transpiles_to_identity(qiskit_transpiler) -
     assert np.allclose(statevector, np.array([1.0, 0.0]), atol=1e-8)
 
 
+def test_inverse_nested_call_implementation_uses_available_wires() -> None:
+    """Nested-call inverse fallback block should not reference source-only wires."""
+
+    @qmc.qkernel
+    def circuit(rotation_angle: qmc.Float) -> qmc.Qubit:
+        q = qmc.qubit("q")
+        q = qmc.inverse(_inverse_runtime_call_then_gate_layer)(q, rotation_angle)
+        return q
+
+    implementation = _single_inverse_implementation(
+        circuit.build(parameters=["rotation_angle"])
+    )
+    available = {value.uuid for value in implementation.input_values}
+    for op in implementation.operations:
+        if isinstance(op, GateOperation):
+            for operand in op.qubit_operands:
+                assert operand.uuid in available
+        available.update(result.uuid for result in op.results)
+
+
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
 @pytest.mark.parametrize("kernel_factory, width", QKERNEL_ROUNDTRIP_CASES)
 def test_inverse_allowed_qkernel_roundtrip_cross_backend(

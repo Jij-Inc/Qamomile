@@ -984,14 +984,8 @@ class _BlockInverter:
             block=op.source_block,
         )
 
-        for operand, result in zip(op.control_qubits, new_controls):
-            value_map[operand.uuid] = result
-        for operand, result in zip(op.target_qubits, new_targets):
-            value_map[operand.uuid] = result
-            if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
-                for operand_dim, result_dim in zip(operand.shape, result.shape):
-                    if operand_dim.uuid != result_dim.uuid:
-                        value_map[operand_dim.uuid] = result_dim
+        self._update_quantum_value_map(value_map, op.control_qubits, new_controls)
+        self._update_quantum_value_map(value_map, op.target_qubits, new_targets)
         return [restored]
 
     def _bind_forward_block_inputs(
@@ -1123,7 +1117,8 @@ class _BlockInverter:
             body_map[op.loop_var_value.uuid] = loop_var_value
 
         body = self._clone_forward_operations(op.operations, body_map)
-        self._merge_loop_body_map(value_map, body_map)
+        excluded_uuids = {op.loop_var_value.uuid} if op.loop_var_value else set()
+        self._merge_loop_body_map(value_map, body_map, excluded_uuids)
 
         cloned = dataclasses.replace(
             op,
@@ -1238,10 +1233,11 @@ class _BlockInverter:
         else:
             raise NotImplementedError(f"inverse() cannot invert {type(op).__name__}.")
 
-        for operand, result in zip(
-            op.control_operands + op.target_operands, new_results
-        ):
-            value_map[operand.uuid] = result
+        self._update_quantum_value_map(
+            value_map,
+            op.control_operands + op.target_operands,
+            new_results,
+        )
         return [inverse_op]
 
     def _invert_call_block(
@@ -1275,7 +1271,8 @@ class _BlockInverter:
         for block_output, call_result in zip(op.block.output_values, op.results):
             local_map[block_output.uuid] = _substitute_value(call_result, value_map)
 
-        operations = self.invert_call_site(op.block, local_map)
+        self._reject_unsupported_control_flow(op.block.operations)
+        operations = self._invert_block_operations(op.block, local_map)
         for block_input, call_operand in zip(op.block.input_values, op.operands):
             if block_input.type.is_quantum():
                 value_map[call_operand.uuid] = local_map[block_input.uuid]
@@ -1311,7 +1308,8 @@ class _BlockInverter:
         if op.loop_var_value is not None:
             body_map[op.loop_var_value.uuid] = loop_var
         inverse_body = self._invert_operations(op.operations, body_map)
-        self._merge_loop_body_map(value_map, body_map)
+        excluded_uuids = {op.loop_var_value.uuid} if op.loop_var_value else set()
+        self._merge_loop_body_map(value_map, body_map, excluded_uuids)
         return [
             ForOperation(
                 # Match control_flow._value_to_ir_value: Python range sentinels
@@ -1331,6 +1329,7 @@ class _BlockInverter:
         self,
         value_map: dict[str, ValueBase],
         body_map: dict[str, ValueBase],
+        excluded_uuids: set[str],
     ) -> None:
         """Propagate loop-body substitutions back to the surrounding scope.
 
@@ -1339,11 +1338,40 @@ class _BlockInverter:
                 map to update.
             body_map (dict[str, ValueBase]): Loop-body map after cloning or
                 inverting the body.
+            excluded_uuids (set[str]): Loop-local UUIDs that must not leak
+                into the surrounding scope.
 
         Returns:
             None.
         """
-        value_map.update(body_map)
+        for uuid, value in body_map.items():
+            if uuid not in excluded_uuids:
+                value_map[uuid] = value
+
+    def _update_quantum_value_map(
+        self,
+        value_map: dict[str, ValueBase],
+        operands: Sequence[ValueBase],
+        results: Sequence[ValueBase],
+    ) -> None:
+        """Map quantum operands to their current result values.
+
+        Args:
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map
+                to update.
+            operands (Sequence[ValueBase]): Original quantum operands.
+            results (Sequence[ValueBase]): Current result values replacing
+                the operands.
+
+        Returns:
+            None.
+        """
+        for operand, result in zip(operands, results):
+            value_map[operand.uuid] = result
+            if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
+                for operand_dim, result_dim in zip(operand.shape, result.shape):
+                    if operand_dim.uuid != result_dim.uuid:
+                        value_map[operand_dim.uuid] = result_dim
 
     def _resolve_range_constants(
         self,
