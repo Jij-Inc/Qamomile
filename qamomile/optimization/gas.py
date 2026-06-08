@@ -34,9 +34,21 @@ class GASConverter(MathematicalProblemConverter):
     coefficients (binary variables take values in {0, 1}, not ±1).
     """
 
+    _MAX_EXACT_INT_IN_FLOAT_BITS = 54
+
     def __post_init__(self) -> None:
         """Derive and cache the BINARY model from the parent spin model."""
         self.binary_model = self.spin_model.change_vartype(VarType.BINARY)
+        coeffs = [self.binary_model.constant] + list(self.binary_model.coefficients.values())
+        coeffs = GASConverter._align_precision(coeffs)
+        precision_aligned_constant = coeffs[0]
+        precision_aligned_coefficients = {
+            k: v for k, v in zip(self.binary_model.coefficients.keys(), coeffs[1:])
+        }
+        self.binary_model = BinaryModel.from_hubo(
+            hubo=precision_aligned_coefficients,
+            constant=precision_aligned_constant,
+        )
 
     @staticmethod
     def _align_precision(values: list[float]) -> list[float]:
@@ -48,13 +60,13 @@ class GASConverter(MathematicalProblemConverter):
         value would make ``_detect_eps`` report a spuriously fine epsilon driven
         by rounding noise rather than by the precision the user actually wrote.
 
-        This rounds every non-integer value to the precision of the *least*
-        precise non-integer value in the list (the one with the fewest decimal
-        digits in its shortest round-tripping representation), so all
-        non-integer coefficients share one common decimal step before epsilon
-        detection runs. Integer-valued coefficients (within ``atol=1e-12``) are
-        considered exact — they neither influence the detected precision nor
-        get rounded.
+        By default, this infers the *finest meaningful* decimal precision across
+        non-integer values while ignoring binary floating-point tails.
+        Concretely, for each value it finds the smallest number of decimal
+        digits that reproduces the value within ``atol=1e-12``; then all
+        non-integer values are rounded to the maximum of those per-value
+        precisions. Integer-valued coefficients (within ``atol=1e-12``) are
+        considered exact.
 
         Args:
             values (list[float]): Coefficient values to align, typically the
@@ -62,29 +74,52 @@ class GASConverter(MathematicalProblemConverter):
 
         Returns:
             list[float]: ``values`` with every non-integer entry rounded to the
-                coarsest decimal precision found among the non-integer entries.
-                Returned unchanged (aside from float coercion) when every value
-                is integer-valued.
+                finest meaningful decimal precision inferred from non-integer
+                entries. Returned unchanged (aside from float coercion) when
+                every value is integer-valued.
 
         """
-        non_integer_exponents = []
+        non_integer_values = []
         for v in values:
             fv = float(v)
             if not np.isclose(fv, round(fv), atol=1e-12):
-                non_integer_exponents.append(Decimal(str(fv)).as_tuple().exponent)
+                non_integer_values.append(fv)
 
-        if not non_integer_exponents:
-            return [float(v) for v in values]
+        if not non_integer_values:
+            return [
+                float(round(float(v)))
+                if np.isclose(float(v), round(float(v)), atol=1e-12)
+                else float(v)
+                for v in values
+            ]
 
-        coarsest_exponent = max(non_integer_exponents)  # type: ignore[type-var]
+        max_scan_decimals = 12
+        inferred_digits = []
+        for fv in non_integer_values:
+            inferred = None
+            for d in range(max_scan_decimals + 1):
+                if np.isclose(fv, round(fv, d), atol=1e-12, rtol=0.0):
+                    inferred = d
+                    break
+
+            if inferred is None:
+                exp = Decimal(str(fv)).as_tuple().exponent
+                inferred = -exp if exp < 0 else 0  # type: ignore[operator]
+
+            inferred_digits.append(inferred)
+
+        round_digits = max(inferred_digits)
 
         aligned = []
         for v in values:
             fv = float(v)
             if np.isclose(fv, round(fv), atol=1e-12):
-                aligned.append(fv)
+                # Snap integer-like float artifacts (e.g. 4.000000000000005)
+                # to exact integers so downstream precision detection does not
+                # keep meaningless binary tails.
+                aligned.append(float(round(fv)))
             else:
-                aligned.append(round(fv, -coarsest_exponent))  # type: ignore[operator]
+                aligned.append(round(fv, round_digits))
         return aligned
 
     @staticmethod
@@ -133,7 +168,7 @@ class GASConverter(MathematicalProblemConverter):
         max_coeff = float(np.max(np.abs(coeffs)))
         N_terms = len(coeffs)
 
-        epsilon = GASConverter._detect_eps(GASConverter._align_precision(coeffs))
+        epsilon = GASConverter._detect_eps(coeffs)
 
         p = math.ceil(math.log2(max_coeff / epsilon))
         log_N = math.ceil(math.log2(N_terms)) if N_terms > 1 else 0
@@ -178,9 +213,17 @@ class GASConverter(MathematicalProblemConverter):
             quantization_parameter = GASConverter._greedy_quantization_parameter(
                 binary_model
             )
-        frac_list = [
-            round(a * 2 ** (quantization_parameter - 1)) for a in rescaled_coef_list
-        ]
+            if quantization_parameter > GASConverter._MAX_EXACT_INT_IN_FLOAT_BITS:
+                warnings.warn(
+                    "Auto-selected quantization_parameter is too large for exact integer "
+                    "representation in float-backed binary models. Clamping it to 54 bits "
+                    "to preserve integer-valued coefficients.",
+                    UserWarning,
+                )
+                quantization_parameter = GASConverter._MAX_EXACT_INT_IN_FLOAT_BITS
+
+        scale = 2 ** (quantization_parameter - 1)
+        frac_list = [int(round(float(a) * scale)) for a in rescaled_coef_list]
         new_constant = frac_list[0]
         new_coef = {
             i: j for i, j in zip(binary_model.coefficients.keys(), frac_list[1:])
@@ -287,7 +330,7 @@ class GASConverter(MathematicalProblemConverter):
             )
             warnings.warn(
                 "The binary model contains non-integer coefficients. "
-                "They have been rescaled and approximated to the nearest rational number. "
+                "They have been rescaled and approximated to the nearest integer. "
                 "This may affect the accuracy of the results. "
                 "Use approximate_real_coefficients=False to disable this approximation "
                 "and use the original real coefficients."
