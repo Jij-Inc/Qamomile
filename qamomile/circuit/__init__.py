@@ -83,6 +83,14 @@ def __getattr__(name: str):  # type: ignore[no-untyped-def]
     raise AttributeError(f"module 'qamomile.circuit' has no attribute {name!r}")
 
 
+# Imported after frontend symbols are initialized because these kernels use
+# ``import qamomile.circuit as qmc`` in their implementation module.
+from .algorithm.arithmetic.modular_incdec import (  # noqa: E402, I001
+    modular_decrement,
+    modular_increment,
+)
+
+
 __all__ = [
     "qkernel",
     "composite_gate",
@@ -133,6 +141,8 @@ __all__ = [
     "Tensor",
     "Observable",
     # stdlib
+    "modular_decrement",
+    "modular_increment",
     "qpe",
     "iqft",
     "qft",
