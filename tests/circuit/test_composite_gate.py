@@ -15,7 +15,14 @@ from qamomile.circuit.ir.operation.composite_gate import (
     ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.types import FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
+    extract_phase_from_params,
+)
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+    ValueResolver,
+)
 from tests.circuit.conftest import run_statevector
 
 # =============================================================================
@@ -1313,6 +1320,90 @@ class TestBackwardsCompatibility:
         assert qft is not None
         assert iqft is not None
         assert qpe is not None
+
+
+class TestQPEPhaseExtraction:
+    """Regression tests for QPE fallback phase operand resolution."""
+
+    @staticmethod
+    def _emit_pass():
+        """Create the minimal emit-pass facade needed by phase extraction."""
+        return type("EmitPassStub", (), {"_resolver": ValueResolver()})()
+
+    @staticmethod
+    def _qpe_op(phase_operand):
+        """Create a block-free QPE operation with one phase operand."""
+        target = Value(type=QubitType(), name="target")
+        return CompositeGateOperation(
+            operands=[target, phase_operand],
+            results=[],
+            gate_type=CompositeGateType.QPE,
+            num_target_qubits=1,
+            has_implementation=False,
+        )
+
+    def test_extract_phase_from_bound_array_element(self):
+        """QPE fallback phase extraction reads a bound array element."""
+        parent = ArrayValue(type=FloatType(), name="theta")
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {"theta": np.array([0.125, 0.25])},
+        )
+
+        assert phase == pytest.approx(0.25)
+
+    def test_extract_phase_from_const_array_element_metadata(self):
+        """QPE fallback phase extraction reads frozen array literal metadata."""
+        parent = ArrayValue(
+            type=FloatType(),
+            name="theta",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.375])
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {},
+        )
+
+        assert phase == pytest.approx(0.375)
+
+    def test_extract_phase_leaves_symbolic_array_index_unresolved(self):
+        """QPE fallback phase extraction preserves unresolved symbolic indices."""
+        parent = ArrayValue(
+            type=FloatType(),
+            name="theta",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.375])
+        index = Value(type=UIntType(), name="idx")
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {},
+        )
+
+        assert phase is None
 
 
 class TestVectorQubitParamRejection:

@@ -357,29 +357,99 @@ def extract_phase_from_params(
     op: CompositeGateOperation,
     bindings: dict[str, Any],
 ) -> float | None:
-    """Extract phase parameter from QPE operation."""
+    """Extract a concrete phase parameter from a QPE operation.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose resolver
+            should resolve bound scalar and array-element operands.
+        op (CompositeGateOperation): The QPE composite operation.
+        bindings (dict[str, Any]): Emit-time concrete bindings keyed by
+            parameter name, value UUID, or loop-local variable name.
+
+    Returns:
+        float | None: The resolved phase angle, or ``None`` when the phase
+            operand remains symbolic.
+    """
     for i, operand in enumerate(op.operands):
         if i < 1:
             continue
         if hasattr(operand, "type") and hasattr(operand.type, "is_classical"):
             if operand.type.is_classical():
-                if operand.is_constant():
-                    const_val = operand.get_const()
-                    if const_val is not None:
-                        return float(const_val)
-                if operand.is_parameter():
-                    param_name = operand.parameter_name()
-                    if param_name and param_name in bindings:
-                        return float(bindings[param_name])
-                if (
-                    hasattr(operand, "name")
-                    and operand.name
-                    and operand.name in bindings
-                ):
-                    return float(bindings[operand.name])
+                phase = _resolve_phase_operand(emit_pass, operand, bindings)
+                if phase is not None:
+                    return phase
         elif operand.is_constant():
             const_val = operand.get_const()
             if const_val is not None:
                 return float(const_val)
 
     return None
+
+
+def _resolve_phase_operand(
+    emit_pass: "StandardEmitPass",
+    operand: Any,
+    bindings: dict[str, Any],
+) -> float | None:
+    """Resolve a QPE phase operand to a concrete float.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose resolver
+            should perform ordinary scalar and bound-array lookup.
+        operand (Any): Candidate classical phase operand.
+        bindings (dict[str, Any]): Emit-time concrete bindings.
+
+    Returns:
+        float | None: The resolved phase angle, or ``None`` when the operand
+            is symbolic or its array index cannot be resolved.
+    """
+    resolved = emit_pass._resolver.resolve_classical_value(operand, bindings)
+    if resolved is not None:
+        return float(resolved)
+
+    # Resolver indexing intentionally targets public bindings. Composite QPE
+    # can also carry frozen literal arrays in Value metadata; only concrete
+    # indices are safe to read here, while symbolic indices remain unresolved.
+    resolved = _resolve_const_array_element(emit_pass, operand, bindings)
+    if resolved is not None:
+        return float(resolved)
+    return None
+
+
+def _resolve_const_array_element(
+    emit_pass: "StandardEmitPass",
+    operand: Any,
+    bindings: dict[str, Any],
+) -> Any:
+    """Resolve an array element from its parent's frozen literal payload.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose resolver
+            should resolve element index operands.
+        operand (Any): Candidate array-element value.
+        bindings (dict[str, Any]): Emit-time concrete bindings used for
+            constant or loop-local index values.
+
+    Returns:
+        Any: The selected payload element, or ``None`` when the operand is not
+            a frozen array element or any index remains symbolic.
+    """
+    parent = getattr(operand, "parent_array", None)
+    element_indices = getattr(operand, "element_indices", None)
+    if parent is None or not element_indices:
+        return None
+
+    const_array = parent.get_const_array()
+    if const_array is None:
+        return None
+
+    result = const_array
+    for index_value in element_indices:
+        index = emit_pass._resolver.resolve_int_value(index_value, bindings)
+        if index is None:
+            return None
+        try:
+            result = result[index]
+        except (IndexError, KeyError, TypeError):
+            return None
+    return result
