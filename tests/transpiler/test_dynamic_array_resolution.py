@@ -22,6 +22,7 @@ from qamomile.circuit.transpiler.errors import EmitError, QamomileCompileError
 from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
     ResourceAllocator,
 )
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import ValueResolver
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 Backend = tuple[str, Any, Any]
@@ -99,6 +100,23 @@ def kernel_size_from_uint_slice_element(
         qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
     """
     q = qmc.qubit_array(sizes[1:3][0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_strided_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a strided vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose strided
+            view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[0:3:2][1], name="q")
     return qmc.measure(q)
 
 
@@ -411,6 +429,21 @@ class TestDynamicArraySizeResolution:
         counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
         _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
 
+    def test_qubit_array_size_from_bound_uint_strided_vector_view_element(self):
+        """Test that a strided UInt vector-view size remaps to its root index."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_strided_slice_element,
+            bindings={"sizes": np.array([2, 7, 5], dtype=np.uint64)},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
     @pytest.mark.parametrize(
         ("kernel", "sizes", "width"),
         [
@@ -456,6 +489,11 @@ class TestDynamicArraySizeResolution:
                 np.array([2, 5, 7], dtype=np.uint64),
                 5,
             ),
+            (
+                kernel_size_from_uint_strided_slice_element,
+                np.array([2, 7, 5], dtype=np.uint64),
+                5,
+            ),
         ],
     )
     def test_bound_uint_vector_element_executes_on_sdk_backends(
@@ -475,6 +513,31 @@ class TestDynamicArraySizeResolution:
         counts = _counts(executable.sample(executor, shots=16).result())
 
         _assert_all_zero_counts(name, counts, width=width, shots=16)
+
+    @pytest.mark.parametrize("n", [0, -1, np.int64(-3)])
+    def test_non_positive_scalar_size_raises(self, n: int):
+        """Test that non-positive scalar sizes are rejected."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(kernel_size_from_uint_scalar, bindings={"n": n})
+
+    @pytest.mark.parametrize(
+        "sizes",
+        [
+            np.array([0], dtype=np.int64),
+            np.array([-1], dtype=np.int64),
+            np.array([-3], dtype=np.int64),
+        ],
+    )
+    def test_non_positive_vector_element_size_raises(self, sizes: np.ndarray):
+        """Test that non-positive vector-element sizes are rejected."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_uint_element, bindings={"sizes": sizes}
+            )
 
     def test_symbolic_uint_vector_element_size_raises(self):
         """Test that symbolic element indices do not fall back to array length."""
@@ -580,7 +643,7 @@ class TestDynamicArraySizeResolution:
             element_indices=(idx,),
         )
         q = ArrayValue(type=QubitType(), name="q", shape=(size,))
-        allocator = ResourceAllocator(parameters={"sizes"})
+        allocator = ResourceAllocator(ValueResolver(parameters={"sizes"}))
 
         with pytest.raises(EmitError, match="Cannot resolve array size"):
             allocator.allocate(

@@ -61,18 +61,17 @@ class ResourceAllocator:
     adding new physical resources.
     """
 
-    def __init__(self, parameters: set[str] | None = None) -> None:
+    def __init__(self, resolver: ValueResolver | None = None) -> None:
         """Initialize allocator state.
 
         Args:
-            parameters (set[str] | None): Runtime parameter names that must
-                remain symbolic during emission. Used when resolving array
-                element sizes so placeholder data for runtime parameter arrays
-                is not treated as compile-time concrete. Defaults to None.
+            resolver (ValueResolver | None): Emit value resolver that carries
+                runtime parameter names and binding lookup rules. Defaults to
+                None, which creates a resolver without runtime parameters.
         """
         self._next_qubit_index: int = 0
         self._next_clbit_index: int = 0
-        self._parameters = parameters or set()
+        self._resolver = resolver or ValueResolver()
 
     @staticmethod
     def _coerce_integral_size(value: Any) -> int | None:
@@ -89,7 +88,8 @@ class ResourceAllocator:
         if isinstance(value, bool):
             return None
         if isinstance(value, numbers.Integral):
-            return int(cast(Any, value))
+            size = int(cast(Any, value))
+            return size if size > 0 else None
         return None
 
     def allocate(
@@ -459,7 +459,7 @@ class ResourceAllocator:
         # rules as other emit-time value resolution paths.
         if size_val.parent_array is not None and size_val.element_indices:
             return self._coerce_integral_size(
-                ValueResolver(self._parameters).resolve_bound_value(size_val, bindings)
+                self._resolver.resolve_bound_value(size_val, bindings)
             )
 
         # Check by name, then uuid in bindings
