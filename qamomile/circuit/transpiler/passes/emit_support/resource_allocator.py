@@ -74,8 +74,8 @@ class ResourceAllocator:
         self._resolver = resolver or ValueResolver()
 
     @staticmethod
-    def _coerce_integral_size(value: Any) -> int | None:
-        """Coerce a non-boolean integral value to a Python int.
+    def _coerce_nonnegative_integral_size(value: Any) -> int | None:
+        """Coerce a non-negative, non-boolean integral value to a Python int.
 
         Args:
             value (Any): Candidate structural size value resolved from IR
@@ -83,7 +83,7 @@ class ResourceAllocator:
 
         Returns:
             int | None: The coerced integer size, or None when ``value`` is
-                not an integral numeric value or is a boolean.
+                negative, not an integral numeric value, or is a boolean.
         """
         if isinstance(value, bool):
             return None
@@ -452,27 +452,27 @@ class ResourceAllocator:
         import re
 
         if size_val.is_constant():
-            return self._coerce_integral_size(size_val.get_const())
+            return self._coerce_nonnegative_integral_size(size_val.get_const())
 
         # Array element (e.g., sizes[0]): delegate to the emit value resolver
         # so bound containers and VectorView slices follow the same lookup
         # rules as other emit-time value resolution paths.
         if size_val.parent_array is not None and size_val.element_indices:
-            return self._coerce_integral_size(
+            return self._coerce_nonnegative_integral_size(
                 self._resolver.resolve_bound_value(size_val, bindings)
             )
 
         # Check by name, then uuid in bindings
         if size_val.name and size_val.name in bindings:
             bound = bindings[size_val.name]
-            if (size := self._coerce_integral_size(bound)) is not None:
+            if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
                 return size
             if hasattr(bound, "__len__"):
                 return len(bound)
 
         if size_val.uuid in bindings:
             bound = bindings[size_val.uuid]
-            if (size := self._coerce_integral_size(bound)) is not None:
+            if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
                 return size
 
         # Dimension naming pattern (e.g., "hi_dim0" -> array "hi", dimension 0).

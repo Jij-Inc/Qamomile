@@ -384,13 +384,14 @@ class TestDynamicArraySizeResolution:
         for bitstring, _count in result.results:
             assert len(bitstring) == 3
 
-    def test_qubit_array_size_from_numpy_uint_scalar(self):
-        """Test that NumPy integer scalar sizes resolve from bindings."""
+    @pytest.mark.parametrize("n", [5, np.uint64(5)])
+    def test_qubit_array_size_from_bound_uint_scalar(self, n: int):
+        """Test that Python and NumPy integer scalar sizes resolve."""
         transpiler = QiskitTranspiler()
 
         executor = transpiler.transpile(
             kernel_size_from_uint_scalar,
-            bindings={"n": np.uint64(5)},
+            bindings={"n": n},
         )
 
         circuit = executor.compiled_quantum[0].circuit
