@@ -458,24 +458,37 @@ class ValueResolver:
         ``None`` here.
         """
         parent = v.parent_array
+        # Only element Values carry a parent array; scalar Values cannot be
+        # indexed through this helper.
         if parent is None:
             return None
+        # Resolve a possibly sliced view element to the root array and
+        # concrete indices; symbolic indices or slice bounds intentionally
+        # fall back to unresolved.
         location = self._resolve_array_element_location(
             parent, v.element_indices, bindings
         )
         if location is None:
             return None
         root_parent, indices = location
+        # Runtime parameter arrays are symbolic even if placeholder data is
+        # present in bindings; never index them at emit time.
         if root_parent.name in self.parameters:
             return None
+        # Prefer const_array metadata, then explicit bindings for the root
+        # container. A missing container means the element stays unresolved.
         container = self._resolve_array_container(root_parent, bindings)
         if container is None:
             return None
 
+        # Descend through nested containers one index at a time; the final
+        # value of ``container`` is the resolved element, not the parent array.
         for i in indices:
             try:
                 container = container[i]
             except (IndexError, KeyError, TypeError):
+                # Out-of-range or non-indexable containers are unresolved
+                # rather than guessed.
                 return None
         return container
 
@@ -503,6 +516,8 @@ class ValueResolver:
                 index or slice bound is unresolved.
         """
         resolved_indices: list[int] = []
+        # Resolve local element indices first. Any symbolic index keeps the
+        # whole element access unresolved at emit time.
         for idx in element_indices:
             i = self.resolve_int_value(idx, bindings)
             if i is None:
@@ -510,12 +525,18 @@ class ValueResolver:
                 return None
             resolved_indices.append(i)
 
+        # No explicit element index means callers are asking for the array
+        # container itself, so there is no slice-local coordinate to compose.
         if not resolved_indices:
             return parent, ()
 
         root_index = resolved_indices[0]
         cur = parent
+        # Compose each VectorView affine map back to the root container:
+        # root_index = slice_start + slice_step * local_index.
         while cur.slice_of is not None:
+            # A sliced view must carry both affine-map operands. If either is
+            # absent, keep this access unresolved instead of inventing bounds.
             if cur.slice_start is None or cur.slice_step is None:
                 return None
             start = self.resolve_int_value(cur.slice_start, bindings)
@@ -549,7 +570,8 @@ class ValueResolver:
         if container is not None:
             return container
 
-        # Fall back to caller-supplied or emit-local array bindings.
+        # Fall back to caller-supplied or emit-local array bindings by
+        # stable public name first, then by internal UUID.
         container = bindings.get(parent.name)
         if container is not None:
             return container
@@ -571,6 +593,8 @@ class ValueResolver:
         compile error.
         """
         raw = self.lookup_in_bindings(val, bindings, index_array=True)
+        # Symbolic values, including array elements with symbolic indices,
+        # must remain unresolved so emit callers can raise or fall back.
         if raw is None:
             return None
         return self._resolve_numeric_index(raw)
