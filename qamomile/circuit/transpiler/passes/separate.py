@@ -279,15 +279,16 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             v.uuid for v in block.output_values if isinstance(v, ValueBase)
         }
 
-        # Absorbable set: top-level classical ops that may be folded into the
-        # surrounding quantum segment. An op qualifies only when its results
-        # are consumed exclusively by quantum / hybrid ops, or by other
-        # absorbable classical ops that themselves ultimately feed quantum —
-        # never by a classical sink (a classical-segment op, a measurement-
-        # derived op, or a block output). Computing this transitively is what
-        # makes a chain like ``(phase * 2) - 1`` feeding a gate fully
-        # absorbable while a value read back by later classical work stays in
-        # its own classical segment.
+        # Absorbable set: classical ops (top-level or nested) whose results are
+        # consumed exclusively by quantum / hybrid ops, or by other absorbable
+        # classical ops that themselves ultimately feed quantum — never by a
+        # classical sink (a classical-segment op, a measurement-derived op, or a
+        # block output). Only top-level members are actually folded into a
+        # segment below; nested members ride inside their control-flow op and
+        # are tracked here only so the sink analysis treats a nested chain link
+        # correctly. Computing this transitively is what makes a chain like
+        # ``(phase * 2) - 1`` feeding a gate fully absorbable while a value read
+        # back by later classical work stays in its own classical segment.
         self._absorbable_op_ids = self._compute_absorbable(block.operations)
 
         current_ops: list[Operation] = []
@@ -556,10 +557,21 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
     def _compute_absorbable(self, operations: list[Operation]) -> set[int]:
         """Compute the set of classical ops safe to fold into a quantum segment.
 
-        A top-level classical op is *absorbable* when it is non-measurement,
-        feeds a quantum gate, is not a block output, and — transitively — every
-        consumer of its results is a quantum / hybrid op or another absorbable
-        classical op. This greatest-fixpoint keeps a chain of gate-angle
+        A classical op is *absorbable* when it is non-measurement, feeds a
+        quantum gate, is not a block output, and — transitively — every consumer
+        of its results is a quantum / hybrid op or another absorbable classical
+        op. Candidates include classical ops nested inside control-flow bodies
+        (e.g. ``angle = base + 1`` inside ``qmc.range``), not just top-level
+        ones: a nested chain link that ultimately feeds only quantum ops must be
+        able to qualify so a top-level op feeding it stays absorbable, while a
+        nested classical op whose result is a block output (or otherwise flows
+        to a classical sink) must NOT qualify so the op feeding it is kept out
+        of the quantum segment. Only top-level ops are actually folded into a
+        segment at segmentation time; nested ops ride inside their enclosing
+        control-flow op, so their membership here is used purely for the sink
+        analysis.
+
+        This iterate-until-stable computation keeps a chain of gate-angle
         expressions (e.g. ``(phase * 2) - 1``) absorbable while refusing to
         absorb a value that is also read back by later classical work or
         returned, which would be dropped by the (classical-op-free) quantum
@@ -569,8 +581,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             operations (list[Operation]): Top-level operations of the block.
 
         Returns:
-            set[int]: ``id()`` of every top-level classical op that may be
-                absorbed into the surrounding quantum segment.
+            set[int]: ``id()`` of every classical op (top-level or nested) that
+                is safe with respect to the quantum-segment absorption.
         """
 
         class ConsumerCollector(ControlFlowVisitor):
@@ -597,22 +609,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         collector.visit_operations(operations)
         consumers = collector.consumers
 
-        # Map every op (nested or top-level) to its top-level ancestor. A
-        # consumer's segment is decided by the top-level op that contains it:
-        # an op nested inside a quantum-effective control-flow body (e.g. a
-        # ``BinOp`` inside ``qmc.range``) rides in the quantum segment, not a
-        # classical one. Classifying a nested consumer by its own kind would
-        # wrongly treat such a chain link as a classical sink and reject a
-        # valid pure-quantum nested angle expression.
-        top_level_owner = self._build_top_level_owner(operations)
-
-        # Seed candidates: non-measurement, quantum-feeding, non-output
-        # top-level classical ops.
+        # Candidates: every classical op (recursing into control-flow bodies)
+        # that is non-measurement, quantum-feeding, and not a block output.
+        classical_ops = self._collect_classical_ops(operations)
         absorbable: set[int] = {
             id(op)
-            for op in operations
-            if op.operation_kind == OperationKind.CLASSICAL
-            and not self._is_measurement_tainted(op)
+            for op in classical_ops
+            if not self._is_measurement_tainted(op)
             and self._feeds_quantum(op)
             and not self._produces_block_output(op)
         }
@@ -620,85 +623,63 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # Iteratively drop any candidate that has a result consumed by a
         # classical sink — a consumer that is neither a quantum/hybrid op nor a
         # (still-)absorbable classical op. Removing one op can disqualify the
-        # ops feeding it, so iterate to a fixpoint.
+        # ops feeding it, so iterate until the set stops changing.
         changed = True
         while changed:
             changed = False
-            for op in operations:
+            for op in classical_ops:
                 if id(op) not in absorbable:
                     continue
-                if self._has_classical_sink(op, consumers, absorbable, top_level_owner):
+                if self._has_classical_sink(op, consumers, absorbable):
                     absorbable.discard(id(op))
                     changed = True
         return absorbable
 
-    def _build_top_level_owner(
-        self, operations: list[Operation]
-    ) -> dict[int, Operation]:
-        """Map every operation to the top-level operation that contains it.
-
-        Walks each top-level op and, recursively, the bodies of any nested
-        control-flow op, recording the top-level ancestor for every
-        descendant. A top-level op maps to itself. Used to decide which
-        segment a (possibly nested) consumer executes in.
+    def _collect_classical_ops(self, operations: list[Operation]) -> list[Operation]:
+        """Collect every classical-kind op, recursing into control-flow bodies.
 
         Args:
-            operations (list[Operation]): Top-level operations of the block.
+            operations (list[Operation]): Operations to walk (a block's
+                top-level list or a control-flow op's nested body).
 
         Returns:
-            dict[int, Operation]: ``id(op) -> top-level ancestor op`` for every
-                op reachable from ``operations`` (including the top-level ops
-                themselves).
+            list[Operation]: Every ``OperationKind.CLASSICAL`` op reachable from
+                ``operations``, including those nested inside control flow.
         """
-        owner: dict[int, Operation] = {}
-
-        def record(op: Operation, top: Operation) -> None:
-            """Record ``top`` as the top-level owner of ``op`` and its descendants.
-
-            Args:
-                op (Operation): The current (possibly nested) operation.
-                top (Operation): The top-level ancestor of ``op``.
-
-            Returns:
-                None: Mutates the enclosing ``owner`` map in place.
-            """
-            owner[id(op)] = top
+        result: list[Operation] = []
+        for op in operations:
+            if op.operation_kind == OperationKind.CLASSICAL:
+                result.append(op)
             if isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
-                    for inner in body:
-                        record(inner, top)
-
-        for op in operations:
-            record(op, op)
-        return owner
+                    result.extend(self._collect_classical_ops(body))
+        return result
 
     def _has_classical_sink(
         self,
         op: Operation,
         consumers: dict[str, list[Operation]],
         absorbable: set[int],
-        top_level_owner: dict[int, Operation],
     ) -> bool:
         """Return whether any result of ``op`` is read by a classical sink.
 
         A classical sink is a consumer that will run in a classical segment
-        (measurement post-processing, a non-absorbable classical expression,
-        classical control flow) and would therefore fail to read a value buried
-        in a quantum segment. The segment a consumer runs in is decided by its
-        top-level ancestor: a consumer nested inside a quantum/hybrid-effective
-        control-flow body rides in the quantum segment (not a sink), and a
-        top-level absorbable classical op joins the quantum segment too. Only
-        consumers owned by a genuinely classical top-level op are sinks.
+        (measurement post-processing, a non-absorbable classical expression, a
+        block output, classical control flow) and would therefore fail to read a
+        value buried in a quantum segment. A consumer is safe (not a sink) when
+        it is a quantum / hybrid op — including a gate nested inside a quantum
+        loop, whose own effective kind is QUANTUM/HYBRID — or another currently-
+        absorbable classical op (which may itself be nested). A nested classical
+        consumer is therefore *not* trusted on the strength of its enclosing
+        loop alone: it counts as safe only when it is itself absorbable (i.e.
+        its results, too, flow only to quantum ops and are not block outputs).
 
         Args:
             op (Operation): The candidate op whose results are checked.
             consumers (dict[str, list[Operation]]): Map from value UUID to the
                 operations that read it.
             absorbable (set[int]): ``id()`` of ops still considered absorbable
-                in the current fixpoint iteration.
-            top_level_owner (dict[int, Operation]): Map from ``id(op)`` to the
-                top-level op that contains it, as built by
-                :meth:`_build_top_level_owner`.
+                in the current iteration.
 
         Returns:
             bool: ``True`` if some result of ``op`` is consumed by a classical
@@ -710,13 +691,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             for consumer in consumers.get(result.uuid, ()):
                 if consumer is op:
                     continue
-                owner = top_level_owner.get(id(consumer), consumer)
-                if self._effective_kind(owner) in (
+                if self._effective_kind(consumer) in (
                     OperationKind.QUANTUM,
                     OperationKind.HYBRID,
                 ):
                     continue
-                if id(owner) in absorbable:
+                if id(consumer) in absorbable:
                     continue
                 return True
         return False

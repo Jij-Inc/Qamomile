@@ -839,13 +839,13 @@ def value_feeding_gate_and_classical_run(
 #
 # ``base = phase * 2`` is a top-level classical op, but the next link of the
 # chain (``angle = base + 1``) lives inside the ``qmc.range`` loop body. The
-# absorbable-set fixpoint classifies a consumer by the top-level op that
-# contains it: the nested ``angle = base + 1`` rides in the (quantum-effective)
-# loop's segment, so ``base`` is still absorbed rather than being treated as
-# feeding a classical sink. Without that ownership-aware classification the
-# kernel spuriously raised ``MultipleQuantumSegmentsError``. The loop index is
-# used so the loop unrolls and the kernel actually executes; both qubits end up
-# in state ``rx(2 * phase + 1) |0>``.
+# absorbable-set analysis seeds nested classical ops as candidates too, so the
+# nested ``angle = base + 1`` is itself absorbable (it feeds only the gate), and
+# ``base`` — feeding it — stays absorbable rather than being treated as feeding
+# a classical sink. Without nested candidates the kernel spuriously raised
+# ``MultipleQuantumSegmentsError``. The loop index is used so the loop unrolls
+# and the kernel actually executes; both qubits end up in state
+# ``rx(2 * phase + 1) |0>``.
 
 
 @qmc.qkernel
@@ -868,6 +868,30 @@ def nested_classical_chain_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Flo
         angle = base + 1.0
         q[i] = qmc.rx(q[i], angle)
     return qmc.expval(q, obs)
+
+
+# --- Regression: a nested classical op whose result is a block output ---
+#
+# ``base = phase * 2`` feeds a gate (``rx``) and a nested ``out = base + 1``
+# whose result is returned. ``out`` runs inside the loop body, so it cannot be
+# surfaced as a block output from the quantum segment. The absorbable-set
+# analysis must therefore refuse to absorb ``base`` (the nested ``out`` is a
+# classical sink because it is a block output), so the kernel raises an explicit
+# ``MultipleQuantumSegmentsError`` instead of silently returning ``None`` for the
+# ``out`` field.
+
+
+@qmc.qkernel
+def nested_classical_output_run(
+    phase: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Float]:
+    """Return a nested classical value that also feeds a gate angle."""
+    q = qmc.qubit_array(1, "q")
+    base = phase * 2.0
+    for i in qmc.range(1):
+        q[0] = qmc.rx(q[0], base)
+        out = base + 1.0
+    return qmc.measure(q), out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1389,6 +1413,21 @@ def test_value_feeding_gate_and_classical_is_not_miscompiled(
     _name, transpiler, _executor = backend
     with pytest.raises(MultipleQuantumSegmentsError):
         transpiler.transpile(value_feeding_gate_and_classical_run, parameters=["phase"])
+
+
+def test_nested_classical_output_is_not_miscompiled(backend: Backend) -> None:
+    """A nested classical op that is also a block output is not absorbed.
+
+    Guards against silent data corruption: a top-level value feeding both a gate
+    and a nested classical op whose result is returned must not be absorbed just
+    because the nested op rides in a quantum loop. The nested op is a block
+    output (a classical sink), so the kernel must raise an explicit
+    ``MultipleQuantumSegmentsError`` rather than transpiling and returning
+    ``None`` for the classical output field.
+    """
+    _name, transpiler, _executor = backend
+    with pytest.raises(MultipleQuantumSegmentsError):
+        transpiler.transpile(nested_classical_output_run, parameters=["phase"])
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
