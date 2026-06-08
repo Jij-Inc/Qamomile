@@ -3426,7 +3426,7 @@ class TestStdlibQPE:
 
 
 class TestControlledGate:
-    """Test qmc.controlled() through the QuriParts pipeline.
+    """Test qmc.control() through the QuriParts pipeline.
 
     QuriParts' circuit_to_gate() returns None, but the transpiler's
     fallback path in _emit_controlled_u manually decomposes each gate
@@ -3442,7 +3442,7 @@ class TestControlledGate:
             q = qmc.h(q)
             return q
 
-        controlled_h = qmc.controlled(h_gate)
+        controlled_h = qmc.control(h_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3463,7 +3463,7 @@ class TestControlledGate:
             q = qmc.h(q)
             return q
 
-        controlled_h = qmc.controlled(h_gate)
+        controlled_h = qmc.control(h_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3488,7 +3488,7 @@ class TestControlledGate:
             q = qmc.rx(q, theta)
             return q
 
-        controlled_rx = qmc.controlled(rx_gate)
+        controlled_rx = qmc.control(rx_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3509,7 +3509,7 @@ class TestControlledGate:
             q = qmc.rx(q, theta)
             return q
 
-        controlled_rx = qmc.controlled(rx_gate)
+        controlled_rx = qmc.control(rx_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3528,19 +3528,20 @@ class TestControlledGate:
         assert statevectors_equal(sv, expected)
 
     # -- Double-control (num_controls=2) tests --
-    # QuriParts' gate_controlled() returns None and the fallback decomposition
-    # only supports single control.  Verify that multi-control raises EmitError.
+    # QURI Parts has no native sub-circuit gate object, and this backend
+    # intentionally does not synthesize a dense controlled-unitary matrix.
+    # Multi-control helper kernels therefore fail when the shared
+    # gate-by-gate fallback cannot route them safely.
 
-    def test_controlled_h_double_control_raises(self):
-        """controlled(h_gate, num_controls=2) raises EmitError on QuriParts."""
-        from qamomile.circuit.transpiler.errors import EmitError
+    def test_controlled_h_double_control_rejects_dense_fallback(self):
+        """controlled(H, num_controls=2) raises instead of using dense fallback."""
 
         @qmc.qkernel
         def h_gate(q: qmc.Qubit) -> qmc.Qubit:
             q = qmc.h(q)
             return q
 
-        controlled_h2 = qmc.controlled(h_gate, num_controls=2)
+        controlled_h2 = qmc.control(h_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3550,19 +3551,18 @@ class TestControlledGate:
             q[0], q[1], q[2] = controlled_h2(q[0], q[1], q[2])
             return qmc.measure(q)
 
-        with pytest.raises(EmitError, match="multi-controlled"):
+        with pytest.raises(EmitError, match="multi-controlled operation"):
             _transpile_and_get_circuit(circuit)
 
-    def test_controlled_rx_double_control_raises(self):
-        """controlled(rx_gate, num_controls=2) raises EmitError on QuriParts."""
-        from qamomile.circuit.transpiler.errors import EmitError
+    def test_controlled_rx_double_control_rejects_dense_fallback(self):
+        """controlled(RX, num_controls=2) raises instead of using dense fallback."""
 
         @qmc.qkernel
         def rx_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
             q = qmc.rx(q, theta)
             return q
 
-        controlled_rx2 = qmc.controlled(rx_gate, num_controls=2)
+        controlled_rx2 = qmc.control(rx_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3572,8 +3572,8 @@ class TestControlledGate:
             q[0], q[1], q[2] = controlled_rx2(q[0], q[1], q[2], theta=theta)
             return qmc.measure(q)
 
-        with pytest.raises(EmitError, match="multi-controlled"):
-            _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
+        with pytest.raises(EmitError, match="multi-controlled operation"):
+            _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 3})
 
 
 class TestCustomCompositeGate:
@@ -5551,11 +5551,12 @@ class TestFQAOAIntegration:
         assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-10)
 
     def test_givens_rotation_gate_count(self):
-        """Givens rotation contains 4 CNOT gates in QuriParts.
+        """Givens rotation contains explicit and decomposed CNOT gates.
 
         Structure: CX + controlled-RY + CX.
-        In QuriParts, controlled-RY is decomposed to 2 CNOT + RY gates,
-        giving 2 outer CX + 2 inner CNOT = 4 CNOT total.
+        QURI Parts emits controlled-RY through its gate decomposition,
+        so the circuit contains the two explicit outer CNOTs plus two
+        CNOTs from the CRY decomposition.
         """
 
         @qmc.qkernel
@@ -5567,7 +5568,6 @@ class TestFQAOAIntegration:
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": 2, "theta": 0.5})
         gates = _get_gates(circ)
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
-        # 2 outer CX + 2 from CRY decomposition = 4
         assert len(cx_gates) == 4
         # All CNOT gates operate on qubits 0 and 1
         for g in cx_gates:
@@ -5854,7 +5854,7 @@ class TestDeepNestedQKernelComposition:
 
 
 class TestControlledSubRoutines:
-    """Test qmc.controlled() with statevector verification and power.
+    """Test qmc.control() with statevector verification and power.
 
     All tests use single-control (num_controls=1), which is handled by
     the fallback decomposition in standard_emit._emit_controlled_u.
@@ -5869,7 +5869,7 @@ class TestControlledSubRoutines:
             q = qmc.ry(q, theta)
             return q
 
-        controlled_ry = qmc.controlled(ry_gate)
+        controlled_ry = qmc.control(ry_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -5895,7 +5895,7 @@ class TestControlledSubRoutines:
             q = qmc.ry(q, theta)
             return q
 
-        controlled_ry = qmc.controlled(ry_gate)
+        controlled_ry = qmc.control(ry_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -5916,7 +5916,7 @@ class TestControlledSubRoutines:
             q = qmc.rz(q, theta)
             return q
 
-        controlled_rz = qmc.controlled(rz_gate)
+        controlled_rz = qmc.control(rz_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -5943,7 +5943,7 @@ class TestControlledSubRoutines:
             q = qmc.x(q)
             return q
 
-        controlled_hx = qmc.controlled(hx_gate)
+        controlled_hx = qmc.control(hx_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -5964,7 +5964,7 @@ class TestControlledSubRoutines:
             q = qmc.x(q)
             return q
 
-        controlled_hx = qmc.controlled(hx_gate)
+        controlled_hx = qmc.control(hx_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -5994,7 +5994,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -6014,7 +6014,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -6034,7 +6034,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -6060,9 +6060,8 @@ class TestControlledSubRoutines:
         expected = CP @ state
         assert statevectors_equal(sv, expected)
 
-    def test_controlled_multi_gate_double_control_raises(self):
-        """controlled(H·X, num_controls=2) raises EmitError on QuriParts."""
-        from qamomile.circuit.transpiler.errors import EmitError
+    def test_controlled_multi_gate_double_control_rejects_dense_fallback(self):
+        """controlled(H·X, num_controls=2) raises instead of using dense fallback."""
 
         @qmc.qkernel
         def hx_gate(q: qmc.Qubit) -> qmc.Qubit:
@@ -6070,7 +6069,7 @@ class TestControlledSubRoutines:
             q = qmc.x(q)
             return q
 
-        controlled_hx2 = qmc.controlled(hx_gate, num_controls=2)
+        controlled_hx2 = qmc.control(hx_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -6080,7 +6079,7 @@ class TestControlledSubRoutines:
             q[0], q[1], q[2] = controlled_hx2(q[0], q[1], q[2])
             return qmc.measure(q)
 
-        with pytest.raises(EmitError, match="multi-controlled"):
+        with pytest.raises(EmitError, match="multi-controlled operation"):
             _transpile_and_get_circuit(circuit)
 
 

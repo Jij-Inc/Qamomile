@@ -43,6 +43,8 @@
 # # !pip install qamomile
 
 # %%
+from typing import Any
+
 import matplotlib.pyplot as plt
 import numpy as np
 from qiskit import QuantumCircuit, transpile as qk_transpile
@@ -81,6 +83,32 @@ Hx = 0.5 * Omega * qm_o.X(0)
 Hs = [Hz, Hx]
 
 # %% [markdown]
+# ### Verifying $[H_z, H_x] \neq 0$
+#
+# Trotter approximations only matter because $H_z$ and $H_x$ do not commute.
+# `qamomile.observable.commutator(a, b)` computes the commutator
+# $[a, b] = a b - b a$ on Hamiltonians directly. Internally it iterates over
+# the Pauli-string pairs once and uses the qubit-parity rule — two Pauli
+# strings anticommute iff the number of qubits on which they carry different
+# non-identity Paulis is odd — to drop every commuting pair before any
+# product is built. This is cheaper than expanding `Hz * Hx - Hx * Hz` and
+# cancelling, and the result is a fully simplified `Hamiltonian` that we can
+# inspect or compare against an analytic value.
+#
+# For the Rabi Hamiltonian the textbook value is
+#
+# $$ [H_z, H_x] \;=\; \tfrac{\omega \Omega}{4}\,[Z, X] \;=\; i\,\tfrac{\omega \Omega}{2}\, Y, $$
+#
+# which `commutator` reproduces exactly:
+
+# %%
+comm_zx = qm_o.commutator(Hz, Hx)
+print(comm_zx)
+
+expected = 1j * 0.5 * omega * Omega * qm_o.Y(0)
+assert comm_zx == expected
+
+# %% [markdown]
 # ## Exact reference state
 #
 # A 2x2 matrix exponential gives the exact state $|\psi(T)\rangle = e^{-iHT}|0\rangle$,
@@ -110,7 +138,9 @@ def statevector(circuit) -> np.ndarray:
         stripped,
         basis_gates=["u", "cx", "rx", "ry", "rz", "h", "p", "sx", "x", "y", "z"],
     )
-    stripped.save_statevector()
+    # ``save_statevector`` is a qiskit-aer monkey-patch on ``QuantumCircuit``
+    # that base qiskit's typeshed does not know about.
+    stripped.save_statevector()  # type: ignore[attr-defined]
     sim = AerSimulator(method="statevector")
     return np.asarray(sim.run(stripped).result().get_statevector())
 
@@ -360,7 +390,7 @@ for name, order in suzuki_orders.items():
 # %%
 Ns = np.array([2, 4, 8, 16, 32, 64])
 all_names = ["S1", "S2", "S4", "S6"]
-errors = {name: [] for name in all_names}
+errors: dict[str, Any] = {name: [] for name in all_names}
 
 for N in Ns:
     for name, ker in s1_s2_kernels.items():

@@ -117,6 +117,8 @@ edge_list = [
 G = nx.Graph()
 G.add_nodes_from(range(num_nodes))
 G.add_edges_from(edge_list)
+assert G.number_of_nodes() == num_nodes
+assert G.number_of_edges() == len(edge_list)
 
 pos = nx.spring_layout(G, seed=1)
 plt.figure(figsize=(5, 5))
@@ -162,6 +164,13 @@ converter = QAOAConverter(instance)
 converter.spin_model = converter.spin_model.normalize_by_abs_max()
 hamiltonian = converter.get_cost_hamiltonian()
 print(hamiltonian)
+# Structural invariants of the spin model derived from this fixed instance:
+# one qubit per vertex, no linear (single-Z) terms, and a fixed quadratic-term
+# count once the QUBO simplifies the |V|=8, |E|=16 problem.
+assert converter.spin_model.num_bits == num_nodes
+assert converter.spin_model.linear == {}
+assert len(converter.spin_model.quad) == 12
+assert len(hamiltonian.terms) == 12
 
 # %% [markdown]
 # ## Transpile to an Executable Circuit
@@ -292,6 +301,7 @@ maxiter = 25 if docs_test_mode else 1000
 
 rng = np.random.default_rng(900)
 initial_params = rng.uniform(0, np.pi, 2 * p)
+assert initial_params.shape == (2 * p,)
 
 cost_history = []
 
@@ -327,6 +337,11 @@ res = minimize(
 print(f"Optimized cost: {res.fun:.3f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
 print(f"Function evaluations: {res.nfev}")
+assert len(cost_history) == res.nfev
+assert len(res.x) == 2 * p
+if docs_test_mode:
+    # In docs test mode COBYLA is truncated at the maxiter budget.
+    assert res.nfev == maxiter
 
 # %%
 plt.figure(figsize=(8, 4))
@@ -357,7 +372,10 @@ sample_result = executable.sample(
 # feasibility, the true objective, and per-constraint diagnostics are
 # available through OMMX's own API — no hand-rolled feasibility or
 # objective helper is needed.
+import ommx.v1
+
 sample_set = converter.decode(sample_result)
+assert isinstance(sample_set, ommx.v1.SampleSet)
 
 # %% [markdown]
 # ## Analyze the Results
@@ -382,6 +400,7 @@ print(
     f"Feasible samples: {total_feasible} / {total_samples} "
     f"({100 * total_feasible / total_samples:.1f}%)"
 )
+assert total_samples == 1000  # matches the hardcoded shots above
 
 # %% [markdown]
 # ### Best Feasible Solution
@@ -403,6 +422,10 @@ if total_feasible > 0:
     }
     print(f"Best feasible solution: {best_sample}")
     print(f"Cut edges:             {best_obj}")
+    # Any feasible solution must satisfy the equal-partition constraint
+    # sum(x_u) == |V|/2 exactly.
+    assert sum(best_sample.values()) == num_nodes // 2
+    assert best_obj >= 0
 else:
     print("No feasible solution found. Try increasing p or maxiter.")
     best_sample = None

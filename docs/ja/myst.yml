@@ -38,6 +38,10 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_12_5.md
+        - file: release_notes/v0_12_4.md
+        - file: release_notes/v0_12_3.md
+        - file: release_notes/v0_12_2.md
         - file: release_notes/v0_12_1.md
         - file: release_notes/v0_12_0.md
         - file: release_notes/v0_11_1.md
@@ -67,6 +71,7 @@ project:
             - file: api/optimization/binary_model
             - file: api/optimization/converter
             - file: api/optimization/fqaoa
+            - file: api/optimization/pce
             - file: api/optimization/post_process
             - file: api/optimization/qaoa
             - file: api/optimization/qrao

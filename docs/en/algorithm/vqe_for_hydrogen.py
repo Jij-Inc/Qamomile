@@ -67,6 +67,10 @@ molecule = of_chem.MolecularData(geometry, basis, multiplicity, charge, descript
 molecule = of_pyscf.run_pyscf(molecule, run_scf=True, run_fci=True)
 n_qubit = molecule.n_qubits
 n_electron = molecule.n_electrons
+# H2 in the STO-3G basis has 2 spatial orbitals -> 4 spin orbitals -> 4 qubits,
+# and is a 2-electron molecule.
+assert n_qubit == 4
+assert n_electron == 2
 fermionic_hamiltonian = of_trans.get_fermion_operator(
     molecule.get_molecular_hamiltonian()
 )
@@ -100,12 +104,13 @@ def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
 
 
 hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
+assert hamiltonian.num_qubits == n_qubit
 
 
 # %% [markdown]
 # ## Creating the VQE Ansatz
 #
-# In this section, we create an EfficientSU2 ansatz for the VQE algorithm using the `@qkernel` decorator. An ansatz is a parametrized quantum circuit that prepares a trial wavefunction. We build it by combining `ry_layer`, `rz_layer`, and a linear CX entangling layer, and finally compute the expectation value of the Hamiltonian using `expval`.
+# In this section, we create a Hardware Efficient SU(2) ansatz for the VQE algorithm using the `@qkernel` decorator. An ansatz is a parametrized quantum circuit that prepares a trial wavefunction. We build it by combining `ry_layer`, `rz_layer`, and a linear CX entangling layer, and finally compute the expectation value of the Hamiltonian using `expval`.
 
 
 # %%
@@ -164,6 +169,11 @@ def cost_callback(param_values):
 num_params = len(executable.parameter_names)
 rng = np.random.default_rng(42)
 initial_params = rng.uniform(0, np.pi, num_params)
+# Each rep emits one RY layer (n parameters) and one RZ layer (n parameters);
+# the final pre-CX layer adds one more RY + RZ pair. So the parameter count is
+# (reps + 1) * 2 * n_qubit.
+assert num_params == (reps + 1) * 2 * n_qubit
+assert initial_params.shape == (num_params,)
 
 # Run VQE optimization
 maxiter = 1 if docs_test_mode else 50
@@ -176,12 +186,21 @@ result = minimize(
     callback=cost_callback,
 )
 print(result)
+# Variational principle: any trial energy is an upper bound on the FCI
+# ground-state energy, regardless of how short the BFGS budget is.
+# ``run_fci=True`` was passed to ``of_pyscf.run_pyscf`` above, so
+# ``molecule.fci_energy`` is populated; openfermion's stub declares it
+# ``float | None`` to cover the ``run_fci=False`` case, so narrow here.
+fci_ref = molecule.fci_energy
+assert fci_ref is not None
+assert result.fun >= fci_ref - 1e-9
+assert len(result.x) == num_params
 
 # %%
 plt.plot(cost_history)
 plt.plot(
     range(len(cost_history)),
-    [molecule.fci_energy] * len(cost_history),
+    [fci_ref] * len(cost_history),
     linestyle="dashed",
     color="black",
     label="Exact Solution",
@@ -212,9 +231,12 @@ def hydrogen_molecule(bond_length):
 
 n_points = 3 if docs_test_mode else 15
 bond_lengths = np.linspace(0.2, 1.5, n_points)
+assert bond_lengths.shape == (n_points,)
 energies = []
 for bond_length in bond_lengths:
     hamiltonian, fci_energy = hydrogen_molecule(bond_length)
+    # H2 remains a 4-qubit problem regardless of bond length.
+    assert hamiltonian.num_qubits == 4
 
     executable = transpiler.transpile(
         vqe_ansatz,
@@ -232,8 +254,15 @@ for bond_length in bond_lengths:
     )
 
     energies.append(result.fun)
+    # ``run_fci=True`` was passed, so ``fci_energy`` is populated;
+    # narrow off openfermion's ``float | None`` stub.
+    assert fci_energy is not None
+    # Variational principle holds at every bond length.
+    assert result.fun >= fci_energy - 1e-9
 
     print("distance: ", bond_length, "energy: ", result.fun, "fci_energy: ", fci_energy)
+
+assert len(energies) == n_points
 
 # %%
 plt.plot(bond_lengths, energies, "-o")

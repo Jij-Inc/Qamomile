@@ -291,12 +291,34 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             ],
         )
 
-        new_results = list(op.results)
+        # Phi substitution must reach into ``SliceArrayOperation`` result
+        # metadata too.  The result is a sliced ``ArrayValue`` whose
+        # ``slice_start`` / ``slice_step`` / ``slice_of`` Values may be
+        # phi-output references when the slice bounds come from an
+        # ``if`` branch.  Without substituting the result fields, the
+        # post-fold ``SliceBorrowCheckPass`` sees a still-symbolic
+        # ``slice_start`` and silently skips coverage registration,
+        # letting aliased direct-parent accesses slip through.
+        from qamomile.circuit.ir.operation import SliceArrayOperation
 
-        changed = any(
-            new_operands[i] is not op.operands[i]
-            for i in range(len(op.operands))
-            if isinstance(op.operands[i], ValueBase)
+        new_results: list[Value] = list(op.results)
+        results_changed = False
+        if isinstance(op, SliceArrayOperation):
+            for i, r in enumerate(op.results):
+                if isinstance(r, ValueBase):
+                    sub_r = substitutor.substitute_value(r)
+                    if sub_r is not r:
+                        assert isinstance(sub_r, Value)
+                        new_results[i] = sub_r
+                        results_changed = True
+
+        changed = (
+            any(
+                new_operands[i] is not op.operands[i]
+                for i in range(len(op.operands))
+                if isinstance(op.operands[i], ValueBase)
+            )
+            or results_changed
         )
 
         # Handle control-flow recursion.
@@ -320,7 +342,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
         from qamomile.circuit.ir.operation.gate import (
             ControlledUOperation,
-            IndexSpecControlledU,
             SymbolicControlledU,
         )
 
@@ -339,7 +360,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
         result_op = op
         if changed:
-            result_op = dataclasses.replace(op, operands=new_operands)
+            result_op = dataclasses.replace(
+                op, operands=new_operands, results=new_results
+            )
 
         # theta is now part of operands, handled by the operands
         # substitution above.
@@ -352,27 +375,16 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 new_power = substitutor.substitute_value(result_op.power)
                 if new_power is not result_op.power:
                     extra_kwargs["power"] = new_power
-            if isinstance(result_op, IndexSpecControlledU):
-                if isinstance(result_op.num_controls, Value):
-                    new_nc = substitutor.substitute_value(result_op.num_controls)
-                    if new_nc is not result_op.num_controls:
-                        extra_kwargs["num_controls"] = new_nc
-                if result_op.target_indices is not None:
-                    new_ti = self._substitute_value_list(
-                        result_op.target_indices, substitutor
-                    )
-                    if new_ti is not None:
-                        extra_kwargs["target_indices"] = new_ti
-                if result_op.controlled_indices is not None:
-                    new_ci = self._substitute_value_list(
-                        result_op.controlled_indices, substitutor
-                    )
-                    if new_ci is not None:
-                        extra_kwargs["controlled_indices"] = new_ci
-            elif isinstance(result_op, SymbolicControlledU):
+            if isinstance(result_op, SymbolicControlledU):
                 new_nc = substitutor.substitute_value(result_op.num_controls)
                 if new_nc is not result_op.num_controls:
                     extra_kwargs["num_controls"] = new_nc
+                if result_op.control_indices is not None:
+                    new_ci = self._substitute_value_list(
+                        list(result_op.control_indices), substitutor
+                    )
+                    if new_ci is not None:
+                        extra_kwargs["control_indices"] = tuple(new_ci)
             # ConcreteControlledU: num_controls is int, nothing to substitute.
             if extra_kwargs:
                 result_op = dataclasses.replace(result_op, **extra_kwargs)
@@ -532,24 +544,17 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # ControlledUOperation non-operand fields (per subclass).
         from qamomile.circuit.ir.operation.gate import (
             ControlledUOperation,
-            IndexSpecControlledU,
             SymbolicControlledU,
         )
 
         if isinstance(op, ControlledUOperation):
             if isinstance(op.power, Value):
                 used.add(op.power.uuid)
-            if isinstance(op, IndexSpecControlledU):
-                if isinstance(op.num_controls, Value):
-                    used.add(op.num_controls.uuid)
-                if op.target_indices is not None:
-                    for v in op.target_indices:
-                        used.add(v.uuid)
-                if op.controlled_indices is not None:
-                    for v in op.controlled_indices:
-                        used.add(v.uuid)
-            elif isinstance(op, SymbolicControlledU):
+            if isinstance(op, SymbolicControlledU):
                 used.add(op.num_controls.uuid)
+                if op.control_indices is not None:
+                    for v in op.control_indices:
+                        used.add(v.uuid)
 
         # Recurse into control flow (For/ForItems/While/If).
         if isinstance(op, HasNestedOps):

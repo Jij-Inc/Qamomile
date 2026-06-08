@@ -18,10 +18,11 @@ from .frontend.handle import (
     Tuple,
     UInt,
     Vector,
+    VectorView,
 )
 from .frontend.operation.cast import cast
+from .frontend.operation.control import control
 from .frontend.operation.control_flow import for_items, items, range
-from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
 from .frontend.operation.pauli_evolve import pauli_evolve
@@ -50,6 +51,16 @@ from .frontend.qkernel import QKernel, qkernel
 # Standard library circuits
 from .stdlib import iqft, qft, qpe
 
+# Execution result / job types (return values of ExecutableProgram.sample / run)
+from .transpiler.job import (
+    ExpvalJob,
+    Job,
+    JobStatus,
+    RunJob,
+    SampleJob,
+    SampleResult,
+)
+
 if TYPE_CHECKING:
     from .visualization import DEFAULT_STYLE, CircuitStyle, MatplotlibDrawer
 
@@ -71,11 +82,19 @@ def __getattr__(name: str):  # type: ignore[no-untyped-def]
     raise AttributeError(f"module 'qamomile.circuit' has no attribute {name!r}")
 
 
+# Imported after frontend symbols are initialized because these kernels use
+# ``import qamomile.circuit as qmc`` in their implementation module.
+from .algorithm.arithmetic.modular_incdec import (  # noqa: E402, I001
+    modular_decrement,
+    modular_increment,
+)
+
+
 __all__ = [
     "qkernel",
     "composite_gate",
     "CompositeGate",
-    "controlled",
+    "control",
     "cast",
     "bit",
     "float_",
@@ -115,14 +134,24 @@ __all__ = [
     "Tuple",
     "UInt",
     "Vector",
+    "VectorView",
     "Matrix",
     "Tensor",
     "Observable",
     # stdlib
+    "modular_decrement",
+    "modular_increment",
     "qpe",
     "iqft",
     "qft",
     "QKernel",
+    # Job / result types
+    "Job",
+    "JobStatus",
+    "SampleResult",
+    "SampleJob",
+    "RunJob",
+    "ExpvalJob",
     # Visualization (lazy-loaded)
     "MatplotlibDrawer",
     "CircuitStyle",

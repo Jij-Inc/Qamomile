@@ -21,8 +21,15 @@ def _source_link(obj: griffe.Object, config: ApiGenConfig) -> str:
     """Generate a GitHub source link for an object."""
     if obj.filepath is None or obj.lineno is None:
         return ""
+    filepath = obj.filepath
+    # Namespace packages can produce ``list[Path]`` for ``filepath``; pick
+    # the first source for the source-link target.
+    if isinstance(filepath, list):
+        if not filepath:
+            return ""
+        filepath = filepath[0]
     try:
-        rel = Path(obj.filepath).resolve().relative_to(config.repo_root)
+        rel = Path(filepath).resolve().relative_to(config.repo_root)
     except ValueError:
         return ""
     return f" [[source]({config.github_base_url}/{rel}#L{obj.lineno})]"
@@ -127,9 +134,7 @@ def generate_class_doc(
             lines.append(_make_anchor_target(f"{cls.name}.{method_name}"))
             lines.append(f"{h}## `{method_name}`")
             lines.append("")
-            lines.extend(
-                generate_function_doc(method, config, page_path, registry)
-            )
+            lines.extend(generate_function_doc(method, config, page_path, registry))
 
     return lines
 
@@ -188,8 +193,7 @@ def generate_module_content(
         real_attrs = [
             (n, a)
             for n, a in sorted(attributes)
-            if a.annotation is not None
-            or (a.docstring and a.docstring.value)
+            if a.annotation is not None or (a.docstring and a.docstring.value)
         ]
         if real_attrs:
             lines.append(f"{h} Constants")
@@ -216,9 +220,7 @@ def generate_module_content(
             lines.append(_make_anchor_target(func_name))
             lines.append(f"{h}# `{func_name}`{src}")
             lines.append("")
-            lines.extend(
-                generate_function_doc(func, config, page_path, registry)
-            )
+            lines.extend(generate_function_doc(func, config, page_path, registry))
             if i < len(functions) - 1:
                 lines.append("---")
                 lines.append("")
