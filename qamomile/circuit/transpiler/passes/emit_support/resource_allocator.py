@@ -89,7 +89,7 @@ class ResourceAllocator:
             return None
         if isinstance(value, numbers.Integral):
             size = int(cast(Any, value))
-            return size if size > 0 else None
+            return size if size >= 0 else None
         return None
 
     def allocate(

@@ -514,9 +514,9 @@ class TestDynamicArraySizeResolution:
 
         _assert_all_zero_counts(name, counts, width=width, shots=16)
 
-    @pytest.mark.parametrize("n", [0, -1, np.int64(-3)])
-    def test_non_positive_scalar_size_raises(self, n: int):
-        """Test that non-positive scalar sizes are rejected."""
+    @pytest.mark.parametrize("n", [-1, np.int64(-3)])
+    def test_negative_scalar_size_raises(self, n: int):
+        """Test that negative scalar sizes are rejected."""
         transpiler = QiskitTranspiler()
 
         with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
@@ -525,13 +525,12 @@ class TestDynamicArraySizeResolution:
     @pytest.mark.parametrize(
         "sizes",
         [
-            np.array([0], dtype=np.int64),
             np.array([-1], dtype=np.int64),
             np.array([-3], dtype=np.int64),
         ],
     )
-    def test_non_positive_vector_element_size_raises(self, sizes: np.ndarray):
-        """Test that non-positive vector-element sizes are rejected."""
+    def test_negative_vector_element_size_raises(self, sizes: np.ndarray):
+        """Test that negative vector-element sizes are rejected."""
         transpiler = QiskitTranspiler()
 
         with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
