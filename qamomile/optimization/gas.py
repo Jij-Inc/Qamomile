@@ -39,6 +39,55 @@ class GASConverter(MathematicalProblemConverter):
         self.binary_model = self.spin_model.change_vartype(VarType.BINARY)
 
     @staticmethod
+    def _align_precision(values: list[float]) -> list[float]:
+        """Round noisy non-integer coefficients to a common user-intended precision.
+
+        Floating-point computation can leave a coefficient that the user meant
+        as an exact decimal (e.g. ``1.0``) fakely precise (e.g.
+        ``0.9999999999999999`` or ``1.0000000000000002``). Left as-is, such a
+        value would make ``_detect_eps`` report a spuriously fine epsilon driven
+        by rounding noise rather than by the precision the user actually wrote.
+
+        This rounds every non-integer value to the precision of the *least*
+        precise non-integer value in the list (the one with the fewest decimal
+        digits in its shortest round-tripping representation), so all
+        non-integer coefficients share one common decimal step before epsilon
+        detection runs. Integer-valued coefficients (within ``atol=1e-12``) are
+        considered exact — they neither influence the detected precision nor
+        get rounded.
+
+        Args:
+            values (list[float]): Coefficient values to align, typically the
+                model's constant followed by its interaction coefficients.
+
+        Returns:
+            list[float]: ``values`` with every non-integer entry rounded to the
+                coarsest decimal precision found among the non-integer entries.
+                Returned unchanged (aside from float coercion) when every value
+                is integer-valued.
+
+        """
+        non_integer_exponents = []
+        for v in values:
+            fv = float(v)
+            if not np.isclose(fv, round(fv), atol=1e-12):
+                non_integer_exponents.append(Decimal(str(fv)).as_tuple().exponent)
+
+        if not non_integer_exponents:
+            return [float(v) for v in values]
+
+        coarsest_exponent = max(non_integer_exponents)  # type: ignore[type-var]
+
+        aligned = []
+        for v in values:
+            fv = float(v)
+            if np.isclose(fv, round(fv), atol=1e-12):
+                aligned.append(fv)
+            else:
+                aligned.append(round(fv, -coarsest_exponent))  # type: ignore[operator]
+        return aligned
+
+    @staticmethod
     def _detect_eps(values: list[float]) -> float:
         """Auto-detect the input precision epsilon from a list of floats.
 
@@ -84,7 +133,7 @@ class GASConverter(MathematicalProblemConverter):
         max_coeff = float(np.max(np.abs(coeffs)))
         N_terms = len(coeffs)
 
-        epsilon = GASConverter._detect_eps(coeffs)
+        epsilon = GASConverter._detect_eps(GASConverter._align_precision(coeffs))
 
         p = math.ceil(math.log2(max_coeff / epsilon))
         log_N = math.ceil(math.log2(N_terms)) if N_terms > 1 else 0
@@ -233,8 +282,8 @@ class GASConverter(MathematicalProblemConverter):
             not np.isclose(v, round(v), atol=1e-12) for v in all_values
         )
         if has_non_integer and approximate_real_coefficients:
-            self.binary_model = self.approximate_real_valued_model(
-                self.effective_model, quantization_parameter=quantization_parameter
+            self.effective_model = self.approximate_real_valued_model(
+                self.binary_model, quantization_parameter=quantization_parameter
             )
             warnings.warn(
                 "The binary model contains non-integer coefficients. "
