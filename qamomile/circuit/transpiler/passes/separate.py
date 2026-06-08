@@ -268,6 +268,17 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             block.operations, dependency_graph
         )
 
+        # Block-output set: UUIDs the block returns. A classical op producing
+        # one of these must stay in a classical segment even if it also feeds
+        # a quantum gate — the executor only runs classical segments, so
+        # absorbing such an op would drop its returned value (the orchestrator
+        # would surface ``None``). Keeping it classical instead surfaces the
+        # value, and if that forces a quantum-segment split the user gets an
+        # explicit error rather than a silently wrong result.
+        self._block_output_uuids = {
+            v.uuid for v in block.output_values if isinstance(v, ValueBase)
+        }
+
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
 
@@ -368,15 +379,20 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             #     above) or genuine post-processing (e.g.
             #     ``DecodeQFixedOperation``) that must stay classical.
             #   * ``_feeds_quantum`` — the op's result must actually be needed
-            #     by a quantum gate. A classical op whose result is a block
-            #     output or feeds only later classical steps stays in its own
-            #     classical segment; absorbing it into a quantum segment would
-            #     drop its value (quantum segments never run classical ops).
+            #     by a quantum gate. A classical op whose result feeds only
+            #     later classical steps stays in its own classical segment;
+            #     absorbing it into a quantum segment would drop its value
+            #     (quantum segments never run classical ops).
+            #   * ``not _produces_block_output`` — even a gate-feeding op must
+            #     stay classical when its result is also a block output, so the
+            #     executor runs it and the returned value is surfaced rather
+            #     than silently dropped.
             if (
                 op_kind == OperationKind.CLASSICAL
                 and current_kind == OperationKind.QUANTUM
                 and not self._is_measurement_tainted(op)
                 and self._feeds_quantum(op)
+                and not self._produces_block_output(op)
             ):
                 current_ops.append(op)
                 continue
@@ -512,6 +528,26 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         needed = self._quantum_needed
         for v in op.results:
             if isinstance(v, ValueBase) and v.uuid in needed:
+                return True
+        return False
+
+    def _produces_block_output(self, op: Operation) -> bool:
+        """Return whether any result of ``op`` is a block output value.
+
+        Block outputs must be produced inside a classical segment so the
+        executor runs the op and the orchestrator can surface the value;
+        such ops are therefore never absorbed into a quantum segment.
+
+        Args:
+            op (Operation): The operation to classify.
+
+        Returns:
+            bool: ``True`` if any result UUID is in the block-output set,
+                ``False`` otherwise.
+        """
+        outputs = self._block_output_uuids
+        for v in op.results:
+            if isinstance(v, ValueBase) and v.uuid in outputs:
                 return True
         return False
 

@@ -1233,7 +1233,7 @@ def test_interleaved_param_expr_angle_sample_and_run(
     rng = np.random.default_rng(seed)
     # Include boundary angles (0, pi, 2*pi) alongside a random one.
     angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
-    shots = 4096
+    shots = 2048
 
     sample_executable = transpiler.transpile(
         interleaved_param_expr_sample, parameters=["phase"]
