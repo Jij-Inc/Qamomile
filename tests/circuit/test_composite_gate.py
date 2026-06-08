@@ -1383,6 +1383,87 @@ class TestQPEPhaseExtraction:
 
         assert phase == pytest.approx(0.375)
 
+    def test_extract_phase_from_bound_vector_view_element(self):
+        """QPE fallback phase extraction maps VectorView elements to root data."""
+        root = ArrayValue(type=FloatType(), name="gammas")
+        view = ArrayValue(
+            type=FloatType(),
+            name="gammas[slice]",
+            slice_of=root,
+            slice_start=Value(type=UIntType(), name="start").with_const(1),
+            slice_step=Value(type=UIntType(), name="step").with_const(2),
+        )
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="gamma_view_elem",
+            parent_array=view,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {"gammas": np.array([0.125, 0.25, 0.375, 0.5])},
+        )
+
+        assert phase == pytest.approx(0.5)
+
+    def test_extract_phase_from_const_vector_view_element_metadata(self):
+        """QPE fallback phase extraction maps VectorView elements to root literals."""
+        root = ArrayValue(
+            type=FloatType(),
+            name="gammas",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.25, 0.375, 0.5])
+        view = ArrayValue(
+            type=FloatType(),
+            name="gammas[slice]",
+            slice_of=root,
+            slice_start=Value(type=UIntType(), name="start").with_const(1),
+            slice_step=Value(type=UIntType(), name="step").with_const(2),
+        )
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="gamma_view_elem",
+            parent_array=view,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {},
+        )
+
+        assert phase == pytest.approx(0.5)
+
+    def test_extract_phase_leaves_symbolic_slice_bound_unresolved(self):
+        """QPE fallback phase extraction preserves unresolved VectorView bounds."""
+        root = ArrayValue(type=FloatType(), name="gammas")
+        view = ArrayValue(
+            type=FloatType(),
+            name="gammas[slice]",
+            slice_of=root,
+            slice_start=Value(type=UIntType(), name="start"),
+            slice_step=Value(type=UIntType(), name="step").with_const(1),
+        )
+        index = Value(type=UIntType(), name="idx").with_const(0)
+        phase_operand = Value(
+            type=FloatType(),
+            name="gamma_view_elem",
+            parent_array=view,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {"gammas": np.array([0.125, 0.25])},
+        )
+
+        assert phase is None
+
     def test_extract_phase_leaves_symbolic_array_index_unresolved(self):
         """QPE fallback phase extraction preserves unresolved symbolic indices."""
         parent = ArrayValue(

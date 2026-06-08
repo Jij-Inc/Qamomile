@@ -407,47 +407,63 @@ def _resolve_phase_operand(
     if resolved is not None:
         return float(resolved)
 
-    # Resolver indexing intentionally targets public bindings. Composite QPE
-    # can also carry frozen literal arrays in Value metadata; only concrete
-    # indices are safe to read here, while symbolic indices remain unresolved.
-    resolved = _resolve_const_array_element(emit_pass, operand, bindings)
+    # Resolver indexing intentionally targets direct parent bindings. Composite
+    # QPE may receive elements from sliced VectorViews, so this fallback walks
+    # back to the root array before indexing. Symbolic slice bounds or indices
+    # stay unresolved and fall through to the existing fallback behavior.
+    resolved = _resolve_array_element_from_root(emit_pass, operand, bindings)
     if resolved is not None:
         return float(resolved)
     return None
 
 
-def _resolve_const_array_element(
+def _resolve_array_element_from_root(
     emit_pass: "StandardEmitPass",
     operand: Any,
     bindings: dict[str, Any],
 ) -> Any:
-    """Resolve an array element from its parent's frozen literal payload.
+    """Resolve an array element from its root container or literal payload.
 
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose resolver
-            should resolve element index operands.
+            should resolve element index operands and slice bounds.
         operand (Any): Candidate array-element value.
         bindings (dict[str, Any]): Emit-time concrete bindings used for
-            constant or loop-local index values.
+            arrays, constant index values, or loop-local index values.
 
     Returns:
-        Any: The selected payload element, or ``None`` when the operand is not
-            a frozen array element or any index remains symbolic.
+        Any: The selected element, or ``None`` when the operand is not an array
+            element or any index/slice component remains symbolic.
     """
     parent = getattr(operand, "parent_array", None)
     element_indices = getattr(operand, "element_indices", None)
     if parent is None or not element_indices:
         return None
 
-    const_array = parent.get_const_array()
-    if const_array is None:
+    try:
+        root, start, step = emit_pass._resolver.resolve_slice_chain(
+            parent,
+            bindings,
+            operation="CompositeGateOperation[QPE]",
+        )
+    except EmitError:
         return None
 
-    result = const_array
-    for index_value in element_indices:
+    container = bindings.get(root.name)
+    if container is None:
+        container = bindings.get(root.uuid)
+    if container is None:
+        container = root.get_const_array()
+    if container is None:
+        return None
+
+    result = container
+    for axis, index_value in enumerate(element_indices):
         index = emit_pass._resolver.resolve_int_value(index_value, bindings)
         if index is None:
             return None
+        if axis == 0:
+            index = start + step * index
         try:
             result = result[index]
         except (IndexError, KeyError, TypeError):
