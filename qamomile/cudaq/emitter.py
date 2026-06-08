@@ -21,10 +21,17 @@ import enum
 import itertools
 import linecache
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
+
+# Matches the ``thetas`` parameter identifier as a whole word (e.g. ``thetas[0]``
+# or ``cudaq.control(..., thetas)``) without matching unrelated identifiers that
+# merely contain the substring (e.g. ``thetas_count``). Used to detect whether a
+# generated helper body references the entry-point parameter list.
+_THETAS_REFERENCE = re.compile(r"\bthetas\b")
 
 
 def _to_expr(value: Any) -> str:
@@ -400,11 +407,13 @@ class CudaqKernelEmitter:
             # reference before the helper body is built and then reused from
             # the resolver cache, so the flag may stay unset even though the
             # emitted body references ``thetas``. Scan the body as a backstop:
-            # if any line mentions ``thetas`` the helper must take the
-            # entry-point parameter list, otherwise CUDA-Q rejects the helper
-            # with "Invalid variable name 'thetas' is not defined".
+            # if any line mentions ``thetas`` (matched as a whole-word token so
+            # identifiers like ``thetas_count`` do not false-positive) the
+            # helper must take the entry-point parameter list, otherwise CUDA-Q
+            # rejects the helper with "Invalid variable name 'thetas' is not
+            # defined".
             uses_thetas = self._helper_param_used or any(
-                "thetas" in line for line in helper_lines
+                _THETAS_REFERENCE.search(line) for line in helper_lines
             )
             cache_key = (num_targets, uses_thetas, tuple(helper_lines))
             cached_name = self._helper_cache.get(cache_key)
