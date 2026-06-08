@@ -11,9 +11,11 @@ deterministic resolution order:
 1. **Context map** — caller-supplied ``UUID → concrete value`` dict
    (e.g. ``folded_values``, ``concrete_values``).
 2. **Constant** — ``value.is_constant() → value.get_const()``.
-3. **Bindings by parameter name** — ``value.is_parameter() → bindings[param_name]``.
-4. **Bindings by value name** — ``value.name → bindings[name]``.
-5. Returns ``None`` if none of the above match.
+3. **Compile-time array element** — ``arr[i]`` resolves from
+   ``arr``'s ``const_array`` metadata or a binding for ``arr``.
+4. **Bindings by parameter name** — ``value.is_parameter() → bindings[param_name]``.
+5. **Bindings by value name** — ``value.name → bindings[name]``.
+6. Returns ``None`` if none of the above match.
 """
 
 from __future__ import annotations
@@ -22,17 +24,15 @@ from typing import Any
 
 
 class ValueResolver:
-    """Resolves IR Values to concrete Python values.
+    """Resolve IR Values to concrete Python values.
 
-    Parameters
-    ----------
-    context:
-        UUID-keyed map of already-resolved values.  The *values* may be
-        either raw Python scalars or ``Value`` objects; if a ``Value`` is
-        found its ``get_const()`` is extracted automatically.
-    bindings:
-        Name-keyed parameter bindings supplied by the user at transpile
-        time.
+    Args:
+        context (dict[str, Any] | None): UUID-keyed map of already
+            resolved values. The values may be either raw Python scalars
+            or ``Value`` objects; if a ``Value`` is found its
+            ``get_const()`` is extracted automatically.
+        bindings (dict[str, Any] | None): Name-keyed parameter
+            bindings supplied by the user at transpile time.
     """
 
     __slots__ = ("_context", "_bindings")
@@ -42,14 +42,31 @@ class ValueResolver:
         context: dict[str, Any] | None = None,
         bindings: dict[str, Any] | None = None,
     ):
+        """Create a resolver with optional context and bindings.
+
+        Args:
+            context (dict[str, Any] | None): UUID-keyed map of
+                already-resolved values. Defaults to None.
+            bindings (dict[str, Any] | None): Name-keyed parameter
+                bindings supplied by the user. Defaults to None.
+        """
         self._context = context or {}
         self._bindings = bindings or {}
 
     def resolve(self, value: Any) -> Any | None:
-        """Resolve *value* to a concrete Python value, or ``None``.
+        """Resolve a Value-like object to a concrete Python value.
 
         If *value* is not a Value-like object (no ``uuid`` attribute) it
         is returned as-is — the caller already has a concrete value.
+
+        Args:
+            value (Any): The Value-like object or already concrete value
+                to resolve.
+
+        Returns:
+            Any | None: The resolved concrete value, the original
+                concrete value for non-Value inputs, or ``None`` when no
+                resolution rule applies.
         """
         if not hasattr(value, "uuid"):
             return value  # Already concrete
@@ -67,14 +84,63 @@ class ValueResolver:
         if hasattr(value, "is_constant") and value.is_constant():
             return value.get_const()
 
-        # 3. Bindings by parameter name
+        # 3. Compile-time array element
+        array_element = self._resolve_array_element(value)
+        if array_element is not None:
+            return array_element
+
+        # 4. Bindings by parameter name
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = value.parameter_name()
             if param_name and param_name in self._bindings:
                 return self._bindings[param_name]
 
-        # 4. Bindings by value name
+        # 5. Bindings by value name
         if hasattr(value, "name") and value.name and value.name in self._bindings:
             return self._bindings[value.name]
 
         return None
+
+    def _resolve_array_element(self, value: Any) -> Any | None:
+        """Resolve an array-element Value from compile-time array data.
+
+        Args:
+            value (Any): The Value-like object to inspect. It may be an
+                element Value with ``parent_array`` and
+                ``element_indices`` metadata.
+
+        Returns:
+            Any | None: The indexed element when every index resolves and
+                the parent array has compile-time data. Returns ``None``
+                when the value is not an array element, the parent has no
+                compile-time data, an index is symbolic, or indexing
+                fails.
+        """
+        parent_array = getattr(value, "parent_array", None)
+        element_indices = getattr(value, "element_indices", None)
+        if parent_array is None or not element_indices:
+            return None
+
+        container = None
+        get_const_array = getattr(parent_array, "get_const_array", None)
+        if callable(get_const_array):
+            container = get_const_array()
+        if container is None:
+            parent_name = getattr(parent_array, "name", None)
+            parent_uuid = getattr(parent_array, "uuid", None)
+            if parent_name in self._bindings:
+                container = self._bindings[parent_name]
+            elif parent_uuid in self._bindings:
+                container = self._bindings[parent_uuid]
+        if container is None:
+            return None
+
+        for index_value in element_indices:
+            index = self.resolve(index_value)
+            if index is None:
+                return None
+            try:
+                container = container[int(index)]
+            except (IndexError, KeyError, TypeError, ValueError):
+                return None
+        return container

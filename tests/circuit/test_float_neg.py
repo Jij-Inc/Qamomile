@@ -89,9 +89,63 @@ BACKENDS = [
 _BOUNDARY_ANGLES = [0.0, math.pi, 2.0 * math.pi, -0.7]
 
 
+def _manual_cry_half_angle(
+    ctrl: qmc.Qubit, tgt: qmc.Qubit, angle: float
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Decompose CRY with the same symbolic half-angle form users write.
+
+    Args:
+        ctrl (qmc.Qubit): Control qubit consumed by the decomposition.
+        tgt (qmc.Qubit): Target qubit consumed by the decomposition.
+        angle (float): Rotation angle. Tests intentionally pass a
+            ``qmc.Float`` value through this annotation to mirror user
+            helper code written with a Python ``float`` annotation.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Updated control and target qubits.
+    """
+    tgt = qmc.ry(tgt, angle / 2)
+    ctrl, tgt = qmc.cx(ctrl, tgt)
+    tgt = qmc.ry(tgt, -angle / 2)
+    ctrl, tgt = qmc.cx(ctrl, tgt)
+    return ctrl, tgt
+
+
 def test_float_handle_exposes_neg():
     """``qamomile.circuit.Float`` implements ``__neg__`` (issue #329 fix)."""
     assert hasattr(qmc.Float, "__neg__")
+
+
+def test_vector_float_element_helper_supports_negated_half_angle():
+    """A ``Vector[qmc.Float]`` element can flow through ``-angle / 2``."""
+
+    @qmc.qkernel
+    def circuit(slopes_p: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, name="qs")
+        qs[0], qs[1] = _manual_cry_half_angle(qs[0], qs[1], slopes_p[0])
+        return qmc.measure(qs)
+
+    block = circuit.build(slopes_p=np.array([0.3]))
+
+    assert block.operations
+
+
+@pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed")
+def test_vector_float_element_helper_transpiles_with_bindings():
+    """Qiskit transpilation accepts the user-reported ``-angle / 2`` pattern."""
+
+    @qmc.qkernel
+    def circuit(slopes_p: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, name="qs")
+        qs[0], qs[1] = _manual_cry_half_angle(qs[0], qs[1], slopes_p[0])
+        return qmc.measure(qs)
+
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(circuit, bindings={"slopes_p": np.array([0.3])})
+    result = exe.sample(transpiler.executor(), shots=16).result()
+
+    assert exe.quantum_circuit.num_qubits == 2
+    assert sum(count for _value, count in result.results) == 16
 
 
 class TestNegCancelsRotation:
