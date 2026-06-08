@@ -408,7 +408,19 @@ class ResourceAllocator:
         size_val: "Value",
         bindings: dict[str, Any],
     ) -> int | None:
-        """Resolve a size Value to a concrete integer."""
+        """Resolve a size Value to a concrete integer.
+
+        Args:
+            size_val (Value): IR value used as a qubit-array size.
+                Constants, bound scalar values, shape-dimension values, and
+                array-element values are supported when compile-time concrete.
+            bindings (dict[str, Any]): Compile-time bindings available to the
+                emit pass, keyed by parameter names or value UUIDs.
+
+        Returns:
+            int | None: Concrete integer size, or None when the value cannot
+                be resolved at allocation time.
+        """
         import re
 
         if size_val.is_constant():
@@ -481,10 +493,10 @@ class ResourceAllocator:
                 None when the parent container or any element index is not
                 compile-time concrete.
         """
-        parent = value.parent_array
-        if parent is None:
-            return None
-
+        assert value.parent_array is not None and value.element_indices, (
+            "_resolve_bound_array_element expects an array-element value, "
+            "not a whole-array shape dimension."
+        )
         root_parent, indices = self._resolve_array_element_indices(value)
         if root_parent is None or indices is None:
             return None
@@ -505,7 +517,7 @@ class ResourceAllocator:
             except (IndexError, KeyError, TypeError):
                 return None
 
-        if isinstance(container, numbers.Real):
+        if isinstance(container, numbers.Integral):
             return int(cast(Any, container))
         return None
 
@@ -535,6 +547,9 @@ class ResourceAllocator:
                 return None, None
             indices.append(int(cast(Any, idx_val.get_const())))
 
+        # VectorView is represented as a one-dimensional slice over the
+        # leading axis.  Any remaining indices belong to nested elements and
+        # pass through unchanged after the leading index is remapped.
         root_index = indices[0]
         while True:
             if parent.slice_of is None:
