@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numbers
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
@@ -85,10 +85,12 @@ class ResourceAllocator:
             int | None: The coerced integer size, or None when ``value`` is
                 negative, not an integral numeric value, or is a boolean.
         """
+        # Python bool is an Integral subclass, but it is never a valid size.
+        # NumPy bool scalars are rejected because they are not Integral values.
         if isinstance(value, bool):
             return None
         if isinstance(value, numbers.Integral):
-            size = int(cast(Any, value))
+            size = int(value)
             return size if size >= 0 else None
         return None
 
