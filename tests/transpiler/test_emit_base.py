@@ -1033,6 +1033,34 @@ def binop_pow_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
+@qmc.qkernel
+def array_element_loop_bound_circuit(
+    bounds: qmc.Vector[qmc.UInt], theta: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) using ``bounds[0]`` as an emit-time loop bound."""
+    q = qmc.qubit_array(4, "q")
+    for i in qmc.range(bounds[0]):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def apply_rx_helper(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Apply RX(theta) through a helper kernel."""
+    return qmc.rx(q, angle=theta)
+
+
+@qmc.qkernel
+def vector_view_element_helper_circuit(
+    slopes_p: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Pass ``view[0]`` from ``slopes_p[1:3]`` into a helper kernel."""
+    q = qmc.qubit_array(1, "q")
+    view = slopes_p[1:3]
+    q[0] = apply_rx_helper(q[0], view[0])
+    return qmc.measure(q)
+
+
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
@@ -1183,3 +1211,30 @@ class TestUIntBinOpFolding:
             assert np.isclose(angle, theta), (
                 f"RX[{i}] angle {angle} != expected {theta}"
             )
+
+
+class TestEmitArrayElementResolution:
+    """Integration coverage for array elements resolved during emit."""
+
+    def test_bound_uint_array_element_executes_as_loop_bound(self) -> None:
+        """``qmc.range(bounds[0])`` executes the expected deterministic flips."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            array_element_loop_bound_circuit,
+            bindings={"bounds": np.array([3], dtype=np.uint64), "theta": np.pi},
+        )
+        results = exe.sample(transpiler.executor(), shots=200).result().results
+
+        assert results == [((1, 1, 1, 0), 200)]
+
+    def test_vector_view_element_executes_through_helper_kernel(self) -> None:
+        """``view[0]`` passed to a helper executes with the root array element."""
+        transpiler = QiskitTranspiler()
+        slopes = np.array([0.1, np.pi, 0.7], dtype=np.float64)
+        exe = transpiler.transpile(
+            vector_view_element_helper_circuit,
+            bindings={"slopes_p": slopes},
+        )
+        results = exe.sample(transpiler.executor(), shots=200).result().results
+
+        assert results == [((1,), 200)]
