@@ -199,8 +199,11 @@ class ValueSubstitutor:
                 composition.
 
         Returns:
-            tuple[str, int] | None: Root array UUID and composed index, or
-                None when a slice bound is symbolic.
+            tuple[str, int] | None: Resolved parent UUID and composed index.
+                The parent is the root array when every slice in the chain
+                has concrete bounds; otherwise it is the deepest substituted
+                symbolic slice that can still address ``index`` locally.
+                Returns None when no parent can be resolved.
         """
         current: ArrayValue | None = parent
         resolved_index = index
@@ -211,7 +214,7 @@ class ValueSubstitutor:
                 or not current.slice_start.is_constant()
                 or not current.slice_step.is_constant()
             ):
-                return None
+                return current.uuid, resolved_index
             start = int(current.slice_start.get_const())
             step = int(current.slice_step.get_const())
             resolved_index = start + step * resolved_index

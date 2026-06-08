@@ -254,6 +254,56 @@ class TestArrayRuntimeMetadataSymbolicRootLimitations:
         assert result.metadata.array_runtime.element_parent_indices == (loop_index,)
 
 
+class TestArrayRuntimeMetadataSymbolicParentSubstitution:
+    """Tests symbolic slice parent metadata substitution."""
+
+    def test_symbolic_slice_parent_uuid_is_substituted(self) -> None:
+        """Symbolic slice parents keep a valid substituted parent UUID."""
+        old_parent = _make_array_value("callee_q")
+        root = _make_array_value("caller_q")
+        start = _make_value("i")
+        one = _make_const_value("one", 1)
+        replacement_parent = ArrayValue(
+            type=QubitType(),
+            name="caller_q[i:]",
+            slice_of=root,
+            slice_start=start,
+            slice_step=one,
+        )
+        old_child = _make_value("callee_q_1", QubitType)
+        new_child = _make_value("caller_q_i_plus_1", QubitType)
+        carrier = ArrayValue(
+            type=QubitType(),
+            name="tuple_qubits",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_uuids=(old_child.uuid,),
+                    element_logical_ids=(old_child.logical_id,),
+                    element_parent_uuids=(old_parent.uuid,),
+                    element_parent_indices=(1,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor(
+            {
+                old_parent.uuid: replacement_parent,
+                old_child.uuid: new_child,
+            }
+        ).substitute_value(carrier)
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == (new_child.uuid,)
+        assert result.metadata.array_runtime.element_logical_ids == (
+            new_child.logical_id,
+        )
+        assert result.metadata.array_runtime.element_parent_uuids == (
+            replacement_parent.uuid,
+        )
+        assert result.metadata.array_runtime.element_parent_indices == (1,)
+
+
 # ===========================================================================
 # Bug #5: ArrayValue.shape cloning and substitution
 # ===========================================================================

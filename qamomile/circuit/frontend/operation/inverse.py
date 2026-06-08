@@ -133,6 +133,7 @@ class _InverseRotationCallable:
         """
         signature = inspect.signature(self.rotation_callable)
         bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
         negated = -bound.arguments[self.angle_param]
         if isinstance(negated, Real):
             negated = _normalize_zero(float(negated))
@@ -907,6 +908,15 @@ class _BlockInverter:
                 "source block outputs do not match its stored target operands."
             )
 
+        if op.num_control_qubits > 0:
+            return self._restore_controlled_inverse_block(
+                op,
+                current_controls,
+                current_targets,
+                mapped_params,
+                value_map,
+            )
+
         local_map = dict(value_map)
         self._bind_forward_block_inputs(
             op.source_block,
@@ -918,9 +928,6 @@ class _BlockInverter:
             op.source_block.operations, local_map
         )
 
-        for operand, result in zip(op.control_qubits, current_controls):
-            value_map[operand.uuid] = result
-
         for output, operand in zip(op.source_block.output_values, op.target_qubits):
             resolved = _substitute_value(output, local_map)
             value_map[operand.uuid] = resolved
@@ -929,6 +936,63 @@ class _BlockInverter:
                     if operand_dim.uuid != resolved_dim.uuid:
                         value_map[operand_dim.uuid] = resolved_dim
         return operations
+
+    def _restore_controlled_inverse_block(
+        self,
+        op: InverseBlockOperation,
+        current_controls: Sequence[ValueBase],
+        current_targets: Sequence[ValueBase],
+        mapped_params: Sequence[ValueBase],
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Restore a controlled forward block from an inverse block.
+
+        Args:
+            op (InverseBlockOperation): Controlled inverse block being
+                inverted.
+            current_controls (Sequence[ValueBase]): Current control values
+                flowing out of `op`.
+            current_targets (Sequence[ValueBase]): Current target values
+                flowing out of `op`.
+            mapped_params (Sequence[ValueBase]): Classical/object operands
+                after applying `value_map`.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map
+                to update with the restored operation results.
+
+        Returns:
+            list[Operation]: A single controlled forward operation.
+
+        Raises:
+            NotImplementedError: If the controlled inverse block has no
+                source block to restore.
+        """
+        if op.source_block is None:
+            raise NotImplementedError(
+                "inverse() cannot restore a controlled inverse block without "
+                "a source block."
+            )
+
+        new_controls = [control.next_version() for control in current_controls]
+        new_targets = [target.next_version() for target in current_targets]
+        restored = ConcreteControlledU(
+            operands=cast(
+                list[Value],
+                [*current_controls, *current_targets, *mapped_params],
+            ),
+            results=cast(list[Value], [*new_controls, *new_targets]),
+            num_controls=op.num_control_qubits,
+            block=op.source_block,
+        )
+
+        for operand, result in zip(op.control_qubits, new_controls):
+            value_map[operand.uuid] = result
+        for operand, result in zip(op.target_qubits, new_targets):
+            value_map[operand.uuid] = result
+            if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
+                for operand_dim, result_dim in zip(operand.shape, result.shape):
+                    if operand_dim.uuid != result_dim.uuid:
+                        value_map[operand_dim.uuid] = result_dim
+        return [restored]
 
     def _bind_forward_block_inputs(
         self,

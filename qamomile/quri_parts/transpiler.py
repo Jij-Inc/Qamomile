@@ -970,14 +970,7 @@ class QuriPartsEmitPass(
                     bindings,
                 )
             )
-        except (
-            AttributeError,
-            TypeError,
-            ValueError,
-            KeyError,
-            IndexError,
-            RuntimeError,
-        ):
+        except (AttributeError, TypeError, ValueError, RuntimeError):
             return False
 
         emitter = cast(QuriPartsGateEmitter, self._emitter)
@@ -1008,14 +1001,7 @@ class QuriPartsEmitPass(
                 force_unroll=True,
             )
             inverse_circuit = self._emitter.gate_inverse(sub_circuit)
-        except (
-            AttributeError,
-            TypeError,
-            ValueError,
-            KeyError,
-            IndexError,
-            RuntimeError,
-        ):
+        except (AttributeError, TypeError, ValueError, RuntimeError):
             return False
         finally:
             emitter._current_circuit = saved_circuit
@@ -1026,7 +1012,7 @@ class QuriPartsEmitPass(
 
         try:
             self._append_remapped_circuit(circuit, inverse_circuit, qubit_indices)
-        except (AttributeError, TypeError, ValueError, IndexError, RuntimeError):
+        except (AttributeError, TypeError, ValueError, RuntimeError):
             return False
         return True
 

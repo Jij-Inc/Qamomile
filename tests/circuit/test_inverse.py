@@ -8,6 +8,10 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.estimator import count_gates
+from qamomile.circuit.frontend.operation.inverse import (
+    _BlockInverter,
+    _InverseRotationCallable,
+)
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
@@ -1176,6 +1180,68 @@ def test_inverse_of_inverse_restores_source_operations() -> None:
         GateOperationType.H,
         GateOperationType.RZ,
     ]
+
+
+def test_inverse_of_controlled_inverse_restores_controlled_source() -> None:
+    """Double inversion preserves controls on first-class inverse blocks."""
+    source_input = Value(type=QubitType(), name="target")
+    source_output = source_input.next_version()
+    source_block = Block(
+        name="source",
+        input_values=[source_input],
+        output_values=[source_output],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [source_input],
+                [source_output],
+            )
+        ],
+        kind=BlockKind.HIERARCHICAL,
+    )
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    inverse_control = control.next_version()
+    inverse_target = target.next_version()
+    inverse_op = InverseBlockOperation(
+        operands=[control, target],
+        results=[inverse_control, inverse_target],
+        num_control_qubits=1,
+        num_target_qubits=1,
+        custom_name="source_inverse",
+        source_block=source_block,
+        implementation_block=source_block,
+    )
+    block = Block(
+        name="controlled_inverse",
+        input_values=[control, target],
+        output_values=[inverse_control, inverse_target],
+        operations=[inverse_op],
+        kind=BlockKind.HIERARCHICAL,
+    )
+
+    inverted = _BlockInverter().invert_block(block)
+
+    assert len(inverted.operations) == 1
+    restored = inverted.operations[0]
+    assert isinstance(restored, ConcreteControlledU)
+    assert restored.num_controls == 1
+    assert restored.block is source_block
+    assert restored.control_operands == [control]
+    assert restored.target_operands[:1] == [target]
+    assert inverted.output_values == restored.results
+
+
+def test_inverse_rotation_callable_applies_defaults() -> None:
+    """Inverse rotation callables negate defaulted angles."""
+
+    def rotation(q: object, angle: float = 0.0) -> tuple[object, float]:
+        """Return the supplied qubit-like object and angle."""
+        return q, angle
+
+    inverse_rotation = _InverseRotationCallable(rotation, "angle")
+
+    assert inverse_rotation("q") == ("q", 0.0)
 
 
 def test_inverse_qkernel_rejects_vector_for_scalar_input() -> None:
