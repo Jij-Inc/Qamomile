@@ -582,7 +582,8 @@ def test_hubo_ommx_instance_builds_spin_model_with_higher_terms():
     hubo_dict, _ = ommx.v1.Instance.from_bytes(instance.to_bytes()).to_hubo()
     cubic_keys = [k for k in hubo_dict if len(k) == 3]
     assert len(cubic_keys) == 1, f"expected exactly one cubic HUBO term, got {cubic_keys}"
-    assert cubic_keys[0] == (0, 1, 2), f"unexpected cubic key {cubic_keys[0]}"
+    # Use a set comparison so index ordering within the tuple does not matter.
+    assert set(cubic_keys[0]) == {0, 1, 2}, f"unexpected cubic variables {cubic_keys[0]}"
     assert hubo_dict[cubic_keys[0]] == pytest.approx(1.0), (
         f"x0*x1*x2 coefficient must be 1.0, got {hubo_dict[cubic_keys[0]]}"
     )
