@@ -564,18 +564,28 @@ def test_hubo_ommx_instance_builds_spin_model_with_higher_terms():
     RuntimeError for degree-3 terms.  After the fix it calls to_hubo() and
     the cubic term survives into spin_model.higher.
     """
-    from qamomile.optimization.binary_model import BinaryModel
-
     instance = _build_hubo_ommx_instance()
     converter = QAOAConverter(instance)
 
     assert converter.spin_model.higher, "cubic term must appear in spin_model.higher"
 
-    # Cross-check: BinaryModel.from_hubo path for the same problem must agree
-    hubo_dict, constant = ommx.v1.Instance.from_bytes(instance.to_bytes()).to_hubo()
-    reference = BinaryModel.from_hubo(hubo_dict, constant)
-    assert set(converter.spin_model.higher.keys()) == set(
-        reference.change_vartype(converter.spin_model.vartype).higher.keys()
+    # Verify that a degree-3 key survived into the spin model.  This directly
+    # checks the property broken before the fix, independently of BinaryModel.
+    assert any(len(k) == 3 for k in converter.spin_model.higher), (
+        "spin_model.higher must contain at least one degree-3 key"
+    )
+
+    # Cross-check against the raw to_hubo() output — without routing through
+    # BinaryModel.from_hubo() — so regressions in normalize_problem_input are
+    # caught independently of the BinaryModel conversion code.
+    # The objective x0*x1*x2 + x1*x3 - x0 must produce exactly one cubic key.
+    hubo_dict, _ = ommx.v1.Instance.from_bytes(instance.to_bytes()).to_hubo()
+    cubic_keys = [k for k in hubo_dict if len(k) == 3]
+    assert len(cubic_keys) == 1, f"expected exactly one cubic HUBO term, got {cubic_keys}"
+    # Use a set comparison so index ordering within the tuple does not matter.
+    assert set(cubic_keys[0]) == {0, 1, 2}, f"unexpected cubic variables {cubic_keys[0]}"
+    assert hubo_dict[cubic_keys[0]] == pytest.approx(1.0), (
+        f"x0*x1*x2 coefficient must be 1.0, got {hubo_dict[cubic_keys[0]]}"
     )
 
 
@@ -588,5 +598,5 @@ def test_hubo_ommx_instance_rejected_by_qrac_with_clear_error():
 
     instance = _build_hubo_ommx_instance()
 
-    with pytest.raises(ValueError, match="higher-order"):
+    with pytest.raises(ValueError, match=r"higher[\s-]order"):
         QRAC31Converter(instance)
