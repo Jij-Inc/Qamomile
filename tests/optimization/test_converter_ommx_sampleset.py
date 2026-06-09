@@ -598,5 +598,5 @@ def test_hubo_ommx_instance_rejected_by_qrac_with_clear_error():
 
     instance = _build_hubo_ommx_instance()
 
-    with pytest.raises(ValueError, match="higher-order"):
+    with pytest.raises(ValueError, match=r"higher[\s-]order"):
         QRAC31Converter(instance)

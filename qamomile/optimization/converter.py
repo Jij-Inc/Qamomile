@@ -38,7 +38,7 @@ def normalize_problem_input(
     ``to_hubo`` is used instead of ``to_qubo`` so that both purely
     quadratic (QUBO) and higher-order (HUBO) instances are handled
     uniformly. For quadratic-only instances the two paths produce
-    identical :class:`BinaryModel` results.
+    equivalent optimization problems (same coefficients and vartype).
 
     Args:
         instance (ommx.v1.Instance | BinaryModel): The combinatorial
