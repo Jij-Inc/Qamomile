@@ -575,17 +575,22 @@ def test_hubo_ommx_instance_builds_spin_model_with_higher_terms():
         "spin_model.higher must contain at least one degree-3 key"
     )
 
-    # Cross-check against the raw to_hubo() output — without routing through
-    # BinaryModel.from_hubo() — so regressions in normalize_problem_input are
-    # caught independently of the BinaryModel conversion code.
-    # The objective x0*x1*x2 + x1*x3 - x0 must produce exactly one cubic key.
-    hubo_dict, _ = ommx.v1.Instance.from_bytes(instance.to_bytes()).to_hubo()
-    cubic_keys = [k for k in hubo_dict if len(k) == 3]
-    assert len(cubic_keys) == 1, f"expected exactly one cubic HUBO term, got {cubic_keys}"
-    # Use a set comparison so index ordering within the tuple does not matter.
-    assert set(cubic_keys[0]) == {0, 1, 2}, f"unexpected cubic variables {cubic_keys[0]}"
-    assert hubo_dict[cubic_keys[0]] == pytest.approx(1.0), (
-        f"x0*x1*x2 coefficient must be 1.0, got {hubo_dict[cubic_keys[0]]}"
+    # Cross-check that the cubic term survived the full normalize_problem_input
+    # → BinaryModel.from_hubo → change_vartype pipeline into spin_model.higher;
+    # this catches regressions in qamomile's conversion code, not ommx internals.
+    cubic_spin_keys = [k for k in converter.spin_model.higher if len(k) == 3]
+    assert len(cubic_spin_keys) == 1, (
+        f"expected exactly one cubic spin term, got {cubic_spin_keys}"
+    )
+    # Set comparison so index ordering within the tuple does not matter.
+    assert set(cubic_spin_keys[0]) == {0, 1, 2}, (
+        f"unexpected cubic spin variables {cubic_spin_keys[0]}"
+    )
+    # x0*x1*x2 (BINARY, coeff 1) expands to spin via prod((1-si)/2); the cubic
+    # spin coefficient is -1/8.
+    assert converter.spin_model.higher[cubic_spin_keys[0]] == pytest.approx(-1 / 8), (
+        f"x0*x1*x2 cubic spin coefficient must be -1/8, "
+        f"got {converter.spin_model.higher[cubic_spin_keys[0]]}"
     )
 
 
