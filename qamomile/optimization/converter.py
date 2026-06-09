@@ -52,7 +52,7 @@ def normalize_problem_input(
         ``(stored_instance, original_vartype, spin_model)``.
 
         * ``stored_instance``: the deep-copied ``Instance`` for OMMX
-          inputs (post ``to_qubo``), or ``None`` for ``BinaryModel``
+          inputs (post ``to_hubo``), or ``None`` for ``BinaryModel``
           inputs.
         * ``original_vartype``: the declared vartype of the input — used
           by converters' ``decode`` paths to return results in the
