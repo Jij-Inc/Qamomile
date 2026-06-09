@@ -445,8 +445,13 @@ class GASConverter(MathematicalProblemConverter):
             controls = [q_input[ci] for ci in ctrl_indices]
             result = ctrl_qft(*controls, q_output, coef)
             # result = (ctrl_0, ..., ctrl_{degree-1}, q_output)
-            for k in range(degree):
-                q_input[ctrl_indices[k]] = result[k]  # type: ignore[index]
+            # List-comp instead of a for-statement: the DSL transformer converts
+            # `for k in range(...)` statements into for_loop() context managers
+            # where k becomes a symbolic UInt, causing ctrl_indices[k] and
+            # result[k] (both Python-sequence indexing) to call UInt.__index__()
+            # and raise TypeError.  Inside a list comprehension range(degree) is
+            # Python's built-in and k stays a concrete int.
+            [q_input.__setitem__(ctrl_indices[k], result[k]) for k in range(degree)]  # type: ignore[index]
             q_output = result[degree]  # type: ignore[index]
             return q_output, q_input
 
