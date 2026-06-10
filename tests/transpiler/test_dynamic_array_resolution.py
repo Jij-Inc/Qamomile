@@ -18,7 +18,12 @@ import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import EmitError, QamomileCompileError
+from qamomile.circuit.transpiler.errors import (
+    EmitError,
+    QamomileCompileError,
+    ResolutionFailureReason,
+)
+from qamomile.circuit.transpiler.passes.emit_support.qubit_address import QubitAddress
 from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
     ResourceAllocator,
 )
@@ -170,6 +175,40 @@ def kernel_size_from_symbolic_uint_element(
         qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
     """
     q = qmc.qubit_array(sizes[i], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_negative_index_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a negative-index vector element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Vector accessed with an unsupported
+            Python-style negative index.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[-1], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_negative_view_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a negative-index vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Vector whose sliced view is accessed
+            with an unsupported Python-style negative index.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[1:3][-1], name="q")
     return qmc.measure(q)
 
 
@@ -550,6 +589,22 @@ class TestDynamicArraySizeResolution:
                 parameters=["i"],
             )
 
+    def test_negative_bound_index_size_rejected(self):
+        """Test that an index bound to ``-1`` does not Python-wrap the container.
+
+        Binding ``i=-1`` previously made ``sizes[i]`` silently resolve to the
+        last container element (7 qubits); call-time specialization now folds
+        the negative constant into the element access, where the frontend
+        rejection fires.
+        """
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            transpiler.transpile(
+                kernel_size_from_symbolic_uint_element,
+                bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64), "i": -1},
+            )
+
     def test_non_integral_vector_element_size_raises(self):
         """Test that non-integral element sizes are not silently truncated."""
         transpiler = QiskitTranspiler()
@@ -568,6 +623,29 @@ class TestDynamicArraySizeResolution:
             transpiler.transpile(
                 kernel_size_from_uint_element,
                 bindings={"sizes": np.array([True], dtype=np.bool_)},
+            )
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            kernel_size_from_negative_index_element,
+            kernel_size_from_negative_view_element,
+        ],
+    )
+    def test_negative_const_element_index_size_rejected_at_trace(self, kernel: Any):
+        """Test that constant negative element indices are rejected at trace.
+
+        ``sizes[-1]`` previously resolved by Python container accident while
+        ``sizes[1:3][-1]`` silently affine-composed to ``sizes[0]`` and
+        produced a wrong-sized circuit; both now fail loudly before IR is
+        built.
+        """
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            transpiler.transpile(
+                kernel,
+                bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64)},
             )
 
     def test_allocator_size_from_const_uint_vector_element(self):
@@ -650,6 +728,106 @@ class TestDynamicArraySizeResolution:
                 [QInitOperation([], [q])],
                 bindings={"sizes": np.array([5], dtype=np.uint64)},
             )
+
+    def test_allocator_negative_symbolic_element_index_stays_unresolved(self):
+        """Test that a negative-resolved element index does not Python-wrap.
+
+        A symbolic index bound to ``-1`` must not silently read the last
+        container element (``container[-1]``); the size stays unresolved
+        and surfaces as the standard unresolved-size error.
+        """
+        dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        parent = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(dim,),
+        ).with_array_runtime_metadata(const_array=(2, 5, 7))
+        idx = Value(type=UIntType(), name="i")
+        size = Value(
+            type=UIntType(),
+            name="sizes[i]",
+            parent_array=parent,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate([QInitOperation([], [q])], bindings={"i": -1})
+
+    def test_allocator_negative_symbolic_view_element_index_stays_unresolved(self):
+        """Test that a negative-resolved view-local index is not affine-composed.
+
+        For a view over ``sizes`` with ``start=1, step=1``, a local index
+        bound to ``-1`` must not compose to root index ``0`` (which would
+        silently allocate ``sizes[0]`` qubits); the size stays unresolved.
+        """
+        root_dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        root = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(root_dim,),
+        ).with_array_runtime_metadata(const_array=(2, 5, 7))
+        view_dim = Value(type=UIntType(), name="view_dim_0").with_const(2)
+        start = Value(type=UIntType(), name="slice_start").with_const(1)
+        step = Value(type=UIntType(), name="slice_step").with_const(1)
+        view = ArrayValue(
+            type=UIntType(),
+            name="sizes_slice",
+            shape=(view_dim,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        idx = Value(type=UIntType(), name="i")
+        size = Value(
+            type=UIntType(),
+            name="sizes_slice[i]",
+            parent_array=view,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate([QInitOperation([], [q])], bindings={"i": -1})
+
+    def test_resolver_negative_view_qubit_index_fails(self):
+        """Test that emit-time qubit routing refuses negative view indices.
+
+        Without the guard, a view-local index bound to ``-1`` composes to
+        root index ``start + step * (-1)`` — a valid-but-wrong physical
+        wire — instead of failing with ``NEGATIVE_INDEX``.
+        """
+        root_dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        root = ArrayValue(type=QubitType(), name="q", shape=(root_dim,))
+        view_dim = Value(type=UIntType(), name="view_dim_0").with_const(2)
+        start = Value(type=UIntType(), name="slice_start").with_const(1)
+        step = Value(type=UIntType(), name="slice_step").with_const(1)
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_slice",
+            shape=(view_dim,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        idx = Value(type=UIntType(), name="i")
+        element = Value(
+            type=QubitType(),
+            name="q_slice[i]",
+            parent_array=view,
+            element_indices=(idx,),
+        )
+        qubit_map = {QubitAddress(root.uuid, k): k for k in range(3)}
+        resolver = ValueResolver()
+
+        result = resolver.resolve_qubit_index_detailed(
+            element, qubit_map, bindings={"i": -1}
+        )
+
+        assert not result.success
+        assert result.failure_reason is ResolutionFailureReason.NEGATIVE_INDEX
 
 
 class TestNestedArrayAccess:

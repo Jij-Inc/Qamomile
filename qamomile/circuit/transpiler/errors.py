@@ -74,6 +74,7 @@ class ResolutionFailureReason(Enum):
     SYMBOLIC_INDEX_NOT_BOUND = "symbolic_index_not_bound"
     ARRAY_ELEMENT_NOT_IN_QUBIT_MAP = "array_element_not_in_qubit_map"
     INDEX_NOT_NUMERIC = "index_not_numeric"
+    NEGATIVE_INDEX = "negative_index"
     NESTED_ARRAY_RESOLUTION_FAILED = "nested_array_resolution_failed"
     DIRECT_UUID_NOT_FOUND = "direct_uuid_not_found"
     UNKNOWN = "unknown"

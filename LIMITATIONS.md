@@ -108,6 +108,16 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 
 **Future fix**: introduce a block-local operand-to-target mapping in the shared fallback emitter, then use it to lower general multi-target inner blocks gate by gate. Until then, kernels that need this shape should run on a backend where block-to-gate conversion succeeds or rewrite the controlled operation into element-wise controlled calls.
 
+## Negative element indices are rejected, not normalized
+
+Python-style negative indexing on traced array handles — `vec[-1]`, `view[-1]`, `q[-1] = ...`, `mat[0, -1]` — raises `NotImplementedError` at trace time instead of selecting an element from the end. Symbolic indices that resolve to a negative value from bindings at compile or emit time stay unresolved and surface as the standard compile error (`Cannot resolve array size ...` / qubit resolution failure) instead of wrapping.
+
+**When it bites**: code written with Python container habits, e.g. `qmc.qubit_array(sizes[-1])` or `q[k - 1]` where `k` folds to `0`. The latter is usually a genuine precondition violation (see `phase_gadget` with empty `indices`), which now fails at trace time with a negative-index message rather than surviving to emit.
+
+**Why this trade-off was chosen**: negative-index semantics were never actually implemented. Root-container classical reads (`sizes[-1]`) only worked by accident of Python container indexing, while every slice-composed path silently mis-addressed: `sizes[1:3][-1]` read `sizes[0]` (the affine root composition `start + step * local` yields `1 + 1 * (-1) = 0`) and produced a wrong-sized circuit, a gate on `view[-1]` for `view = q[1:3]` was routed onto physical `q[0]` instead of `q[2]`, and `q[-1]` on a root qubit array tripped an internal allocator assertion claiming a transpiler bug. Rejecting negative constants in `ArrayBase._get_element` / `_return_element` — exactly where negative slice bounds were already rejected — eliminates the silent-miscompilation class without committing to wrap semantics. Defense-in-depth guards in the compile-time resolver (`UnifiedValueResolver`), the emit resolver (`ValueResolver`), and the IR-level `resolve_root_qubit_address` refuse negative resolved indices and out-of-contract slice bounds (`start < 0`, `step <= 0`) so programmatically constructed IR and binding-resolved negatives cannot slip through either.
+
+**Future fix**: support Python semantics by normalizing `idx < 0` to `dim + idx` in `_get_element` when the dimension is a compile-time constant (rejecting only when the dimension is symbolic), and extend the same normalization to binding-resolved indices using the resolved view length. Until then, compute the index explicitly (e.g. `vec[n - 1]` with a bound `n`).
+
 ## Symbolic slice disjointness beyond direct unit-stride intervals
 
 **When it bites**: two symbolic slices on the same root are actually disjoint, but their disjointness cannot be expressed as direct unit-stride root-space intervals.

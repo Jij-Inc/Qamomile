@@ -29,13 +29,25 @@ class QubitResolutionResult:
 def resolve_qubit_key(qubit: "Value") -> tuple[QubitAddress | None, bool]:
     """Resolve a qubit Value to its allocation key.
 
-    Returns a ``(QubitAddress | None, is_array_element)`` tuple.
+    Args:
+        qubit (Value): The qubit Value to resolve. May be a scalar qubit
+            or an array element carrying ``parent_array`` and
+            ``element_indices``.
+
+    Returns:
+        tuple[QubitAddress | None, bool]: ``(QubitAddress |
+            None, is_array_element)``. The address is None for array
+            elements whose index is symbolic or a negative constant —
+            negative indices never form a valid allocation key and must
+            not silently address a parent-array slot.
     """
     if qubit.parent_array is not None and qubit.element_indices:
         parent_uuid = qubit.parent_array.uuid
         idx_value = qubit.element_indices[0]
         if idx_value.is_constant():
             idx = int(idx_value.get_const())
+            if idx < 0:
+                return None, True
             return QubitAddress(parent_uuid, idx), True
         return None, True
     return QubitAddress(qubit.uuid), False
@@ -152,6 +164,21 @@ class ValueResolver:
                     )
 
             if idx is not None:
+                # A negative local index must fail before the slice-chain
+                # walk: the affine composition ``start + step * idx`` can
+                # turn it into a valid-but-wrong non-negative root index
+                # (e.g. ``view[-1]`` for ``view = q[1:3]`` would silently
+                # address ``q[0]`` instead of ``q[2]``).
+                if idx < 0:
+                    return QubitResolutionResult(
+                        success=False,
+                        failure_reason=ResolutionFailureReason.NEGATIVE_INDEX,
+                        failure_details=(
+                            f"Index {idx} for array '{v.parent_array.name}' "
+                            f"is negative; Python-style negative indexing "
+                            f"is not supported."
+                        ),
+                    )
                 # Walk any slice_of chain attached to the parent so
                 # sliced views resolve to their root parent's physical
                 # qubit.  For ordinary (non-sliced) arrays the while
@@ -176,6 +203,20 @@ class ValueResolver:
                                 f"Slice bounds for view over '{parent.slice_of.name}' "
                                 f"could not be resolved; start={parent.slice_start.name}, "
                                 f"step={parent.slice_step.name}."
+                            ),
+                        )
+                    # Symbolic slice bounds resolved from bindings must
+                    # satisfy the same contract the frontend enforces for
+                    # constant bounds: non-negative start, positive step.
+                    if int(start_val) < 0 or int(step_val) <= 0:
+                        return QubitResolutionResult(
+                            success=False,
+                            failure_reason=ResolutionFailureReason.NEGATIVE_INDEX,
+                            failure_details=(
+                                f"Slice bounds for view over "
+                                f"'{parent.slice_of.name}' resolved to "
+                                f"start={int(start_val)}, step={int(step_val)}; "
+                                f"start must be non-negative and step positive."
                             ),
                         )
                     idx = int(start_val) + int(step_val) * idx
@@ -267,6 +308,19 @@ class ValueResolver:
                     f"'{cur.slice_of.name}': start={cur.slice_start}, "
                     f"step={cur.slice_step}. Slice views require concrete "
                     f"start/step at emit time.",
+                    operation=operation,
+                )
+            # Symbolic slice bounds resolved from bindings must satisfy
+            # the same contract the frontend enforces for constant bounds
+            # (non-negative start, positive step); composing a negative
+            # start or non-positive step would silently remap view
+            # elements onto wrong root slots.
+            if int(sub_start) < 0 or int(sub_step) <= 0:
+                raise EmitError(
+                    f"Invalid slice bounds for view of "
+                    f"'{cur.slice_of.name}': start={int(sub_start)}, "
+                    f"step={int(sub_step)}. Slice start must be "
+                    f"non-negative and step positive.",
                     operation=operation,
                 )
             # Compose: if current (start, step) maps view-local i to
@@ -523,6 +577,12 @@ class ValueResolver:
             if i is None:
                 # Symbolic element indices stay unresolved at emit time.
                 return None
+            if i < 0:
+                # Negative indices must not reach Python container
+                # indexing (where they would silently wrap) or the slice
+                # affine composition below (where they would silently
+                # address a wrong root slot).
+                return None
             resolved_indices.append(i)
 
         # No explicit element index means callers are asking for the array
@@ -543,6 +603,12 @@ class ValueResolver:
             step = self.resolve_int_value(cur.slice_step, bindings)
             if start is None or step is None:
                 # Symbolic slice bounds stay unresolved at emit time.
+                return None
+            if start < 0 or step <= 0:
+                # Bounds resolved from bindings must satisfy the same
+                # contract the frontend enforces for constant bounds
+                # (non-negative start, positive step); anything else
+                # would compose a wrong root index.
                 return None
             root_index = start + step * root_index
             cur = cur.slice_of
