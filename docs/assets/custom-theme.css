@@ -93,6 +93,19 @@
 .dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: #C08A40 !important; }
 .dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: #C08A40 !important; }
 
+/* === Card headers === */
+.myst-card-header {
+  background-color: #F9EDD8 !important;
+  color: #5A3A15 !important;
+  border-bottom-color: #F0DCC0 !important;
+}
+
+.dark .myst-card-header {
+  background-color: rgba(110, 74, 28, 0.45) !important;
+  color: #FDF8F0 !important;
+  border-bottom-color: #6E4A1C !important;
+}
+
 /* === Tag chips ===
  * Pill-shaped clickable tag labels emitted by docs/scripts/build_doc_tags.py.
  * They appear in:

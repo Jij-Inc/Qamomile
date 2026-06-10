@@ -6,6 +6,12 @@ slug: usage
 
 Qamomileの個別モジュールを使うためのHow-toガイドです。
 
-## すべての記事
+::::{grid} 1 2 2 2
 
-- [`BinaryModel`の使い方](binary_model) — 制約なしのバイナリ/スピン変数モデルをQUBO/HUBO/IsingあるいはOMMXから構築する
+:::{card}
+:header: **`BinaryModel`の使い方**
+:link: binary_model
+制約なしのバイナリ/スピン変数モデルをQUBO/HUBO/IsingあるいはOMMXから構築します。
+:::
+
+::::

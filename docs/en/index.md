@@ -4,27 +4,35 @@
 
 Qamomile is a quantum programming SDK. Write quantum circuits as typed Python functions and run them on quantum SDKs like Qiskit, CUDA-Q, QURI Parts, and qBraid. Furthermore, Qamomile supports symbolic algebraic resource estimation and can estimate resources for circuits containing black-box oracles — even when the circuit itself cannot be executed.
 
-> **Note** Qamomile is under active development, and breaking changes may be introduced between releases. If you find a bug, we'd really appreciate it if you could let us know via [GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new).
+:::{note}
+Qamomile is under active development, and breaking changes may be introduced between releases.
+If you find a bug, we'd really appreciate it if you could let us know via [GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new).
+:::
+
+---
 
 ## Installation
+
+Qamomile can be installed via standard package managers, such as pip.
 
 ```bash
 pip install qamomile
 ```
 
-## Supported Quantum SDKs
-
-Qamomile supports multiple quantum SDKs as execution backends. Qiskit is included by default; the others are optional extras.
-
-### Qiskit (default)
-
-Included with `pip install qamomile`. No extra flags needed.
+Qiskit is included as the default execution backend.
 
 ```python
 from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
 ```
 
-### CUDA-Q (optional)
+### Supported Quantum SDKs
+
+Qamomile supports multiple quantum SDKs as execution backends. Additional backends are installed as optional extras.
+
+::::{tab-set}
+
+:::{tab-item} CUDA-Q
+:sync: cuda-q
 
 CUDA-Q supports Linux and macOS ARM64 (Apple Silicon). Choose the extra that matches your CUDA version:
 
@@ -37,7 +45,10 @@ pip install "qamomile[cudaq-cu13]"   # CUDA 13.x, Linux or macOS ARM64
 from qamomile.cudaq import CudaqTranspiler, CudaqExecutor
 ```
 
-### QURI Parts (optional)
+:::
+
+:::{tab-item} QURI Parts
+:sync: quri-parts
 
 ```bash
 pip install "qamomile[quri_parts]"
@@ -47,7 +58,10 @@ pip install "qamomile[quri_parts]"
 from qamomile.quri_parts import QuriPartsTranspiler, QuriPartsExecutor
 ```
 
-### qBraid (optional)
+:::
+
+:::{tab-item} qBraid
+:sync: qbraid
 
 Runs Qiskit circuits on qBraid-supported devices and simulators.
 
@@ -59,16 +73,56 @@ pip install "qamomile[qbraid]"
 from qamomile.qbraid import QBraidExecutor
 ```
 
+:::
+
+::::
+
+---
+
 ## Sections
 
-- [Algorithms](algorithm/index.md) — Concrete walkthroughs of variational and quantum algorithms (QAOA, VQE, …) end-to-end with Qamomile.
-- [Usage](usage/index.md) — How-to guides for individual Qamomile modules (`BinaryModel`, future module-walkthroughs).
-- [Integration](integration/index.md) — Notes on using Qamomile with external libraries and quantum platforms (qBraid, …).
-- [Release Notes](release_notes/index.md) — Per-version changelog with feature highlights and breaking changes.
+::::{grid} 1 2 2 2
 
-For SDK-level fundamentals (kernels, parameters, execution, transpilation, QEC primitives), see the [Tutorials](tutorial/index.md) section.
+:::{card}
+:header: **Tutorials**
+:link: tutorial/index.md
+For SDK-level fundamentals (kernels, parameters, execution, transpilation, QEC primitives).
+:::
+
+:::{card}
+:header: **Algorithms**
+:link: algorithm/index.md
+Concrete walkthroughs of variational and quantum algorithms (QAOA, VQE, …) end-to-end with Qamomile.
+:::
+
+:::{card}
+:header: **Usage**
+:link: usage/index.md
+How-to guides for individual Qamomile modules (`BinaryModel`, future module-walkthroughs).
+:::
+
+:::{card}
+:header: **Integration**
+:link: integration/index.md
+Notes on using Qamomile with external libraries and quantum platforms (qBraid, …).
+:::
+
+:::{card}
+:header: **Release Notes**
+:link: release_notes/index.md
+Per-version changelog with feature highlights and breaking changes.
+:::
+
+:::{card}
+:header: **API Reference**
+:link: api/index.md
+API References.
+:::
+
+::::
+
+---
 
 ## Links
 
 - [GitHub Repository](https://github.com/Jij-Inc/Qamomile)
-- [API Reference](api/index.md)
