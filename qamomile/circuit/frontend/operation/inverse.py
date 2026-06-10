@@ -206,19 +206,26 @@ def _static_quantum_width(value: ValueBase) -> int | None:
     """Return the compile-time scalar qubit width of a quantum value.
 
     Args:
-        value (ValueBase): Scalar qubit or ``Vector[Qubit]`` value.
+        value (ValueBase): Scalar qubit or quantum array value. The width
+            is computed as the product over all shape dimensions so the
+            result stays correct for any array rank.
 
     Returns:
         int | None: Number of scalar qubits represented by ``value`` when
-            statically known, or None for unresolved vector lengths.
+            statically known, or None when the value is an array with no
+            shape or with any non-constant dimension.
     """
     if isinstance(value, ArrayValue):
         if not value.shape:
             return None
-        dim = value.shape[0]
-        if not dim.is_constant():
-            return None
-        return int(dim.get_const())
+        width = 1
+        for dim in value.shape:
+            if not dim.is_constant():
+                return None
+            const = dim.get_const()
+            assert const is not None
+            width *= int(const)
+        return width
     return 1
 
 

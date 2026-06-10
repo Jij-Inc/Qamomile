@@ -11,6 +11,7 @@ from qamomile.circuit.estimator import count_gates
 from qamomile.circuit.frontend.operation.inverse import (
     _BlockInverter,
     _InverseRotationCallable,
+    _static_quantum_width,
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -33,7 +34,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-from qamomile.circuit.ir.value import DictValue, Value
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 from qamomile.circuit.stdlib import IQFT, QFT
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import CircuitStyle
@@ -2360,3 +2361,32 @@ def test_inverse_roundtrip_cross_backend_sampling_and_expval(
     ).result()
 
     assert np.isclose(expval_result, float(num_qubits), atol=1e-6)
+
+
+def test_static_quantum_width_multiplies_all_dimensions():
+    """``_static_quantum_width`` counts scalar qubits across every dimension.
+
+    The width helper must stay correct for any array rank so that
+    ``InverseBlockOperation.num_target_qubits`` can never understate a
+    register's scalar width (a rank-2 ``(2, 3)`` value is 6 qubits, not
+    the first dimension's 2).
+    """
+
+    def dim(value: int) -> Value:
+        return Value(type=UIntType(), name="dim").with_const(value)
+
+    scalar = Value(type=QubitType(), name="q")
+    assert _static_quantum_width(scalar) == 1
+
+    vector = ArrayValue(type=QubitType(), name="v", shape=(dim(3),))
+    assert _static_quantum_width(vector) == 3
+
+    matrix = ArrayValue(type=QubitType(), name="m", shape=(dim(2), dim(3)))
+    assert _static_quantum_width(matrix) == 6
+
+    symbolic = ArrayValue(
+        type=QubitType(),
+        name="s",
+        shape=(dim(2), Value(type=UIntType(), name="n")),
+    )
+    assert _static_quantum_width(symbolic) is None
