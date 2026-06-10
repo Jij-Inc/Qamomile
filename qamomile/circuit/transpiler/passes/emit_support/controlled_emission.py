@@ -1378,9 +1378,16 @@ def _populate_input_qubit_map(
             consecutive physical index starting at 0.
 
     Raises:
-        EmitError: Four failure modes are surfaced loudly rather than
+        EmitError: Five failure modes are surfaced loudly rather than
             silently mis-mapping qubits:
 
+            * A quantum input is a rank>1 register (its ``ArrayValue``
+              has more than one shape dimension). Elements are keyed as
+              ``QubitAddress(uuid, i)`` with a single flat index, so a
+              higher-rank register would silently alias distinct
+              elements onto the same physical qubit. The frontend
+              rejects such registers at construction time; this guard
+              covers hand-built or deserialized IR.
             * A resolved ``Vector[Qubit]`` length (from a constant shape
               or a binding) is negative. ``range(length)`` would be
               empty and ``qubit_idx += length`` would step the cursor
@@ -1404,6 +1411,22 @@ def _populate_input_qubit_map(
 
     scalar_count = sum(1 for iv in quantum_inputs if not isinstance(iv, ArrayValue))
     vector_inputs = [iv for iv in quantum_inputs if isinstance(iv, ArrayValue)]
+
+    # Rank guard in its own loop, before any length resolution: the
+    # element addressing below keys each element as
+    # ``QubitAddress(uuid, i)`` with a single flat index, so a rank>1
+    # register cannot be mapped without aliasing distinct elements onto
+    # the same physical qubit.
+    for iv in vector_inputs:
+        if len(iv.shape) > 1:
+            raise EmitError(
+                f"Inner block input {iv.name!r} is a rank-{len(iv.shape)} "
+                f"quantum register: the qubit addressing path is rank-1, "
+                f"so a higher-rank register would silently alias distinct "
+                f"elements onto the same physical qubit. Use a 1-D "
+                f"Vector[Qubit] with explicit index arithmetic instead.",
+                operation="ControlledUOperation",
+            )
 
     resolved_lengths: dict[str, int] = {}
     unresolved: list[ArrayValue] = []

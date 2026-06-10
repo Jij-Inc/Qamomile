@@ -334,6 +334,13 @@ def create_dummy_input(
         TypeError: If ``param_type`` is not a supported parameter type,
             or if a Tuple/array annotation is missing its element
             type(s).
+        NotImplementedError: If ``param_type`` is a rank>1 quantum
+            array annotation (``Matrix[Qubit]`` / ``Tensor[Qubit]``).
+            The quantum addressing path is rank-1, so a higher-rank
+            register would silently alias distinct elements onto the
+            same physical qubit. This path constructs the handle via
+            ``object.__new__`` (bypassing ``ArrayBase.__post_init__``),
+            so it needs its own guard.
     """
     # Handle Tuple types (e.g., Tuple[UInt, UInt])
     if is_tuple_type(param_type):
@@ -400,6 +407,16 @@ def create_dummy_input(
 
         # Determine number of dimensions (Vector=1, Matrix=2, Tensor=3)
         ndim = _get_ndim(param_type)
+
+        if ndim > 1 and isinstance(element_ir_type, ir_types.QubitType):
+            raise NotImplementedError(
+                f"Parameter {name!r} is a rank-{ndim} quantum register "
+                f"({param_type}): the quantum addressing path is rank-1, "
+                f"so a higher-rank register would silently alias distinct "
+                f"elements onto the same physical qubit. Declare a 1-D "
+                f"Vector[Qubit] parameter and compute flat indices "
+                f"explicitly instead (e.g. q[i * ncols + j])."
+            )
 
         if shape is not None:
             if len(shape) != ndim:
