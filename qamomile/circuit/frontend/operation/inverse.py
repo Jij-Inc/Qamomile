@@ -1304,7 +1304,10 @@ class _BlockInverter:
             NotImplementedError: If the bounds are symbolic or invalid.
         """
         start, stop, step = self._resolve_range_constants(op, value_map)
-        sequence = list(range(start, stop, step))
+        # ``range`` supports O(1) emptiness, length, and indexing — do not
+        # materialize it: compile-time bounds can be arbitrarily large
+        # while the IR keeps the loop symbolic.
+        sequence = range(start, stop, step)
         if not sequence:
             return []
         reverse_start = sequence[-1]

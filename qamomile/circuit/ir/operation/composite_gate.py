@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.types.primitives import BlockType, QubitType
+from qamomile.circuit.ir.value import ArrayValue
 
 from .operation import Operation, OperationKind, ParamHint, Signature
 
@@ -210,11 +211,14 @@ class InverseBlockOperation(Operation):
     implementation_block: Block | None = None
 
     def __post_init__(self) -> None:
-        """Validate inverse-block operand layout invariants.
+        """Validate inverse-block operand and result layout invariants.
 
         Raises:
-            ValueError: If control operands are not quantum values, or if a
-                quantum target operand appears after a non-quantum parameter.
+            ValueError: If control operands are not quantum values, if a
+                quantum target operand appears after a non-quantum
+                parameter, or if the results do not mirror the quantum
+                operand layout (one quantum result per control operand
+                followed by one per target operand).
         """
         if self.num_control_qubits < 0 or self.num_target_qubits < 0:
             raise ValueError("inverse block qubit counts must be non-negative.")
@@ -237,6 +241,32 @@ class InverseBlockOperation(Operation):
                     )
             else:
                 seen_parameter = True
+
+        # Results must mirror the quantum operand layout: downstream
+        # passes pair operands with results by ``zip``, so a missing or
+        # extra result would otherwise be silently part-processed.
+        num_targets = len(self.target_qubits)
+        expected_results = self.num_control_qubits + num_targets
+        if len(self.results) != expected_results:
+            raise ValueError(
+                "inverse block results must mirror the quantum operand "
+                f"layout: expected {expected_results} "
+                f"({self.num_control_qubits} control + {num_targets} "
+                f"target), got {len(self.results)}."
+            )
+        quantum_operands = [
+            *self.operands[: self.num_control_qubits],
+            *self.target_qubits,
+        ]
+        for operand, result in zip(quantum_operands, self.results):
+            if not result.type.is_quantum():
+                raise ValueError("inverse block results must be quantum values.")
+            if isinstance(operand, ArrayValue) != isinstance(result, ArrayValue):
+                raise ValueError(
+                    "inverse block results must mirror operand array-ness: "
+                    f"operand {operand.name!r} and result {result.name!r} "
+                    "disagree on being a vector."
+                )
 
     @property
     def control_qubits(self) -> list["Value"]:

@@ -53,6 +53,10 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.parameter import ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
@@ -303,6 +307,12 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
     if isinstance(v, ArrayValue):
         for dim in v.shape:
             ctx.register_value(dim)
+        if v.slice_of is not None:
+            ctx.register_value(v.slice_of)
+        if v.slice_start is not None:
+            ctx.register_value(v.slice_start)
+        if v.slice_step is not None:
+            ctx.register_value(v.slice_step)
         return {
             "$type": "ArrayValue",
             "uuid": v.uuid,
@@ -312,6 +322,11 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
             "value_type": _encode_value_type(v.type),
             "metadata": _encode_metadata(v.metadata),
             "shape_refs": [d.uuid for d in v.shape],
+            "slice_of_ref": v.slice_of.uuid if v.slice_of is not None else None,
+            "slice_start_ref": (
+                v.slice_start.uuid if v.slice_start is not None else None
+            ),
+            "slice_step_ref": (v.slice_step.uuid if v.slice_step is not None else None),
         }
     if isinstance(v, Value):
         if v.parent_array is not None:
@@ -829,6 +844,34 @@ def _encode_cinit(op: CInitOperation, ctx: _EncodeContext) -> dict[str, Any]:
     return _base_op_dict("CInitOperation", op)
 
 
+def _encode_slice_array(op: SliceArrayOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`SliceArrayOperation`.
+
+    Args:
+        op (SliceArrayOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("SliceArrayOperation", op)
+
+
+def _encode_release_slice_view(
+    op: ReleaseSliceViewOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`ReleaseSliceViewOperation`.
+
+    Args:
+        op (ReleaseSliceViewOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("ReleaseSliceViewOperation", op)
+
+
 def _encode_return(op: ReturnOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`ReturnOperation`.
 
@@ -1226,6 +1269,8 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,
+    SliceArrayOperation: _encode_slice_array,
+    ReleaseSliceViewOperation: _encode_release_slice_view,
     ReturnOperation: _encode_return,
     ExpvalOp: _encode_expval,
     PauliEvolveOp: _encode_pauli_evolve,

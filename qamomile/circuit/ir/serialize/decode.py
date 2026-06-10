@@ -58,6 +58,10 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
@@ -333,6 +337,23 @@ def _decode_value(d: dict[str, Any], ctx: _DecodeContext) -> ValueBase:
             logical_id=d["logical_id"],
             shape=tuple(
                 _materialize_as_value(ctx, ref) for ref in d.get("shape_refs", ())
+            ),
+            # Slice-view refs are additive fields: payloads written
+            # before they existed decode to a non-sliced array.
+            slice_of=(
+                _materialize_array(ctx, d["slice_of_ref"])
+                if d.get("slice_of_ref")
+                else None
+            ),
+            slice_start=(
+                _materialize_as_value(ctx, d["slice_start_ref"])
+                if d.get("slice_start_ref")
+                else None
+            ),
+            slice_step=(
+                _materialize_as_value(ctx, d["slice_step_ref"])
+                if d.get("slice_step_ref")
+                else None
             ),
         )
     if tag == "TupleValue":
@@ -925,6 +946,36 @@ def _decode_cinit(d: dict[str, Any], ctx: _DecodeContext) -> CInitOperation:
     return CInitOperation(operands=operands, results=results)
 
 
+def _decode_slice_array(d: dict[str, Any], ctx: _DecodeContext) -> SliceArrayOperation:
+    """Decode :class:`SliceArrayOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        SliceArrayOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return SliceArrayOperation(operands=operands, results=results)
+
+
+def _decode_release_slice_view(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> ReleaseSliceViewOperation:
+    """Decode :class:`ReleaseSliceViewOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        ReleaseSliceViewOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ReleaseSliceViewOperation(operands=operands, results=results)
+
+
 def _decode_return(d: dict[str, Any], ctx: _DecodeContext) -> ReturnOperation:
     """Decode :class:`ReturnOperation`.
 
@@ -1389,6 +1440,8 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
     "CInitOperation": _decode_cinit,
+    "SliceArrayOperation": _decode_slice_array,
+    "ReleaseSliceViewOperation": _decode_release_slice_view,
     "ReturnOperation": _decode_return,
     "ExpvalOp": _decode_expval,
     "PauliEvolveOp": _decode_pauli_evolve,

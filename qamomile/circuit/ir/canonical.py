@@ -482,6 +482,9 @@ class _Canonicalizer:
                 entries=tuple(new_entries),
             )
         elif isinstance(value, ArrayValue):
+            new_slice_of: ArrayValue | None = None
+            if value.slice_of is not None:
+                new_slice_of = cast(ArrayValue, self.canonical_value(value.slice_of))
             cloned = dataclasses.replace(
                 value,
                 uuid=new_uuid,
@@ -489,6 +492,17 @@ class _Canonicalizer:
                 metadata=new_metadata,
                 shape=tuple(
                     cast(Value, self.canonical_value(dim)) for dim in value.shape
+                ),
+                slice_of=new_slice_of,
+                slice_start=(
+                    cast(Value, self.canonical_value(value.slice_start))
+                    if value.slice_start is not None
+                    else None
+                ),
+                slice_step=(
+                    cast(Value, self.canonical_value(value.slice_step))
+                    if value.slice_step is not None
+                    else None
                 ),
             )
         elif isinstance(value, Value):
@@ -700,6 +714,12 @@ def _collect_values(block: Block, out: list[ValueBase], seen: set[str]) -> None:
         elif isinstance(v, ArrayValue):
             for dim in v.shape:
                 visit(dim)
+            if v.slice_of is not None:
+                visit(v.slice_of)
+            if v.slice_start is not None:
+                visit(v.slice_start)
+            if v.slice_step is not None:
+                visit(v.slice_step)
         elif isinstance(v, Value):
             if v.parent_array is not None:
                 visit(v.parent_array)
@@ -876,6 +896,12 @@ def _value_declaration(v: ValueBase) -> str:
             parts.append("indices=" + _token([idx.uuid for idx in v.element_indices]))
     if isinstance(v, ArrayValue):
         parts.append("shape=" + _token([dim.uuid for dim in v.shape]))
+        if v.slice_of is not None:
+            parts.append(f"slice_of={v.slice_of.uuid}")
+        if v.slice_start is not None:
+            parts.append(f"slice_start={v.slice_start.uuid}")
+        if v.slice_step is not None:
+            parts.append(f"slice_step={v.slice_step.uuid}")
     if isinstance(v, TupleValue):
         parts.append("elements=" + _token([e.uuid for e in v.elements]))
     if isinstance(v, DictValue):

@@ -2390,3 +2390,116 @@ def test_static_quantum_width_multiplies_all_dimensions():
         shape=(dim(2), Value(type=UIntType(), name="n")),
     )
     assert _static_quantum_width(symbolic) is None
+
+
+def test_inverse_block_operation_rejects_missing_result():
+    """The constructor rejects a result list shorter than the operand layout.
+
+    Downstream passes pair operands with results by ``zip``; a malformed
+    op (e.g. from hand-built IR) must fail at construction instead of
+    being silently part-processed.
+    """
+    ctrl = Value(type=QubitType(), name="ctrl")
+    target = Value(type=QubitType(), name="target")
+
+    with pytest.raises(ValueError, match="results must mirror"):
+        InverseBlockOperation(
+            operands=[ctrl, target],
+            results=[ctrl.next_version()],
+            num_control_qubits=1,
+            num_target_qubits=1,
+            custom_name="malformed",
+        )
+
+
+def test_inverse_block_operation_rejects_classical_result():
+    """The constructor rejects non-quantum values in the result list."""
+    target = Value(type=QubitType(), name="target")
+
+    with pytest.raises(ValueError, match="must be quantum"):
+        InverseBlockOperation(
+            operands=[target],
+            results=[Value(type=UIntType(), name="bad")],
+            num_control_qubits=0,
+            num_target_qubits=1,
+            custom_name="malformed",
+        )
+
+
+@qmc.qkernel
+def _negative_step_loop_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Loop layer with a negative compile-time step."""
+    for i in qmc.range(2, -1, -1):
+        qs[i] = qmc.h(qs[i])
+        qs[i] = qmc.rx(qs[i], 0.37)
+    return qs
+
+
+def test_inverse_negative_step_loop_roundtrip_statevector(qiskit_transpiler):
+    """inverse() reverses a negative-step compile-time loop to identity."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = _negative_step_loop_layer(qs)
+        qs = qmc.inverse(_negative_step_loop_layer)(qs)
+        return qmc.measure(qs)
+
+    statevector = run_statevector(qiskit_transpiler.to_circuit(circuit))
+    expected = np.zeros(8, dtype=complex)
+    expected[0] = 1.0
+
+    assert np.allclose(statevector, expected, atol=1e-8)
+
+
+@qmc.qkernel
+def _huge_range_layer(q: qmc.Qubit) -> qmc.Qubit:
+    """Loop layer whose compile-time bound is far too large to unroll."""
+    for _i in qmc.range(10**9):
+        q = qmc.h(q)
+    return q
+
+
+def test_inverse_loop_with_huge_compile_time_bound_builds_in_constant_space():
+    """Reversing a loop must not materialize its compile-time iteration space.
+
+    The reversed bounds are derived arithmetically from the forward
+    ``range``; materializing ``10**9`` iterations at trace time would
+    hang or exhaust memory even though the IR keeps the loop symbolic.
+    """
+
+    @qmc.qkernel
+    def circuit(q: qmc.Qubit) -> qmc.Qubit:
+        q = _huge_range_layer(q)
+        q = qmc.inverse(_huge_range_layer)(q)
+        return q
+
+    block = circuit.build()
+    inverse_op = next(
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
+    )
+    assert inverse_op.implementation_block is not None
+    loop = next(
+        op
+        for op in inverse_op.implementation_block.operations
+        if isinstance(op, ForOperation)
+    )
+    bounds = [operand.get_const() for operand in loop.operands]
+    assert bounds == [10**9 - 1, -1, -1]
+
+
+def test_inverse_block_operation_rejects_arrayness_mismatch():
+    """The constructor rejects a scalar result for a vector target operand."""
+    from qamomile.circuit.ir.value import ArrayValue
+
+    dim = Value(type=UIntType(), name="dim").with_const(2)
+    target = ArrayValue(type=QubitType(), name="target", shape=(dim,))
+
+    with pytest.raises(ValueError, match="array-ness"):
+        InverseBlockOperation(
+            operands=[target],
+            results=[Value(type=QubitType(), name="scalar")],
+            num_control_qubits=0,
+            num_target_qubits=2,
+            custom_name="malformed",
+        )

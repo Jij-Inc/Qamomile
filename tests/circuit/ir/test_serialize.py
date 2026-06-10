@@ -118,6 +118,24 @@ def _nested_inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _view_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Vector layer applied to a slice view by ``_view_inverse_kernel``."""
+    qs = qmc.h(qs)
+    qs = qmc.s(qs)
+    return qs
+
+
+@qmc.qkernel
+def _view_inverse_kernel() -> qmc.Vector[qmc.Bit]:
+    """Kernel whose inverse block operand is a strided slice view."""
+    qs = qmc.qubit_array(4, "qs")
+    view = qs[1:4]
+    view = qmc.inverse(_view_layer)(view)
+    qs[1:4] = view
+    return qmc.measure(qs)
+
+
+@qmc.qkernel
 def _loop_kernel(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     """Symbolic ``ForOperation`` over a Vector input."""
     n = qs.shape[0]
@@ -244,6 +262,39 @@ class TestRoundTripStructure:
         restored = load_json(dump_json(block))
         assert load_msgpack(dump_msgpack(block)).kind == block.kind
         assert content_hash(restored) == content_hash(block)
+
+    def test_inverse_block_view_operand_round_trips_slice_fields(self):
+        """A sliced view operand keeps its slice refs across the round-trip.
+
+        ``ArrayValue.slice_of`` / ``slice_start`` / ``slice_step`` carry
+        the affine map that resolves view elements to root-array qubits
+        at emit time; dropping them on the wire would make the restored
+        inverse block unresolvable.
+        """
+        block = _to_affine(_view_inverse_kernel)
+        original = next(
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        )
+        original_operand = cast(ArrayValue, original.target_qubits[0])
+        assert original_operand.slice_of is not None
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            inverse_op = next(
+                op
+                for op in restored.operations
+                if isinstance(op, InverseBlockOperation)
+            )
+            operand = cast(ArrayValue, inverse_op.target_qubits[0])
+            assert operand.slice_of is not None
+            assert operand.slice_of.uuid == original_operand.slice_of.uuid
+            assert operand.slice_start is not None
+            assert operand.slice_start.get_const() == 1
+            assert operand.slice_step is not None
+            assert operand.slice_step.get_const() == 1
+            assert content_hash(restored) == content_hash(block)
 
     def test_input_value_types_preserved(self):
         """Input Value types match across the round-trip."""
