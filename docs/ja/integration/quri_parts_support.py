@@ -35,9 +35,6 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
-from quri_parts.circuit.utils.circuit_drawer import draw_circuit
-from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
@@ -484,6 +481,6 @@ plt.show()
 # - QURI Parts の `NoiseSimulator` ベースの sampler など、独自の sampler / estimator は `transpiler.executor(...)` 経由で差し替えられます。カーネルをトランスパイルし直す必要はありません。
 
 # %% [markdown]
-# ### See also
+# ### 関連項目
 #
 # - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Qバックエンドで扱います。
