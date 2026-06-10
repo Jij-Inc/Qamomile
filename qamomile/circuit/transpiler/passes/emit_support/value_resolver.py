@@ -74,7 +74,24 @@ class ValueResolver:
         qubit_map: QubitMap,
         bindings: dict[str, Any],
     ) -> QubitResolutionResult:
-        """Resolve a Value to a physical qubit index with detailed failure info."""
+        """Resolve a Value to a physical qubit index with detailed failure info.
+
+        Args:
+            v (Value): The qubit Value to resolve. May be a scalar qubit or
+                an array element (possibly through a sliced view chain).
+            qubit_map (QubitMap): Mapping from ``QubitAddress`` to physical
+                qubit indices built by the resource allocator.
+            bindings (dict[str, Any]): Active emit-time bindings used to
+                resolve symbolic element indices and slice bounds.
+
+        Returns:
+            QubitResolutionResult: Success with the physical index, or a
+                failure carrying a ``ResolutionFailureReason`` — including
+                ``NEGATIVE_INDEX`` when a resolved element index is negative
+                or a resolved slice bound violates the frontend contract
+                (non-negative start, positive step); composing those through
+                the affine map would silently address a wrong root slot.
+        """
         if v.parent_array is not None and v.element_indices:
             parent_uuid = v.parent_array.uuid
             idx_value = v.element_indices[0]
@@ -283,7 +300,9 @@ class ValueResolver:
 
         Raises:
             EmitError: If any ``slice_start`` or ``slice_step`` in the
-                chain resolves to a non-numeric or unbound value.
+                chain resolves to a non-numeric or unbound value, or to
+                bounds violating the frontend contract (negative start or
+                non-positive step).
 
         Example:
             >>> # For ``view = q[1::2]`` where ``q`` has 4 qubits:
@@ -567,7 +586,10 @@ class ValueResolver:
         Returns:
             tuple[ArrayValue, tuple[int, ...]] | None: The root array and
                 concrete indices into its container, or ``None`` when any
-                index or slice bound is unresolved.
+                index or slice bound is unresolved, when a resolved index
+                is negative (Python-style wrapping is refused), or when a
+                resolved slice bound violates the frontend contract
+                (non-negative start, positive step).
         """
         resolved_indices: list[int] = []
         # Resolve local element indices first. Any symbolic index keeps the

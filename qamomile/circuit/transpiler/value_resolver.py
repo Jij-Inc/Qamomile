@@ -118,8 +118,9 @@ class ValueResolver:
             Any | None: The indexed element when every index resolves and
                 the parent array has compile-time data. Returns ``None``
                 when the value is not an array element, the parent has no
-                compile-time data, an index is symbolic, or indexing
-                fails.
+                compile-time data, an index is symbolic or resolves to a
+                negative value (Python-style wrapping is refused), or
+                indexing fails.
         """
         parent_array = getattr(value, "parent_array", None)
         element_indices = getattr(value, "element_indices", None)
@@ -199,8 +200,10 @@ class ValueResolver:
         Returns:
             tuple[ArrayValue | None, tuple[Any, ...]]: The root array and
                 root-local indices when every slice bound can be resolved,
-                or ``(None, ())`` when the slice chain is symbolic or
-                otherwise not resolvable at compile time.
+                or ``(None, ())`` when the slice chain is symbolic, a
+                resolved index is negative, a resolved bound violates the
+                frontend contract (non-negative start, positive step), or
+                the chain is otherwise not resolvable at compile time.
         """
         root_array = parent_array
         root_indices = element_indices

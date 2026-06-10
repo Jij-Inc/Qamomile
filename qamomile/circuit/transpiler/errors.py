@@ -186,6 +186,12 @@ class QubitIndexResolutionError(EmitError):
                     f"The resolved index for '{info.operand_name}' is not a number. "
                     f"Ensure your bindings contain numeric values for array indices."
                 )
+            elif info.failure_reason == ResolutionFailureReason.NEGATIVE_INDEX:
+                suggestions.append(
+                    f"The resolved index for '{info.operand_name}' is negative. "
+                    f"Python-style negative indexing is not supported; compute "
+                    f"the index explicitly (e.g. 'n - 1' with a bound 'n')."
+                )
 
         if not suggestions:
             suggestions.append(
