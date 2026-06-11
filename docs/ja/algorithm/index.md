@@ -6,7 +6,7 @@ slug: algorithm
 
 Qamomileで実装した具体的な量子アルゴリズム例です。
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 
 :::{card}
 :header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)**

@@ -6,7 +6,7 @@ slug: usage
 
 How-to guides for using individual Qamomile modules.
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 
 :::{card}
 :header: **How to use BinaryModel**

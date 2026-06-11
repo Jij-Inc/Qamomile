@@ -6,7 +6,7 @@ slug: algorithm
 
 Concrete quantum algorithm examples built with Qamomile.
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 
 :::{card}
 :header: **Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)**

@@ -6,7 +6,7 @@ slug: usage
 
 Qamomileの個別モジュールを使うためのHow-toガイドです。
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 
 :::{card}
 :header: **`BinaryModel`の使い方**

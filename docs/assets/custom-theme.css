@@ -93,6 +93,11 @@
 .dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: #C08A40 !important; }
 .dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: #C08A40 !important; }
 
+/* === Admonitions === */
+.dark .myst-admonition-note .myst-admonition-header {
+  background-color: rgba(168, 116, 48, 0.6) !important;
+}
+
 /* === Card headers === */
 .myst-card-header {
   background-color: #F9EDD8 !important;
@@ -114,7 +119,8 @@
  *   - the Browse-by-tag header and article cards on per-tag pages,
  *   - the auto-tags chip block at the top of every tagged article.
  */
-a.tag-chip {
+a.tag-chip,
+.tag-chip-static {
   display: inline-block;
   padding: 0.15em 0.75em;
   margin: 0.18em 0.12em;
@@ -140,8 +146,19 @@ a.tag-chip::before {
   opacity: 0.55;
 }
 
+.tag-chip-static::before {
+  content: "#";
+  margin-right: 0.25em;
+  opacity: 0.55;
+}
+
+.tag-chip-static {
+  cursor: default;
+}
+
 /* Dark mode: deeper amber tint that reads against the dark background. */
-.dark a.tag-chip {
+.dark a.tag-chip,
+.dark .tag-chip-static {
   background-color: rgba(110, 74, 28, 0.45);
   color: #F0DCC0;
 }
@@ -149,6 +166,48 @@ a.tag-chip::before {
 .dark a.tag-chip:hover {
   background-color: rgba(168, 116, 48, 0.6);
   color: #FDF8F0;
+}
+
+/* Section index cards: thumbnails + tags emitted into _build_src by
+ * docs/scripts/build_doc_tags.py. The thumbnail floats to the right of the
+ * card body so existing hand-written summaries remain the main text.
+ */
+.qamomile-section-card-thumb-wrap {
+  float: right;
+  width: min(9rem, 38%);
+  margin: 0 0 0.55rem 0.9rem;
+}
+
+.qamomile-section-card-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  box-sizing: border-box;
+  border-radius: 6px;
+  background-color: #FFFFFF;
+}
+
+.qamomile-section-card-thumb-default {
+  object-fit: contain;
+  padding: 0.45rem;
+}
+
+.qamomile-section-card-tags {
+  clear: both;
+  padding-top: 0.35rem;
+}
+
+.dark .qamomile-section-card-thumb {
+  background-color: #FFFFFF;
+}
+
+@media (max-width: 640px) {
+  .qamomile-section-card-thumb-wrap {
+    float: none;
+    width: 100%;
+    margin: 0 0 0.65rem;
+  }
 }
 
 /* Google Colab launch button (injected at build output) */

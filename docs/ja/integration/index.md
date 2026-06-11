@@ -6,7 +6,7 @@ slug: integration
 
 Qamomileを外部ライブラリや量子プラットフォームと組み合わせて使うときのノートです。
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 
 :::{card}
 :header: **OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク**

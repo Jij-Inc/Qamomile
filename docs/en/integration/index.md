@@ -6,7 +6,7 @@ slug: integration
 
 Notes on using Qamomile together with external libraries and quantum platforms.
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 
 :::{card}
 :header: **Using OMMX Quantum Benchmarks (1): Implementing and Benchmarking Quantum Algorithms with Qamomile**
