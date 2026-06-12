@@ -7,6 +7,8 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.algorithm.arithmetic import modular_increment
+from qamomile.circuit.algorithm.basic import rx_layer
 from qamomile.circuit.estimator import count_gates
 from qamomile.circuit.frontend.operation.inverse import (
     _BlockInverter,
@@ -305,6 +307,22 @@ def _assert_all_zero_samples(
     for value, count in results:
         assert count > 0
         assert value in expected_values
+
+
+def _sum_z_observable(width: int) -> qm_o.Hamiltonian:
+    """Build the sum of single-qubit Z observables over a register.
+
+    Args:
+        width (int): Register width in qubits.
+
+    Returns:
+        qm_o.Hamiltonian: Observable summing `Z(idx)` over every qubit
+            index, so the all-zero state has expectation `width`.
+    """
+    observable = qm_o.Hamiltonian.zero(num_qubits=width)
+    for idx in range(width):
+        observable += qm_o.Z(idx)
+    return observable
 
 
 def _apply_unary_native_gate(
@@ -797,8 +815,11 @@ def test_inverse_qkernel_atomic_inverse_accepts_dict_parameter() -> None:
         q: qmc.Qubit,
         angles: qmc.Dict[qmc.UInt, qmc.Float],
     ) -> qmc.Qubit:
-        """Accept a dict parameter while remaining a unitary scalar qkernel."""
-        del angles
+        """Apply H while keeping an intentionally unused dict parameter.
+
+        `angles` is never read; it stays in the signature only so the
+        traced call carries a DictValue operand for the inverse op.
+        """
         q = qmc.h(q)
         return q
 
@@ -2226,37 +2247,48 @@ def test_inverse_nested_call_implementation_uses_available_wires() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fixed_scalar_qkernel_roundtrip_kernel() -> qmc.QKernel:
-    """Build a scalar qkernel inverse roundtrip kernel with fixed angles.
+def _fixed_scalar_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build scalar qkernel inverse roundtrip kernels with fixed angles.
 
     Returns:
-        qmc.QKernel: Kernel that samples zero after a qkernel and its
-            inverse are applied.
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures zero
+            and expval kernel whose sum-Z expectation equals the width.
     """
 
-    @qmc.qkernel
-    def circuit() -> qmc.Bit:
-        q = qmc.qubit("q")
+    def roundtrip(q: qmc.Qubit) -> qmc.Qubit:
+        """Apply the scalar layer and its inverse inside an H sandwich."""
         q = qmc.h(q)
         q = _inverse_layer(q, 0.37)
         q = qmc.inverse(_inverse_layer)(q, 0.37)
         q = qmc.h(q)
-        return qmc.measure(q)
-
-    return circuit
-
-
-def _controlled_qkernel_roundtrip_kernel() -> qmc.QKernel:
-    """Build a controlled-qkernel inverse roundtrip kernel.
-
-    Returns:
-        qmc.QKernel: Kernel that samples all-zero after controlled-U and
-            inverse controlled-U are applied.
-    """
+        return q
 
     @qmc.qkernel
-    def circuit() -> qmc.Vector[qmc.Bit]:
-        qs = qmc.qubit_array(2, "qs")
+    def sample_circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = roundtrip(q)
+        return qmc.measure(q)
+
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(1, "qs")
+        qs[0] = roundtrip(qs[0])
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
+
+
+def _controlled_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build controlled-qkernel inverse roundtrip kernels.
+
+    Returns:
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width.
+    """
+
+    def roundtrip(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply controlled-U and inverse controlled-U inside an H sandwich."""
         qs[0] = qmc.h(qs[0])
         qs[0], qs[1] = _inverse_controlled_concrete_layer(qs[0], qs[1], 0.37)
         qs[0], qs[1] = qmc.inverse(_inverse_controlled_concrete_layer)(
@@ -2265,17 +2297,30 @@ def _controlled_qkernel_roundtrip_kernel() -> qmc.QKernel:
             0.37,
         )
         qs[0] = qmc.h(qs[0])
+        return qs
+
+    @qmc.qkernel
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs)
         return qmc.measure(qs)
 
-    return circuit
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
 
 
-def _controlled_native_roundtrip_kernel() -> qmc.QKernel:
-    """Build a directly controlled native-gate inverse roundtrip kernel.
+def _controlled_native_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build directly controlled native-gate inverse roundtrip kernels.
 
     Returns:
-        qmc.QKernel: Kernel that samples all-zero after `control(qmc.rx)` and
-            its inverse are applied.
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after `control(qmc.rx)` and its inverse are applied.
     """
 
     @qmc.qkernel
@@ -2289,9 +2334,8 @@ def _controlled_native_roundtrip_kernel() -> qmc.QKernel:
         ctrl, target = controlled_rx(ctrl, target, rotation_angle)
         return ctrl, target
 
-    @qmc.qkernel
-    def circuit() -> qmc.Vector[qmc.Bit]:
-        qs = qmc.qubit_array(2, "qs")
+    def roundtrip(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the controlled layer and its inverse inside an H sandwich."""
         qs[0] = qmc.h(qs[0])
         qs[0], qs[1] = controlled_native_layer(qs[0], qs[1], 0.37)
         qs[0], qs[1] = qmc.inverse(controlled_native_layer)(
@@ -2300,37 +2344,61 @@ def _controlled_native_roundtrip_kernel() -> qmc.QKernel:
             0.37,
         )
         qs[0] = qmc.h(qs[0])
-        return qmc.measure(qs)
-
-    return circuit
-
-
-def _custom_composite_qkernel_roundtrip_kernel() -> qmc.QKernel:
-    """Build a custom-composite inverse roundtrip kernel.
-
-    Returns:
-        qmc.QKernel: Kernel that samples zero after composite and inverse
-            composite are applied.
-    """
+        return qs
 
     @qmc.qkernel
-    def circuit() -> qmc.Bit:
-        q = qmc.qubit("q")
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs)
+        return qmc.measure(qs)
+
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
+
+
+def _custom_composite_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build custom-composite inverse roundtrip kernels.
+
+    Returns:
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures zero
+            and expval kernel whose sum-Z expectation equals the width.
+    """
+
+    def roundtrip(q: qmc.Qubit) -> qmc.Qubit:
+        """Apply the composite layer and its inverse inside an X sandwich."""
         q = qmc.x(q)
         q = _inverse_custom_composite_layer(q)
         q = qmc.inverse(_inverse_custom_composite_layer)(q)
         q = qmc.x(q)
+        return q
+
+    @qmc.qkernel
+    def sample_circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = roundtrip(q)
         return qmc.measure(q)
 
-    return circuit
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(1, "qs")
+        qs[0] = roundtrip(qs[0])
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
 
 
-def _generic_vector_qkernel_roundtrip_kernel() -> qmc.QKernel:
-    """Build a size-generic Vector qkernel inverse roundtrip kernel.
+def _generic_vector_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build size-generic Vector qkernel inverse roundtrip kernels.
 
     Returns:
-        qmc.QKernel: Kernel that samples all-zero after a generic vector
-            layer and its inverse are applied.
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after a generic vector layer and its inverse are applied.
     """
 
     @qmc.qkernel
@@ -2340,21 +2408,29 @@ def _generic_vector_qkernel_roundtrip_kernel() -> qmc.QKernel:
         return qs
 
     @qmc.qkernel
-    def circuit() -> qmc.Vector[qmc.Bit]:
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
         qs = qmc.qubit_array(3, "qs")
         qs = layer(qs)
         qs = qmc.inverse(layer)(qs)
         return qmc.measure(qs)
 
-    return circuit
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(3, "qs")
+        qs = layer(qs)
+        qs = qmc.inverse(layer)(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
 
 
-def _vector_param_qkernel_roundtrip_kernel() -> qmc.QKernel:
-    """Build a vector qkernel inverse roundtrip with a classical parameter.
+def _vector_param_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build vector qkernel inverse roundtrip kernels with a classical parameter.
 
     Returns:
-        qmc.QKernel: Kernel that samples zero after a vector layer and its
-            inverse are applied.
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after a vector layer and its inverse are applied.
     """
 
     @qmc.qkernel
@@ -2368,46 +2444,65 @@ def _vector_param_qkernel_roundtrip_kernel() -> qmc.QKernel:
         qs[0], qs[2] = qmc.cx(qs[0], qs[2])
         return qs
 
-    @qmc.qkernel
-    def circuit() -> qmc.Vector[qmc.Bit]:
-        qs = qmc.qubit_array(3, "qs")
+    def roundtrip(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the parametric layer and its inverse inside an X sandwich."""
         qs[0] = qmc.x(qs[0])
         qs[2] = qmc.x(qs[2])
         qs = vector_param_layer(qs, 0.41)
         qs = qmc.inverse(vector_param_layer)(qs, 0.41)
         qs[0] = qmc.x(qs[0])
         qs[2] = qmc.x(qs[2])
+        return qs
+
+    @qmc.qkernel
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
         return qmc.measure(qs)
 
-    return circuit
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
 
 
-def _vector_loop_qkernel_roundtrip_kernel() -> qmc.QKernel:
-    """Build a Vector-loop qkernel inverse roundtrip kernel.
+def _vector_loop_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build Vector-loop qkernel inverse roundtrip kernels.
 
     Returns:
-        qmc.QKernel: Kernel that samples all-zero after a loop body and its
-            inverse are applied.
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after a loop body and its inverse are applied.
     """
 
     @qmc.qkernel
-    def circuit() -> qmc.Vector[qmc.Bit]:
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
         qs = qmc.qubit_array(3, "qs")
         qs = _inverse_loop_layer(qs)
         qs = qmc.inverse(_inverse_loop_layer)(qs)
         return qmc.measure(qs)
 
-    return circuit
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(3, "qs")
+        qs = _inverse_loop_layer(qs)
+        qs = qmc.inverse(_inverse_loop_layer)(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
 
 
 QKERNEL_ROUNDTRIP_CASES = [
-    pytest.param(_fixed_scalar_qkernel_roundtrip_kernel, 1, id="scalar-layer"),
-    pytest.param(_controlled_qkernel_roundtrip_kernel, 2, id="controlled"),
-    pytest.param(_controlled_native_roundtrip_kernel, 2, id="controlled-native"),
-    pytest.param(_custom_composite_qkernel_roundtrip_kernel, 1, id="custom-composite"),
-    pytest.param(_generic_vector_qkernel_roundtrip_kernel, 3, id="generic-vector"),
-    pytest.param(_vector_param_qkernel_roundtrip_kernel, 3, id="vector-param"),
-    pytest.param(_vector_loop_qkernel_roundtrip_kernel, 3, id="vector-loop"),
+    pytest.param(_fixed_scalar_qkernel_roundtrip_kernels, 1, id="scalar-layer"),
+    pytest.param(_controlled_qkernel_roundtrip_kernels, 2, id="controlled"),
+    pytest.param(_controlled_native_roundtrip_kernels, 2, id="controlled-native"),
+    pytest.param(_custom_composite_qkernel_roundtrip_kernels, 1, id="custom-composite"),
+    pytest.param(_generic_vector_qkernel_roundtrip_kernels, 3, id="generic-vector"),
+    pytest.param(_vector_param_qkernel_roundtrip_kernels, 3, id="vector-param"),
+    pytest.param(_vector_loop_qkernel_roundtrip_kernels, 3, id="vector-loop"),
 ]
 
 
@@ -2418,12 +2513,27 @@ def test_inverse_allowed_qkernel_roundtrip_cross_backend(
     kernel_factory,
     width: int,
 ) -> None:
-    """Allowed qkernel inverse roundtrips sample all-zero on every backend."""
-    transpiler = transpiler_factory()
-    executable = transpiler.transpile(kernel_factory())
-    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+    """Allowed qkernel inverse roundtrips execute on sampling and expval paths.
 
+    Sampling and expectation values go through different backend primitives
+    (sampler vs estimator) and regress independently, so both legs run for
+    every case: samples must be all-zero and the sum-Z expectation must
+    equal the register width.
+    """
+    sample_kernel, expval_kernel = kernel_factory()
+    transpiler = transpiler_factory()
+
+    executable = transpiler.transpile(sample_kernel)
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
     _assert_all_zero_samples(sample_result, width, 32)
+
+    expval_executable = transpiler.transpile(
+        expval_kernel,
+        bindings={"observable": _sum_z_observable(width)},
+    )
+    expval_result = expval_executable.run(transpiler.executor()).result()
+
+    assert np.isclose(expval_result, float(width), atol=1e-6)
 
 
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
@@ -2483,6 +2593,284 @@ def test_inverse_roundtrip_cross_backend_sampling_and_expval(
     ).result()
 
     assert np.isclose(expval_result, float(num_qubits), atol=1e-6)
+
+
+def _qft_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build stdlib-QFT qkernel inverse roundtrip kernels.
+
+    Returns:
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after a QFT layer and its inverse are applied.
+    """
+
+    @qmc.qkernel
+    def qft_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the stdlib QFT to the whole register."""
+        qs = qmc.qft(qs)
+        return qs
+
+    def roundtrip(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the QFT layer and its inverse inside an X sandwich."""
+        qs[0] = qmc.x(qs[0])
+        qs = qft_layer(qs)
+        qs = qmc.inverse(qft_layer)(qs)
+        qs[0] = qmc.x(qs[0])
+        return qs
+
+    @qmc.qkernel
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
+        return qmc.measure(qs)
+
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
+
+
+def _iqft_qkernel_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build stdlib-IQFT qkernel inverse roundtrip kernels.
+
+    Returns:
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after an IQFT layer and its inverse are applied.
+    """
+
+    @qmc.qkernel
+    def iqft_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the stdlib IQFT to the whole register."""
+        qs = qmc.iqft(qs)
+        return qs
+
+    def roundtrip(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the IQFT layer and its inverse inside an X sandwich."""
+        qs[0] = qmc.x(qs[0])
+        qs = iqft_layer(qs)
+        qs = qmc.inverse(iqft_layer)(qs)
+        qs[0] = qmc.x(qs[0])
+        return qs
+
+    @qmc.qkernel
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
+        return qmc.measure(qs)
+
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
+
+
+def _qft_direct_callable_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build direct `inverse(qmc.qft)` callable roundtrip kernels.
+
+    `qmc.inverse(qmc.qft)` maps directly to `qmc.iqft` (no qkernel wrapper),
+    so this exercises the direct-callable QFT inverse path end to end.
+
+    Returns:
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after `qmc.qft` and `qmc.inverse(qmc.qft)` are applied.
+    """
+
+    def roundtrip(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply qmc.qft and its direct inverse inside an X sandwich."""
+        qs[0] = qmc.x(qs[0])
+        qs = qmc.qft(qs)
+        qs = qmc.inverse(qmc.qft)(qs)
+        qs[0] = qmc.x(qs[0])
+        return qs
+
+    @qmc.qkernel
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
+        return qmc.measure(qs)
+
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(3, "qs")
+        qs = roundtrip(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
+
+
+def _rx_layer_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build algorithm rx_layer inverse roundtrip kernels.
+
+    The `thetas` angle vector stays a kernel argument (rx_layer consumes a
+    `Vector[Float]`), so the table binds it at transpile time.
+
+    Returns:
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after rx_layer and its inverse are applied.
+    """
+
+    def roundtrip(
+        qs: qmc.Vector[qmc.Qubit],
+        thetas: qmc.Vector[qmc.Float],
+    ) -> qmc.Vector[qmc.Qubit]:
+        """Apply rx_layer and its inverse with the same angles."""
+        qs = rx_layer(qs, thetas, 0)
+        qs = qmc.inverse(rx_layer)(qs, thetas, 0)
+        return qs
+
+    @qmc.qkernel
+    def sample_circuit(thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs, thetas)
+        return qmc.measure(qs)
+
+    @qmc.qkernel
+    def expval_circuit(
+        thetas: qmc.Vector[qmc.Float],
+        observable: qmc.Observable,
+    ) -> qmc.Float:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs, thetas)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
+
+
+def _modular_increment_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build algorithm modular_increment inverse roundtrip kernels.
+
+    The register stays at two qubits so the QURI Parts modular-arithmetic
+    support documented in LIMITATIONS.md is not exceeded by the forward op.
+
+    Returns:
+        tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
+            all-zero and expval kernel whose sum-Z expectation equals the
+            width, after modular_increment and its inverse are applied.
+    """
+
+    def roundtrip(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply modular_increment and its inverse inside an X sandwich."""
+        qs[0] = qmc.x(qs[0])
+        qs = modular_increment(qs)
+        qs = qmc.inverse(modular_increment)(qs)
+        qs[0] = qmc.x(qs[0])
+        return qs
+
+    @qmc.qkernel
+    def sample_circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs)
+        return qmc.measure(qs)
+
+    @qmc.qkernel
+    def expval_circuit(observable: qmc.Observable) -> qmc.Float:
+        qs = qmc.qubit_array(2, "qs")
+        qs = roundtrip(qs)
+        return qmc.expval(qs, observable)
+
+    return sample_circuit, expval_circuit
+
+
+STDLIB_ALGO_ROUNDTRIP_CASES = [
+    pytest.param(_qft_qkernel_roundtrip_kernels, 3, {}, id="qft"),
+    pytest.param(_iqft_qkernel_roundtrip_kernels, 3, {}, id="iqft"),
+    pytest.param(
+        _qft_direct_callable_roundtrip_kernels,
+        3,
+        {},
+        id="qft-direct-callable",
+    ),
+    pytest.param(
+        _rx_layer_roundtrip_kernels,
+        2,
+        {"thetas": [0.37, 0.37]},
+        id="algorithm-rx-layer",
+    ),
+    pytest.param(
+        _modular_increment_roundtrip_kernels,
+        2,
+        {},
+        id="algorithm-modular-increment",
+    ),
+]
+
+
+def _skip_unsupported_stdlib_algo_inverse_case(
+    transpiler_factory: type,
+    kernel_factory: object,
+) -> None:
+    """Skip stdlib/algorithm inverse cases outside a backend's support.
+
+    Args:
+        transpiler_factory (type): Backend transpiler class under test.
+        kernel_factory (object): Case kernel factory from the parametrize
+            table.
+
+    Returns:
+        None.
+    """
+    # `inverse(modular_increment)` executes today only where the backend
+    # inverts the forward block natively (Qiskit's reusable-gate inverse).
+    # QURI Parts and CUDA-Q reach the inverted-IR fallback block, whose
+    # sliced multi-controlled X loop body still arrives at emit as a
+    # SliceArrayOperation and is rejected. LIMITATIONS.md ("QURI Parts
+    # modular arithmetic support is partial") documents the related
+    # modular emission gaps; the forward op itself passes on both backends
+    # at this register width.
+    if kernel_factory is _modular_increment_roundtrip_kernels and (
+        transpiler_factory is QuriPartsTranspiler
+        or transpiler_factory is CudaqTranspiler
+    ):
+        pytest.skip(
+            "inverse(modular_increment) fallback emission retains a "
+            "SliceArrayOperation on this backend; only Qiskit's native "
+            "reusable-gate inverse executes this shape today."
+        )
+
+
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize(
+    "kernel_factory, width, case_bindings",
+    STDLIB_ALGO_ROUNDTRIP_CASES,
+)
+def test_inverse_stdlib_algorithm_roundtrip_cross_backend(
+    transpiler_factory,
+    kernel_factory,
+    width: int,
+    case_bindings: dict[str, object],
+) -> None:
+    """Stdlib and algorithm qkernel inverse roundtrips execute on backends.
+
+    This is the execution matrix for inverses of stdlib kernels (qmc.qft /
+    qmc.iqft, both qkernel-wrapped and as the direct callable mapping) and
+    algorithm kernels (rx_layer, modular_increment). Both backend
+    primitives run per case: samples must be all-zero and the sum-Z
+    expectation must equal the register width.
+    """
+    _skip_unsupported_stdlib_algo_inverse_case(transpiler_factory, kernel_factory)
+    sample_kernel, expval_kernel = kernel_factory()
+    transpiler = transpiler_factory()
+
+    executable = transpiler.transpile(sample_kernel, bindings=case_bindings or None)
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+    _assert_all_zero_samples(sample_result, width, 32)
+
+    expval_executable = transpiler.transpile(
+        expval_kernel,
+        bindings={**case_bindings, "observable": _sum_z_observable(width)},
+    )
+    expval_result = expval_executable.run(transpiler.executor()).result()
+
+    assert np.isclose(expval_result, float(width), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
