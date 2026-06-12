@@ -118,8 +118,9 @@ class ValueResolver:
             Any | None: The indexed element when every index resolves and
                 the parent array has compile-time data. Returns ``None``
                 when the value is not an array element, the parent has no
-                compile-time data, an index is symbolic, or indexing
-                fails.
+                compile-time data, an index is symbolic or resolves to a
+                negative value (Python-style wrapping is refused), or
+                indexing fails.
         """
         parent_array = getattr(value, "parent_array", None)
         element_indices = getattr(value, "element_indices", None)
@@ -166,8 +167,17 @@ class ValueResolver:
             if index is None:
                 return None
             try:
-                container = container[int(index)]
-            except (IndexError, KeyError, TypeError, ValueError):
+                concrete_index = int(index)
+            except (TypeError, ValueError):
+                return None
+            if concrete_index < 0:
+                # Negative indices must not reach Python container
+                # indexing, where they would silently wrap to the wrong
+                # element. Python-style negative indexing is unsupported.
+                return None
+            try:
+                container = container[concrete_index]
+            except (IndexError, KeyError, TypeError):
                 # Shape/type mismatches mean this Value is not resolvable
                 # from the available compile-time data.
                 return None
@@ -190,8 +200,10 @@ class ValueResolver:
         Returns:
             tuple[ArrayValue | None, tuple[Any, ...]]: The root array and
                 root-local indices when every slice bound can be resolved,
-                or ``(None, ())`` when the slice chain is symbolic or
-                otherwise not resolvable at compile time.
+                or ``(None, ())`` when the slice chain is symbolic, a
+                resolved index is negative, a resolved bound violates the
+                frontend contract (non-negative start, positive step), or
+                the chain is otherwise not resolvable at compile time.
         """
         root_array = parent_array
         root_indices = element_indices
@@ -213,9 +225,19 @@ class ValueResolver:
                 # the wrong compile-time value.
                 return None, ()
             try:
-                root_index = int(start) + int(step) * int(index)
+                start_int = int(start)
+                step_int = int(step)
+                index_int = int(index)
             except (TypeError, ValueError):
                 return None, ()
+            if index_int < 0 or start_int < 0 or step_int <= 0:
+                # A negative local index would compose to a wrong root
+                # slot (e.g. ``view[-1]`` for ``view = a[1:3]`` maps to
+                # ``a[0]`` instead of ``a[2]``), and resolved bounds must
+                # satisfy the frontend contract (non-negative start,
+                # positive step). Stay unresolved instead of guessing.
+                return None, ()
+            root_index = start_int + step_int * index_int
 
             root_indices = (
                 _constant_index_like(root_indices[0], root_index),

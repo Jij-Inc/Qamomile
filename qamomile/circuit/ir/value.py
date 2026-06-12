@@ -612,7 +612,12 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
             ``None`` when ``value`` is not an array element, when its index is
             non-constant, or when any slice bound in the chain is non-constant
             (those cases are deferred to the emit-time resolver, which has
-            bindings available).
+            bindings available). Also ``None`` for a negative constant index
+            or a chain frame with negative ``slice_start`` / non-positive
+            ``slice_step`` — composing those would silently address a wrong
+            root slot, so they are refused rather than guessed (the frontend
+            rejects them at trace time; this guard covers programmatically
+            constructed IR).
     """
     # Not an array element (e.g. a standalone qubit / scalar): there is no
     # root array to address against.
@@ -634,6 +639,13 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     if not idx_value.is_constant():
         return None
     idx = int(typing.cast(int, idx_value.get_const()))
+    # A negative local index would compose through the affine map below into
+    # a valid-but-wrong non-negative root index (``view[-1]`` for
+    # ``view = q[1:3]`` would address ``q[0]`` instead of ``q[2]``). The
+    # frontend rejects constant negative indices at trace time; refuse them
+    # here as well so programmatically constructed IR cannot slip through.
+    if idx < 0:
+        return None
     # Walk the ``slice_of`` chain root-ward. Each strided view contributes the
     # affine map ``parent_index = start + step * local_index``; composing them
     # rewrites a (possibly nested) view element into the underlying root array's
@@ -651,6 +663,10 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
             return None
         start = int(typing.cast(int, parent.slice_start.get_const()))
         step = int(typing.cast(int, parent.slice_step.get_const()))
+        # Mirror the frontend slice contract (non-negative start, positive
+        # step); composing anything else would remap onto a wrong root slot.
+        if start < 0 or step <= 0:
+            return None
         idx = start + step * idx
         parent = parent.slice_of
     if parent is None:
