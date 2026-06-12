@@ -7,16 +7,25 @@ import uuid as uuid_module
 from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
 )
 from qamomile.circuit.ir.value import (
+    ArrayRuntimeMetadata,
     ArrayValue,
+    CastMetadata,
     DictValue,
+    QFixedMetadata,
     TupleValue,
     Value,
     ValueBase,
+    ValueMetadata,
+    remap_indexed_identifier,
+    remap_value_metadata_references,
+    resolve_root_array_index,
+    split_indexed_identifier,
 )
 
 
@@ -65,24 +74,63 @@ class UUIDRemapper:
         sub_map: dict[str, ValueBase] = {}
         for v in op.all_input_values():
             sub_map[v.uuid] = self.clone_value(v)
+
+        # Clone nested bodies BEFORE results. IfOperation results are phi
+        # outputs whose metadata may reference values whose first (and only)
+        # appearance is inside the branch bodies — e.g. QFixed carrier keys
+        # pointing at an array that is cast inside the ``if``. Cloning the
+        # bodies first fills the remap tables so ``_clone_metadata`` can
+        # resolve those references; the phi outputs themselves are cloned
+        # while cloning ``phi_ops`` (the last nested list) and the results
+        # loop below then reuses the cached clones.
+        cloned_lists: list[list[Operation]] | None = None
+        if isinstance(op, HasNestedOps):
+            cloned_lists = [
+                self.clone_operations(op_list) for op_list in op.nested_op_lists()
+            ]
+
         for v in op.results:
             if isinstance(v, ValueBase) and v.uuid not in sub_map:
                 sub_map[v.uuid] = self.clone_value(v)
 
         new_op = op.replace_values(sub_map) if sub_map else op
 
-        # Recursively clone nested ops for control flow ops. Nested
-        # bodies see the same UUIDRemapper, so their references to a
+        # Nested bodies see the same UUIDRemapper, so their references to a
         # cloned outer Value (e.g. a parent ForOperation's loop_var_value)
         # resolve through ``self._value_cache`` and stay consistent with
         # the parent op's field.
-        if isinstance(new_op, HasNestedOps):
-            cloned_lists = [
-                self.clone_operations(op_list) for op_list in new_op.nested_op_lists()
-            ]
-            new_op = new_op.rebuild_nested(cloned_lists)
+        if cloned_lists is not None:
+            new_op = cast(HasNestedOps, new_op).rebuild_nested(cloned_lists)
+
+        if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
+            new_op = dataclasses.replace(
+                new_op,
+                qubit_mapping=[
+                    remap_indexed_identifier(
+                        qubit_uuid,
+                        lambda uuid: self._uuid_remap.get(uuid, uuid),
+                    )
+                    for qubit_uuid in new_op.qubit_mapping
+                ],
+            )
 
         return new_op
+
+    def _clone_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
+        """Clone metadata references through the current UUID maps.
+
+        Args:
+            metadata (ValueMetadata): Metadata from the source value.
+
+        Returns:
+            ValueMetadata: Metadata whose embedded UUID and logical-id
+                references point at cloned values when those values are known.
+        """
+        return remap_value_metadata_references(
+            metadata,
+            lambda uuid: self._uuid_remap.get(uuid, uuid),
+            lambda logical_id: self._logical_id_remap.get(logical_id, logical_id),
+        )
 
     def clone_value(self, value: ValueBase) -> ValueBase:
         """Clone any value type with a fresh UUID and logical_id.
@@ -105,6 +153,7 @@ class UUIDRemapper:
         if old_logical_id not in self._logical_id_remap:
             self._logical_id_remap[old_logical_id] = str(uuid_module.uuid4())
         new_logical_id = self._logical_id_remap[old_logical_id]
+        new_metadata = self._clone_metadata(value.metadata)
 
         # Handle different value types
         if isinstance(value, TupleValue):
@@ -116,6 +165,7 @@ class UUIDRemapper:
                 value,
                 uuid=new_uuid,
                 logical_id=new_logical_id,
+                metadata=new_metadata,
                 elements=new_elements,
             )
         elif isinstance(value, DictValue):
@@ -132,6 +182,7 @@ class UUIDRemapper:
                 value,
                 uuid=new_uuid,
                 logical_id=new_logical_id,
+                metadata=new_metadata,
                 entries=tuple(new_entries),
             )
         elif isinstance(value, ArrayValue):
@@ -173,6 +224,7 @@ class UUIDRemapper:
                 value,
                 uuid=new_uuid,
                 logical_id=new_logical_id,
+                metadata=new_metadata,
                 parent_array=new_parent_array,
                 element_indices=new_element_indices if new_element_indices else (),
                 shape=new_shape,
@@ -198,6 +250,7 @@ class UUIDRemapper:
                 value,
                 uuid=new_uuid,
                 logical_id=new_logical_id,
+                metadata=new_metadata,
                 parent_array=new_parent_array_v,
                 element_indices=new_element_indices_v if new_element_indices_v else (),
             )
@@ -207,6 +260,7 @@ class UUIDRemapper:
                 cast(Any, value),
                 uuid=new_uuid,
                 logical_id=new_logical_id,
+                metadata=new_metadata,
             )
 
         self._value_cache[old_uuid] = cloned
@@ -226,6 +280,258 @@ class ValueSubstitutor:
     def __init__(self, value_map: Mapping[str, ValueBase], transitive: bool = False):
         self._value_map = value_map
         self._transitive = transitive
+
+    def _mapped_value_for_uuid(self, uuid: str) -> ValueBase | None:
+        """Return the mapped value for a UUID, following transitive mappings.
+
+        Args:
+            uuid (str): UUID to resolve through the substitution map.
+
+        Returns:
+            ValueBase | None: The terminal mapped value, or ``None`` when the
+                UUID is not present in the map.
+        """
+        if uuid not in self._value_map:
+            return None
+        result = self._value_map[uuid]
+        if self._transitive:
+            seen: set[str] = {uuid}
+            while result.uuid in self._value_map and result.uuid not in seen:
+                seen.add(result.uuid)
+                result = self._value_map[result.uuid]
+        return result
+
+    def _substitute_uuid(self, uuid: str) -> str:
+        """Substitute a scalar UUID reference through the value map.
+
+        Args:
+            uuid (str): UUID reference to substitute.
+
+        Returns:
+            str: Replacement UUID when mapped, otherwise the original UUID.
+        """
+        mapped = self._mapped_value_for_uuid(uuid)
+        return mapped.uuid if mapped is not None else uuid
+
+    def _resolve_mapped_carrier(
+        self,
+        base_uuid: str,
+        suffix: str,
+    ) -> tuple[ValueBase, str] | None:
+        """Resolve a carrier-key base through the map, folding view indices.
+
+        Composite carrier keys index into the ROOT array's element space.
+        When the base maps to a strided slice view (e.g. an inline pass
+        substituting a callee formal with the caller's ``q[1::2]``), keeping
+        the index verbatim would silently re-interpret it in view-local
+        space, so the index is folded through the view's slice chain into
+        the root array's index space instead.
+
+        Args:
+            base_uuid (str): Base UUID of a legacy ``"<base>_<index>"`` key.
+            suffix (str): Decimal index suffix of the key.
+
+        Returns:
+            tuple[ValueBase, str] | None: Mapped value and translated index
+                suffix, or ``None`` when the base is not mapped. When the
+                mapped value is a constant-bound slice view, the chain root
+                and the folded root-space index are returned; otherwise the
+                mapped value and the original suffix are returned unchanged.
+        """
+        mapped = self._mapped_value_for_uuid(base_uuid)
+        if mapped is None:
+            return None
+        if isinstance(mapped, ArrayValue) and mapped.slice_of is not None:
+            resolved = resolve_root_array_index(mapped, int(suffix))
+            if resolved is not None:
+                root, root_index = resolved
+                return root, str(root_index)
+        return mapped, suffix
+
+    def _substitute_uuid_ref(self, uuid_ref: str) -> str:
+        """Substitute a scalar or legacy indexed UUID reference.
+
+        Args:
+            uuid_ref (str): Scalar UUID or legacy ``"<uuid>_<index>"`` key.
+
+        Returns:
+            str: Substituted UUID reference. Index suffixes are preserved for
+                plain remappings and folded into root-array space when the
+                base maps to a constant-bound slice view.
+        """
+        parts = split_indexed_identifier(uuid_ref)
+        if parts is None:
+            return self._substitute_uuid(uuid_ref)
+        base_uuid, suffix = parts
+        resolved = self._resolve_mapped_carrier(base_uuid, suffix)
+        if resolved is None:
+            return uuid_ref
+        mapped, new_suffix = resolved
+        return f"{mapped.uuid}_{new_suffix}"
+
+    def _substitute_logical_id_for_uuid_ref(
+        self,
+        logical_id: str,
+        uuid_ref: str,
+    ) -> str:
+        """Substitute a logical-id reference using its parallel UUID key.
+
+        Args:
+            logical_id (str): Logical-id reference to substitute.
+            uuid_ref (str): Parallel UUID reference from the same metadata
+                position.
+
+        Returns:
+            str: Replacement logical-id reference when the UUID base is mapped,
+                otherwise ``logical_id`` unchanged. The index suffix follows
+                the same root-space folding as :meth:`_substitute_uuid_ref` so
+                UUID and logical-id keys stay parallel.
+        """
+        parts = split_indexed_identifier(uuid_ref)
+        if parts is None:
+            mapped = self._mapped_value_for_uuid(uuid_ref)
+            return mapped.logical_id if mapped is not None else logical_id
+
+        base_uuid, suffix = parts
+        resolved = self._resolve_mapped_carrier(base_uuid, suffix)
+        if resolved is None:
+            return logical_id
+        mapped, new_suffix = resolved
+        return f"{mapped.logical_id}_{new_suffix}"
+
+    def _substitute_parallel_logical_ids(
+        self,
+        logical_ids: tuple[str, ...],
+        uuid_refs: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Substitute logical IDs that are parallel to UUID references.
+
+        Args:
+            logical_ids (tuple[str, ...]): Logical-id metadata entries.
+            uuid_refs (tuple[str, ...]): UUID entries at the same positions.
+
+        Returns:
+            tuple[str, ...]: Logical IDs substituted by looking at the
+                corresponding UUID references where available.
+        """
+        rewritten: list[str] = []
+        for i, logical_id in enumerate(logical_ids):
+            if i < len(uuid_refs):
+                rewritten.append(
+                    self._substitute_logical_id_for_uuid_ref(logical_id, uuid_refs[i])
+                )
+            else:
+                rewritten.append(logical_id)
+        return tuple(rewritten)
+
+    def _metadata_has_referenced_uuid(self, metadata: ValueMetadata) -> bool:
+        """Return whether metadata contains a UUID present in the value map.
+
+        Args:
+            metadata (ValueMetadata): Metadata bundle to inspect.
+
+        Returns:
+            bool: ``True`` when an embedded scalar or carrier-key base UUID is
+                present in ``self._value_map``.
+        """
+
+        def has_uuid_ref(uuid_ref: str) -> bool:
+            parts = split_indexed_identifier(uuid_ref)
+            uuid = parts[0] if parts is not None else uuid_ref
+            return uuid in self._value_map
+
+        if metadata.cast is not None:
+            if has_uuid_ref(metadata.cast.source_uuid):
+                return True
+            if any(has_uuid_ref(uuid_ref) for uuid_ref in metadata.cast.qubit_uuids):
+                return True
+        if metadata.qfixed is not None and any(
+            has_uuid_ref(uuid_ref) for uuid_ref in metadata.qfixed.qubit_uuids
+        ):
+            return True
+        if metadata.array_runtime is not None:
+            if any(
+                has_uuid_ref(uuid_ref)
+                for uuid_ref in metadata.array_runtime.element_uuids
+            ):
+                return True
+            if any(
+                uuid_ref in self._value_map
+                for uuid_ref in metadata.array_runtime.element_parent_uuids
+                if uuid_ref
+            ):
+                return True
+        return False
+
+    def _substitute_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
+        """Substitute UUID and logical-id references inside metadata.
+
+        Args:
+            metadata (ValueMetadata): Metadata bundle to substitute.
+
+        Returns:
+            ValueMetadata: Metadata with embedded references rewritten through
+                the current value map.
+        """
+        new_cast = metadata.cast
+        if new_cast is not None:
+            new_cast = CastMetadata(
+                source_uuid=self._substitute_uuid(new_cast.source_uuid),
+                qubit_uuids=tuple(
+                    self._substitute_uuid_ref(uuid_ref)
+                    for uuid_ref in new_cast.qubit_uuids
+                ),
+                source_logical_id=(
+                    self._substitute_logical_id_for_uuid_ref(
+                        new_cast.source_logical_id,
+                        new_cast.source_uuid,
+                    )
+                    if new_cast.source_logical_id is not None
+                    else None
+                ),
+                qubit_logical_ids=self._substitute_parallel_logical_ids(
+                    new_cast.qubit_logical_ids,
+                    new_cast.qubit_uuids,
+                ),
+            )
+
+        new_qfixed = metadata.qfixed
+        if new_qfixed is not None:
+            new_qfixed = QFixedMetadata(
+                qubit_uuids=tuple(
+                    self._substitute_uuid_ref(uuid_ref)
+                    for uuid_ref in new_qfixed.qubit_uuids
+                ),
+                num_bits=new_qfixed.num_bits,
+                int_bits=new_qfixed.int_bits,
+            )
+
+        new_array_rt = metadata.array_runtime
+        if new_array_rt is not None:
+            new_array_rt = ArrayRuntimeMetadata(
+                const_array=new_array_rt.const_array,
+                element_uuids=tuple(
+                    self._substitute_uuid_ref(uuid_ref)
+                    for uuid_ref in new_array_rt.element_uuids
+                ),
+                element_logical_ids=self._substitute_parallel_logical_ids(
+                    new_array_rt.element_logical_ids,
+                    new_array_rt.element_uuids,
+                ),
+                element_parent_uuids=tuple(
+                    self._substitute_uuid(uuid_ref) if uuid_ref else uuid_ref
+                    for uuid_ref in new_array_rt.element_parent_uuids
+                ),
+                element_parent_indices=new_array_rt.element_parent_indices,
+            )
+
+        return ValueMetadata(
+            scalar=metadata.scalar,
+            cast=new_cast,
+            qfixed=new_qfixed,
+            array_runtime=new_array_rt,
+            dict_runtime=metadata.dict_runtime,
+        )
 
     def substitute_operation(self, op: Operation) -> Operation:
         """Substitute values in an operation using the value map.
@@ -258,16 +564,20 @@ class ValueSubstitutor:
             )
             result = dataclasses.replace(result, phi_ops=new_phi_ops)
 
+        if isinstance(result, CastOperation) and result.qubit_mapping:
+            new_qubit_mapping = [
+                self._substitute_uuid_ref(uuid_ref) for uuid_ref in result.qubit_mapping
+            ]
+            if new_qubit_mapping != result.qubit_mapping:
+                result = dataclasses.replace(result, qubit_mapping=new_qubit_mapping)
+
         return result
 
     def _chase_transitive(self, v: ValueBase) -> ValueBase:
         """Chase transitive chains in the value map with cycle detection."""
-        result = self._value_map[v.uuid]
-        if self._transitive:
-            seen: set[str] = {v.uuid}
-            while result.uuid in self._value_map and result.uuid not in seen:
-                seen.add(result.uuid)
-                result = self._value_map[result.uuid]
+        result = self._mapped_value_for_uuid(v.uuid)
+        if result is None:
+            raise KeyError(v.uuid)
         return result
 
     def _has_referenced_field(self, v: "Value") -> bool:
@@ -288,6 +598,8 @@ class ValueSubstitutor:
             in the substitution map.
         """
         if v.parent_array is not None and v.parent_array.uuid in self._value_map:
+            return True
+        if self._metadata_has_referenced_uuid(v.metadata):
             return True
         if v.element_indices:
             for idx in v.element_indices:
@@ -317,6 +629,8 @@ class ValueSubstitutor:
             ``shape`` / slice metadata substituted.  Non-referenced
             fields are left unchanged.
         """
+        new_metadata = self._substitute_metadata(v.metadata)
+
         new_parent_array = v.parent_array
         if v.parent_array is not None:
             sub_pa = self.substitute_value(v.parent_array)
@@ -369,6 +683,7 @@ class ValueSubstitutor:
 
             return dataclasses.replace(
                 v,
+                metadata=new_metadata,
                 parent_array=new_parent_array,
                 element_indices=new_element_indices,
                 shape=new_shape,
@@ -379,6 +694,7 @@ class ValueSubstitutor:
 
         return dataclasses.replace(
             v,
+            metadata=new_metadata,
             parent_array=new_parent_array,
             element_indices=new_element_indices,
         )
@@ -420,7 +736,8 @@ class ValueSubstitutor:
         # Handle TupleValue - substitute elements
         if isinstance(v, TupleValue):
             new_elements = []
-            changed = False
+            new_metadata = self._substitute_metadata(v.metadata)
+            changed = new_metadata != v.metadata
             for elem in v.elements:
                 if elem.uuid in self._value_map:
                     substituted = self._chase_transitive(elem)
@@ -432,13 +749,18 @@ class ValueSubstitutor:
                 else:
                     new_elements.append(elem)
             if changed:
-                return dataclasses.replace(v, elements=tuple(new_elements))
+                return dataclasses.replace(
+                    v,
+                    metadata=new_metadata,
+                    elements=tuple(new_elements),
+                )
             return v
 
         # Handle DictValue - substitute entries
         if isinstance(v, DictValue):
             new_entries: list[tuple[TupleValue | Value, Value]] = []
-            changed = False
+            new_metadata = self._substitute_metadata(v.metadata)
+            changed = new_metadata != v.metadata
             for k, val in v.entries:
                 new_k = k
                 new_v = val
@@ -454,7 +776,11 @@ class ValueSubstitutor:
                         changed = True
                 new_entries.append((new_k, new_v))
             if changed:
-                return dataclasses.replace(v, entries=tuple(new_entries))
+                return dataclasses.replace(
+                    v,
+                    metadata=new_metadata,
+                    entries=tuple(new_entries),
+                )
             return v
 
         # Handle regular Value/ArrayValue
@@ -462,7 +788,8 @@ class ValueSubstitutor:
             new_parent_array = v.parent_array
             new_element_indices = v.element_indices
             new_shape: tuple[Value, ...] | None = None
-            changed = False
+            new_metadata = self._substitute_metadata(v.metadata)
+            changed = new_metadata != v.metadata
 
             # Substitute the parent_array.  ``v.parent_array`` itself may
             # not be in the map (it can be a freshly-cloned slice-view
@@ -565,6 +892,7 @@ class ValueSubstitutor:
             if changed:
                 if isinstance(v, ArrayValue):
                     replace_kwargs: dict[str, Any] = dict(
+                        metadata=new_metadata,
                         parent_array=new_parent_array,
                         element_indices=new_element_indices,
                     )
@@ -577,6 +905,7 @@ class ValueSubstitutor:
                     return dataclasses.replace(v, **replace_kwargs)
                 return dataclasses.replace(
                     v,
+                    metadata=new_metadata,
                     parent_array=new_parent_array,
                     element_indices=new_element_indices,
                 )
