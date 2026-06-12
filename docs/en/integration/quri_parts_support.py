@@ -28,6 +28,21 @@
 # Install the latest Qamomile with the QURI Parts extras through pip.
 # # !pip install "qamomile[quri_parts]"
 
+# %%
+import os
+from collections import Counter
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from scipy.optimize import minimize
+
+import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+from qamomile.optimization.binary_model import BinaryModel
+from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
+from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
+
 # %% [markdown]
 # ## The MaxCut problem
 #
@@ -37,14 +52,6 @@
 # The model object is used as a problem container that gives us `quad` / `linear` dictionaries for the QAOA kernel and a helper for decoding measurements back into spin values $(+1 / -1)$.
 
 # %%
-import os
-
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
-
-from qamomile.optimization.binary_model import BinaryModel
-
 G = nx.Graph()
 G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
 num_nodes = G.number_of_nodes()
@@ -87,10 +94,8 @@ plt.show()
 # This coefficient difference is absorbed into the variational parameter $\gamma$: the $\gamma$ used here is twice the textbook QAOA $\gamma$.
 # :::
 
+
 # %%
-import qamomile.circuit as qmc
-
-
 @qmc.qkernel
 def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(n, name="q")
@@ -161,8 +166,6 @@ qaoa_ansatz.draw(
 # We bind the arguments that determine the problem structure and keep `gammas` / `betas` as runtime parameters.
 
 # %%
-from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
-
 transpiler = QuriPartsTranspiler()
 # Passing a `seed` makes the Qulacs sampler reproducible: two `sample(...)`
 # calls with the same seed and circuit return identical shot counts. Omit it
@@ -244,8 +247,6 @@ print(f"Mean energy at random init: {decoded.energy_mean():+.4f}")
 # Each iteration reuses the same `executable` and `QuriPartsExecutor`.
 
 # %%
-from scipy.optimize import minimize
-
 cost_history: list[float] = []
 
 
@@ -307,9 +308,6 @@ plt.show()
 # Then convert it to a QURI Parts operator and call `estimate_expectation` for each circuit variant.
 
 # %%
-import qamomile.observable as qm_o
-from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
-
 cost_hamiltonian = qm_o.Hamiltonian()
 for (i, j), Jij in spin_model.quad.items():
     cost_hamiltonian.add_term(
@@ -347,9 +345,7 @@ bound_circuit = unbound_circuit.bind_parameters(flat_params)
 print(f"bound   type           : {type(bound_circuit).__name__}")
 
 # Path 1: unbound -> parametric estimator. param_values is consumed.
-energy_unbound = executor.estimate_expectation(
-    unbound_circuit, quri_H, flat_params
-)
+energy_unbound = executor.estimate_expectation(unbound_circuit, quri_H, flat_params)
 
 # Path 2: bound -> non-parametric estimator. param_values is ignored.
 energy_bound = executor.estimate_expectation(bound_circuit, quri_H, [])
@@ -413,10 +409,57 @@ noisy_result = executable.sample(
     shots=sample_shots,
 ).result()
 
-clean_energy = spin_model.decode_from_sampleresult(clean_result).energy_mean()
-noisy_energy = spin_model.decode_from_sampleresult(noisy_result).energy_mean()
+clean_decoded = spin_model.decode_from_sampleresult(clean_result)
+noisy_decoded = spin_model.decode_from_sampleresult(noisy_result)
+clean_energy = clean_decoded.energy_mean()
+noisy_energy = noisy_decoded.energy_mean()
 print(f"noiseless sampler mean energy: {clean_energy:+.4f}")
 print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
+
+# %% [markdown]
+# Because both sampler runs return shot counts, we can compare their sampled energy distributions directly.
+# The vertical line in each subplot marks the sample mean energy.
+
+# %%
+
+
+def energy_distribution(decoded_samples):
+    counts: Counter[float] = Counter()
+    for energy, occ in zip(decoded_samples.energy, decoded_samples.num_occurrences):
+        counts[energy] += occ
+    energies = sorted(counts.keys())
+    return energies, [counts[energy] for energy in energies]
+
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
+for ax, decoded_samples, mean_energy, title, color in [
+    (axes[0], clean_decoded, clean_energy, "Noiseless sampler", "#2696EB"),
+    (
+        axes[1],
+        noisy_decoded,
+        noisy_energy,
+        "NoiseSimulator sampler",
+        "#FF8A3D",
+    ),
+]:
+    energies, counts = energy_distribution(decoded_samples)
+    ax.bar(energies, counts, width=0.6, color=color)
+    ax.axvline(
+        mean_energy,
+        color="#2B2B2B",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"mean = {mean_energy:+.3f}",
+    )
+    ax.set_xticks(energies)
+    ax.set_title(title)
+    ax.set_xlabel("Ising energy")
+    ax.legend()
+
+axes[0].set_ylabel("Frequency")
+fig.suptitle("Sampled energy distributions by QURI Parts sampler")
+fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # Depolarizing noise pushes the QAOA state toward the maximally mixed state.
@@ -434,3 +477,8 @@ print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 # - `QuriPartsExecutor` supports both `executable.sample()` for QAOA-style sampling and `executor.estimate(...)` for noise-free expectation values, against the Qulacs state-vector simulator by default.
 # - `estimate_expectation` switches between QURI Parts' parametric and non-parametric estimators depending on whether the input circuit still has free parameters. Usually, `executor.estimate()` lets you use this behavior without thinking about the switch.
 # - Custom samplers and estimators, including QURI Parts' `NoiseSimulator`-backed sampler, can be passed through `transpiler.executor(...)` without re-transpiling the kernel.
+
+# %% [markdown]
+# ### See also
+#
+# - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow on the CUDA-Q backend.
