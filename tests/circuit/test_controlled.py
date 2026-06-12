@@ -1026,8 +1026,9 @@ except ImportError:  # pragma: no cover
 
 _HAS_CUDAQ = True
 try:  # pragma: no cover - presence check
-    import cudaq  # noqa: F401
-
+    # The lazy accessor raises ImportError when cudaq is missing, without
+    # loading the cudaq runtime at collection time when it is installed
+    # (see tests/_cudaq_isolation.py).
     from qamomile.cudaq import CudaqTranspiler as _CudaqTranspilerCheck  # noqa: F401
 except ImportError:  # pragma: no cover
     _HAS_CUDAQ = False
