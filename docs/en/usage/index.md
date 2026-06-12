@@ -6,6 +6,12 @@ slug: usage
 
 How-to guides for using individual Qamomile modules.
 
-## All articles
+::::{grid} 1 1 1 1
 
-- [How to use BinaryModel](binary_model) — Build unconstrained binary/spin models from BinaryExpr, QUBO/HUBO/Ising, or OMMX
+:::{card}
+:header: **How to use BinaryModel**
+:link: binary_model
+Build unconstrained binary/spin models from BinaryExpr, QUBO/HUBO/Ising, or OMMX.
+:::
+
+::::

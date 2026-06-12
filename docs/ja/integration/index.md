@@ -6,8 +6,24 @@ slug: integration
 
 Qamomileを外部ライブラリや量子プラットフォームと組み合わせて使うときのノートです。
 
-## すべての記事
+::::{grid} 1 1 1 1
 
-- [OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク](ommx_quantum_benchmarks_qaoa) — OMMX Quantum Benchmarksから取得したLABSインスタンス上でQAOAを動かし、SCIPと比較する
-- [qBraid Executor](qbraid_executor) — qBraid対応デバイスでのQiskit回路実行
-- [QURI Parts Support](quri_parts_support) — QURI PartsへのトランスパイルとQulacs状態ベクトルシミュレータでの実行
+:::{card}
+:header: **OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク**
+:link: ommx_quantum_benchmarks_qaoa
+OMMX Quantum Benchmarksから取得したLABSインスタンス上でQAOAを動かし、SCIPと比較します。
+:::
+
+:::{card}
+:header: **qBraid サポート**
+:link: qbraid_executor
+qBraid対応デバイスでQiskit回路を実行します。
+:::
+
+:::{card}
+:header: **QURI Parts サポート**
+:link: quri_parts_support
+QURI Partsへトランスパイルし、Qulacs状態ベクトルシミュレータで実行します。
+:::
+
+::::
