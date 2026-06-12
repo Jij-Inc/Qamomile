@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation import (
     ForItemsOperation,
     GateOperation,
     GateOperationType,
+    InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -343,6 +344,23 @@ def _decode_value(d: dict[str, Any], ctx: _DecodeContext) -> ValueBase:
             logical_id=d["logical_id"],
             shape=tuple(
                 _materialize_as_value(ctx, ref) for ref in d.get("shape_refs", ())
+            ),
+            # Slice-view refs are additive fields: payloads written
+            # before they existed decode to a non-sliced array.
+            slice_of=(
+                _materialize_array(ctx, d["slice_of_ref"])
+                if d.get("slice_of_ref")
+                else None
+            ),
+            slice_start=(
+                _materialize_as_value(ctx, d["slice_start_ref"])
+                if d.get("slice_start_ref")
+                else None
+            ),
+            slice_step=(
+                _materialize_as_value(ctx, d["slice_step_ref"])
+                if d.get("slice_step_ref")
+                else None
             ),
         )
     if tag == "TupleValue":
@@ -935,6 +953,36 @@ def _decode_cinit(d: dict[str, Any], ctx: _DecodeContext) -> CInitOperation:
     return CInitOperation(operands=operands, results=results)
 
 
+def _decode_slice_array(d: dict[str, Any], ctx: _DecodeContext) -> SliceArrayOperation:
+    """Decode :class:`SliceArrayOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        SliceArrayOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return SliceArrayOperation(operands=operands, results=results)
+
+
+def _decode_release_slice_view(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> ReleaseSliceViewOperation:
+    """Decode :class:`ReleaseSliceViewOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        ReleaseSliceViewOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ReleaseSliceViewOperation(operands=operands, results=results)
+
+
 def _decode_return(d: dict[str, Any], ctx: _DecodeContext) -> ReturnOperation:
     """Decode :class:`ReturnOperation`.
 
@@ -1378,6 +1426,39 @@ def _decode_composite_gate(
     )
 
 
+def _decode_inverse_block(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> InverseBlockOperation:
+    """Decode :class:`InverseBlockOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        InverseBlockOperation: The reconstructed inverse block op with its
+            source and fallback blocks.
+    """
+    operands, results = _operands_results(d, ctx)
+    source_block = (
+        _decode_block(d["source_block"]) if d.get("source_block") is not None else None
+    )
+    implementation_block = (
+        _decode_block(d["implementation_block"])
+        if d.get("implementation_block") is not None
+        else None
+    )
+    return InverseBlockOperation(
+        operands=operands,
+        results=results,
+        num_control_qubits=int(d.get("num_control_qubits", 0)),
+        num_target_qubits=int(d.get("num_target_qubits", 0)),
+        custom_name=d.get("custom_name", ""),
+        source_block=source_block,
+        implementation_block=implementation_block,
+    )
+
+
 def _decode_resource_metadata(d: Any) -> ResourceMetadata | None:
     """Decode :class:`ResourceMetadata` (or ``None``).
 
@@ -1416,6 +1497,8 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
     "CInitOperation": _decode_cinit,
+    "SliceArrayOperation": _decode_slice_array,
+    "ReleaseSliceViewOperation": _decode_release_slice_view,
     "ReturnOperation": _decode_return,
     "ExpvalOp": _decode_expval,
     "PauliEvolveOp": _decode_pauli_evolve,
@@ -1434,4 +1517,5 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
     "CompositeGateOperation": _decode_composite_gate,
+    "InverseBlockOperation": _decode_inverse_block,
 }

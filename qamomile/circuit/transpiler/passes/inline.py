@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import InliningError
@@ -39,6 +40,10 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
     for op in operations:
         if isinstance(op, CallBlockOperation):
             return True
+        if isinstance(op, InverseBlockOperation):
+            for block in (op.source_block, op.implementation_block):
+                if block is not None and _has_any_call_block(block.operations):
+                    return True
         if isinstance(op, IfOperation):
             if _has_any_call_block(op.true_operations) or _has_any_call_block(
                 op.false_operations
@@ -59,6 +64,10 @@ def count_call_blocks(operations: list[Operation]) -> int:
     for op in operations:
         if isinstance(op, CallBlockOperation) and op.block is not None:
             count += 1
+        if isinstance(op, InverseBlockOperation):
+            for block in (op.source_block, op.implementation_block):
+                if block is not None:
+                    count += count_call_blocks(block.operations)
         if isinstance(op, IfOperation):
             count += count_call_blocks(op.true_operations)
             count += count_call_blocks(op.false_operations)
@@ -196,6 +205,23 @@ class InlinePass(Pass[Block, Block]):
                     # Keep as atomic operation (for native backend support)
                     substituted = self._substitute_values(op, value_map)
                     result.append(substituted)
+
+            elif isinstance(op, InverseBlockOperation):
+                source_block = self._inline_nested_block(
+                    op.source_block,
+                    visiting_blocks,
+                )
+                implementation_block = self._inline_nested_block(
+                    op.implementation_block,
+                    visiting_blocks,
+                )
+                new_op = dataclasses.replace(
+                    op,
+                    source_block=source_block,
+                    implementation_block=implementation_block,
+                )
+                substituted = self._substitute_values(new_op, value_map)
+                result.append(substituted)
 
             else:
                 # Regular operation - apply value substitutions
@@ -354,6 +380,45 @@ class InlinePass(Pass[Block, Block]):
 
         return inlined
 
+    def _inline_nested_block(
+        self,
+        block: Block | None,
+        visiting_blocks: set[int],
+    ) -> Block | None:
+        """Inline calls stored inside an operation-owned nested block.
+
+        Args:
+            block (Block | None): Nested block to inline. ``None`` is
+                returned unchanged.
+            visiting_blocks (set[int]): Blocks currently being expanded by
+                the enclosing inline traversal.
+
+        Returns:
+            Block | None: Nested block with its internal calls inlined as far
+                as the current recursion context allows.
+        """
+        if block is None:
+            return None
+
+        value_map: dict[str, Value] = {}
+        serialized_ops = self._serialize_operations(
+            block.operations,
+            value_map,
+            visiting_blocks | {id(block)},
+        )
+        output_values = [value_map.get(v.uuid, v) for v in block.output_values]
+        out_kind = (
+            BlockKind.HIERARCHICAL
+            if _has_any_call_block(serialized_ops)
+            else BlockKind.AFFINE
+        )
+        return dataclasses.replace(
+            block,
+            output_values=output_values,
+            operations=serialized_ops,
+            kind=out_kind,
+        )
+
     def _substitute_values(
         self,
         op: Operation,
@@ -438,11 +503,18 @@ class InlinePass(Pass[Block, Block]):
         if not return_values:
             return_values = [remapper.clone_value(v) for v in impl.output_values]
 
-        # Map block's return values to operation's result values
+        # Map block's return values to operation's result values. This mirrors
+        # _inline_call: a composite implementation usually returns a fresh
+        # value produced inside the inlined body, not the original operation
+        # result placeholder.
+        sub = ValueSubstitutor({k: v for k, v in local_map.items()}, transitive=True)
         for block_return, op_result in zip(return_values, op.results):
             if block_return.uuid in local_map:
                 value_map[op_result.uuid] = local_map[block_return.uuid]
             else:
-                value_map[op_result.uuid] = op_result
+                substituted = sub.substitute_value(block_return)
+                value_map[op_result.uuid] = (
+                    substituted if isinstance(substituted, Value) else op_result
+                )
 
         return inlined

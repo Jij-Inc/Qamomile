@@ -25,6 +25,39 @@ if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 
 
+def _ensure_composite_gate_type(
+    op: Any,
+    expected: CompositeGateType,
+    helper_name: str,
+) -> None:
+    """Validate that a specialized composite helper received its gate type.
+
+    Args:
+        op (Any): Operation-like object passed to the specialized helper.
+        expected (CompositeGateType): Gate type that the helper knows how to
+            process.
+        helper_name (str): Name of the helper reporting the validation error.
+
+    Raises:
+        EmitError: If ``op`` is not the expected composite gate type.
+    """
+    if not isinstance(op, CompositeGateOperation):
+        raise EmitError(
+            f"{helper_name} only supports {expected.name} composite gates, "
+            f"got {type(op).__name__}.",
+            operation=type(op).__name__,
+        )
+
+    if op.gate_type == expected:
+        return
+
+    raise EmitError(
+        f"{helper_name} only supports {expected.name} composite gates, "
+        f"got {op.gate_type.name}.",
+        operation=f"CompositeGateOperation[{op.gate_type.name}]",
+    )
+
+
 def emit_composite_gate(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -112,7 +145,20 @@ def emit_qft_with_strategy(
 
     If a strategy is specified and 'approximate', uses truncated rotations.
     Otherwise falls back to standard QFT.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose emitter
+            should receive decomposed QFT gates.
+        circuit (Any): Backend circuit being emitted.
+        op (CompositeGateOperation): Composite operation expected to be a QFT.
+        qubit_indices (list[int]): Physical qubit indices for the QFT target
+            register.
+
+    Raises:
+        EmitError: If ``op`` is not a QFT composite operation.
     """
+    _ensure_composite_gate_type(op, CompositeGateType.QFT, "emit_qft_with_strategy")
+
     strategy_name = op.strategy_name
 
     # Check if using approximate strategy
@@ -139,7 +185,21 @@ def emit_iqft_with_strategy(
 
     If a strategy is specified and 'approximate', uses truncated rotations.
     Otherwise falls back to standard IQFT.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose emitter
+            should receive decomposed IQFT gates.
+        circuit (Any): Backend circuit being emitted.
+        op (CompositeGateOperation): Composite operation expected to be an
+            IQFT.
+        qubit_indices (list[int]): Physical qubit indices for the IQFT target
+            register.
+
+    Raises:
+        EmitError: If ``op`` is not an IQFT composite operation.
     """
+    _ensure_composite_gate_type(op, CompositeGateType.IQFT, "emit_iqft_with_strategy")
+
     strategy_name = op.strategy_name
 
     if strategy_name and "approximate" in strategy_name:
@@ -301,7 +361,23 @@ def emit_qpe_manual(
     qubit_indices: list[int],
     bindings: dict[str, Any],
 ) -> None:
-    """Emit QPE using manual decomposition."""
+    """Emit QPE using manual decomposition.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose emitter
+            should receive decomposed QPE gates.
+        circuit (Any): Backend circuit being emitted.
+        op (CompositeGateOperation): Composite operation expected to be a QPE.
+        qubit_indices (list[int]): Physical qubit indices for counting and
+            target registers, in operation operand order.
+        bindings (dict[str, Any]): Emit-time concrete bindings used to resolve
+            QPE block parameters or phase operands.
+
+    Raises:
+        EmitError: If ``op`` is not a QPE composite operation.
+    """
+    _ensure_composite_gate_type(op, CompositeGateType.QPE, "emit_qpe_manual")
+
     num_counting = op.num_control_qubits
     num_targets = op.num_target_qubits
 
@@ -357,29 +433,81 @@ def extract_phase_from_params(
     op: CompositeGateOperation,
     bindings: dict[str, Any],
 ) -> float | None:
-    """Extract phase parameter from QPE operation."""
-    for i, operand in enumerate(op.operands):
-        if i < 1:
-            continue
+    """Extract a concrete phase parameter from a QPE operation.
+
+    Scans the operation's parameter operands. The block-free QPE fallback
+    models a single phase parameter, so more than one concrete numeric
+    parameter is ambiguous and rejected instead of guessed.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose resolver
+            should resolve bound scalar and array-element operands.
+        op (CompositeGateOperation): The QPE composite operation.
+        bindings (dict[str, Any]): Emit-time concrete bindings keyed by
+            parameter name, value UUID, or loop-local variable name.
+
+    Returns:
+        float | None: The resolved phase angle, or ``None`` when the phase
+            operand remains symbolic.
+
+    Raises:
+        EmitError: If ``op`` is not a QPE composite operation, or if multiple
+            concrete numeric phase parameters are present.
+    """
+    _ensure_composite_gate_type(op, CompositeGateType.QPE, "extract_phase_from_params")
+
+    phase: float | None = None
+    for operand in op.parameters:
         if hasattr(operand, "type") and hasattr(operand.type, "is_classical"):
             if operand.type.is_classical():
-                if operand.is_constant():
-                    const_val = operand.get_const()
-                    if const_val is not None:
-                        return float(const_val)
-                if operand.is_parameter():
-                    param_name = operand.parameter_name()
-                    if param_name and param_name in bindings:
-                        return float(bindings[param_name])
-                if (
-                    hasattr(operand, "name")
-                    and operand.name
-                    and operand.name in bindings
-                ):
-                    return float(bindings[operand.name])
+                resolved = _resolve_phase_operand(emit_pass, operand, bindings)
+                if resolved is None:
+                    continue
+                if phase is not None:
+                    raise EmitError(
+                        "QPE manual fallback requires exactly one concrete "
+                        "phase parameter, but multiple numeric parameters "
+                        "were resolved.",
+                        operation="CompositeGateOperation[QPE]",
+                    )
+                phase = resolved
         elif operand.is_constant():
             const_val = operand.get_const()
             if const_val is not None:
-                return float(const_val)
+                if phase is not None:
+                    raise EmitError(
+                        "QPE manual fallback requires exactly one concrete "
+                        "phase parameter, but multiple numeric parameters "
+                        "were resolved.",
+                        operation="CompositeGateOperation[QPE]",
+                    )
+                phase = float(const_val)
 
+    return phase
+
+
+def _resolve_phase_operand(
+    emit_pass: "StandardEmitPass",
+    operand: Any,
+    bindings: dict[str, Any],
+) -> float | None:
+    """Resolve a QPE phase operand to a concrete float.
+
+    Symbolic array indices or slice bounds return ``None`` and preserve the
+    existing manual-QPE fallback behavior, where no phase kickback gates are
+    emitted when no concrete phase can be extracted.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass whose resolver
+            should perform ordinary scalar and bound-array lookup.
+        operand (Any): Candidate classical phase operand.
+        bindings (dict[str, Any]): Emit-time concrete bindings.
+
+    Returns:
+        float | None: The resolved phase angle, or ``None`` when the operand
+            is symbolic or its array index cannot be resolved.
+    """
+    resolved = emit_pass._resolver.resolve_classical_value(operand, bindings)
+    if resolved is not None:
+        return float(resolved)
     return None

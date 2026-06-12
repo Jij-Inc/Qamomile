@@ -162,12 +162,13 @@ class TestCombineSymbolicNonLinear:
 class TestSymbolicEndToEnd:
     """End-to-end transpile + bind + sample/estimate with symbolic angles.
 
-    Note: top-level ``rx(q, theta * 2.0)`` patterns (BinOp directly between
-    quantum gates without an enclosing for-items loop) are rejected by the
-    segmentation pass with ``MultipleQuantumSegmentsError`` on every backend
-    — this is a separate, pre-existing constraint of the NISQ segmentation
-    strategy, not a QURI-Parts-specific issue. The realistic and supported
-    pattern is BinOp-inside-loop, which the QAOA tests below exercise.
+    Note: a top-level ``rx(q, theta * 2.0)`` pattern (a BinOp gate angle
+    between quantum gates, without an enclosing for-items loop) is now
+    supported on every backend — the segmentation pass absorbs such a
+    non-measurement parameter-expression op into the surrounding quantum
+    segment instead of splitting on it (see the cross-backend
+    ``test_interleaved_param_expr_angle_sample_and_run``). The
+    BinOp-inside-loop pattern the QAOA tests below exercise is supported too.
     """
 
     def test_controlled_gate_before_runtime_param_sample_and_expval(self):

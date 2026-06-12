@@ -122,6 +122,15 @@ def find_measurement_derived_values(
         set[str]: The set of all UUIDs transitively derived from a
             measurement, including the seeds themselves.
     """
+    # Build a reverse adjacency map once (dependency -> dependents) so taint
+    # propagation is a linear worklist traversal instead of rescanning the
+    # whole graph for every popped node (which is O(N^2) and shows up as a
+    # compile-time cost on large kernels, since this runs on every transpile).
+    dependents: dict[str, list[str]] = {}
+    for uuid, deps in dependency_graph.items():
+        for dep in deps:
+            dependents.setdefault(dep, []).append(uuid)
+
     derived: set[str] = set()
     worklist = list(measurement_uuids)
     while worklist:
@@ -129,9 +138,9 @@ def find_measurement_derived_values(
         if current in derived:
             continue
         derived.add(current)
-        for uuid, deps in dependency_graph.items():
-            if current in deps and uuid not in derived:
-                worklist.append(uuid)
+        for dependent in dependents.get(current, ()):
+            if dependent not in derived:
+                worklist.append(dependent)
     return derived
 
 

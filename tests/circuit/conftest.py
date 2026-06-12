@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -14,6 +15,14 @@ if TYPE_CHECKING:
 _SIMULATOR_SEED = 901
 
 
+@dataclass(frozen=True)
+class SdkTranspilerCase:
+    """Bundle a backend label with its transpiler instance."""
+
+    backend_name: str
+    transpiler: Any
+
+
 @pytest.fixture
 def qiskit_transpiler():
     """Get Qiskit transpiler."""
@@ -21,6 +30,34 @@ def qiskit_transpiler():
     from qamomile.qiskit import QiskitTranspiler
 
     return QiskitTranspiler()
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("qiskit", id="qiskit"),
+        pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
+        pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
+    ]
+)
+def sdk_transpiler(request):
+    """Return a supported SDK transpiler or skip when unavailable."""
+    backend = request.param
+    if backend == "qiskit":
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return SdkTranspilerCase(backend, QiskitTranspiler())
+    if backend == "quri_parts":
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        return SdkTranspilerCase(backend, QuriPartsTranspiler())
+    if backend == "cudaq":
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        return SdkTranspilerCase(backend, CudaqTranspiler())
+    raise AssertionError(f"Unsupported SDK backend fixture value: {backend}")
 
 
 @pytest.fixture
