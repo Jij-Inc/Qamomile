@@ -12,6 +12,7 @@ overrides (e.g. backend emit passes) are respected, mirroring
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
@@ -22,6 +23,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _emitter_supports_reusable_gates,
     _expand_quantum_operands_to_phys,
     _gate_matches_qubit_count,
+    _prepare_nested_block_for_emit,
 )
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
@@ -31,6 +33,58 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
 
 if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+
+def _normalize_inverse_block_op(
+    op: InverseBlockOperation,
+    bindings: dict[str, Any],
+) -> InverseBlockOperation:
+    """Normalize an inverse operation's nested blocks for emission.
+
+    ``InverseBlockOperation`` carries ``source_block`` and
+    ``implementation_block`` as operation fields, so the main pipeline's
+    ``SliceBorrowCheckPass`` / ``StripSliceArrayOpsPass`` never descend
+    into them (mirroring how ``ControlledUOperation.block`` is treated).
+    Emission paths that walk those blocks' operations directly — the
+    shared inline fallback, QURI Parts' native circuit inverse, and
+    CUDA-Q's adjoint helper — therefore need the same emit-time
+    preparation that ``blockvalue_to_gate`` applies internally:
+    constant-fold the nested block, run the slice borrow check, and
+    strip the slice marker ops.
+
+    Args:
+        op (InverseBlockOperation): Inverse operation about to be
+            emitted.
+        bindings (dict[str, Any]): Active emit bindings used to fold
+            slice bounds inside the nested blocks.
+
+    Returns:
+        InverseBlockOperation: ``op`` unchanged when neither nested
+        block needed preparation, otherwise a copy whose
+        ``source_block`` and ``implementation_block`` are normalized
+        for emission.
+
+    Raises:
+        EmitError: If a marker-bearing nested block is already past the
+            stages that can be safely checked.
+        SliceBorrowViolationError: If a nested block's slice usage
+            violates the same linearity rules enforced for top-level
+            blocks.
+    """
+    source_block = _prepare_nested_block_for_emit(op.source_block, bindings)
+    implementation_block = _prepare_nested_block_for_emit(
+        op.implementation_block, bindings
+    )
+    if (
+        source_block is op.source_block
+        and implementation_block is op.implementation_block
+    ):
+        return op
+    return dataclasses.replace(
+        op,
+        source_block=source_block,
+        implementation_block=implementation_block,
+    )
 
 
 def emit_inverse_block(
@@ -113,12 +167,15 @@ def emit_inverse_block_at_indices(
     Raises:
         EmitError: If required source/fallback blocks are missing or no
             emission path can represent the operation.
+        SliceBorrowViolationError: If a nested block's slice usage fails
+            the borrow check run by ``_normalize_inverse_block_op``.
     """
     if op.source_block is None or op.implementation_block is None:
         raise EmitError(
             "Cannot emit inverse block without both source and implementation blocks.",
             operation="InverseBlockOperation",
         )
+    op = _normalize_inverse_block_op(op, bindings)
     if len(target_indices) != op.num_target_qubits:
         raise EmitError(
             "Inverse block target count does not match resolved qubits: "

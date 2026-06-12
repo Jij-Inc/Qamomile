@@ -73,6 +73,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
+    _normalize_inverse_block_op,
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
@@ -1035,7 +1036,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         Raises:
             EmitError: If neither CUDA-Q adjoint nor the shared fallback can
                 emit the inverse operation.
+            SliceBorrowViolationError: If a nested block's slice usage fails
+                the borrow check run by ``_normalize_inverse_block_op``.
         """
+        # Strip nested slice markers (after the borrow check) before the
+        # adjoint path or the shared fallback walks the blocks' operations
+        # directly; see ``_normalize_inverse_block_op``.
+        op = _normalize_inverse_block_op(op, bindings)
         if op.num_control_qubits == 0 and op.source_block is not None:
             try:
                 target_index_groups = [

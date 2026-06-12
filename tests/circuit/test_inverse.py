@@ -2804,39 +2804,6 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
 ]
 
 
-def _skip_unsupported_stdlib_algo_inverse_case(
-    transpiler_factory: type,
-    kernel_factory: object,
-) -> None:
-    """Skip stdlib/algorithm inverse cases outside a backend's support.
-
-    Args:
-        transpiler_factory (type): Backend transpiler class under test.
-        kernel_factory (object): Case kernel factory from the parametrize
-            table.
-
-    Returns:
-        None.
-    """
-    # `inverse(modular_increment)` executes today only where the backend
-    # inverts the forward block natively (Qiskit's reusable-gate inverse).
-    # QURI Parts and CUDA-Q reach the inverted-IR fallback block, whose
-    # sliced multi-controlled X loop body still arrives at emit as a
-    # SliceArrayOperation and is rejected. LIMITATIONS.md ("QURI Parts
-    # modular arithmetic support is partial") documents the related
-    # modular emission gaps; the forward op itself passes on both backends
-    # at this register width.
-    if kernel_factory is _modular_increment_roundtrip_kernels and (
-        transpiler_factory is QuriPartsTranspiler
-        or transpiler_factory is CudaqTranspiler
-    ):
-        pytest.skip(
-            "inverse(modular_increment) fallback emission retains a "
-            "SliceArrayOperation on this backend; only Qiskit's native "
-            "reusable-gate inverse executes this shape today."
-        )
-
-
 @pytest.mark.parametrize("transpiler_factory", BACKENDS)
 @pytest.mark.parametrize(
     "kernel_factory, width, case_bindings",
@@ -2856,7 +2823,6 @@ def test_inverse_stdlib_algorithm_roundtrip_cross_backend(
     primitives run per case: samples must be all-zero and the sum-Z
     expectation must equal the register width.
     """
-    _skip_unsupported_stdlib_algo_inverse_case(transpiler_factory, kernel_factory)
     sample_kernel, expval_kernel = kernel_factory()
     transpiler = transpiler_factory()
 

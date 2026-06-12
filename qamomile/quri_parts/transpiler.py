@@ -48,6 +48,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
+    _normalize_inverse_block_op,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
@@ -404,7 +405,13 @@ def _emit_quri_inverse_operation(
     Raises:
         EmitError: If the inverse operation has no source/fallback block or
             cannot be emitted by native inverse or recursive fallback.
+        SliceBorrowViolationError: If a nested block's slice usage fails
+            the borrow check run by ``_normalize_inverse_block_op``.
     """
+    # Strip nested slice markers (after the borrow check) before any path
+    # below walks the blocks' operations directly; see
+    # ``_normalize_inverse_block_op``.
+    op = _normalize_inverse_block_op(op, bindings)
     if op.source_block is None or op.implementation_block is None:
         raise EmitError(
             "QURI Parts cannot emit an inverse block without both source and "
