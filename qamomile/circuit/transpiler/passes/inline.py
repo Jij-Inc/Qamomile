@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
 )
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
@@ -44,6 +45,9 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
             for block in (op.source_block, op.implementation_block):
                 if block is not None and _has_any_call_block(block.operations):
                     return True
+        if isinstance(op, ControlledUOperation):
+            if op.block is not None and _has_any_call_block(op.block.operations):
+                return True
         if isinstance(op, IfOperation):
             if _has_any_call_block(op.true_operations) or _has_any_call_block(
                 op.false_operations
@@ -68,6 +72,8 @@ def count_call_blocks(operations: list[Operation]) -> int:
             for block in (op.source_block, op.implementation_block):
                 if block is not None:
                     count += count_call_blocks(block.operations)
+        if isinstance(op, ControlledUOperation) and op.block is not None:
+            count += count_call_blocks(op.block.operations)
         if isinstance(op, IfOperation):
             count += count_call_blocks(op.true_operations)
             count += count_call_blocks(op.false_operations)
@@ -219,6 +225,20 @@ class InlinePass(Pass[Block, Block]):
                     op,
                     source_block=source_block,
                     implementation_block=implementation_block,
+                )
+                substituted = self._substitute_values(new_op, value_map)
+                result.append(substituted)
+
+            elif isinstance(op, ControlledUOperation):
+                # The nested unitary block of qmc.control(<kernel>) is the
+                # kernel's cached hierarchical block. A non-leaf kernel
+                # (one that calls other kernels) leaves CallBlockOperations
+                # inside it; inline them so AFFINE keeps meaning "no
+                # residual calls anywhere reachable" — segmentation,
+                # serialization, and emit all rely on that invariant.
+                new_op = dataclasses.replace(
+                    op,
+                    block=self._inline_nested_block(op.block, visiting_blocks),
                 )
                 substituted = self._substitute_values(new_op, value_map)
                 result.append(substituted)

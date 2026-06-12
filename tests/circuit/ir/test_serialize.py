@@ -24,10 +24,10 @@ from qamomile.circuit.algorithm.basic import (  # noqa: E402
     rx_layer,
     superposition_vector,
 )
-from qamomile.circuit.frontend.func_to_block import func_to_block
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.canonical import content_hash
 from qamomile.circuit.ir.operation import (
+    ForItemsOperation,
     GateOperation,
     GateOperationType,
     InverseBlockOperation,
@@ -50,12 +50,18 @@ from qamomile.circuit.ir.types.primitives import (
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
+    DictValue,
     ScalarMetadata,
     Value,
     ValueMetadata,
 )
 from qamomile.circuit.stdlib.qft import iqft, qft  # noqa: E402
+from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
+from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
+from qamomile.circuit.transpiler.passes.slice_borrow_check import SliceBorrowCheckPass
+from qamomile.circuit.transpiler.passes.strip_slice_ops import StripSliceArrayOpsPass
 
 # ---------------------------------------------------------------------------
 # Fixture kernels (representative IR shapes)
@@ -72,6 +78,27 @@ def _to_affine(kernel: qmc.QKernel) -> Block:
         Block: The kernel's traced block after running ``InlinePass``.
     """
     return InlinePass().run(kernel.block)
+
+
+def _to_analyzed(block: Block) -> Block:
+    """Advance an AFFINE block to ANALYZED without a backend transpiler.
+
+    Mirrors the canonical pipeline order (affine_validate →
+    partial_eval → slice_borrow_check → strip_slice_ops → analyze) so
+    the resulting block matches what ``Transpiler.transpile`` hands to
+    serialization-stage consumers.
+
+    Args:
+        block (Block): An AFFINE block (e.g. from :func:`_to_affine`).
+
+    Returns:
+        Block: The block with ``BlockKind.ANALYZED``.
+    """
+    block = AffineValidationPass().run(block)
+    block = PartialEvaluationPass().run(block)
+    block = SliceBorrowCheckPass().run(block)
+    block = StripSliceArrayOpsPass().run(block)
+    return AnalyzePass().run(block)
 
 
 @qmc.qkernel
@@ -248,6 +275,85 @@ def _nested_slice_assignment_kernel() -> qmc.Vector[qmc.Bit]:
     evens[0:2] = qmc.x(evens[0:2])
     q[0::2] = evens
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _for_items_vector_key_kernel(
+    n_qubits: qmc.UInt,
+    interactions: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Kernel that exercises ``key_is_vector=True`` ForItemsOperation."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for key, coeff in qmc.items(interactions):
+        for step in qmc.range(key.shape[0] - 1):
+            q[key[step]], q[key[step + 1]] = qmc.rzz(
+                q[key[step]], q[key[step + 1]], gamma * coeff
+            )
+    return q
+
+
+@qmc.qkernel
+def _for_items_classical_kernel(
+    n_qubits: qmc.UInt,
+    ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Measure-terminated for-items kernel (classical I/O for analyze)."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for (i, j), jij in qmc.items(ising):
+        q[i], q[j] = qmc.rzz(q[i], q[j], gamma * jij)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _inverse_dict_param_layer(
+    q: qmc.Qubit,
+    angles: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Qubit:
+    """Layer whose unused dict parameter rides along as a DictValue operand."""
+    q = qmc.h(q)
+    return q
+
+
+@qmc.qkernel
+def _inverse_dict_param_kernel(
+    angles: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Qubit:
+    """Kernel whose InverseBlockOperation carries a DictValue operand."""
+    q = qmc.qubit("q")
+    q = qmc.inverse(_inverse_dict_param_layer)(q, angles)
+    return q
+
+
+@qmc.qkernel
+def _controlled_nonleaf_inner(q: qmc.Qubit) -> qmc.Qubit:
+    """Leaf helper called by the non-leaf controlled unitary."""
+    q = qmc.h(q)
+    return q
+
+
+@qmc.qkernel
+def _controlled_nonleaf_unitary(q: qmc.Qubit) -> qmc.Qubit:
+    """Non-leaf unitary: its cached block contains a CallBlockOperation."""
+    q = _controlled_nonleaf_inner(q)
+    q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def _controlled_nonleaf_kernel(
+    ctrl: qmc.Qubit, target: qmc.Qubit
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Kernel controlling a non-leaf sub-kernel.
+
+    Before InlinePass descended into ``ControlledUOperation.block``,
+    the nested call survived inlining, the block was still reported as
+    AFFINE, and serialization died on the residual CallBlockOperation.
+    """
+    op = qmc.control(_controlled_nonleaf_unitary)
+    ctrl, target = op(ctrl, target)
+    return ctrl, target
 
 
 # ---------------------------------------------------------------------------
@@ -494,13 +600,109 @@ class TestRoundTripIRFeatures:
         original = to_dict(block)
         assert to_dict(load_json(dump_json(block))) == original
         assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
 
     def test_for_items_operation_round_trip(self):
         """Dict-backed ForItemsOperation survives both wire formats."""
-        block = InlinePass().run(func_to_block(_for_items_ising_kernel.func))
+        block = _to_affine(_for_items_ising_kernel)
         original = to_dict(block)
         assert to_dict(load_json(dump_json(block))) == original
         assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    def test_for_items_vector_key_round_trip(self):
+        """``key_is_vector=True`` ForItemsOperation survives both formats."""
+        block = _to_affine(_for_items_vector_key_kernel)
+        for_items_ops = [
+            op for op in block.operations if isinstance(op, ForItemsOperation)
+        ]
+        assert for_items_ops and for_items_ops[0].key_is_vector
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_ops = [
+                op for op in restored.operations if isinstance(op, ForItemsOperation)
+            ]
+            assert restored_ops and restored_ops[0].key_is_vector
+
+    def test_bound_dict_metadata_round_trip(self):
+        """Bound-dict tuple keys survive decode as real tuples.
+
+        The wire formats flatten tuples to lists; the decoder must
+        re-freeze ``dict_runtime.bound_data`` so a deserialized block
+        still supports ``DictValue.get_bound_data()`` (dict keys must
+        be hashable) and ``content_hash``.
+        """
+        bound = {(0, 1): 0.5, (1, 2): -0.3}
+        block = InlinePass().run(
+            _for_items_classical_kernel.build(n_qubits=3, ising=bound, gamma=0.7)
+        )
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == to_dict(block)
+            dict_values = [v for v in restored.input_values if isinstance(v, DictValue)]
+            assert dict_values
+            assert dict_values[0].get_bound_data() == bound
+            assert content_hash(restored) == content_hash(block)
+
+    def test_inverse_block_dict_parameter_round_trip(self):
+        """InverseBlockOperation with a DictValue operand survives decode."""
+        block = _to_affine(_inverse_dict_param_kernel)
+        inverse_ops = [
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        ]
+        assert inverse_ops
+        assert any(
+            isinstance(operand, DictValue) for operand in inverse_ops[0].operands
+        )
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_inverse = [
+                op
+                for op in restored.operations
+                if isinstance(op, InverseBlockOperation)
+            ]
+            assert restored_inverse
+            assert any(
+                isinstance(operand, DictValue)
+                for operand in restored_inverse[0].operands
+            )
+
+    def test_controlled_u_nonleaf_kernel_round_trip(self):
+        """A controlled non-leaf kernel inlines fully and round-trips.
+
+        InlinePass must descend into ``ControlledUOperation.block`` so
+        AFFINE keeps meaning "no residual CallBlockOperation anywhere
+        reachable"; the serializer rejects residual calls.
+        """
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+
+        block = _to_affine(_controlled_nonleaf_kernel)
+        assert block.kind is BlockKind.AFFINE
+        controlled_ops = [
+            op for op in block.operations if isinstance(op, ControlledUOperation)
+        ]
+        assert controlled_ops
+        nested = controlled_ops[0].block
+        assert nested is not None
+        assert not any(isinstance(op, CallBlockOperation) for op in nested.operations)
+
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
 
     @pytest.mark.parametrize(
         "kernel",
@@ -519,6 +721,28 @@ class TestRoundTripIRFeatures:
         original = to_dict(block)
         assert to_dict(load_json(dump_json(block))) == original
         assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            _while_measure_kernel,
+            _for_items_classical_kernel,
+        ],
+    )
+    def test_round_trip_at_analyzed_stage(self, kernel: qmc.QKernel):
+        """The ANALYZED half of the serialization contract also round-trips.
+
+        ``from_dict`` accepts AFFINE and ANALYZED; the while / for-items
+        fixtures must survive both formats after the analyze pass, not
+        just right after inline.
+        """
+        block = _to_analyzed(_to_affine(kernel))
+        assert block.kind is BlockKind.ANALYZED
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
 
 
 # ---------------------------------------------------------------------------
