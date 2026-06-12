@@ -585,3 +585,87 @@ class TestParametersOrdering:
             output_values=[alpha, beta],
         )
         assert to_canonical_bytes(block_in_order) == to_canonical_bytes(block_reversed)
+
+
+@qmc.qkernel
+def _slice_view_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Vector layer inverted on a slice view by the twin kernels below."""
+    qs = qmc.h(qs)
+    qs = qmc.s(qs)
+    return qs
+
+
+@qmc.qkernel
+def _slice_view_inverse_a() -> qmc.Vector[qmc.Bit]:
+    """Kernel whose inverse block operand is a strided slice view."""
+    qs = qmc.qubit_array(4, "qs")
+    view = qs[1:4]
+    view = qmc.inverse(_slice_view_layer)(view)
+    qs[1:4] = view
+    return qmc.measure(qs)
+
+
+@qmc.qkernel
+def _slice_view_inverse_b() -> qmc.Vector[qmc.Bit]:
+    """Structural twin of ``_slice_view_inverse_a``."""
+    qs = qmc.qubit_array(4, "qs")
+    view = qs[1:4]
+    view = qmc.inverse(_slice_view_layer)(view)
+    qs[1:4] = view
+    return qmc.measure(qs)
+
+
+class TestCanonicalizeSliceViews:
+    """Slice-view refs are remapped into the canonical UUID space."""
+
+    def test_slice_refs_remapped_to_canonical_values(self):
+        """``slice_of`` / ``slice_start`` / ``slice_step`` are canonicalized.
+
+        The view operand of an inverse block references its root array
+        and slice bounds by Value identity; canonicalize must rewrite
+        those references with the same mapping as every other use of
+        the root array, otherwise the canonical block leaks build-time
+        UUIDs and content hashes diverge between identical builds.
+        """
+        from qamomile.circuit.ir.operation.inverse_block import (
+            InverseBlockOperation,
+        )
+        from qamomile.circuit.ir.operation.operation import QInitOperation
+
+        block = _to_affine(_slice_view_inverse_a)
+        original_operand = cast(
+            ArrayValue,
+            next(
+                op for op in block.operations if isinstance(op, InverseBlockOperation)
+            ).target_qubits[0],
+        )
+        assert original_operand.slice_of is not None
+
+        canonical = canonicalize(block)
+        operand = cast(
+            ArrayValue,
+            next(
+                op
+                for op in canonical.operations
+                if isinstance(op, InverseBlockOperation)
+            ).target_qubits[0],
+        )
+        root = next(
+            op.results[0]
+            for op in canonical.operations
+            if isinstance(op, QInitOperation)
+        )
+
+        assert operand.slice_of is not None
+        assert operand.slice_of.uuid != original_operand.slice_of.uuid
+        assert operand.slice_of.uuid == root.uuid
+        assert operand.slice_start is not None
+        assert operand.slice_start.get_const() == 1
+        assert operand.slice_step is not None
+        assert operand.slice_step.get_const() == 1
+
+    def test_slice_view_twins_same_hash(self):
+        """Two identical builds with slice-view operands hash equally."""
+        hash_a = content_hash(_to_affine(_slice_view_inverse_a))
+        hash_b = content_hash(_to_affine(_slice_view_inverse_b))
+        assert hash_a == hash_b

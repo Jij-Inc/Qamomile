@@ -25,7 +25,12 @@ from qamomile.circuit.algorithm.basic import (  # noqa: E402
     superposition_vector,
 )
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import GateOperation, GateOperationType
+from qamomile.circuit.ir.canonical import content_hash
+from qamomile.circuit.ir.operation import (
+    GateOperation,
+    GateOperationType,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
@@ -81,6 +86,53 @@ def _measure_kernel(q: qmc.Qubit) -> qmc.Bit:
     """Kernel that exercises a measurement-derived classical bit."""
     q = qmc.h(q)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Kernel that emits a first-class inverse block operation."""
+    q = qmc.inverse(_scalar_gate)(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_inner(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Single nested helper for inverse source-block serialization."""
+    q = qmc.rx(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_outer(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Outer helper that leaves a CallBlockOperation before inline."""
+    q = qmc.h(q)
+    q = _nested_inverse_inner(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Kernel whose inverse source block contains a nested call."""
+    q = qmc.inverse(_nested_inverse_outer)(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _view_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Vector layer applied to a slice view by ``_view_inverse_kernel``."""
+    qs = qmc.h(qs)
+    qs = qmc.s(qs)
+    return qs
+
+
+@qmc.qkernel
+def _view_inverse_kernel() -> qmc.Vector[qmc.Bit]:
+    """Kernel whose inverse block operand is a strided slice view."""
+    qs = qmc.qubit_array(4, "qs")
+    view = qs[1:4]
+    view = qmc.inverse(_view_layer)(view)
+    qs[1:4] = view
+    return qmc.measure(qs)
 
 
 @qmc.qkernel
@@ -172,6 +224,77 @@ class TestRoundTripStructure:
             assert original.kind == restored_slot.kind
             assert original.ndim == restored_slot.ndim
             assert isinstance(restored_slot.type, type(original.type))
+
+    def test_inverse_block_round_trip_preserves_source_and_fallback(self):
+        """InverseBlockOperation persists its source and fallback blocks."""
+        block = _to_affine(_inverse_kernel)
+        restored = load_json(dump_json(block))
+        inverse_ops = [
+            op for op in restored.operations if isinstance(op, InverseBlockOperation)
+        ]
+
+        assert len(inverse_ops) == 1
+        assert inverse_ops[0].source_block is not None
+        assert inverse_ops[0].source_block.name == "_scalar_gate"
+        assert inverse_ops[0].implementation_block is not None
+        assert inverse_ops[0].implementation_block.name.endswith("_inverse")
+
+    def test_inverse_block_nested_blocks_are_inlined(self):
+        """Nested inverse source and fallback blocks can serialize and hash."""
+        block = _to_affine(_nested_inverse_kernel)
+        inverse_op = next(
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        )
+
+        assert inverse_op.source_block is not None
+        assert inverse_op.implementation_block is not None
+        assert inverse_op.source_block.kind is BlockKind.AFFINE
+        assert inverse_op.implementation_block.kind is BlockKind.AFFINE
+        assert not any(
+            isinstance(op, CallBlockOperation)
+            for op in inverse_op.source_block.operations
+        )
+        assert not any(
+            isinstance(op, CallBlockOperation)
+            for op in inverse_op.implementation_block.operations
+        )
+
+        restored = load_json(dump_json(block))
+        assert load_msgpack(dump_msgpack(block)).kind == block.kind
+        assert content_hash(restored) == content_hash(block)
+
+    def test_inverse_block_view_operand_round_trips_slice_fields(self):
+        """A sliced view operand keeps its slice refs across the round-trip.
+
+        ``ArrayValue.slice_of`` / ``slice_start`` / ``slice_step`` carry
+        the affine map that resolves view elements to root-array qubits
+        at emit time; dropping them on the wire would make the restored
+        inverse block unresolvable.
+        """
+        block = _to_affine(_view_inverse_kernel)
+        original = next(
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        )
+        original_operand = cast(ArrayValue, original.target_qubits[0])
+        assert original_operand.slice_of is not None
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            inverse_op = next(
+                op
+                for op in restored.operations
+                if isinstance(op, InverseBlockOperation)
+            )
+            operand = cast(ArrayValue, inverse_op.target_qubits[0])
+            assert operand.slice_of is not None
+            assert operand.slice_of.uuid == original_operand.slice_of.uuid
+            assert operand.slice_start is not None
+            assert operand.slice_start.get_const() == 1
+            assert operand.slice_step is not None
+            assert operand.slice_step.get_const() == 1
+            assert content_hash(restored) == content_hash(block)
 
     def test_input_value_types_preserved(self):
         """Input Value types match across the round-trip."""

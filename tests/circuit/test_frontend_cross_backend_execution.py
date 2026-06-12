@@ -1079,7 +1079,6 @@ FRONTEND_EXECUTION_CASES = [
         run_bindings={
             "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3) + qm_o.Z(4) + qm_o.Z(5)
         },
-        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-power",
@@ -1120,7 +1119,6 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)},
         expected_expval=0.0,
         run_bindings={"obs": qm_o.Z(1) + qm_o.Z(2)},
-        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="controlled-custom-composite",
