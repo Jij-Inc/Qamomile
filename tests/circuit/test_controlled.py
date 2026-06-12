@@ -3854,6 +3854,9 @@ class TestControlledVectorSubArgFollowUpOps:
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
             emit_controlled_powers,
         )
+        from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+            ValueResolver,
+        )
 
         @qmc.qkernel
         def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -3873,6 +3876,7 @@ class TestControlledVectorSubArgFollowUpOps:
             """Force controlled-power emission through the fallback path."""
 
             _emitter = FakeEmitter()
+            _resolver = ValueResolver()
 
             def _blockvalue_to_gate(self, block_value, num_qubits, bindings):
                 """Return no gate so the fallback receives ``block_value``."""

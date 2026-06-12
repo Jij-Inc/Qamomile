@@ -456,6 +456,48 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bindings,
         )
 
+    def _emit_irreducible_multi_controlled_gate(
+        self,
+        circuit: T,
+        gate_type: Any,
+        control_indices: list[int],
+        target_idx: int,
+        angle: Any,
+    ) -> None:
+        """Backend hook: emit one irreducible multi-controlled gate.
+
+        The shared controlled fallback reduces multi-qubit gate types
+        structurally and covers up to two controls on X / Z via
+        Toffoli. Single-qubit gates that still carry two or more
+        controls after those reductions land here. Backends that can
+        realize an arbitrary multi-controlled single-qubit gate (e.g.
+        QURI Parts via a dense local unitary) override this method.
+
+        Args:
+            circuit (T): Backend circuit being built.
+            gate_type (Any): ``GateOperationType`` of the single-qubit
+                gate to control.
+            control_indices (list[int]): Physical control qubits.
+            target_idx (int): Physical target qubit.
+            angle (Any): Resolved rotation angle for rotation-like
+                gates, or ``None`` for fixed gates.
+
+        Raises:
+            EmitError: Always, in the base implementation.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        gate_name = getattr(gate_type, "name", str(gate_type))
+        raise EmitError(
+            f"Cannot emit {len(control_indices)}-controlled {gate_name}: "
+            f"the shared fallback reduces to Toffoli for up to two "
+            f"controls only, and backend {type(self).__name__!r} does "
+            f"not override ``_emit_irreducible_multi_controlled_gate``. "
+            f"Run this kernel on a backend with native multi-control "
+            f"support, or add the hook to the backend's emit pass.",
+            operation="ControlledGate",
+        )
+
     def _blockvalue_to_gate(
         self,
         block_value: Any,
