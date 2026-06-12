@@ -1068,7 +1068,12 @@ _BUILTIN_BACKENDS = [
     pytest.param(
         _cudaq_transpiler_factory,
         id="cudaq",
-        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
     ),
 ]
 
@@ -1081,7 +1086,12 @@ _QISKIT_CUDAQ_BACKENDS = [
     pytest.param(
         _cudaq_transpiler_factory,
         id="cudaq",
-        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
     ),
 ]
 
