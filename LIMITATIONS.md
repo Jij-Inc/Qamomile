@@ -84,13 +84,16 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 
 **Future fix**: extend controlled-U composite lowering so it can safely resolve sub-kernel parameterized slice widths from bindings and reflect those resolved widths in the backend target mapping.
 
-## `qmc.inverse` requires compile-time constant loop bounds
+## `qmc.inverse` requires trace-time-resolvable control flow
 
-**When it bites**: `qmc.inverse(layer)(...)` is traced for a `layer` kernel whose quantum body contains `qmc.range(...)` with symbolic bounds. The eager inverse builder must reverse the loop order while constructing the fallback `implementation_block`, so it rejects bounds that cannot be resolved to concrete integers at trace time.
+**When it bites**: `qmc.inverse(layer)(...)` is traced for a `layer` kernel whose quantum body contains control flow the eager inverse builder cannot resolve while constructing the fallback `implementation_block`:
+
+- `qmc.range(...)` bounds that are still symbolic at trace time raise `NotImplementedError`. Because `transpile(bindings=...)` bakes bindings into the trace before the inverse wrapper runs, a loop bound supplied via `bindings` resolves fine — the rejection only fires for bounds kept as runtime parameters (`parameters=[...]`) or for a bindings-free `build()`.
+- `if` / `while` / `for ... in items(...)` are rejected unconditionally — **even when `bindings` would resolve the condition at transpile time**. The fallback block is built eagerly at trace time, before `partial_eval` runs `CompileTimeIfLoweringPass`, so the traced block still contains the `IfOperation` / `WhileOperation` / `ForItemsOperation`. Loop bounds are the one control-flow input the inverter can resolve itself, because the bound constants ride directly on the operand `Value`s; a compile-time `if` would need the inverter to fold the branch on its own.
 
 **Why this trade-off was chosen**: the PR keeps inverse fallback blocks explicit in Qamomile IR so every backend has a correct decomposition when its native inverse path is unavailable. Deferring fallback construction would require a later transpiler pass to build the inverse after parameter shape resolution and to keep serialization/canonicalization compatible with a lazy inverse representation.
 
-**Future fix**: make inverse fallback construction lazy for blocks that need transpile-time shape or loop-bound resolution, or add a dedicated pass that lowers unresolved `InverseBlockOperation` implementations after `resolve_parameter_shapes`.
+**Future fix**: make inverse fallback construction lazy for blocks that need transpile-time shape, loop-bound, or branch resolution, or add a dedicated pass that lowers unresolved `InverseBlockOperation` implementations after `resolve_parameter_shapes` / `partial_eval`. That pass would also let bindings-resolved `if` branches invert by folding the selected branch.
 
 ## QURI Parts modular arithmetic support is partial
 
