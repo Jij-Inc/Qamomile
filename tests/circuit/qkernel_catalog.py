@@ -745,7 +745,7 @@ def _network_decomposition_controlled_z(
         ladder_qubits[0], ladder_qubits[1], ancillas[0]
     )
 
-    qs[0:n] = ladder_qubits
+    qs[0 : n - 1] = ladder_qubits
     qs[n - 1] = target_qubit
     return qs
 
