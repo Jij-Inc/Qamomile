@@ -627,7 +627,7 @@ class TestCanonicalizeSliceViews:
         the root array, otherwise the canonical block leaks build-time
         UUIDs and content hashes diverge between identical builds.
         """
-        from qamomile.circuit.ir.operation.composite_gate import (
+        from qamomile.circuit.ir.operation.inverse_block import (
             InverseBlockOperation,
         )
         from qamomile.circuit.ir.operation.operation import QInitOperation

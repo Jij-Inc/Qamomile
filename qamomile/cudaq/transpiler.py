@@ -26,7 +26,6 @@ from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
-    InverseBlockOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -44,6 +43,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -69,8 +69,10 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _bind_block_inputs,
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
-    _map_inverse_block_results,
     _quantum_input_operands,
+)
+from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
+    _map_inverse_block_results,
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,

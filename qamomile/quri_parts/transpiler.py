@@ -14,7 +14,6 @@ import numpy as np
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
-    InverseBlockOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
@@ -23,6 +22,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
@@ -42,10 +42,12 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
     _map_controlled_u_results,
-    _map_inverse_block_results,
     _populate_input_qubit_map,
     emit_controlled_gate,
     resolve_power,
+)
+from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
+    _map_inverse_block_results,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass

@@ -6,11 +6,14 @@ from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
-    InverseBlockOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.transpiler.passes.emit_support import controlled_emission
+from qamomile.circuit.transpiler.passes.emit_support import (
+    controlled_emission,
+    inverse_emission,
+)
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _gate_matches_qubit_count,
     emit_controlled_operations,
@@ -65,8 +68,11 @@ def test_controlled_dispatch_accepts_inverse_block(monkeypatch) -> None:
         del emit_pass, circuit, op, bindings
         calls.append((control_indices, target_indices))
 
+    # The dispatch site imports lazily from ``inverse_emission`` at call
+    # time, so the patch targets that module rather than
+    # ``controlled_emission``.
     monkeypatch.setattr(
-        controlled_emission,
+        inverse_emission,
         "emit_inverse_block_at_indices",
         fake_emit_inverse,
     )

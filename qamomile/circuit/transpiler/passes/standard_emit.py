@@ -29,7 +29,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
-    InverseBlockOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -45,6 +44,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
@@ -75,9 +75,11 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     blockvalue_to_gate,
     emit_controlled_fallback,
     emit_controlled_u,
-    emit_inverse_block,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
+from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
+    emit_inverse_block,
+)
 from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import (
     emit_measure,
     emit_measure_qfixed,
