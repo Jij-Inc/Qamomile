@@ -439,13 +439,26 @@ class Transpiler(ABC, Generic[T]):
         return ClassicalLoweringPass().run(block)
 
     def validate_symbolic_shapes(self, block: Block) -> Block:
-        """Pass 2.5: Reject unresolved parameter shape dims in loop bounds.
+        """Pass 2.5: Reject unresolvable ``ForOperation`` loop bounds.
 
         Runs after ``analyze`` so dependency info is complete. Raises
         ``QamomileCompileError`` with an actionable message when a
         ``gamma_dim0``-style symbolic Value reaches a ``ForOperation``
         bound without being folded to a constant by
-        ``ParameterShapeResolutionPass``.
+        ``ParameterShapeResolutionPass``, or when a loop bound depends
+        (directly or through classical arithmetic) on a runtime
+        parameter — loop bounds are compile-time structure and must be
+        provided via ``bindings``, not ``parameters``.
+
+        Args:
+            block (Block): The analyzed block to validate.
+
+        Returns:
+            Block: ``block``, unchanged, when validation succeeds.
+
+        Raises:
+            QamomileCompileError: If a loop bound is an unresolved
+                parameter shape dim or depends on a runtime parameter.
         """
         return SymbolicShapeValidationPass().run(block)
 
