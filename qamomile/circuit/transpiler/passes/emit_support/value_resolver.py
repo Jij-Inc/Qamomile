@@ -532,6 +532,27 @@ class ValueResolver:
         guard is defense-in-depth: even if a future caller forgets the
         op-level guard, array indexing for runtime parameters returns
         ``None`` here.
+
+        Args:
+            v (Value): The element Value to resolve. Must carry a
+                ``parent_array``; scalar Values resolve to ``None``.
+            bindings (dict[str, Any]): The active emit-time bindings.
+
+        Returns:
+            Any: The resolved element, or ``None`` when the access is
+                genuinely symbolic at emit time (unresolved indices or
+                slice bounds, a runtime parameter array, or a container
+                that is absent from compile-time data).
+
+        Raises:
+            EmitError: If every index resolved to a concrete int and the
+                root array's container holds compile-time data, but an
+                index is out of range for that data. Falling back to
+                ``None`` here instead used to let loop-unrolled accesses
+                past the bound length (``theta[i]`` with
+                ``i >= len(theta)``) reach symbolic-parameter creation,
+                where every out-of-range iteration silently shared one
+                phantom runtime parameter.
         """
         parent = v.parent_array
         # Only element Values carry a parent array; scalar Values cannot be
@@ -562,9 +583,27 @@ class ValueResolver:
         for i in indices:
             try:
                 container = container[i]
-            except (IndexError, KeyError, TypeError):
-                # Out-of-range or non-indexable containers are unresolved
-                # rather than guessed.
+            except IndexError:
+                # Every guard above already passed: the indices are
+                # concrete ints, the array is not a runtime parameter,
+                # and the container holds known compile-time data. The
+                # access is therefore genuinely out of range, not
+                # symbolic — fail fast instead of falling through to
+                # phantom-parameter creation.
+                length = len(container) if hasattr(container, "__len__") else None
+                length_note = f" of length {length}" if length is not None else ""
+                raise EmitError(
+                    f"Index {i} is out of range for compile-time bound "
+                    f"array '{root_parent.name}'{length_note}. Bind data "
+                    f"covering every index reached at emit time (e.g. "
+                    f"every unrolled loop iteration), or declare "
+                    f"'{root_parent.name}' in `parameters` to keep its "
+                    f"elements symbolic.",
+                    operation="array element resolution",
+                )
+            except (KeyError, TypeError):
+                # Missing keys and non-indexable containers stay
+                # unresolved rather than guessed.
                 return None
         return container
 
