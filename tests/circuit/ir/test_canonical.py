@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 from typing import cast
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -24,6 +25,8 @@ from qamomile.circuit.ir.canonical import (
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
+from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
     QubitType,
@@ -812,3 +815,137 @@ class TestCanonicalizeSliceViews:
         hash_a = content_hash(_to_affine(_slice_view_inverse_a))
         hash_b = content_hash(_to_affine(_slice_view_inverse_b))
         assert hash_a == hash_b
+
+
+# ---------------------------------------------------------------------------
+# param_slots: preservation, serialize round-trip, hash participation
+# ---------------------------------------------------------------------------
+
+
+def _block_with_bound_slot(bound_value: np.ndarray) -> Block:
+    """Build a minimal AFFINE Block whose manifest carries ``bound_value``.
+
+    The Block has no values or operations, so any content-hash
+    difference between two such Blocks is attributable to the
+    ``param_slots`` manifest alone.
+
+    Args:
+        bound_value (np.ndarray): Payload stored on the single
+            ``COMPILE_TIME_BOUND`` slot.
+
+    Returns:
+        Block: An otherwise-empty AFFINE Block with a one-slot
+            ``param_slots`` manifest.
+    """
+    return Block(
+        name="manual",
+        kind=BlockKind.AFFINE,
+        param_slots=(
+            ParamSlot(
+                name="weights",
+                type=FloatType(),
+                kind=ParamKind.COMPILE_TIME_BOUND,
+                ndim=1,
+                bound_value=bound_value,
+            ),
+        ),
+    )
+
+
+class TestParamSlotsPreservation:
+    """``Block.param_slots`` must survive canonicalize and serialization."""
+
+    def test_canonicalize_preserves_param_slots_verbatim(self):
+        """A non-empty manifest is carried over unchanged.
+
+        Regression: the canonical Block used to be rebuilt without
+        ``param_slots``, silently resetting the manifest to ``()``.
+        """
+        block = _to_affine(_h_then_rx)
+        assert block.param_slots, "fixture kernel must produce a non-empty manifest"
+        canon = canonicalize(block)
+        assert canon.param_slots == block.param_slots
+
+    def test_canonicalize_and_remap_preserves_param_slots(self):
+        """The remap-table variant carries the manifest too."""
+        block = _to_affine(_h_then_rx)
+        canon, _, _ = canonicalize_and_remap(block)
+        assert canon.param_slots == block.param_slots
+
+    def test_canonicalize_then_serialize_keeps_manifest(self):
+        """canonicalize → dump_json/load_json keeps every slot field.
+
+        Covers the documented flow "canonicalize first for
+        build-independent identity, then serialize", including a
+        ``COMPILE_TIME_BOUND`` slot with a numpy ``bound_value``.
+        """
+        affine = _to_affine(_h_then_rx)
+        bound = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+        block = dataclasses.replace(
+            affine,
+            param_slots=(
+                *affine.param_slots,
+                ParamSlot(
+                    name="weights",
+                    type=FloatType(),
+                    kind=ParamKind.COMPILE_TIME_BOUND,
+                    ndim=1,
+                    bound_value=bound,
+                ),
+            ),
+        )
+        canon = canonicalize(block)
+        restored = load_json(dump_json(canon))
+        assert len(restored.param_slots) == len(canon.param_slots) == 2
+        for original, restored_slot in zip(canon.param_slots, restored.param_slots):
+            assert restored_slot.name == original.name
+            assert restored_slot.kind == original.kind
+            assert restored_slot.ndim == original.ndim
+            assert isinstance(restored_slot.type, type(original.type))
+            assert restored_slot.default == original.default
+            assert restored_slot.differentiable == original.differentiable
+        restored_bound = restored.param_slots[-1].bound_value
+        assert isinstance(restored_bound, np.ndarray)
+        assert np.array_equal(restored_bound, bound)
+
+
+class TestParamSlotsHashParticipation:
+    """``param_slots`` is functional and participates in ``content_hash``."""
+
+    def test_dropping_manifest_changes_hash(self):
+        """Stripping a non-empty manifest changes the content hash."""
+        block = _to_affine(_h_then_rx)
+        stripped = dataclasses.replace(block, param_slots=())
+        assert content_hash(block) != content_hash(stripped)
+
+    def test_slot_kind_changes_hash(self):
+        """Rebinding a slot from RUNTIME_PARAMETER to COMPILE_TIME_BOUND changes the hash."""
+        block = _to_affine(_h_then_rx)
+        rebound = dataclasses.replace(
+            block,
+            param_slots=tuple(
+                dataclasses.replace(
+                    slot, kind=ParamKind.COMPILE_TIME_BOUND, bound_value=0.5
+                )
+                for slot in block.param_slots
+            ),
+        )
+        assert content_hash(block) != content_hash(rebound)
+
+    def test_equal_numpy_bound_values_hash_equal(self):
+        """Separately constructed arrays with equal content hash identically."""
+        hash_a = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
+        hash_b = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
+        assert hash_a == hash_b
+
+    def test_large_numpy_bound_values_hash_by_content(self):
+        """Arrays indistinguishable under truncated ``repr`` still hash apart."""
+        base = np.zeros(2048)
+        tweaked = base.copy()
+        tweaked[1500] = 1.0
+        # Default printoptions truncate both to the same repr, so
+        # repr-based array hashing would collide on this pair.
+        assert repr(base) == repr(tweaked)
+        assert content_hash(_block_with_bound_slot(base)) != content_hash(
+            _block_with_bound_slot(tweaked)
+        )
