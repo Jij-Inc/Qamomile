@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Any
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -22,6 +24,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
@@ -285,7 +288,7 @@ class ResourceAllocator:
             elif isinstance(op, PauliEvolveOp):
                 self._allocate_pauli_evolve(op, qubit_map)
 
-            elif isinstance(op, CompositeGateOperation):
+            elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
@@ -678,10 +681,10 @@ class ResourceAllocator:
 
     def _allocate_composite(
         self,
-        op: CompositeGateOperation,
+        op: CompositeGateOperation | InverseBlockOperation,
         qubit_map: QubitMap,
     ) -> None:
-        """Allocate resources for a CompositeGateOperation."""
+        """Allocate resources for a composite-like quantum operation."""
         all_qubits = op.control_qubits + op.target_qubits
         self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 

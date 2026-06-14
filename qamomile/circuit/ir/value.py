@@ -153,14 +153,16 @@ def remap_value_metadata_references(
         metadata (ValueMetadata): Metadata bundle whose embedded references
             should be rewritten.
         remap_uuid (typing.Callable[[str], str]): Function that maps scalar
-            UUID references to replacement UUIDs.
+            UUID references (and carrier-key bases) to replacement UUIDs.
         remap_logical_id (typing.Callable[[str], str]): Function that maps
-            scalar logical-id references to replacement logical IDs.
+            scalar logical-id references (and carrier-key bases) to
+            replacement logical IDs.
 
     Returns:
         ValueMetadata: Metadata with every embedded UUID / logical-id reference
             rewritten. Legacy ``"<uuid>_<index>"`` carrier keys keep their
-            index suffix while remapping the base UUID.
+            index suffix while remapping the base UUID. The original bundle is
+            returned unchanged when no reference is rewritten.
     """
     new_cast = metadata.cast
     if new_cast is not None:
@@ -204,6 +206,8 @@ def remap_value_metadata_references(
                 remap_indexed_identifier(logical_id, remap_logical_id)
                 for logical_id in new_array_rt.element_logical_ids
             ),
+            # Empty parent UUID is a sentinel for standalone or unresolved
+            # elements, not a Value UUID, so keep it unchanged.
             element_parent_uuids=tuple(
                 remap_uuid(uuid_ref) if uuid_ref else uuid_ref
                 for uuid_ref in new_array_rt.element_parent_uuids
@@ -211,12 +215,18 @@ def remap_value_metadata_references(
             element_parent_indices=new_array_rt.element_parent_indices,
         )
 
-    return ValueMetadata(
-        scalar=metadata.scalar,
+    if (
+        new_cast == metadata.cast
+        and new_qfixed == metadata.qfixed
+        and new_array_rt == metadata.array_runtime
+    ):
+        return metadata
+
+    return dataclasses.replace(
+        metadata,
         cast=new_cast,
         qfixed=new_qfixed,
         array_runtime=new_array_rt,
-        dict_runtime=metadata.dict_runtime,
     )
 
 

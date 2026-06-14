@@ -39,7 +39,7 @@
 import math
 
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.errors import EmitError, UnreturnedBorrowError
+from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -579,11 +579,14 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 
 # %% [markdown]
 # (cg-6)=
-# ## 6. Patterns that don't work
+# ## 6. Rejected and edge-case patterns
 #
-# This section walks through the rejected call shapes one at a
-# time, asserting the expected exception with a small
-# `expect_error` helper.
+# This section walks through rejected call shapes one at a time,
+# asserting the expected exception with a small `expect_error`
+# helper. It ends with a concrete sliced-QFT case that is supported
+# and worth keeping as a regression example for nested controlled
+# emission on backends that can convert the nested block to a gate
+# (Qiskit in this tutorial).
 #
 # | Case | Mode | Exception |
 # | --- | --- | --- |
@@ -593,7 +596,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | 6.4 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg control prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 single scalar control in symbolic mode | symbolic | `ValueError` |
-# | 6.7 controlled QFT over a sub-kernel `UInt` slice | concrete | `EmitError` |
+# | 6.7 controlled QFT over a sub-kernel `UInt` slice | concrete | supported when block-to-gate conversion succeeds |
 
 
 # %%
@@ -817,17 +820,13 @@ expect_error(
 # For example, `controlled_qft = qmc.control(apply_qft)` works
 # when `apply_qft(q)` applies QFT to all of `q`.
 #
-# The narrower pattern below is still unsupported: the wrapped
-# sub-kernel receives a classical `UInt` argument and uses it to
-# form a `q[:m]` slice before calling QFT. The controlled-U emitter
-# does not yet lower that parameterized sliced composite block into
-# a backend gate, so transpilation raises `EmitError`.
-#
-# Workaround: make the QFT/IQFT width come from the target vector's
-# concrete shape at the controlled call site. In practice, pass the
-# exact target view to a sub-kernel that applies QFT to the whole
-# vector argument, instead of passing a larger vector plus a separate
-# `UInt` slice length.
+# The same now holds for the narrower Qiskit-backed pattern below:
+# the wrapped sub-kernel receives a classical `UInt` argument and uses
+# it to form a `q[:m]` slice before calling QFT. Qamomile strips the
+# slice marker inside the nested controlled block after borrow
+# checking, so a controlled-U emitter whose block-to-gate conversion
+# succeeds can lower the sliced composite block. Backends without
+# block-to-gate conversion may still reject this multi-target fallback.
 
 
 # %%
@@ -851,11 +850,7 @@ def case_controlled_qft_over_uint_slice() -> None:
     transpiler.transpile(kernel, bindings={"n": 2})
 
 
-expect_error(
-    "controlled QFT over a sub-kernel UInt slice",
-    EmitError,
-    case_controlled_qft_over_uint_slice,
-)
+case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=

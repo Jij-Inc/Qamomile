@@ -14,7 +14,9 @@ from sympy import Sum
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -26,8 +28,10 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.value import ArrayValue
 
 from ._catalog import (
     classify_controlled_u,
@@ -169,6 +173,13 @@ def _count_from_operations(
                     num_controls,
                 )
 
+            case InverseBlockOperation():
+                count = count + _handle_inverse_block(
+                    op,
+                    resolver,
+                    num_controls,
+                )
+
             case PauliEvolveOp():
                 count = count + _handle_pauli_evolve(op, bindings)
 
@@ -285,6 +296,66 @@ def _handle_composite(
 
     # error
     raise ValueError(res.error_message)
+
+
+def _handle_inverse_block(
+    op: InverseBlockOperation,
+    resolver: ExprResolver,
+    num_controls: int | sp.Expr,
+) -> GateCount:
+    """Count an inverse block through its fallback implementation.
+
+    Args:
+        op (InverseBlockOperation): Inverse block operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+        num_controls (int | sp.Expr): Number of controls already applied by
+            the enclosing traversal.
+
+    Returns:
+        GateCount: Gate count for the inverse implementation block.
+
+    Raises:
+        ValueError: If the inverse operation has no implementation block.
+    """
+    impl = op.implementation_block
+    if not isinstance(impl, Block):
+        raise ValueError(
+            f"Cannot estimate resources for InverseBlockOperation "
+            f"'{op.name}': no implementation block is available."
+        )
+
+    extra: dict[str, sp.Expr] = {}
+    quantum_actuals = iter(op.target_qubits)
+    parameter_actuals = iter(op.parameters)
+    for formal in impl.input_values:
+        if formal.type.is_quantum():
+            actual = next(quantum_actuals, None)
+            if (
+                isinstance(formal, ArrayValue)
+                and isinstance(actual, ArrayValue)
+                and formal.shape
+                and actual.shape
+            ):
+                extra[formal.shape[0].uuid] = resolver.resolve(actual.shape[0])
+            continue
+
+        actual = next(parameter_actuals, None)
+        if actual is not None:
+            extra[formal.uuid] = resolver.resolve(actual)
+
+    ctx = resolver.context
+    ctx.update(extra)
+    child = ExprResolver(
+        block=impl,
+        context=ctx,
+        loop_var_names=resolver.loop_var_names,
+        parent_blocks=[],
+    )
+    return _count_from_operations(
+        impl.operations,
+        child,
+        num_controls + op.num_control_qubits,
+    )
 
 
 # ------------------------------------------------------------------ #

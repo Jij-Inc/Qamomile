@@ -21,10 +21,17 @@ import enum
 import itertools
 import linecache
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
+
+# Matches the ``thetas`` parameter identifier as a whole word (e.g. ``thetas[0]``
+# or ``cudaq.control(..., thetas)``) without matching unrelated identifiers that
+# merely contain the substring (e.g. ``thetas_count``). Used to detect whether a
+# generated helper body references the entry-point parameter list.
+_THETAS_REFERENCE = re.compile(r"\bthetas\b")
 
 
 def _to_expr(value: Any) -> str:
@@ -185,7 +192,7 @@ class CudaqKernelEmitter:
         self._measurement_mode: MeasurementMode = MeasurementMode.STATIC
         self._boxed_clbits: set[int] = set()
         self._helper_sources: list[str] = []
-        self._helper_cache: dict[tuple[int, bool, tuple[str, ...]], str] = {}
+        self._helper_cache: dict[tuple[str, int, bool, tuple[str, ...]], str] = {}
         self._helper_counter = itertools.count()
         self._qubit_refs: dict[int, str] = {}
         self._building_helper: bool = False
@@ -371,6 +378,66 @@ class CudaqKernelEmitter:
             EmitError: Propagated from ``emit_body`` when the helper
                 body cannot be emitted for CUDA-Q.
         """
+        return self._build_kernel_helper(
+            "controlled",
+            num_targets,
+            emit_body,
+        )
+
+    def build_adjoint_helper(
+        self,
+        num_targets: int,
+        emit_body: Callable[[], None],
+    ) -> tuple[str, bool]:
+        """Build a pure-device helper kernel for ``cudaq.adjoint``.
+
+        Args:
+            num_targets (int): Number of target qubit arguments accepted
+                by the helper.
+            emit_body (Callable[[], None]): Callback that emits the
+                helper body into this emitter while qubit slots are mapped
+                to helper arguments.
+
+        Returns:
+            tuple[str, bool]: Helper function name, and whether the
+            caller must pass the entry-point ``thetas`` parameter list.
+
+        Raises:
+            EmitError: Propagated from ``emit_body`` when the helper
+                body cannot be emitted for CUDA-Q.
+        """
+        return self._build_kernel_helper(
+            "adjoint",
+            num_targets,
+            emit_body,
+        )
+
+    def _build_kernel_helper(
+        self,
+        helper_kind: str,
+        num_targets: int,
+        emit_body: Callable[[], None],
+    ) -> tuple[str, bool]:
+        """Build a pure-device helper kernel for CUDA-Q synthesis calls.
+
+        Args:
+            helper_kind (str): Descriptive name used in the generated
+                helper function name, such as ``"controlled"`` or
+                ``"adjoint"``.
+            num_targets (int): Number of target qubit arguments accepted
+                by the helper.
+            emit_body (Callable[[], None]): Callback that emits the
+                helper body into this emitter while qubit slots are mapped
+                to helper arguments.
+
+        Returns:
+            tuple[str, bool]: Helper function name, and whether the
+                caller must pass the entry-point ``thetas`` parameter list.
+
+        Raises:
+            EmitError: Propagated from ``emit_body`` when the helper
+                body cannot be emitted for CUDA-Q.
+        """
         saved_lines = self._lines
         saved_indent = self._indent
         saved_qubit_refs = self._qubit_refs
@@ -394,13 +461,26 @@ class CudaqKernelEmitter:
         try:
             emit_body()
             helper_lines = self._lines
-            uses_thetas = self._helper_param_used
-            cache_key = (num_targets, uses_thetas, tuple(helper_lines))
+            # ``_helper_param_used`` is set when ``create_parameter`` runs
+            # inside the helper-building context. A gate-angle *expression*
+            # (e.g. ``theta=-phase``) can be resolved to a ``thetas[i]``
+            # reference before the helper body is built and then reused from
+            # the resolver cache, so the flag may stay unset even though the
+            # emitted body references ``thetas``. Scan the body as a backstop:
+            # if any line mentions ``thetas`` (matched as a whole-word token so
+            # identifiers like ``thetas_count`` do not false-positive) the
+            # helper must take the entry-point parameter list, otherwise CUDA-Q
+            # rejects the helper with "Invalid variable name 'thetas' is not
+            # defined".
+            uses_thetas = self._helper_param_used or any(
+                _THETAS_REFERENCE.search(line) for line in helper_lines
+            )
+            cache_key = (helper_kind, num_targets, uses_thetas, tuple(helper_lines))
             cached_name = self._helper_cache.get(cache_key)
             if cached_name is not None:
                 return cached_name, uses_thetas
 
-            helper_name = f"_qamomile_controlled_{next(self._helper_counter)}"
+            helper_name = f"_qamomile_{helper_kind}_{next(self._helper_counter)}"
             args = [f"t{i}: cudaq.qubit" for i in range(num_targets)]
             if uses_thetas:
                 args.append("thetas: list[float]")
@@ -452,6 +532,35 @@ class CudaqKernelEmitter:
             if self._building_helper:
                 self._helper_param_used = True
         self._emit(f"cudaq.control({', '.join(args)})")
+
+    def emit_adjoint_kernel_call(
+        self,
+        circuit: CudaqKernelArtifact,
+        helper_name: str,
+        target_indices: list[int],
+        uses_thetas: bool,
+    ) -> None:
+        """Emit a ``cudaq.adjoint`` call to a generated helper kernel.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being
+                emitted.  The argument is accepted for GateEmitter
+                symmetry and tracing subclasses.
+            helper_name (str): Name of the generated helper function.
+            target_indices (list[int]): Physical target qubit slots.
+            uses_thetas (bool): Whether to pass the entry-point
+                ``thetas`` parameter list to the helper.
+        """
+        del circuit
+        args = [
+            helper_name,
+            *[self._qref(index) for index in target_indices],
+        ]
+        if uses_thetas:
+            args.append("thetas")
+            if self._building_helper:
+                self._helper_param_used = True
+        self._emit(f"cudaq.adjoint({', '.join(args)})")
 
     def create_parameter(self, name: str) -> CudaqExpr:
         """Return a ``CudaqExpr`` referencing ``thetas[i]``.
@@ -517,6 +626,8 @@ class CudaqKernelEmitter:
 
     def _angle_expr(self, angle: float | str | Any) -> str:
         """Convert an angle to a source expression."""
+        if self._building_helper and isinstance(angle, CudaqExpr):
+            self._helper_param_used = True
         if isinstance(angle, str):
             return angle  # Already a source expression (e.g. "thetas[0]")
         if isinstance(angle, (int, float)):
@@ -821,6 +932,14 @@ class CudaqKernelEmitter:
         """No-op: not supported by CUDA-Q codegen path."""
         return None
 
+    def supports_reusable_gates(self) -> bool:
+        """Return False because CUDA-Q source emission has no reusable gate path.
+
+        Returns:
+            bool: Always False.
+        """
+        return False
+
     def append_gate(
         self, circuit: CudaqKernelArtifact, gate: Any, qubits: list[int]
     ) -> None:
@@ -834,6 +953,25 @@ class CudaqKernelEmitter:
     def gate_controlled(self, gate: Any, num_controls: int) -> Any:
         """No-op: not supported by CUDA-Q codegen path."""
         return None
+
+    def gate_inverse(self, gate: Any) -> Any:
+        """Return None because CUDA-Q source emission has no reusable inverse gate.
+
+        Args:
+            gate (Any): Ignored reusable gate placeholder.
+
+        Returns:
+            Any: Always None.
+        """
+        return None
+
+    def supports_gate_inverse(self) -> bool:
+        """Return False because CUDA-Q uses dedicated adjoint helper emission.
+
+        Returns:
+            bool: Always False.
+        """
+        return False
 
     # ------------------------------------------------------------------
     # Multi-controlled gate emission

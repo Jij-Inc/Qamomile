@@ -13,10 +13,20 @@ overrides (e.g. CudaqEmitPass) are respected.
 
 from __future__ import annotations
 
+import dataclasses
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -25,9 +35,13 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    evaluate_binop,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
@@ -48,6 +62,7 @@ def emit_controlled_powers(
 ) -> None:
     """Emit controlled-U^(2^k) operations."""
     num_targets = len(target_indices)
+    block_value = _prepare_nested_block_for_emit(block_value, bindings)
     unitary_gate = emit_pass._blockvalue_to_gate(block_value, num_targets, bindings)
 
     if unitary_gate is not None:
@@ -105,6 +120,8 @@ def emit_controlled_operations(
             emit_controlled_gate(
                 emit_pass, circuit, op, control_idx, target_indices, bindings
             )
+        elif isinstance(op, BinOp):
+            evaluate_binop(emit_pass, op, bindings)
         elif isinstance(op, ControlledUOperation):
             raise EmitError(
                 "Cannot decompose nested ControlledUOperation in a controlled "
@@ -114,6 +131,51 @@ def emit_controlled_operations(
                 "backend that can convert the inner block to a native "
                 "controlled gate, or flatten the controls explicitly.",
                 operation="ControlledUOperation",
+            )
+        elif isinstance(op, CompositeGateOperation):
+            qubit_count = op.num_control_qubits + op.num_target_qubits
+            if len(target_indices) < qubit_count:
+                raise EmitError(
+                    "CompositeGateOperation target count does not match "
+                    "controlled block targets: "
+                    f"expected at least {qubit_count}, got {len(target_indices)}.",
+                    operation="CompositeGateOperation",
+                )
+            emit_controlled_composite_at_indices(
+                emit_pass,
+                circuit,
+                op,
+                [control_idx],
+                target_indices[:qubit_count],
+                bindings,
+            )
+        elif isinstance(op, InverseBlockOperation):
+            qubit_count = op.num_control_qubits + op.num_target_qubits
+            if len(target_indices) < qubit_count:
+                raise EmitError(
+                    "InverseBlockOperation target count does not match "
+                    "controlled block targets: "
+                    f"expected at least {qubit_count}, got {len(target_indices)}.",
+                    operation="InverseBlockOperation",
+                )
+            inner_controls = target_indices[: op.num_control_qubits]
+            inner_targets = target_indices[
+                op.num_control_qubits : op.num_control_qubits + op.num_target_qubits
+            ]
+            # Imported lazily: inverse_emission imports this module's
+            # shared helpers at module level, so a top-level import here
+            # would be circular.
+            from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (  # noqa: I001
+                emit_inverse_block_at_indices,
+            )
+
+            emit_inverse_block_at_indices(
+                emit_pass,
+                circuit,
+                op,
+                [control_idx, *inner_controls],
+                inner_targets,
+                bindings,
             )
         elif isinstance(op, ForOperation):
             start = (
@@ -433,6 +495,7 @@ def emit_controlled_u_with_symbolic_indices(
     _bind_quantum_input_shapes(
         emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
+    block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     num_targets = len(target_indices)
     unitary_gate = emit_pass._blockvalue_to_gate(
@@ -590,6 +653,7 @@ def emit_controlled_u_multi_arg(
     _bind_quantum_input_shapes(
         emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
+    block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     num_targets = len(target_indices)
     unitary_gate = emit_pass._blockvalue_to_gate(
@@ -751,6 +815,7 @@ def emit_controlled_u(
     _bind_quantum_input_shapes(
         emit_pass, block_value, target_qubit_operands, bindings, local_bindings
     )
+    block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     power_value = resolve_power(emit_pass, op, bindings)
     if _should_emit_single_target_block_per_vector_element(
@@ -937,6 +1002,8 @@ def emit_controlled_fallback(
             ``_build_block_qubit_map`` override) bypass this check by
             replacing the method outright.
     """
+    block_value = _prepare_nested_block_for_emit(block_value, bindings)
+
     if num_controls > 1:
         raise EmitError(
             f"Cannot decompose multi-controlled operation "
@@ -1003,20 +1070,41 @@ def emit_custom_composite(
     qubit_indices: list[int],
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a custom composite gate with implementation."""
-    num_qubits = len(qubit_indices)
-    custom_gate = emit_pass._blockvalue_to_gate(impl, num_qubits, bindings)
+    """Emit a custom composite gate with implementation.
 
-    if custom_gate is not None:
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (Any): Composite gate operation.
+        impl (Any): Fallback implementation block to emit.
+        qubit_indices (list[int]): Physical qubits for the operation.
+        bindings (dict[str, Any]): Active emit bindings.
+    """
+    num_qubits = len(qubit_indices)
+    impl = _prepare_nested_block_for_emit(impl, bindings)
+    custom_gate = emit_pass._blockvalue_to_gate(
+        impl,
+        num_qubits,
+        bindings,
+        input_operands=op.operands,
+        operation_name="CompositeGateOperation",
+    )
+
+    if custom_gate is not None and _gate_matches_qubit_count(custom_gate, num_qubits):
         emit_pass._emitter.append_gate(circuit, custom_gate, qubit_indices)
     else:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
-
-        if hasattr(impl, "input_values"):
-            for i, input_val in enumerate(impl.input_values):
-                if i < len(qubit_indices):
-                    local_qubit_map[QubitAddress(input_val.uuid)] = qubit_indices[i]
+        local_bindings = _bind_and_populate_block_inputs(
+            emit_pass,
+            impl,
+            op.operands,
+            num_qubits,
+            bindings,
+            local_qubit_map,
+            parent_qubits=qubit_indices,
+            operation_name="CompositeGateOperation",
+        )
 
         if hasattr(impl, "operations"):
             emit_pass._emit_operations(
@@ -1024,9 +1112,102 @@ def emit_custom_composite(
                 impl.operations,
                 local_qubit_map,
                 local_clbit_map,
-                bindings,
+                local_bindings,
                 force_unroll=True,
             )
+
+
+def emit_controlled_composite_at_indices(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: CompositeGateOperation,
+    control_indices: list[int],
+    qubit_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a composite gate under already-resolved outer controls.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (CompositeGateOperation): Composite operation to emit.
+        control_indices (list[int]): Physical outer control qubits.
+        qubit_indices (list[int]): Physical qubits occupied by ``op``'s
+            own control and target operands.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Returns:
+        None.
+
+    Raises:
+        EmitError: If the composite has no implementation block or the
+            fallback cannot represent the controlled composite.
+    """
+    impl = op.implementation
+    if impl is None:
+        raise EmitError(
+            "Cannot emit controlled composite without an implementation block.",
+            operation="CompositeGateOperation",
+        )
+
+    num_qubits = len(qubit_indices)
+    custom_gate = emit_pass._blockvalue_to_gate(
+        impl,
+        num_qubits,
+        bindings,
+        input_operands=op.operands,
+        operation_name="CompositeGateOperation",
+    )
+    if custom_gate is not None:
+        controlled_gate = custom_gate
+        if control_indices:
+            controlled_gate = emit_pass._emitter.gate_controlled(
+                custom_gate,
+                len(control_indices),
+            )
+        if controlled_gate is not None and _gate_matches_qubit_count(
+            controlled_gate,
+            len(control_indices) + num_qubits,
+        ):
+            emit_pass._emitter.append_gate(
+                circuit,
+                controlled_gate,
+                [*control_indices, *qubit_indices],
+            )
+            return
+
+    local_qubit_map: QubitMap = {}
+    local_bindings = _bind_and_populate_block_inputs(
+        emit_pass,
+        impl,
+        op.operands,
+        num_qubits,
+        bindings,
+        local_qubit_map,
+        operation_name="CompositeGateOperation",
+    )
+    emit_pass._emit_controlled_fallback(
+        circuit,
+        impl,
+        len(control_indices),
+        control_indices,
+        qubit_indices,
+        1,
+        local_bindings,
+    )
+
+
+def _emitter_supports_reusable_gates(emitter: Any) -> bool:
+    """Return whether an emitter can build reusable gates.
+
+    Args:
+        emitter (Any): Backend gate emitter.
+
+    Returns:
+        bool: True when ``emitter`` advertises reusable-gate support.
+    """
+    supports = getattr(emitter, "supports_reusable_gates", None)
+    return bool(supports()) if callable(supports) else False
 
 
 def blockvalue_to_gate(
@@ -1034,6 +1215,8 @@ def blockvalue_to_gate(
     block_value: Any,
     num_qubits: int,
     bindings: dict[str, Any],
+    input_operands: list[Any] | None = None,
+    operation_name: str = "ControlledUOperation",
 ) -> Any:
     """Convert a Block to a backend gate.
 
@@ -1061,6 +1244,14 @@ def blockvalue_to_gate(
         bindings (dict[str, Any]): Parameter bindings forwarded to the
             allocator and ``_emit_operations``. Also consulted when
             resolving ``Vector[Qubit]`` input shapes.
+        input_operands (list[Any] | None): Optional call-site operands
+            corresponding to `block_value.input_values`. Quantum operands
+            propagate actual ``Vector[Qubit]`` shapes into the nested
+            block before the vector-aware input qubit map is populated;
+            classical operands are resolved into local bindings before the
+            nested block is emitted. Defaults to None.
+        operation_name (str): Operation name used in diagnostics when
+            input binding fails. Defaults to ``"ControlledUOperation"``.
 
     Returns:
         Any: A backend gate object produced by
@@ -1072,22 +1263,24 @@ def blockvalue_to_gate(
     if not hasattr(block_value, "operations"):
         return None
 
+    block_value = _prepare_nested_block_for_emit(block_value, bindings)
+
     try:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
-
-        if hasattr(block_value, "input_values"):
-            _populate_input_qubit_map(
-                emit_pass,
-                block_value.input_values,
-                num_qubits,
-                bindings,
-                local_qubit_map,
-            )
+        local_bindings = _bind_and_populate_block_inputs(
+            emit_pass,
+            block_value,
+            input_operands,
+            num_qubits,
+            bindings,
+            local_qubit_map,
+            operation_name=operation_name,
+        )
 
         local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
             block_value.operations,
-            bindings,
+            local_bindings,
             initial_qubit_map=local_qubit_map,
             initial_clbit_map=local_clbit_map,
         )
@@ -1102,7 +1295,7 @@ def blockvalue_to_gate(
             block_value.operations,
             local_qubit_map,
             local_clbit_map,
-            bindings,
+            local_bindings,
             force_unroll=True,
         )
 
@@ -1116,6 +1309,431 @@ def blockvalue_to_gate(
             exc_info=True,
         )
         return None
+
+
+def _bind_block_inputs(
+    emit_pass: "StandardEmitPass",
+    block_value: Any,
+    input_operands: list[Any] | None,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind nested block classical inputs to call-site operands.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        block_value (Any): Nested block whose inputs are being emitted.
+        input_operands (list[Any] | None): Call-site operands. Quantum
+            operands are skipped here; callers should handle them through
+            ``_bind_quantum_input_shapes`` and ``_populate_input_qubit_map``.
+            Classical operands are resolved into local bindings. When None,
+            no direct binding is performed.
+        bindings (dict[str, Any]): Parent emit bindings.
+
+    Returns:
+        dict[str, Any]: Local bindings for nested emission.
+    """
+    local_bindings = dict(bindings)
+    if input_operands is None or not hasattr(block_value, "input_values"):
+        return local_bindings
+
+    quantum_inputs = [
+        formal
+        for formal in block_value.input_values
+        if hasattr(formal, "type") and formal.type.is_quantum()
+    ]
+    classical_inputs = [
+        formal
+        for formal in block_value.input_values
+        if not (hasattr(formal, "type") and formal.type.is_quantum())
+    ]
+    classical_operands = list(input_operands[len(quantum_inputs) :])
+
+    for formal, actual in zip(classical_inputs, classical_operands):
+        if hasattr(formal, "uuid"):
+            local_bindings[formal.uuid] = _resolve_call_operand(
+                emit_pass,
+                actual,
+                bindings,
+            )
+
+    return local_bindings
+
+
+def _bind_and_populate_block_inputs(
+    emit_pass: "StandardEmitPass",
+    block_value: Any,
+    input_operands: list[Any] | None,
+    num_qubits: int,
+    bindings: dict[str, Any],
+    qubit_map: QubitMap,
+    parent_qubits: list[int] | None = None,
+    operation_name: str = "ControlledUOperation",
+) -> dict[str, Any]:
+    """Bind nested block inputs and populate its quantum input map.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        block_value (Any): Nested block whose inputs are being emitted.
+        input_operands (list[Any] | None): Call-site operands. Quantum
+            operands are used to propagate ``Vector[Qubit]`` shapes;
+            classical operands are resolved into local bindings. Defaults
+            to None.
+        num_qubits (int): Local qubit width available to ``block_value``.
+        bindings (dict[str, Any]): Parent emit bindings.
+        qubit_map (QubitMap): Local qubit map to mutate with scalar and
+            per-element quantum input addresses.
+        parent_qubits (list[int] | None): Optional parent-circuit physical
+            qubits used to remap the local ``0..num_qubits-1`` indices after
+            population. Defaults to None.
+        operation_name (str): Operation label used in emitted errors.
+            Defaults to ``"ControlledUOperation"``.
+
+    Returns:
+        dict[str, Any]: Local bindings for nested emission.
+
+    Raises:
+        EmitError: If vector inputs cannot fit in ``num_qubits`` or a local
+            populated qubit index cannot be remapped to ``parent_qubits``.
+    """
+    local_bindings = _bind_block_inputs(
+        emit_pass,
+        block_value,
+        input_operands,
+        bindings,
+    )
+    quantum_operands = _quantum_input_operands(block_value, input_operands)
+    _bind_quantum_input_shapes(
+        emit_pass,
+        block_value,
+        quantum_operands,
+        bindings,
+        local_bindings,
+    )
+    if hasattr(block_value, "input_values"):
+        _populate_input_qubit_map(
+            emit_pass,
+            block_value.input_values,
+            num_qubits,
+            local_bindings,
+            qubit_map,
+        )
+    if parent_qubits is not None:
+        _remap_local_qubit_map(
+            qubit_map,
+            parent_qubits,
+            operation_name,
+        )
+    return local_bindings
+
+
+def _quantum_input_operands(
+    block_value: Any,
+    input_operands: list[Any] | None,
+) -> list[Any]:
+    """Return call-site operands that correspond to quantum block inputs.
+
+    Args:
+        block_value (Any): Block whose ``input_values`` define the formal
+            quantum/classical input split.
+        input_operands (list[Any] | None): Call-site operands. Defaults to
+            None.
+
+    Returns:
+        list[Any]: Quantum operands paired with formal quantum inputs in
+            declaration order.
+    """
+    if input_operands is None or not hasattr(block_value, "input_values"):
+        return []
+    quantum_input_count = sum(
+        1
+        for input_value in block_value.input_values
+        if hasattr(input_value, "type") and input_value.type.is_quantum()
+    )
+    return list(input_operands[:quantum_input_count])
+
+
+def _remap_local_qubit_map(
+    qubit_map: QubitMap,
+    parent_qubits: list[int],
+    operation_name: str,
+) -> None:
+    """Remap local block input qubit slots to parent physical qubits.
+
+    Args:
+        qubit_map (QubitMap): Map populated with local ``0..n-1`` slots.
+            Mutated in place to parent-circuit physical qubit indices.
+        parent_qubits (list[int]): Parent physical qubits indexed by local
+            slot.
+        operation_name (str): Operation label used in emitted errors.
+
+    Raises:
+        EmitError: If a local slot falls outside ``parent_qubits``.
+    """
+    for address, local_index in list(qubit_map.items()):
+        if local_index < 0 or local_index >= len(parent_qubits):
+            raise EmitError(
+                f"{operation_name}: local input qubit index {local_index} "
+                f"cannot be remapped through {len(parent_qubits)} parent "
+                f"qubit(s).",
+                operation=operation_name,
+            )
+        qubit_map[address] = parent_qubits[local_index]
+
+
+def _gate_matches_qubit_count(gate: Any, num_qubits: int) -> bool:
+    """Return whether a backend gate can be appended at the call site.
+
+    Args:
+        gate (Any): Backend gate candidate.
+        num_qubits (int): Number of qubits supplied by the call site.
+
+    Returns:
+        bool: True when the backend exposes a qubit-count field and the
+            field matches `num_qubits`.
+    """
+    gate_num_qubits = getattr(gate, "num_qubits", None)
+    return gate_num_qubits == num_qubits
+
+
+def _resolve_call_operand(
+    emit_pass: "StandardEmitPass",
+    actual: Any,
+    bindings: dict[str, Any],
+) -> Any:
+    """Resolve a call-site classical operand for nested block emission.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        actual (Any): Call-site operand.
+        bindings (dict[str, Any]): Parent emit bindings.
+
+    Returns:
+        Any: Concrete value, backend parameter, or backend expression.
+    """
+    if not hasattr(actual, "uuid"):
+        return actual
+    resolved = emit_pass._resolver.resolve_classical_value(
+        actual,
+        bindings,
+    )
+    if resolved is not None:
+        return resolved
+    param_key = emit_pass._resolver.get_parameter_key(actual, bindings)
+    if param_key is not None:
+        return emit_pass._get_or_create_parameter(param_key, actual.uuid)
+    return actual
+
+
+def _contains_slice_markers(
+    operations: list[Operation],
+    _seen: set[int] | None = None,
+) -> bool:
+    """Return whether ``operations`` contains slice borrow markers.
+
+    Args:
+        operations (list[Operation]): Operations to inspect recursively,
+            including control-flow children and nested block-valued
+            operations.
+
+    Returns:
+        bool: ``True`` when a ``SliceArrayOperation`` or
+        ``ReleaseSliceViewOperation`` is present; otherwise ``False``.
+    """
+    seen = _seen if _seen is not None else set()
+    for op in operations:
+        if isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
+            return True
+        if isinstance(op, HasNestedOps):
+            if any(
+                _contains_slice_markers(nested, seen) for nested in op.nested_op_lists()
+            ):
+                return True
+        nested_block = getattr(op, "block", None)
+        if isinstance(nested_block, Block):
+            block_id = id(nested_block)
+            if block_id not in seen:
+                seen.add(block_id)
+                if _contains_slice_markers(nested_block.operations, seen):
+                    return True
+        implementation_block = getattr(op, "implementation_block", None)
+        if isinstance(implementation_block, Block):
+            block_id = id(implementation_block)
+            if block_id not in seen:
+                seen.add(block_id)
+                if _contains_slice_markers(implementation_block.operations, seen):
+                    return True
+    return False
+
+
+def _prepare_nested_block_for_emit(
+    block_value: Any,
+    bindings: dict[str, Any],
+    _seen: set[int] | None = None,
+) -> Any:
+    """Run nested-block slice checks and remove emit-only markers.
+
+    Top-level blocks pass through ``SliceBorrowCheckPass`` and
+    ``StripSliceArrayOpsPass`` before segmentation and emission, but a
+    ``ControlledUOperation`` or custom composite carries its inner
+    ``Block`` as an operation field rather than as regular control-flow
+    children. Generic pass visitors therefore do not descend into that
+    nested block. Apply the same invariant here before any nested block
+    with slice markers is converted to a backend gate or emitted through
+    a fallback path.
+
+    Args:
+        block_value (Any): Candidate nested block to normalize.
+        bindings (dict[str, Any]): Compile-time bindings visible inside
+            the nested block.
+
+    Returns:
+        Any: ``block_value`` after ``SliceBorrowCheckPass`` and marker
+        stripping when it is a ``Block`` containing slice markers; otherwise
+        the original object unchanged.
+
+    Raises:
+        EmitError: If the marker-bearing block is already past the stages
+            that can be safely checked.
+        ValidationError: If ``SliceBorrowCheckPass`` rejects the block
+            stage.
+        SliceBorrowViolationError: If nested slice borrows violate the
+            same linearity rules enforced for top-level blocks.
+    """
+    if not isinstance(block_value, Block):
+        return block_value
+
+    seen = _seen if _seen is not None else set()
+    block_id = id(block_value)
+    if block_id in seen:
+        return block_value
+    seen.add(block_id)
+
+    try:
+        block_value = _prepare_nested_operation_blocks(block_value, bindings, seen)
+        if not _contains_slice_markers(block_value.operations, seen):
+            return block_value
+
+        from qamomile.circuit.transpiler.passes.constant_fold import (
+            ConstantFoldingPass,
+        )
+        from qamomile.circuit.transpiler.passes.slice_borrow_check import (
+            SliceBorrowCheckPass,
+        )
+        from qamomile.circuit.transpiler.passes.strip_slice_ops import (
+            StripSliceArrayOpsPass,
+        )
+
+        if block_value.kind == BlockKind.TRACED:
+            block_value = dataclasses.replace(block_value, kind=BlockKind.HIERARCHICAL)
+        elif block_value.kind not in (BlockKind.HIERARCHICAL, BlockKind.AFFINE):
+            raise EmitError(
+                f"Cannot normalize nested slice markers in {block_value.kind} block "
+                f"{block_value.name!r}; slice markers must be checked before "
+                f"analysis and emit.",
+                operation="SliceArrayOperation",
+            )
+        folded = ConstantFoldingPass(bindings, strip_slice_ops=False).run(block_value)
+        checked = SliceBorrowCheckPass().run(folded)
+        return StripSliceArrayOpsPass().run(checked)
+    finally:
+        seen.remove(block_id)
+
+
+def _prepare_nested_operation_blocks(
+    block_value: Block,
+    bindings: dict[str, Any],
+    seen: set[int],
+) -> Block:
+    """Normalize block-valued operation fields inside ``block_value``.
+
+    Args:
+        block_value (Block): Parent block whose operations may carry
+            nested ``block`` or ``implementation_block`` attributes.
+        bindings (dict[str, Any]): Bindings visible while normalizing
+            nested block-valued attributes.
+        seen (set[int]): Identity set used to avoid following cyclic
+            block references repeatedly.
+
+    Returns:
+        Block: ``block_value`` with any normalized nested block fields
+        reattached to their owning operations.
+    """
+    new_ops, changed = _prepare_nested_operation_list_blocks(
+        block_value.operations,
+        bindings,
+        seen,
+    )
+    if not changed:
+        return block_value
+    return dataclasses.replace(block_value, operations=new_ops)
+
+
+def _prepare_nested_operation_list_blocks(
+    operations: list[Operation],
+    bindings: dict[str, Any],
+    seen: set[int],
+) -> tuple[list[Operation], bool]:
+    """Normalize block-valued fields in an operation list.
+
+    Args:
+        operations (list[Operation]): Operations to inspect.
+        bindings (dict[str, Any]): Bindings visible to nested blocks.
+        seen (set[int]): Identity set used as a recursion guard.
+
+    Returns:
+        tuple[list[Operation], bool]: Rewritten operations and whether
+        any operation changed.
+    """
+    new_ops: list[Operation] = []
+    changed = False
+    for op in operations:
+        new_op = _prepare_nested_operation_block_fields(op, bindings, seen)
+        if new_op is not op:
+            changed = True
+        if isinstance(new_op, HasNestedOps):
+            nested_lists: list[list[Operation]] = []
+            nested_changed = False
+            for nested in new_op.nested_op_lists():
+                new_nested, did_change = _prepare_nested_operation_list_blocks(
+                    nested,
+                    bindings,
+                    seen,
+                )
+                nested_lists.append(new_nested)
+                nested_changed = nested_changed or did_change
+            if nested_changed:
+                new_op = new_op.rebuild_nested(nested_lists)
+                changed = True
+        new_ops.append(new_op)
+    return new_ops, changed
+
+
+def _prepare_nested_operation_block_fields(
+    op: Operation,
+    bindings: dict[str, Any],
+    seen: set[int],
+) -> Operation:
+    """Normalize ``block`` and ``implementation_block`` fields on ``op``.
+
+    Args:
+        op (Operation): Operation to inspect.
+        bindings (dict[str, Any]): Bindings visible to nested blocks.
+        seen (set[int]): Identity set used as a recursion guard.
+
+    Returns:
+        Operation: ``op`` with normalized nested block fields when
+        needed; otherwise ``op`` unchanged.
+    """
+    updates: dict[str, Block] = {}
+    for attr in ("block", "implementation_block"):
+        nested = getattr(op, attr, None)
+        if isinstance(nested, Block):
+            normalized = _prepare_nested_block_for_emit(nested, bindings, seen)
+            if normalized is not nested:
+                updates[attr] = normalized
+    if not updates:
+        return op
+    return dataclasses.replace(cast(Any, op), **updates)
 
 
 def _populate_input_qubit_map(

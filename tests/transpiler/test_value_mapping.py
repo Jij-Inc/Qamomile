@@ -28,7 +28,14 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
 )
 from qamomile.circuit.ir.types.q_register import QFixedType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayRuntimeMetadata,
+    ArrayValue,
+    CastMetadata,
+    QFixedMetadata,
+    Value,
+    ValueMetadata,
+)
 from qamomile.circuit.transpiler.passes.value_mapping import (
     UUIDRemapper,
     ValueSubstitutor,
@@ -58,6 +65,270 @@ def _make_array_value(
 ) -> ArrayValue:
     """Create an ArrayValue with the given shape dimension Values."""
     return ArrayValue(type=type_cls(), name=name, shape=shape_vals)
+
+
+# ===========================================================================
+# Metadata UUID cloning
+# ===========================================================================
+
+
+class TestUUIDRemapperMetadataCloning:
+    """Tests that UUIDRemapper clones UUID references in ValueMetadata."""
+
+    def test_cast_metadata_uuid_references_are_cloned(self) -> None:
+        """Cast source and qubit references follow cloned Values."""
+        source = _make_value("source")
+        qubit = _make_value("q", QubitType)
+        carrier = Value(
+            type=UIntType(),
+            name="cast",
+            metadata=ValueMetadata(
+                cast=CastMetadata(
+                    source_uuid=source.uuid,
+                    source_logical_id=source.logical_id,
+                    qubit_uuids=(qubit.uuid,),
+                    qubit_logical_ids=(qubit.logical_id,),
+                ),
+            ),
+        )
+
+        remapper = UUIDRemapper()
+        cloned_source = remapper.clone_value(source)
+        cloned_qubit = remapper.clone_value(qubit)
+        cloned_carrier = remapper.clone_value(carrier)
+
+        assert isinstance(cloned_carrier, Value)
+        assert cloned_carrier.metadata.cast is not None
+        assert cloned_carrier.metadata.cast.source_uuid == cloned_source.uuid
+        assert cloned_carrier.metadata.cast.source_logical_id == (
+            cloned_source.logical_id
+        )
+        assert cloned_carrier.metadata.cast.qubit_uuids == (cloned_qubit.uuid,)
+        assert cloned_carrier.metadata.cast.qubit_logical_ids == (
+            cloned_qubit.logical_id,
+        )
+
+    def test_qfixed_metadata_qubit_references_are_cloned(self) -> None:
+        """QFixed carrier qubit references follow cloned Values."""
+        q0 = _make_value("q0", QubitType)
+        q1 = _make_value("q1", QubitType)
+        qfixed = Value(
+            type=UIntType(),
+            name="qfixed",
+            metadata=ValueMetadata(
+                qfixed=QFixedMetadata(
+                    qubit_uuids=(q0.uuid, q1.uuid),
+                    num_bits=2,
+                    int_bits=0,
+                ),
+            ),
+        )
+
+        remapper = UUIDRemapper()
+        cloned_q0 = remapper.clone_value(q0)
+        cloned_q1 = remapper.clone_value(q1)
+        cloned_qfixed = remapper.clone_value(qfixed)
+
+        assert isinstance(cloned_qfixed, Value)
+        assert cloned_qfixed.metadata.qfixed is not None
+        assert cloned_qfixed.metadata.qfixed.qubit_uuids == (
+            cloned_q0.uuid,
+            cloned_q1.uuid,
+        )
+        assert cloned_qfixed.metadata.qfixed.num_bits == 2
+        assert cloned_qfixed.metadata.qfixed.int_bits == 0
+
+    def test_cast_metadata_uuid_references_are_substituted(self) -> None:
+        """Cast metadata references follow substituted Values."""
+        old_source = _make_value("old_source")
+        new_source = _make_value("new_source")
+        old_qubit = _make_value("old_q", QubitType)
+        new_qubit = _make_value("new_q", QubitType)
+        carrier = Value(
+            type=UIntType(),
+            name="cast",
+            metadata=ValueMetadata(
+                cast=CastMetadata(
+                    source_uuid=old_source.uuid,
+                    source_logical_id=old_source.logical_id,
+                    qubit_uuids=(old_qubit.uuid,),
+                    qubit_logical_ids=(old_qubit.logical_id,),
+                ),
+            ),
+        )
+
+        sub = ValueSubstitutor({old_source.uuid: new_source, old_qubit.uuid: new_qubit})
+        result = sub.substitute_value(carrier)
+
+        assert isinstance(result, Value)
+        assert result.metadata.cast is not None
+        assert result.metadata.cast.source_uuid == new_source.uuid
+        assert result.metadata.cast.source_logical_id == new_source.logical_id
+        assert result.metadata.cast.qubit_uuids == (new_qubit.uuid,)
+        assert result.metadata.cast.qubit_logical_ids == (new_qubit.logical_id,)
+
+    def test_qfixed_metadata_qubit_references_are_substituted(self) -> None:
+        """QFixed metadata references follow substituted Values."""
+        old_q0 = _make_value("old_q0", QubitType)
+        new_q0 = _make_value("new_q0", QubitType)
+        old_q1 = _make_value("old_q1", QubitType)
+        new_q1 = _make_value("new_q1", QubitType)
+        qfixed = Value(
+            type=UIntType(),
+            name="qfixed",
+            metadata=ValueMetadata(
+                qfixed=QFixedMetadata(
+                    qubit_uuids=(old_q0.uuid, old_q1.uuid),
+                    num_bits=2,
+                    int_bits=0,
+                ),
+            ),
+        )
+
+        sub = ValueSubstitutor({old_q0.uuid: new_q0, old_q1.uuid: new_q1})
+        result = sub.substitute_value(qfixed)
+
+        assert isinstance(result, Value)
+        assert result.metadata.qfixed is not None
+        assert result.metadata.qfixed.qubit_uuids == (new_q0.uuid, new_q1.uuid)
+        assert result.metadata.qfixed.num_bits == 2
+        assert result.metadata.qfixed.int_bits == 0
+
+
+class TestArrayRuntimeMetadataSymbolicRootLimitations:
+    """Known limitations around symbolic root-address metadata."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=("ArrayRuntimeMetadata cannot encode symbolic affine root indices yet."),
+    )
+    def test_scalar_inline_metadata_cannot_promote_symbolic_slice_parent(
+        self,
+    ) -> None:
+        """Scalar tuple metadata cannot promote ``q[j:j+1][0]`` to root ``q[j]``.
+
+        A scalar helper traces ``expval((q,), obs)`` with standalone-qubit
+        metadata, encoded as the ``("", -1)`` sentinel.  After inlining, that
+        scalar may map to an element of a caller-side symbolic slice such as
+        ``q[j:j+1][0]``.  The current metadata can only store integer root
+        indices, so it cannot represent the desired root address ``(q.uuid,
+        j)`` and leaves the sentinel in place.
+        """
+        root = _make_array_value("q")
+        loop_index = _make_value("j")
+        one = _make_const_value("one", 1)
+        zero = _make_const_value("zero", 0)
+        symbolic_view = ArrayValue(
+            type=QubitType(),
+            name="q[j:j+1]",
+            slice_of=root,
+            slice_start=loop_index,
+            slice_step=one,
+        )
+        callee_scalar = _make_value("callee_q", QubitType)
+        caller_element = Value(
+            type=QubitType(),
+            name="q[j]",
+            parent_array=symbolic_view,
+            element_indices=(zero,),
+        )
+        tuple_operand = ArrayValue(
+            type=QubitType(),
+            name="expval_qubits",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_uuids=(callee_scalar.uuid,),
+                    element_logical_ids=(callee_scalar.logical_id,),
+                    element_parent_uuids=("",),
+                    element_parent_indices=(-1,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor(
+            {callee_scalar.uuid: caller_element}
+        ).substitute_value(tuple_operand)
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == (caller_element.uuid,)
+        assert result.metadata.array_runtime.element_parent_uuids == (root.uuid,)
+        assert result.metadata.array_runtime.element_parent_indices == (loop_index,)
+
+
+class TestArrayRuntimeMetadataSymbolicParentSubstitution:
+    """Tests symbolic slice parent metadata substitution."""
+
+    def test_symbolic_slice_parent_uuid_is_substituted(self) -> None:
+        """Symbolic slice parents keep a valid substituted parent UUID."""
+        old_parent = _make_array_value("callee_q")
+        root = _make_array_value("caller_q")
+        start = _make_value("i")
+        one = _make_const_value("one", 1)
+        replacement_parent = ArrayValue(
+            type=QubitType(),
+            name="caller_q[i:]",
+            slice_of=root,
+            slice_start=start,
+            slice_step=one,
+        )
+        old_child = _make_value("callee_q_1", QubitType)
+        new_child = _make_value("caller_q_i_plus_1", QubitType)
+        carrier = ArrayValue(
+            type=QubitType(),
+            name="tuple_qubits",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_uuids=(old_child.uuid,),
+                    element_logical_ids=(old_child.logical_id,),
+                    element_parent_uuids=(old_parent.uuid,),
+                    element_parent_indices=(1,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor(
+            {
+                old_parent.uuid: replacement_parent,
+                old_child.uuid: new_child,
+            }
+        ).substitute_value(carrier)
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == (new_child.uuid,)
+        assert result.metadata.array_runtime.element_logical_ids == (
+            new_child.logical_id,
+        )
+        assert result.metadata.array_runtime.element_parent_uuids == (
+            replacement_parent.uuid,
+        )
+        assert result.metadata.array_runtime.element_parent_indices == (1,)
+
+    def test_parent_metadata_without_element_uuids_is_preserved(self) -> None:
+        """Parent provenance can be substituted without element UUIDs."""
+        old_parent = _make_array_value("old_parent")
+        new_parent = _make_array_value("new_parent")
+        carrier = ArrayValue(
+            type=QubitType(),
+            name="parent_only",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_parent_uuids=(old_parent.uuid,),
+                    element_parent_indices=(2,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor({old_parent.uuid: new_parent}).substitute_value(
+            carrier
+        )
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == ()
+        assert result.metadata.array_runtime.element_parent_uuids == (new_parent.uuid,)
+        assert result.metadata.array_runtime.element_parent_indices == (2,)
 
 
 # ===========================================================================

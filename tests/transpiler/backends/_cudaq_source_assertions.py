@@ -218,6 +218,16 @@ class _ExpectedCudaqSourceBuilder:
                 call_args.append("thetas")
             self._emit(f"cudaq.control({', '.join(call_args)})")
             return
+        if kind == "adjoint_kernel_call":
+            helper_name, targets, uses_thetas = args
+            call_args = [
+                helper_name,
+                *[f"q[{index}]" for index in targets],
+            ]
+            if uses_thetas:
+                call_args.append("thetas")
+            self._emit(f"cudaq.adjoint({', '.join(call_args)})")
+            return
         if kind == "measure":
             qubit, clbit = args
             if self._mode == ExecutionMode.RUNNABLE:
@@ -501,6 +511,27 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
             circuit,
             helper_name,
             control_indices,
+            target_indices,
+            uses_thetas,
+        )
+
+    def emit_adjoint_kernel_call(
+        self,
+        circuit: CudaqKernelArtifact,
+        helper_name: str,
+        target_indices: list[int],
+        uses_thetas: bool,
+    ) -> None:
+        self._record(
+            circuit,
+            "adjoint_kernel_call",
+            helper_name,
+            list(target_indices),
+            uses_thetas,
+        )
+        super().emit_adjoint_kernel_call(
+            circuit,
+            helper_name,
             target_indices,
             uses_thetas,
         )

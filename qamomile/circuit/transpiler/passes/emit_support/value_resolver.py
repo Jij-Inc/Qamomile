@@ -379,7 +379,7 @@ class ValueResolver:
         param operand at the call site must resolve to a value to seed the
         callee's parameter bindings.
         """
-        return self.lookup_in_bindings(operand, bindings)
+        return self.lookup_in_bindings(operand, bindings, index_array=True)
 
     def bind_block_params(
         self,
@@ -458,25 +458,124 @@ class ValueResolver:
         ``None`` here.
         """
         parent = v.parent_array
+        # Only element Values carry a parent array; scalar Values cannot be
+        # indexed through this helper.
         if parent is None:
             return None
-        if parent.name in self.parameters:
+        # Resolve a possibly sliced view element to the root array and
+        # concrete indices; symbolic indices or slice bounds intentionally
+        # fall back to unresolved.
+        location = self._resolve_array_element_location(
+            parent, v.element_indices, bindings
+        )
+        if location is None:
             return None
-        container = bindings.get(parent.name)
-        if container is None:
-            container = bindings.get(parent.uuid)
+        root_parent, indices = location
+        # Runtime parameter arrays are symbolic even if placeholder data is
+        # present in bindings; never index them at emit time.
+        if root_parent.name in self.parameters:
+            return None
+        # Prefer const_array metadata, then explicit bindings for the root
+        # container. A missing container means the element stays unresolved.
+        container = self._resolve_array_container(root_parent, bindings)
         if container is None:
             return None
 
-        for idx in v.element_indices:
-            i = self.resolve_int_value(idx, bindings)
-            if i is None:
-                return None
+        # Descend through nested containers one index at a time; the final
+        # value of ``container`` is the resolved element, not the parent array.
+        for i in indices:
             try:
                 container = container[i]
             except (IndexError, KeyError, TypeError):
+                # Out-of-range or non-indexable containers are unresolved
+                # rather than guessed.
                 return None
         return container
+
+    def _resolve_array_element_location(
+        self,
+        parent: "ArrayValue",
+        element_indices: tuple["Value", ...],
+        bindings: dict[str, Any],
+    ) -> tuple["ArrayValue", tuple[int, ...]] | None:
+        """Resolve an array element access to a root array and indices.
+
+        Slice affine composition is applied to the leading index because
+        Qamomile VectorView slices are one-dimensional Vector slices.
+
+        Args:
+            parent (ArrayValue): The immediate parent array on the
+                element Value. This may be a sliced view.
+            element_indices (tuple[Value, ...]): The element's indices in
+                the immediate parent array's local coordinate system.
+            bindings (dict[str, Any]): The active emit-time bindings.
+
+        Returns:
+            tuple[ArrayValue, tuple[int, ...]] | None: The root array and
+                concrete indices into its container, or ``None`` when any
+                index or slice bound is unresolved.
+        """
+        resolved_indices: list[int] = []
+        # Resolve local element indices first. Any symbolic index keeps the
+        # whole element access unresolved at emit time.
+        for idx in element_indices:
+            i = self.resolve_int_value(idx, bindings)
+            if i is None:
+                # Symbolic element indices stay unresolved at emit time.
+                return None
+            resolved_indices.append(i)
+
+        # No explicit element index means callers are asking for the array
+        # container itself, so there is no slice-local coordinate to compose.
+        if not resolved_indices:
+            return parent, ()
+
+        root_index = resolved_indices[0]
+        cur = parent
+        # Compose each VectorView affine map back to the root container:
+        # root_index = slice_start + slice_step * local_index.
+        while cur.slice_of is not None:
+            # A sliced view must carry both affine-map operands. If either is
+            # absent, keep this access unresolved instead of inventing bounds.
+            if cur.slice_start is None or cur.slice_step is None:
+                return None
+            start = self.resolve_int_value(cur.slice_start, bindings)
+            step = self.resolve_int_value(cur.slice_step, bindings)
+            if start is None or step is None:
+                # Symbolic slice bounds stay unresolved at emit time.
+                return None
+            root_index = start + step * root_index
+            cur = cur.slice_of
+
+        return cur, (root_index, *resolved_indices[1:])
+
+    def _resolve_array_container(
+        self,
+        parent: "ArrayValue",
+        bindings: dict[str, Any],
+    ) -> Any:
+        """Resolve an array parent to a concrete container for indexing.
+
+        Args:
+            parent (ArrayValue): The parent array whose element is being
+                resolved.
+            bindings (dict[str, Any]): The active emit-time bindings.
+
+        Returns:
+            Any: The concrete array-like container, or ``None`` if the
+                parent is unresolved.
+        """
+        # Prefer compile-time literal metadata over explicit bindings.
+        container = parent.get_const_array()
+        if container is not None:
+            return container
+
+        # Fall back to caller-supplied or emit-local array bindings by
+        # stable public name first, then by internal UUID.
+        container = bindings.get(parent.name)
+        if container is not None:
+            return container
+        return bindings.get(parent.uuid)
 
     def resolve_int_value(
         self,
@@ -493,7 +592,9 @@ class ValueResolver:
         failure to ``emit_for_unrolled``, which converts it into a hard
         compile error.
         """
-        raw = self.lookup_in_bindings(val, bindings)
+        raw = self.lookup_in_bindings(val, bindings, index_array=True)
+        # Symbolic values, including array elements with symbolic indices,
+        # must remain unresolved so emit callers can raise or fall back.
         if raw is None:
             return None
         return self._resolve_numeric_index(raw)
