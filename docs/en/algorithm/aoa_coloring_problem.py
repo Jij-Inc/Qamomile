@@ -226,42 +226,23 @@ executable_aoa_dicke = converter.transpile(
 # %% [markdown]
 # ## Visualize the AOA Circuit
 #
-# We can draw the AOA circuit with the same method as in the QAOA tutorial, using `Transpiler.to_block`, `Transpiler.inline` and then `MatplotlibDrawer.draw`.
+# The `Transpiler.to_block` -> `MatplotlibDrawer.draw` pipeline does not support yet the AOA qkernel.
+#
+# We can use qiskit draw function to visualize the ansatz.
 #
 # For readability we use `p=1`.
-#
-# We need to compute the indices consumed by the qkernel by calling the method `compute_dicke_composition_schedule` and `resolve_pair_indices` of the `converter` class.
 
 # %%
-from qamomile.circuit.algorithm.aoa import aoa_state_dicke
-from qamomile.circuit.visualization import MatplotlibDrawer
-
-#We can access the internal logic of the converter to get the indices for dicke state preparation and mixer construction.
-#This is useful for visualizing but not part of the normal user workflow.
-initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
-resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
-
-block = transpiler.to_block(
-    aoa_state_dicke,
-    bindings={
-        "linear": converter.spin_model.linear,
-        "quad": converter.spin_model.quad,
-        "n": converter.spin_model.num_bits,
-        "p": 1,
-        "pair_indices_mixer": resolved_pair,
-        "initial_ones": initial_ones,
-        "schedule_dicke": schedule_dicke,
-    },
-    parameters=["gammas", "betas"],
+executable = converter.transpile(
+    transpiler,
+    p=1,
+    initial_state="dicke",
+    hamming_weight=1,
+    mixer="fully-connected",
+    block_size=num_colors,
 )
 
-block = transpiler.inline(block)
-fig = MatplotlibDrawer(block).draw(
-    inline=True,
-    fold_loops=False,
-    expand_composite=True,
-    inline_depth=None,
-)
+fig = executable.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
 fig
 
 # %% [markdown]
@@ -282,28 +263,35 @@ fig
 # `xy_mixer`, repeated `p` times.
 
 # %%
+import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.aoa import xy_mixer
 from qamomile.circuit.algorithm.qaoa import ising_cost
 from qamomile.circuit.algorithm.state_preparation import prepare_dicke
 
-block = transpiler.to_block(
-    prepare_dicke,
+#We can access the internal logic of the converter to get the indices for dicke state preparation and mixer construction.
+#This is useful for visualizing but not part of the normal user workflow.
+initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
+resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
+
+@qmc.qkernel
+def prepare_dicke_measure(
+    n: qmc.UInt,
+    initial_ones: qmc.Vector[qmc.UInt],
+    schedule: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    q = prepare_dicke(n, initial_ones, schedule)
+    return qmc.measure(q)
+
+executable = transpiler.transpile(
+    prepare_dicke_measure,
     bindings={
         "n": converter.spin_model.num_bits,
         "initial_ones": initial_ones,
         "schedule": schedule_dicke,
     },
-    parameters=[],
 )
-block = transpiler.inline(block)
-fig = MatplotlibDrawer(block).draw(
-    inline=True,
-    fold_loops=False,
-    expand_composite=True,
-    inline_depth=None,
-)
-fig.set_size_inches(100, 8)
-fig
+
+executable.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
 
 # %%
 ising_cost.draw(
@@ -314,6 +302,10 @@ ising_cost.draw(
 )
 
 # %%
+#We can access the internal logic of the converter to get the indices for the mixer construction.
+#This is useful for visualizing but not part of the normal user workflow.
+resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
+
 fig = xy_mixer.draw(
     q=converter.spin_model.num_bits,
     pair_indices_mixer=resolved_pair,
@@ -509,3 +501,25 @@ nx.draw(
 )
 plt.title(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 plt.show()
+
+# %% [markdown]
+# ## Summary
+#
+# In this tutorial we:
+#
+# 1. Modeled the K-coloring problem with JijModeling — a one-hot variable
+#    per node and a Hamming-weight-1 constraint per node, converted to an
+#    Ising model via `BinaryModel`.
+# 2. Used `AOAConverter` to build the Alternating Operator Ansatz: the same
+#    Ising cost layer as QAOA, but with an XY mixer and a Dicke-state initial
+#    state that keep every sample within the one-hot feasible subspace.
+# 3. Inspected the building blocks — `prepare_dicke`, `ising_cost`, and
+#    `xy_mixer` — and how `block_size` partitions the register into one
+#    Dicke block per node.
+# 4. Optimized `gammas` and `betas` against the sampled mean energy, then
+#    sampled the optimized circuit and decoded the result back into OMMX
+#    `SampleSet` to check feasibility and visualize the best coloring.
+#
+# Because the AOA initial state and mixer already enforce the one-hot
+# constraint, every sampled bitstring is feasible by construction — the
+# optimizer only needs to minimize conflicts between adjacent nodes.

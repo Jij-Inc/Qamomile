@@ -1,6 +1,5 @@
 """Algorithm building blocks for quantum circuits."""
 
-
 from .aoa import (
     aoa_layers,
     aoa_state_basis_state,
@@ -13,7 +12,7 @@ from .aoa import (
     hubo_aoa_state_superposition,
     xy_mixer,
     xy_pair_rotation,
-
+)
 from .arithmetic import (
     modular_decrement,
     modular_increment,

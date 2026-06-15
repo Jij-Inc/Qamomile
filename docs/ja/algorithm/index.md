@@ -20,3 +20,4 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 - [Quantum-enhanced MCMCを実装する](qe_mcmc) — トロッター分解による時間発展を利用して、Quantum-enhanced MCMCを実装
 - [Möttönen振幅エンコーディング](mottonen_amplitude_encoding) — Gray符号Ry/Rz多重制御回転で任意の実数・複素振幅ベクトルを準備する。3つの入力モード（具体値、バインドされた`Vector[Float]`、ランタイムパラメトリックな角度）を扱う
 - [PCEによるMaxCut](pce_maxcut) — Pauli Correlation Encodingを使い、20変数MaxCutを**わずか3量子ビット**で解く。ハードウェア効率的なアンザッツをtanh緩和された代理損失で学習し、符号丸めで離散解を復元する
+- [グラフ彩色のためのAlternating Operator Ansatz](aoa_coloring_problem) — Dicke状態による初期状態とXYミキサーを使い、ワンホットの可行部分空間に留まったままK彩色問題をAlternating Operator Ansatzで解く

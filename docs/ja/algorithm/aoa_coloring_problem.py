@@ -225,42 +225,22 @@ executable_aoa_dicke = converter.transpile(
 # %% [markdown]
 # ## AOA 回路の可視化
 #
-# QAOA チュートリアルと同じ方法、すなわち `Transpiler.to_block`、`Transpiler.inline`、そして `MatplotlibDrawer.draw` を使って AOA 回路を描画できます。
+# `Transpiler.to_block` -> `MatplotlibDrawer.draw` パイプラインが適応できないため、qiskitのdrawを使います。
 #
 # 見やすさのために `p=1` を使用します。
 #
-# qkernel が消費するインデックスを得るには、`converter` クラスの `compute_dicke_composition_schedule` と `resolve_pair_indices` メソッドを呼び出す必要があります。
 
 # %%
-from qamomile.circuit.algorithm.aoa import aoa_state_dicke
-from qamomile.circuit.visualization import MatplotlibDrawer
-
-# Dicke 状態の準備とミキサーの構築に必要なインデックスを取得するため、コンバーターの内部ロジックにアクセスできます。
-# これは可視化には便利ですが、通常のユーザーワークフローの一部ではありません。
-initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
-resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
-
-block = transpiler.to_block(
-    aoa_state_dicke,
-    bindings={
-        "linear": converter.spin_model.linear,
-        "quad": converter.spin_model.quad,
-        "n": converter.spin_model.num_bits,
-        "p": 1,
-        "pair_indices_mixer": resolved_pair,
-        "initial_ones": initial_ones,
-        "schedule_dicke": schedule_dicke,
-    },
-    parameters=["gammas", "betas"],
+executable = converter.transpile(
+    transpiler,
+    p=1,
+    initial_state="dicke",
+    hamming_weight=1,
+    mixer="fully-connected",
+    block_size=num_colors,
 )
 
-block = transpiler.inline(block)
-fig = MatplotlibDrawer(block).draw(
-    inline=True,
-    fold_loops=False,
-    expand_composite=True,
-    inline_depth=None,
-)
+fig = executable.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
 fig
 
 # %% [markdown]
@@ -280,28 +260,35 @@ fig
 # `aoa_layers(p, ...)` は単に `ising_cost` と `xy_mixer` を交互に並べ、`p` 回繰り返したものです。
 
 # %%
+import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.aoa import xy_mixer
 from qamomile.circuit.algorithm.qaoa import ising_cost
 from qamomile.circuit.algorithm.state_preparation import prepare_dicke
 
-block = transpiler.to_block(
-    prepare_dicke,
+# Dicke 状態の準備とミキサーの構築に必要なインデックスを取得するため、コンバーターの内部ロジックにアクセスできます。
+# これは可視化には便利ですが、通常のユーザーワークフローの一部ではありません。
+initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(hamming_weight=1, block_size=num_colors)
+resolved_pair = converter.resolve_pair_indices(mixer="fully-connected", pair_indices=None, block_size=num_colors)
+
+@qmc.qkernel
+def prepare_dicke_measure(
+    n: qmc.UInt,
+    initial_ones: qmc.Vector[qmc.UInt],
+    schedule: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    q = prepare_dicke(n, initial_ones, schedule)
+    return qmc.measure(q)
+
+executable = transpiler.transpile(
+    prepare_dicke_measure,
     bindings={
         "n": converter.spin_model.num_bits,
         "initial_ones": initial_ones,
         "schedule": schedule_dicke,
     },
-    parameters=[],
 )
-block = transpiler.inline(block)
-fig = MatplotlibDrawer(block).draw(
-    inline=True,
-    fold_loops=False,
-    expand_composite=True,
-    inline_depth=None,
-)
-fig.set_size_inches(100, 8)
-fig
+
+executable.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
 
 # %%
 ising_cost.draw(
@@ -506,3 +493,23 @@ nx.draw(
 )
 plt.title(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 plt.show()
+
+# %% [markdown]
+# ## まとめ
+#
+# このチュートリアルでは以下を行いました：
+#
+# 1. JijModeling で K 彩色問題をモデル化しました。各ノードに 1 つのワンホット変数を割り当て、
+#    各ノードにハミング重み 1 の制約を課し、`BinaryModel` でIsingモデルへ変換しました。
+# 2. `AOAConverter` を使って交互演算子アンザッツを構築しました。コスト層は QAOA と同じ
+#    Ising コスト層ですが、ミキサーには XY ミキサー、初期状態には Dicke 状態を使うことで、
+#    すべてのサンプルがワンホットの可行部分空間に留まるようにしました。
+# 3. `prepare_dicke`、`ising_cost`、`xy_mixer` といった構成要素と、`block_size` が
+#    レジスタをノードごとの Dicke ブロックに分割する仕組みを確認しました。
+# 4. サンプリングした平均エネルギーに対して `gammas` と `betas` を最適化し、最適化後の回路を
+#    サンプリングして OMMX の `SampleSet` にデコードすることで、可行性のチェックと
+#    最良の彩色の可視化を行いました。
+#
+# AOA の初期状態とミキサーがワンホット制約をあらかじめ満たすように設計されているため、
+# サンプリングされるすべてのビット列は構成上常に可行となります。オプティマイザは
+# 隣接ノード間の衝突数を最小化することだけに専念できます。

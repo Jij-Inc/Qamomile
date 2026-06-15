@@ -556,7 +556,7 @@ class AOAConverter(QAOAConverter):
         p: int,
         pair_indices_mixer: np.ndarray,
         initial_ones: np.ndarray,
-        schedule_dicke: dict,
+        schedule_dicke: dict[tuple[int, int, int], float],
     ) -> ExecutableProgram:
         """Transpile a quadratic-only model using the AOA circuit with Dicke state preparation.
 
@@ -731,7 +731,7 @@ class AOAConverter(QAOAConverter):
         p: int,
         pair_indices_mixer: np.ndarray,
         initial_ones: np.ndarray,
-        schedule_dicke: dict,
+        schedule_dicke: dict[tuple[int, int, int], float],
     ) -> ExecutableProgram:
         """Transpile a HUBO model using the AOA circuit with Dicke state preparation.
 

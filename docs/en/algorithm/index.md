@@ -20,3 +20,4 @@ Concrete quantum algorithm examples built with Qamomile.
 - [Implementing Quantum-enhanced MCMC](qe_mcmc) — Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution
 - [Möttönen Amplitude Encoding](mottonen_amplitude_encoding) — Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multiplexers, with three input modes (concrete, bound `Vector[Float]`, runtime-parametric angles)
 - [PCE for MaxCut](pce_maxcut) — Solve a 20-variable MaxCut on just 3 qubits with Pauli Correlation Encoding, training a hardware-efficient ansatz against a tanh-relaxed surrogate and decoding via sign rounding
+- [Alternating Operator Ansatz for Graph Coloring](aoa_coloring_problem) — Solve K-coloring with the Alternating Operator Ansatz, using a Dicke-state initial state and an XY mixer to stay within the one-hot feasible subspace
