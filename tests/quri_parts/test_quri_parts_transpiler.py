@@ -9,9 +9,12 @@ pytestmark = pytest.mark.quri_parts
 # Skip entire module if QURI Parts circuit support is not installed.
 pytest.importorskip("quri_parts.circuit")
 
+import qamomile.circuit as qmc  # noqa: E402
 from qamomile.quri_parts import (  # noqa: E402
+    QuriPartsExecutor,
     QuriPartsGateEmitter,
 )
+from qamomile.quri_parts.transpiler import QuriPartsEmitPass  # noqa: E402
 
 
 class TestQuriPartsGateEmitter:
@@ -105,6 +108,17 @@ class TestQuriPartsGateEmitter:
 
         gates = list(circuit.gates)
         assert len(gates) == 1
+
+    def test_inverse_remap_index_error_propagates(self) -> None:
+        """Out-of-range native-inverse remaps should not be hidden."""
+        emitter = QuriPartsGateEmitter()
+        parent = emitter.create_circuit(1, 0)
+        source = emitter.create_circuit(2, 0)
+        emitter.emit_x(source, 1)
+        emit_pass = QuriPartsEmitPass()
+
+        with pytest.raises(IndexError):
+            emit_pass._append_remapped_circuit(parent, source, [0])
 
     def test_controlled_single_qubit_decomposition(self) -> None:
         """Test controlled single-qubit gate decompositions."""
@@ -201,3 +215,105 @@ class TestQuriPartsTranspiler:
         # Custom sampler can be passed to executor
         executor = transpiler.executor(sampler=None, estimator=None)
         assert executor is not None
+
+    def test_controlled_cp_with_runtime_parameter_transpiles(self) -> None:
+        """Controlled CP fallback preserves a symbolic QURI Parts angle."""
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def cp_layer(
+            control: qmc.Qubit,
+            target: qmc.Qubit,
+            theta: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            """Apply a symbolic controlled-phase body."""
+            control, target = qmc.cp(control, target, theta)
+            return control, target
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            """Apply a controlled CP body with a runtime angle."""
+            qs = qmc.qubit_array(3, "qs")
+            qs[0], qs[1], qs[2] = qmc.control(cp_layer)(
+                qs[0],
+                qs[1],
+                qs[2],
+                theta=theta,
+            )
+            return qmc.measure(qs)
+
+        transpiler = QuriPartsTranspiler()
+        executable = transpiler.transpile(circuit, parameters=["theta"])
+        quri_circuit = executable.compiled_quantum[0].circuit
+
+        assert quri_circuit.parameter_count == 1
+        assert len(quri_circuit.gates) > 0
+
+    def test_controlled_inverse_with_runtime_parameter_transpiles(self) -> None:
+        """Controlled inverse fallback evaluates symbolic angle negation."""
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def phase_layer(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            """Apply a runtime phase rotation."""
+            q = qmc.rz(q, theta)
+            return q
+
+        @qmc.qkernel
+        def inverse_body(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            """Apply an inverse runtime phase inside a controlled body."""
+            q = qmc.inverse(phase_layer)(q, theta)
+            return q
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            """Apply a controlled inverse body with a runtime angle."""
+            qs = qmc.qubit_array(2, "qs")
+            qs[0] = qmc.x(qs[0])
+            controlled = qmc.control(inverse_body)
+            qs[0], qs[1] = controlled(qs[0], qs[1], theta)
+            return qmc.measure(qs)
+
+        transpiler = QuriPartsTranspiler()
+        executable = transpiler.transpile(circuit, parameters=["theta"])
+        quri_circuit = executable.compiled_quantum[0].circuit
+
+        assert quri_circuit.parameter_count == 1
+        assert len(quri_circuit.gates) > 0
+
+    def test_controlled_toffoli_matrix_path_executes(self) -> None:
+        """Controlled-Toffoli fallback flips only the intended target qubit."""
+        pytest.importorskip("quri_parts.qulacs")
+
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def toffoli_layer(
+            left: qmc.Qubit,
+            right: qmc.Qubit,
+            target: qmc.Qubit,
+        ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+            """Apply a Toffoli gate inside a controlled body."""
+            left, right, target = qmc.ccx(left, right, target)
+            return left, right, target
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            """Prepare three controls and apply a controlled Toffoli."""
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            qs[0], qs[1], qs[2], qs[3] = qmc.control(toffoli_layer)(
+                qs[0],
+                qs[1],
+                qs[2],
+                qs[3],
+            )
+            return qmc.measure(qs)
+
+        transpiler = QuriPartsTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(QuriPartsExecutor(seed=123), shots=16).result()
+
+        assert result.results == [((True, True, True, True), 16)]

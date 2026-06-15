@@ -109,8 +109,9 @@ def emit_pauli_evolve(
 
     # Validate qubit count: logical array size vs Hamiltonian
     input_array = op.qubits
+    assert isinstance(input_array, ArrayValue)
     num_h_qubits = hamiltonian.num_qubits
-    if isinstance(input_array, ArrayValue) and input_array.shape:
+    if input_array.shape:
         n_resolved = emit_pass._resolver.resolve_int_value(
             input_array.shape[0], bindings
         )
@@ -214,6 +215,7 @@ def emit_pauli_evolve(
     # callers that walk to the root find the registered mapping, while
     # direct lookups via the result array's own uuid also still work.
     result_array = op.evolved_qubits
+    assert isinstance(result_array, ArrayValue)
     result_root, result_start, result_step = emit_pass._resolver.resolve_slice_chain(
         result_array, bindings, operation="PauliEvolveOp"
     )

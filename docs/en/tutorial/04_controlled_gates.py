@@ -237,7 +237,15 @@ vec_target_demo.draw()
 
 # %%
 @qmc.qkernel
-def _phase(q: qmc.Qubit, theta: qmc.Float = math.pi / 2) -> qmc.Qubit:
+def _phase(
+    q: qmc.Qubit,
+    # Runtime: ``_create_bound_input`` accepts a raw ``float`` default for
+    # a ``qmc.Float`` parameter and wraps it as a constant ``Float`` handle.
+    # Static signature: declares the actual handle type; ``# type: ignore``
+    # acknowledges that the default literal is intentionally not a ``Float``
+    # instance.
+    theta: qmc.Float = math.pi / 2,  # type: ignore[assignment]
+) -> qmc.Qubit:
     return qmc.rx(q, theta)
 
 
@@ -550,8 +558,11 @@ def controlled_increment_demo(
 ) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, "q")
     q[control_index] = qmc.x(q[control_index])
-    n = q.shape[0]
-    for k in qmc.range(n - 1):
+    # ``q.shape[0]`` is typed as ``int | UInt``; rebinding ``n`` would
+    # widen the parameter's narrow ``qmc.UInt`` annotation, so introduce
+    # a fresh local instead.
+    n_shape = q.shape[0]
+    for k in qmc.range(n_shape - 1):
         target_idx = n - 2 - k
         ctrl_main = q[control_index]
         prefix = q[0:target_idx]
@@ -568,11 +579,14 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 
 # %% [markdown]
 # (cg-6)=
-# ## 6. Patterns that don't work
+# ## 6. Rejected and edge-case patterns
 #
-# This section walks through the rejected call shapes one at a
-# time, asserting the expected exception with a small
-# `expect_error` helper.
+# This section walks through rejected call shapes one at a time,
+# asserting the expected exception with a small `expect_error`
+# helper. It ends with a concrete sliced-QFT case that is supported
+# and worth keeping as a regression example for nested controlled
+# emission on backends that can convert the nested block to a gate
+# (Qiskit in this tutorial).
 #
 # | Case | Mode | Exception |
 # | --- | --- | --- |
@@ -582,10 +596,11 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | 6.4 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg control prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 single scalar control in symbolic mode | symbolic | `ValueError` |
+# | 6.7 controlled QFT over a sub-kernel `UInt` slice | concrete | supported when block-to-gate conversion succeeds |
 
 
 # %%
-def expect_error(label: str, exc_type: type, body) -> None:
+def expect_error(label: str, exc_type: type[BaseException], body) -> None:
     """Assert that ``body`` raises an exception of ``exc_type``.
 
     The helper only catches the *expected* exception class.  Any
@@ -795,6 +810,47 @@ expect_error(
     ValueError,
     case_single_scalar_control_symbolic,
 )
+
+# %% [markdown]
+# (cg-6-7)=
+# ### 6.7 Controlled QFT over a sub-kernel `UInt` slice (concrete)
+#
+# A controlled sub-kernel may call `qmc.qft` / `qmc.iqft` on a
+# `Vector[Qubit]` argument whose size is known at the call site.
+# For example, `controlled_qft = qmc.control(apply_qft)` works
+# when `apply_qft(q)` applies QFT to all of `q`.
+#
+# The same now holds for the narrower Qiskit-backed pattern below:
+# the wrapped sub-kernel receives a classical `UInt` argument and uses
+# it to form a `q[:m]` slice before calling QFT. Qamomile strips the
+# slice marker inside the nested controlled block after borrow
+# checking, so a controlled-U emitter whose block-to-gate conversion
+# succeeds can lower the sliced composite block. Backends without
+# block-to-gate conversion may still reject this multi-target fallback.
+
+
+# %%
+def case_controlled_qft_over_uint_slice() -> None:
+    @qmc.qkernel
+    def qft_prefix(q: qmc.Vector[qmc.Qubit], m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+        prefix = q[:m]
+        prefix = qmc.qft(prefix)
+        q[:m] = prefix
+        return q
+
+    @qmc.qkernel
+    def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n + 1, "q")
+        q[0] = qmc.x(q[0])
+        controlled_qft = qmc.control(qft_prefix)
+        q[0], targets = controlled_qft(q[0], q[1 : n + 1], n)
+        q[1 : n + 1] = targets
+        return qmc.measure(q)
+
+    transpiler.transpile(kernel, bindings={"n": 2})
+
+
+case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=

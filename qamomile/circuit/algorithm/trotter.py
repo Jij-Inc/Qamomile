@@ -132,7 +132,7 @@ def _resolve_order(order: int | qmc.UInt) -> int | None:
         return None
     if isinstance(order, int):
         return order
-    return None
+    return None  # type: ignore[unreachable]
 
 
 def _resolve_hamiltonian_len(
@@ -205,7 +205,7 @@ def trotterized_time_evolution(
     if n is not None and n < 2:
         raise ValueError(f"hamiltonian must contain at least 2 terms, got {n}")
 
-    return _trotter_evolve(q, hamiltonian, order, gamma, step)
+    return _trotter_evolve(q, hamiltonian, order, gamma, step)  # type: ignore[arg-type]
 
 
 __all__ = ["trotterized_time_evolution"]

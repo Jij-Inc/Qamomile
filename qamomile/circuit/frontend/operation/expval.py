@@ -12,14 +12,14 @@ from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
 
 if TYPE_CHECKING:
     pass
 
 
 def expval(
-    qubits: Vector[Qubit] | tuple[Qubit, ...],
+    qubits: Qubit | Vector[Qubit] | tuple[Qubit, ...],
     hamiltonian: Observable,
 ) -> Float:
     """Compute the expectation value of an observable on a quantum state.
@@ -37,14 +37,14 @@ def expval(
     trace time and post-fold in the IR.
 
     Args:
-        qubits (Vector[Qubit] | tuple[Qubit, ...]): The quantum
-            register (or tuple of individual qubits) holding the
-            prepared state.  When a ``Vector`` is passed all
-            previously-borrowed elements must have been returned (the
-            strict-return policy is enforced by ``consume`` here).
-            When a slice view (``VectorView``) is passed its covered
-            parent slots become consumed-slot markers so the parent
-            cannot reuse them later.
+        qubits (Qubit | Vector[Qubit] | tuple[Qubit, ...]): The quantum
+            register holding the prepared state. A single ``Qubit``
+            handle is accepted for 1-qubit observables. When a
+            ``Vector`` is passed all previously-borrowed elements must
+            have been returned (the strict-return policy is enforced
+            by ``consume`` here). When a slice view (``VectorView``)
+            is passed its covered parent slots become consumed-slot
+            markers so the parent cannot reuse them later.
         hamiltonian (Observable): The Observable parameter
             representing the Hamiltonian.  The actual
             ``qamomile.observable.Hamiltonian`` is provided via
@@ -93,6 +93,20 @@ def expval(
         # unpacking is unaffected.
         consumed_qubits = tuple(q.consume(operation_name="expval") for q in qubits)
         qubit_values = [q.value for q in consumed_qubits]
+        # Snapshot each element's root ``(array_uuid, index)`` so emit can map
+        # the observable's Pauli index to the physical qubit registered under
+        # the root array's QInit key, even for a Vector element whose own UUID
+        # was never registered in the quantum segment (e.g. an ungated ancilla,
+        # or an element produced as a gate/composite result).  A standalone
+        # qubit has no ``parent_array`` and resolves to ``None``; it is recorded
+        # with the ``("", -1)`` sentinel so emit falls back to the flat UUID
+        # lookup that already resolves standalone qubits.
+        # We must resolve the root address HERE (at trace time) because the
+        # pseudo-ArrayValue below flattens the elements into bare UUID tuples and
+        # drops their ``parent_array`` -- emit could not chain-walk later. (The
+        # non-tuple branch keeps the real element Value, so it resolves at emit
+        # instead; see ``_build_qubit_map``.)
+        parent_addrs = [resolve_root_qubit_address(v) for v in qubit_values]
         qubits_value = ArrayValue(
             type=qubit_values[0].type,
             name="expval_qubits",
@@ -100,6 +114,17 @@ def expval(
         ).with_array_runtime_metadata(
             element_uuids=tuple(q.uuid for q in qubit_values),
             element_logical_ids=tuple(q.logical_id for q in qubit_values),
+            # Encode each resolved root as (uuid, idx); ``None`` (standalone
+            # qubit, or unresolved element) becomes the ``("", -1)`` sentinel
+            # that ``get_element_parent_addresses()`` decodes back to ``None``.
+            # Kept as two parallel tuples (not one tuple of pairs) so they ride
+            # the existing ArrayRuntimeMetadata serialize / canonical paths.
+            element_parent_uuids=tuple(
+                addr[0] if addr is not None else "" for addr in parent_addrs
+            ),
+            element_parent_indices=tuple(
+                addr[1] if addr is not None else -1 for addr in parent_addrs
+            ),
         )
     else:
         # Guard for Vector[Qubit] operands: if any slot of the array was
@@ -111,9 +136,9 @@ def expval(
         #
         # We only call this on ``Vector`` (which is an ``ArrayBase``
         # subclass and has ``_check_no_consumed_slots``).  A bare
-        # ``Qubit`` handle — supported for back-compat even though the
-        # public type signature requires ``Vector | tuple`` — cannot
-        # carry consumed-slot markers and is skipped.
+        # ``Qubit`` handle — accepted by the public signature for
+        # 1-qubit observables — cannot carry consumed-slot markers and
+        # is skipped.
         if isinstance(qubits, Vector):
             qubits._check_no_consumed_slots("expval")
         # Destructive consume: validates outstanding borrows, marks

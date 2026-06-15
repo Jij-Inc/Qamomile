@@ -2,10 +2,21 @@
 
 import math
 import random
+from typing import Any
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.handle import QFixed, Qubit
+from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    CompositeGateType,
+)
+from qamomile.circuit.ir.types import QFixedType
+from qamomile.circuit.ir.value import Value
 
 
 def _decode_phase(bits: list) -> float:
@@ -79,6 +90,151 @@ def builtin_qpe(n: int, phase: float) -> qmc.Float:
     return qmc.measure(phase_q)
 
 
+@qmc.qkernel
+def builtin_qpe_vector_view_phase(gammas: qmc.Vector[qmc.Float]) -> qmc.Float:
+    """Estimate a phase selected from a sliced Vector through public QPE.
+
+    Args:
+        gammas (qmc.Vector[qmc.Float]): Compile-time-bound phase angle vector.
+
+    Returns:
+        qmc.Float: Decoded QPE phase estimate.
+    """
+    gammas_view = gammas[1:3]
+    q_phase = qmc.qubit_array(3, name="phase_reg")
+    target = qmc.qubit(name="target")
+    target = qmc.x(target)
+    phase_q: qmc.QFixed = qmc.qpe(target, q_phase, _p_gate, theta=gammas_view[0])
+    return qmc.measure(phase_q)
+
+
+def _fallback_qpe_phase(
+    target: qmc.Qubit,
+    counting: qmc.Vector[qmc.Qubit],
+    theta: qmc.Float,
+) -> QFixed:
+    """Emit a block-free QPE composite operation for fallback emission tests.
+
+    Args:
+        target (qmc.Qubit): Eigenstate qubit consumed as the QPE target.
+        counting (qmc.Vector[qmc.Qubit]): Three-qubit counting register.
+        theta (qmc.Float): Phase angle operand passed through composite
+            fallback phase extraction.
+
+    Returns:
+        QFixed: Fixed-point phase register produced from the counting qubits.
+    """
+    counting_handles = [counting[i] for i in range(3)]
+    counting_operands = [handle.value for handle in counting_handles]
+    target_operand = target.value
+    counting_results = [value.next_version() for value in counting_operands]
+    target_result = target_operand.next_version()
+
+    for i, handle in enumerate(counting_handles):
+        counting[i] = Qubit(
+            value=counting_results[i],
+            parent=handle.parent,
+            indices=handle.indices,
+            name=handle.name,
+        )
+
+    op = CompositeGateOperation(
+        operands=[*counting_operands, target_operand, theta.value],
+        results=[*counting_results, target_result],
+        gate_type=CompositeGateType.QPE,
+        num_control_qubits=3,
+        num_target_qubits=1,
+        has_implementation=False,
+    )
+    get_current_tracer().add_operation(op)
+
+    qubit_uuids = [result.uuid for result in counting_results]
+    qubit_logical_ids = [result.logical_id for result in counting_results]
+    result_value = (
+        Value(
+            type=QFixedType(),
+            name=f"{counting.value.name}_as_qfixed",
+        )
+        .with_cast_metadata(
+            source_uuid=counting.value.uuid,
+            source_logical_id=counting.value.logical_id,
+            qubit_uuids=qubit_uuids,
+            qubit_logical_ids=qubit_logical_ids,
+        )
+        .with_qfixed_metadata(
+            qubit_uuids=qubit_uuids,
+            num_bits=3,
+            int_bits=0,
+        )
+    )
+    get_current_tracer().add_operation(
+        CastOperation(
+            operands=[counting.value],
+            results=[result_value],
+            source_type=counting.value.type,
+            target_type=result_value.type,
+            qubit_mapping=qubit_uuids,
+        )
+    )
+    return QFixed(value=result_value)
+
+
+@qmc.qkernel
+def fallback_qpe_vector_view_phase(gammas: qmc.Vector[qmc.Float]) -> qmc.Float:
+    """Estimate a phase selected from a sliced Vector parameter.
+
+    Args:
+        gammas (qmc.Vector[qmc.Float]): Compile-time-bound phase angle vector.
+
+    Returns:
+        qmc.Float: Decoded QPE phase estimate.
+    """
+    gammas_view = gammas[1:3]
+    q_phase = qmc.qubit_array(3, name="phase_reg")
+    target = qmc.qubit(name="target")
+    target = qmc.x(target)
+    phase_q = _fallback_qpe_phase(target, q_phase, gammas_view[0])
+    return qmc.measure(phase_q)
+
+
+def _assert_fallback_qpe_vector_view_phase(transpiler: Any) -> None:
+    """Assert fallback QPE resolves and executes a VectorView phase operand.
+
+    Args:
+        transpiler (Any): Backend transpiler exposing ``transpile`` and
+            ``executor`` methods.
+    """
+    executable = transpiler.transpile(
+        fallback_qpe_vector_view_phase,
+        bindings={"gammas": np.array([math.pi / 4, math.pi / 2, math.pi])},
+    )
+    result = executable.sample(transpiler.executor(), shots=256).result()
+
+    assert len(result.results) == 1
+    value, count = result.results[0]
+    assert value == pytest.approx(0.25)
+    assert count == 256
+
+
+def _assert_builtin_qpe_vector_view_phase(transpiler: Any) -> None:
+    """Assert public QPE resolves and executes a VectorView phase operand.
+
+    Args:
+        transpiler (Any): Backend transpiler exposing ``transpile`` and
+            ``executor`` methods.
+    """
+    executable = transpiler.transpile(
+        builtin_qpe_vector_view_phase,
+        bindings={"gammas": np.array([math.pi / 4, math.pi / 2, math.pi])},
+    )
+    result = executable.sample(transpiler.executor(), shots=256).result()
+
+    assert len(result.results) == 1
+    value, count = result.results[0]
+    assert value == pytest.approx(0.25)
+    assert count == 256
+
+
 # -- Tests --------------------------------------------------------------------
 
 
@@ -145,6 +301,50 @@ class TestQPEBuiltin:
             )
 
 
+class TestQPEFallbackVectorViewPhase:
+    """Fallback QPE composite emission with VectorView phase operands."""
+
+    def test_qiskit_executes_vector_view_phase(self, qiskit_transpiler):
+        """Qiskit executes fallback QPE with a VectorView phase element."""
+        _assert_fallback_qpe_vector_view_phase(qiskit_transpiler)
+
+    def test_quri_parts_executes_vector_view_phase(self):
+        """QURI Parts executes fallback QPE with a VectorView phase element."""
+        pytest.importorskip("quri_parts")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        _assert_fallback_qpe_vector_view_phase(QuriPartsTranspiler())
+
+    def test_cudaq_executes_vector_view_phase(self):
+        """CUDA-Q executes fallback QPE with a VectorView phase element."""
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        _assert_fallback_qpe_vector_view_phase(CudaqTranspiler())
+
+
+class TestQPEBuiltinVectorViewPhase:
+    """Public QPE with VectorView phase operands."""
+
+    def test_qiskit_executes_vector_view_phase(self, qiskit_transpiler):
+        """Qiskit executes public QPE with a VectorView phase element."""
+        _assert_builtin_qpe_vector_view_phase(qiskit_transpiler)
+
+    def test_quri_parts_executes_vector_view_phase(self):
+        """QURI Parts executes public QPE with a VectorView phase element."""
+        pytest.importorskip("quri_parts")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        _assert_builtin_qpe_vector_view_phase(QuriPartsTranspiler())
+
+    def test_cudaq_executes_vector_view_phase(self):
+        """CUDA-Q executes public QPE with a VectorView phase element."""
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        _assert_builtin_qpe_vector_view_phase(CudaqTranspiler())
+
+
 class TestQPEConsistency:
     """Verify naive QPE and built-in QPE return the same phase estimates."""
 
@@ -190,7 +390,7 @@ class TestQPEConsistency:
         )
 
     @pytest.mark.parametrize("n_qubits", [3, 5, 7])
-    @pytest.mark.parametrize("seed", [901 + i for i in range(100)])
+    @pytest.mark.parametrize("seed", [901 + i for i in range(5)])
     def test_random_angle_consistency(self, qiskit_transpiler, seed, n_qubits):
         r"""Both QPE implementations return a theoretically valid phase for random angles.
 

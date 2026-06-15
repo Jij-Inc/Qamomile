@@ -1,5 +1,6 @@
 """Algorithm building blocks for quantum circuits."""
 
+
 from .aoa import (
     aoa_layers,
     aoa_state_basis_state,
@@ -12,6 +13,10 @@ from .aoa import (
     hubo_aoa_state_superposition,
     xy_mixer,
     xy_pair_rotation,
+
+from .arithmetic import (
+    modular_decrement,
+    modular_increment,
 )
 from .basic import (
     cx_entangling_layer,
@@ -49,6 +54,9 @@ from .state_preparation import (
 from .trotter import trotterized_time_evolution
 
 __all__ = [
+    # Arithmetic
+    "modular_increment",
+    "modular_decrement",
     # QAOA
     "ising_cost",
     "x_mixer",

@@ -2571,8 +2571,8 @@ class TestCudaqHelperKernelSemanticsContract:
             f"Multi-control second-target helper: expected |1011>, got statevector {sv}"
         )
 
-    def test_helper_body_with_loop_multi_control_raises_emit_error(self):
-        """Multi-control helper body with ForOperation should raise EmitError."""
+    def test_helper_body_with_loop_multi_control_uses_cudaq_control(self):
+        """Multi-control helper body with ForOperation uses cudaq.control."""
 
         @qmc.qkernel
         def loop_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
@@ -2591,8 +2591,17 @@ class TestCudaqHelperKernelSemanticsContract:
             q[0], q[1], q[2], q[3] = cc(q[0], q[1], q[2], q[3])
             return qmc.measure(q)
 
-        with pytest.raises(EmitError, match="Unsupported operation"):
-            _transpile_and_get_circuit(circuit)
+        _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(4, 0b1111)
+        assert statevectors_equal(sv, expected)
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit, t1: cudaq.qubit):",
+            "x(t0)",
+            "x(t1)",
+            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2], q[3])",
+        )
 
     def test_existing_ccx_happy_path_regression(self):
         """Existing CCX (Toffoli) happy path must not regress."""
@@ -3787,7 +3796,126 @@ class TestControlledSubRoutines:
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         assert qc.num_qubits == 2
         assert qc.execution_mode == ExecutionMode.STATIC
-        _assert_source_contains(qc, "def _qamomile_kernel():", "q = cudaq.qvector(2)")
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit):",
+            "h(t0)",
+            "x(t0)",
+            "def _qamomile_kernel():",
+            "q = cudaq.qvector(2)",
+            "cudaq.control(_qamomile_controlled_0, q[0], q[1])",
+        )
+
+    def test_controlled_parametric_kernel_uses_cudaq_control(self):
+        """A controlled parametric helper is emitted via cudaq.control."""
+
+        @qmc.qkernel
+        def ry_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            q = qmc.ry(q, theta)
+            return q
+
+        controlled_ry = qmc.control(ry_gate)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0], q[1] = controlled_ry(q[0], q[1], theta=theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
+            "ry(thetas[0], t0)",
+            "def _qamomile_kernel(thetas: list[float]):",
+            "cudaq.control(_qamomile_controlled_0, q[0], q[1], thetas)",
+        )
+
+    def test_nested_controlled_parametric_helper_forwards_thetas(self):
+        """A nested controlled helper forwards runtime parameters."""
+
+        @qmc.qkernel
+        def ry_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            q = qmc.ry(q, theta)
+            return q
+
+        controlled_ry = qmc.control(ry_gate)
+
+        @qmc.qkernel
+        def inner_controlled(
+            control: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            control, target = controlled_ry(control, target, theta=theta)
+            return control, target
+
+        nested_controlled = qmc.control(inner_controlled)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0], q[1], q[2] = nested_controlled(q[0], q[1], q[2], theta=theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
+            "ry(thetas[0], t0)",
+            "def _qamomile_controlled_1(t0: cudaq.qubit, t1: cudaq.qubit, thetas: list[float]):",
+            "cudaq.control(_qamomile_controlled_0, t0, t1, thetas)",
+            "cudaq.control(_qamomile_controlled_1, q[0], q[1], q[2], thetas)",
+        )
+
+    def test_controlled_multi_control_helper_uses_cudaq_control(self):
+        """A multi-control helper uses CUDA-Q's controlled-kernel API."""
+
+        @qmc.qkernel
+        def hx_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            q = qmc.x(q)
+            return q
+
+        controlled_hx = qmc.control(hx_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = controlled_hx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit):",
+            "h(t0)",
+            "x(t0)",
+            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2])",
+        )
+
+    def test_identical_controlled_helpers_are_reused(self):
+        """Identical generated helper kernels share one CUDA-Q helper."""
+
+        @qmc.qkernel
+        def hx_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            q = qmc.x(q)
+            return q
+
+        controlled_hx = qmc.control(hx_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[0], q[1] = controlled_hx(q[0], q[1])
+            q[0], q[2] = controlled_hx(q[0], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
+        assert qc.source.count("def _qamomile_controlled_") == 1
+        assert qc.source.count("cudaq.control(_qamomile_controlled_0") == 2
 
     def test_controlled_power_2(self):
         """A powered controlled phase helper transpiles."""

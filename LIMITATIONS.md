@@ -1,6 +1,6 @@
 # Known Limitations
 
-This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover both the call-time specialization fix for issue #392 and the eager qkernel rebind-detection change.
+This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, and the slice/control-flow work tracked by recent controlled-view fixes.
 
 ## Re-trace cost is uncached
 
@@ -75,3 +75,79 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 **Workaround**: refer to the primitives by their qualified path (`qm.measure(...)` / `qmc.qubit_array(...)`) or import the unaliased name. The four syntactic forms accepted by `_is_classical_returning_call` and `_is_quantum_constructor_call` (`Name` and `Attribute` for each of the two names) cover both bare and `<module>.<name>` styles, so unless the importer deliberately renames the symbol the analyzer sees it correctly.
 
 **Future fix**: replace the syntactic-name check with an identity-based one. Each `QKernel` has access to the user function's `__globals__` (and surrounding closure cells), so the analyzer can resolve `call.func.id` to a Python object at decoration time and compare against the canonical `qamomile.circuit.measure` / `qamomile.circuit.expval` / `qamomile.circuit.qubit` / `qamomile.circuit.qubit_array` references. Closure-bound aliases would need a separate pass over the function's `__closure__`. Attribute-form aliases (`obj.measure(...)` where `obj` is not `qm` / `qmc`) remain ambiguous and would either require local type information or a structurally-conservative fall-back.
+
+## Controlled QFT/IQFT over sub-kernel `UInt` slices
+
+**When it bites**: a controlled sub-kernel receives a classical `UInt` argument, forms a prefix slice such as `q[:m]` inside the sub-kernel, and applies `qmc.qft` or `qmc.iqft` to that prefix.
+
+**Why this trade-off was chosen**: a sub-kernel that applies QFT/IQFT to the whole target vector can be specialized from the concrete target size at the controlled call site. The narrower pattern above is different: the composite gate target is a parameterized slice created inside the controlled body. The controlled-U emitter does not yet lower that parameterized sliced composite block into a backend gate while also reflecting the resolved slice width into the target mapping.
+
+**Future fix**: extend controlled-U composite lowering so it can safely resolve sub-kernel parameterized slice widths from bindings and reflect those resolved widths in the backend target mapping.
+
+## `qmc.inverse` requires trace-time-resolvable control flow
+
+**When it bites**: `qmc.inverse(layer)(...)` is traced for a `layer` kernel whose quantum body contains control flow the eager inverse builder cannot resolve while constructing the fallback `implementation_block`:
+
+- `qmc.range(...)` bounds that are still symbolic at trace time raise `NotImplementedError`. Because `transpile(bindings=...)` bakes bindings into the trace before the inverse wrapper runs, a loop bound supplied via `bindings` resolves fine — the rejection only fires for bounds kept as runtime parameters (`parameters=[...]`) or for a bindings-free `build()`.
+- `if` / `while` / `for ... in items(...)` are rejected unconditionally — **even when `bindings` would resolve the condition at transpile time**. The fallback block is built eagerly at trace time, before `partial_eval` runs `CompileTimeIfLoweringPass`, so the traced block still contains the `IfOperation` / `WhileOperation` / `ForItemsOperation`. Loop bounds are the one control-flow input the inverter can resolve itself, because the bound constants ride directly on the operand `Value`s; a compile-time `if` would need the inverter to fold the branch on its own.
+
+**Why this trade-off was chosen**: the PR keeps inverse fallback blocks explicit in Qamomile IR so every backend has a correct decomposition when its native inverse path is unavailable. Deferring fallback construction would require a later transpiler pass to build the inverse after parameter shape resolution and to keep serialization/canonicalization compatible with a lazy inverse representation.
+
+**Future fix**: make inverse fallback construction lazy for blocks that need transpile-time shape, loop-bound, or branch resolution, or add a dedicated pass that lowers unresolved `InverseBlockOperation` implementations after `resolve_parameter_shapes` / `partial_eval`. That pass would also let bindings-resolved `if` branches invert by folding the selected branch.
+
+## QURI Parts modular arithmetic support is partial
+
+**When it bites**: `qamomile.circuit.modular_increment` / `modular_decrement` on the QURI Parts backend. Plain modular arithmetic is skipped for registers larger than two qubits because the current QURI Parts emitter cannot emit the multi-controlled X gates generated by the ripple construction. Controlled modular arithmetic is skipped for multi-qubit registers because the recursive controlled fallback does not yet fully handle the BinOp-bearing loop body generated by the controlled modular shift kernels.
+
+**Why this trade-off was chosen**: the primitives are expressed in terms of X and multi-controlled X gates so they remain QFT-free and reuse Qamomile's existing controlled-gate machinery. Qiskit can package the inner block as a controlled gate, and CUDA-Q has a dedicated controlled fallback path, but the QURI Parts path still needs either native multi-controlled X support or a decomposition that preserves the loop-local bindings inside the controlled body. The limitation is marked explicitly in `tests/circuit/algorithm/arithmetic/test_modular.py::_skip_unsupported_backend_case`.
+
+**Future fix**: add a QURI Parts decomposition for the required multi-controlled X gates and extend the QURI Parts recursive controlled fallback so it can lower loop-local classical BinOp values in nested controlled bodies. Once both are supported, the QURI Parts skips in `tests/circuit/algorithm/arithmetic/test_modular.py` should be converted to normal assertions.
+
+## CUDA-Q observe cannot estimate controlled modular arithmetic yet
+
+**When it bites**: running the controlled modular arithmetic expectation-value path on the CUDA-Q backend. Sampling uses a separate execution path, but `cudaq.observe()` does not yet support the runtime control flow used by these controlled modular arithmetic kernels.
+
+**Why this trade-off was chosen**: the controlled modular primitives are tested through `qmc.control(modular_increment)` / `qmc.control(modular_decrement)` rather than through backend-specific rewrites. CUDA-Q sampling can execute that shape through the generated runnable/sample paths, while observe currently rejects the runtime-control-flow shape. The limitation is marked with an explicit `pytest.xfail` in `tests/circuit/algorithm/arithmetic/test_modular.py::_expval_if_supported`.
+
+**Future fix**: remove the xfail once CUDA-Q observe supports this runtime-control-flow pattern, or add a CUDA-Q-specific expectation-value lowering that avoids the unsupported observe shape while preserving the same qkernel semantics.
+
+## Base controlled-U fallback only handles narrow target shapes
+
+**When it bites**: a backend reaches the shared controlled-U gate-by-gate fallback after block-to-gate conversion has failed, and the inner block has multiple controls or a general multi-target body. The fallback can safely route single-target gates, and it has a narrow exception for a single SWAP because that branch explicitly uses two target slots. Other multi-target bodies are rejected with `EmitError`.
+
+**Why this trade-off was chosen**: the shared fallback controls each top-level inner operation without carrying a full operand-to-target mapping. Letting a general multi-target block through would silently route gates meant for `target_indices[i > 0]` onto `target_indices[0]`. The guard in `qamomile/circuit/transpiler/passes/emit_support/controlled_emission.py::emit_controlled_fallback` prefers a loud failure over a wrong circuit. Backends with a richer mapping, such as the CUDA-Q override, can bypass the shared fallback.
+
+**Future fix**: introduce a block-local operand-to-target mapping in the shared fallback emitter, then use it to lower general multi-target inner blocks gate by gate. Until then, kernels that need this shape should run on a backend where block-to-gate conversion succeeds or rewrite the controlled operation into element-wise controlled calls.
+
+## Symbolic slice disjointness beyond direct unit-stride intervals
+
+**When it bites**: two symbolic slices on the same root are actually disjoint, but their disjointness cannot be expressed as direct unit-stride root-space intervals.
+
+**Why this trade-off was chosen**: `_symbolic_slices_definitely_disjoint()` only compares direct `slice_step == 1` root slices as half-open intervals, such as `q[:k]` and `q[k:n]`. Strided symbolic slices, nested symbolic affine maps, and more complex symbolic arithmetic are treated conservatively as potentially overlapping.
+
+**Future fix**: add small proof helpers only for shapes that can be proven safely, such as parity partitions or limited affine intervals, without turning the borrow checker into a general symbolic inequality solver.
+
+## Tuple-form expval metadata cannot encode symbolic root indices
+
+**When it bites**: an inlined helper packs a qubit into tuple-form expval metadata, and the caller-side replacement is an element of a symbolic slice, such as `q[j:j+1][0]` where `j` is a `qmc.range(...)` loop variable. Conceptually, the shape is a scalar helper called on an element whose root index is still symbolic:
+
+```python
+@qmc.qkernel
+def helper(q: qmc.Qubit, obs: qmc.Observable) -> qmc.Float:
+    return qmc.expval((q,), obs)
+
+@qmc.qkernel
+def caller(obs: qmc.Observable) -> qmc.Float:
+    q = qmc.qubit_array(4, "q")
+    for j in qmc.range(4):
+        view = q[j : j + 1]
+        # The desired metadata root address for view[0] is (q.uuid, j),
+        # but the current metadata can only store integer indices.
+        helper(view[0], obs)
+```
+
+The concrete-index cases (`q[1]`, `q[1::2]`, or a slice bound that has already been resolved from compile-time bindings) are not affected. The limitation is about values that still carry a symbolic affine index when `ValueSubstitutor._substitute_metadata()` runs. The regression pin is an IR-level `xfail` rather than a backend execution test because current qkernel control-flow / expval composition hits other frontend and execution constraints before this metadata representation gap can be isolated cleanly.
+
+**Why this trade-off was chosen**: `ArrayRuntimeMetadata.element_parent_uuids` and `element_parent_indices` currently encode a root address as `(array_uuid: str, index: int)`. During inline substitution, `_substitute_metadata()` can promote a standalone sentinel `("", -1)` to a real root address only when `resolve_root_qubit_address()` can reduce the caller-side element to a constant root index. For `q[j:j+1][0]`, the desired root address is conceptually `(q.uuid, j)`, but `j` is a symbolic `Value`, not an `int`. Storing the slice view UUID plus local index, or leaving the standalone sentinel in place, is the only representable state today. The known gap is pinned by `tests/transpiler/test_value_mapping.py::TestArrayRuntimeMetadataSymbolicRootLimitations::test_scalar_inline_metadata_cannot_promote_symbolic_slice_parent`, which is marked `xfail(strict=True)` until metadata can represent symbolic affine root indices.
+
+**Future fix**: extend array-runtime metadata to carry a symbolic affine root expression, for example `(root_uuid, offset_value, stride_value, local_index_value)` or an equivalent small expression tree, and teach emit-time qubit-map construction to resolve that expression with the same binding resolver used for runtime slice chains. Once that exists, the xfail test should be flipped to a normal passing test and this limitation entry can be removed.

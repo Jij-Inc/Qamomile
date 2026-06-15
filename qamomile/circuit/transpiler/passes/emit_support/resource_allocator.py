@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Any
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -22,12 +24,14 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
+    resolve_condition_address_detailed,
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
@@ -218,10 +222,7 @@ class ResourceAllocator:
                         if hasattr(initial_cond, "value")
                         else initial_cond
                     )
-                    init_uuid = (
-                        init_val.uuid if hasattr(init_val, "uuid") else str(init_val)
-                    )
-                    init_addr = QubitAddress(init_uuid)
+                    init_addr = self._condition_source_address(init_val, bindings)
 
                     # Save the canonical clbit for the initial condition
                     # BEFORE body allocation.  An if-only (no else) inside
@@ -248,12 +249,7 @@ class ResourceAllocator:
                         if hasattr(loop_carried, "value")
                         else loop_carried
                     )
-                    carried_uuid = (
-                        carried_val.uuid
-                        if hasattr(carried_val, "uuid")
-                        else str(carried_val)
-                    )
-                    carried_addr = QubitAddress(carried_uuid)
+                    carried_addr = self._condition_source_address(carried_val, bindings)
                     carried_clbit = clbit_map.get(carried_addr)
 
                     # Alias the loop-carried condition to the initial
@@ -292,7 +288,7 @@ class ResourceAllocator:
             elif isinstance(op, PauliEvolveOp):
                 self._allocate_pauli_evolve(op, qubit_map)
 
-            elif isinstance(op, CompositeGateOperation):
+            elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
@@ -300,6 +296,38 @@ class ResourceAllocator:
 
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
+
+    @staticmethod
+    def _condition_source_address(
+        value: Any,
+        bindings: dict[str, Any],
+    ) -> QubitAddress:
+        """Resolve a while / phi condition source to its ``clbit_map`` key.
+
+        A measured ``Vector[Bit]`` element (``s[i]`` from
+        ``s = qmc.measure(register)``) registers its clbit under
+        ``QubitAddress(root_array.uuid, index)``, not the element's own
+        UUID. Resolving the source the same way the emit-time condition
+        lookup does keeps the loop-carried / phi clbit alias consistent
+        with where the clbit was actually allocated. The allocator has no
+        ``ValueResolver``, so only constant indices / slice bounds resolve;
+        an unresolved element falls back to its scalar UUID (which is not
+        registered, so the caller's ``clbit_map`` lookup misses and the
+        aliasing is correctly skipped rather than pointed at a wrong slot).
+
+        Args:
+            value (Any): The condition / phi source — an IR ``Value`` or, in
+                degenerate cases, a non-Value (handled via ``str``).
+            bindings (dict[str, Any]): Active bindings for constant folding.
+
+        Returns:
+            QubitAddress: The address the source's classical bit is
+                registered under.
+        """
+        if isinstance(value, Value):
+            address, _ = resolve_condition_address_detailed(value, bindings, None)
+            return address
+        return QubitAddress(str(value))
 
     def _alias_loop_carried_clbits(
         self,
@@ -332,8 +360,8 @@ class ResourceAllocator:
                     continue
                 true_val = phi.operands[1]
                 false_val = phi.operands[2]
-                true_addr = QubitAddress(true_val.uuid)
-                false_addr = QubitAddress(false_val.uuid)
+                true_addr = self._condition_source_address(true_val, {})
+                false_addr = self._condition_source_address(false_val, {})
                 if true_addr in clbit_map:
                     clbit_map[true_addr] = canonical_clbit
                 if false_addr in clbit_map:
@@ -612,34 +640,26 @@ class ResourceAllocator:
     ) -> QubitAddress | None:
         """Walk the slice_of chain and return the root-space QubitAddress.
 
-        Composes the nested affine maps so ``view[i]`` resolves to
-        ``QubitAddress(root_uuid, start + step * i)`` for the
-        composed ``(start, step)``.  Returns ``None`` when the operand
-        is not an array element, when its index is non-constant, or
-        when the chain contains any non-constant ``slice_start`` /
-        ``slice_step`` value (the latter case is deferred to the
-        emit-time resolver, which has bindings available).
+        Thin wrapper over :func:`resolve_root_qubit_address` (shared with the
+        frontend's ``expval`` lowering) that wraps the resolved
+        ``(root_uuid, index)`` pair in a ``QubitAddress``.
+
+        Args:
+            operand (Value): The qubit operand to resolve; expected to be an
+                array element with a constant index.
+
+        Returns:
+            QubitAddress | None: ``QubitAddress(root_uuid, index)`` for a
+                resolvable array element, or ``None`` when the operand is not an
+                array element, its index is non-constant, or the slice chain has
+                a non-constant ``slice_start`` / ``slice_step`` (deferred to the
+                emit-time resolver, which has bindings available).
         """
-        if operand.parent_array is None or not operand.element_indices:
+        resolved = resolve_root_qubit_address(operand)
+        if resolved is None:
             return None
-        idx_value = operand.element_indices[0]
-        if not idx_value.is_constant():
-            return None
-        idx = int(idx_value.get_const())
-        parent = operand.parent_array
-        while parent.slice_of is not None:
-            if (
-                parent.slice_start is None
-                or parent.slice_step is None
-                or not parent.slice_start.is_constant()
-                or not parent.slice_step.is_constant()
-            ):
-                return None
-            start = int(parent.slice_start.get_const())
-            step = int(parent.slice_step.get_const())
-            idx = start + step * idx
-            parent = parent.slice_of
-        return QubitAddress(parent.uuid, idx)
+        root_uuid, idx = resolved
+        return QubitAddress(root_uuid, idx)
 
     def _allocate_pauli_evolve(
         self,
@@ -661,10 +681,10 @@ class ResourceAllocator:
 
     def _allocate_composite(
         self,
-        op: CompositeGateOperation,
+        op: CompositeGateOperation | InverseBlockOperation,
         qubit_map: QubitMap,
     ) -> None:
-        """Allocate resources for a CompositeGateOperation."""
+        """Allocate resources for a composite-like quantum operation."""
         all_qubits = op.control_qubits + op.target_qubits
         self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 
