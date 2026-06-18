@@ -40,6 +40,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
+    GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -459,7 +460,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     def _emit_irreducible_multi_controlled_gate(
         self,
         circuit: T,
-        gate_type: Any,
+        gate_type: GateOperationType,
         control_indices: list[int],
         target_idx: int,
         angle: Any,
@@ -475,8 +476,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         Args:
             circuit (T): Backend circuit being built.
-            gate_type (Any): ``GateOperationType`` of the single-qubit
-                gate to control.
+            gate_type (GateOperationType): The single-qubit gate to
+                control.
             control_indices (list[int]): Physical control qubits.
             target_idx (int): Physical target qubit.
             angle (Any): Resolved rotation angle for rotation-like
@@ -487,9 +488,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """
         from qamomile.circuit.transpiler.errors import EmitError
 
-        gate_name = getattr(gate_type, "name", str(gate_type))
         raise EmitError(
-            f"Cannot emit {len(control_indices)}-controlled {gate_name}: "
+            f"Cannot emit {len(control_indices)}-controlled {gate_type.name}: "
             f"the shared fallback reduces to Toffoli for up to two "
             f"controls only, and backend {type(self).__name__!r} does "
             f"not override ``_emit_irreducible_multi_controlled_gate``. "

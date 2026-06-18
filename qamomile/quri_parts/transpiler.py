@@ -213,18 +213,20 @@ def _single_qubit_gate_unitary(
     ):
         if not isinstance(angle, Real):
             return None
-        theta = float(angle)
+        angle_rad = float(angle)
         if gate_type == GateOperationType.P:
-            return np.array([[1.0, 0.0], [0.0, np.exp(1j * theta)]])
+            return np.array([[1.0, 0.0], [0.0, np.exp(1j * angle_rad)]])
         if gate_type == GateOperationType.RX:
-            cos = np.cos(theta / 2.0)
-            sin = np.sin(theta / 2.0)
+            cos = np.cos(angle_rad / 2.0)
+            sin = np.sin(angle_rad / 2.0)
             return np.array([[cos, -1j * sin], [-1j * sin, cos]])
         if gate_type == GateOperationType.RY:
-            cos = np.cos(theta / 2.0)
-            sin = np.sin(theta / 2.0)
+            cos = np.cos(angle_rad / 2.0)
+            sin = np.sin(angle_rad / 2.0)
             return np.array([[cos, -sin], [sin, cos]])
-        return np.array([[np.exp(-0.5j * theta), 0.0], [0.0, np.exp(0.5j * theta)]])
+        return np.array(
+            [[np.exp(-0.5j * angle_rad), 0.0], [0.0, np.exp(0.5j * angle_rad)]]
+        )
 
     inv_sqrt2 = 1.0 / np.sqrt(2.0)
     fixed_unitaries = {
@@ -304,6 +306,14 @@ def _emit_quri_c3x_matrix(
         circuit (Any): QURI Parts circuit being emitted into.
         control_indices (list[int]): Three physical control qubits.
         target_index (int): Physical target qubit.
+
+    Raises:
+        EmitError: Propagated from
+            :func:`_emit_quri_multi_controlled_unitary_matrix` if the
+            local width exceeds the dense-unitary cap. With three
+            controls the width is four, well under the cap, so this
+            cannot fire in practice; it is documented for parity with
+            the general helper.
     """
     _emit_quri_multi_controlled_unitary_matrix(
         circuit,
