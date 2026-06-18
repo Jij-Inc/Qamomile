@@ -54,13 +54,14 @@ class BinOpKind(enum.Enum):
     MUL = enum.auto()
     DIV = enum.auto()
     FLOORDIV = enum.auto()
+    MOD = enum.auto()
     POW = enum.auto()
     MIN = enum.auto()
 
 
 @dataclasses.dataclass
 class BinOp(BinaryOperationBase):
-    """Binary arithmetic operation (ADD, SUB, MUL, DIV, FLOORDIV, POW)."""
+    """Binary arithmetic operation (ADD, SUB, MUL, DIV, FLOORDIV, MOD, POW)."""
 
     kind: BinOpKind | None = None
 
@@ -178,6 +179,7 @@ class RuntimeOpKind(enum.Enum):
     MUL = enum.auto()
     DIV = enum.auto()
     FLOORDIV = enum.auto()
+    MOD = enum.auto()
     POW = enum.auto()
 
 
@@ -193,7 +195,7 @@ class RuntimeClassicalExpr(Operation):
     (e.g. ``qiskit.circuit.classical.expr.Expr``).
 
     Operand convention:
-    - Binary kinds (EQ/NEQ/LT/LE/GT/GE/AND/OR/ADD/SUB/MUL/DIV/FLOORDIV/POW):
+    - Binary kinds (EQ/NEQ/LT/LE/GT/GE/AND/OR/ADD/SUB/MUL/DIV/FLOORDIV/MOD/POW):
       ``operands = [lhs, rhs]``.
     - Unary kind (NOT): ``operands = [val]``.
     - Result: ``results = [output_value]``.
@@ -240,6 +242,7 @@ _BINOP_KIND_TO_RUNTIME: dict[BinOpKind, RuntimeOpKind] = {
     BinOpKind.MUL: RuntimeOpKind.MUL,
     BinOpKind.DIV: RuntimeOpKind.DIV,
     BinOpKind.FLOORDIV: RuntimeOpKind.FLOORDIV,
+    BinOpKind.MOD: RuntimeOpKind.MOD,
     BinOpKind.POW: RuntimeOpKind.POW,
 }
 

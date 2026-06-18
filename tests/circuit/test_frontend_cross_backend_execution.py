@@ -992,6 +992,36 @@ def nested_classical_output_run(
     return qmc.measure(q), out
 
 
+# --- Modulo operator (UInt.__mod__) on alternating loop indices ---
+#
+# Motivating use case for ``UInt.__mod__`` (backlog BACKLOG-8409): a QSVT-style
+# loop that selects between a forward and inverse step on alternating iterations
+# via ``if i % 2 == 0``. Here it flips the even-indexed qubits, giving the
+# deterministic bit pattern ``(1, 0, 1, 0)``. ``i % 2`` folds to a concrete
+# value once the loop is unrolled, so the compile-time ``if`` resolves per
+# iteration and every backend emits the same circuit.
+
+
+@qmc.qkernel
+def uint_mod_alternating_sample() -> qmc.Vector[qmc.Bit]:
+    """Flip even-indexed qubits using ``i % 2 == 0`` in an unrolled loop."""
+    q = qmc.qubit_array(4, "q")
+    for i in qmc.range(4):
+        if i % 2 == 0:
+            q[i] = qmc.x(q[i])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def uint_mod_alternating_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after flipping even-indexed qubits via ``i % 2 == 0``."""
+    q = qmc.qubit_array(4, "q")
+    for i in qmc.range(4):
+        if i % 2 == 0:
+            q[i] = qmc.x(q[i])
+    return qmc.expval(q, obs)
+
+
 @dataclasses.dataclass(frozen=True)
 class FrontendExecutionCase:
     """Describe one frontend pattern with paired sample and run kernels."""
@@ -1229,6 +1259,16 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 0, 1)},
         expected_expval=-1.0,
         run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2)},
+    ),
+    FrontendExecutionCase(
+        name="uint-mod-alternating",
+        sample_kernel=uint_mod_alternating_sample,
+        run_kernel=uint_mod_alternating_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1, 0),
+        expected_support={(1, 0, 1, 0)},
+        expected_expval=0.0,  # Z0+Z1+Z2+Z3 over (1,0,1,0) = -1+1-1+1
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
     ),
     FrontendExecutionCase(
         name="pauli-evolve",

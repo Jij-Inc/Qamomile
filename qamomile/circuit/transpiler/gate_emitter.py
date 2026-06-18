@@ -529,6 +529,8 @@ def default_combine_symbolic(
             return lhs / rhs if rhs != 0 else 0.0
         case BinOpKind.FLOORDIV:
             return lhs // rhs if rhs != 0 else 0
+        case BinOpKind.MOD:
+            return lhs % rhs if rhs != 0 else 0
         case BinOpKind.POW:
             return lhs**rhs
         case _:

@@ -228,6 +228,54 @@ class UInt(ArithmeticMixin, Handle):
         _emit_binop(coerced.value, self.value, result, BinOpKind.FLOORDIV)
         return result
 
+    # UInt-specific modulo
+    def __mod__(self, other: "int | UInt") -> "UInt":
+        """Take this UInt modulo an integer-like operand.
+
+        Mirrors the other ``UInt`` arithmetic operators by emitting a
+        ``BinOp(MOD)`` whose result is a fresh ``UInt`` handle. When both
+        operands are compile-time constants the result is folded eagerly
+        (``_emit_binop``), so ``i % k`` is a valid index/loop-bound
+        expression and ``i % k == 0`` is a valid compile-time ``if``
+        predicate once the enclosing loop is unrolled.
+
+        Args:
+            other (int | UInt): The divisor. A Python ``int`` is coerced
+                to a constant ``UInt`` operand.
+
+        Returns:
+            UInt: A new ``UInt`` handle holding ``self % other``.
+
+        Example:
+            >>> import qamomile.circuit as qmc
+            >>> @qmc.qkernel
+            ... def circuit() -> qmc.Vector[qmc.Qubit]:
+            ...     q = qmc.qubit_array(4, "q")
+            ...     for i in qmc.range(4):
+            ...         if i % 2 == 0:
+            ...             q[i] = qmc.x(q[i])
+            ...     return q
+        """
+        coerced = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, coerced.value, result, BinOpKind.MOD)
+        return result
+
+    def __rmod__(self, other: "int | UInt") -> "UInt":
+        """Take an integer-like operand modulo this UInt.
+
+        Args:
+            other (int | UInt): The dividend. A Python ``int`` is coerced
+                to a constant ``UInt`` operand.
+
+        Returns:
+            UInt: A new ``UInt`` handle holding ``other % self``.
+        """
+        coerced = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(coerced.value, self.value, result, BinOpKind.MOD)
+        return result
+
     # UInt-specific power operation
     def __pow__(self, other: "int | UInt") -> "UInt":
         coerced = self._coerce(other)
