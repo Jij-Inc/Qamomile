@@ -1270,9 +1270,11 @@ FRONTEND_EXECUTION_CASES = [
         sample_kernel=uint_mod_alternating_sample,
         run_kernel=uint_mod_alternating_run,
         sample_mode="deterministic",
-        expected_bits=(1, 0, 1, 0),
+        expected_bits=(1, 0, 1, 0),  # sample kernel flips even indices
         expected_support={(1, 0, 1, 0)},
-        expected_expval=0.0,  # Z0+Z1+Z2+Z3 over (1,0,1,0) = -1+1-1+1
+        # run kernel flips ODD indices via RX((i % 2) * pi) -> state (0,1,0,1),
+        # so Z0+Z1+Z2+Z3 = +1-1+1-1 = 0.
+        expected_expval=0.0,
         run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
     ),
     FrontendExecutionCase(
