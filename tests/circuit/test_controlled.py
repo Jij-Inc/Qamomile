@@ -1026,8 +1026,9 @@ except ImportError:  # pragma: no cover
 
 _HAS_CUDAQ = True
 try:  # pragma: no cover - presence check
-    import cudaq  # noqa: F401
-
+    # The lazy accessor raises ImportError when cudaq is missing, without
+    # loading the cudaq runtime at collection time when it is installed
+    # (see tests/_cudaq_isolation.py).
     from qamomile.cudaq import CudaqTranspiler as _CudaqTranspilerCheck  # noqa: F401
 except ImportError:  # pragma: no cover
     _HAS_CUDAQ = False
@@ -1067,7 +1068,12 @@ _BUILTIN_BACKENDS = [
     pytest.param(
         _cudaq_transpiler_factory,
         id="cudaq",
-        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
     ),
 ]
 
@@ -1080,7 +1086,12 @@ _QISKIT_CUDAQ_BACKENDS = [
     pytest.param(
         _cudaq_transpiler_factory,
         id="cudaq",
-        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
     ),
 ]
 

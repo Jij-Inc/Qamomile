@@ -56,6 +56,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     QubitAddress,
     ResourceAllocator,
     map_phi_outputs,
+    resolve_qubit_key,
 )
 
 # ---------------------------------------------------------------------------
@@ -82,6 +83,32 @@ def _make_array_value(
 ) -> ArrayValue:
     """Create an ArrayValue with the given shape dimension Values."""
     return ArrayValue(type=type_cls(), name=name, shape=shape_vals)
+
+
+def _make_array_element(
+    parent: ArrayValue,
+    index: int,
+    name: str,
+    type_cls: type = QubitType,
+) -> Value:
+    """Create a constant-index element Value for an ArrayValue.
+
+    Args:
+        parent (ArrayValue): Parent vector or slice view.
+        index (int): Constant element index.
+        name (str): Display name assigned to the element.
+        type_cls (type): Element type class. Defaults to QubitType.
+
+    Returns:
+        Value: Element value referencing ``parent[index]``.
+    """
+    idx_value = _make_const_value(f"{name}_idx", index)
+    return Value(
+        type=type_cls(),
+        name=name,
+        parent_array=parent,
+        element_indices=(idx_value,),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +178,97 @@ def _make_gate(
 
 class TestPhiOpsAllocation:
     """Tests that ResourceAllocator processes phi_ops for IfOperation."""
+
+    def test_resolve_qubit_key_uses_root_for_nested_slice_element(self) -> None:
+        """Constant nested slice elements resolve to the root qubit address."""
+        root_size = _make_const_value("q_dim0", 5)
+        q_array = _make_array_value("q", shape_vals=(root_size,))
+        first_view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_make_const_value("q_view_dim0", 2),),
+            slice_of=q_array,
+            slice_start=_make_const_value("start_1", 1),
+            slice_step=_make_const_value("step_2", 2),
+        )
+        nested_view = ArrayValue(
+            type=QubitType(),
+            name="q_nested_view",
+            shape=(_make_const_value("q_nested_view_dim0", 2),),
+            slice_of=first_view,
+            slice_start=_make_const_value("nested_start_0", 0),
+            slice_step=_make_const_value("nested_step_1", 1),
+        )
+        element = _make_array_element(nested_view, 1, "q_nested_view[1]")
+
+        key, is_array = resolve_qubit_key(element)
+
+        assert is_array
+        assert key == QubitAddress(q_array.uuid, 3)
+
+    def test_resolve_qubit_key_defers_symbolic_slice_bounds(self) -> None:
+        """Symbolic slice bounds defer instead of using the slice UUID."""
+        root_size = _make_const_value("q_dim0", 4)
+        q_array = _make_array_value("q", shape_vals=(root_size,))
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_make_const_value("q_view_dim0", 2),),
+            slice_of=q_array,
+            slice_start=_make_value("offset", UIntType),
+            slice_step=_make_const_value("step_1", 1),
+        )
+        element = _make_array_element(view, 0, "q_view[0]")
+
+        key, is_array = resolve_qubit_key(element)
+
+        assert is_array
+        assert key is None
+
+    def test_scalar_phi_merges_root_and_slice_element_aliases(self) -> None:
+        """Scalar qubit PhiOp should recognize root and slice element aliases."""
+        q_array = _make_array_value("q", shape_vals=(_make_const_value("q_dim0", 3),))
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_make_const_value("q_view_dim0", 2),),
+            slice_of=q_array,
+            slice_start=_make_const_value("start_1", 1),
+            slice_step=_make_const_value("step_1", 1),
+        )
+        cond = _make_value("cond", BitType)
+        root_element = _make_array_element(q_array, 1, "q[1]")
+        view_element = _make_array_element(view, 0, "q_view[0]")
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(operands=[cond, root_element, view_element], results=[phi_output])
+        qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
+
+        map_phi_outputs([phi], qubit_map, {})
+
+        assert qubit_map[QubitAddress(phi_output.uuid)] == 1
+        assert QubitAddress(view.uuid, 0) not in qubit_map
+
+    def test_scalar_phi_defers_unresolved_symbolic_slice_element(self) -> None:
+        """Unresolved symbolic slice elements must not create slice-address aliases."""
+        q_array = _make_array_value("q", shape_vals=(_make_const_value("q_dim0", 3),))
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_make_const_value("q_view_dim0", 2),),
+            slice_of=q_array,
+            slice_start=_make_value("offset", UIntType),
+            slice_step=_make_const_value("step_1", 1),
+        )
+        cond = _make_value("cond", BitType)
+        view_element = _make_array_element(view, 0, "q_view[0]")
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(operands=[cond, view_element, view_element], results=[phi_output])
+        qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
+
+        map_phi_outputs([phi], qubit_map, {})
+
+        assert QubitAddress(phi_output.uuid) not in qubit_map
+        assert QubitAddress(view.uuid, 0) not in qubit_map
 
     def test_phi_output_qubit_is_allocated(self) -> None:
         """Phi output for a qubit type should be registered in qubit_map."""

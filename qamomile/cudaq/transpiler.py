@@ -95,6 +95,44 @@ if TYPE_CHECKING:
 CudaqControlledQubitMap = dict[str | QubitAddress, int]
 
 
+def _cudaq_slice_root_slots_available(
+    array_value: ArrayValue,
+    vector_slots: dict[str, list[int]],
+    qubit_map: CudaqControlledQubitMap,
+    emit_pass: Any,
+    bindings: dict[str, Any],
+) -> bool:
+    """Return whether a sliced vector's root physical slots are available.
+
+    Args:
+        array_value (ArrayValue): Sliced Vector[Qubit] value whose root
+            availability should be checked.
+        vector_slots (dict[str, list[int]]): Cached vector UUID to physical
+            slot table carried by the CUDA-Q controlled fallback walker.
+        qubit_map (CudaqControlledQubitMap): UUID/address to physical qubit map.
+        emit_pass (Any): Emit pass whose resolver folds root shape values.
+        bindings (dict[str, Any]): Active controlled-body bindings.
+
+    Returns:
+        bool: True when the non-sliced root is registered in ``vector_slots`` or
+            every root element address can be found in ``qubit_map``.
+    """
+    root = array_value
+    while root.is_slice():
+        if root.slice_of is None:
+            return False
+        root = root.slice_of
+
+    if root.uuid in vector_slots:
+        return True
+    if not root.shape:
+        return False
+    size = emit_pass._resolver.resolve_int_value(root.shape[0], bindings)
+    if size is None or size < 0:
+        return False
+    return all(QubitAddress(root.uuid, i) in qubit_map for i in range(size))
+
+
 def _build_block_qubit_map(
     block_value: Any,
     target_indices: list[int],
@@ -225,13 +263,13 @@ def _seed_vector_element_uuid(
 ) -> None:
     """Seed ``qubit_map`` with a Vector[Qubit] element operand's UUID.
 
-    Resolves an ``operand`` that addresses an element of a ``Vector[Qubit]``
-    input (i.e., ``operand.parent_array`` matches a registered vector
-    and ``operand.element_indices[0]`` resolves under ``bindings``) to
-    its physical target via ``vector_slots`` and stores it under
-    ``operand.uuid``.
+    Resolves an ``operand`` that addresses an element of a registered
+    ``Vector[Qubit]`` input, including an element of a slice view over a
+    registered root vector, to its physical target via ``vector_slots`` and
+    stores it under ``operand.uuid``.
     Non-element operands (scalar ``Qubit`` inputs already seeded by
-    ``_build_block_qubit_map``) are skipped silently.
+    ``_build_block_qubit_map``) and elements whose parent/root vector is not
+    available are skipped silently so direct UUID mappings can still resolve.
 
     Args:
         operand (Any): A gate operand to seed.
@@ -246,25 +284,41 @@ def _seed_vector_element_uuid(
             including loop-local values when emitting an unrolled loop.
 
     Raises:
-        EmitError: Raised in three situations, all of which would
-            otherwise degenerate into a downstream "Missing qubit
-            mapping ..." assertion in ``_emit_cudaq_controlled_ops``.
-            (1) A Vector[Qubit] element addressed by the inner block
-            uses an element index that cannot be resolved under the
-            current bindings.
-            (2) The element index is outside the declared Vector
-            length (``elem_idx < 0`` or ``elem_idx >= len(slots)``); the
-            inner block addresses a slot past what the controlled-U
-            was wired up with.
+        EmitError: Raised when a recognized Vector[Qubit] element uses an
+            index that cannot be resolved under the current bindings, or when
+            the resolved index is outside the registered/sliced slot range. A
+            slice parent may also propagate ``EmitError`` from slice length or
+            slice-bound resolution.
     """
     parent = getattr(operand, "parent_array", None)
     if parent is None:
         return
-    if parent.uuid not in vector_slots:
-        return
     indices = tuple(getattr(operand, "element_indices", ()))
     if not indices:
         return
+
+    if (
+        isinstance(parent, ArrayValue)
+        and parent.uuid in vector_slots
+        and not parent.is_slice()
+    ):
+        slots = vector_slots[parent.uuid]
+    elif isinstance(parent, ArrayValue) and parent.is_slice():
+        if not _cudaq_slice_root_slots_available(
+            parent, vector_slots, qubit_map, emit_pass, bindings
+        ):
+            return
+        slots = _resolve_cudaq_array_slots(
+            parent,
+            vector_slots,
+            qubit_map,
+            emit_pass,
+            bindings,
+            operation="ControlledUOperation",
+        )
+    else:
+        return
+
     idx_val = indices[0]
     if idx_val.is_constant():
         elem_idx = int(idx_val.get_const())
@@ -292,7 +346,6 @@ def _seed_vector_element_uuid(
                 operation="ControlledUOperation",
             )
         elem_idx = int(resolved)
-    slots = vector_slots[parent.uuid]
     if elem_idx < 0 or elem_idx >= len(slots):
         # Silently skipping leaves the element's UUID unmapped in
         # ``qubit_map``, which later trips a hard ``AssertionError``
@@ -465,7 +518,7 @@ def _resolve_cudaq_array_slots(
             f"{operation}, got {type(array_value).__name__}.",
             operation=operation,
         )
-    if array_value.uuid in vector_slots:
+    if not array_value.is_slice() and array_value.uuid in vector_slots:
         return list(vector_slots[array_value.uuid])
     if not array_value.shape:
         raise EmitError(
@@ -516,7 +569,7 @@ def _resolve_cudaq_array_slots(
             slice_slots.append(parent_slots[parent_idx])
         vector_slots[array_value.uuid] = slice_slots
         if slice_slots:
-            qubit_map.setdefault(array_value.uuid, slice_slots[0])
+            qubit_map[array_value.uuid] = slice_slots[0]
         return slice_slots
 
     slots: list[int] = []
