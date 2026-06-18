@@ -996,10 +996,16 @@ def nested_classical_output_run(
 #
 # Motivating use case for ``UInt.__mod__`` (backlog BACKLOG-8409): a QSVT-style
 # loop that selects between a forward and inverse step on alternating iterations
-# via ``if i % 2 == 0``. Here it flips the even-indexed qubits, giving the
-# deterministic bit pattern ``(1, 0, 1, 0)``. ``i % 2`` folds to a concrete
-# value once the loop is unrolled, so the compile-time ``if`` resolves per
-# iteration and every backend emits the same circuit.
+# via ``i % 2``. ``i % 2`` folds to a concrete value once the loop is unrolled.
+#
+# The sample kernel uses the natural ``if i % 2 == 0`` form (compile-time
+# branch resolved per iteration) to flip the even-indexed qubits, giving the
+# deterministic pattern ``(1, 0, 1, 0)``. The run/expval kernel instead folds
+# ``i % 2`` into an RX angle (``(i % 2) * pi``) rather than an ``if``: CUDA-Q
+# marks any ``if``-containing kernel as RUNNABLE, and ``cudaq.observe()`` (the
+# expval path) rejects RUNNABLE artifacts, so the angle form keeps the kernel
+# STATIC and exercises ``%`` through the estimator on every backend. RX(pi)
+# flips the odd-indexed qubits, so Z0+Z1+Z2+Z3 sums to +1-1+1-1 = 0.
 
 
 @qmc.qkernel
@@ -1014,11 +1020,10 @@ def uint_mod_alternating_sample() -> qmc.Vector[qmc.Bit]:
 
 @qmc.qkernel
 def uint_mod_alternating_run(obs: qmc.Observable) -> qmc.Float:
-    """Run expval after flipping even-indexed qubits via ``i % 2 == 0``."""
+    """Run expval after RX((i % 2) * pi), flipping odd-indexed qubits."""
     q = qmc.qubit_array(4, "q")
     for i in qmc.range(4):
-        if i % 2 == 0:
-            q[i] = qmc.x(q[i])
+        q[i] = qmc.rx(q[i], (i % 2) * math.pi)
     return qmc.expval(q, obs)
 
 
