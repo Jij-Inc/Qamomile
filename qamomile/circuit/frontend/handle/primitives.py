@@ -239,6 +239,11 @@ class UInt(ArithmeticMixin, Handle):
         expression and ``i % k == 0`` is a valid compile-time ``if``
         predicate once the enclosing loop is unrolled.
 
+        Like the sibling integer operators (``__floordiv__`` / ``__pow__``),
+        the ``int | UInt`` operand contract is enforced statically by the
+        type checker; passing a non-integral operand (e.g. a Python
+        ``float``) is a type error rather than a runtime branch here.
+
         Args:
             other (int | UInt): The divisor. A Python ``int`` is coerced
                 to a constant ``UInt`` operand.
