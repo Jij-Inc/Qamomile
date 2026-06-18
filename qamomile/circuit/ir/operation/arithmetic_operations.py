@@ -61,7 +61,7 @@ class BinOpKind(enum.Enum):
 
 @dataclasses.dataclass
 class BinOp(BinaryOperationBase):
-    """Binary arithmetic operation (ADD, SUB, MUL, DIV, FLOORDIV, MOD, POW)."""
+    """Binary arithmetic operation (ADD, SUB, MUL, DIV, FLOORDIV, MOD, POW, MIN)."""
 
     kind: BinOpKind | None = None
 
