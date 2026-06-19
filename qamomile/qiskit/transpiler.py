@@ -552,7 +552,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
             return
 
-        # Validate qubit count: logical array size vs Hamiltonian
+        # Validate qubit count: logical array size vs Hamiltonian. A
+        # Hamiltonian smaller than the register is embedded into the
+        # register (identity on the untouched qubits) by appending the
+        # evolution gate onto only its declared qubits below; only a
+        # Hamiltonian *larger* than the register is a genuine error.
         input_array = op.qubits
         num_h_qubits = hamiltonian.num_qubits
         from qamomile.circuit.ir.value import ArrayValue
@@ -561,11 +565,12 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             n_resolved = self._resolver.resolve_int_value(
                 input_array.shape[0], bindings
             )
-            if n_resolved is not None and n_resolved != num_h_qubits:
+            if n_resolved is not None and num_h_qubits > n_resolved:
                 raise EmitError(
                     f"PauliEvolveOp qubit count mismatch: "
                     f"qubit register has {n_resolved} qubits but "
-                    f"Hamiltonian acts on {num_h_qubits} qubits.",
+                    f"Hamiltonian acts on {num_h_qubits} qubits. "
+                    f"The Hamiltonian must not be larger than the register.",
                 )
 
         # Validate Hermitian (real coefficients)

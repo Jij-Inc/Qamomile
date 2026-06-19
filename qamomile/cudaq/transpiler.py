@@ -1986,11 +1986,15 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             bindings,
             operation="PauliEvolveOp",
         )
-        if len(qubit_indices) != hamiltonian.num_qubits:
+        # A Hamiltonian smaller than the register is embedded by acting
+        # only on its declared qubits (the leading ``num_qubits`` slots);
+        # only a Hamiltonian *larger* than the register is a real error.
+        if hamiltonian.num_qubits > len(qubit_indices):
             raise EmitError(
                 f"PauliEvolveOp qubit count mismatch: qubit register has "
                 f"{len(qubit_indices)} qubits but Hamiltonian acts on "
-                f"{hamiltonian.num_qubits} qubits.",
+                f"{hamiltonian.num_qubits} qubits. "
+                f"The Hamiltonian must not be larger than the register.",
                 operation="PauliEvolveOp",
             )
         for operators, coeff in hamiltonian:

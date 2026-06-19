@@ -325,12 +325,46 @@ def test_native_fallback_statevector_match():
 # ---------------------------------------------------------------------------
 
 
-def test_qubit_count_mismatch_raises():
-    """Passing a 1-qubit Hamiltonian to a 2-qubit register should error."""
-    from qamomile.circuit.transpiler.errors import EmitError
+def test_smaller_hamiltonian_is_identity_padded():
+    """A Hamiltonian narrower than the register is embedded, not rejected.
+
+    Regression for #467: ``Z(0)`` (1 qubit) on a 2-qubit register must
+    transpile by acting only on q[0] (identity on q[1]) instead of
+    raising a qubit-count mismatch.
+    """
+    import numpy as np
+    from qiskit.quantum_info import Statevector
 
     H = qm_o.Hamiltonian()
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)  # 1-qubit
+
+    for use_native in (True, False):
+        exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+            _wrap_pauli_evolve,
+            bindings={"n": 2, "hamiltonian": H, "gamma": 0.5},
+        )
+        circuit = exe.compiled_quantum[0].circuit.remove_final_measurements(
+            inplace=False
+        )
+        # exp(-i * Z_0 * 0.5) on |00> is a global phase; the populations of
+        # the statevector must remain concentrated on |00>.
+        probs = np.abs(Statevector(circuit).data) ** 2
+        expected = np.zeros(4)
+        expected[0] = 1.0
+        assert np.allclose(probs, expected), (
+            f"use_native={use_native}: padded evolution changed populations: {probs}"
+        )
+
+
+def test_larger_hamiltonian_raises():
+    """A Hamiltonian wider than the register is still a genuine error."""
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    H = qm_o.Hamiltonian()
+    H.add_term(
+        (qm_o.PauliOperator(qm_o.Pauli.Z, 0), qm_o.PauliOperator(qm_o.Pauli.Z, 2)),
+        1.0,
+    )  # acts on 3 qubits
 
     transpiler = QiskitTranspiler(use_native_composite=False)
     with pytest.raises(EmitError, match="qubit count mismatch"):
