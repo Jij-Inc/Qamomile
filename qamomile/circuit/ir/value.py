@@ -99,36 +99,86 @@ class ValueMetadata:
     dict_runtime: DictRuntimeMetadata | None = None
 
 
+def split_indexed_identifier(identifier: str) -> tuple[str, str] | None:
+    """Split a legacy indexed identifier into base and index suffix.
+
+    Args:
+        identifier (str): Identifier to inspect. Legacy carrier keys use the
+            ``"<base>_<index>"`` spelling, where ``index`` is decimal.
+
+    Returns:
+        tuple[str, str] | None: ``(base, index)`` when ``identifier`` carries a
+            numeric suffix, otherwise ``None``.
+    """
+    separator = identifier.rfind("_")
+    if separator <= 0:
+        return None
+    suffix = identifier[separator + 1 :]
+    if not suffix.isdigit():
+        return None
+    return identifier[:separator], suffix
+
+
+def remap_indexed_identifier(
+    identifier: str,
+    remap_identifier: typing.Callable[[str], str],
+) -> str:
+    """Remap an identifier while preserving a legacy index suffix.
+
+    Args:
+        identifier (str): Scalar identifier or legacy ``"<base>_<index>"``
+            carrier key.
+        remap_identifier (typing.Callable[[str], str]): Function that remaps
+            scalar identifiers and carrier-key bases.
+
+    Returns:
+        str: Remapped identifier. Numeric index suffixes are preserved after
+            remapping the base identifier.
+    """
+    parts = split_indexed_identifier(identifier)
+    if parts is None:
+        return remap_identifier(identifier)
+    base, suffix = parts
+    return f"{remap_identifier(base)}_{suffix}"
+
+
 def remap_value_metadata_references(
     metadata: ValueMetadata,
     remap_uuid: typing.Callable[[str], str],
     remap_logical_id: typing.Callable[[str], str],
 ) -> ValueMetadata:
-    """Rewrite UUID and logical-id references inside ``ValueMetadata``.
+    """Rewrite UUID and logical-id references inside value metadata.
 
     Args:
-        metadata (ValueMetadata): Metadata bundle to rewrite.
-        remap_uuid (Callable[[str], str]): Function that maps a referenced
-            Value UUID to its replacement UUID.
-        remap_logical_id (Callable[[str], str]): Function that maps a
-            referenced Value logical ID to its replacement logical ID.
+        metadata (ValueMetadata): Metadata bundle whose embedded references
+            should be rewritten.
+        remap_uuid (typing.Callable[[str], str]): Function that maps scalar
+            UUID references (and carrier-key bases) to replacement UUIDs.
+        remap_logical_id (typing.Callable[[str], str]): Function that maps
+            scalar logical-id references (and carrier-key bases) to
+            replacement logical IDs.
 
     Returns:
-        ValueMetadata: Metadata with UUID-bearing sections rewritten.
-            Sections that do not carry Value references are preserved.
+        ValueMetadata: Metadata with every embedded UUID / logical-id reference
+            rewritten. Legacy ``"<uuid>_<index>"`` carrier keys keep their
+            index suffix while remapping the base UUID. The original bundle is
+            returned unchanged when no reference is rewritten.
     """
     new_cast = metadata.cast
     if new_cast is not None:
         new_cast = CastMetadata(
             source_uuid=remap_uuid(new_cast.source_uuid),
-            qubit_uuids=tuple(remap_uuid(uuid) for uuid in new_cast.qubit_uuids),
+            qubit_uuids=tuple(
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_cast.qubit_uuids
+            ),
             source_logical_id=(
                 remap_logical_id(new_cast.source_logical_id)
                 if new_cast.source_logical_id is not None
                 else None
             ),
             qubit_logical_ids=tuple(
-                remap_logical_id(logical_id)
+                remap_indexed_identifier(logical_id, remap_logical_id)
                 for logical_id in new_cast.qubit_logical_ids
             ),
         )
@@ -136,7 +186,10 @@ def remap_value_metadata_references(
     new_qfixed = metadata.qfixed
     if new_qfixed is not None:
         new_qfixed = QFixedMetadata(
-            qubit_uuids=tuple(remap_uuid(uuid) for uuid in new_qfixed.qubit_uuids),
+            qubit_uuids=tuple(
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_qfixed.qubit_uuids
+            ),
             num_bits=new_qfixed.num_bits,
             int_bits=new_qfixed.int_bits,
         )
@@ -146,17 +199,18 @@ def remap_value_metadata_references(
         new_array_rt = ArrayRuntimeMetadata(
             const_array=new_array_rt.const_array,
             element_uuids=tuple(
-                remap_uuid(uuid) for uuid in new_array_rt.element_uuids
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_array_rt.element_uuids
             ),
             element_logical_ids=tuple(
-                remap_logical_id(logical_id)
+                remap_indexed_identifier(logical_id, remap_logical_id)
                 for logical_id in new_array_rt.element_logical_ids
             ),
             # Empty parent UUID is a sentinel for standalone or unresolved
             # elements, not a Value UUID, so keep it unchanged.
             element_parent_uuids=tuple(
-                remap_uuid(uuid) if uuid else uuid
-                for uuid in new_array_rt.element_parent_uuids
+                remap_uuid(uuid_ref) if uuid_ref else uuid_ref
+                for uuid_ref in new_array_rt.element_parent_uuids
             ),
             element_parent_indices=new_array_rt.element_parent_indices,
         )
@@ -586,6 +640,49 @@ class ArrayValue(Value[T]):
         return self.slice_of is not None
 
 
+def resolve_root_array_index(
+    array: "ArrayValue",
+    index: int,
+) -> tuple["ArrayValue", int] | None:
+    """Fold a view-local element index into the root array's index space.
+
+    Walks the ``slice_of`` chain root-ward, composing each strided view's
+    affine map ``parent_index = start + step * local_index``. This is the
+    array-level counterpart of :func:`resolve_root_qubit_address` (which
+    starts from an array-element ``Value``); both must stay consistent with
+    the composite carrier keys ``"<root_uuid>_<root_index>"`` registered by
+    ``QInitOperation`` at emit time.
+
+    Args:
+        array (ArrayValue): Array the index is local to. May be a root array
+            (``slice_of`` unset) or an arbitrarily nested strided view.
+        index (int): Element index in ``array``'s own index space.
+
+    Returns:
+        tuple[ArrayValue, int] | None: ``(root_array, composed_index)`` when
+            every slice bound on the chain is compile-time constant. ``None``
+            when any ``slice_start`` / ``slice_step`` on the chain is missing
+            or symbolic; callers must then defer resolution rather than guess.
+    """
+    current = array
+    idx = index
+    while current.slice_of is not None:
+        # Symbolic view bounds cannot be folded to a fixed root index at
+        # this stage; defer to a resolver that has bindings available.
+        if (
+            current.slice_start is None
+            or current.slice_step is None
+            or not current.slice_start.is_constant()
+            or not current.slice_step.is_constant()
+        ):
+            return None
+        start = int(typing.cast(int, current.slice_start.get_const()))
+        step = int(typing.cast(int, current.slice_step.get_const()))
+        idx = start + step * idx
+        current = current.slice_of
+    return current, idx
+
+
 def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     """Resolve an array-element value to its root ``(array_uuid, index)``.
 
@@ -638,24 +735,11 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     # affine map ``parent_index = start + step * local_index``; composing them
     # rewrites a (possibly nested) view element into the underlying root array's
     # own index space, so the result matches the composite key QInit registered.
-    parent: ArrayValue | None = value.parent_array
-    while parent is not None and parent.slice_of is not None:
-        # Same constant-only restriction as the element index: a view whose
-        # bounds are symbolic is deferred (None), not guessed.
-        if (
-            parent.slice_start is None
-            or parent.slice_step is None
-            or not parent.slice_start.is_constant()
-            or not parent.slice_step.is_constant()
-        ):
-            return None
-        start = int(typing.cast(int, parent.slice_start.get_const()))
-        step = int(typing.cast(int, parent.slice_step.get_const()))
-        idx = start + step * idx
-        parent = parent.slice_of
-    if parent is None:
+    resolved = resolve_root_array_index(value.parent_array, idx)
+    if resolved is None:
         return None
-    return (parent.uuid, idx)
+    root, root_idx = resolved
+    return (root.uuid, root_idx)
 
 
 @dataclasses.dataclass(frozen=True)
