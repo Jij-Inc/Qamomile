@@ -581,6 +581,15 @@ class TestCarrierMetadataMapping:
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
 
         def branch_cast(label: str) -> CastOperation:
+            """Build a CastOperation over ``source`` with carrier metadata.
+
+            Args:
+                label (str): Name for the cast result value.
+
+            Returns:
+                CastOperation: Cast of ``source`` to QFixed carrying the
+                    two composite carrier keys for ``source``'s elements.
+            """
             result = (
                 Value(type=result_type, name=label)
                 .with_cast_metadata(

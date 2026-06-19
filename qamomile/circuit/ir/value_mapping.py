@@ -85,8 +85,7 @@ class ValueSubstitutor:
         # it explicitly to keep it in lockstep with the cast result metadata.
         if isinstance(result, CastOperation) and result.qubit_mapping:
             new_qubit_mapping = [
-                self._substitute_uuid_ref(uuid_ref)
-                for uuid_ref in result.qubit_mapping
+                self._substitute_uuid_ref(uuid_ref) for uuid_ref in result.qubit_mapping
             ]
             if new_qubit_mapping != result.qubit_mapping:
                 result = dataclasses.replace(result, qubit_mapping=new_qubit_mapping)
@@ -303,6 +302,7 @@ class ValueSubstitutor:
             bool: True when a metadata UUID reference is present in the
                 value map.
         """
+
         def has_uuid_ref(uuid_ref: str) -> bool:
             """Return True when a scalar UUID or carrier-key base is mapped."""
             parts = split_indexed_identifier(uuid_ref)
@@ -318,9 +318,7 @@ class ValueSubstitutor:
             if any(has_uuid_ref(uuid) for uuid in metadata.qfixed.qubit_uuids):
                 return True
         if metadata.array_runtime is not None:
-            if any(
-                has_uuid_ref(uuid) for uuid in metadata.array_runtime.element_uuids
-            ):
+            if any(has_uuid_ref(uuid) for uuid in metadata.array_runtime.element_uuids):
                 return True
             return any(
                 uuid and uuid in self._value_map
@@ -392,8 +390,7 @@ class ValueSubstitutor:
             # ``"<root_uuid>_<index>"`` keys; substitute base UUIDs while
             # folding view-local indices into root-array space.
             qubit_uuids = tuple(
-                self._substitute_uuid_ref(uuid_ref)
-                for uuid_ref in new_cast.qubit_uuids
+                self._substitute_uuid_ref(uuid_ref) for uuid_ref in new_cast.qubit_uuids
             )
             qubit_logical_ids = self._substitute_parallel_logical_ids(
                 new_cast.qubit_logical_ids,
