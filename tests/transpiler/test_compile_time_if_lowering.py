@@ -1519,6 +1519,83 @@ class TestCastSourceProvenanceSync:
             f"{root.uuid}_2",
         )
 
+    def test_cast_selected_symbolic_slice_view_raises(self):
+        """A selected slice view with symbolic bounds fails fast, not silently.
+
+        When the chosen branch is a strided view whose ``slice_start`` /
+        ``slice_step`` are not compile-time constants, the root index space
+        cannot be resolved, so the carriers cannot be rebuilt in root space.
+        Emitting view-local keys would silently drop the measurement, so the
+        pass must raise instead.
+        """
+        import pytest
+
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType
+        from qamomile.circuit.transpiler.errors import ValidationError
+
+        root = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(_uint_val("root_len", const=4),),
+        )
+        # Symbolic slice_start (no const) makes the root index unresolvable.
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_uint_val("view_len", const=2),),
+            slice_of=root,
+            slice_start=_uint_val("start"),
+            slice_step=_uint_val("step", const=2),
+        )
+        arr_false = ArrayValue(type=QubitType(), name="qb")
+        flag = _uint_val("flag", const=1)
+
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi = PhiOp(operands=[flag, view, arr_false], results=[phi_arr])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=phi_arr.uuid,
+                source_logical_id=phi_arr.logical_id,
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{phi_arr.logical_id}_0",
+                    f"{phi_arr.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        cast_op = CastOperation(
+            operands=[phi_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+        )
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+
+        with pytest.raises(ValidationError, match="symbolic slice"):
+            _run_pass(block)
+
 
 # ---------------------------------------------------------------------------
 # CC6: Cast provenance through separate() (frontend integration)

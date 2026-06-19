@@ -457,6 +457,29 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     carriers: tuple[list[str], list[str]] | None = None
                     if num_bits is not None:
                         carriers = _array_carrier_keys(new_source, num_bits)
+                        if (
+                            carriers is None
+                            and isinstance(new_source, ArrayValue)
+                            and new_source.slice_of is not None
+                        ):
+                            # The selected branch is a strided view whose root
+                            # index space is not compile-time resolvable
+                            # (symbolic slice bounds). Synthesizing
+                            # ``f"{view.uuid}_{i}"`` below would emit view-local
+                            # carrier keys that the allocator never registers
+                            # (only root-array addresses are), silently dropping
+                            # the QFixed measurement at emit. Fail fast instead,
+                            # mirroring the frontend's rejection of symbolic
+                            # slice views for casts.
+                            raise ValidationError(
+                                "Compile-time `if` selected a slice-view cast "
+                                "source whose root index space is not "
+                                "compile-time resolvable (symbolic slice "
+                                "bounds). Bind the slice bounds so the QFixed "
+                                "carrier qubits resolve to root-array "
+                                "addresses; leaving them symbolic would "
+                                "silently drop the measurement at emit time."
+                            )
                     if carriers is None and num_bits is not None:
                         source_logical_id = getattr(
                             new_source, "logical_id", new_source.uuid
