@@ -480,9 +480,16 @@ class InlinePass(Pass[Block, Block]):
         # Map block's input values to operation's qubit arguments
         # Since uuid is now unique per Value, we can use simple uuid mapping
         local_map: dict[str, Value] = {}
+        arg_substitutor = ValueSubstitutor(value_map, transitive=True)
 
         for block_input, qubit_arg in zip(impl.input_values, qubit_args):
-            resolved_arg = value_map.get(qubit_arg.uuid, qubit_arg)
+            # Composite implementation inputs are scalar qubits, but the
+            # call-site operands may be array-element Values whose own UUIDs
+            # are unmapped while their parent arrays are mapped to caller
+            # arrays. Substitute the full value so parent_array fields move
+            # with the call-site scope, mirroring _inline_call()'s argument
+            # resolution.
+            resolved_arg = cast(Value, arg_substitutor.substitute_value(qubit_arg))
 
             # Get the cloned version of the input value
             cloned_input = remapper.clone_value(block_input)
