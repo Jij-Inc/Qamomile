@@ -48,7 +48,15 @@ class UUIDRemapper:
         return self._logical_id_remap
 
     def clone_operations(self, operations: list[Operation]) -> list[Operation]:
-        """Clone a list of operations with fresh UUIDs."""
+        """Clone a list of operations with fresh UUIDs.
+
+        Args:
+            operations (list[Operation]): Operations to clone in order.
+
+        Returns:
+            list[Operation]: Cloned operations, each with fresh UUIDs, in the
+                same order as ``operations``.
+        """
         return [self.clone_operation(op) for op in operations]
 
     def clone_operation(self, op: Operation) -> Operation:
@@ -62,6 +70,15 @@ class UUIDRemapper:
         point to it. Without this, a subclass field could keep an old
         UUID while body operands referencing the same logical Value got
         fresh UUIDs, breaking identity-by-UUID lookups at emit time.
+
+        Args:
+            op (Operation): Operation to clone.
+
+        Returns:
+            Operation: A clone of ``op`` with every owned Value (operands,
+                results, subclass-extra fields) and every nested-body Value
+                reassigned a fresh UUID / logical_id, and with
+                ``CastOperation.qubit_mapping`` carrier keys remapped.
         """
         # Build a uuid -> cloned_value substitution map covering every
         # Value the operation owns (operands, results, plus subclass
@@ -131,7 +148,19 @@ class UUIDRemapper:
         """Clone any value type with a fresh UUID and logical_id.
 
         Handles Value, ArrayValue, TupleValue, and DictValue through
-        the unified ValueBase protocol.
+        the unified ValueBase protocol. Nested values (tuple elements, dict
+        entries, ``parent_array`` / ``element_indices`` / ``shape`` / slice
+        fields) and embedded metadata references are cloned consistently.
+        Results are cached by source UUID so a repeated clone returns the
+        same instance.
+
+        Args:
+            value (ValueBase): The value to clone.
+
+        Returns:
+            ValueBase: The cloned value of the same concrete type, with a
+                fresh UUID / logical_id and its nested values and metadata
+                references remapped through this remapper.
         """
         old_uuid = value.uuid
 
