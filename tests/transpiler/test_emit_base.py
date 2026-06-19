@@ -16,7 +16,7 @@ Section 2: LoopAnalyzer BinOp dependency detection.
     inside nested control-flow), and theta array-element access
     referencing the loop variable triggers unrolling.
 
-Section 3: Integration tests for UInt BinOp (``//``, ``**``) folding
+Section 3: Integration tests for UInt BinOp (``//``, ``%``, ``**``) folding
     into loop bounds via the constant folding pass.
 """
 
@@ -1152,6 +1152,26 @@ def binop_pow_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
+def binop_mod_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first n % 3 qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = n % 3
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_rmod_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first 7 % n qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = 7 % n  # exercises UInt.__rmod__
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def array_element_loop_bound_circuit(
     bounds: qmc.Vector[qmc.UInt], theta: qmc.Float
 ) -> qmc.Vector[qmc.Bit]:
@@ -1271,7 +1291,7 @@ class TestPhiMergeAliasRegression:
 
 
 class TestUIntBinOpFolding:
-    """Tests for UInt BinOp kinds (``//``, ``**``) that affect loop bounds.
+    """Tests for UInt BinOp kinds (``//``, ``%``, ``**``) that affect loop bounds.
 
     At tracing time ``n`` is a symbolic ``UInt`` handle, so ``n // 2``
     emits a ``BinOp(FLOORDIV)`` into the IR.  The constant folding pass
@@ -1323,6 +1343,59 @@ class TestUIntBinOpFolding:
 
         assert len(rx_angles) == expected_rx_count, (
             f"Expected {expected_rx_count} RX gates (n={n}, n**2={n**2}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )
+
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (4, 0.5, 1),  # 4 % 3 = 1
+            (5, 0.3, 2),  # 5 % 3 = 2
+            (6, 1.0, 0),  # 6 % 3 = 0 (boundary: empty loop)
+            (2, 0.2, 2),  # 2 % 3 = 2
+        ],
+        ids=["4%3=1", "5%3=2", "6%3=0", "2%3=2"],
+    )
+    def test_mod_loop_bound(self, n: int, theta: float, expected_rx_count: int) -> None:
+        """``n % 3`` correctly folded as loop bound; angles verified."""
+        _, qc = _transpile_and_get_circuit(
+            binop_mod_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, n%3={n % 3}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )
+
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (2, 0.5, 1),  # 7 % 2 = 1
+            (3, 0.3, 1),  # 7 % 3 = 1
+            (4, 1.0, 3),  # 7 % 4 = 3
+        ],
+        ids=["7%2=1", "7%3=1", "7%4=3"],
+    )
+    def test_rmod_loop_bound(
+        self, n: int, theta: float, expected_rx_count: int
+    ) -> None:
+        """``7 % n`` (UInt.__rmod__) correctly folded as loop bound."""
+        _, qc = _transpile_and_get_circuit(
+            binop_rmod_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, 7%n={7 % n}), "
             f"got {len(rx_angles)}"
         )
         for i, angle in enumerate(rx_angles):
