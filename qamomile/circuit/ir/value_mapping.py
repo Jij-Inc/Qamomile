@@ -205,15 +205,31 @@ class ValueSubstitutor:
                 mapped value is a constant-bound slice view, the chain root
                 and the folded root-space index are returned; otherwise the
                 mapped value and the original suffix are returned unchanged.
+
+        Raises:
+            ValueError: If the base maps to a strided slice view whose slice
+                bounds are not compile-time constants, so the carrier index
+                cannot be folded into root-array space. Emitting the verbatim
+                view-local key would leave the carrier unresolvable at emit
+                (silently dropping the measurement), so this fails fast,
+                mirroring the frontend's rejection of symbolic-bound slice
+                views for ``cast()``.
         """
         mapped = self._mapped_value_for_uuid(base_uuid)
         if mapped is None:
             return None
         if isinstance(mapped, ArrayValue) and mapped.slice_of is not None:
             resolved = resolve_root_array_index(mapped, int(suffix))
-            if resolved is not None:
-                root, root_index = resolved
-                return root, str(root_index)
+            if resolved is None:
+                raise ValueError(
+                    "Cannot remap a QFixed carrier key onto a slice view with "
+                    "symbolic slice bounds: the carrier index cannot be folded "
+                    "into root-array space, so the measurement would be "
+                    "silently dropped at emit. Use literal-bounded slicing for "
+                    "cast operands."
+                )
+            root, root_index = resolved
+            return root, str(root_index)
         return mapped, suffix
 
     def _substitute_uuid_ref(self, uuid_ref: str) -> str:
