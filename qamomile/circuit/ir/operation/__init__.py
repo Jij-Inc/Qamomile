@@ -17,6 +17,7 @@ from .gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
 from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
@@ -25,6 +26,7 @@ __all__ = [
     "Operation",
     "ReturnOperation",
     "CompositeGateOperation",
+    "InverseBlockOperation",
     "CompositeGateType",
     "ResourceMetadata",
     "GateOperation",

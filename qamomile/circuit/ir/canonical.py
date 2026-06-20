@@ -52,9 +52,12 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -63,6 +66,7 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueMetadata,
+    remap_indexed_identifier,
     remap_value_metadata_references,
 )
 
@@ -207,8 +211,9 @@ class _Canonicalizer:
     """Walker that assigns deterministic UUIDs by traversal order.
 
     A single ``_Canonicalizer`` covers one ``canonicalize`` invocation
-    and may recurse into nested Blocks (currently only via
-    ``CompositeGateOperation.implementation_block``). A shared counter
+    and may recurse into nested Blocks (for example via
+    ``CompositeGateOperation.implementation_block`` and
+    ``InverseBlockOperation`` source/fallback blocks). A shared counter
     across nested Blocks guarantees no UUID string collisions within
     the returned canonical tree.
     """
@@ -299,16 +304,14 @@ class _Canonicalizer:
     def canonical_block(self, block: Block) -> Block:
         """Return a canonical clone of ``block``.
 
-        Sub-Blocks reached via ``CompositeGateOperation`` are
+        Sub-Blocks reached via nested operation fields are
         canonicalized through the same Canonicalizer instance and are
         cached by Python ``id`` so repeated references share a single
         canonical Block.
 
         Args:
             block (Block): The IR Block to canonicalize. Sub-Blocks
-                reachable from this Block (via
-                ``CompositeGateOperation.implementation_block``) are
-                canonicalized recursively.
+                reachable from this Block are canonicalized recursively.
 
         Returns:
             Block: A new Block with canonical UUIDs and rewritten
@@ -352,7 +355,7 @@ class _Canonicalizer:
         so subclass-extra Value fields (e.g., ``ControlledU.power``,
         ``ForOperation.loop_var_value``) are rewritten consistently.
         Recurses into nested control-flow ops via ``HasNestedOps`` and
-        into ``CompositeGateOperation.implementation_block``.
+        into nested operation Blocks.
 
         Args:
             op (Operation): The Operation to canonicalize.
@@ -391,7 +394,10 @@ class _Canonicalizer:
         if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
             new_op = dataclasses.replace(
                 new_op,
-                qubit_mapping=[self._remap_uuid(u) for u in new_op.qubit_mapping],
+                qubit_mapping=[
+                    remap_indexed_identifier(u, self._remap_uuid)
+                    for u in new_op.qubit_mapping
+                ],
             )
 
         if (
@@ -400,6 +406,13 @@ class _Canonicalizer:
         ):
             sub = self.canonical_block(new_op.implementation_block)
             new_op = dataclasses.replace(new_op, implementation_block=sub)
+        if isinstance(new_op, InverseBlockOperation):
+            if new_op.source_block is not None:
+                sub = self.canonical_block(new_op.source_block)
+                new_op = dataclasses.replace(new_op, source_block=sub)
+            if new_op.implementation_block is not None:
+                sub = self.canonical_block(new_op.implementation_block)
+                new_op = dataclasses.replace(new_op, implementation_block=sub)
 
         # ControlledUOperation carries the unitary as a nested ``block``
         # field. Canonicalize it through the same canonicalizer so UUIDs
@@ -473,6 +486,9 @@ class _Canonicalizer:
                 entries=tuple(new_entries),
             )
         elif isinstance(value, ArrayValue):
+            new_slice_of: ArrayValue | None = None
+            if value.slice_of is not None:
+                new_slice_of = cast(ArrayValue, self.canonical_value(value.slice_of))
             cloned = dataclasses.replace(
                 value,
                 uuid=new_uuid,
@@ -480,6 +496,17 @@ class _Canonicalizer:
                 metadata=new_metadata,
                 shape=tuple(
                     cast(Value, self.canonical_value(dim)) for dim in value.shape
+                ),
+                slice_of=new_slice_of,
+                slice_start=(
+                    cast(Value, self.canonical_value(value.slice_start))
+                    if value.slice_start is not None
+                    else None
+                ),
+                slice_step=(
+                    cast(Value, self.canonical_value(value.slice_step))
+                    if value.slice_step is not None
+                    else None
                 ),
             )
         elif isinstance(value, Value):
@@ -522,7 +549,20 @@ class _Canonicalizer:
         return cloned
 
     def _canonical_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
-        """Rewrite UUID and logical_id references inside ValueMetadata."""
+        """Rewrite UUID and logical_id references inside ValueMetadata.
+
+        ``ScalarMetadata`` and ``DictRuntimeMetadata`` carry no UUID
+        references; ``CastMetadata``, ``QFixedMetadata``, and
+        ``ArrayRuntimeMetadata`` do and are rewritten through the
+        active remap tables.
+
+        Args:
+            metadata (ValueMetadata): Original metadata bundle.
+
+        Returns:
+            ValueMetadata: A new bundle with rewritten UUID / logical_id
+                references and untouched scalar / dict-runtime sections.
+        """
         return remap_value_metadata_references(
             metadata,
             self._remap_uuid,
@@ -691,6 +731,12 @@ def _collect_values(block: Block, out: list[ValueBase], seen: set[str]) -> None:
         elif isinstance(v, ArrayValue):
             for dim in v.shape:
                 visit(dim)
+            if v.slice_of is not None:
+                visit(v.slice_of)
+            if v.slice_start is not None:
+                visit(v.slice_start)
+            if v.slice_step is not None:
+                visit(v.slice_step)
         elif isinstance(v, Value):
             if v.parent_array is not None:
                 visit(v.parent_array)
@@ -727,10 +773,16 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _collect_from_operation(child, visit)
-    if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
-        # Nested block's values participate in the same canonical
-        # universe; recurse to ensure they are declared too.
-        _collect_from_subblock(op.implementation_block, visit)
+    if isinstance(op, CompositeGateOperation):
+        if op.implementation_block is not None:
+            # Nested block's values participate in the same canonical
+            # universe; recurse to ensure they are declared too.
+            _collect_from_subblock(op.implementation_block, visit)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            _collect_from_subblock(op.source_block, visit)
+        if op.implementation_block is not None:
+            _collect_from_subblock(op.implementation_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
 
@@ -738,7 +790,9 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
 def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """Walk the Values declared inside a nested Block.
 
-    Used for ``CompositeGateOperation.implementation_block`` and
+    Used for nested operation Blocks such as
+    ``CompositeGateOperation.implementation_block``,
+    ``InverseBlockOperation.source_block``, and
     ``ControlledUOperation.block``. Mirrors the top-level
     ``_collect_values`` walk order so declarations remain
     deterministic.
@@ -770,11 +824,11 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         # CompositeGateOperation extras: opaque Python references that
         # do not reflect IR-level structure.
         "composite_gate_instance",
-        # Nested-Block fields. Both ``implementation_block``
-        # (CompositeGateOperation) and ``block`` (ControlledUOperation)
-        # are emitted separately by ``_emit_operation`` so they are not
-        # rendered through ``repr`` here.
+        # Nested-Block fields. These are emitted separately by
+        # ``_emit_operation`` so they are not rendered through ``repr``
+        # here.
         "implementation_block",
+        "source_block",
         "block",
     }
 )
@@ -859,6 +913,12 @@ def _value_declaration(v: ValueBase) -> str:
             parts.append("indices=" + _token([idx.uuid for idx in v.element_indices]))
     if isinstance(v, ArrayValue):
         parts.append("shape=" + _token([dim.uuid for dim in v.shape]))
+        if v.slice_of is not None:
+            parts.append(f"slice_of={v.slice_of.uuid}")
+        if v.slice_start is not None:
+            parts.append(f"slice_start={v.slice_start.uuid}")
+        if v.slice_step is not None:
+            parts.append(f"slice_step={v.slice_step.uuid}")
     if isinstance(v, TupleValue):
         parts.append("elements=" + _token([e.uuid for e in v.elements]))
     if isinstance(v, DictValue):
@@ -896,6 +956,13 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
         out.append(f"{pad}{_INLINE_INDENT}implementation:")
         _emit_block(op.implementation_block, out, indent + 2)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            out.append(f"{pad}{_INLINE_INDENT}source:")
+            _emit_block(op.source_block, out, indent + 2)
+        if op.implementation_block is not None:
+            out.append(f"{pad}{_INLINE_INDENT}implementation:")
+            _emit_block(op.implementation_block, out, indent + 2)
 
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")

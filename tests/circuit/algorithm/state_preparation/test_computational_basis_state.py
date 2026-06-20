@@ -161,9 +161,11 @@ class TestComputationalBasisStateSample:
         results = _sample_compile_time(_quri_parts_transpiler(), n, bits, shots)
         _assert_deterministic_sample(results, bits, shots)
 
+    @pytest.mark.cudaq
     @pytest.mark.parametrize("n", _SIZES)
     @pytest.mark.parametrize("seed", _SEEDS)
     def test_cudaq(self, n: int, seed: int) -> None:
+        """CUDA-Q leg; ``-m cudaq`` sessions only (see tests/_cudaq_isolation.py)."""
         rng = np.random.default_rng(seed)
         bits = _random_bits(rng, n)
         shots = 64
@@ -198,9 +200,11 @@ class TestComputationalBasisStateRuntimeBits:
         results = _sample_runtime_bits(_quri_parts_transpiler(), n, bits, shots)
         _assert_deterministic_sample(results, bits, shots)
 
+    @pytest.mark.cudaq
     @pytest.mark.parametrize("n", _SIZES)
     @pytest.mark.parametrize("seed", _SEEDS)
     def test_cudaq(self, n: int, seed: int) -> None:
+        """CUDA-Q leg; ``-m cudaq`` sessions only (see tests/_cudaq_isolation.py)."""
         rng = np.random.default_rng(seed)
         bits = _random_bits(rng, n)
         shots = 64
@@ -241,9 +245,11 @@ class TestComputationalBasisStateExpval:
             f"quri_parts expval={observed}, expected={expected}"
         )
 
+    @pytest.mark.cudaq
     @pytest.mark.parametrize("n", _SIZES)
     @pytest.mark.parametrize("seed", _SEEDS)
     def test_cudaq(self, n: int, seed: int) -> None:
+        """CUDA-Q leg; ``-m cudaq`` sessions only (see tests/_cudaq_isolation.py)."""
         rng = np.random.default_rng(seed)
         bits = _random_bits(rng, n)
         coeffs = rng.uniform(-1.0, 1.0, size=n).tolist()
@@ -275,9 +281,11 @@ class TestComputationalBasisStateBoundary:
         results = _sample_compile_time(_quri_parts_transpiler(), n, bits, shots)
         _assert_deterministic_sample(results, bits, shots)
 
+    @pytest.mark.cudaq
     @pytest.mark.parametrize("n", _BOUNDARY_SIZES)
     @pytest.mark.parametrize("pattern", ["all_zero", "all_one"])
     def test_cudaq(self, n: int, pattern: str) -> None:
+        """CUDA-Q leg; ``-m cudaq`` sessions only (see tests/_cudaq_isolation.py)."""
         bits = [0] * n if pattern == "all_zero" else [1] * n
         shots = 32
         results = _sample_compile_time(_cudaq_transpiler(), n, bits, shots)

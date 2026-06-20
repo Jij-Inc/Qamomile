@@ -20,12 +20,14 @@ import numpy as np
 import pytest
 
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     QubitType,
     UIntType,
 )
+from qamomile.circuit.ir.types.q_register import QFixedType
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
@@ -254,6 +256,81 @@ class TestArrayRuntimeMetadataSymbolicRootLimitations:
         assert result.metadata.array_runtime.element_parent_indices == (loop_index,)
 
 
+class TestArrayRuntimeMetadataSymbolicParentSubstitution:
+    """Tests symbolic slice parent metadata substitution."""
+
+    def test_symbolic_slice_parent_uuid_is_substituted(self) -> None:
+        """Symbolic slice parents keep a valid substituted parent UUID."""
+        old_parent = _make_array_value("callee_q")
+        root = _make_array_value("caller_q")
+        start = _make_value("i")
+        one = _make_const_value("one", 1)
+        replacement_parent = ArrayValue(
+            type=QubitType(),
+            name="caller_q[i:]",
+            slice_of=root,
+            slice_start=start,
+            slice_step=one,
+        )
+        old_child = _make_value("callee_q_1", QubitType)
+        new_child = _make_value("caller_q_i_plus_1", QubitType)
+        carrier = ArrayValue(
+            type=QubitType(),
+            name="tuple_qubits",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_uuids=(old_child.uuid,),
+                    element_logical_ids=(old_child.logical_id,),
+                    element_parent_uuids=(old_parent.uuid,),
+                    element_parent_indices=(1,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor(
+            {
+                old_parent.uuid: replacement_parent,
+                old_child.uuid: new_child,
+            }
+        ).substitute_value(carrier)
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == (new_child.uuid,)
+        assert result.metadata.array_runtime.element_logical_ids == (
+            new_child.logical_id,
+        )
+        assert result.metadata.array_runtime.element_parent_uuids == (
+            replacement_parent.uuid,
+        )
+        assert result.metadata.array_runtime.element_parent_indices == (1,)
+
+    def test_parent_metadata_without_element_uuids_is_preserved(self) -> None:
+        """Parent provenance can be substituted without element UUIDs."""
+        old_parent = _make_array_value("old_parent")
+        new_parent = _make_array_value("new_parent")
+        carrier = ArrayValue(
+            type=QubitType(),
+            name="parent_only",
+            metadata=ValueMetadata(
+                array_runtime=ArrayRuntimeMetadata(
+                    element_parent_uuids=(old_parent.uuid,),
+                    element_parent_indices=(2,),
+                ),
+            ),
+        )
+
+        result = ValueSubstitutor({old_parent.uuid: new_parent}).substitute_value(
+            carrier
+        )
+
+        assert isinstance(result, ArrayValue)
+        assert result.metadata.array_runtime is not None
+        assert result.metadata.array_runtime.element_uuids == ()
+        assert result.metadata.array_runtime.element_parent_uuids == (new_parent.uuid,)
+        assert result.metadata.array_runtime.element_parent_indices == (2,)
+
+
 # ===========================================================================
 # Bug #5: ArrayValue.shape cloning and substitution
 # ===========================================================================
@@ -315,6 +392,308 @@ class TestArrayValueShapeCloning:
         for orig, clone in zip(dims, cloned.shape):
             assert clone.uuid != orig.uuid
             assert orig.uuid in remapper.uuid_remap
+
+
+class TestCarrierMetadataMapping:
+    """Tests that cast/QFixed carrier metadata follows value remapping."""
+
+    def test_uuid_remapper_clones_indexed_cast_carriers(self) -> None:
+        """Cast carrier metadata and operation mapping use cloned array UUIDs."""
+        source = _make_array_value("q")
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=source.uuid,
+                source_logical_id=source.logical_id,
+                qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{source.logical_id}_0",
+                    f"{source.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        op = CastOperation(
+            operands=[source],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{source.uuid}_0", f"{source.uuid}_1"],
+        )
+
+        cloned = UUIDRemapper().clone_operation(op)
+
+        assert isinstance(cloned, CastOperation)
+        cloned_source = cloned.operands[0]
+        cloned_result = cloned.results[0]
+        assert cloned_result.get_cast_source_uuid() == cloned_source.uuid
+        assert cloned_result.get_cast_qubit_uuids() == (
+            f"{cloned_source.uuid}_0",
+            f"{cloned_source.uuid}_1",
+        )
+        assert cloned_result.get_qfixed_qubit_uuids() == (
+            f"{cloned_source.uuid}_0",
+            f"{cloned_source.uuid}_1",
+        )
+        assert cloned.qubit_mapping == [
+            f"{cloned_source.uuid}_0",
+            f"{cloned_source.uuid}_1",
+        ]
+
+    def test_value_substitutor_rewrites_indexed_cast_carriers(self) -> None:
+        """Cast carrier metadata and operation mapping follow substitution."""
+        old_source = _make_array_value("old_q")
+        new_source = _make_array_value("new_q")
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=old_source.uuid,
+                source_logical_id=old_source.logical_id,
+                qubit_uuids=[f"{old_source.uuid}_0", f"{old_source.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{old_source.logical_id}_0",
+                    f"{old_source.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{old_source.uuid}_0", f"{old_source.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        op = CastOperation(
+            operands=[old_source],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{old_source.uuid}_0", f"{old_source.uuid}_1"],
+        )
+
+        substituted = ValueSubstitutor(
+            {old_source.uuid: new_source}
+        ).substitute_operation(op)
+
+        assert isinstance(substituted, CastOperation)
+        result = substituted.results[0]
+        assert substituted.operands[0] is new_source
+        assert result.get_cast_source_uuid() == new_source.uuid
+        assert result.get_cast_source_logical_id() == new_source.logical_id
+        assert result.get_cast_qubit_uuids() == (
+            f"{new_source.uuid}_0",
+            f"{new_source.uuid}_1",
+        )
+        assert result.get_cast_qubit_logical_ids() == (
+            f"{new_source.logical_id}_0",
+            f"{new_source.logical_id}_1",
+        )
+        assert result.get_qfixed_qubit_uuids() == (
+            f"{new_source.uuid}_0",
+            f"{new_source.uuid}_1",
+        )
+        assert substituted.qubit_mapping == [
+            f"{new_source.uuid}_0",
+            f"{new_source.uuid}_1",
+        ]
+
+    def test_value_substitutor_folds_view_carriers_to_root_space(self) -> None:
+        """Carrier indices fold through slice views into root index space.
+
+        Inlining a sub-kernel called with ``q[1::2]`` maps the callee formal
+        to a strided view; the carrier index must be re-based to the root
+        array (``view_i -> root_{start + step * i}``), not kept verbatim.
+        """
+        formal = _make_array_value("formal")
+        root = _make_array_value("root", shape_vals=(_make_const_value("len", 4),))
+        view = ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(_make_const_value("view_len", 2),),
+            slice_of=root,
+            slice_start=_make_const_value("start", 1),
+            slice_step=_make_const_value("step", 2),
+        )
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=formal.uuid,
+                source_logical_id=formal.logical_id,
+                qubit_uuids=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{formal.logical_id}_0",
+                    f"{formal.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        op = CastOperation(
+            operands=[formal],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
+        )
+
+        substituted = ValueSubstitutor({formal.uuid: view}).substitute_operation(op)
+
+        assert isinstance(substituted, CastOperation)
+        result = substituted.results[0]
+        assert result.get_cast_source_uuid() == view.uuid
+        assert result.get_cast_qubit_uuids() == (
+            f"{root.uuid}_1",
+            f"{root.uuid}_3",
+        )
+        assert result.get_cast_qubit_logical_ids() == (
+            f"{root.logical_id}_1",
+            f"{root.logical_id}_3",
+        )
+        assert result.get_qfixed_qubit_uuids() == (
+            f"{root.uuid}_1",
+            f"{root.uuid}_3",
+        )
+        assert substituted.qubit_mapping == [
+            f"{root.uuid}_1",
+            f"{root.uuid}_3",
+        ]
+
+    def test_value_substitutor_symbolic_view_carrier_raises(self) -> None:
+        """Substituting a carrier onto a symbolic-bound slice view fails fast.
+
+        When the mapped view's ``slice_start`` / ``slice_step`` are not
+        compile-time constants, the carrier index cannot be folded into
+        root-array space, so emitting a view-local key would silently drop
+        the measurement. The substitutor must raise instead.
+        """
+        formal = _make_array_value("formal")
+        root = _make_array_value("root", shape_vals=(_make_const_value("len", 4),))
+        # Symbolic slice_start (plain Value, no const) blocks root-index folding.
+        view = ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(_make_value("view_len"),),
+            slice_of=root,
+            slice_start=_make_value("start"),
+            slice_step=_make_const_value("step", 2),
+        )
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=formal.uuid,
+                source_logical_id=formal.logical_id,
+                qubit_uuids=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{formal.logical_id}_0",
+                    f"{formal.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        op = CastOperation(
+            operands=[formal],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
+        )
+
+        with pytest.raises(ValueError, match="symbolic slice bounds"):
+            ValueSubstitutor({formal.uuid: view}).substitute_operation(op)
+
+    def test_uuid_remapper_clones_phi_output_carriers_from_branch_body(
+        self,
+    ) -> None:
+        """If-phi output carriers track arrays first seen inside branch bodies.
+
+        IfOperation results are phi outputs whose carrier metadata references
+        the array cast inside the branches. The array's first appearance is
+        inside the nested bodies, so cloning must fill the remap tables from
+        the bodies before remapping the result metadata.
+        """
+        source = _make_array_value("q")
+        condition = _make_value("b", type_cls=BitType)
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+
+        def branch_cast(label: str) -> CastOperation:
+            """Build a CastOperation over ``source`` with carrier metadata.
+
+            Args:
+                label (str): Name for the cast result value.
+
+            Returns:
+                CastOperation: Cast of ``source`` to QFixed carrying the
+                    two composite carrier keys for ``source``'s elements.
+            """
+            result = (
+                Value(type=result_type, name=label)
+                .with_cast_metadata(
+                    source_uuid=source.uuid,
+                    source_logical_id=source.logical_id,
+                    qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                    qubit_logical_ids=[
+                        f"{source.logical_id}_0",
+                        f"{source.logical_id}_1",
+                    ],
+                )
+                .with_qfixed_metadata(
+                    qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                    num_bits=2,
+                    int_bits=0,
+                )
+            )
+            return CastOperation(
+                operands=[source],
+                results=[result],
+                source_type=QubitType(),
+                target_type=result_type,
+                qubit_mapping=[f"{source.uuid}_0", f"{source.uuid}_1"],
+            )
+
+        cast_true = branch_cast("qf_true")
+        cast_false = branch_cast("qf_false")
+        phi_out = Value(type=result_type, name="qf_phi").with_qfixed_metadata(
+            qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+            num_bits=2,
+            int_bits=0,
+        )
+        phi = PhiOp(
+            operands=[condition, cast_true.results[0], cast_false.results[0]],
+            results=[phi_out],
+        )
+        if_op = IfOperation(
+            operands=[condition],
+            results=[phi_out],
+            true_operations=[cast_true],
+            false_operations=[cast_false],
+            phi_ops=[phi],
+        )
+
+        remapper = UUIDRemapper()
+        cloned = remapper.clone_operation(if_op)
+
+        assert isinstance(cloned, IfOperation)
+        cloned_source_uuid = remapper.uuid_remap[source.uuid]
+        cloned_out = cloned.results[0]
+        assert cloned_out.get_qfixed_qubit_uuids() == (
+            f"{cloned_source_uuid}_0",
+            f"{cloned_source_uuid}_1",
+        )
+        # The phi output and the operation result stay the same clone.
+        assert cloned.phi_ops[0].results[0] is cloned_out
 
 
 class TestArrayValueShapeSubstitution:

@@ -18,7 +18,11 @@ import math
 from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    RuntimeClassicalExpr,
+)
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -39,6 +43,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -56,6 +61,19 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ValueResolver,
     resolve_condition_address,
     resolve_if_condition,
+)
+from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    evaluate_binop,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _bind_block_inputs,
+    _bind_quantum_input_shapes,
+    _expand_quantum_operands_to_phys,
+    _quantum_input_operands,
+)
+from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
+    _map_inverse_block_results,
+    _normalize_inverse_block_op,
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
@@ -75,6 +93,44 @@ if TYPE_CHECKING:
 
 
 CudaqControlledQubitMap = dict[str | QubitAddress, int]
+
+
+def _cudaq_slice_root_slots_available(
+    array_value: ArrayValue,
+    vector_slots: dict[str, list[int]],
+    qubit_map: CudaqControlledQubitMap,
+    emit_pass: Any,
+    bindings: dict[str, Any],
+) -> bool:
+    """Return whether a sliced vector's root physical slots are available.
+
+    Args:
+        array_value (ArrayValue): Sliced Vector[Qubit] value whose root
+            availability should be checked.
+        vector_slots (dict[str, list[int]]): Cached vector UUID to physical
+            slot table carried by the CUDA-Q controlled fallback walker.
+        qubit_map (CudaqControlledQubitMap): UUID/address to physical qubit map.
+        emit_pass (Any): Emit pass whose resolver folds root shape values.
+        bindings (dict[str, Any]): Active controlled-body bindings.
+
+    Returns:
+        bool: True when the non-sliced root is registered in ``vector_slots`` or
+            every root element address can be found in ``qubit_map``.
+    """
+    root = array_value
+    while root.is_slice():
+        if root.slice_of is None:
+            return False
+        root = root.slice_of
+
+    if root.uuid in vector_slots:
+        return True
+    if not root.shape:
+        return False
+    size = emit_pass._resolver.resolve_int_value(root.shape[0], bindings)
+    if size is None or size < 0:
+        return False
+    return all(QubitAddress(root.uuid, i) in qubit_map for i in range(size))
 
 
 def _build_block_qubit_map(
@@ -207,13 +263,13 @@ def _seed_vector_element_uuid(
 ) -> None:
     """Seed ``qubit_map`` with a Vector[Qubit] element operand's UUID.
 
-    Resolves an ``operand`` that addresses an element of a ``Vector[Qubit]``
-    input (i.e., ``operand.parent_array`` matches a registered vector
-    and ``operand.element_indices[0]`` resolves under ``bindings``) to
-    its physical target via ``vector_slots`` and stores it under
-    ``operand.uuid``.
+    Resolves an ``operand`` that addresses an element of a registered
+    ``Vector[Qubit]`` input, including an element of a slice view over a
+    registered root vector, to its physical target via ``vector_slots`` and
+    stores it under ``operand.uuid``.
     Non-element operands (scalar ``Qubit`` inputs already seeded by
-    ``_build_block_qubit_map``) are skipped silently.
+    ``_build_block_qubit_map``) and elements whose parent/root vector is not
+    available are skipped silently so direct UUID mappings can still resolve.
 
     Args:
         operand (Any): A gate operand to seed.
@@ -228,25 +284,41 @@ def _seed_vector_element_uuid(
             including loop-local values when emitting an unrolled loop.
 
     Raises:
-        EmitError: Raised in three situations, all of which would
-            otherwise degenerate into a downstream "Missing qubit
-            mapping ..." assertion in ``_emit_cudaq_controlled_ops``.
-            (1) A Vector[Qubit] element addressed by the inner block
-            uses an element index that cannot be resolved under the
-            current bindings.
-            (2) The element index is outside the declared Vector
-            length (``elem_idx < 0`` or ``elem_idx >= len(slots)``); the
-            inner block addresses a slot past what the controlled-U
-            was wired up with.
+        EmitError: Raised when a recognized Vector[Qubit] element uses an
+            index that cannot be resolved under the current bindings, or when
+            the resolved index is outside the registered/sliced slot range. A
+            slice parent may also propagate ``EmitError`` from slice length or
+            slice-bound resolution.
     """
     parent = getattr(operand, "parent_array", None)
     if parent is None:
         return
-    if parent.uuid not in vector_slots:
-        return
     indices = tuple(getattr(operand, "element_indices", ()))
     if not indices:
         return
+
+    if (
+        isinstance(parent, ArrayValue)
+        and parent.uuid in vector_slots
+        and not parent.is_slice()
+    ):
+        slots = vector_slots[parent.uuid]
+    elif isinstance(parent, ArrayValue) and parent.is_slice():
+        if not _cudaq_slice_root_slots_available(
+            parent, vector_slots, qubit_map, emit_pass, bindings
+        ):
+            return
+        slots = _resolve_cudaq_array_slots(
+            parent,
+            vector_slots,
+            qubit_map,
+            emit_pass,
+            bindings,
+            operation="ControlledUOperation",
+        )
+    else:
+        return
+
     idx_val = indices[0]
     if idx_val.is_constant():
         elem_idx = int(idx_val.get_const())
@@ -274,7 +346,6 @@ def _seed_vector_element_uuid(
                 operation="ControlledUOperation",
             )
         elem_idx = int(resolved)
-    slots = vector_slots[parent.uuid]
     if elem_idx < 0 or elem_idx >= len(slots):
         # Silently skipping leaves the element's UUID unmapped in
         # ``qubit_map``, which later trips a hard ``AssertionError``
@@ -447,7 +518,7 @@ def _resolve_cudaq_array_slots(
             f"{operation}, got {type(array_value).__name__}.",
             operation=operation,
         )
-    if array_value.uuid in vector_slots:
+    if not array_value.is_slice() and array_value.uuid in vector_slots:
         return list(vector_slots[array_value.uuid])
     if not array_value.shape:
         raise EmitError(
@@ -498,7 +569,7 @@ def _resolve_cudaq_array_slots(
             slice_slots.append(parent_slots[parent_idx])
         vector_slots[array_value.uuid] = slice_slots
         if slice_slots:
-            qubit_map.setdefault(array_value.uuid, slice_slots[0])
+            qubit_map[array_value.uuid] = slice_slots[0]
         return slice_slots
 
     slots: list[int] = []
@@ -626,6 +697,66 @@ def _validate_controlled_helper_unitary_ops(
         if isinstance(op, HasNestedOps):
             for nested in op.nested_op_lists():
                 _validate_controlled_helper_unitary_ops(nested, bindings)
+
+
+def _validate_adjoint_helper_ops(
+    operations: Sequence[Operation],
+    bindings: dict[str, Any],
+) -> None:
+    """Validate that a CUDA-Q adjoint helper can be emitted safely.
+
+    Args:
+        operations (Sequence[Operation]): Operations in the helper block
+            or in a nested control-flow body.
+        bindings (dict[str, Any]): Emit-time bindings used to decide
+            whether ``if`` conditions are compile-time constants.
+
+    Raises:
+        EmitError: If the adjoint target contains non-unitary operations or
+            nested controlled-kernel synthesis that CUDA-Q 0.14.x aborts on
+            when wrapped in ``cudaq.adjoint``.
+    """
+    _validate_controlled_helper_unitary_ops(operations, bindings)
+    for op in operations:
+        if isinstance(op, CallBlockOperation):
+            raise EmitError(
+                "CUDA-Q cudaq.adjoint helper kernels cannot contain residual "
+                "nested qkernel calls; falling back to Qamomile inverse "
+                "decomposition.",
+                operation="InverseBlockOperation",
+            )
+        if isinstance(op, ControlledUOperation):
+            raise EmitError(
+                "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "
+                "controlled-kernel synthesis on CUDA-Q 0.14.x; falling back "
+                "to Qamomile inverse decomposition.",
+                operation="InverseBlockOperation",
+            )
+        if isinstance(op, InverseBlockOperation):
+            raise EmitError(
+                "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "
+                "inverse-kernel synthesis on CUDA-Q 0.14.x; falling back "
+                "to Qamomile inverse decomposition.",
+                operation="InverseBlockOperation",
+            )
+        if (
+            isinstance(op, CompositeGateOperation)
+            and op.implementation_block is not None
+        ):
+            _validate_adjoint_helper_ops(op.implementation_block.operations, bindings)
+            continue
+        if isinstance(op, IfOperation):
+            resolved_condition = resolve_if_condition(op.condition, bindings)
+            if resolved_condition is None:
+                continue
+            selected_ops = (
+                op.true_operations if resolved_condition else op.false_operations
+            )
+            _validate_adjoint_helper_ops(selected_ops, bindings)
+            continue
+        if isinstance(op, HasNestedOps):
+            for nested in op.nested_op_lists():
+                _validate_adjoint_helper_ops(nested, bindings)
 
 
 def _build_helper_qubit_map(
@@ -898,6 +1029,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         block_value: Any,
         num_qubits: int,
         bindings: dict[str, Any],
+        input_operands: list[Any] | None = None,
+        operation_name: str = "ControlledUOperation",
     ) -> None:
         """No-op: CUDA-Q codegen does not support sub-circuit gate conversion.
 
@@ -905,8 +1038,181 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         destructively resets the stateful source builder.  Since CUDA-Q's
         ``circuit_to_gate()`` always returns ``None``, skip the probe
         entirely to avoid corrupting the outer kernel source.
+
+        Args:
+            block_value (Any): Ignored nested block.
+            num_qubits (int): Ignored nested circuit width.
+            bindings (dict[str, Any]): Ignored emit bindings.
+            input_operands (list[Any] | None): Ignored call-site operands.
+                Defaults to None.
+            operation_name (str): Ignored diagnostic operation name.
+                Defaults to ``"ControlledUOperation"``.
         """
         return None
+
+    def _emit_custom_composite(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: Any,
+        impl: Any,
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit custom composites through the shared fallback path.
+
+        Args:
+            circuit (CudaqKernelArtifact): CUDA-Q kernel artifact being
+                emitted.
+            op (Any): Composite gate operation.
+            impl (Any): Qamomile fallback implementation block.
+            qubit_indices (list[int]): Physical target qubit indices.
+            bindings (dict[str, Any]): Active emit bindings.
+        """
+        super()._emit_custom_composite(circuit, op, impl, qubit_indices, bindings)
+
+    def _emit_inverse_block(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: InverseBlockOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a first-class inverse block into CUDA-Q.
+
+        Args:
+            circuit (CudaqKernelArtifact): CUDA-Q kernel artifact being
+                emitted.
+            op (InverseBlockOperation): Inverse block operation to emit.
+            qubit_map (QubitMap): Current quantum value to physical qubit map.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If neither CUDA-Q adjoint nor the shared fallback can
+                emit the inverse operation.
+            SliceBorrowViolationError: If a nested block's slice usage fails
+                the borrow check run by ``_normalize_inverse_block_op``.
+        """
+        # Strip nested slice markers (after the borrow check) before the
+        # adjoint path or the shared fallback walks the blocks' operations
+        # directly; see ``_normalize_inverse_block_op``.
+        op = _normalize_inverse_block_op(op, bindings)
+        if op.num_control_qubits == 0 and op.source_block is not None:
+            try:
+                target_index_groups = [
+                    _expand_quantum_operands_to_phys(
+                        self,
+                        operand,
+                        qubit_map,
+                        bindings,
+                        operation="InverseBlockOperation",
+                    )
+                    for operand in op.target_qubits
+                ]
+                target_indices = [
+                    index for group in target_index_groups for index in group
+                ]
+            except EmitError:
+                target_index_groups = []
+                target_indices = []
+            if len(target_indices) == op.num_target_qubits:
+                try:
+                    self._emit_adjoint_helper(
+                        circuit,
+                        op.source_block,
+                        [*op.target_qubits, *op.parameters],
+                        target_indices,
+                        bindings,
+                    )
+                    _map_inverse_block_results(
+                        op,
+                        [],
+                        target_index_groups,
+                        qubit_map,
+                    )
+                    return
+                except EmitError:
+                    pass
+
+        super()._emit_inverse_block(circuit, op, qubit_map, bindings)
+
+    def _emit_adjoint_helper(
+        self,
+        circuit: CudaqKernelArtifact,
+        block_value: Any,
+        input_operands: list[Any] | None,
+        target_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit ``cudaq.adjoint`` for a nested source block.
+
+        Args:
+            circuit (CudaqKernelArtifact): CUDA-Q kernel artifact being
+                emitted.
+            block_value (Any): Source block whose inverse should be
+                emitted by CUDA-Q.
+            input_operands (list[Any] | None): Call-site operands used to
+                bind block inputs. Defaults to None.
+            target_indices (list[int]): Physical target qubit indices for
+                the adjoint call.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If the block cannot be emitted as a CUDA-Q pure
+                device helper.
+        """
+        if not hasattr(block_value, "operations"):
+            raise EmitError(
+                "Cannot emit CUDA-Q adjoint: block has no operations.",
+                operation="InverseBlockOperation",
+            )
+
+        _validate_adjoint_helper_ops(block_value.operations, bindings)
+
+        local_bindings = _bind_block_inputs(
+            self,
+            block_value,
+            input_operands,
+            bindings,
+        )
+        quantum_operands = _quantum_input_operands(block_value, input_operands)
+        _bind_quantum_input_shapes(
+            self,
+            block_value,
+            quantum_operands,
+            bindings,
+            local_bindings,
+        )
+
+        helper_targets = list(range(len(target_indices)))
+        helper_qubit_map = _build_helper_qubit_map(
+            block_value,
+            helper_targets,
+            self,
+            local_bindings,
+        )
+        emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
+
+        def emit_body() -> None:
+            """Emit the adjoint helper body into the helper source."""
+            self._emit_operations(
+                circuit,
+                block_value.operations,
+                helper_qubit_map,
+                {},
+                local_bindings,
+                force_unroll=True,
+            )
+
+        helper_name, uses_thetas = emitter.build_adjoint_helper(
+            len(target_indices),
+            emit_body,
+        )
+        emitter.emit_adjoint_kernel_call(
+            circuit,
+            helper_name,
+            target_indices,
+            uses_thetas,
+        )
 
     def _emit_controlled_fallback(
         self,
@@ -1027,6 +1333,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         for op in operations:
             if isinstance(op, ReturnOperation):
                 continue
+            if isinstance(op, BinOp):
+                evaluate_binop(self, op, bindings)
+                continue
             if isinstance(op, GateOperation):
                 for operand in op.qubit_operands:
                     _seed_vector_element_uuid(
@@ -1049,6 +1358,19 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 continue
             if isinstance(op, CompositeGateOperation):
                 self._emit_cudaq_controlled_composite(
+                    circuit,
+                    op,
+                    num_controls,
+                    control_indices,
+                    target_indices,
+                    qubit_map,
+                    vector_slots,
+                    emitter,
+                    bindings,
+                )
+                continue
+            if isinstance(op, InverseBlockOperation):
+                self._emit_cudaq_controlled_inverse(
                     circuit,
                     op,
                     num_controls,
@@ -1463,6 +1785,149 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             )
         for result, phys in zip(op.results, qubit_indices, strict=False):
             qubit_map[result.uuid] = phys
+
+    def _emit_cudaq_controlled_inverse(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: InverseBlockOperation,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        qubit_map: CudaqControlledQubitMap,
+        vector_slots: dict[str, list[int]],
+        emitter: CudaqKernelEmitter,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit an inverse block under outer CUDA-Q controls.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (InverseBlockOperation): Inverse op inside the controlled
+                block.
+            num_controls (int): Number of outer controls.
+            control_indices (list[int]): Physical outer controls.
+            target_indices (list[int]): Fallback target slots from the
+                controlled-U call site.
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
+            vector_slots (dict[str, list[int]]): Vector slot map.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            bindings (dict[str, Any]): Current controlled-body bindings.
+
+        Raises:
+            EmitError: If the inverse fallback implementation is missing or
+                cannot be emitted under controls.
+        """
+        del num_controls, target_indices
+        impl = op.implementation_block
+        if impl is None:
+            raise EmitError(
+                "CUDA-Q controlled fallback cannot emit an inverse block "
+                "without an implementation block.",
+                operation="InverseBlockOperation",
+            )
+
+        control_groups = [
+            (
+                _resolve_cudaq_array_slots(
+                    operand,
+                    vector_slots,
+                    qubit_map,
+                    self,
+                    bindings,
+                    operation="InverseBlockOperation",
+                )
+                if isinstance(operand, ArrayValue)
+                else [
+                    _resolve_cudaq_value_index(
+                        operand,
+                        vector_slots,
+                        qubit_map,
+                        self,
+                        bindings,
+                        operation="InverseBlockOperation",
+                    )
+                ]
+            )
+            for operand in op.control_qubits
+        ]
+        target_groups = [
+            (
+                _resolve_cudaq_array_slots(
+                    operand,
+                    vector_slots,
+                    qubit_map,
+                    self,
+                    bindings,
+                    operation="InverseBlockOperation",
+                )
+                if isinstance(operand, ArrayValue)
+                else [
+                    _resolve_cudaq_value_index(
+                        operand,
+                        vector_slots,
+                        qubit_map,
+                        self,
+                        bindings,
+                        operation="InverseBlockOperation",
+                    )
+                ]
+            )
+            for operand in op.target_qubits
+        ]
+        local_controls = [index for group in control_groups for index in group]
+        inverse_targets = [index for group in target_groups for index in group]
+        local_bindings = self._resolver.bind_block_params(
+            impl,
+            op.parameters,
+            bindings,
+        )
+        _bind_quantum_input_shapes(
+            self,
+            impl,
+            op.target_qubits,
+            bindings,
+            local_bindings,
+        )
+        local_qubit_map, local_vector_slots = _build_block_qubit_map(
+            impl,
+            inverse_targets,
+            self,
+            local_bindings,
+        )
+        effective_controls = control_indices + local_controls
+        self._emit_cudaq_controlled_ops(
+            circuit,
+            impl.operations,
+            len(effective_controls),
+            effective_controls,
+            inverse_targets,
+            local_qubit_map,
+            local_vector_slots,
+            emitter,
+            local_bindings,
+        )
+        for result, indices in zip(
+            op.results[: op.num_control_qubits],
+            control_groups,
+            strict=False,
+        ):
+            if indices:
+                qubit_map[result.uuid] = indices[0]
+
+        target_results = [
+            result
+            for result in op.results[op.num_control_qubits :]
+            if result.type.is_quantum()
+        ]
+        for result, indices in zip(target_results, target_groups, strict=False):
+            if isinstance(result, ArrayValue):
+                vector_slots[result.uuid] = list(indices)
+                for i, phys in enumerate(indices):
+                    qubit_map[QubitAddress(result.uuid, i)] = phys
+                if indices:
+                    qubit_map[result.uuid] = indices[0]
+            elif indices:
+                qubit_map[result.uuid] = indices[0]
 
     def _emit_cudaq_controlled_pauli_evolve(
         self,
