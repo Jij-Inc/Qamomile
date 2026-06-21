@@ -330,10 +330,22 @@ class _ControlEntry:
             ``VectorView``, signalling that the consume is deferred and
             ``original`` should still be used to read the current
             ``ArrayValue``.
+        result_array (ArrayValue | None): For a whole-``Vector`` /
+            ``VectorView`` control entry, the freshly-versioned result
+            ``ArrayValue`` that the per-element scalar control results
+            are re-parented onto (see
+            :meth:`ControlledGate._build_control_results`).  The same
+            object is handed back by
+            :meth:`ControlledGate._wrap_entry_output` so the user-facing
+            output handle and the IR result scalars agree on the array
+            UUID, which is what lets the emit / allocation passes map the
+            output vector's per-element addresses.  ``None`` for scalar
+            ``Qubit`` controls and for every sub-quantum entry.
     """
 
     original: Any
     consumed: Any | None = None
+    result_array: ArrayValue | None = None
 
     @property
     def is_deferred_view(self) -> bool:
@@ -1008,11 +1020,55 @@ class ControlledGate:
         """
         results: list[Value] = []
         for entry in consumed_controls:
-            operands_for_entry = self._expand_control_to_scalars(entry)
-            results.extend(op.next_version() for op in operands_for_entry)
+            results.extend(self._build_control_results(entry))
         for entry in consumed_sub_quantum:
             results.append(self._sub_quantum_operand_value(entry).next_version())
         return results
+
+    def _build_control_results(self, entry: _ControlEntry) -> list[Value]:
+        """Build the per-qubit result Values for one control entry.
+
+        A scalar ``Qubit`` control produces a single ``next_version``
+        scalar whose UUID the returned ``Qubit`` handle wraps directly,
+        so no array bookkeeping is needed.
+
+        A whole ``Vector`` / ``VectorView`` control is expanded into one
+        scalar result per covered qubit (mirroring the per-element
+        control operands), but every such scalar is re-parented onto a
+        freshly-versioned result ``ArrayValue`` recorded on ``entry``.
+        ``ConcreteControlledU`` keeps the control region as per-element
+        scalars (its operand / result contract), so without this
+        re-parenting the user-facing output ``Vector`` would wrap a
+        throwaway ``ArrayValue`` whose ``QubitAddress(uuid, i)`` keys are
+        never written by any pass — a later ``measure`` / element access
+        of the returned control vector would then resolve to nothing
+        (silently measuring all zeros).  Pointing the result scalars'
+        ``parent_array`` at the same array the output handle wraps is
+        what lets :meth:`_map_controlled_u_results` and the resource
+        allocator map the result vector's per-element addresses to the
+        control's physical qubits.
+
+        Args:
+            entry (_ControlEntry): One control entry from
+                :meth:`_consume_with_borrow_transfer`.
+
+        Returns:
+            list[Value]: One result ``Value`` per covered qubit, in
+                element order.
+        """
+        from qamomile.circuit.frontend.handle.array import ArrayBase
+
+        operand_scalars = self._expand_control_to_scalars(entry)
+        source = entry.original if entry.is_deferred_view else entry.consumed
+        if not isinstance(source, ArrayBase):
+            return [scalar.next_version() for scalar in operand_scalars]
+
+        result_array = cast(ArrayValue, source.value).next_version()
+        entry.result_array = result_array
+        return [
+            dataclasses.replace(scalar.next_version(), parent_array=result_array)
+            for scalar in operand_scalars
+        ]
 
     @staticmethod
     def _expand_control_to_scalars(entry: _ControlEntry) -> list[Value]:
@@ -1210,14 +1266,19 @@ class ControlledGate:
     ) -> Any:
         """Build a single output handle for one control or sub-quantum entry.
 
-        Two ``ArrayBase`` shapes are handled:
+        Three ``ArrayBase`` shapes are handled:
 
-        - Per-element scalar results (``ConcreteControlledU`` controls
-          where a ``Vector`` / ``VectorView`` was expanded to scalars
-          by :meth:`_expand_control_to_scalars`).  No single
-          ``ArrayValue`` exists in ``op.results`` for the entry, so a
-          fresh ``next_version`` of the source array is synthesised
-          and used as the wrapper handle's value.
+        - Per-element scalar results with a recorded ``result_array``
+          (``ConcreteControlledU`` whole-``Vector`` / ``VectorView``
+          controls).  :meth:`_build_control_results` already created the
+          next-version result ``ArrayValue`` and re-parented the scalar
+          results onto it, recording it on ``entry.result_array``; the
+          wrapper handle re-uses that exact array so the output handle
+          and the IR result scalars agree on the array UUID the emit /
+          allocation passes map.
+        - Per-element scalar results with no recorded ``result_array``
+          (legacy fallback).  A fresh ``next_version`` of the source
+          array is synthesised and used as the wrapper handle's value.
         - Single ``ArrayValue`` result (``SymbolicControlledU`` control
           pool, or ``Vector`` / ``VectorView`` sub-kernel argument).
           The IR-side ``next_version`` is already laid out for us; the
@@ -1256,12 +1317,17 @@ class ControlledGate:
             )
 
         assert isinstance(original, ArrayBase)
-        # Discriminate the two shapes by inspecting the caller-supplied
-        # result list: a single ``ArrayValue`` means the IR already
-        # carries the next-version array we should hand back; anything
-        # else is a per-element scalar list and we synthesise a fresh
-        # ``next_version`` from the source array.
-        if len(entry_results) == 1 and isinstance(entry_results[0], ArrayValue):
+        # Discriminate the shapes.  A control entry with a recorded
+        # ``result_array`` (set by :meth:`_build_control_results` for a
+        # whole-``Vector`` / ``VectorView`` control) hands that exact
+        # array back, so the output handle and the per-element scalar
+        # results share its UUID.  Otherwise a single ``ArrayValue`` in
+        # the result list means the IR already carries the next-version
+        # array; anything else is a legacy per-element scalar list and a
+        # fresh ``next_version`` of the source array is synthesised.
+        if entry.result_array is not None:
+            new_av = entry.result_array
+        elif len(entry_results) == 1 and isinstance(entry_results[0], ArrayValue):
             new_av = entry_results[0]
         else:
             source_for_av: Any = original if entry.is_deferred_view else entry.consumed
