@@ -3157,12 +3157,8 @@ def _computational_basis_state_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKe
 def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     """Build state-preparation amplitude_encoding inverse roundtrip kernels.
 
-    The inverse leg goes through a register-parameterized qkernel wrapper,
-    exercising Mottonen composite-gate inversion. The forward leg applies
-    `amplitude_encoding` directly inside the entry kernel: routing the
-    forward call through the same wrapper currently trips a pre-existing
-    transpiler qubit-map assertion (QInit ordering for nested composite
-    emission, unrelated to inverse), so only the inverse leg is wrapped.
+    Both legs go through a register-parameterized qkernel wrapper,
+    exercising Möttönen custom-composite inlining and inversion.
 
     Returns:
         tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
@@ -3180,14 +3176,14 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     @qmc.qkernel
     def sample_circuit() -> qmc.Vector[qmc.Bit]:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding(qs, amplitudes)
+        qs = amplitude_layer(qs)
         qs = qmc.inverse(amplitude_layer)(qs)
         return qmc.measure(qs)
 
     @qmc.qkernel
     def expval_circuit(observable: qmc.Observable) -> qmc.Float:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding(qs, amplitudes)
+        qs = amplitude_layer(qs)
         qs = qmc.inverse(amplitude_layer)(qs)
         return qmc.expval(qs, observable)
 
@@ -3200,10 +3196,9 @@ def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     """Build state-preparation amplitude_encoding_from_angles roundtrip kernels.
 
     The parametric companion to `amplitude_encoding`: pre-computed Mottonen
-    Ry angles flow through the same composite gate, so the case mirrors the
-    amplitude_encoding one, including the direct forward leg (the nested
-    forward call trips the same pre-existing transpiler qubit-map
-    assertion, unrelated to inverse).
+    Ry angles are emitted as elementary gates rather than through a custom
+    composite operation. The wrapper path is included for symmetry with
+    `amplitude_encoding`, but it does not exercise `_inline_composite`.
 
     Returns:
         tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
@@ -3224,14 +3219,14 @@ def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     @qmc.qkernel
     def sample_circuit() -> qmc.Vector[qmc.Bit]:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding_from_angles(qs, ry_angles)
+        qs = amplitude_angles_layer(qs)
         qs = qmc.inverse(amplitude_angles_layer)(qs)
         return qmc.measure(qs)
 
     @qmc.qkernel
     def expval_circuit(observable: qmc.Observable) -> qmc.Float:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding_from_angles(qs, ry_angles)
+        qs = amplitude_angles_layer(qs)
         qs = qmc.inverse(amplitude_angles_layer)(qs)
         return qmc.expval(qs, observable)
 

@@ -160,6 +160,67 @@ class TestVectorViewFrontend:
         with pytest.raises(NotImplementedError, match="Negative start"):
             _ = kern.block
 
+    def test_negative_element_index_raises(self):
+        """Constant negative element index is an explicit NotImplementedError.
+
+        Previously ``q[-1]`` survived tracing and tripped a misleading
+        internal allocator assertion ("This indicates a bug in the
+        transpiler pipeline") at emit time.
+        """
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[-1] = qmc.h(q[-1])
+            return qmc.measure(q)
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            _ = kern.block
+
+    def test_negative_view_element_index_raises(self):
+        """Negative index on a VectorView is rejected at trace time.
+
+        Previously ``v[-1]`` for ``v = q[1:3]`` silently affine-composed to
+        root index ``1 + 1 * (-1) = 0``, routing the gate onto physical
+        ``q[0]`` instead of ``q[2]`` — a silent miscompilation.
+        """
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            v = q[1:3]
+            v[-1] = qmc.x(v[-1])
+            q[1:3] = v
+            return qmc.measure(q)
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            _ = kern.block
+
+    def test_negative_element_setitem_raises(self):
+        """Write-side negative element index is rejected like the read side."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[-1] = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            _ = kern.block
+
+    def test_negative_matrix_element_index_raises(self):
+        """Negative constant index on a Matrix element is rejected."""
+
+        @qmc.qkernel
+        def kern(edges: qmc.Matrix[qmc.UInt]) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            i = edges[0, -1]
+            q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            _ = kern.block
+
     def test_view_round_trip_releases_borrow(self):
         """Borrowing through the view and writing back releases the slot.
 

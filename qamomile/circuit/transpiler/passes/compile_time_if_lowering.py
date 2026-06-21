@@ -23,7 +23,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     PhiOp,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
-from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    resolve_root_array_index,
+)
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.value_resolver import (
     ValueResolver as UnifiedValueResolver,
@@ -33,6 +38,41 @@ from . import Pass
 from .emit_support import resolve_if_condition
 from .eval_utils import FoldPolicy, fold_classical_op
 from .value_mapping import ValueSubstitutor
+
+
+def _array_carrier_keys(
+    source: ValueBase,
+    num_bits: int,
+) -> tuple[list[str], list[str]] | None:
+    """Build root-space carrier keys for a selected array source.
+
+    Delegates the slice-chain folding to
+    :func:`~qamomile.circuit.ir.value.resolve_root_array_index` so the keys
+    stay consistent with every other carrier-key producer and resolver.
+
+    Args:
+        source (ValueBase): Selected source value after phi substitution.
+            Array sources may be plain arrays or strided views.
+        num_bits (int): Number of QFixed carrier bits to build.
+
+    Returns:
+        tuple[list[str], list[str]] | None: Parallel UUID and logical-id
+            carrier keys when ``source`` is an array with constant slice
+            metadata, otherwise ``None``.
+    """
+    if not isinstance(source, ArrayValue):
+        return None
+
+    uuids: list[str] = []
+    logical_ids: list[str] = []
+    for i in range(num_bits):
+        resolved = resolve_root_array_index(source, i)
+        if resolved is None:
+            return None
+        root, root_index = resolved
+        uuids.append(f"{root.uuid}_{root_index}")
+        logical_ids.append(f"{root.logical_id}_{root_index}")
+    return uuids, logical_ids
 
 
 class CompileTimeIfLoweringPass(Pass[Block, Block]):
@@ -277,7 +317,19 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         op: Operation,
         subst: dict[str, ValueBase],
     ) -> Operation:
-        """Apply phi substitution map to an operation's operands and results."""
+        """Apply phi substitution map to an operation's operands and results.
+
+        Args:
+            op (Operation): Operation to rewrite through ``subst``.
+            subst (dict[str, ValueBase]): Accumulated phi substitution map.
+                Mutated in place when a CastOperation result is rebuilt with
+                re-synced carrier metadata, so later operations holding the
+                same SSA value pick up the rebuilt metadata.
+
+        Returns:
+            Operation: The rewritten operation (``op`` itself when nothing
+                changed).
+        """
         if not subst:
             return op
 
@@ -402,30 +454,61 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 result_val = result_op.results[0]
                 if result_val.is_cast_result():
                     num_bits = result_val.get_qfixed_num_bits()
+                    carriers: tuple[list[str], list[str]] | None = None
+                    if num_bits is not None:
+                        carriers = _array_carrier_keys(new_source, num_bits)
+                        if (
+                            carriers is None
+                            and isinstance(new_source, ArrayValue)
+                            and new_source.slice_of is not None
+                        ):
+                            # The selected branch is a strided view whose root
+                            # index space is not compile-time resolvable
+                            # (symbolic slice bounds). Synthesizing
+                            # ``f"{view.uuid}_{i}"`` below would emit view-local
+                            # carrier keys that the allocator never registers
+                            # (only root-array addresses are), silently dropping
+                            # the QFixed measurement at emit. Fail fast instead,
+                            # mirroring the frontend's rejection of symbolic
+                            # slice views for casts.
+                            raise ValidationError(
+                                "Compile-time `if` selected a slice-view cast "
+                                "source whose root index space is not "
+                                "compile-time resolvable (symbolic slice "
+                                "bounds). Bind the slice bounds so the QFixed "
+                                "carrier qubits resolve to root-array "
+                                "addresses; leaving them symbolic would "
+                                "silently drop the measurement at emit time."
+                            )
+                    if carriers is None and num_bits is not None:
+                        source_logical_id = getattr(
+                            new_source, "logical_id", new_source.uuid
+                        )
+                        carriers = (
+                            [f"{new_source.uuid}_{i}" for i in range(num_bits)],
+                            [f"{source_logical_id}_{i}" for i in range(num_bits)],
+                        )
+                    carrier_uuids = (
+                        carriers[0]
+                        if carriers is not None
+                        else list(result_val.get_cast_qubit_uuids() or ())
+                    )
+                    carrier_logical_ids = (
+                        carriers[1]
+                        if carriers is not None
+                        else list(result_val.get_cast_qubit_logical_ids() or ())
+                    )
                     new_result = result_val.with_cast_metadata(
                         source_uuid=new_source.uuid,
                         source_logical_id=getattr(
                             new_source, "logical_id", new_source.uuid
                         ),
-                        qubit_uuids=(
-                            [f"{new_source.uuid}_{i}" for i in range(num_bits)]
-                            if num_bits is not None
-                            else result_val.get_cast_qubit_uuids() or ()
-                        ),
-                        qubit_logical_ids=(
-                            [
-                                f"{getattr(new_source, 'logical_id', new_source.uuid)}_{i}"
-                                for i in range(num_bits)
-                            ]
-                            if num_bits is not None
-                            else result_val.get_cast_qubit_logical_ids() or ()
-                        ),
+                        qubit_uuids=carrier_uuids,
+                        qubit_logical_ids=carrier_logical_ids,
                     )
                     if num_bits is not None:
                         new_result = new_result.with_qfixed_metadata(
-                            qubit_uuids=[
-                                f"{new_source.uuid}_{i}" for i in range(num_bits)
-                            ],
+                            qubit_uuids=carrier_uuids,
                             num_bits=num_bits,
                             int_bits=result_val.get_qfixed_int_bits() or 0,
                         )
@@ -438,6 +521,14 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                         results=[new_result],
                         qubit_mapping=new_mapping,
                     )
+                    # Propagate the rebuilt result to downstream consumers.
+                    # The MeasureQFixedOperation operand is the same SSA
+                    # value, and plan-time lowering reads carrier keys from
+                    # that operand's metadata — without this entry it would
+                    # keep the stale trace-time carriers of the unselected
+                    # branch. Self-mapping is safe: ``_mapped_value_for_uuid``
+                    # seeds its cycle guard with the queried UUID.
+                    subst[result_val.uuid] = new_result
 
         return result_op
 

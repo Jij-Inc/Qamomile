@@ -2456,6 +2456,8 @@ class CircuitAnalyzer:
                         return lhs_val * rhs_val
                     elif op.kind == BinOpKind.FLOORDIV:
                         return lhs_val // rhs_val if rhs_val != 0 else None
+                    elif op.kind == BinOpKind.MOD:
+                        return lhs_val % rhs_val if rhs_val != 0 else None
                     elif op.kind == BinOpKind.DIV:
                         return lhs_val / rhs_val if rhs_val != 0 else None
                     elif op.kind == BinOpKind.POW:
@@ -2719,6 +2721,7 @@ class CircuitAnalyzer:
         else:
             _extra_ops: dict[BinOpKind, str] = {
                 BinOpKind.FLOORDIV: "//",
+                BinOpKind.MOD: "%",
                 BinOpKind.POW: "**",
             }
             op_sym = _extra_ops.get(binop.kind, "?") if binop.kind is not None else "?"
@@ -4507,6 +4510,7 @@ class CircuitAnalyzer:
                     BinOpKind.SUB: "-",
                     BinOpKind.MUL: "*",
                     BinOpKind.FLOORDIV: "//",
+                    BinOpKind.MOD: "%",
                     BinOpKind.POW: "**",
                 }
                 op_symbol = (
