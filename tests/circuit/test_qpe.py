@@ -315,8 +315,13 @@ class TestQPEFallbackVectorViewPhase:
 
         _assert_fallback_qpe_vector_view_phase(QuriPartsTranspiler())
 
+    @pytest.mark.cudaq
     def test_cudaq_executes_vector_view_phase(self):
-        """CUDA-Q executes fallback QPE with a VectorView phase element."""
+        """CUDA-Q executes fallback QPE with a VectorView phase element.
+
+        Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+        session is unsafe — see tests/_cudaq_isolation.py.
+        """
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
@@ -337,8 +342,13 @@ class TestQPEBuiltinVectorViewPhase:
 
         _assert_builtin_qpe_vector_view_phase(QuriPartsTranspiler())
 
+    @pytest.mark.cudaq
     def test_cudaq_executes_vector_view_phase(self):
-        """CUDA-Q executes public QPE with a VectorView phase element."""
+        """CUDA-Q executes public QPE with a VectorView phase element.
+
+        Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+        session is unsafe — see tests/_cudaq_isolation.py.
+        """
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 

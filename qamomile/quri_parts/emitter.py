@@ -247,7 +247,7 @@ class QuriPartsGateEmitter:
                         "QURI Parts backend: division by zero in symbolic angle."
                     )
                 return _scale_form(lf_lhs, 1.0 / divisor)
-            case BinOpKind.POW | BinOpKind.FLOORDIV:
+            case BinOpKind.POW | BinOpKind.FLOORDIV | BinOpKind.MOD:
                 raise QamomileQuriPartsTranspileError(
                     f"QURI Parts backend supports only linear combinations of "
                     f"parameters; '{kind.name}' is not supported on parametric "
@@ -656,6 +656,46 @@ class QuriPartsGateEmitter:
         Returns None since QURI Parts doesn't support this natively.
         """
         return None
+
+    def supports_gate_inverse(self) -> bool:
+        """Report QURI Parts circuit inverse support.
+
+        Returns:
+            bool: True because ``gate_inverse`` can invert concrete
+            QURI Parts circuits. The backend still reports no reusable
+            gate support, so inverse blocks normally use the
+            transpiler-level native path rather than the shared
+            ``blockvalue_to_gate`` path.
+        """
+        return True
+
+    def gate_inverse(self, gate: Any) -> Any:
+        """Return the inverse of a concrete QURI Parts circuit.
+
+        Args:
+            gate (Any): Candidate QURI Parts circuit to invert. Runtime
+                parametric circuits are expected to fall back to Qamomile's
+                gate-by-gate inverse implementation.
+
+        Returns:
+            Any: Inverted QURI Parts circuit when ``inverse_circuit`` can
+                handle ``gate``; otherwise None so callers can fall back to
+                Qamomile-level decomposition.
+        """
+        if gate is None:
+            return None
+
+        try:
+            import quri_parts.circuit as qp_c  # type: ignore[import-not-found]
+
+            return qp_c.inverse_circuit(gate)
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+        ):
+            return None
 
     # Control flow support - not supported by QURI Parts
     def supports_for_loop(self) -> bool:

@@ -409,11 +409,50 @@ class ArrayBase(Handle, Generic[T]):
         return self._shape
 
     def _make_uint_index(self, idx: int) -> UInt:
-        """Create a UInt from an integer index."""
+        """Create a UInt from an integer index.
+
+        Args:
+            idx (int): The Python integer index to wrap.
+
+        Returns:
+            UInt: A handle whose underlying Value carries ``idx`` as a
+                compile-time constant.
+        """
         return UInt(
             value=Value(type=UIntType(), name=f"idx_{idx}").with_const(idx),
             init_value=idx,
         )
+
+    @staticmethod
+    def _reject_negative_const_indices(indices: tuple[UInt, ...]) -> None:
+        """Reject element indices that carry a negative compile-time constant.
+
+        Python-style negative indexing is not supported for array element
+        access. On sliced views the emit-time affine root composition
+        ``root = start + step * local`` would silently address the wrong
+        root slot (e.g. ``v[-1]`` for ``v = q[1:3]`` resolves to ``q[0]``
+        instead of ``q[2]``), so the access is rejected before any IR is
+        built — mirroring the negative ``start`` / ``stop`` / ``step``
+        rejection in ``_make_slice_view``.
+
+        Args:
+            indices (tuple[UInt, ...]): Element indices to validate. Only
+                indices whose underlying Value is a compile-time constant
+                are checked; symbolic indices are deferred to emit-time
+                resolution, which refuses negative resolved values.
+
+        Raises:
+            NotImplementedError: If any index is a negative compile-time
+                constant.
+        """
+        for idx in indices:
+            idx_const = _as_int_const(idx)
+            if idx_const is not None and idx_const < 0:
+                raise NotImplementedError(
+                    f"Negative index is not supported for array element "
+                    f"access (got index={idx_const}).  Use a non-negative "
+                    f"value or compute the index explicitly."
+                )
 
     def _format_index(self, indices: tuple[UInt, ...]) -> str:
         """Format indices for element naming and parameter tracking."""
@@ -471,6 +510,9 @@ class ArrayBase(Handle, Generic[T]):
         """Get an element at the given indices.
 
         Raises:
+            NotImplementedError: If any index is a negative compile-time
+                constant — Python-style negative indexing is not
+                supported (see ``_reject_negative_const_indices``).
             QubitConsumedError: If the array (or the targeted slot) was
                 already destroyed by a prior destructive operation
                 (``measure`` / ``cast`` / ``expval``).
@@ -478,6 +520,12 @@ class ArrayBase(Handle, Generic[T]):
                 or the slot is currently owned by a ``VectorView`` slice
                 (whether on ``self`` or a nested outer view).
         """
+        # Reject constant negative indices before any borrow-table or IR
+        # side effect: a negative index built into the IR would either
+        # silently compose to the wrong root slot through a view's affine
+        # map or surface much later as an internal allocator assertion.
+        self._reject_negative_const_indices(indices)
+
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 
@@ -487,10 +535,10 @@ class ArrayBase(Handle, Generic[T]):
         # length-3 array — from being built into the IR. For a measured
         # ``Vector[Bit]`` such an element would otherwise compose to a
         # valid-but-wrong root clbit at emit time and be read silently. Only
-        # the ``idx >= dim`` overflow is rejected here: negative indices are
-        # a separate (unsupported) concern already diagnosed downstream, and
-        # symbolic indices / dimensions (loop variables, runtime parameters)
-        # carry no provable range and are deferred to emit-time resolution.
+        # the ``idx >= dim`` overflow is rejected here: negative indices were
+        # already rejected above, and symbolic indices / dimensions (loop
+        # variables, runtime parameters) carry no provable range and are
+        # deferred to emit-time resolution.
         if len(indices) == 1 and self._shape:
             idx_const = _as_int_const(indices[0])
             dim_const = _as_int_const(self._shape[0])
@@ -623,6 +671,9 @@ class ArrayBase(Handle, Generic[T]):
             value: The handle being written back.
 
         Raises:
+            NotImplementedError: If any index is a negative compile-time
+                constant — Python-style negative indexing is not
+                supported (see ``_reject_negative_const_indices``).
             QubitConsumedError: If the array was already consumed.
             AffineTypeError: If the index was borrowed **and** the value
                 was not borrowed from this array (``value.parent is not self``).
@@ -636,6 +687,10 @@ class ArrayBase(Handle, Generic[T]):
             UInt handles from ``_get_element`` and thus matches the borrow
             key reliably.
         """
+        # Mirror the read-side rejection so ``arr[-1] = value`` cannot
+        # register a borrow-table entry under a negative key either.
+        self._reject_negative_const_indices(indices)
+
         target_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 
@@ -871,7 +926,9 @@ class Vector(ArrayBase[T]):
 
         Raises:
             NotImplementedError: If the slice uses a non-positive step or
-                negative start/stop values, which are not yet supported.
+                negative start/stop values, or if an element index is a
+                negative constant — Python-style negative indexing is not
+                yet supported.
         """
         if isinstance(index, slice):
             return self._make_slice_view(index)

@@ -16,8 +16,15 @@ Top-level envelope
     }
 
 ``SCHEMA_VERSION`` increments whenever the schema changes in a way
-that breaks forward / backward compatibility (added required fields,
-removed fields, semantic changes).  The current value and the
+that breaks **backward** compatibility — i.e. the current decoder can
+no longer read previously-written payloads (required fields added or
+removed, field semantics changed).  Purely additive changes do not
+bump the version: new optional fields are read with
+``d.get(...)``-with-default semantics (old payloads decode to the
+default), and unknown extra fields in newer payloads are ignored by
+older readers.  New operation ``$type`` tags are likewise additive —
+an older reader rejects them loudly with the closed-dispatch
+``ValueError`` rather than mis-decoding.  The current value and the
 per-bump history are recorded next to the constant at the bottom of
 this module.
 
@@ -105,5 +112,10 @@ from __future__ import annotations
 # still read old, field-less v1 payloads) rather than a schema bump;
 # the version stays at 1.  The same pattern now also applies to the
 # ``num_control_args`` field added alongside the multi-arg control
-# prefix.
+# prefix. New operation tags such as ``InverseBlockOperation`` are also
+# additive: old loaders fail loudly on the unknown tag, while v1 readers
+# that know the tag can still read older payloads.  The ``ArrayValue``
+# slice-view refs (``slice_of_ref`` / ``slice_start_ref`` /
+# ``slice_step_ref``) follow the same additive pattern: payloads
+# written before they existed decode to a non-sliced array.
 SCHEMA_VERSION: int = 1
