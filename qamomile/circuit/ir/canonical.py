@@ -67,6 +67,7 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueMetadata,
+    remap_indexed_identifier,
     remap_value_metadata_references,
 )
 
@@ -394,7 +395,10 @@ class _Canonicalizer:
         if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
             new_op = dataclasses.replace(
                 new_op,
-                qubit_mapping=[self._remap_uuid(u) for u in new_op.qubit_mapping],
+                qubit_mapping=[
+                    remap_indexed_identifier(u, self._remap_uuid)
+                    for u in new_op.qubit_mapping
+                ],
             )
 
         if (
@@ -550,7 +554,20 @@ class _Canonicalizer:
         return cloned
 
     def _canonical_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
-        """Rewrite UUID and logical_id references inside ValueMetadata."""
+        """Rewrite UUID and logical_id references inside ValueMetadata.
+
+        ``ScalarMetadata`` and ``DictRuntimeMetadata`` carry no UUID
+        references; ``CastMetadata``, ``QFixedMetadata``, and
+        ``ArrayRuntimeMetadata`` do and are rewritten through the
+        active remap tables.
+
+        Args:
+            metadata (ValueMetadata): Original metadata bundle.
+
+        Returns:
+            ValueMetadata: A new bundle with rewritten UUID / logical_id
+                references and untouched scalar / dict-runtime sections.
+        """
         return remap_value_metadata_references(
             metadata,
             self._remap_uuid,
