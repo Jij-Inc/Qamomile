@@ -328,3 +328,42 @@ def test_multi_controlled_irreducible_without_hook_raises() -> None:
     op = _fixed_gate(GateOperationType.X, 1)
     with pytest.raises(EmitError, match="3-controlled X"):
         emit_multi_controlled_gate(emit_pass, object(), op, [4, 5, 6], [9], {})
+
+
+def test_resolve_controlled_u_rejects_control_indices_with_multi_arg_prefix() -> None:
+    """control_indices combined with a multi-arg control prefix raises EmitError."""
+    import pytest
+
+    from qamomile.circuit.ir.operation.gate import SymbolicControlledU
+    from qamomile.circuit.ir.types.primitives import UIntType
+    from qamomile.circuit.transpiler.errors import EmitError
+    from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+        resolve_controlled_u_call,
+    )
+
+    c0 = Value(type=QubitType(), name="c0")
+    c1 = Value(type=QubitType(), name="c1")
+    target = Value(type=QubitType(), name="t")
+    num_controls = Value(type=UIntType(), name="nc").with_const(1)
+    control_index = Value(type=UIntType(), name="ci").with_const(0)
+
+    # Malformed layout: control_indices selects from a single pool, yet the
+    # control prefix carries two operands (num_control_args=2). The frontend
+    # rejects this, but a hand-built / deserialized op must still fail loudly
+    # rather than silently treating only the first operand as the pool.
+    op = SymbolicControlledU(
+        operands=[c0, c1, target],
+        results=[c0.next_version(), c1.next_version(), target.next_version()],
+        num_controls=num_controls,
+        control_indices=(control_index,),
+        num_control_args=2,
+        block=Block(),
+    )
+
+    qubit_map = {
+        QubitAddress(c0.uuid): 0,
+        QubitAddress(c1.uuid): 1,
+        QubitAddress(target.uuid): 2,
+    }
+    with pytest.raises(EmitError, match="exactly one control-pool operand"):
+        resolve_controlled_u_call(_ResolverOnlyEmitPass(), op, qubit_map, {})

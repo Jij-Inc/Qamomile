@@ -548,6 +548,20 @@ def resolve_controlled_u_call(
     ]
 
     if isinstance(op, SymbolicControlledU) and op.control_indices is not None:
+        # ``control_indices`` selects a subset of a single control pool, so the
+        # frontend rejects combining it with a multi-arg control prefix. Guard
+        # the invariant here too: a malformed op (e.g. one reconstructed from a
+        # wire payload) with ``num_control_args > 1`` would otherwise treat
+        # ``control_operand_groups[0]`` as the whole pool and silently drop the
+        # remaining control operands.
+        if len(control_operand_groups) != 1:
+            raise EmitError(
+                f"SymbolicControlledU with control_indices must carry exactly "
+                f"one control-pool operand, but num_control_args="
+                f"{num_control_args}. Combining control_indices with a "
+                f"multi-arg control prefix is not a valid operand layout.",
+                operation="ControlledUOperation",
+            )
         pool_phys = control_operand_groups[0]
         resolved_indices: list[int] = []
         for index_value in op.control_indices:
