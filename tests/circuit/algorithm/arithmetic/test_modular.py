@@ -284,8 +284,6 @@ def _run_shift_case(
     )
 
 
-
-
 @pytest.mark.parametrize("n", _SIZES)
 @pytest.mark.parametrize("seed", _SEEDS)
 @pytest.mark.parametrize(("direction", "mode"), _CASES)

@@ -3574,8 +3574,9 @@ class TestControlledGate:
         _, circ = _transpile_and_get_circuit(circuit)
         sv = _run_statevector(circ)
         expected = _double_controlled_unitary(GATE_SPECS["H"].matrix_fn()) @ (
-            tensor_product(identity(2), GATE_SPECS["X"].matrix_fn(),
-                           GATE_SPECS["X"].matrix_fn())
+            tensor_product(
+                identity(2), GATE_SPECS["X"].matrix_fn(), GATE_SPECS["X"].matrix_fn()
+            )
             @ all_zeros_state(3)
         )
         assert statevectors_equal(sv, expected)
@@ -3601,11 +3602,10 @@ class TestControlledGate:
         theta = np.pi / 3
         _, circ = _transpile_and_get_circuit(circuit, bindings={"theta": theta})
         sv = _run_statevector(circ)
-        expected = _double_controlled_unitary(
-            GATE_SPECS["RX"].matrix_fn(theta)
-        ) @ (
-            tensor_product(identity(2), GATE_SPECS["X"].matrix_fn(),
-                           GATE_SPECS["X"].matrix_fn())
+        expected = _double_controlled_unitary(GATE_SPECS["RX"].matrix_fn(theta)) @ (
+            tensor_product(
+                identity(2), GATE_SPECS["X"].matrix_fn(), GATE_SPECS["X"].matrix_fn()
+            )
             @ all_zeros_state(3)
         )
         assert statevectors_equal(sv, expected)
@@ -6158,8 +6158,9 @@ class TestControlledSubRoutines:
         sv = _run_statevector(circ)
         hx = GATE_SPECS["X"].matrix_fn() @ GATE_SPECS["H"].matrix_fn()
         expected = _double_controlled_unitary(hx) @ (
-            tensor_product(identity(2), GATE_SPECS["X"].matrix_fn(),
-                           GATE_SPECS["X"].matrix_fn())
+            tensor_product(
+                identity(2), GATE_SPECS["X"].matrix_fn(), GATE_SPECS["X"].matrix_fn()
+            )
             @ all_zeros_state(3)
         )
         assert statevectors_equal(sv, expected)
