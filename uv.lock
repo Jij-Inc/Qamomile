@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
@@ -1500,7 +1500,7 @@ wheels = [
 
 [[package]]
 name = "jupyter-server"
-version = "2.17.0"
+version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1523,9 +1523,9 @@ dependencies = [
     { name = "traitlets" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5b/ac/e040ec363d7b6b1f11304cc9f209dac4517ece5d5e01821366b924a64a50/jupyter_server-2.17.0.tar.gz", hash = "sha256:c38ea898566964c888b4772ae1ed58eca84592e88251d2cfc4d171f81f7e99d5", size = 731949, upload-time = "2025-08-21T14:42:54.042Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/dc/db3a582633170186f8c8b31298d7eb26ad0eb031a1f53476c258b64eed05/jupyter_server-2.20.0.tar.gz", hash = "sha256:b5778ba337d8015a3dc2b80803ecdd5ac18d3797fddf61a50ea5fb472b4ebe14", size = 756523, upload-time = "2026-06-17T12:09:09.435Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/80/a24767e6ca280f5a49525d987bf3e4d7552bf67c8be07e8ccf20271f8568/jupyter_server-2.17.0-py3-none-any.whl", hash = "sha256:e8cb9c7db4251f51ed307e329b81b72ccf2056ff82d50524debde1ee1870e13f", size = 388221, upload-time = "2025-08-21T14:42:52.034Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/71/8c002223e873a870f5c41dc69b0a7c922301123e4a31d5d01ecb700aef77/jupyter_server-2.20.0-py3-none-any.whl", hash = "sha256:c3b67c93c471e947c18b5026f04f21614218adb706df8f48227d3ee8e0a7cdcc", size = 393143, upload-time = "2026-06-17T12:09:07.234Z" },
 ]
 
 [[package]]
@@ -1543,7 +1543,7 @@ wheels = [
 
 [[package]]
 name = "jupyterlab"
-version = "4.5.6"
+version = "4.5.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "async-lru" },
@@ -1560,9 +1560,9 @@ dependencies = [
     { name = "tornado" },
     { name = "traitlets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/d5/730628e03fff2e8a8e8ccdaedde1489ab1309f9a4fa2536248884e30b7c7/jupyterlab-4.5.6.tar.gz", hash = "sha256:642fe2cfe7f0f5922a8a558ba7a0d246c7bc133b708dfe43f7b3a826d163cf42", size = 23970670, upload-time = "2026-03-11T14:17:04.531Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/52/a8d4895bef501ffeb6af448e8bf7079541c7772978211963aa653518c2d9/jupyterlab-4.5.9.tar.gz", hash = "sha256:dd79a073fecae7a39066ea99e4627ed6c76269ac926e95a810e1e1df6358d865", size = 23994445, upload-time = "2026-06-17T15:42:16.406Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e1/1b/dad6fdcc658ed7af26fdf3841e7394072c9549a8b896c381ab49dd11e2d9/jupyterlab-4.5.6-py3-none-any.whl", hash = "sha256:d6b3dac883aa4d9993348e0f8e95b24624f75099aed64eab6a4351a9cdd1e580", size = 12447124, upload-time = "2026-03-11T14:17:00.229Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/bb/2f9b425062416fba58f580c9b89c3b07277ccdf0a292501fedbca8ea00ea/jupyterlab-4.5.9-py3-none-any.whl", hash = "sha256:5ff0f908e8ac0afbed32b106fdef360f101c0a6654d1bf4a81e98a293ae1b336", size = 12449803, upload-time = "2026-06-17T15:42:12.18Z" },
 ]
 
 [[package]]
@@ -1933,11 +1933,11 @@ wheels = [
 
 [[package]]
 name = "mistune"
-version = "3.2.0"
+version = "3.2.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9d/55/d01f0c4b45ade6536c51170b9043db8b2ec6ddf4a35c7ea3f5f559ac935b/mistune-3.2.0.tar.gz", hash = "sha256:708487c8a8cdd99c9d90eb3ed4c3ed961246ff78ac82f03418f5183ab70e398a", size = 95467, upload-time = "2025-12-23T11:36:34.994Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ca/84/620cc3f7e3adf6f5067e10f4dbae71295d8f9e16d5d3f9ef97c40f2f592c/mistune-3.2.1.tar.gz", hash = "sha256:7c8e5501d38bac1582e067e46c8343f17d57ea1aaa735823f3aba1fd59c88a28", size = 98003, upload-time = "2026-05-03T14:33:22.312Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9b/f7/4a5e785ec9fbd65146a27b6b70b6cdc161a66f2024e4b04ac06a67f5578b/mistune-3.2.0-py3-none-any.whl", hash = "sha256:febdc629a3c78616b94393c6580551e0e34cc289987ec6c35ed3f4be42d0eee1", size = 53598, upload-time = "2025-12-23T11:36:33.211Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/7f/a946aa4f8752b37102b41e64dca18a1976ac705c3a0d1dfe74d820a02552/mistune-3.2.1-py3-none-any.whl", hash = "sha256:78cdb0ba5e938053ccf63651b352508d2efa9411dc8810bfb05f2dc5140c0048", size = 53749, upload-time = "2026-05-03T14:33:20.551Z" },
 ]
 
 [[package]]
@@ -2086,7 +2086,7 @@ wheels = [
 
 [[package]]
 name = "notebook"
-version = "7.5.5"
+version = "7.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jupyter-server" },
@@ -2095,9 +2095,9 @@ dependencies = [
     { name = "notebook-shim" },
     { name = "tornado" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1f/6d/41052c48d6f6349ca0a7c4d1f6a78464de135e6d18f5829ba2510e62184c/notebook-7.5.5.tar.gz", hash = "sha256:dc0bfab0f2372c8278c457423d3256c34154ac2cc76bf20e9925260c461013c3", size = 14169167, upload-time = "2026-03-11T16:32:51.922Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/c2/cf59bd2e6f2c8b976b52477e3e53bf6f97bc714ed046a51821afb428eaee/notebook-7.5.6.tar.gz", hash = "sha256:621174aade80108f0020b0f00738000b215f75fa3cd90771ad7aa0f24536a4e1", size = 14170814, upload-time = "2026-04-30T11:46:26.613Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/aa/cbd1deb9f07446241e88f8d5fecccd95b249bca0b4e5482214a4d1714c49/notebook-7.5.5-py3-none-any.whl", hash = "sha256:a7c14dbeefa6592e87f72290ca982e0c10f5bbf3786be2a600fda9da2764a2b8", size = 14578929, upload-time = "2026-03-11T16:32:48.021Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/d6/1fd0646b9bbd9efbb0b8ae21b2325fbef515769a5621c03e31d8eb8da587/notebook-7.5.6-py3-none-any.whl", hash = "sha256:4dde3f8fb55fa8fb7946d58c6e869ce9baf46d00fc070664f62604569d0faca0", size = 14581730, upload-time = "2026-04-30T11:46:22.342Z" },
 ]
 
 [[package]]
@@ -2468,7 +2468,7 @@ wheels = [
 
 [[package]]
 name = "openfermion"
-version = "1.7.1"
+version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cirq-core" },
@@ -2481,9 +2481,9 @@ dependencies = [
     { name = "scipy" },
     { name = "sympy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/10/86/5ab524a132b93e70c55215dfb91d2ce8012801a82f55ad6643616717575b/openfermion-1.7.1.tar.gz", hash = "sha256:717f4b969a1fd1df24f11bd462b485d317f257bdd91cef32ced23d276cc83f70", size = 44495108, upload-time = "2025-06-06T04:10:45.536Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/cb/479729416a560a51ab5ed9c02d5576e639c13512f013e7fc80bca6e6db4e/openfermion-1.6.1.tar.gz", hash = "sha256:d7f1df4cf98feaa577a070cb432e3d05863c73a4f3bc1f7d112914cf2a3c9bcb", size = 965802, upload-time = "2024-02-09T00:16:08.256Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b4/39/28f89ae6516fe327e22ea2f8162c0f83f6d580a8ca00a47447b4473571e3/openfermion-1.7.1-py3-none-any.whl", hash = "sha256:2f3745786d9aa1913bb3281b5151eae3a5082d90aeacd6b964e813b9fa8a3e46", size = 44717798, upload-time = "2025-06-06T04:10:29.073Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/a8/3d6942f7c25ec9f0b58c5d7864743c43d6a7a65052795b343be46019cf85/openfermion-1.6.1-py3-none-any.whl", hash = "sha256:9cc65558ac4915ab25a3366f71b80acf22b16116c9f6132c08990fd2f59b557e", size = 1208991, upload-time = "2024-02-09T00:16:06.166Z" },
 ]
 
 [[package]]
@@ -3728,7 +3728,7 @@ wheels = [
 
 [[package]]
 name = "requests"
-version = "2.32.5"
+version = "2.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "certifi" },
@@ -3736,9 +3736,9 @@ dependencies = [
     { name = "idna" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c9/74/b3ff8e6c8446842c3f5c837e9c3dfcfe2018ea6ecef224c710c85ef728f4/requests-2.32.5.tar.gz", hash = "sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf", size = 134517, upload-time = "2025-08-18T20:46:02.573Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/64/8860370b167a9721e8956ae116825caff829224fbca0ca6e7bf8ddef8430/requests-2.33.0.tar.gz", hash = "sha256:c7ebc5e8b0f21837386ad0e1c8fe8b829fa5f544d8df3b2253bff14ef29d7652", size = 134232, upload-time = "2026-03-25T15:10:41.586Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl", hash = "sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6", size = 64738, upload-time = "2025-08-18T20:46:00.542Z" },
+    { url = "https://files.pythonhosted.org/packages/56/5d/c814546c2333ceea4ba42262d8c4d55763003e767fa169adc693bd524478/requests-2.33.0-py3-none-any.whl", hash = "sha256:3324635456fa185245e24865e810cecec7b4caf933d7eb133dcde67d48cee69b", size = 65017, upload-time = "2026-03-25T15:10:40.382Z" },
 ]
 
 [[package]]
