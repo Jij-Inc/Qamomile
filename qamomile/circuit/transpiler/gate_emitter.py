@@ -529,6 +529,14 @@ def default_combine_symbolic(
             return lhs / rhs if rhs != 0 else 0.0
         case BinOpKind.FLOORDIV:
             return lhs // rhs if rhs != 0 else 0
+        case BinOpKind.MOD:
+            # Unlike the div-by-zero degenerate convention above (return 0 to
+            # let emission continue), modulo by zero is undefined, and the
+            # compile-time fold path (evaluate_binop_values) treats it as
+            # non-foldable. Do not special-case rhs == 0 here: a concrete zero
+            # divisor raises loudly rather than silently producing a wrong
+            # value, keeping the symbolic path consistent with folding.
+            return lhs % rhs
         case BinOpKind.POW:
             return lhs**rhs
         case _:

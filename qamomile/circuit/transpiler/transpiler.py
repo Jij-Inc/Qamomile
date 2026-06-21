@@ -27,6 +27,7 @@ from qamomile.circuit.transpiler.passes.entrypoint_validation import (
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
     count_call_blocks,
+    count_unrollable_call_blocks,
 )
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
     ParameterShapeResolutionPass,
@@ -291,11 +292,34 @@ class Transpiler(ABC, Generic[T]):
 
         Each iteration unrolls one layer of self-referential
         ``CallBlockOperation`` and then folds the base-case
-        ``IfOperation`` via ``partial_eval``.  Terminates when no
-        ``CallBlockOperation`` remains (success), when the call count
-        stops decreasing (symbolic driver — self-calls are left in the
-        IR and handled by downstream passes), or when ``MAX_UNROLL_DEPTH``
-        is reached (non-terminating recursion — raises).
+        ``IfOperation`` via ``partial_eval``. Terminates when no
+        ``CallBlockOperation`` remains (success), when every residual call
+        is trapped inside an operation-owned block where ``partial_eval``
+        cannot fold it (control / inverse of a recursive kernel — raises a
+        targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
+        (genuinely non-terminating top-level recursion — raises).
+
+        Args:
+            block (Block): The block to unroll. May be ``HIERARCHICAL``
+                (still containing self-referential ``CallBlockOperation``s)
+                or already ``AFFINE`` (returned unchanged).
+            bindings (dict[str, Any] | None): Compile-time bindings used by
+                ``partial_eval`` to fold the base-case condition. Defaults
+                to None, meaning no bindings are applied.
+
+        Returns:
+            Block: The fully unrolled, ``AFFINE`` block once no
+                ``CallBlockOperation`` remains. Returned unchanged when the
+                input already has no calls.
+
+        Raises:
+            FrontendTransformError: If every remaining ``CallBlockOperation``
+                is trapped inside a ``ControlledUOperation.block`` /
+                ``InverseBlockOperation`` block (a self-recursive kernel was
+                passed to ``qmc.control`` / ``qmc.inverse``), or if a
+                genuinely non-terminating top-level recursion does not
+                converge within ``MAX_UNROLL_DEPTH`` iterations. The two
+                cases carry distinct, cause-specific messages.
         """
         if count_call_blocks(block.operations) == 0:
             return block
@@ -310,6 +334,29 @@ class Transpiler(ABC, Generic[T]):
                 # to refresh the kind to AFFINE so downstream
                 # ``affine_validate`` is happy.
                 return self.inline(block)
+            # After a full inline + partial_eval iteration, if calls remain
+            # only inside operation-owned blocks (a ControlledUOperation's
+            # ``block`` or an InverseBlockOperation's nested blocks), no
+            # further iteration can make progress: ``inline`` already
+            # unrolled one layer there, but ``partial_eval`` never descends
+            # into those blocks to fold the base-case ``if``. This is the
+            # signature of a self-recursive @qkernel passed to
+            # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
+            # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
+            # blaming the bindings.
+            if count_unrollable_call_blocks(block.operations) == 0:
+                raise FrontendTransformError(
+                    "qmc.control / qmc.inverse was given a recursive "
+                    "@qkernel: after inlining, a CallBlockOperation still "
+                    "remains inside the controlled / inverted block, and "
+                    "partial_eval cannot fold its base-case `if` there "
+                    "(constant folding does not descend into a "
+                    "ControlledUOperation.block or an InverseBlockOperation "
+                    "block). Controlling or inverting a self-recursive "
+                    "kernel is not supported. Rewrite the kernel "
+                    "non-recursively (manually unrolled to the required "
+                    "depth) before passing it to qmc.control / qmc.inverse."
+                )
 
         raise FrontendTransformError(
             f"Recursive @qkernel did not terminate after "

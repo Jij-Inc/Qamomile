@@ -8247,6 +8247,126 @@ class TestDirectCastMeasure:
             f"Expected 2 measurement ops, got {len(measure_ops)}"
         )
 
+    def test_inlined_cast_measure_remaps_carriers(self):
+        """Inline pass must remap cast carriers from callee to caller arrays."""
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            anc = qmc.qubit("anc")
+            q = qmc.qubit_array(2, "q")
+            anc = qmc.x(anc)
+            return sub(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measured_qubits = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_qubits == [1, 2]
+
+    def test_inlined_cast_measure_with_slice_view_argument(self):
+        """Inlined cast over a strided-view argument measures root qubits.
+
+        The inline pass maps the callee formal to the caller's ``q[1::2]``
+        view; carrier keys must be folded into the root array's index space
+        (physical qubits 1 and 3), not kept as view-local indices.
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            return sub(q[1::2])
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measured_qubits = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_qubits == [1, 3]
+
+    @pytest.mark.parametrize(
+        ("flag", "expected_qubits"),
+        [(1, [1, 3]), (0, [0, 2])],
+    )
+    def test_cast_measure_compile_time_if_selects_branch_qubits(
+        self, flag, expected_qubits
+    ):
+        """Compile-time if over slice views measures the selected qubits.
+
+        Trace time bakes the TRUE branch's carrier keys into the cast
+        metadata; lowering must rebuild them for the actually-selected
+        branch and propagate the rebuilt result to the measurement.
+        """
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            if flag == 1:
+                v = q[1::2]
+            else:
+                v = q[0::2]
+            qf = qmc.cast(v, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"flag": flag})
+        qc = exe.compiled_quantum[0].circuit
+        measured_qubits = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_qubits == expected_qubits
+
+    def test_inlined_runtime_if_phi_cast_measures_all_qubits(self):
+        """Phi-merged QFixed carriers survive inlining of runtime-if bodies.
+
+        The phi output of a measurement-backed ``if`` carries QFixed carrier
+        metadata referencing the array cast inside the branches; cloning
+        during inline must remap those references so the final measurement
+        is not silently dropped (1 ancilla measure + 2 carrier measures).
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit], anc: qmc.Qubit, t: qmc.Qubit) -> qmc.Float:
+            b = qmc.measure(anc)
+            if b:
+                t = qmc.x(t)
+                qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            else:
+                t = qmc.z(t)
+                qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            anc = qmc.qubit("anc")
+            t = qmc.qubit("t")
+            return sub(q, anc, t)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measure_count = sum(1 for inst in qc.data if inst.operation.name == "measure")
+        assert measure_count == 3
+
 
 # ============================================================================
 # Unresolved non-measurement if-condition rejection

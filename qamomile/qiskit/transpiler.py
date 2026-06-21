@@ -378,7 +378,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         Every arm of ``RuntimeOpKind`` (except ``NOT``, which is handled
         upstream) is dispatched here. Kinds without a Qiskit ``expr``
-        equivalent — currently ``FLOORDIV`` and ``POW`` — raise
+        equivalent — currently ``FLOORDIV``, ``MOD`` and ``POW`` — raise
         ``NotImplementedError`` rather than silently returning ``None``,
         so the contract gap is loud at emit time instead of producing a
         misleading "Unsupported kind" error.
@@ -413,7 +413,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 return expr.mul(lhs, rhs)
             case RuntimeOpKind.DIV:
                 return expr.div(lhs, rhs)
-            case RuntimeOpKind.FLOORDIV | RuntimeOpKind.POW:
+            case RuntimeOpKind.FLOORDIV | RuntimeOpKind.MOD | RuntimeOpKind.POW:
                 raise NotImplementedError(
                     f"RuntimeOpKind.{kind.name} is not supported by the Qiskit "
                     f"backend (Qiskit's classical expr has no equivalent). "

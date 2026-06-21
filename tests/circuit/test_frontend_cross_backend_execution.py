@@ -992,6 +992,41 @@ def nested_classical_output_run(
     return qmc.measure(q), out
 
 
+# --- Modulo operator (UInt.__mod__) on alternating loop indices ---
+#
+# Motivating use case for ``UInt.__mod__`` (backlog BACKLOG-8409): a QSVT-style
+# loop that selects between a forward and inverse step on alternating iterations
+# via ``i % 2``. ``i % 2`` folds to a concrete value once the loop is unrolled.
+#
+# The sample kernel uses the natural ``if i % 2 == 0`` form (compile-time
+# branch resolved per iteration) to flip the even-indexed qubits, giving the
+# deterministic pattern ``(1, 0, 1, 0)``. The run/expval kernel instead folds
+# ``i % 2`` into an RX angle (``(i % 2) * pi``) rather than an ``if``: CUDA-Q
+# marks any ``if``-containing kernel as RUNNABLE, and ``cudaq.observe()`` (the
+# expval path) rejects RUNNABLE artifacts, so the angle form keeps the kernel
+# STATIC and exercises ``%`` through the estimator on every backend. RX(pi)
+# flips the odd-indexed qubits, so Z0+Z1+Z2+Z3 sums to +1-1+1-1 = 0.
+
+
+@qmc.qkernel
+def uint_mod_alternating_sample() -> qmc.Vector[qmc.Bit]:
+    """Flip even-indexed qubits using ``i % 2 == 0`` in an unrolled loop."""
+    q = qmc.qubit_array(4, "q")
+    for i in qmc.range(4):
+        if i % 2 == 0:
+            q[i] = qmc.x(q[i])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def uint_mod_alternating_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after RX((i % 2) * pi), flipping odd-indexed qubits."""
+    q = qmc.qubit_array(4, "q")
+    for i in qmc.range(4):
+        q[i] = qmc.rx(q[i], (i % 2) * math.pi)
+    return qmc.expval(q, obs)
+
+
 @dataclasses.dataclass(frozen=True)
 class FrontendExecutionCase:
     """Describe one frontend pattern with paired sample and run kernels."""
@@ -1229,6 +1264,18 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 0, 1)},
         expected_expval=-1.0,
         run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2)},
+    ),
+    FrontendExecutionCase(
+        name="uint-mod-alternating",
+        sample_kernel=uint_mod_alternating_sample,
+        run_kernel=uint_mod_alternating_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1, 0),  # sample kernel flips even indices
+        expected_support={(1, 0, 1, 0)},
+        # run kernel flips ODD indices via RX((i % 2) * pi) -> state (0,1,0,1),
+        # so Z0+Z1+Z2+Z3 = +1-1+1-1 = 0.
+        expected_expval=0.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
     ),
     FrontendExecutionCase(
         name="pauli-evolve",
