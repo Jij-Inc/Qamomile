@@ -28,6 +28,15 @@ from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
     ResourceAllocator,
 )
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import ValueResolver
+
+# Most tests in this module transpile through Qiskit, and the module-level
+# import below pulls qiskit in at collection time. Skip the whole module when
+# the optional dependency is absent so a qiskit-free environment skips rather
+# than errors. The allocator-only tests (TestDynamicArraySizeResolution's
+# ``test_allocator_*`` / ``test_resolver_*``) do not need qiskit themselves,
+# but they are covered in CI where qiskit is always installed.
+pytest.importorskip("qiskit")
+
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 Backend = tuple[str, Any, Any]
