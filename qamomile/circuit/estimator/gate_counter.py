@@ -28,6 +28,7 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
 )
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
@@ -175,6 +176,13 @@ def _count_from_operations(
 
             case InverseBlockOperation():
                 count = count + _handle_inverse_block(
+                    op,
+                    resolver,
+                    num_controls,
+                )
+
+            case GlobalPhaseBlockOperation():
+                count = count + _handle_global_phase_block(
                     op,
                     resolver,
                     num_controls,
@@ -353,6 +361,70 @@ def _handle_inverse_block(
     )
     return _count_from_operations(
         impl.operations,
+        child,
+        num_controls + op.num_control_qubits,
+    )
+
+
+def _handle_global_phase_block(
+    op: GlobalPhaseBlockOperation,
+    resolver: ExprResolver,
+    num_controls: int | sp.Expr,
+) -> GateCount:
+    """Count a global-phase block through its wrapped source block.
+
+    The global phase itself contributes no gates; only the wrapped block's
+    body is counted. The body's formal inputs are bound to the operation's
+    target / parameter operands exactly as for an inverse block.
+
+    Args:
+        op (GlobalPhaseBlockOperation): Global-phase block operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+        num_controls (int | sp.Expr): Number of controls already applied by
+            the enclosing traversal.
+
+    Returns:
+        GateCount: Gate count for the wrapped source block.
+
+    Raises:
+        ValueError: If the global-phase operation has no source block.
+    """
+    source = op.source_block
+    if not isinstance(source, Block):
+        raise ValueError(
+            f"Cannot estimate resources for GlobalPhaseBlockOperation "
+            f"'{op.name}': no source block is available."
+        )
+
+    extra: dict[str, sp.Expr] = {}
+    quantum_actuals = iter(op.target_qubits)
+    parameter_actuals = iter(op.parameters)
+    for formal in source.input_values:
+        if formal.type.is_quantum():
+            actual = next(quantum_actuals, None)
+            if (
+                isinstance(formal, ArrayValue)
+                and isinstance(actual, ArrayValue)
+                and formal.shape
+                and actual.shape
+            ):
+                extra[formal.shape[0].uuid] = resolver.resolve(actual.shape[0])
+            continue
+
+        actual = next(parameter_actuals, None)
+        if actual is not None:
+            extra[formal.uuid] = resolver.resolve(actual)
+
+    ctx = resolver.context
+    ctx.update(extra)
+    child = ExprResolver(
+        block=source,
+        context=ctx,
+        loop_var_names=resolver.loop_var_names,
+        parent_blocks=[],
+    )
+    return _count_from_operations(
+        source.operations,
         child,
         num_controls + op.num_control_qubits,
     )

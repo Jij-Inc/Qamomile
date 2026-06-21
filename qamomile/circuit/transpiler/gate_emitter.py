@@ -253,6 +253,15 @@ class GateEmitter(Protocol[T]):
         """Emit Phase gate (P(θ) = diag(1, e^(iθ)))."""
         ...
 
+    # Note: ``emit_global_phase(circuit, angle)`` is an OPTIONAL hook, not a
+    # required protocol method. ``GlobalPhaseBlockOperation`` emission calls
+    # it via ``getattr`` only when the backend provides it: a backend with a
+    # native circuit-level global phase (Qiskit) implements it to fold the
+    # phase in; a backend without one (CUDA-Q, QURI Parts) omits it and the
+    # standalone phase is correctly dropped (it is physically unobservable).
+    # Keeping it off the protocol means a new backend needs no global-phase
+    # code to stay correct.
+
     # Two-qubit gates
     @abstractmethod
     def emit_cx(self, circuit: T, control: int, target: int) -> None:

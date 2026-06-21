@@ -35,6 +35,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import Value
@@ -170,6 +171,34 @@ def emit_controlled_operations(
             )
 
             emit_inverse_block_at_indices(
+                emit_pass,
+                circuit,
+                op,
+                [control_idx, *inner_controls],
+                inner_targets,
+                bindings,
+            )
+        elif isinstance(op, GlobalPhaseBlockOperation):
+            qubit_count = op.num_control_qubits + op.num_target_qubits
+            if len(target_indices) < qubit_count:
+                raise EmitError(
+                    "GlobalPhaseBlockOperation target count does not match "
+                    "controlled block targets: "
+                    f"expected at least {qubit_count}, got {len(target_indices)}.",
+                    operation="GlobalPhaseBlockOperation",
+                )
+            inner_controls = target_indices[: op.num_control_qubits]
+            inner_targets = target_indices[
+                op.num_control_qubits : op.num_control_qubits + op.num_target_qubits
+            ]
+            # Imported lazily: global_phase_emission imports this module's
+            # shared helpers at module level, so a top-level import here
+            # would be circular.
+            from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (  # noqa: I001
+                emit_global_phase_block_at_indices,
+            )
+
+            emit_global_phase_block_at_indices(
                 emit_pass,
                 circuit,
                 op,

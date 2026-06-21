@@ -23,6 +23,7 @@ from qamomile.circuit.ir.operation import (
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
+    GlobalPhaseBlockOperation,
     InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
@@ -238,6 +239,8 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
             _walk_block_values(op.source_block, ctx)
         if op.implementation_block is not None:
             _walk_block_values(op.implementation_block, ctx)
+    if isinstance(op, GlobalPhaseBlockOperation) and op.source_block is not None:
+        _walk_block_values(op.source_block, ctx)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _walk_block_values(op.block, ctx)
 
@@ -1231,6 +1234,34 @@ def _encode_inverse_block(
     return d
 
 
+def _encode_global_phase_block(
+    op: GlobalPhaseBlockOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`GlobalPhaseBlockOperation`.
+
+    Args:
+        op (GlobalPhaseBlockOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus control / target counts, custom
+            name, source block, and the phase-angle Value reference.
+    """
+    d = _base_op_dict("GlobalPhaseBlockOperation", op)
+    d["num_control_qubits"] = op.num_control_qubits
+    d["num_target_qubits"] = op.num_target_qubits
+    d["custom_name"] = op.custom_name
+    d["source_block"] = (
+        _encode_block(op.source_block, ctx) if op.source_block is not None else None
+    )
+    if op.phase is not None:
+        ctx.register_value(op.phase)
+        d["phase_ref"] = op.phase.uuid
+    else:
+        d["phase_ref"] = None
+    return d
+
+
 def _encode_resource_metadata(
     m: ResourceMetadata | None,
 ) -> dict[str, Any] | None:
@@ -1288,4 +1319,5 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     SymbolicControlledU: _encode_symbolic_controlled,
     CompositeGateOperation: _encode_composite_gate,
     InverseBlockOperation: _encode_inverse_block,
+    GlobalPhaseBlockOperation: _encode_global_phase_block,
 }

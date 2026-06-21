@@ -187,7 +187,31 @@ def resolve_angle(
     theta is always a Value stored as the last element of operands
     for rotation gates.
     """
-    theta = op.theta
+    return resolve_angle_value(emit_pass, op.theta, bindings)
+
+
+def resolve_angle_value(
+    emit_pass: "StandardEmitPass",
+    theta: Any,
+    bindings: dict[str, Any],
+) -> float | Any:
+    """Resolve a bare angle Value to a concrete float or backend parameter.
+
+    Shared core of :func:`resolve_angle` so that operations carrying a
+    standalone angle Value (e.g. ``GlobalPhaseBlockOperation.phase``) reuse
+    the exact same resolution order as rotation-gate thetas.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass providing the
+            resolver and backend-parameter factory.
+        theta (Any): Angle ``Value`` to resolve, or ``None``.
+        bindings (dict[str, Any]): Active compile-time bindings.
+
+    Returns:
+        float | Any: A concrete ``float`` when the angle is bound, a
+            backend parameter expression when it stays symbolic, or
+            ``0.0`` when ``theta`` is ``None``.
+    """
     if theta is not None:
         # Shape-hint fast path: if theta is an element of a declared
         # parameter array (``gamma[p]`` with ``parameters=['gamma']``),

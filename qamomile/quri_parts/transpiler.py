@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
 )
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
@@ -43,8 +44,16 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _expand_quantum_operands_to_phys,
     _map_controlled_u_results,
     _populate_input_qubit_map,
+    _prepare_nested_block_for_emit,
     emit_controlled_gate,
     resolve_power,
+)
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    resolve_angle_value,
+)
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    _map_global_phase_results,
+    emit_controlled_global_phase,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
@@ -628,6 +637,73 @@ def _emit_quri_nested_controlled_u(
     )
 
 
+def _emit_quri_global_phase_operation(
+    emit_pass: Any,
+    circuit: Any,
+    op: GlobalPhaseBlockOperation,
+    outer_control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a global-phase block under accumulated QURI Parts controls.
+
+    Controls the wrapped block's body, then emits the relative phase that the
+    controlled global phase produces on the control qubits (a single-qubit
+    phase for one control, a controlled phase for two).
+
+    Args:
+        emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
+        circuit (Any): QURI Parts circuit being built.
+        op (GlobalPhaseBlockOperation): Global-phase op from the current
+            controlled block.
+        outer_control_indices (list[int]): Controls accumulated from
+            enclosing controlled-U operations.
+        qubit_map (QubitMap): Current block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible inside the current block.
+
+    Raises:
+        EmitError: If the global-phase op has no source block, or if the
+            number of accumulated controls exceeds the two-control phase
+            primitives QURI Parts exposes.
+    """
+    if op.source_block is None:
+        raise EmitError(
+            "QURI Parts cannot emit a global-phase block without a source block.",
+            operation="GlobalPhaseBlockOperation",
+        )
+    source = _prepare_nested_block_for_emit(op.source_block, bindings)
+    target_index_groups = [
+        _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
+        for operand in op.target_qubits
+    ]
+    target_indices = [index for group in target_index_groups for index in group]
+    input_operands = [*op.target_qubits, *op.parameters]
+    effective_controls = list(outer_control_indices)
+
+    local_qubit_map, _local_clbit_map, local_bindings = (
+        emit_pass._prepare_local_block_maps(
+            source,
+            input_operands,
+            len(target_indices),
+            bindings,
+            parent_qubits=target_indices,
+        )
+    )
+    _emit_quri_controlled_operations(
+        emit_pass,
+        circuit,
+        source.operations,
+        effective_controls,
+        local_qubit_map,
+        local_bindings,
+    )
+
+    angle = resolve_angle_value(emit_pass, op.phase, bindings)
+    emit_controlled_global_phase(emit_pass, circuit, effective_controls, angle)
+
+    _map_global_phase_results(op, target_index_groups, qubit_map)
+
+
 def _emit_quri_controlled_operations(
     emit_pass: StandardEmitPass[Any],
     circuit: Any,
@@ -680,6 +756,11 @@ def _emit_quri_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
             continue
+        if isinstance(op, GlobalPhaseBlockOperation):
+            _emit_quri_global_phase_operation(
+                emit_pass, circuit, op, control_indices, qubit_map, bindings
+            )
+            continue
         if isinstance(op, ForOperation):
             from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
                 _bind_loop_var,
@@ -709,7 +790,8 @@ def _emit_quri_controlled_operations(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
             "CompositeGateOperation values, InverseBlockOperation values, "
-            "ReturnOperation, and statically resolved ForOperation bodies. "
+            "GlobalPhaseBlockOperation values, ReturnOperation, and "
+            "statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",
         )

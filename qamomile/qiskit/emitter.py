@@ -82,6 +82,16 @@ class QiskitGateEmitter:
     def emit_p(self, circuit: "QuantumCircuit", qubit: int, angle: float | Any) -> None:
         circuit.p(angle, qubit)
 
+    def emit_global_phase(self, circuit: "QuantumCircuit", angle: float | Any) -> None:
+        """Accumulate a global phase into Qiskit's circuit-level attribute.
+
+        Args:
+            circuit (QuantumCircuit): Circuit being built.
+            angle (float | Any): Global phase angle in radians, or a Qiskit
+                ``ParameterExpression`` for a symbolic phase.
+        """
+        circuit.global_phase += angle
+
     # Two-qubit gates
     def emit_cx(self, circuit: "QuantumCircuit", control: int, target: int) -> None:
         circuit.cx(control, target)

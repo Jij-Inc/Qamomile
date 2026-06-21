@@ -44,6 +44,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
@@ -77,6 +78,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     emit_controlled_u,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    emit_global_phase_block,
+)
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     emit_inverse_block,
 )
@@ -244,6 +248,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 emit_composite_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
+            elif isinstance(op, GlobalPhaseBlockOperation):
+                self._emit_global_phase_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
@@ -363,6 +369,28 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 fallback implementation can be emitted.
         """
         emit_inverse_block(self, circuit, op, qubit_map, bindings)
+
+    def _emit_global_phase_block(
+        self,
+        circuit: T,
+        op: GlobalPhaseBlockOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a first-class global-phase block operation.
+
+        Emits the wrapped block's body and folds the scalar global phase
+        into the backend (Qiskit ``global_phase``; dropped elsewhere). The
+        body is emitted via ``_emit_operations`` so every backend reuses the
+        same implementation.
+
+        Args:
+            circuit (T): Backend circuit being built.
+            op (GlobalPhaseBlockOperation): Global-phase block op to emit.
+            qubit_map (QubitMap): Current quantum value to physical qubit map.
+            bindings (dict[str, Any]): Active emit bindings.
+        """
+        emit_global_phase_block(self, circuit, op, qubit_map, bindings)
 
     def _emit_runtime_classical_expr(
         self,

@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation import (
     ForItemsOperation,
     GateOperation,
     GateOperationType,
+    GlobalPhaseBlockOperation,
     InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
@@ -1402,6 +1403,36 @@ def _decode_inverse_block(
     )
 
 
+def _decode_global_phase_block(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> GlobalPhaseBlockOperation:
+    """Decode :class:`GlobalPhaseBlockOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        GlobalPhaseBlockOperation: The reconstructed global-phase block op
+            with its source block and phase-angle Value.
+    """
+    operands, results = _operands_results(d, ctx)
+    source_block = (
+        _decode_block(d["source_block"]) if d.get("source_block") is not None else None
+    )
+    phase_ref = d.get("phase_ref")
+    phase = _materialize_as_value(ctx, phase_ref) if phase_ref is not None else None
+    return GlobalPhaseBlockOperation(
+        operands=operands,
+        results=results,
+        num_control_qubits=int(d.get("num_control_qubits", 0)),
+        num_target_qubits=int(d.get("num_target_qubits", 0)),
+        custom_name=d.get("custom_name", ""),
+        source_block=source_block,
+        phase=phase,
+    )
+
+
 def _decode_resource_metadata(d: Any) -> ResourceMetadata | None:
     """Decode :class:`ResourceMetadata` (or ``None``).
 
@@ -1459,4 +1490,5 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "SymbolicControlledU": _decode_symbolic_controlled,
     "CompositeGateOperation": _decode_composite_gate,
     "InverseBlockOperation": _decode_inverse_block,
+    "GlobalPhaseBlockOperation": _decode_global_phase_block,
 }

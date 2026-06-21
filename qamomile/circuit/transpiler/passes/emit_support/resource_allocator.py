@@ -24,6 +24,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
@@ -288,7 +289,14 @@ class ResourceAllocator:
             elif isinstance(op, PauliEvolveOp):
                 self._allocate_pauli_evolve(op, qubit_map)
 
-            elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
+            elif isinstance(
+                op,
+                (
+                    CompositeGateOperation,
+                    InverseBlockOperation,
+                    GlobalPhaseBlockOperation,
+                ),
+            ):
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
@@ -681,7 +689,7 @@ class ResourceAllocator:
 
     def _allocate_composite(
         self,
-        op: CompositeGateOperation | InverseBlockOperation,
+        op: CompositeGateOperation | InverseBlockOperation | GlobalPhaseBlockOperation,
         qubit_map: QubitMap,
     ) -> None:
         """Allocate resources for a composite-like quantum operation."""

@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
 )
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
@@ -44,6 +45,11 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
             for block in (op.source_block, op.implementation_block):
                 if block is not None and _has_any_call_block(block.operations):
                     return True
+        if isinstance(op, GlobalPhaseBlockOperation):
+            if op.source_block is not None and _has_any_call_block(
+                op.source_block.operations
+            ):
+                return True
         if isinstance(op, IfOperation):
             if _has_any_call_block(op.true_operations) or _has_any_call_block(
                 op.false_operations
@@ -68,6 +74,9 @@ def count_call_blocks(operations: list[Operation]) -> int:
             for block in (op.source_block, op.implementation_block):
                 if block is not None:
                     count += count_call_blocks(block.operations)
+        if isinstance(op, GlobalPhaseBlockOperation):
+            if op.source_block is not None:
+                count += count_call_blocks(op.source_block.operations)
         if isinstance(op, IfOperation):
             count += count_call_blocks(op.true_operations)
             count += count_call_blocks(op.false_operations)
@@ -220,6 +229,15 @@ class InlinePass(Pass[Block, Block]):
                     source_block=source_block,
                     implementation_block=implementation_block,
                 )
+                substituted = self._substitute_values(new_op, value_map)
+                result.append(substituted)
+
+            elif isinstance(op, GlobalPhaseBlockOperation):
+                source_block = self._inline_nested_block(
+                    op.source_block,
+                    visiting_blocks,
+                )
+                new_op = dataclasses.replace(op, source_block=source_block)
                 substituted = self._substitute_values(new_op, value_map)
                 result.append(substituted)
 

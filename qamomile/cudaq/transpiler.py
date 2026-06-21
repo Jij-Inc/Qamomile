@@ -43,6 +43,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -69,7 +70,11 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _bind_block_inputs,
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
+    _prepare_nested_block_for_emit,
     _quantum_input_operands,
+)
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    resolve_angle_value,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
@@ -1382,6 +1387,19 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                     bindings,
                 )
                 continue
+            if isinstance(op, GlobalPhaseBlockOperation):
+                self._emit_cudaq_controlled_global_phase(
+                    circuit,
+                    op,
+                    num_controls,
+                    control_indices,
+                    target_indices,
+                    qubit_map,
+                    vector_slots,
+                    emitter,
+                    bindings,
+                )
+                continue
             if isinstance(op, PauliEvolveOp):
                 self._emit_cudaq_controlled_pauli_evolve(
                     circuit,
@@ -1913,6 +1931,128 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         ):
             if indices:
                 qubit_map[result.uuid] = indices[0]
+
+        target_results = [
+            result
+            for result in op.results[op.num_control_qubits :]
+            if result.type.is_quantum()
+        ]
+        for result, indices in zip(target_results, target_groups, strict=False):
+            if isinstance(result, ArrayValue):
+                vector_slots[result.uuid] = list(indices)
+                for i, phys in enumerate(indices):
+                    qubit_map[QubitAddress(result.uuid, i)] = phys
+                if indices:
+                    qubit_map[result.uuid] = indices[0]
+            elif indices:
+                qubit_map[result.uuid] = indices[0]
+
+    def _emit_cudaq_controlled_global_phase(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: GlobalPhaseBlockOperation,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        qubit_map: CudaqControlledQubitMap,
+        vector_slots: dict[str, list[int]],
+        emitter: CudaqKernelEmitter,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a global-phase block under outer CUDA-Q controls.
+
+        Controls the wrapped block's body, then emits the relative phase the
+        controlled global phase produces as an ``r1`` (single control) or a
+        multi-controlled ``r1.ctrl`` on the control qubits.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (GlobalPhaseBlockOperation): Global-phase op inside the
+                controlled block.
+            num_controls (int): Number of outer controls (unused; controls
+                are taken from ``control_indices``).
+            control_indices (list[int]): Physical outer controls.
+            target_indices (list[int]): Fallback target slots from the
+                controlled-U call site (unused; re-resolved from operands).
+            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
+            vector_slots (dict[str, list[int]]): Vector slot map.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+            bindings (dict[str, Any]): Current controlled-body bindings.
+
+        Raises:
+            EmitError: If the global-phase op has no source block.
+        """
+        del num_controls, target_indices
+        if op.source_block is None:
+            raise EmitError(
+                "CUDA-Q controlled fallback cannot emit a global-phase block "
+                "without a source block.",
+                operation="GlobalPhaseBlockOperation",
+            )
+        source = _prepare_nested_block_for_emit(op.source_block, bindings)
+        target_groups = [
+            (
+                _resolve_cudaq_array_slots(
+                    operand,
+                    vector_slots,
+                    qubit_map,
+                    self,
+                    bindings,
+                    operation="GlobalPhaseBlockOperation",
+                )
+                if isinstance(operand, ArrayValue)
+                else [
+                    _resolve_cudaq_value_index(
+                        operand,
+                        vector_slots,
+                        qubit_map,
+                        self,
+                        bindings,
+                        operation="GlobalPhaseBlockOperation",
+                    )
+                ]
+            )
+            for operand in op.target_qubits
+        ]
+        gp_targets = [index for group in target_groups for index in group]
+        local_bindings = self._resolver.bind_block_params(
+            source,
+            op.parameters,
+            bindings,
+        )
+        _bind_quantum_input_shapes(
+            self,
+            source,
+            op.target_qubits,
+            bindings,
+            local_bindings,
+        )
+        local_qubit_map, local_vector_slots = _build_block_qubit_map(
+            source,
+            gp_targets,
+            self,
+            local_bindings,
+        )
+        effective_controls = list(control_indices)
+        self._emit_cudaq_controlled_ops(
+            circuit,
+            source.operations,
+            len(effective_controls),
+            effective_controls,
+            gp_targets,
+            local_qubit_map,
+            local_vector_slots,
+            emitter,
+            local_bindings,
+        )
+        if effective_controls:
+            angle = resolve_angle_value(self, op.phase, bindings)
+            emitter.emit_multi_controlled_p(
+                circuit,
+                effective_controls[1:],
+                effective_controls[0],
+                angle,
+            )
 
         target_results = [
             result

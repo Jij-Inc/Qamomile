@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation import (
     ControlledUOperation,
     ForItemsOperation,
     GateOperation,
+    GlobalPhaseBlockOperation,
     InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
@@ -231,6 +232,8 @@ def _format_flat_op(op: Operation) -> str:
         return _format_composite(op)
     if isinstance(op, InverseBlockOperation):
         return _format_inverse_block(op)
+    if isinstance(op, GlobalPhaseBlockOperation):
+        return _format_global_phase_block(op)
     if isinstance(op, MeasureOperation):
         return _format_measure(op, "measure")
     if isinstance(op, MeasureVectorOperation):
@@ -336,6 +339,20 @@ def _format_composite(op: CompositeGateOperation) -> str:
 def _format_inverse_block(op: InverseBlockOperation) -> str:
     args = ", ".join(_format_value(v) for v in op.operands)
     return f"{_format_results(op.results)} = inverse {op.name}({args})"
+
+
+def _format_global_phase_block(op: GlobalPhaseBlockOperation) -> str:
+    """Format a global-phase block as ``res = global_phase[θ] name(args)``.
+
+    Args:
+        op (GlobalPhaseBlockOperation): Operation to format.
+
+    Returns:
+        str: Single-line textual representation including the phase Value.
+    """
+    args = ", ".join(_format_value(v) for v in op.operands)
+    phase = _format_value(op.phase) if op.phase is not None else "0"
+    return f"{_format_results(op.results)} = global_phase[{phase}] {op.name}({args})"
 
 
 def _format_measure(op: Operation, mnemonic: str) -> str:

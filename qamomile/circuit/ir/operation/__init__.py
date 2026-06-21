@@ -17,6 +17,7 @@ from .gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from .global_phase_block import GlobalPhaseBlockOperation
 from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
@@ -27,6 +28,7 @@ __all__ = [
     "ReturnOperation",
     "CompositeGateOperation",
     "InverseBlockOperation",
+    "GlobalPhaseBlockOperation",
     "CompositeGateType",
     "ResourceMetadata",
     "GateOperation",

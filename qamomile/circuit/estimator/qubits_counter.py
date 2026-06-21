@@ -24,6 +24,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
@@ -264,6 +265,52 @@ def _count_inverse_block_total(
     return sp.Integer(0)
 
 
+def _count_global_phase_block_split(
+    op: GlobalPhaseBlockOperation,
+    resolver: ExprResolver,
+) -> tuple[sp.Expr, bool]:
+    """Count reusable qubits from a global-phase block's source body.
+
+    The global phase itself allocates no qubits; the count is that of the
+    wrapped source block.
+
+    Args:
+        op (GlobalPhaseBlockOperation): Global-phase block to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+
+    Returns:
+        tuple[sp.Expr, bool]: Allocation count and whether it is reusable
+            across loop iterations.
+    """
+    source = op.source_block
+    source_alloc: sp.Expr = sp.Integer(0)
+    if isinstance(source, Block):
+        source_alloc = _count_from_operations(source.operations, resolver)
+        if _is_clean_call(source):
+            return source_alloc, True
+    return source_alloc, False
+
+
+def _count_global_phase_block_total(
+    op: GlobalPhaseBlockOperation,
+    resolver: ExprResolver,
+) -> sp.Expr:
+    """Count qubits from a global-phase block's wrapped source body.
+
+    Args:
+        op (GlobalPhaseBlockOperation): Global-phase block to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+
+    Returns:
+        sp.Expr: Total additional qubit allocation required by the wrapped
+            source block (the global phase itself allocates none).
+    """
+    source = op.source_block
+    if isinstance(source, Block):
+        return _count_from_operations(source.operations, resolver)
+    return sp.Integer(0)
+
+
 # ------------------------------------------------------------------ #
 #  Loop body split counting                                           #
 # ------------------------------------------------------------------ #
@@ -324,6 +371,13 @@ def _count_loop_body_split(
 
             case InverseBlockOperation():
                 alloc, is_reusable = _count_inverse_block_split(op, resolver)
+                if is_reusable:
+                    reusable = sp.Max(reusable, alloc)
+                else:
+                    persistent += alloc  # type: ignore
+
+            case GlobalPhaseBlockOperation():
+                alloc, is_reusable = _count_global_phase_block_split(op, resolver)
                 if is_reusable:
                     reusable = sp.Max(reusable, alloc)
                 else:
@@ -460,6 +514,9 @@ def _count_from_operations(
 
             case InverseBlockOperation():
                 count += _count_inverse_block_total(op, resolver)  # type: ignore
+
+            case GlobalPhaseBlockOperation():
+                count += _count_global_phase_block_total(op, resolver)  # type: ignore
 
             case PauliEvolveOp():
                 # PauliEvolveOp operates in-place; no new qubits.
