@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from qamomile.observable.hamiltonian import Hamiltonian, Pauli, PauliOperator
 
 _HAMILTONIAN_TAG = "$hamiltonian"
@@ -69,7 +71,9 @@ def hamiltonian_to_dict(h: Hamiltonian) -> dict[str, Any]:
 
     Args:
         h (Hamiltonian): The Hamiltonian to encode. Term coefficients
-            and the constant must be int, float, or complex.
+            and the constant must be int, float, or complex, or a
+            ``numpy`` scalar of one of those kinds (coerced via
+            ``.item()``).
 
     Returns:
         dict[str, Any]: A wrapper dict with ``$hamiltonian``,
@@ -78,7 +82,9 @@ def hamiltonian_to_dict(h: Hamiltonian) -> dict[str, Any]:
 
     Raises:
         TypeError: If ``h`` is not a ``Hamiltonian``, or if a
-            coefficient / the constant is not int, float, or complex.
+            coefficient / the constant is not int, float, or complex
+            (after coercing any ``numpy`` scalar to its Python
+            equivalent).
     """
     if not isinstance(h, Hamiltonian):
         raise TypeError(
@@ -189,8 +195,9 @@ def _coeff_to_wire(coeff: Any) -> Any:
     """Encode a term coefficient (or the constant) for the wire.
 
     Args:
-        coeff (Any): The coefficient. Must be int, float, or complex
-            (bool is rejected even though it subclasses int).
+        coeff (Any): The coefficient. Must be int, float, or complex, or
+            a ``numpy`` scalar of one of those kinds. ``bool`` (and
+            ``numpy.bool_``) is rejected even though it subclasses int.
 
     Returns:
         Any: A plain int / float for real coefficients, or
@@ -199,8 +206,18 @@ def _coeff_to_wire(coeff: Any) -> Any:
             survives the round-trip.
 
     Raises:
-        TypeError: If ``coeff`` is not int, float, or complex.
+        TypeError: If ``coeff`` is not int, float, or complex (after
+            coercing any ``numpy`` scalar to its Python equivalent).
     """
+    # numpy scalar coefficients (e.g. np.float64 from np.sqrt(...) used in
+    # several Hamiltonian builders) behave like plain numbers but are not
+    # instances of the Python int / float / complex checked below. Coerce
+    # them to their Python equivalent up front so they serialize like any
+    # other real / complex coefficient instead of being rejected; a
+    # numpy.bool_ collapses to a Python bool and is still caught by the
+    # bool guard.
+    if isinstance(coeff, np.generic):
+        coeff = coeff.item()
     if isinstance(coeff, bool):
         raise TypeError("Hamiltonian coefficients must not be bool")
     if isinstance(coeff, int):

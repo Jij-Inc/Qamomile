@@ -707,6 +707,41 @@ class TestHamiltonianWrapper:
         assert type(restored.constant) is int
         assert restored.num_qubits == 5
 
+    def test_numpy_scalar_coefficients_serialize_as_plain_numbers(self):
+        """numpy scalar coefficients (np.float64 / np.complex128) round-trip.
+
+        Real Hamiltonian builders carry numpy scalars — e.g. a coefficient
+        from ``np.sqrt(...)`` is an ``np.float64`` — which are not Python
+        ``float`` / ``complex`` instances. The wrapper coerces them via
+        ``.item()`` so they serialize like plain numbers (and decode back to
+        Python scalars) instead of being rejected as unencodable.
+        """
+        h = qm_o.Hamiltonian()
+        h.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), np.float64(np.sqrt(2.0)))
+        h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 1),), np.complex128(0.5 + 0.25j))
+        h.constant = np.float64(2.0)
+        restored = dict_to_hamiltonian(hamiltonian_to_dict(h))
+        real_coeff, complex_coeff = restored.terms.values()
+        assert type(real_coeff) is float
+        assert type(complex_coeff) is complex
+        assert type(restored.constant) is float
+        # value fidelity: numpy scalars coerce to the equal Python scalar,
+        # so the reconstructed Hamiltonian compares equal term-for-term.
+        assert restored == h
+
+    def test_numpy_bool_constant_rejected(self):
+        """A ``numpy.bool_`` constant is rejected like a Python ``bool``.
+
+        Hamiltonian coefficients are never boolean. Setting the constant to a
+        ``numpy.bool_`` reaches the guard directly (unlike ``add_term``, whose
+        internal ``phase * coeff`` would coerce a bool to a float first), and
+        ``.item()`` collapses it to a Python ``bool`` so the guard fires.
+        """
+        h = qm_o.Hamiltonian()
+        h.constant = np.bool_(True)
+        with pytest.raises(TypeError, match="must not be bool"):
+            hamiltonian_to_dict(h)
+
     def test_unknown_pauli_name_rejected(self):
         """A Pauli name outside the allow-map raises on decode."""
         wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
