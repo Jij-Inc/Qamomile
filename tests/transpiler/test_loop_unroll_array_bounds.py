@@ -208,3 +208,15 @@ class TestIndexIntoBoundArray:
             element, bindings={"angles": [0.1, 0.2, 0.3]}
         )
         assert resolved is None
+
+    def test_zero_dim_container_surfaces_emit_error_not_typeerror(self):
+        """A 0-d container raises on both indexing and ``len()``; the
+        out-of-range ``EmitError`` must still surface rather than being
+        masked by a ``TypeError`` while formatting the length note."""
+        resolver = ValueResolver()
+        element = _array_element(Value(type=UIntType(), name="i").with_const(0))
+
+        with pytest.raises(EmitError, match=r"Index 0 is out of range .* 'angles'"):
+            resolver.resolve_classical_value(
+                element, bindings={"angles": np.array(5.0)}
+            )

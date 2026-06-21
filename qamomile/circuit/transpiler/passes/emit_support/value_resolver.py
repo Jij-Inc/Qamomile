@@ -519,7 +519,7 @@ class ValueResolver:
         self,
         v: "Value",
         bindings: dict[str, Any],
-    ) -> Any:
+    ) -> Any | None:
         """Index into a bound array container at the operand's element indices.
 
         Refuses to index when the parent array's name is in
@@ -539,8 +539,8 @@ class ValueResolver:
             bindings (dict[str, Any]): The active emit-time bindings.
 
         Returns:
-            Any: The resolved element, or ``None`` when the access is
-                genuinely symbolic at emit time (unresolved indices or
+            Any | None: The resolved element, or ``None`` when the access
+                is genuinely symbolic at emit time (unresolved indices or
                 slice bounds, a runtime parameter array, or a container
                 that is absent from compile-time data).
 
@@ -590,7 +590,14 @@ class ValueResolver:
                 # access is therefore genuinely out of range, not
                 # symbolic — fail fast instead of falling through to
                 # phantom-parameter creation.
-                length = len(container) if hasattr(container, "__len__") else None
+                try:
+                    length = len(container)
+                except TypeError:
+                    # Some objects define ``__len__`` but still raise on
+                    # ``len()`` (e.g. 0-d NumPy arrays). Fall back to an
+                    # unqualified message rather than masking the real
+                    # out-of-range error with a length-formatting failure.
+                    length = None
                 length_note = f" of length {length}" if length is not None else ""
                 raise EmitError(
                     f"Index {i} is out of range for compile-time bound "
