@@ -197,14 +197,17 @@ def _validate_classical_param_handle(
     param_name: str,
     declared: Any,
     param_value: Handle,
+    context: str = "control()",
 ) -> None:
     """Validate that a handle matches a classical parameter declaration.
 
     Args:
-        param_name (str): Wrapped-kernel parameter name, used in error
-            messages.
-        declared (Any): Resolved wrapped-kernel input annotation.
+        param_name (str): Kernel parameter name, used in error messages.
+        declared (Any): Resolved kernel input annotation.
         param_value (Handle): Caller-supplied handle value.
+        context (str): Call-site label used to prefix the error message,
+            e.g. ``"control()"`` or ``"my_kernel()"``. Defaults to
+            ``"control()"`` so existing callers keep their wording.
 
     Raises:
         TypeError: If the supplied handle is quantum or does not match the
@@ -214,7 +217,7 @@ def _validate_classical_param_handle(
 
     if _is_quantum_handle(param_value):
         raise TypeError(
-            f"control(): parameter {param_name!r} is declared as a "
+            f"{context}: parameter {param_name!r} is declared as a "
             f"classical parameter but received quantum handle "
             f"{type(param_value).__name__}. Pass a classical handle instead."
         )
@@ -222,7 +225,7 @@ def _validate_classical_param_handle(
     if declared is Observable:
         if not isinstance(param_value, Observable):
             raise TypeError(
-                f"control(): parameter {param_name!r} is declared as "
+                f"{context}: parameter {param_name!r} is declared as "
                 f"Observable but received {type(param_value).__name__}. "
                 f"Pass an Observable handle from the enclosing qkernel."
             )
@@ -232,7 +235,7 @@ def _validate_classical_param_handle(
     if element_type is not None:
         if not isinstance(param_value, ArrayBase):
             raise TypeError(
-                f"control(): parameter {param_name!r} is declared as "
+                f"{context}: parameter {param_name!r} is declared as "
                 f"an array parameter but received "
                 f"{type(param_value).__name__}. Pass the corresponding "
                 f"Vector handle from the caller kernel instead."
@@ -240,7 +243,7 @@ def _validate_classical_param_handle(
         expected_type = UIntType() if element_type in (UInt, int) else FloatType()
         if param_value.value.type != expected_type:
             raise TypeError(
-                f"control(): parameter {param_name!r} expects "
+                f"{context}: parameter {param_name!r} expects "
                 f"{expected_type.label()} elements but received "
                 f"{param_value.value.type.label()} elements."
             )
@@ -249,7 +252,7 @@ def _validate_classical_param_handle(
     if _is_uint_param_decl(declared):
         if not isinstance(param_value, UInt):
             raise TypeError(
-                f"control(): parameter {param_name!r} is declared as "
+                f"{context}: parameter {param_name!r} is declared as "
                 f"UInt/int but received {type(param_value).__name__}. "
                 f"Pass a UInt handle instead."
             )
@@ -257,10 +260,132 @@ def _validate_classical_param_handle(
 
     if not isinstance(param_value, Float):
         raise TypeError(
-            f"control(): parameter {param_name!r} is declared as "
+            f"{context}: parameter {param_name!r} is declared as "
             f"Float/float but received {type(param_value).__name__}. "
             f"Pass a Float handle instead."
         )
+
+
+def _validate_quantum_param_handle(
+    param_name: str,
+    declared: Any,
+    param_value: Handle,
+    context: str = "control()",
+    allow_broadcast: bool = False,
+) -> None:
+    """Validate that a handle matches a quantum parameter declaration.
+
+    Catches the arity mismatches that previously leaked an opaque
+    ``AttributeError`` (``'Qubit' object has no attribute 'shape'``) or
+    silently miscompiled. A classical handle bound to a quantum parameter
+    is rejected outright. The two arity directions are not symmetric:
+
+    * **An array declaration receiving a scalar ``Qubit``** (e.g. passing
+      a single qubit to a ``Vector[Qubit]`` target) is always rejected --
+      the callee indexes the register internally, so a lone qubit cannot
+      satisfy it.
+    * **A scalar ``Qubit`` declaration receiving a quantum array** is a
+      *broadcast* in the control path (the controlled gate is applied
+      once per target qubit -- see ``controlled_native_broadcast_target``)
+      but a silent miscompile in a plain ``CallBlockOperation`` call
+      (the whole register collapses onto one scalar dummy input).
+      ``allow_broadcast`` selects which contract applies.
+
+    Args:
+        param_name (str): Kernel parameter name, used in error messages.
+        declared (Any): Resolved kernel input annotation. Either scalar
+            ``Qubit`` or an array form such as ``Vector[Qubit]``.
+        param_value (Handle): Caller-supplied handle value.
+        context (str): Call-site label used to prefix the error message,
+            e.g. ``"control()"`` or ``"my_kernel()"``. Defaults to
+            ``"control()"``.
+        allow_broadcast (bool): When ``True``, a quantum array bound to a
+            scalar ``Qubit`` declaration is accepted as a per-element
+            broadcast (the control path). When ``False`` (a plain
+            qkernel call, which does not broadcast), the same shape is
+            rejected. Defaults to ``False``.
+
+    Raises:
+        TypeError: If the supplied handle is classical, or its arity
+            (scalar vs. array) does not match the declared quantum
+            parameter kind under the active broadcast contract.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if not _is_quantum_handle(param_value):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as a "
+            f"quantum parameter but received non-quantum handle "
+            f"{type(param_value).__name__}. Pass a Qubit or Vector[Qubit] "
+            f"handle instead."
+        )
+
+    if declared is Qubit:
+        if isinstance(param_value, Qubit):
+            return
+        # A quantum array bound to a scalar ``Qubit`` parameter broadcasts
+        # in the control path but silently miscompiles in a plain call.
+        if allow_broadcast and isinstance(param_value, ArrayBase):
+            return
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as a "
+            f"scalar Qubit but received {type(param_value).__name__}. "
+            f"Pass a single Qubit handle (e.g. index the register with "
+            f"qs[0]) instead."
+        )
+
+    # Array quantum declaration (``Vector[Qubit]`` / higher-rank register).
+    if not isinstance(param_value, ArrayBase):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as a quantum "
+            f"array (e.g. Vector[Qubit]) but received scalar "
+            f"{type(param_value).__name__}. Pass the corresponding Vector "
+            f"handle (wrap a single qubit with qmc.qubit_array(1, ...)) "
+            f"instead."
+        )
+
+
+def _validate_param_handle(
+    param_name: str,
+    declared: Any,
+    param_value: Handle,
+    context: str = "control()",
+    allow_broadcast: bool = False,
+) -> None:
+    """Validate a bound handle against its qkernel parameter declaration.
+
+    Routes to the quantum or classical validator based on the declared
+    parameter kind. Structural-container declarations (``Tuple`` /
+    ``Dict``) and unannotated parameters are passed through unchecked --
+    their shape is enforced by the inline / segmentation passes instead.
+
+    Args:
+        param_name (str): Kernel parameter name, used in error messages.
+        declared (Any): Resolved kernel input annotation.
+        param_value (Handle): Caller-supplied handle bound to the
+            parameter.
+        context (str): Call-site label used to prefix the error message,
+            e.g. ``"control()"`` or ``"my_kernel()"``. Defaults to
+            ``"control()"``.
+        allow_broadcast (bool): Forwarded to
+            :func:`_validate_quantum_param_handle`; ``True`` lets a
+            quantum array bind to a scalar ``Qubit`` parameter as a
+            per-element broadcast (the control path). Has no effect on
+            classical parameters. Defaults to ``False``.
+
+    Raises:
+        TypeError: If *param_value* does not match the quantum or
+            classical declaration of *param_name*.
+    """
+    if _is_quantum_param_decl(declared):
+        _validate_quantum_param_handle(
+            param_name, declared, param_value, context, allow_broadcast=allow_broadcast
+        )
+    elif _is_classical_param_decl(declared):
+        _validate_classical_param_handle(param_name, declared, param_value, context)
+    # else: a structural container (``Tuple`` / ``Dict``) or an
+    # unannotated parameter -- there is no scalar/array arity contract to
+    # enforce here, so the handle passes through unchecked.
 
 
 def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
@@ -776,26 +901,39 @@ class ControlledGate:
         """
         return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
 
-    def _validate_bound_classical_handles(
+    def _validate_bound_handles(
         self,
         sub_args_resolved: dict[str, Any],
     ) -> None:
-        """Validate bound classical parameters before quantum filtering.
+        """Validate bound sub-kernel handles before quantum filtering.
+
+        Checks every bound parameter -- quantum *and* classical -- against
+        its declaration, so an arity mismatch fails fast with a clear
+        ``TypeError`` instead of leaking an ``AttributeError`` from a
+        deeper specialization step (``get_size`` on a scalar ``Qubit``).
+        Validation runs with ``allow_broadcast=True``: a quantum array
+        bound to a scalar ``Qubit`` target is a legitimate per-element
+        broadcast in the control path (the controlled gate is applied
+        once per target qubit), so it is accepted here even though the
+        same shape is rejected on a plain qkernel call.
 
         Args:
             sub_args_resolved (dict[str, Any]): Bound sub-kernel
                 arguments in wrapped-kernel signature order.
 
         Raises:
-            TypeError: If a classical parameter is bound to an
-                incompatible handle, including quantum handles that would
-                otherwise be collected as target operands.
+            TypeError: If a parameter is bound to a handle that does not
+                match its declared quantum / classical kind (a scalar
+                ``Qubit`` into a ``Vector[Qubit]`` target, a classical
+                handle into a quantum parameter, etc.).
         """
         kernel_input_types: dict[str, Any] = self._qkernel.input_types
         for name, value in sub_args_resolved.items():
             declared = kernel_input_types[name]
-            if _is_classical_param_decl(declared) and isinstance(value, Handle):
-                _validate_classical_param_handle(name, declared, value)
+            if isinstance(value, Handle):
+                _validate_param_handle(
+                    name, declared, value, context="control()", allow_broadcast=True
+                )
 
     # ``_validate_no_alias_or_overlap`` used to live here as an entry-
     # point alias / overlap check, mirroring the
@@ -1331,7 +1469,7 @@ class ControlledGate:
 
         controls, sub_positional = self._split_controls_by_count(args, num_controls)
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
-        self._validate_bound_classical_handles(sub_args_resolved)
+        self._validate_bound_handles(sub_args_resolved)
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(
@@ -1635,7 +1773,7 @@ class ControlledGate:
         )
 
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
-        self._validate_bound_classical_handles(sub_args_resolved)
+        self._validate_bound_handles(sub_args_resolved)
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(

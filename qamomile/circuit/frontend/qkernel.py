@@ -588,6 +588,28 @@ class QKernel(Generic[P, R]):
                     arg_value, expected_type
                 )
 
+        # Fail fast on argument type mismatches before any handle is
+        # consumed: a scalar ``Qubit`` bound to a ``Vector[Qubit]``
+        # parameter (or the reverse), or a quantum handle bound to a
+        # classical parameter. Without this guard a scalar-into-array
+        # mismatch surfaces much later as an opaque ``AttributeError``
+        # (``'Qubit' object has no attribute 'shape'``) from ``get_size``
+        # during call-time specialization, and a quantum-into-classical
+        # mismatch silently miscompiles (a ``Qubit`` bound to a ``Float``
+        # parameter emits ``Rx(0.0)``). ``control.py`` only imports this
+        # module under ``TYPE_CHECKING``, so importing its validator lazily
+        # here keeps the frontend import graph acyclic.
+        from qamomile.circuit.frontend.operation.control import (
+            _validate_param_handle,
+        )
+
+        for arg_name, arg_value in bound_args.arguments.items():
+            declared = self.input_types.get(arg_name)
+            if declared is not None and isinstance(arg_value, Handle):
+                _validate_param_handle(
+                    arg_name, declared, arg_value, context=f"{self.name}()"
+                )
+
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map: dict[str, Value] = {}
         # Track borrow provenance for input-derived quantum scalar handles.
