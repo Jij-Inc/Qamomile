@@ -634,7 +634,11 @@ def _token(obj: Any) -> str:
         # buffer instead. Object-dtype arrays have no content-defined
         # buffer and fall through to the ``repr`` fallback below.
         data = np.ascontiguousarray(obj)
-        digest = hashlib.sha256(data.tobytes()).hexdigest()
+        # Feed the contiguous buffer to the hasher as a flat ``uint8``
+        # memoryview (buffer protocol) so no extra ``bytes`` copy of a
+        # potentially large array is allocated; ``ascontiguousarray``
+        # already guarantees a C-contiguous buffer.
+        digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
         return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
     if isinstance(obj, ValueBase):
         return _value_token(obj)

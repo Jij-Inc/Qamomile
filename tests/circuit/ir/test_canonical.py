@@ -943,9 +943,13 @@ class TestParamSlotsHashParticipation:
         base = np.zeros(2048)
         tweaked = base.copy()
         tweaked[1500] = 1.0
-        # Default printoptions truncate both to the same repr, so
-        # repr-based array hashing would collide on this pair.
-        assert repr(base) == repr(tweaked)
+        # Pin printoptions so the repr-collision precondition is
+        # deterministic regardless of any global ``np.set_printoptions``:
+        # 2048 > threshold elides the middle (where index 1500 differs),
+        # so both arrays render identically and repr-based hashing would
+        # collide on this pair.
+        with np.printoptions(threshold=1000, edgeitems=3):
+            assert repr(base) == repr(tweaked)
         assert content_hash(_block_with_bound_slot(base)) != content_hash(
             _block_with_bound_slot(tweaked)
         )
