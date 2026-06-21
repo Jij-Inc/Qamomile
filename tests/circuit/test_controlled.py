@@ -2523,6 +2523,295 @@ class TestControlledVectorInnerKernelCrossSDK:
 
 
 # =============================================================================
+# Cross-SDK execution: measuring / expval the RETURNED whole-Vector control
+# =============================================================================
+#
+# Regression for the bug where passing a whole ``Vector[Qubit]`` as the
+# concrete control prefix (e.g. ``cg(qmc.qubit_array(2), target)``) left
+# the *returned* control vector's per-element ``QubitAddress`` keys
+# unmapped.  ``ConcreteControlledU`` expands a whole-Vector control into
+# per-element scalar operands / results, but the user-facing output
+# handle was re-aggregated into a throwaway next-version ``ArrayValue``
+# whose element addresses were never written to the emit ``qubit_map``.
+# A later ``measure`` / element access of that vector then silently
+# resolved to nothing (Qiskit emitted no measurement at all and returned
+# an all-zeros classical register).  Passing the controls as individual
+# scalar ``Qubit`` handles always worked because each output ``Qubit``
+# wraps the IR result scalar directly; these tests pin the whole-Vector
+# control output against the scalar-control form on every SDK and
+# exercise the sampling and expectation-value primitives independently.
+
+
+def _whole_vector_control_measure_kernel(bits, num_controls):
+    """Build a kernel that whole-Vector-controls an X and measures the controls.
+
+    The control register is prepared to the basis state ``bits``, used
+    as the *whole* control prefix of a ``num_controls``-controlled X on
+    a separate target, and the returned control vector is measured.  The
+    controlled-U leaves the control qubits' computational-basis values
+    unchanged, so the measurement must reproduce ``bits`` exactly — which
+    only happens if the returned control vector's element addresses are
+    mapped.
+
+    Args:
+        bits (tuple[int, ...]): Per-control basis bits (0/1); length must
+            equal ``num_controls``.
+        num_controls (int): Control register length (2 or 3).
+
+    Returns:
+        QKernel: A no-argument kernel returning ``Vector[Bit]``.
+
+    Raises:
+        ValueError: If ``num_controls`` is not 2 or 3.
+    """
+    if num_controls == 2:
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            ctrl = qmc.qubit_array(2, "ctrl")
+            t = qmc.qubit(name="t")
+            if bits[0]:
+                ctrl[0] = qmc.x(ctrl[0])
+            if bits[1]:
+                ctrl[1] = qmc.x(ctrl[1])
+            cg = qmc.control(_x_gate, num_controls=2)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.measure(c_out)
+
+        return kernel
+    if num_controls == 3:
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            ctrl = qmc.qubit_array(3, "ctrl")
+            t = qmc.qubit(name="t")
+            if bits[0]:
+                ctrl[0] = qmc.x(ctrl[0])
+            if bits[1]:
+                ctrl[1] = qmc.x(ctrl[1])
+            if bits[2]:
+                ctrl[2] = qmc.x(ctrl[2])
+            cg = qmc.control(_x_gate, num_controls=3)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.measure(c_out)
+
+        return kernel
+    raise ValueError(f"unsupported num_controls={num_controls}")
+
+
+def _whole_vector_control_expval_kernel(theta, num_controls):
+    """Build an expval kernel using a whole-Vector control prefix.
+
+    Prepares the control register with ``RY(theta)`` (broadcast over the
+    whole vector) and the target with ``H``, applies a
+    ``num_controls``-controlled X, and returns the expectation value of
+    the bound observable over the *returned* control register.
+
+    Args:
+        theta (float): RY rotation angle applied to every control qubit.
+        num_controls (int): Control register length (2 or 3).
+
+    Returns:
+        QKernel: A kernel taking ``obs: qmc.Observable`` returning a
+            ``qmc.Float``.
+
+    Raises:
+        ValueError: If ``num_controls`` is not 2 or 3.
+    """
+    if num_controls == 2:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            ctrl = qmc.qubit_array(2, "ctrl")
+            t = qmc.qubit(name="t")
+            ctrl = qmc.ry(ctrl, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=2)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.expval(c_out, obs)
+
+        return kernel
+    if num_controls == 3:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            ctrl = qmc.qubit_array(3, "ctrl")
+            t = qmc.qubit(name="t")
+            ctrl = qmc.ry(ctrl, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=3)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.expval(c_out, obs)
+
+        return kernel
+    raise ValueError(f"unsupported num_controls={num_controls}")
+
+
+def _scalar_control_expval_kernel(theta, num_controls):
+    """Build the scalar-control counterpart of the whole-Vector expval kernel.
+
+    Same circuit as :func:`_whole_vector_control_expval_kernel` but the
+    controls are supplied as individual scalar ``Qubit`` handles (the
+    always-working form), so the two expectation values must agree.
+
+    Args:
+        theta (float): RY rotation angle applied to every control qubit.
+        num_controls (int): Control register length (2 or 3).
+
+    Returns:
+        QKernel: A kernel taking ``obs: qmc.Observable`` returning a
+            ``qmc.Float``.
+
+    Raises:
+        ValueError: If ``num_controls`` is not 2 or 3.
+    """
+    if num_controls == 2:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            c0 = qmc.qubit(name="c0")
+            c1 = qmc.qubit(name="c1")
+            t = qmc.qubit(name="t")
+            c0 = qmc.ry(c0, theta)
+            c1 = qmc.ry(c1, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=2)
+            c0, c1, _t_out = cg(c0, c1, t)
+            return qmc.expval((c0, c1), obs)
+
+        return kernel
+    if num_controls == 3:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            c0 = qmc.qubit(name="c0")
+            c1 = qmc.qubit(name="c1")
+            c2 = qmc.qubit(name="c2")
+            t = qmc.qubit(name="t")
+            c0 = qmc.ry(c0, theta)
+            c1 = qmc.ry(c1, theta)
+            c2 = qmc.ry(c2, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=3)
+            c0, c1, c2, _t_out = cg(c0, c1, c2, t)
+            return qmc.expval((c0, c1, c2), obs)
+
+        return kernel
+    raise ValueError(f"unsupported num_controls={num_controls}")
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("num_controls", [2, 3])
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+class TestControlledWholeVectorControlOutput:
+    """Measure / expval the returned whole-Vector control output, per SDK.
+
+    Cross-SDK execution coverage for the fixed bug: the regression is
+    parametrized over every supported quantum SDK (`_BUILTIN_BACKENDS`:
+    Qiskit, QuriParts, CUDA-Q) and exercises both the sampling and the
+    expectation-value primitives (they regress independently).  The
+    minimal reproducing case is `num_controls == 2`; transpilation +
+    execution there is mandatory on every supported SDK (an `EmitError`
+    is re-raised, not skipped), so the fix stays verified end-to-end on
+    all backends.  Only the orthogonal `num_controls >= 3` multi-control
+    decomposition gap — a pre-existing per-backend limitation unrelated
+    to this fix — is skipped gracefully.
+    """
+
+    def test_measure_control_output_matches_prepared_state(
+        self, transpiler_factory, num_controls, seed
+    ):
+        """Measuring the returned control vector reproduces the prepared bits.
+
+        Reproduces the original bug directly: a non-zero basis state is
+        prepared on a whole ``Vector[Qubit]`` control prefix, the
+        controlled gate is applied, and the *returned* control vector is
+        measured.  Pre-fix this emitted no measurement and returned an
+        all-zeros register; post-fix every shot must equal the prepared
+        bitstring.
+        """
+        rng = np.random.default_rng(seed)
+        # Draw a non-zero bitstring so a regression that silently
+        # measures all-zeros is always caught.
+        bits = tuple(int(b) for b in rng.integers(0, 2, size=num_controls))
+        if not any(bits):
+            bits = (1, *bits[1:])
+
+        kernel = _whole_vector_control_measure_kernel(bits, num_controls)
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel)
+        except EmitError as e:
+            # The fixed bug (whole-Vector control output) reproduces at
+            # num_controls == 2, which every supported SDK can emit and
+            # execute, so an EmitError there must fail loudly — the whole
+            # point of this regression is that the fix runs end-to-end on
+            # every backend.  Only the orthogonal multi-control
+            # (num_controls >= 3) decomposition gap, a pre-existing
+            # per-backend limitation, is skipped gracefully.
+            if num_controls <= 2:
+                raise
+            pytest.skip(
+                f"{t.__class__.__name__} does not support "
+                f"{num_controls}-controlled-U: {e}"
+            )
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total > 0, f"no shots returned on SDK={transpiler_factory.__name__}"
+        for value, count in result.results:
+            assert tuple(value) == bits, (
+                f"expected control output to measure {bits}, got value={value} "
+                f"count={count} on SDK={transpiler_factory.__name__}, seed={seed}"
+            )
+
+    def test_expval_control_output_matches_scalar_form(
+        self, transpiler_factory, num_controls, seed
+    ):
+        """Whole-Vector control output expval equals the scalar-control form.
+
+        Builds two circuits that differ only in how the controls are
+        supplied — one whole ``Vector[Qubit]`` prefix vs. individual
+        scalar ``Qubit`` handles — and pins the expectation value of
+        ``Σ_i Z_i`` over the *returned control register*.  The
+        whole-Vector form must agree with the always-working scalar form
+        on every SDK.
+        """
+        import qamomile.observable as qm_o
+
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+
+        H = qm_o.Hamiltonian.zero(num_qubits=num_controls)
+        for i in range(num_controls):
+            H += qm_o.Z(i)
+
+        vector_kernel = _whole_vector_control_expval_kernel(theta, num_controls)
+        scalar_kernel = _scalar_control_expval_kernel(theta, num_controls)
+
+        t = transpiler_factory()
+        try:
+            exe_v = t.transpile(vector_kernel, bindings={"obs": H})
+            exe_s = t.transpile(scalar_kernel, bindings={"obs": H})
+        except EmitError as e:
+            # See the measurement test: the fixed case (num_controls == 2)
+            # must execute on every supported SDK, so only the orthogonal
+            # multi-control (num_controls >= 3) gap is skipped.
+            if num_controls <= 2:
+                raise
+            pytest.skip(
+                f"{t.__class__.__name__} does not support "
+                f"{num_controls}-controlled-U: {e}"
+            )
+        val_v = exe_v.run(t.executor()).result()
+        val_s = exe_s.run(t.executor()).result()
+        assert np.isclose(val_v, val_s, atol=1e-6), (
+            f"whole-Vector/scalar control expval mismatch on "
+            f"SDK={transpiler_factory.__name__}, seed={seed}, theta={theta}: "
+            f"vector={val_v}, scalar={val_s}"
+        )
+
+
+# =============================================================================
 # Cross-SDK execution: concrete-mode VectorView controls + Vector[Qubit] sub args
 # =============================================================================
 #

@@ -2092,12 +2092,38 @@ def _map_controlled_u_results(
         qubit_map (QubitMap): Mutated in place with the new result
             ``QubitAddress`` entries.
     """
-    from qamomile.circuit.ir.value import ArrayValue
+    from qamomile.circuit.ir.value import ArrayValue, resolve_root_qubit_address
 
     control_results = op.results[:num_controls]
     for i, result in enumerate(control_results):
-        if i < len(control_indices):
-            qubit_map[QubitAddress(result.uuid)] = control_indices[i]
+        if i >= len(control_indices):
+            break
+        physical = control_indices[i]
+        qubit_map[QubitAddress(result.uuid)] = physical
+        # Whole-``Vector`` / ``VectorView`` controls expand into
+        # per-element scalar results, but the user-facing output handle
+        # wraps a single next-version ``ArrayValue`` that the frontend
+        # re-parented these scalars onto (see
+        # ``ControlledGate._build_control_results``).  Populate that
+        # array's per-element root ``QubitAddress`` so a downstream
+        # ``measure`` / element access of the returned control vector
+        # resolves to the same physical qubit as the input element:
+        # ``emit_measure_vector`` / ``resolve_slice_chain`` look the
+        # element up by the root ``(array_uuid, start + step * i)`` key,
+        # which mirrors ``_allocate_qubit_list``'s result-chain copy.
+        # Standalone scalar ``Qubit`` controls have no ``parent_array``
+        # so ``resolve_root_qubit_address`` returns ``None`` and they
+        # fall through; array-element scalar controls resolve to their
+        # already-registered input-array address (guarded no-op).  The
+        # whole-array base key (no element index) is intentionally not
+        # written here — no resolver path reads it for these results,
+        # and writing it would add a base key to the *input* array for
+        # array-element scalar controls.
+        root = resolve_root_qubit_address(result)
+        if root is not None:
+            element_addr = QubitAddress(*root)
+            if element_addr not in qubit_map:
+                qubit_map[element_addr] = physical
 
     target_results = [r for r in op.results[num_controls:] if r.type.is_quantum()]
     for i, result in enumerate(target_results):
