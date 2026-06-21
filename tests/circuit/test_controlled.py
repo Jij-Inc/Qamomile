@@ -2704,7 +2704,19 @@ def _scalar_control_expval_kernel(theta, num_controls):
 @pytest.mark.parametrize("num_controls", [2, 3])
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 class TestControlledWholeVectorControlOutput:
-    """Measure / expval the returned whole-Vector control output, per SDK."""
+    """Measure / expval the returned whole-Vector control output, per SDK.
+
+    Cross-SDK execution coverage for the fixed bug: the regression is
+    parametrized over every supported quantum SDK (`_BUILTIN_BACKENDS`:
+    Qiskit, QuriParts, CUDA-Q) and exercises both the sampling and the
+    expectation-value primitives (they regress independently).  The
+    minimal reproducing case is `num_controls == 2`; transpilation +
+    execution there is mandatory on every supported SDK (an `EmitError`
+    is re-raised, not skipped), so the fix stays verified end-to-end on
+    all backends.  Only the orthogonal `num_controls >= 3` multi-control
+    decomposition gap — a pre-existing per-backend limitation unrelated
+    to this fix — is skipped gracefully.
+    """
 
     def test_measure_control_output_matches_prepared_state(
         self, transpiler_factory, num_controls, seed
@@ -2730,8 +2742,18 @@ class TestControlledWholeVectorControlOutput:
         try:
             exe = t.transpile(kernel)
         except EmitError as e:
+            # The fixed bug (whole-Vector control output) reproduces at
+            # num_controls == 2, which every supported SDK can emit and
+            # execute, so an EmitError there must fail loudly — the whole
+            # point of this regression is that the fix runs end-to-end on
+            # every backend.  Only the orthogonal multi-control
+            # (num_controls >= 3) decomposition gap, a pre-existing
+            # per-backend limitation, is skipped gracefully.
+            if num_controls <= 2:
+                raise
             pytest.skip(
-                f"{t.__class__.__name__} does not support this controlled-U: {e}"
+                f"{t.__class__.__name__} does not support "
+                f"{num_controls}-controlled-U: {e}"
             )
         result = exe.sample(t.executor(), shots=128).result()
         total = sum(count for _value, count in result.results)
@@ -2771,8 +2793,14 @@ class TestControlledWholeVectorControlOutput:
             exe_v = t.transpile(vector_kernel, bindings={"obs": H})
             exe_s = t.transpile(scalar_kernel, bindings={"obs": H})
         except EmitError as e:
+            # See the measurement test: the fixed case (num_controls == 2)
+            # must execute on every supported SDK, so only the orthogonal
+            # multi-control (num_controls >= 3) gap is skipped.
+            if num_controls <= 2:
+                raise
             pytest.skip(
-                f"{t.__class__.__name__} does not support this controlled-U: {e}"
+                f"{t.__class__.__name__} does not support "
+                f"{num_controls}-controlled-U: {e}"
             )
         val_v = exe_v.run(t.executor()).result()
         val_s = exe_s.run(t.executor()).result()
