@@ -49,6 +49,7 @@ from qamomile.circuit.ir.operation.operation import (
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
@@ -630,6 +631,8 @@ class _BlockInverter:
             return self._invert_pauli_evolve(op, value_map)
         if isinstance(op, ControlledUOperation):
             return self._invert_controlled_u(op, value_map)
+        if isinstance(op, SelectOperation):
+            return self._invert_select(op, value_map)
         if isinstance(op, CallBlockOperation):
             return self._invert_call_block(op, value_map)
         if isinstance(op, ForOperation):
@@ -1236,6 +1239,12 @@ class _BlockInverter:
                 num_controls=op.num_controls,
                 power=power,
                 block=inverse_block,
+                # Preserve the zero-control (anti-control) pattern: the
+                # inverse of an anti-controlled U is the anti-controlled
+                # U-dagger (same control basis states), so dropping
+                # control_values here would silently turn anti-controls
+                # into standard controls and break forward+inverse=identity.
+                control_values=op.control_values,
             )
         else:
             raise NotImplementedError(f"inverse() cannot invert {type(op).__name__}.")
@@ -1243,6 +1252,48 @@ class _BlockInverter:
         self._update_quantum_value_map(
             value_map,
             op.control_operands + op.target_operands,
+            new_results,
+        )
+        return [inverse_op]
+
+    def _invert_select(
+        self,
+        op: SelectOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a SELECT (quantum multiplexer) operation.
+
+        Reconstructed select-inverse handler (the original was reverted in
+        the working tree by a concurrent process during review). The inverse
+        of ``sum_i |i><i| (x) U_i`` is ``sum_i |i><i| (x) U_i^dagger``.
+
+        Args:
+            op (SelectOperation): SELECT operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: A single inverse :class:`SelectOperation`.
+        """
+        inverse_case_blocks = [self.invert_block(block) for block in op.case_blocks]
+        current_results = [
+            _as_value(_substitute_value(result, value_map), "Select result")
+            for result in op.results
+        ]
+        new_results = [result.next_version() for result in current_results]
+        mapped_params = [
+            _as_value(_substitute_value(param, value_map), "Select parameter")
+            for param in op.param_operands
+        ]
+        operands = [*current_results, *mapped_params]
+        inverse_op = SelectOperation(
+            operands=operands,
+            results=new_results,
+            num_index_qubits=op.num_index_qubits,
+            case_blocks=inverse_case_blocks,
+        )
+        self._update_quantum_value_map(
+            value_map,
+            op.index_operands + op.target_operands,
             new_results,
         )
         return [inverse_op]

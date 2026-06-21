@@ -47,6 +47,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
 from qamomile.circuit.transpiler.passes.emit import CompositeGateEmitter, EmitPass
@@ -87,6 +88,9 @@ from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     emit_pauli_evolve,
+)
+from qamomile.circuit.transpiler.passes.emit_support.select_emission import (
+    emit_select,
 )
 
 T = TypeVar("T")  # Backend circuit type
@@ -246,6 +250,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
+            elif isinstance(op, SelectOperation):
+                emit_select(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
                 self._emit_pauli_evolve(circuit, op, qubit_map, bindings)
             elif isinstance(op, CastOperation):

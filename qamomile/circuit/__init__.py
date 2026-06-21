@@ -47,6 +47,7 @@ from .frontend.operation.qubit_gates import (
     y,
     z,
 )
+from .frontend.operation.select import select
 from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
@@ -96,6 +97,7 @@ __all__ = [
     "composite_gate",
     "CompositeGate",
     "control",
+    "select",
     "inverse",
     "cast",
     "bit",

@@ -46,6 +46,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
@@ -676,6 +677,19 @@ def _validate_adjoint_helper_ops(
             raise EmitError(
                 "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "
                 "controlled-kernel synthesis on CUDA-Q 0.14.x; falling back "
+                "to Qamomile inverse decomposition.",
+                operation="InverseBlockOperation",
+            )
+        if isinstance(op, SelectOperation):
+            # A SELECT lowers to per-case controlled-U (cudaq.control)
+            # helpers at emit; wrapping those in cudaq.adjoint makes NVQIR
+            # 0.14.x abort the process when it cannot autogenerate the
+            # adjoint. Reject here so the caller falls back to the
+            # Qamomile inverse decomposition (which inverts each case
+            # block and emits the inverted SELECT directly).
+            raise EmitError(
+                "CUDA-Q cudaq.adjoint helper kernels cannot contain a nested "
+                "SELECT (quantum multiplexer) on CUDA-Q 0.14.x; falling back "
                 "to Qamomile inverse decomposition.",
                 operation="InverseBlockOperation",
             )

@@ -1,0 +1,276 @@
+"""SELECT (quantum multiplexer) emission helpers.
+
+Provides :func:`emit_select`, the emit-time lowering of
+:class:`~qamomile.circuit.ir.operation.select.SelectOperation`. A backend
+may register a native multiplexer emitter (see :class:`SelectGateEmitter`)
+on the emit pass via a ``_select_emitters`` attribute; when none can emit,
+the op is decomposed gate-by-gate into one controlled-U per case, each
+controlled on the full index register with a mixed ``0``/``1`` pattern
+equal to the big-endian binary expansion of the case index. The
+``0``-controls reuse the same X-bracket realisation as ``qmc.control``'s
+zero-control mode.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from qamomile.circuit.ir.operation.select import (
+    SelectOperation,
+    control_values_for_index,
+)
+from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _apply_controlled_block,
+    _bind_quantum_input_shapes,
+    _emit_single_target_block_per_vector_element,
+    _expand_quantum_operands_to_phys,
+    _prepare_nested_block_for_emit,
+    _should_emit_single_target_block_per_vector_element,
+)
+from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
+    QubitAddress,
+    QubitMap,
+)
+
+if TYPE_CHECKING:
+    from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+
+@runtime_checkable
+class SelectGateEmitter(Protocol):
+    """Backend hook for emitting a SELECT op with a native primitive.
+
+    A backend that exposes a native quantum-multiplexer / uniformly-
+    controlled-gate primitive can register an instance on the emit pass
+    (``emit_pass._select_emitters``). Emitters are tried in order before
+    the gate-by-gate decomposition fallback runs.
+    """
+
+    def can_emit(self, op: SelectOperation) -> bool:
+        """Return whether this emitter can handle ``op`` natively.
+
+        Args:
+            op (SelectOperation): The SELECT operation to emit.
+
+        Returns:
+            bool: ``True`` if :meth:`emit` should be attempted.
+        """
+        ...
+
+    def emit(
+        self,
+        circuit: Any,
+        op: SelectOperation,
+        index_indices: list[int],
+        target_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> bool:
+        """Emit ``op`` natively into ``circuit``.
+
+        Args:
+            circuit (Any): The backend circuit being built.
+            op (SelectOperation): The SELECT operation to emit.
+            index_indices (list[int]): Physical index (select) qubits.
+            target_indices (list[int]): Physical target qubits.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Returns:
+            bool: ``True`` when emission succeeded, ``False`` to fall back
+                to the gate-by-gate decomposition.
+        """
+        ...
+
+
+def emit_select(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: SelectOperation,
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a :class:`SelectOperation`.
+
+    Tries each registered :class:`SelectGateEmitter` (a backend with a
+    native multiplexer primitive) first, then falls back to decomposing
+    the op into one controlled-U per case. Case ``i`` is applied to the
+    target register controlled on the index register reading the
+    big-endian integer ``i``; the ``0`` bits of that pattern become
+    anti-controls realised by X-bracketing the corresponding index
+    qubits.
+
+    Args:
+        emit_pass (StandardEmitPass): The driving emit pass. Provides the
+            ``_resolver`` / ``_emitter`` / ``_blockvalue_to_gate`` /
+            ``_emit_controlled_fallback`` machinery and an optional
+            ``_select_emitters`` list of native emitters.
+        circuit (Any): The backend circuit being built.
+        op (SelectOperation): The SELECT operation to emit.
+        qubit_map (QubitMap): The active address -> physical qubit map,
+            mutated in place with the result-side mappings.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Raises:
+        EmitError: If an index operand cannot be resolved to a physical
+            qubit, or (propagated from the controlled fallback) the
+            backend cannot realise a per-case controlled-U (e.g. an
+            unsupported multi-control shape).
+    """
+    num_idx = op.num_index_qubits
+    index_operands = op.operands[:num_idx]
+    remaining_operands = op.operands[num_idx:]
+    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
+    param_operands = [
+        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    ]
+
+    # Resolve physical index qubits (mirrors ConcreteControlledU controls:
+    # the frontend normalises ``operands[:num_index_qubits]`` to one scalar
+    # per physical index qubit).
+    index_indices: list[int] = []
+    for q in index_operands:
+        idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
+        if idx is not None:
+            index_indices.append(idx)
+    if len(index_indices) < len(index_operands):
+        raise EmitError(
+            f"SelectOperation: only {len(index_indices)}/"
+            f"{len(index_operands)} index operand(s) could be resolved to "
+            f"physical qubits. Emitting a partial- or zero-arity select "
+            f"would silently miswire the circuit. This typically indicates "
+            f"broken parent_array / slice metadata on the index operands.",
+            operation="SelectOperation",
+        )
+
+    # Resolve physical target qubits once; every case shares them.
+    target_indices: list[int] = []
+    target_index_groups: list[list[int]] = []
+    for q in target_qubit_operands:
+        indices = _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
+        target_index_groups.append(indices)
+        target_indices.extend(indices)
+
+    # Native multiplexer path, when a backend registered one.
+    for emitter in getattr(emit_pass, "_select_emitters", ()):
+        if emitter.can_emit(op) and emitter.emit(
+            circuit, op, index_indices, target_indices, bindings
+        ):
+            _map_select_results(
+                op,
+                num_idx,
+                index_indices,
+                target_qubit_operands,
+                target_index_groups,
+                qubit_map,
+            )
+            return
+
+    # Gate-by-gate fallback: one controlled-U per case with a mixed 0/1
+    # control pattern (big-endian bits of the case index).
+    for case_index, case_block in enumerate(op.case_blocks):
+        control_values = control_values_for_index(case_index, num_idx)
+        zero_phys = [
+            index_indices[j] for j, value in enumerate(control_values) if value == 0
+        ]
+
+        local_bindings = emit_pass._resolver.bind_block_params(
+            case_block, param_operands, bindings
+        )
+        _bind_quantum_input_shapes(
+            emit_pass, case_block, target_qubit_operands, bindings, local_bindings
+        )
+        prepared_block = _prepare_nested_block_for_emit(case_block, local_bindings)
+
+        for phys in zero_phys:
+            emit_pass._emitter.emit_x(circuit, phys)
+        if _should_emit_single_target_block_per_vector_element(
+            prepared_block, target_qubit_operands, target_indices
+        ):
+            # Scalar single-qubit case broadcast over a Vector[Qubit]
+            # target: apply the controlled scalar case to each element,
+            # mirroring qmc.control's vector-broadcast convenience.
+            _emit_single_target_block_per_vector_element(
+                emit_pass,
+                circuit,
+                prepared_block,
+                num_idx,
+                index_indices,
+                target_indices,
+                1,
+                local_bindings,
+            )
+        else:
+            _apply_controlled_block(
+                emit_pass,
+                circuit,
+                prepared_block,
+                num_idx,
+                index_indices,
+                target_indices,
+                1,
+                local_bindings,
+            )
+        for phys in zero_phys:
+            emit_pass._emitter.emit_x(circuit, phys)
+
+    _map_select_results(
+        op,
+        num_idx,
+        index_indices,
+        target_qubit_operands,
+        target_index_groups,
+        qubit_map,
+    )
+
+
+def _map_select_results(
+    op: SelectOperation,
+    num_index_qubits: int,
+    index_indices: list[int],
+    target_qubit_operands: list[Any],
+    target_index_groups: list[list[int]],
+    qubit_map: QubitMap,
+) -> None:
+    """Map a SELECT op's result ``Value`` UUIDs to physical qubits.
+
+    Result layout mirrors the operand layout: ``op.results[:num_index]``
+    are the index qubits (1:1 with ``index_indices``) and the quantum
+    results that follow correspond to the target operands. A
+    ``Vector[Qubit]`` target result registers a per-element address plus
+    the base address so ``result[i]`` and whole-array lookups both
+    resolve. Index and target qubits keep their physical slots — SELECT
+    only adds relative phases / state changes under the index basis, it
+    never moves qubits.
+
+    Args:
+        op (SelectOperation): The emitted SELECT operation.
+        num_index_qubits (int): Number of physical index qubits.
+        index_indices (list[int]): Physical index qubits.
+        target_qubit_operands (list[Any]): Quantum target operands in
+            declaration order (scalar ``Value`` or ``ArrayValue``).
+        target_index_groups (list[list[int]]): Per-operand physical index
+            groups from :func:`_expand_quantum_operands_to_phys`.
+        qubit_map (QubitMap): Mutated in place with the new result
+            addresses.
+    """
+    index_results = op.results[:num_index_qubits]
+    for i, result in enumerate(index_results):
+        if i < len(index_indices):
+            qubit_map[QubitAddress(result.uuid)] = index_indices[i]
+
+    target_results = [r for r in op.results[num_index_qubits:] if r.type.is_quantum()]
+    for i, result in enumerate(target_results):
+        if i >= len(target_index_groups):
+            break
+        indices = target_index_groups[i]
+        if isinstance(result, ArrayValue):
+            for j, phys in enumerate(indices):
+                qubit_map[QubitAddress(result.uuid, j)] = phys
+            if indices:
+                base_addr = QubitAddress(result.uuid)
+                if base_addr not in qubit_map:
+                    qubit_map[base_addr] = indices[0]
+        else:
+            if indices:
+                qubit_map[QubitAddress(result.uuid)] = indices[0]

@@ -58,6 +58,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -418,6 +419,17 @@ class _Canonicalizer:
             sub_block = self.canonical_block(new_op.block)
             new_op = dataclasses.replace(new_op, block=sub_block)
 
+        # SelectOperation carries one nested unitary Block per case; each
+        # is canonicalized through the same canonicalizer so UUIDs in the
+        # case bodies are rewritten in lockstep with the parent Block.
+        if isinstance(new_op, SelectOperation) and new_op.case_blocks:
+            new_op = dataclasses.replace(
+                new_op,
+                case_blocks=[
+                    self.canonical_block(block) for block in new_op.case_blocks
+                ],
+            )
+
         return new_op
 
     # -------------------------------------------------------------------
@@ -768,6 +780,9 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
             _collect_from_subblock(op.implementation_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
+    if isinstance(op, SelectOperation):
+        for case_block in op.case_blocks:
+            _collect_from_subblock(case_block, visit)
 
 
 def _collect_from_subblock(sub: Block, visit: Any) -> None:
@@ -813,6 +828,10 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         "implementation_block",
         "source_block",
         "block",
+        # SelectOperation's per-case unitary blocks are likewise emitted
+        # separately (and rendered via ``repr`` here would be both
+        # non-deterministic and double-counted).
+        "case_blocks",
     }
 )
 
@@ -950,6 +969,11 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")
         _emit_block(op.block, out, indent + 2)
+
+    if isinstance(op, SelectOperation):
+        for i, case_block in enumerate(op.case_blocks):
+            out.append(f"{pad}{_INLINE_INDENT}case[{i}]:")
+            _emit_block(case_block, out, indent + 2)
 
 
 def _extra_field_tokens(op: Operation) -> list[str]:

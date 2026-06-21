@@ -31,6 +31,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import ArrayValue
 
 from ._catalog import (
@@ -166,6 +167,9 @@ def _count_from_operations(
                 nc, nt = resolve_controlled_u(op, resolver)
                 count = count + classify_controlled_u(nc, nt)
 
+            case SelectOperation():
+                count = count + _handle_select(op)
+
             case CompositeGateOperation():
                 count = count + _handle_composite(
                     op,
@@ -194,6 +198,37 @@ def _count_from_operations(
                 continue
 
     return count.simplify()
+
+
+# ------------------------------------------------------------------ #
+#  SelectOperation handler                                            #
+# ------------------------------------------------------------------ #
+
+
+def _handle_select(op: SelectOperation) -> GateCount:
+    """Count a SelectOperation as one opaque controlled gate per case.
+
+    Mirrors the ``ControlledUOperation`` policy (each controlled-U counts
+    as a single opaque gate): a SELECT lowers to one multi-controlled
+    unitary per case, so it is counted as ``num_cases`` opaque controlled
+    gates, each classified by ``(num_index_qubits, num_targets)``. This is
+    an approximation — the per-case gate-level content and the
+    anti-control X brackets are not expanded.
+
+    Args:
+        op (SelectOperation): The select operation.
+
+    Returns:
+        GateCount: ``num_cases`` opaque controlled-gate counts.
+    """
+    if op.case_blocks:
+        num_targets = sum(
+            1 for inp in op.case_blocks[0].input_values if inp.type.is_quantum()
+        )
+    else:
+        num_targets = sum(1 for v in op.target_operands if v.type.is_quantum())
+    per_case = classify_controlled_u(op.num_index_qubits, num_targets)
+    return per_case * op.num_cases
 
 
 # ------------------------------------------------------------------ #

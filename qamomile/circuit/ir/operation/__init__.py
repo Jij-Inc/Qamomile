@@ -20,6 +20,7 @@ from .gate import (
 from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
+from .select import SelectOperation, control_values_for_index
 from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
 
 __all__ = [
@@ -37,6 +38,8 @@ __all__ = [
     "ControlledUOperation",
     "ConcreteControlledU",
     "SymbolicControlledU",
+    "SelectOperation",
+    "control_values_for_index",
     "DecodeQFixedOperation",
     "CastOperation",
     # Control flow operations

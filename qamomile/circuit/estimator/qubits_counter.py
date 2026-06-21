@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue
 
@@ -168,6 +169,44 @@ def _build_controlled_u_child_resolver(
         parent_blocks=[],
     )
     return controlled_block, child
+
+
+def _build_select_case_child_resolver(
+    op: SelectOperation,
+    case_block: Block,
+    resolver: ExprResolver,
+) -> ExprResolver:
+    """Build a child resolver for one case block of a ``SelectOperation``.
+
+    Mirrors :func:`_build_controlled_u_child_resolver`: walks the case
+    block's quantum inputs against the select's ``target_operands`` so any
+    ``Vector[Qubit]`` size bound at the call site is added to the resolver
+    context. Every case shares the same target operands.
+
+    Args:
+        op (SelectOperation): The select operation.
+        case_block (Block): One of ``op.case_blocks`` (always a ``Block``).
+        resolver (ExprResolver): Resolver for the current scope.
+
+    Returns:
+        ExprResolver: A child resolver scoped to ``case_block``.
+    """
+    extra: dict[str, sp.Expr] = {}
+    quantum_formals = [iv for iv in case_block.input_values if iv.type.is_quantum()]
+    quantum_actuals = [v for v in op.target_operands if v.type.is_quantum()]
+    for formal_input, actual_arg in zip(quantum_formals, quantum_actuals):
+        if isinstance(actual_arg, ArrayValue) and isinstance(formal_input, ArrayValue):
+            for df, da in zip(formal_input.shape, actual_arg.shape):
+                extra[df.uuid] = resolver.resolve(da)
+
+    ctx = resolver.context
+    ctx.update(extra)
+    return ExprResolver(
+        block=case_block,
+        context=ctx,
+        loop_var_names=resolver.loop_var_names,
+        parent_blocks=[],
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -315,6 +354,19 @@ def _count_loop_body_split(
                     else:
                         persistent += inner_alloc  # type: ignore
 
+            case SelectOperation():
+                # Cases are mutually exclusive and emitted sequentially, so
+                # any ancilla allocated inside a case block is reused across
+                # cases: take the Max of per-case inner allocations.
+                for case_block in op.case_blocks:
+                    case_child = _build_select_case_child_resolver(
+                        op, case_block, resolver
+                    )
+                    reusable = sp.Max(
+                        reusable,
+                        _count_from_operations(case_block.operations, case_child),
+                    )
+
             case CompositeGateOperation():
                 alloc, is_reusable = _count_composite_split(op, resolver)
                 if is_reusable:
@@ -448,6 +500,20 @@ def _count_from_operations(
                     count += _count_from_operations(  # type: ignore
                         controlled_block.operations, child
                     )
+
+            case SelectOperation():
+                # Ancilla inside case blocks is reused across the mutually
+                # exclusive, sequentially emitted cases: take the Max.
+                case_total: sp.Expr = sp.Integer(0)
+                for case_block in op.case_blocks:
+                    case_child = _build_select_case_child_resolver(
+                        op, case_block, resolver
+                    )
+                    case_total = sp.Max(
+                        case_total,
+                        _count_from_operations(case_block.operations, case_child),
+                    )
+                count += case_total  # type: ignore
 
             case ForItemsOperation():
                 child = build_for_items_scope(op, resolver)

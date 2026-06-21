@@ -242,9 +242,24 @@ class ConcreteControlledU(ControlledUOperation):
 
     Operand layout: ``[ctrl_0, ..., ctrl_n, tgt_0, ..., tgt_m, params...]``
     Result layout:  ``[ctrl_0', ..., ctrl_n', tgt_0', ..., tgt_m']``
+
+    Attributes:
+        num_controls (int): Number of control qubits.
+        control_values (tuple[int, ...]): Per-control activation values
+            (``0`` or ``1``), aligned positionally with
+            ``control_operands``: ``control_values[j]`` is the basis
+            state of control qubit ``j`` that activates ``U``. A ``0``
+            entry marks an **anti-control** (the gate fires when that
+            qubit reads ``|0>``). The empty tuple ``()`` is the canonical
+            "all-ones" marker — every control is a standard ``1``-control.
+            When non-empty, its length **must** equal ``num_controls``.
+            The IR stays abstract here: how a ``0``-control is realised
+            (an X-bracket around the control, or a native ``ctrl_state``
+            primitive) is delegated entirely to the backend emit pass.
     """
 
     num_controls: int = 1
+    control_values: tuple[int, ...] = ()
 
     @property
     def control_operands(self) -> list[Value]:

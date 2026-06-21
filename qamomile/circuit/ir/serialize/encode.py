@@ -53,6 +53,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -1102,6 +1103,11 @@ def _encode_concrete_controlled(
     d = _base_op_dict("ConcreteControlledU", op)
     d["num_controls"] = op.num_controls
     d["power"] = _encode_power(op.power)
+    # ``control_values`` carries the zero-control (anti-control) pattern.
+    # Persist only when non-empty so standard-control payloads stay
+    # byte-compatible with pre-zero-control encoders.
+    if op.control_values:
+        d["control_values"] = list(op.control_values)
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
 
@@ -1168,6 +1174,23 @@ def _encode_power(power: Any) -> Any:
     raise TypeError(
         f"ControlledU.power must be int or Value, got {type(power).__name__}"
     )
+
+
+def _encode_select(op: SelectOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`SelectOperation`.
+
+    Args:
+        op (SelectOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus ``num_index_qubits`` and the
+            list of nested per-case unitary block dicts.
+    """
+    d = _base_op_dict("SelectOperation", op)
+    d["num_index_qubits"] = op.num_index_qubits
+    d["case_blocks"] = [_encode_block(b, ctx) for b in op.case_blocks]
+    return d
 
 
 def _encode_composite_gate(
@@ -1286,6 +1309,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     IfOperation: _encode_if,
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
+    SelectOperation: _encode_select,
     CompositeGateOperation: _encode_composite_gate,
     InverseBlockOperation: _encode_inverse_block,
 }

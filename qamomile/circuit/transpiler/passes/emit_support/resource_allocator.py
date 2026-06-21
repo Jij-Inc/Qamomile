@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     map_phi_outputs,
@@ -293,6 +294,9 @@ class ResourceAllocator:
 
             elif isinstance(op, ControlledUOperation):
                 self._allocate_controlled_u(op, qubit_map)
+
+            elif isinstance(op, SelectOperation):
+                self._allocate_select(op, qubit_map)
 
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
@@ -764,6 +768,31 @@ class ResourceAllocator:
         control_qubits = list(op.control_operands)
         target_qubits = [v for v in op.target_operands if v.type.is_quantum()]
         all_qubits = control_qubits + target_qubits
+        self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
+
+    def _allocate_select(
+        self,
+        op: SelectOperation,
+        qubit_map: QubitMap,
+    ) -> None:
+        """Allocate resources for a SelectOperation.
+
+        The operand / result layout mirrors :class:`ConcreteControlledU`
+        (index qubits play the control role): ``operands`` are
+        ``[index..., targets..., params...]`` and ``results`` are paired
+        one-to-one with the quantum operands (index then targets). Each
+        index / target qubit therefore threads its physical mapping onto
+        the corresponding result Value via :meth:`_allocate_qubit_list`,
+        which also copies ``Vector[Qubit]`` per-element addresses so a
+        downstream element access of the select's result resolves.
+
+        Args:
+            op (SelectOperation): The select operation to allocate.
+            qubit_map (QubitMap): Mutable address -> physical qubit map.
+        """
+        index_qubits = list(op.index_operands)
+        target_qubits = [v for v in op.target_operands if v.type.is_quantum()]
+        all_qubits = index_qubits + target_qubits
         self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 
     @staticmethod

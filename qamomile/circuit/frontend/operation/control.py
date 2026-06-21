@@ -263,6 +263,112 @@ def _validate_classical_param_handle(
         )
 
 
+def _normalize_control_values(
+    control_values: int | Sequence[int] | None,
+    num_controls: int,
+) -> tuple[int, ...]:
+    """Normalise a ``control_values`` spec to a per-control ``0``/``1`` tuple.
+
+    Accepts the two surface forms of the ``qmc.control`` /
+    ``qmc.select`` zero-control API and lowers both to the canonical
+    tuple stored on :attr:`ConcreteControlledU.control_values`:
+
+    * **int bit-mask** — bit ``j`` (value ``1 << j``) is the activation
+      value of control qubit ``j`` (Qiskit ``ctrl_state`` convention).
+      ``0b01`` over two controls means control ``0`` is a normal
+      ``1``-control and control ``1`` is an anti-control.
+    * **sequence of 0/1** — entry ``j`` is the activation value of
+      control qubit ``j``, in the same positional order as the control
+      operands.
+
+    The all-ones result (every control is a standard ``1``-control) is
+    collapsed to the empty tuple ``()`` so it is byte-identical to "no
+    control_values supplied" — standard controls never carry an
+    anti-control bracket.
+
+    Args:
+        control_values (int | Sequence[int] | None): The user-supplied
+            specification, or ``None`` for all standard controls.
+        num_controls (int): The concrete number of control qubits the
+            values must describe.
+
+    Returns:
+        tuple[int, ...]: ``()`` when every control is a standard
+            ``1``-control, otherwise a length-``num_controls`` tuple of
+            ``0``/``1`` ints aligned with the control operands.
+
+    Raises:
+        TypeError: If ``control_values`` is a ``bool``, a non-int /
+            non-sequence, or a sequence with a ``bool`` / non-``{0, 1}``
+            entry.
+        ValueError: If the int mask is negative or wider than
+            ``num_controls`` bits, or the sequence length does not equal
+            ``num_controls``.
+
+    Example:
+        >>> _normalize_control_values(0b01, 2)
+        (1, 0)
+        >>> _normalize_control_values([0, 1], 2)
+        (0, 1)
+        >>> _normalize_control_values(None, 2)
+        ()
+        >>> _normalize_control_values((1, 1), 2)
+        ()
+    """
+    if control_values is None:
+        return ()
+
+    if isinstance(control_values, bool):
+        raise TypeError(
+            f"control_values must be an int bit-mask or a sequence of "
+            f"0/1, not a bool ({control_values!r})."
+        )
+
+    if isinstance(control_values, int):
+        if control_values < 0:
+            raise ValueError(
+                f"control_values bit-mask must be non-negative, got {control_values}."
+            )
+        if control_values >= (1 << num_controls):
+            raise ValueError(
+                f"control_values bit-mask {control_values} (0b"
+                f"{control_values:b}) does not fit in num_controls="
+                f"{num_controls} control qubit(s)."
+            )
+        values = tuple((control_values >> j) & 1 for j in range(num_controls))
+    elif isinstance(control_values, Sequence) and not isinstance(
+        control_values, (str, bytes)
+    ):
+        entries = list(control_values)
+        if len(entries) != num_controls:
+            raise ValueError(
+                f"control_values sequence has length {len(entries)} but "
+                f"num_controls={num_controls}; they must match."
+            )
+        values_list: list[int] = []
+        for entry in entries:
+            if isinstance(entry, bool) or not isinstance(entry, int):
+                raise TypeError(
+                    f"control_values entries must be int 0 or 1; got "
+                    f"{type(entry).__name__} ({entry!r})."
+                )
+            if entry not in (0, 1):
+                raise ValueError(f"control_values entries must be 0 or 1; got {entry}.")
+            values_list.append(entry)
+        values = tuple(values_list)
+    else:
+        raise TypeError(
+            f"control_values must be an int bit-mask or a sequence of "
+            f"0/1; got {type(control_values).__name__}."
+        )
+
+    # Collapse the all-ones case so a standard control gate never carries
+    # an anti-control bracket and hashes identically to the no-arg form.
+    if 0 not in values:
+        return ()
+    return values
+
+
 def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
     """Build the exec namespace used when compiling a synthesized wrapper.
 
@@ -341,6 +447,76 @@ class _ControlEntry:
         return self.consumed is None
 
 
+@dataclasses.dataclass
+class _ConcreteCallPrep:
+    """Prepared operand / result layout for a concrete controlled-style call.
+
+    Produced by :meth:`ControlledGate._prepare_concrete` and consumed by
+    both :meth:`ControlledGate._call_concrete` and the SELECT frontend so
+    the control-prefix / sub-kernel handling stays in one place while the
+    two call sites emit different IR ops.
+
+    Attributes:
+        consumed_controls (list[_ControlEntry]): Per-control bookkeeping
+            entries (the control prefix; the index register for SELECT).
+        consumed_sub_quantum (list[_ControlEntry]): Per-target bookkeeping
+            entries (the sub-kernel quantum arguments).
+        operands (list[Any]): The flat IR operand list
+            ``[controls..., targets..., params...]``.
+        results (list[Value]): Result Values paired one-to-one with the
+            quantum operands (controls first, then targets).
+        sub_args_resolved (dict[str, Any]): The bound sub-kernel arguments
+            in signature order, used to specialize the unitary block(s).
+    """
+
+    consumed_controls: list[_ControlEntry]
+    consumed_sub_quantum: list[_ControlEntry]
+    operands: list[Any]
+    results: list[Value]
+    sub_args_resolved: dict[str, Any]
+
+
+def _specialized_block_for_call(qkernel: "QKernel", sub_args_resolved: dict[str, Any]):
+    """Return ``qkernel``'s block specialized for a concrete call site.
+
+    Mirrors ``QKernel.__call__``'s call-time specialization so that
+    shape-dependent stdlib helpers (``qmc.qft`` / ``qmc.iqft`` /
+    ``qmc.qpe``) embedded as the wrapped unitary do not silently no-op on
+    the cached symbolic block. Used by both ``qmc.control`` and
+    ``qmc.select`` (every SELECT case block is specialized for the same
+    target call). Read-only with respect to the handles in
+    ``sub_args_resolved`` — it never consumes them.
+
+    Args:
+        qkernel (QKernel): The wrapped kernel whose block to specialize.
+        sub_args_resolved (dict[str, Any]): Bound sub-kernel arguments
+            after signature binding and defaults.
+
+    Returns:
+        Block: The specialized block when call-time specialization data is
+            available, otherwise the kernel's cached ``block``.
+    """
+    if qkernel._specializing:
+        return qkernel.block
+    if not all(isinstance(arg, Handle) for arg in sub_args_resolved.values()):
+        return qkernel.block
+
+    spec = qkernel._extract_calltime_specialization(sub_args_resolved)
+    if spec is None:
+        return qkernel.block
+
+    sub_parameters, sub_bindings, sub_qubit_sizes = spec
+    qkernel._specializing = True
+    try:
+        return qkernel._build_specialized(
+            parameters=sub_parameters,
+            bindings=sub_bindings,
+            qubit_sizes=sub_qubit_sizes,
+        )
+    finally:
+        qkernel._specializing = False
+
+
 class ControlledGate:
     """Wrapper for controlled version of a QKernel.
 
@@ -360,7 +536,12 @@ class ControlledGate:
         c0, c1, tgt = cc_phase(ctrl0, ctrl1, target, theta=0.5)
     """
 
-    def __init__(self, qkernel: "QKernel", num_controls: int | UInt = 1) -> None:
+    def __init__(
+        self,
+        qkernel: "QKernel",
+        num_controls: int | UInt = 1,
+        control_values: int | Sequence[int] | None = None,
+    ) -> None:
         if isinstance(num_controls, int) and num_controls < 1:
             raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
         # For UInt (symbolic), validation is deferred to emit time
@@ -399,6 +580,22 @@ class ControlledGate:
                 f"``@qmc.qkernel``-decorated function or a built-in gate "
                 f"callable; arbitrary objects are not supported."
             )
+
+        # Zero-control (anti-control) support.  ``control_values`` is only
+        # meaningful when ``num_controls`` is concrete: a symbolic count
+        # has no compile-time width to interpret the per-control pattern
+        # against, so reject the combination loudly rather than guessing.
+        if control_values is not None and isinstance(num_controls, UInt):
+            raise ValueError(
+                "control_values is only supported with a concrete int "
+                "num_controls; symbolic (UInt) num_controls has no "
+                "compile-time width to align the 0/1 pattern against."
+            )
+        self._control_values: tuple[int, ...] = (
+            _normalize_control_values(control_values, num_controls)
+            if isinstance(num_controls, int)
+            else ()
+        )
 
         self._qkernel = qkernel
         self._num_controls = num_controls
@@ -608,6 +805,7 @@ class ControlledGate:
                 num_controls=num_controls,
                 power=power,
                 block=block,
+                control_values=self._control_values,
             )
         tracer = get_current_tracer()
         tracer.add_operation(op)
@@ -632,26 +830,7 @@ class ControlledGate:
             Any: Specialized block when specialization data is available,
             otherwise the wrapped qkernel's cached block.
         """
-        qkernel = self._qkernel
-        if qkernel._specializing:
-            return qkernel.block
-        if not all(isinstance(arg, Handle) for arg in sub_args_resolved.values()):
-            return qkernel.block
-
-        spec = qkernel._extract_calltime_specialization(sub_args_resolved)
-        if spec is None:
-            return qkernel.block
-
-        sub_parameters, sub_bindings, sub_qubit_sizes = spec
-        qkernel._specializing = True
-        try:
-            return qkernel._build_specialized(
-                parameters=sub_parameters,
-                bindings=sub_bindings,
-                qubit_sizes=sub_qubit_sizes,
-            )
-        finally:
-            qkernel._specializing = False
+        return _specialized_block_for_call(self._qkernel, sub_args_resolved)
 
     # ------------------------------------------------------------------
     # Helpers for ``__call__``'s concrete and symbolic paths.
@@ -1328,7 +1507,51 @@ class ControlledGate:
                 or unsupported classical parameter types.
         """
         num_controls = cast(int, self._num_controls)
+        prep = self._prepare_concrete(args, sub_kwargs, num_controls)
+        block = self._block_for_sub_call(prep.sub_args_resolved)
 
+        self._build_and_emit_op(
+            prep.operands, prep.results, num_controls, power, block=block
+        )
+
+        return self._wrap_results_by_input_kind(
+            prep.consumed_controls, prep.consumed_sub_quantum, prep.results
+        )
+
+    def _prepare_concrete(
+        self,
+        args: tuple[Any, ...],
+        sub_kwargs: dict[str, Any],
+        num_controls: int,
+    ) -> "_ConcreteCallPrep":
+        """Run the concrete-mode prepare choreography without emitting an op.
+
+        Performs split → bind → validate → consume → operands/results so
+        both :meth:`_call_concrete` and the SELECT frontend
+        (``qmc.select``) can reuse the exact same control-prefix /
+        sub-kernel handling, then plug in their own IR op and result
+        wrapping. No tracer operation is emitted here.
+
+        Args:
+            args (tuple[Any, ...]): Positional call arguments, control
+                prefix first.
+            sub_kwargs (dict[str, Any]): Caller kwargs after stripping the
+                reserved ``power`` / ``control_indices`` keys.
+            num_controls (int): Concrete number of control qubits.
+
+        Returns:
+            _ConcreteCallPrep: The consumed control / sub-quantum entries,
+                the flat operand list, the paired result list, and the
+                bound sub-kernel argument dict.
+
+        Raises:
+            ValueError: From :meth:`_split_controls_by_count`, or when no
+                quantum sub-kernel (target) argument is supplied.
+            TypeError: From :meth:`_bind_to_sub_signature` /
+                :meth:`_params_to_operands` on bad kwargs or types.
+            QubitConsumedError / QubitBorrowConflictError: From the
+                consume / borrow-tracker layer on aliasing inputs.
+        """
         controls, sub_positional = self._split_controls_by_count(args, num_controls)
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
         self._validate_bound_classical_handles(sub_args_resolved)
@@ -1365,12 +1588,12 @@ class ControlledGate:
             consumed_controls, consumed_sub_quantum, sub_classical_dict
         )
         results = self._build_results(consumed_controls, consumed_sub_quantum)
-        block = self._block_for_sub_call(sub_args_resolved)
-
-        self._build_and_emit_op(operands, results, num_controls, power, block=block)
-
-        return self._wrap_results_by_input_kind(
-            consumed_controls, consumed_sub_quantum, results
+        return _ConcreteCallPrep(
+            consumed_controls=consumed_controls,
+            consumed_sub_quantum=consumed_sub_quantum,
+            operands=operands,
+            results=results,
+            sub_args_resolved=sub_args_resolved,
         )
 
     def __call__(
@@ -2187,6 +2410,7 @@ def _qkernel_for_callable(fn: Callable[..., Any], caller: str = "control") -> QK
 def control(
     qkernel: QKernel | Callable[..., Any],
     num_controls: int | UInt = 1,
+    control_values: int | Sequence[int] | None = None,
 ) -> ControlledGate:
     """Create a controlled version of a quantum gate.
 
@@ -2206,6 +2430,16 @@ def control(
             such as ``Union[Qubit, Vector[Qubit]]``).
         num_controls: Number of control qubits (default: 1).  Can be ``int``
             (concrete) or ``UInt`` (symbolic).
+        control_values (int | Sequence[int] | None): Per-control
+            activation pattern enabling **zero-controls** (anti-controls).
+            ``None`` (default) makes every control a standard
+            ``1``-control. An ``int`` is read as a bit-mask where bit
+            ``j`` is the activation value of control qubit ``j`` (Qiskit
+            ``ctrl_state`` convention); a sequence gives one ``0``/``1``
+            per control in positional order. A ``0`` entry fires the gate
+            when that control reads ``|0>`` and is realised by bracketing
+            the control qubit with ``X`` gates at emit time. Only valid
+            when ``num_controls`` is a concrete ``int``.
 
     Returns:
         A ``ControlledGate`` that can be called with
@@ -2214,8 +2448,10 @@ def control(
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
             (missing annotations, unsupported types, or no qubit
-            parameters).
-        ValueError: If ``num_controls`` is a concrete ``int`` less than 1.
+            parameters), or ``control_values`` has an invalid element type.
+        ValueError: If ``num_controls`` is a concrete ``int`` less than 1,
+            ``control_values`` is combined with a symbolic ``num_controls``,
+            or the ``control_values`` width does not match ``num_controls``.
 
     Example:
         Built-in gates can be controlled directly, with no wrapper::
@@ -2225,6 +2461,13 @@ def control(
 
             cch = qmc.control(qmc.h, num_controls=2)
             c0, c1, tgt = cch(ctrl0, ctrl1, target)
+
+        Zero-controls fire ``U`` on the ``|0>`` state of selected
+        controls.  Here control ``0`` is an anti-control and control ``1``
+        is a normal control::
+
+            anti = qmc.control(qmc.x, num_controls=2, control_values=(0, 1))
+            c0, c1, tgt = anti(c0, c1, target)
 
         ``@qmc.qkernel`` arguments are still supported for cases that need
         custom logic::
@@ -2242,4 +2485,8 @@ def control(
             controlled_gate = qmc.control(my_composite_gate)
             ctrl_out, tgt0_out, tgt1_out = controlled_gate(ctrl, tgt0, tgt1)
     """
-    return ControlledGate(_qkernel_for_callable(qkernel), num_controls=num_controls)
+    return ControlledGate(
+        _qkernel_for_callable(qkernel),
+        num_controls=num_controls,
+        control_values=control_values,
+    )

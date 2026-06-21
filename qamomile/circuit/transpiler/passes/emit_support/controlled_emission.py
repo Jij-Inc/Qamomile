@@ -818,6 +818,17 @@ def emit_controlled_u(
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     power_value = resolve_power(emit_pass, op, bindings)
+
+    # Zero-control (anti-control) bracket.  For each control whose
+    # activation value is 0, wrap the controlled emission with an X on
+    # that physical qubit so the standard controlled gate below fires on
+    # its |0> state.  ``X_c (C-U)^p X_c == (anti-C-U)^p`` and the same
+    # identity holds for the per-element broadcast product, so a single X
+    # pair around the whole emission is both correct and minimal.
+    zero_control_phys = _zero_control_phys(op.control_values, control_indices)
+    for phys in zero_control_phys:
+        emit_pass._emitter.emit_x(circuit, phys)
+
     if _should_emit_single_target_block_per_vector_element(
         block_value, target_qubit_operands, target_indices
     ):
@@ -831,30 +842,9 @@ def emit_controlled_u(
             power_value,
             local_bindings,
         )
-        _map_controlled_u_results(
-            op,
-            nc,
-            control_indices,
-            target_qubit_operands,
-            target_index_groups,
-            qubit_map,
-        )
-        return
-
-    num_targets = len(target_indices)
-    unitary_gate = emit_pass._blockvalue_to_gate(
-        block_value, num_targets, local_bindings
-    )
-
-    if unitary_gate is not None:
-        if power_value > 1:
-            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
-        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
-        emit_pass._emitter.append_gate(
-            circuit, controlled_gate, control_indices + target_indices
-        )
     else:
-        emit_pass._emit_controlled_fallback(
+        _apply_controlled_block(
+            emit_pass,
             circuit,
             block_value,
             nc,
@@ -864,9 +854,100 @@ def emit_controlled_u(
             local_bindings,
         )
 
+    for phys in zero_control_phys:
+        emit_pass._emitter.emit_x(circuit, phys)
+
     _map_controlled_u_results(
         op, nc, control_indices, target_qubit_operands, target_index_groups, qubit_map
     )
+
+
+def _zero_control_phys(
+    control_values: tuple[int, ...],
+    control_indices: list[int],
+) -> list[int]:
+    """Return the physical control qubits that are anti-controls (value 0).
+
+    Args:
+        control_values (tuple[int, ...]): Per-control activation pattern
+            aligned positionally with ``control_indices``. The empty tuple
+            means every control is a standard ``1``-control.
+        control_indices (list[int]): Physical control qubits.
+
+    Returns:
+        list[int]: Physical qubits whose activation value is ``0`` (to be
+            bracketed with ``X`` gates), or an empty list when there are
+            no anti-controls.
+
+    Raises:
+        EmitError: If ``control_values`` is non-empty and its length does
+            not match ``control_indices`` — a corrupt IR invariant the
+            frontend should never produce.
+    """
+    if not control_values:
+        return []
+    if len(control_values) != len(control_indices):
+        raise EmitError(
+            f"control_values length ({len(control_values)}) does not match "
+            f"the number of resolved control qubits "
+            f"({len(control_indices)}).",
+            operation="ControlledUOperation",
+        )
+    return [phys for value, phys in zip(control_values, control_indices) if value == 0]
+
+
+def _apply_controlled_block(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    block_value: Any,
+    num_controls: int,
+    control_indices: list[int],
+    target_indices: list[int],
+    power: int,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit ``block_value`` controlled by ``control_indices`` once.
+
+    Tries the backend's reusable-gate path (block-to-gate +
+    ``gate_controlled``) and falls back to the gate-by-gate controlled
+    decomposition when the backend cannot build a reusable gate. No
+    anti-control bracketing or result bookkeeping is performed here;
+    callers (``emit_controlled_u`` and ``emit_select``) add those.
+
+    Args:
+        emit_pass (StandardEmitPass): The driving emit pass.
+        circuit (Any): The backend circuit being built.
+        block_value (Any): The prepared unitary block to control.
+        num_controls (int): Number of control qubits.
+        control_indices (list[int]): Physical control qubits.
+        target_indices (list[int]): Physical target qubits.
+        power (int): Positive number of repetitions of ``U``.
+        bindings (dict[str, Any]): Local bindings for the inner block.
+
+    Raises:
+        EmitError: Propagated from the fallback decomposition when the
+            backend can neither build a reusable gate nor decompose the
+            block (e.g. an unsupported multi-control shape).
+    """
+    num_targets = len(target_indices)
+    unitary_gate = emit_pass._blockvalue_to_gate(block_value, num_targets, bindings)
+    if unitary_gate is not None:
+        if power > 1:
+            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
+        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, num_controls)
+        emit_pass._emitter.append_gate(
+            circuit, controlled_gate, control_indices + target_indices
+        )
+    else:
+        emit_pass._emit_controlled_fallback(
+            circuit,
+            block_value,
+            num_controls,
+            control_indices,
+            target_indices,
+            power,
+            bindings,
+        )
 
 
 def _should_emit_single_target_block_per_vector_element(

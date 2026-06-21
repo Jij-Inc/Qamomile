@@ -31,6 +31,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -247,7 +248,11 @@ class LoopAnalyzer:
                             if self._index_depends_on_loop_var(idx, loop_var_uuid):
                                 return True
 
-            elif isinstance(op, ControlledUOperation):
+            elif isinstance(op, (ControlledUOperation, SelectOperation)):
+                # Both carry per-physical-qubit scalar control / index
+                # operands plus target operands that may be ``reg[loop_var]``
+                # element accesses; a loop-var-indexed operand forces
+                # unrolling so the element resolves at emit.
                 for v in op.operands:
                     if isinstance(v, _Value):
                         if v.parent_array is not None and v.element_indices:

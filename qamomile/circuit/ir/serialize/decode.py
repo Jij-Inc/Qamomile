@@ -58,6 +58,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -1259,6 +1260,7 @@ def _decode_concrete_controlled(
         num_controls=int(d.get("num_controls", 1)),
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
+        control_values=tuple(int(v) for v in d.get("control_values", ())),
     )
 
 
@@ -1326,6 +1328,27 @@ def _decode_power(value: Any, ctx: _DecodeContext) -> Any:
     if isinstance(value, dict) and "$value_ref" in value:
         return _materialize_as_value(ctx, value["$value_ref"])
     raise ValueError(f"unrecognized power payload: {value!r}")
+
+
+def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
+    """Decode :class:`SelectOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        SelectOperation: The reconstructed op with its nested per-case
+            unitary blocks.
+    """
+    operands, results = _operands_results(d, ctx)
+    case_blocks = [_decode_block(b) for b in d.get("case_blocks", [])]
+    return SelectOperation(
+        operands=operands,
+        results=results,
+        num_index_qubits=int(d.get("num_index_qubits", 0)),
+        case_blocks=case_blocks,
+    )
 
 
 def _decode_composite_gate(
@@ -1457,6 +1480,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "IfOperation": _decode_if,
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
+    "SelectOperation": _decode_select,
     "CompositeGateOperation": _decode_composite_gate,
     "InverseBlockOperation": _decode_inverse_block,
 }
