@@ -42,24 +42,28 @@ def get_size(arr: Vector[_H]) -> int:
         int: The first-axis size as a plain Python ``int``.
 
     Raises:
-        TypeError: If *arr* is not a sized (``shape``-bearing) handle —
-            e.g., a scalar ``Qubit`` was passed where a ``Vector`` is
-            required. This is a clearer signal than the bare
-            ``AttributeError`` that ``arr.shape`` would otherwise raise,
-            and it guards the stdlib / composite callers that resolve a
-            register size through this helper.
+        TypeError: If *arr* is not a frontend array handle (an
+            ``ArrayBase`` such as ``Vector`` / ``VectorView``) — e.g., a
+            scalar ``Qubit`` was passed where a ``Vector`` is required, or
+            an unrelated ``shape``-bearing object such as a numpy array.
+            This is a clearer signal than the bare ``AttributeError`` that
+            ``arr.shape`` would otherwise raise, and it guards the stdlib /
+            composite callers that resolve a register size through this
+            helper.
         ValueError: If the shape cannot be resolved to a concrete
             integer — e.g., the Vector is a runtime-parametric handle
             without compile-time bindings, or carries a ``UInt``
             dimension whose underlying ``Value`` has not been promoted
             to a constant.
     """
-    if not hasattr(arr, "shape"):
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if not isinstance(arr, ArrayBase):
         raise TypeError(
-            f"get_size expects a sized Vector handle, got "
-            f"{type(arr).__name__}, which has no 'shape'. A scalar handle "
-            f"(e.g. a single Qubit) has no size; pass a Vector / "
-            f"qubit_array instead."
+            f"get_size expects a frontend Vector array handle, got "
+            f"{type(arr).__name__}. A scalar handle (e.g. a single Qubit) "
+            f"has no size, and unrelated objects (e.g. a numpy array) are "
+            f"not accepted; pass a Vector / qubit_array instead."
         )
     size = arr.shape[0]
     if isinstance(size, int):

@@ -339,9 +339,9 @@ def _validate_quantum_param_handle(
         raise TypeError(
             f"{context}: parameter {param_name!r} is declared as a quantum "
             f"array (e.g. Vector[Qubit]) but received scalar "
-            f"{type(param_value).__name__}. Pass the corresponding Vector "
-            f"handle (wrap a single qubit with qmc.qubit_array(1, ...)) "
-            f"instead."
+            f"{type(param_value).__name__}. Pass a Vector[Qubit] register "
+            f"instead -- allocate one with qmc.qubit_array(N, ...) at the "
+            f"call site, or pass an existing Vector handle."
         )
 
 
@@ -907,10 +907,13 @@ class ControlledGate:
     ) -> None:
         """Validate bound sub-kernel handles before quantum filtering.
 
-        Checks every bound parameter -- quantum *and* classical -- against
-        its declaration, so an arity mismatch fails fast with a clear
-        ``TypeError`` instead of leaking an ``AttributeError`` from a
-        deeper specialization step (``get_size`` on a scalar ``Qubit``).
+        Checks every bound argument that is a ``Handle`` -- quantum *and*
+        classical -- against its declaration, so an arity mismatch fails
+        fast with a clear ``TypeError`` instead of leaking an
+        ``AttributeError`` from a deeper specialization step (``get_size``
+        on a scalar ``Qubit``). Raw Python literals (e.g. a ``theta=0.5``
+        default) are not ``Handle`` instances and are skipped here; their
+        type coercion is handled later in :meth:`_params_to_operands`.
         Validation runs with ``allow_broadcast=True``: a quantum array
         bound to a scalar ``Qubit`` target is a legitimate per-element
         broadcast in the control path (the controlled gate is applied
