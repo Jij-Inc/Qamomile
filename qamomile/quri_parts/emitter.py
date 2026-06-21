@@ -247,7 +247,7 @@ class QuriPartsGateEmitter:
                         "QURI Parts backend: division by zero in symbolic angle."
                     )
                 return _scale_form(lf_lhs, 1.0 / divisor)
-            case BinOpKind.POW | BinOpKind.FLOORDIV:
+            case BinOpKind.POW | BinOpKind.FLOORDIV | BinOpKind.MOD:
                 raise QamomileQuriPartsTranspileError(
                     f"QURI Parts backend supports only linear combinations of "
                     f"parameters; '{kind.name}' is not supported on parametric "

@@ -1236,6 +1236,366 @@ class TestCastSourceProvenanceSync:
             f"{arr_true.uuid}_1",
         ]
 
+    def test_cast_selected_slice_rebuilds_root_space_carriers(self):
+        """Selected slice views keep source provenance but use root carriers."""
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType
+
+        root_true = ArrayValue(
+            type=QubitType(),
+            name="qa",
+            shape=(_uint_val("root_len", const=4),),
+        )
+        view_true = ArrayValue(
+            type=QubitType(),
+            name="qa_view",
+            shape=(_uint_val("view_len", const=2),),
+            slice_of=root_true,
+            slice_start=_uint_val("start", const=1),
+            slice_step=_uint_val("step", const=2),
+        )
+        arr_false = ArrayValue(type=QubitType(), name="qb")
+        flag = _uint_val("flag", const=1)
+
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi = PhiOp(operands=[flag, view_true, arr_false], results=[phi_arr])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=phi_arr.uuid,
+                source_logical_id=phi_arr.logical_id,
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{phi_arr.logical_id}_0",
+                    f"{phi_arr.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        cast_op = CastOperation(
+            operands=[phi_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+        )
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        cast_ops = [op for op in lowered.operations if isinstance(op, CastOperation)]
+        assert len(cast_ops) == 1
+        result = cast_ops[0].results[0]
+        assert result.get_cast_source_uuid() == view_true.uuid
+        assert result.get_cast_source_logical_id() == view_true.logical_id
+        assert result.get_cast_qubit_uuids() == (
+            f"{root_true.uuid}_1",
+            f"{root_true.uuid}_3",
+        )
+        assert result.get_cast_qubit_logical_ids() == (
+            f"{root_true.logical_id}_1",
+            f"{root_true.logical_id}_3",
+        )
+        assert result.get_qfixed_qubit_uuids() == (
+            f"{root_true.uuid}_1",
+            f"{root_true.uuid}_3",
+        )
+        assert cast_ops[0].qubit_mapping == [
+            f"{root_true.uuid}_1",
+            f"{root_true.uuid}_3",
+        ]
+
+    def test_cast_false_branch_slice_rebuilds_root_space_carriers(self):
+        """False-branch selection replaces stale trace-time true-branch keys.
+
+        The frontend bakes the TRUE branch's root-space carrier keys into the
+        cast metadata at trace time. When lowering selects the FALSE branch,
+        the carriers must be rebuilt for the actually-selected view instead
+        of keeping the true-branch indices.
+        """
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType
+
+        root = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(_uint_val("root_len", const=4),),
+        )
+        view_true = ArrayValue(
+            type=QubitType(),
+            name="q_odd",
+            shape=(_uint_val("vt_len", const=2),),
+            slice_of=root,
+            slice_start=_uint_val("vt_start", const=1),
+            slice_step=_uint_val("vt_step", const=2),
+        )
+        view_false = ArrayValue(
+            type=QubitType(),
+            name="q_even",
+            shape=(_uint_val("vf_len", const=2),),
+            slice_of=root,
+            slice_start=_uint_val("vf_start", const=0),
+            slice_step=_uint_val("vf_step", const=2),
+        )
+        flag = _uint_val("flag", const=0)
+
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi = PhiOp(operands=[flag, view_true, view_false], results=[phi_arr])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        # Trace-time metadata: source points at the phi output, carriers
+        # carry the TRUE branch's root-space indices (q_1, q_3).
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=phi_arr.uuid,
+                source_logical_id=phi_arr.logical_id,
+                qubit_uuids=[f"{root.uuid}_1", f"{root.uuid}_3"],
+                qubit_logical_ids=[
+                    f"{root.logical_id}_1",
+                    f"{root.logical_id}_3",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{root.uuid}_1", f"{root.uuid}_3"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        cast_op = CastOperation(
+            operands=[phi_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{root.uuid}_1", f"{root.uuid}_3"],
+        )
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        cast_ops = [op for op in lowered.operations if isinstance(op, CastOperation)]
+        assert len(cast_ops) == 1
+        result = cast_ops[0].results[0]
+        assert result.get_cast_source_uuid() == view_false.uuid
+        assert result.get_cast_qubit_uuids() == (
+            f"{root.uuid}_0",
+            f"{root.uuid}_2",
+        )
+        assert result.get_qfixed_qubit_uuids() == (
+            f"{root.uuid}_0",
+            f"{root.uuid}_2",
+        )
+        assert cast_ops[0].qubit_mapping == [
+            f"{root.uuid}_0",
+            f"{root.uuid}_2",
+        ]
+
+    def test_cast_rebuilt_carriers_propagate_to_downstream_measure(self):
+        """Downstream MeasureQFixed operands pick up rebuilt carrier keys.
+
+        Plan-time lowering reads carrier keys from the measure operand's own
+        metadata, not from the CastOperation result, so the rebuilt result
+        must be registered in the substitution map for downstream consumers.
+        """
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.operation.gate import MeasureQFixedOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType
+
+        root = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(_uint_val("root_len", const=4),),
+        )
+        view_true = ArrayValue(
+            type=QubitType(),
+            name="q_odd",
+            shape=(_uint_val("vt_len", const=2),),
+            slice_of=root,
+            slice_start=_uint_val("vt_start", const=1),
+            slice_step=_uint_val("vt_step", const=2),
+        )
+        view_false = ArrayValue(
+            type=QubitType(),
+            name="q_even",
+            shape=(_uint_val("vf_len", const=2),),
+            slice_of=root,
+            slice_start=_uint_val("vf_start", const=0),
+            slice_step=_uint_val("vf_step", const=2),
+        )
+        flag = _uint_val("flag", const=0)
+
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi = PhiOp(operands=[flag, view_true, view_false], results=[phi_arr])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=phi_arr.uuid,
+                source_logical_id=phi_arr.logical_id,
+                qubit_uuids=[f"{root.uuid}_1", f"{root.uuid}_3"],
+                qubit_logical_ids=[
+                    f"{root.logical_id}_1",
+                    f"{root.logical_id}_3",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{root.uuid}_1", f"{root.uuid}_3"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        cast_op = CastOperation(
+            operands=[phi_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{root.uuid}_1", f"{root.uuid}_3"],
+        )
+        float_out = Value(type=FloatType(), name="f")
+        measure_op = MeasureQFixedOperation(
+            operands=[cast_result],
+            results=[float_out],
+            num_bits=2,
+            int_bits=0,
+        )
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op, measure_op],
+            output_values=[float_out],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        measure_ops = [
+            op for op in lowered.operations if isinstance(op, MeasureQFixedOperation)
+        ]
+        assert len(measure_ops) == 1
+        measured_qfixed = measure_ops[0].operands[0]
+        assert measured_qfixed.get_cast_qubit_uuids() == (
+            f"{root.uuid}_0",
+            f"{root.uuid}_2",
+        )
+        assert measured_qfixed.get_qfixed_qubit_uuids() == (
+            f"{root.uuid}_0",
+            f"{root.uuid}_2",
+        )
+
+    def test_cast_selected_symbolic_slice_view_raises(self):
+        """A selected slice view with symbolic bounds fails fast, not silently.
+
+        When the chosen branch is a strided view whose ``slice_start`` /
+        ``slice_step`` are not compile-time constants, the root index space
+        cannot be resolved, so the carriers cannot be rebuilt in root space.
+        Emitting view-local keys would silently drop the measurement, so the
+        pass must raise instead.
+        """
+        import pytest
+
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType
+        from qamomile.circuit.transpiler.errors import ValidationError
+
+        root = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(_uint_val("root_len", const=4),),
+        )
+        # Symbolic slice_start (no const) makes the root index unresolvable.
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_uint_val("view_len", const=2),),
+            slice_of=root,
+            slice_start=_uint_val("start"),
+            slice_step=_uint_val("step", const=2),
+        )
+        arr_false = ArrayValue(type=QubitType(), name="qb")
+        flag = _uint_val("flag", const=1)
+
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi = PhiOp(operands=[flag, view, arr_false], results=[phi_arr])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=phi_arr.uuid,
+                source_logical_id=phi_arr.logical_id,
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{phi_arr.logical_id}_0",
+                    f"{phi_arr.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        cast_op = CastOperation(
+            operands=[phi_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+        )
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+
+        with pytest.raises(ValidationError, match="symbolic slice"):
+            _run_pass(block)
+
 
 # ---------------------------------------------------------------------------
 # CC6: Cast provenance through separate() (frontend integration)

@@ -6,6 +6,7 @@ import numbers
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from qamomile.circuit.ir.value import resolve_root_qubit_address
 from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
@@ -29,14 +30,25 @@ class QubitResolutionResult:
 def resolve_qubit_key(qubit: "Value") -> tuple[QubitAddress | None, bool]:
     """Resolve a qubit Value to its allocation key.
 
-    Returns a ``(QubitAddress | None, is_array_element)`` tuple.
+    Args:
+        qubit (Value): Qubit value to resolve. Array elements with a
+            constant index are resolved through their full ``slice_of``
+            chain to the root array address.
+
+    Returns:
+        tuple[QubitAddress | None, bool]: ``(address, is_array_element)``.
+            ``address`` is the root-space address for a resolvable array
+            element, ``None`` for an array element whose index or slice
+            bounds are symbolic at this binding-free stage, and a scalar
+            UUID address for non-array qubits.
     """
     if qubit.parent_array is not None and qubit.element_indices:
-        parent_uuid = qubit.parent_array.uuid
         idx_value = qubit.element_indices[0]
         if idx_value.is_constant():
-            idx = int(idx_value.get_const())
-            return QubitAddress(parent_uuid, idx), True
+            resolved = resolve_root_qubit_address(qubit)
+            if resolved is not None:
+                root_uuid, idx = resolved
+                return QubitAddress(root_uuid, idx), True
         return None, True
     return QubitAddress(qubit.uuid), False
 
