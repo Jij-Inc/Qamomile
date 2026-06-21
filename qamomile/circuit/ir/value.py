@@ -660,9 +660,15 @@ def resolve_root_array_index(
 
     Returns:
         tuple[ArrayValue, int] | None: ``(root_array, composed_index)`` when
-            every slice bound on the chain is compile-time constant. ``None``
-            when any ``slice_start`` / ``slice_step`` on the chain is missing
-            or symbolic; callers must then defer resolution rather than guess.
+            every slice bound on the chain is compile-time constant and
+            satisfies the frontend contract (non-negative ``slice_start``,
+            positive ``slice_step``). ``None`` when any ``slice_start`` /
+            ``slice_step`` on the chain is missing, symbolic, or violates
+            that contract; callers must then defer resolution rather than
+            guess. Out-of-contract bounds would compose ``index`` onto a
+            wrong root slot, so they are refused here too (the frontend
+            rejects them at trace time; this guard covers programmatically
+            constructed IR).
     """
     current = array
     idx = index
@@ -678,6 +684,11 @@ def resolve_root_array_index(
             return None
         start = int(typing.cast(int, current.slice_start.get_const()))
         step = int(typing.cast(int, current.slice_step.get_const()))
+        # Mirror the frontend slice contract (non-negative start, positive
+        # step); composing a negative start or non-positive step would remap
+        # ``idx`` onto a wrong root slot.
+        if start < 0 or step <= 0:
+            return None
         idx = start + step * idx
         current = current.slice_of
     return current, idx
@@ -709,7 +720,12 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
             ``None`` when ``value`` is not an array element, when its index is
             non-constant, or when any slice bound in the chain is non-constant
             (those cases are deferred to the emit-time resolver, which has
-            bindings available).
+            bindings available). Also ``None`` for a negative constant index
+            or a chain frame with negative ``slice_start`` / non-positive
+            ``slice_step`` — composing those would silently address a wrong
+            root slot, so they are refused rather than guessed (the frontend
+            rejects them at trace time; this guard covers programmatically
+            constructed IR).
     """
     # Not an array element (e.g. a standalone qubit / scalar): there is no
     # root array to address against.
@@ -731,10 +747,20 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     if not idx_value.is_constant():
         return None
     idx = int(typing.cast(int, idx_value.get_const()))
+    # A negative local index would compose through the affine map below into
+    # a valid-but-wrong non-negative root index (``view[-1]`` for
+    # ``view = q[1:3]`` would address ``q[0]`` instead of ``q[2]``). The
+    # frontend rejects constant negative indices at trace time; refuse them
+    # here as well so programmatically constructed IR cannot slip through.
+    if idx < 0:
+        return None
     # Walk the ``slice_of`` chain root-ward. Each strided view contributes the
     # affine map ``parent_index = start + step * local_index``; composing them
     # rewrites a (possibly nested) view element into the underlying root array's
     # own index space, so the result matches the composite key QInit registered.
+    # ``resolve_root_array_index`` also refuses out-of-contract slice bounds
+    # (negative start / non-positive step) so the negative-index defense lives
+    # in one shared place.
     resolved = resolve_root_array_index(value.parent_array, idx)
     if resolved is None:
         return None
