@@ -23,11 +23,13 @@ from qamomile.circuit.ir.canonical import (
 )
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
     QubitType,
     UIntType,
 )
+from qamomile.circuit.ir.types.q_register import QFixedType
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
@@ -451,6 +453,90 @@ class TestMetadataUUIDRewrite:
         assert cqf.metadata.qfixed is not None
         assert cqf.metadata.qfixed.qubit_uuids == (cq0.uuid, cq1.uuid)
 
+    def test_indexed_carrier_keys_preserve_suffixes(self):
+        """Legacy carrier keys remap their root UUID without losing indices."""
+        source = ArrayValue(type=QubitType(), name="q")
+        qf = Value(
+            type=FloatType(),
+            name="qf",
+            metadata=ValueMetadata(
+                cast=CastMetadata(
+                    source_uuid=source.uuid,
+                    source_logical_id=source.logical_id,
+                    qubit_uuids=(f"{source.uuid}_1", f"{source.uuid}_3"),
+                    qubit_logical_ids=(
+                        f"{source.logical_id}_1",
+                        f"{source.logical_id}_3",
+                    ),
+                ),
+                qfixed=QFixedMetadata(
+                    qubit_uuids=(f"{source.uuid}_1", f"{source.uuid}_3"),
+                    num_bits=2,
+                    int_bits=0,
+                ),
+                array_runtime=ArrayRuntimeMetadata(
+                    element_uuids=(f"{source.uuid}_1", f"{source.uuid}_3"),
+                    element_logical_ids=(
+                        f"{source.logical_id}_1",
+                        f"{source.logical_id}_3",
+                    ),
+                ),
+            ),
+        )
+        block = _make_minimal_block(input_values=[source], output_values=[qf])
+
+        canon = canonicalize(block)
+
+        canon_source = canon.input_values[0]
+        canon_qf = canon.output_values[0]
+        assert canon_qf.metadata.cast is not None
+        assert canon_qf.metadata.cast.qubit_uuids == (
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        )
+        assert canon_qf.metadata.cast.qubit_logical_ids == (
+            f"{canon_source.logical_id}_1",
+            f"{canon_source.logical_id}_3",
+        )
+        assert canon_qf.metadata.qfixed is not None
+        assert canon_qf.metadata.qfixed.qubit_uuids == (
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        )
+        assert canon_qf.metadata.array_runtime is not None
+        assert canon_qf.metadata.array_runtime.element_uuids == (
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        )
+
+    def test_cast_operation_mapping_preserves_index_suffixes(self):
+        """CastOperation.qubit_mapping remaps composite-key bases only."""
+        source = ArrayValue(type=QubitType(), name="q")
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        qf = Value(type=result_type, name="qf")
+        op = CastOperation(
+            operands=[source],
+            results=[qf],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{source.uuid}_1", f"{source.uuid}_3"],
+        )
+        block = _make_minimal_block(
+            input_values=[source],
+            output_values=[qf],
+            operations=[op],
+        )
+
+        canon = canonicalize(block)
+
+        canon_source = canon.input_values[0]
+        canon_op = canon.operations[0]
+        assert isinstance(canon_op, CastOperation)
+        assert canon_op.qubit_mapping == [
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        ]
+
     def test_array_runtime_element_uuids_rewritten(self):
         """ArrayRuntimeMetadata element-UUID lists track canonical UUIDs."""
         e0 = Value(type=FloatType(), name="e0")
@@ -499,6 +585,63 @@ class TestMetadataUUIDRewrite:
         assert canon.input_values[0].metadata.scalar == ScalarMetadata(
             parameter_name="theta"
         )
+
+
+class TestCarrierKeyCanonicalStability:
+    """Canonical-form stability for blocks carrying composite carrier keys."""
+
+    @staticmethod
+    def _build_cast_block() -> Block:
+        """Build a structurally fixed cast block with fresh UUIDs.
+
+        Returns:
+            Block: Minimal AFFINE block with a CastOperation whose result
+                carries composite carrier keys in cast / qfixed metadata and
+                in ``CastOperation.qubit_mapping``.
+        """
+        source = ArrayValue(type=QubitType(), name="q")
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        qf = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=source.uuid,
+                source_logical_id=source.logical_id,
+                qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{source.logical_id}_0",
+                    f"{source.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        op = CastOperation(
+            operands=[source],
+            results=[qf],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{source.uuid}_0", f"{source.uuid}_1"],
+        )
+        return _make_minimal_block(
+            input_values=[source],
+            output_values=[qf],
+            operations=[op],
+        )
+
+    def test_content_hash_deterministic_across_builds(self):
+        """Two fresh builds of the same cast kernel hash identically."""
+        assert content_hash(self._build_cast_block()) == content_hash(
+            self._build_cast_block()
+        )
+
+    def test_canonicalize_idempotent_with_carrier_keys(self):
+        """Re-canonicalizing a canonical block with carrier keys is stable."""
+        canon = canonicalize(self._build_cast_block())
+        again = canonicalize(canon)
+        assert to_canonical_bytes(canon) == to_canonical_bytes(again)
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,11 @@ from qamomile.circuit.algorithm.state_preparation import (
     amplitude_encoding_from_angles,
 )
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
+from qamomile.circuit.ir.operation.gate import GateOperation
+from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.value import resolve_root_qubit_address
+from qamomile.circuit.transpiler.passes.emit_support import ResourceAllocator
+from qamomile.circuit.transpiler.segments import QuantumStep
 from qamomile.linalg import (
     compute_mottonen_amplitude_encoding_ry_angles,
     compute_mottonen_amplitude_encoding_rz_angles,
@@ -49,6 +54,7 @@ _FIXED_COMPLEX_AMPLITUDES: list[tuple[str, list[complex]]] = [
 
 _SEEDS = [901, 902, 903, 904, 905]
 _QUBIT_COUNTS = [1, 2, 3, 4]
+_WRAPPER_QUBIT_COUNTS = [1, 2, 3]
 
 # Sampling tolerance: 5 sigma binomial bound at the test shot count, matching
 # the convention used elsewhere in the suite (e.g. test_trotter.py's
@@ -87,6 +93,43 @@ _EXPVAL_CASES: list[tuple[str, list[float] | list[complex], str, int, float]] = 
     # <Z_1> = p_0 + p_1 - p_2 - p_3 = (1 + 2 - 2 - 4) / 9 = -1/3.
     ("2q-mixed-Z0", [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j], "Z", 0, -1.0 / 3.0),
     ("2q-mixed-Z1", [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j], "Z", 1, -1.0 / 3.0),
+]
+
+
+def _random_real_amplitudes(n_qubits: int, seed: int) -> list[float]:
+    """Return a deterministic non-zero random real amplitude vector.
+
+    Args:
+        n_qubits (int): Number of qubits represented by the vector.
+        seed (int): Seed for ``np.random.default_rng``.
+
+    Returns:
+        list[float]: Real amplitude vector of length ``2**n_qubits``.
+    """
+    rng = np.random.default_rng(seed)
+    return rng.standard_normal(2**n_qubits).tolist()
+
+
+_WRAPPER_AMPLITUDE_CASES: list[pytest.ParameterSet] = [
+    pytest.param([1.0, 0.0], id="boundary-1q-zero"),
+    pytest.param([1.0, 2.0, 3.0, 4.0], id="fixed-2q-asymmetric"),
+    pytest.param([1.0 + 0j, 0.0 + 1j], id="complex-1q-plus-y"),
+    pytest.param(
+        [1.0 + 0j, 1.0 + 1j, 1.0 - 1j, 0.0 + 2j],
+        id="complex-2q-mixed",
+    ),
+    pytest.param(
+        [1.0, 2.0, 3.0, -4.0, 5.0, -6.0, 7.0, 8.0],
+        id="fixed-3q-signed",
+    ),
+    *[
+        pytest.param(
+            _random_real_amplitudes(n_qubits, seed),
+            id=f"random-{n_qubits}q-seed{seed}",
+        )
+        for n_qubits in _WRAPPER_QUBIT_COUNTS
+        for seed in [0, 1, 2, 42]
+    ],
 ]
 
 
@@ -756,6 +799,201 @@ def _build_expval_kernel(
     return kernel
 
 
+def _build_wrapper_measure_kernel(
+    amplitudes: list[float] | list[complex],
+) -> qmc.QKernel:
+    """Build a wrapper-kernel amplitude-encoding sampler.
+
+    Args:
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector of length ``2**n``.
+
+    Returns:
+        qmc.QKernel: Kernel that calls an inner qkernel wrapper around
+            ``amplitude_encoding`` before measuring the register.
+    """
+    n_qubits = int(round(np.log2(len(amplitudes))))
+
+    @qmc.qkernel
+    def layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply Möttönen encoding through a qkernel wrapper."""
+        q = amplitude_encoding(q, amplitudes)
+        return q
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = layer(q)
+        return qmc.measure(q)
+
+    return kernel
+
+
+def _build_wrapper_expval_kernel(
+    amplitudes: list[float] | list[complex],
+) -> qmc.QKernel:
+    """Build a wrapper-kernel amplitude-encoding expval circuit.
+
+    Args:
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector of length ``2**n``.
+
+    Returns:
+        qmc.QKernel: Kernel that calls an inner qkernel wrapper around
+            ``amplitude_encoding`` before computing ``<H>``.
+    """
+    n_qubits = int(round(np.log2(len(amplitudes))))
+
+    @qmc.qkernel
+    def layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply Möttönen encoding through a qkernel wrapper."""
+        q = amplitude_encoding(q, amplitudes)
+        return q
+
+    @qmc.qkernel
+    def kernel(H: qmc.Observable) -> qmc.Float:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = layer(q)
+        return qmc.expval(q, H)
+
+    return kernel
+
+
+def _build_nested_wrapper_measure_kernel(
+    amplitudes: list[float] | list[complex],
+) -> qmc.QKernel:
+    """Build a two-level wrapper-kernel amplitude-encoding sampler.
+
+    Args:
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector of length ``2**n``.
+
+    Returns:
+        qmc.QKernel: Kernel whose outer wrapper calls another wrapper
+            around ``amplitude_encoding``.
+    """
+    n_qubits = int(round(np.log2(len(amplitudes))))
+
+    @qmc.qkernel
+    def inner(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply Möttönen encoding inside the innermost wrapper."""
+        q = amplitude_encoding(q, amplitudes)
+        return q
+
+    @qmc.qkernel
+    def outer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Forward to the inner Möttönen wrapper."""
+        q = inner(q)
+        return q
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = outer(q)
+        return qmc.measure(q)
+
+    return kernel
+
+
+def _build_nested_wrapper_expval_kernel(
+    amplitudes: list[float] | list[complex],
+) -> qmc.QKernel:
+    """Build a two-level wrapper-kernel amplitude-encoding expval circuit.
+
+    Args:
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector of length ``2**n``.
+
+    Returns:
+        qmc.QKernel: Kernel whose outer wrapper calls another wrapper
+            around ``amplitude_encoding`` before computing ``<H>``.
+    """
+    n_qubits = int(round(np.log2(len(amplitudes))))
+
+    @qmc.qkernel
+    def inner(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply Möttönen encoding inside the innermost wrapper."""
+        q = amplitude_encoding(q, amplitudes)
+        return q
+
+    @qmc.qkernel
+    def outer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Forward to the inner Möttönen wrapper."""
+        q = inner(q)
+        return q
+
+    @qmc.qkernel
+    def kernel(H: qmc.Observable) -> qmc.Float:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = outer(q)
+        return qmc.expval(q, H)
+
+    return kernel
+
+
+def _expected_z0(amplitudes: list[float] | list[complex]) -> float:
+    """Return the little-endian ``<Z0>`` expectation for *amplitudes*.
+
+    Args:
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector.
+
+    Returns:
+        float: Analytic expectation where basis-index bit 0 corresponds
+            to qubit 0.
+    """
+    probabilities = np.abs(_normalize(amplitudes)) ** 2
+    return float(
+        sum(prob if (idx & 1) == 0 else -prob for idx, prob in enumerate(probabilities))
+    )
+
+
+def _expected_single_pauli(
+    amplitudes: list[float] | list[complex],
+    pauli: str,
+    qubit: int,
+) -> float:
+    """Return the little-endian single-Pauli expectation for *amplitudes*.
+
+    Args:
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector.
+        pauli (str): One of ``"X"``, ``"Y"``, ``"Z"``.
+        qubit (int): Qubit index in little-endian basis order.
+
+    Returns:
+        float: Analytic expectation for the selected single-qubit Pauli.
+
+    Raises:
+        ValueError: If *pauli* is not one of ``"X"``, ``"Y"``, or ``"Z"``.
+    """
+    state = _normalize(amplitudes).astype(complex)
+    mask = 1 << qubit
+
+    if pauli == "Z":
+        return float(
+            sum(
+                (1.0 if (idx & mask) == 0 else -1.0) * abs(amplitude) ** 2
+                for idx, amplitude in enumerate(state)
+            )
+        )
+
+    if pauli not in {"X", "Y"}:
+        raise ValueError(f"Unknown Pauli label: {pauli}")
+
+    total = 0.0 + 0.0j
+    for idx, amplitude in enumerate(state):
+        paired_idx = idx ^ mask
+        if pauli == "X":
+            coefficient = 1.0
+        elif (idx & mask) == 0:
+            coefficient = 1.0j
+        else:
+            coefficient = -1.0j
+        total += np.conjugate(state[paired_idx]) * coefficient * amplitude
+    return float(np.real_if_close(total))
+
+
 def _bits_to_index(bits: tuple[int, ...] | int) -> int:
     """Convert a measurement outcome to a flat basis-state index.
 
@@ -790,6 +1028,169 @@ def _shot_noise_tolerance(p: float, shots: int) -> float:
             still admit a non-zero (but small) tolerance.
     """
     return _STD_TOLERANCE * float(np.sqrt(max(p * (1.0 - p), 1e-12) / shots))
+
+
+# ---------------------------------------------------------------------------
+# Wrapper-kernel regressions for custom-composite inlining
+# ---------------------------------------------------------------------------
+
+
+class TestAmplitudeEncodingWrapperInlining:
+    """Regression tests for amplitude_encoding inside qkernel wrappers."""
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [
+            pytest.param(
+                [1.0, 2.0, 3.0, -4.0, 5.0, -6.0, 7.0, 8.0],
+                id="real-3q",
+            ),
+            pytest.param(
+                [1.0 + 0j, 1.0 + 1j, 1.0 - 1j, 0.0 + 2j],
+                id="complex-2q",
+            ),
+        ],
+    )
+    def test_inline_rewrites_composite_element_parents(
+        self, amplitudes: list[float] | list[complex]
+    ) -> None:
+        """Inlined Möttönen gate operands must resolve to the caller array."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        kernel = _build_wrapper_measure_kernel(amplitudes)
+
+        block = transpiler.to_block(kernel)
+        block = transpiler.substitute(block)
+        block = transpiler.resolve_parameter_shapes(block, None)
+        affine = transpiler.inline(block)
+
+        qinit_arrays = [
+            op.results[0] for op in affine.operations if isinstance(op, QInitOperation)
+        ]
+        assert qinit_arrays
+        qinit_uuid = qinit_arrays[0].uuid
+
+        root_addresses: list[tuple[str, int]] = []
+        for op in affine.operations:
+            if isinstance(op, GateOperation):
+                for operand in op.qubit_operands:
+                    if operand.parent_array is None:
+                        continue
+                    root_addr = resolve_root_qubit_address(operand)
+                    assert root_addr is not None
+                    root_addresses.append(root_addr)
+
+        assert root_addresses
+        assert {root_uuid for root_uuid, _ in root_addresses} == {qinit_uuid}
+
+        affine = transpiler.unroll_recursion(affine, None)
+        validated = transpiler.affine_validate(affine)
+        partially_evaluated = transpiler.partial_eval(validated, None)
+        partially_evaluated = transpiler.slice_borrow_check(partially_evaluated)
+        partially_evaluated = transpiler.strip_slice_ops(partially_evaluated)
+        analyzed = transpiler.analyze(partially_evaluated)
+        analyzed = transpiler.classical_lowering(analyzed)
+        analyzed = transpiler.validate_symbolic_shapes(analyzed)
+        plan = transpiler.plan(analyzed)
+        quantum_segment = next(
+            step.segment for step in plan.steps if isinstance(step, QuantumStep)
+        )
+
+        ResourceAllocator().allocate(quantum_segment.operations, bindings={})
+
+    @pytest.mark.parametrize("amplitudes", _WRAPPER_AMPLITUDE_CASES)
+    def test_forward_wrapper_sampler(self, sdk_transpiler, amplitudes) -> None:
+        """Wrapped amplitude_encoding samples the encoded distribution."""
+        kernel = _build_wrapper_measure_kernel(amplitudes)
+        exe = sdk_transpiler.transpiler.transpile(kernel)
+        results = (
+            exe.sample(sdk_transpiler.transpiler.executor(), shots=_SHOTS)
+            .result()
+            .results
+        )
+
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
+        observed_probs = np.zeros_like(expected_probs)
+        total = 0
+        for bits, count in results:
+            observed_probs[_bits_to_index(bits)] = count / _SHOTS
+            total += count
+        assert total == _SHOTS
+
+        for i, p_exp in enumerate(expected_probs):
+            assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
+                p_exp, _SHOTS
+            ), (
+                f"{sdk_transpiler.backend_name} bin {i}: "
+                f"got {observed_probs[i]:.4f}, expected {p_exp:.4f} "
+                f"(amplitudes={amplitudes})"
+            )
+
+    @pytest.mark.parametrize("amplitudes", _WRAPPER_AMPLITUDE_CASES)
+    def test_forward_wrapper_expval(self, sdk_transpiler, amplitudes) -> None:
+        """Wrapped amplitude_encoding gives the analytic little-endian <Z0>."""
+        n_qubits = int(round(np.log2(len(amplitudes))))
+        H = _pad_observable(n_qubits, _make_pauli("Z", 0))
+        exe = sdk_transpiler.transpiler.transpile(
+            _build_wrapper_expval_kernel(amplitudes), bindings={"H": H}
+        )
+        result = exe.run(sdk_transpiler.transpiler.executor()).result()
+        assert float(result) == pytest.approx(_expected_z0(amplitudes), abs=1e-8)
+
+    def test_forward_wrapper_phase_expval(self, sdk_transpiler) -> None:
+        """Wrapped complex amplitude_encoding preserves phase-sensitive <Y0>."""
+        amplitudes = [1.0 + 0j, 0.0 + 1j]
+        H = _make_pauli("Y", 0)
+        exe = sdk_transpiler.transpiler.transpile(
+            _build_wrapper_expval_kernel(amplitudes), bindings={"H": H}
+        )
+        result = exe.run(sdk_transpiler.transpiler.executor()).result()
+        assert float(result) == pytest.approx(
+            _expected_single_pauli(amplitudes, "Y", 0), abs=1e-8
+        )
+
+    def test_nested_wrapper_sampler(self, sdk_transpiler) -> None:
+        """Nested wrapper amplitude_encoding samples the encoded distribution."""
+        amplitudes = [1.0, 2.0, 3.0, -4.0, 5.0, -6.0, 7.0, 8.0]
+        exe = sdk_transpiler.transpiler.transpile(
+            _build_nested_wrapper_measure_kernel(amplitudes)
+        )
+        results = (
+            exe.sample(sdk_transpiler.transpiler.executor(), shots=_SHOTS)
+            .result()
+            .results
+        )
+
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
+        observed_probs = np.zeros_like(expected_probs)
+        total = 0
+        for bits, count in results:
+            observed_probs[_bits_to_index(bits)] = count / _SHOTS
+            total += count
+        assert total == _SHOTS
+
+        for i, p_exp in enumerate(expected_probs):
+            assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
+                p_exp, _SHOTS
+            ), (
+                f"{sdk_transpiler.backend_name} bin {i}: "
+                f"got {observed_probs[i]:.4f}, expected {p_exp:.4f}"
+            )
+
+    def test_nested_wrapper_expval(self, sdk_transpiler) -> None:
+        """Nested wrapper complex amplitude_encoding preserves phase-sensitive <Y0>."""
+        amplitudes = [1.0 + 0j, 0.0 + 1j, 0.0 + 0j, 0.0 + 0j]
+        n_qubits = int(round(np.log2(len(amplitudes))))
+        H = _pad_observable(n_qubits, _make_pauli("Y", 0))
+        exe = sdk_transpiler.transpiler.transpile(
+            _build_nested_wrapper_expval_kernel(amplitudes), bindings={"H": H}
+        )
+        result = exe.run(sdk_transpiler.transpiler.executor()).result()
+        assert float(result) == pytest.approx(
+            _expected_single_pauli(amplitudes, "Y", 0), abs=1e-8
+        )
 
 
 # ---------------------------------------------------------------------------

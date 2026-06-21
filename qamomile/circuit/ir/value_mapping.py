@@ -6,6 +6,7 @@ import dataclasses
 from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
@@ -17,7 +18,9 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueMetadata,
+    resolve_root_array_index,
     resolve_root_qubit_address,
+    split_indexed_identifier,
 )
 
 __all__ = ["ValueSubstitutor"]
@@ -76,6 +79,16 @@ class ValueSubstitutor:
                 [self.substitute_operation(phi_op) for phi_op in result.phi_ops],
             )
             result = dataclasses.replace(result, phi_ops=new_phi_ops)
+
+        # ``CastOperation.qubit_mapping`` holds carrier keys as a bare
+        # operation field, so ``replace_values`` does not reach it; substitute
+        # it explicitly to keep it in lockstep with the cast result metadata.
+        if isinstance(result, CastOperation) and result.qubit_mapping:
+            new_qubit_mapping = [
+                self._substitute_uuid_ref(uuid_ref) for uuid_ref in result.qubit_mapping
+            ]
+            if new_qubit_mapping != result.qubit_mapping:
+                result = dataclasses.replace(result, qubit_mapping=new_qubit_mapping)
 
         return result
 
@@ -156,6 +169,145 @@ class ValueSubstitutor:
                 result = self._value_map[result.uuid]
         return result
 
+    def _substitute_uuid(self, uuid: str) -> str:
+        """Substitute a scalar UUID reference through the value map.
+
+        Args:
+            uuid (str): UUID reference to substitute.
+
+        Returns:
+            str: Replacement UUID when mapped, otherwise the original UUID.
+        """
+        mapped = self._mapped_value_for_uuid(uuid)
+        return mapped.uuid if mapped is not None else uuid
+
+    def _resolve_mapped_carrier(
+        self,
+        base_uuid: str,
+        suffix: str,
+    ) -> tuple[ValueBase, str] | None:
+        """Resolve a carrier-key base through the map, folding view indices.
+
+        Composite carrier keys index into the ROOT array's element space.
+        When the base maps to a strided slice view (e.g. an inline pass
+        substituting a callee formal with the caller's ``q[1::2]``), keeping
+        the index verbatim would silently re-interpret it in view-local
+        space, so the index is folded through the view's slice chain into
+        the root array's index space instead.
+
+        Args:
+            base_uuid (str): Base UUID of a legacy ``"<base>_<index>"`` key.
+            suffix (str): Decimal index suffix of the key.
+
+        Returns:
+            tuple[ValueBase, str] | None: Mapped value and translated index
+                suffix, or ``None`` when the base is not mapped. When the
+                mapped value is a constant-bound slice view, the chain root
+                and the folded root-space index are returned; otherwise the
+                mapped value and the original suffix are returned unchanged.
+
+        Raises:
+            ValueError: If the base maps to a strided slice view whose slice
+                bounds are not compile-time constants, so the carrier index
+                cannot be folded into root-array space. Emitting the verbatim
+                view-local key would leave the carrier unresolvable at emit
+                (silently dropping the measurement), so this fails fast,
+                mirroring the frontend's rejection of symbolic-bound slice
+                views for ``cast()``.
+        """
+        mapped = self._mapped_value_for_uuid(base_uuid)
+        if mapped is None:
+            return None
+        if isinstance(mapped, ArrayValue) and mapped.slice_of is not None:
+            resolved = resolve_root_array_index(mapped, int(suffix))
+            if resolved is None:
+                raise ValueError(
+                    "Cannot remap a QFixed carrier key onto a slice view with "
+                    "symbolic slice bounds: the carrier index cannot be folded "
+                    "into root-array space, so the measurement would be "
+                    "silently dropped at emit. Use literal-bounded slicing for "
+                    "cast operands."
+                )
+            root, root_index = resolved
+            return root, str(root_index)
+        return mapped, suffix
+
+    def _substitute_uuid_ref(self, uuid_ref: str) -> str:
+        """Substitute a scalar or legacy indexed UUID reference.
+
+        Args:
+            uuid_ref (str): Scalar UUID or legacy ``"<uuid>_<index>"`` key.
+
+        Returns:
+            str: Substituted UUID reference. Index suffixes are preserved for
+                plain remappings and folded into root-array space when the
+                base maps to a constant-bound slice view.
+        """
+        parts = split_indexed_identifier(uuid_ref)
+        if parts is None:
+            return self._substitute_uuid(uuid_ref)
+        base_uuid, suffix = parts
+        resolved = self._resolve_mapped_carrier(base_uuid, suffix)
+        if resolved is None:
+            return uuid_ref
+        mapped, new_suffix = resolved
+        return f"{mapped.uuid}_{new_suffix}"
+
+    def _substitute_logical_id_for_uuid_ref(
+        self,
+        logical_id: str,
+        uuid_ref: str,
+    ) -> str:
+        """Substitute a logical-id reference using its parallel UUID key.
+
+        Args:
+            logical_id (str): Logical-id reference to substitute.
+            uuid_ref (str): Parallel UUID reference from the same metadata
+                position.
+
+        Returns:
+            str: Replacement logical-id reference when the UUID base is mapped,
+                otherwise ``logical_id`` unchanged. The index suffix follows
+                the same root-space folding as :meth:`_substitute_uuid_ref` so
+                UUID and logical-id keys stay parallel.
+        """
+        parts = split_indexed_identifier(uuid_ref)
+        if parts is None:
+            mapped = self._mapped_value_for_uuid(uuid_ref)
+            return mapped.logical_id if mapped is not None else logical_id
+
+        base_uuid, suffix = parts
+        resolved = self._resolve_mapped_carrier(base_uuid, suffix)
+        if resolved is None:
+            return logical_id
+        mapped, new_suffix = resolved
+        return f"{mapped.logical_id}_{new_suffix}"
+
+    def _substitute_parallel_logical_ids(
+        self,
+        logical_ids: tuple[str, ...],
+        uuid_refs: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Substitute logical IDs that are parallel to UUID references.
+
+        Args:
+            logical_ids (tuple[str, ...]): Logical-id metadata entries.
+            uuid_refs (tuple[str, ...]): UUID entries at the same positions.
+
+        Returns:
+            tuple[str, ...]: Logical IDs substituted by looking at the
+                corresponding UUID references where available.
+        """
+        rewritten: list[str] = []
+        for i, logical_id in enumerate(logical_ids):
+            if i < len(uuid_refs):
+                rewritten.append(
+                    self._substitute_logical_id_for_uuid_ref(logical_id, uuid_refs[i])
+                )
+            else:
+                rewritten.append(logical_id)
+        return tuple(rewritten)
+
     def _metadata_has_referenced_field(self, metadata: ValueMetadata) -> bool:
         """Return whether typed metadata references a mappable UUID.
 
@@ -166,18 +318,23 @@ class ValueSubstitutor:
             bool: True when a metadata UUID reference is present in the
                 value map.
         """
+
+        def has_uuid_ref(uuid_ref: str) -> bool:
+            """Return True when a scalar UUID or carrier-key base is mapped."""
+            parts = split_indexed_identifier(uuid_ref)
+            uuid = parts[0] if parts is not None else uuid_ref
+            return uuid in self._value_map
+
         if metadata.cast is not None:
-            if metadata.cast.source_uuid in self._value_map:
+            if has_uuid_ref(metadata.cast.source_uuid):
                 return True
-            if any(uuid in self._value_map for uuid in metadata.cast.qubit_uuids):
+            if any(has_uuid_ref(uuid) for uuid in metadata.cast.qubit_uuids):
                 return True
         if metadata.qfixed is not None:
-            if any(uuid in self._value_map for uuid in metadata.qfixed.qubit_uuids):
+            if any(has_uuid_ref(uuid) for uuid in metadata.qfixed.qubit_uuids):
                 return True
         if metadata.array_runtime is not None:
-            if any(
-                uuid in self._value_map for uuid in metadata.array_runtime.element_uuids
-            ):
+            if any(has_uuid_ref(uuid) for uuid in metadata.array_runtime.element_uuids):
                 return True
             return any(
                 uuid and uuid in self._value_map
@@ -245,19 +402,15 @@ class ValueSubstitutor:
             if source_replacement is not None and source_logical_id is not None:
                 source_logical_id = source_replacement.logical_id
 
+            # Carrier qubit keys may be scalar UUIDs or legacy composite
+            # ``"<root_uuid>_<index>"`` keys; substitute base UUIDs while
+            # folding view-local indices into root-array space.
             qubit_uuids = tuple(
-                replacement.uuid if replacement is not None else uuid
-                for uuid in new_cast.qubit_uuids
-                for replacement in (self._mapped_value_for_uuid(uuid),)
+                self._substitute_uuid_ref(uuid_ref) for uuid_ref in new_cast.qubit_uuids
             )
-            qubit_logical_ids = tuple(
-                replacement.logical_id if replacement is not None else logical_id
-                for uuid, logical_id in zip(
-                    new_cast.qubit_uuids,
-                    new_cast.qubit_logical_ids,
-                    strict=False,
-                )
-                for replacement in (self._mapped_value_for_uuid(uuid),)
+            qubit_logical_ids = self._substitute_parallel_logical_ids(
+                new_cast.qubit_logical_ids,
+                new_cast.qubit_uuids,
             )
             new_cast = CastMetadata(
                 source_uuid=source_uuid,
@@ -270,9 +423,8 @@ class ValueSubstitutor:
         if new_qfixed is not None:
             new_qfixed = QFixedMetadata(
                 qubit_uuids=tuple(
-                    replacement.uuid if replacement is not None else uuid
-                    for uuid in new_qfixed.qubit_uuids
-                    for replacement in (self._mapped_value_for_uuid(uuid),)
+                    self._substitute_uuid_ref(uuid_ref)
+                    for uuid_ref in new_qfixed.qubit_uuids
                 ),
                 num_bits=new_qfixed.num_bits,
                 int_bits=new_qfixed.int_bits,
@@ -284,20 +436,12 @@ class ValueSubstitutor:
                 self._mapped_value_for_uuid(uuid) for uuid in new_array_rt.element_uuids
             ]
             element_uuids = tuple(
-                replacement.uuid if replacement is not None else uuid
-                for uuid, replacement in zip(
-                    new_array_rt.element_uuids,
-                    element_replacements,
-                    strict=False,
-                )
+                self._substitute_uuid_ref(uuid_ref)
+                for uuid_ref in new_array_rt.element_uuids
             )
-            element_logical_ids = tuple(
-                replacement.logical_id if replacement is not None else logical_id
-                for replacement, logical_id in zip(
-                    element_replacements,
-                    new_array_rt.element_logical_ids,
-                    strict=False,
-                )
+            element_logical_ids = self._substitute_parallel_logical_ids(
+                new_array_rt.element_logical_ids,
+                new_array_rt.element_uuids,
             )
             element_parent_uuids: tuple[str, ...] = ()
             element_parent_indices: tuple[int, ...] = ()
