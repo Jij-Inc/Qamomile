@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
 )
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
@@ -36,7 +37,22 @@ def find_return_operation(operations: list[Operation]) -> ReturnOperation | None
 
 
 def _has_any_call_block(operations: list[Operation]) -> bool:
-    """True if any op (or nested op) is a CallBlockOperation."""
+    """Return whether any operation (or nested operation) is a call.
+
+    Recurses into the nested blocks of ``InverseBlockOperation`` and
+    ``ControlledUOperation`` and into ``IfOperation`` / ``HasNestedOps``
+    bodies, so a call hidden inside a control-flow body or an
+    operation-owned block is still detected. ``InlinePass`` uses this to
+    decide whether its output block is ``AFFINE`` (no calls remain) or
+    stays ``HIERARCHICAL``.
+
+    Args:
+        operations (list[Operation]): Operations to scan.
+
+    Returns:
+        bool: ``True`` if at least one ``CallBlockOperation`` is reachable
+            from *operations*, otherwise ``False``.
+    """
     for op in operations:
         if isinstance(op, CallBlockOperation):
             return True
@@ -44,6 +60,9 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
             for block in (op.source_block, op.implementation_block):
                 if block is not None and _has_any_call_block(block.operations):
                     return True
+        if isinstance(op, ControlledUOperation):
+            if op.block is not None and _has_any_call_block(op.block.operations):
+                return True
         if isinstance(op, IfOperation):
             if _has_any_call_block(op.true_operations) or _has_any_call_block(
                 op.false_operations
@@ -57,9 +76,21 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
 
 
 def count_call_blocks(operations: list[Operation]) -> int:
-    """Count CallBlockOperations, including those nested inside IfOps and
-    HasNestedOps.  Used by the unroll loop as the primary termination
-    signal (count==0 means the block is fully inlined)."""
+    """Count all CallBlockOperations reachable from an operation list.
+
+    Recurses into ``InverseBlockOperation`` / ``ControlledUOperation``
+    nested blocks and into ``IfOperation`` / ``HasNestedOps`` bodies, so
+    calls hidden inside control flow or operation-owned blocks are
+    counted. ``unroll_recursion`` uses this as the primary termination
+    signal (``count == 0`` means the block is fully inlined).
+
+    Args:
+        operations (list[Operation]): Operations to scan.
+
+    Returns:
+        int: Total number of ``CallBlockOperation``s reachable from
+            *operations*, including nested ones.
+    """
     count = 0
     for op in operations:
         if isinstance(op, CallBlockOperation) and op.block is not None:
@@ -68,12 +99,57 @@ def count_call_blocks(operations: list[Operation]) -> int:
             for block in (op.source_block, op.implementation_block):
                 if block is not None:
                     count += count_call_blocks(block.operations)
+        if isinstance(op, ControlledUOperation):
+            if op.block is not None:
+                count += count_call_blocks(op.block.operations)
         if isinstance(op, IfOperation):
             count += count_call_blocks(op.true_operations)
             count += count_call_blocks(op.false_operations)
         elif isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 count += count_call_blocks(body)
+    return count
+
+
+def count_unrollable_call_blocks(operations: list[Operation]) -> int:
+    """Count CallBlockOperations the inline/partial-eval loop can still resolve.
+
+    This mirrors :func:`count_call_blocks` but **does not** descend into
+    a ``ControlledUOperation.block`` or an ``InverseBlockOperation``'s
+    nested blocks. A call trapped inside one of those operation-owned
+    blocks cannot be resolved by the ``unroll_recursion`` fixed-point
+    loop: ``partial_eval`` (``ConstantFoldingPass`` /
+    ``CompileTimeIfLoweringPass``) only recurses into ``HasNestedOps``
+    bodies, never into operation-owned blocks, so a self-recursive
+    kernel's base-case ``if`` is never folded there. Such a call is
+    therefore *not* unrollable. Calls at the top level or inside
+    ``For`` / ``If`` / ``While`` bodies are unrollable and are counted.
+
+    The unroll loop uses this to tell two failure modes apart: a non-zero
+    :func:`count_call_blocks` with a zero ``count_unrollable_call_blocks``
+    means every residual call is trapped inside a controlled / inverted
+    block (i.e. a recursive ``@qkernel`` was passed to ``qmc.control`` /
+    ``qmc.inverse``), as opposed to a genuinely non-terminating top-level
+    recursion.
+
+    Args:
+        operations (list[Operation]): Operations to scan.
+
+    Returns:
+        int: Number of CallBlockOperations reachable without entering a
+            ``ControlledUOperation.block`` or ``InverseBlockOperation``
+            nested block.
+    """
+    count = 0
+    for op in operations:
+        if isinstance(op, CallBlockOperation) and op.block is not None:
+            count += 1
+        if isinstance(op, IfOperation):
+            count += count_unrollable_call_blocks(op.true_operations)
+            count += count_unrollable_call_blocks(op.false_operations)
+        elif isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                count += count_unrollable_call_blocks(body)
     return count
 
 
@@ -219,6 +295,25 @@ class InlinePass(Pass[Block, Block]):
                     op,
                     source_block=source_block,
                     implementation_block=implementation_block,
+                )
+                substituted = self._substitute_values(new_op, value_map)
+                result.append(substituted)
+
+            elif isinstance(op, ControlledUOperation):
+                # ControlledUOperation carries its unitary as a nested
+                # ``block`` field (like InverseBlockOperation's source /
+                # implementation blocks), not as HasNestedOps children, so
+                # the generic recursion above never reaches it. Inline the
+                # calls inside that block here. Without this, a pass-through
+                # wrapper kernel (whose body is a single CallBlockOperation
+                # forwarding to a leaf gate) keeps the unexpanded call in
+                # ``block``; at emit time ``blockvalue_to_gate`` cannot turn
+                # a CallBlockOperation into a gate, so the wrapped unitary
+                # collapses to the identity and the controlled gate is
+                # silently dropped.
+                new_op = dataclasses.replace(
+                    op,
+                    block=self._inline_nested_block(op.block, visiting_blocks),
                 )
                 substituted = self._substitute_values(new_op, value_map)
                 result.append(substituted)
@@ -480,9 +575,16 @@ class InlinePass(Pass[Block, Block]):
         # Map block's input values to operation's qubit arguments
         # Since uuid is now unique per Value, we can use simple uuid mapping
         local_map: dict[str, Value] = {}
+        arg_substitutor = ValueSubstitutor(value_map, transitive=True)
 
         for block_input, qubit_arg in zip(impl.input_values, qubit_args):
-            resolved_arg = value_map.get(qubit_arg.uuid, qubit_arg)
+            # Composite implementation inputs are scalar qubits, but the
+            # call-site operands may be array-element Values whose own UUIDs
+            # are unmapped while their parent arrays are mapped to caller
+            # arrays. Substitute the full value so parent_array fields move
+            # with the call-site scope, mirroring _inline_call()'s argument
+            # resolution.
+            resolved_arg = cast(Value, arg_substitutor.substitute_value(qubit_arg))
 
             # Get the cloned version of the input value
             cloned_input = remapper.clone_value(block_input)

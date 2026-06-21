@@ -20,7 +20,7 @@ These tests pin every cell:
    ``equal``/``less``/... arms, exercising numeric preservation.
 
 3. **NotImplementedError** for kinds without a Qiskit equivalent
-   (``FLOORDIV``, ``POW``).
+   (``FLOORDIV``, ``MOD``, ``POW``).
 """
 
 from __future__ import annotations
@@ -162,9 +162,11 @@ class TestSyntheticBinaryExprDispatch:
         assert hasattr(result, "op"), f"Expected expr.Binary, got {type(result)}"
         assert result.op.name == expected_op_name
 
-    @pytest.mark.parametrize("kind", [RuntimeOpKind.FLOORDIV, RuntimeOpKind.POW])
+    @pytest.mark.parametrize(
+        "kind", [RuntimeOpKind.FLOORDIV, RuntimeOpKind.MOD, RuntimeOpKind.POW]
+    )
     def test_unsupported_kinds_raise_not_implemented(self, kind, expr_module):
-        """FLOORDIV and POW have no qiskit.expr equivalent — raise loudly."""
+        """FLOORDIV, MOD and POW have no qiskit.expr equivalent — raise loudly."""
         from qamomile.qiskit.transpiler import QiskitEmitPass
 
         expr, types = expr_module
