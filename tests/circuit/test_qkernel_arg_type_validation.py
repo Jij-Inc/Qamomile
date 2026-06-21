@@ -45,6 +45,24 @@ def _rx_target(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     return qmc.rx(q, theta)
 
 
+@qmc.qkernel
+def _bit_target(b: qmc.Bit) -> qmc.Bit:
+    """Declare a scalar ``Bit`` parameter."""
+    return b
+
+
+@qmc.qkernel
+def _bitvec_target(bits: qmc.Vector[qmc.Bit]) -> qmc.Vector[qmc.Bit]:
+    """Declare a ``Vector[Bit]`` parameter."""
+    return bits
+
+
+@qmc.qkernel
+def _obsvec_target(q: qmc.Qubit, obs: qmc.Vector[qmc.Observable]) -> qmc.Float:
+    """Declare a ``Vector[Observable]`` parameter alongside a qubit."""
+    return qmc.expval(q, obs[0])
+
+
 _c_vec = qmc.control(_vec_target, num_controls=1)
 _c_scalar = qmc.control(_scalar_target, num_controls=1)
 _c_rx = qmc.control(_rx_target, num_controls=1)
@@ -104,6 +122,28 @@ def _err_normal_float_into_qubit() -> qmc.Bit:
 
 
 @qmc.qkernel
+def _err_normal_qubit_into_bit() -> qmc.Bit:
+    """A quantum ``Qubit`` passed to a classical ``Bit`` parameter."""
+    q = qmc.qubit("q")
+    return _bit_target(q)
+
+
+@qmc.qkernel
+def _err_normal_float_into_bit() -> qmc.Bit:
+    """A classical ``Float`` passed to a ``Bit`` parameter (wrong classical kind)."""
+    f = qmc.float_(0.5)
+    return _bit_target(f)
+
+
+@qmc.qkernel
+def _err_normal_qubit_into_obsvec() -> qmc.Float:
+    """A quantum ``Qubit`` passed to a ``Vector[Observable]`` parameter."""
+    a = qmc.qubit("a")
+    q = qmc.qubit("q")
+    return _obsvec_target(a, q)
+
+
+@qmc.qkernel
 def _err_control_scalar_into_vec() -> qmc.Bit:
     """P1 (control): scalar ``Qubit`` target into a ``Vector[Qubit]`` sub-kernel."""
     c = qmc.qubit("c")
@@ -160,6 +200,28 @@ def _ok_normal_singleton_vec() -> qmc.Bit:
 
 
 @qmc.qkernel
+def _ok_normal_bitvec() -> qmc.Vector[qmc.Bit]:
+    """Plain call: a measurement-derived ``Vector[Bit]`` into a ``Vector[Bit]`` parameter."""
+    qs = qmc.qubit_array(2, "qs")
+    bits = qmc.measure(qs)
+    return _bitvec_target(bits)
+
+
+@qmc.qkernel
+def _ok_normal_bit() -> qmc.Bit:
+    """Plain call: a ``Bit`` into a ``Bit`` parameter (classical-only, build path)."""
+    b = qmc.bit(True)
+    return _bit_target(b)
+
+
+@qmc.qkernel
+def _ok_normal_obsvec(obs: qmc.Vector[qmc.Observable]) -> qmc.Float:
+    """Plain call: a ``Vector[Observable]`` forwarded to a ``Vector[Observable]`` parameter."""
+    q = qmc.qubit("q")
+    return _obsvec_target(q, obs)
+
+
+@qmc.qkernel
 def _ok_control_scalar() -> qmc.Bit:
     """Control: scalar ``Qubit`` target into a scalar ``Qubit`` sub-kernel."""
     c = qmc.qubit("c")
@@ -204,6 +266,9 @@ _ERROR_CASES = [
     ("normal_qubit_into_float", _err_normal_qubit_into_float),
     ("normal_vec_into_float", _err_normal_vec_into_float),
     ("normal_float_into_qubit", _err_normal_float_into_qubit),
+    ("normal_qubit_into_bit", _err_normal_qubit_into_bit),
+    ("normal_float_into_bit", _err_normal_float_into_bit),
+    ("normal_qubit_into_obsvec", _err_normal_qubit_into_obsvec),
     ("control_scalar_into_vec", _err_control_scalar_into_vec),
     ("control_qubit_into_float", _err_control_qubit_into_float),
     ("control_float_into_qubit", _err_control_float_into_qubit),
@@ -213,10 +278,20 @@ _OK_CASES = [
     ("normal_scalar", _ok_normal_scalar),
     ("normal_vec", _ok_normal_vec),
     ("normal_singleton_vec", _ok_normal_singleton_vec),
+    ("normal_bitvec", _ok_normal_bitvec),
     ("control_scalar", _ok_control_scalar),
     ("control_vec", _ok_control_vec),
     ("control_broadcast_wholevec", _ok_control_broadcast_wholevec),
     ("control_broadcast_view", _ok_control_broadcast_view),
+]
+
+# Classical-only valid cases that have no quantum content (Bit pass-through)
+# or carry an unbound Observable parameter, so they exercise the build path
+# (where the argument validation fires) but are not parametrized through the
+# no-bindings transpile path.
+_OK_BUILD_ONLY_CASES = [
+    ("normal_bit", _ok_normal_bit),
+    ("normal_obsvec", _ok_normal_obsvec),
 ]
 
 _ERROR_IDS = [case_id for case_id, _ in _ERROR_CASES]
@@ -251,6 +326,22 @@ def test_arg_type_match_transpiles(kernel):
     """A type-correct qkernel (including control broadcast) transpiles cleanly."""
     executable = QiskitTranspiler().transpile(kernel)
     assert executable is not None
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [k for _, k in _OK_BUILD_ONLY_CASES],
+    ids=[i for i, _ in _OK_BUILD_ONLY_CASES],
+)
+def test_classical_arg_type_match_builds(kernel):
+    """A matching Bit / Vector[Observable] argument builds without a false positive.
+
+    Covers the classical types beyond Float/UInt -- a Bit into a Bit
+    parameter and a Vector[Observable] into a Vector[Observable] parameter --
+    so the broadened classical coverage does not over-reject valid handles.
+    """
+    block = kernel.build(parameters=None)
+    assert block is not None
 
 
 def test_qubit_into_float_does_not_silently_emit_rx_zero():

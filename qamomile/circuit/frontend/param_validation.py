@@ -18,11 +18,28 @@ from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
 
 from qamomile.circuit.frontend.func_to_block import is_array_type
 from qamomile.circuit.frontend.handle import Observable
-from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
-from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+from qamomile.circuit.frontend.handle.primitives import Bit, Float, Qubit, UInt
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.handle import Handle
+
+# Maps a classical scalar element annotation to the IR ``ValueType`` an
+# array of that element carries on its ``ArrayValue.type``. Used to check
+# that a bound array handle's element type matches the declared element
+# type (e.g. a ``Vector[Bit]`` argument really carries ``BitType``
+# elements). Covers every classical scalar that ``handle_type_map`` admits
+# as a parameter element: ``Float`` / ``UInt`` / ``Bit`` / ``Observable``.
+_CLASSICAL_ELEMENT_IR_TYPE: dict[Any, type] = {
+    UInt: UIntType,
+    int: UIntType,
+    Float: FloatType,
+    float: FloatType,
+    Bit: BitType,
+    bool: BitType,
+    Observable: ObservableType,
+}
 
 
 def _union_members(param_type: Any) -> tuple[Any, ...]:
@@ -115,15 +132,19 @@ def _is_classical_param_decl(param_type: Any) -> bool:
         param_type (Any): A resolved qkernel input annotation.
 
     Returns:
-        bool: ``True`` for scalar ``Float`` / ``UInt`` declarations and
-            their array forms such as ``Vector[Float]``. Also returns
-            ``True`` for ``Observable`` handles.
+        bool: ``True`` for every classical value declaration: scalar
+            ``Float`` / ``UInt`` / ``Bit`` / ``Observable`` and their array
+            forms (``Vector[Float]``, ``Vector[Bit]``,
+            ``Vector[Observable]``, ...). These are exactly the classical
+            element types ``handle_type_map`` admits as parameters.
     """
     if param_type is Observable:
         return True
+    if param_type is Bit or param_type is bool:
+        return True
     if _is_scalar_classical_param_decl(param_type):
         return True
-    return _array_element_type(param_type) in (Float, float, UInt, int)
+    return _array_element_type(param_type) in _CLASSICAL_ELEMENT_IR_TYPE
 
 
 def _is_quantum_handle(value: Any) -> bool:
@@ -162,8 +183,10 @@ def _validate_classical_param_handle(
             ``"control()"`` so existing callers keep their wording.
 
     Raises:
-        TypeError: If the supplied handle is quantum or does not match the
-            declared scalar, array, or observable parameter kind.
+        TypeError: If the supplied handle is quantum, or does not match the
+            declared scalar (``Float`` / ``UInt`` / ``Bit`` / ``Observable``)
+            or array (``Vector[Float]`` / ``Vector[Bit]`` / ...) parameter
+            kind.
     """
     from qamomile.circuit.frontend.handle.array import ArrayBase
 
@@ -192,12 +215,23 @@ def _validate_classical_param_handle(
                 f"{type(param_value).__name__}. Pass the corresponding "
                 f"Vector handle from the caller kernel instead."
             )
-        expected_type = UIntType() if element_type in (UInt, int) else FloatType()
-        if param_value.value.type != expected_type:
+        expected_cls = _CLASSICAL_ELEMENT_IR_TYPE.get(element_type)
+        if expected_cls is not None:
+            expected_type = expected_cls()
+            if param_value.value.type != expected_type:
+                raise TypeError(
+                    f"{context}: parameter {param_name!r} expects "
+                    f"{expected_type.label()} elements but received "
+                    f"{param_value.value.type.label()} elements."
+                )
+        return
+
+    if declared is Bit or declared is bool:
+        if not isinstance(param_value, Bit):
             raise TypeError(
-                f"{context}: parameter {param_name!r} expects "
-                f"{expected_type.label()} elements but received "
-                f"{param_value.value.type.label()} elements."
+                f"{context}: parameter {param_name!r} is declared as "
+                f"Bit but received {type(param_value).__name__}. "
+                f"Pass a Bit handle instead."
             )
         return
 
