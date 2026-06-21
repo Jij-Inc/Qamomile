@@ -583,7 +583,7 @@ class ValueResolver:
         for i in indices:
             try:
                 container = container[i]
-            except IndexError:
+            except IndexError as exc:
                 # Every guard above already passed: the indices are
                 # concrete ints, the array is not a runtime parameter,
                 # and the container holds known compile-time data. The
@@ -600,7 +600,7 @@ class ValueResolver:
                     f"'{root_parent.name}' in `parameters` to keep its "
                     f"elements symbolic.",
                     operation="array element resolution",
-                )
+                ) from exc
             except (KeyError, TypeError):
                 # Missing keys and non-indexable containers stay
                 # unresolved rather than guessed.

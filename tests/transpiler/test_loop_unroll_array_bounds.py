@@ -12,6 +12,7 @@ array, index, and length, while in-range unrolling and runtime parameter
 arrays keep working unchanged.
 """
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -44,28 +45,53 @@ def rx_loop_indexed(
 # ==============================================================================
 
 
-def test_out_of_range_loop_index_raises_at_transpile():
-    """Unrolling past the bound array length fails at transpile time with an
-    error naming the array, the offending index, and the array length."""
+@pytest.mark.parametrize(
+    ("array_len", "num_rotations"),
+    [(3, 5), (1, 2), (2, 4), (4, 7)],
+)
+def test_out_of_range_loop_index_raises_at_transpile(array_len, num_rotations):
+    """Unrolling past the bound array length fails at transpile time.
+
+    The first out-of-range iteration is ``i == array_len`` (indices
+    ``0 .. array_len - 1`` are valid), so the error must name that index
+    and the array length, regardless of how many extra iterations follow.
+    """
     transpiler = QiskitTranspiler()
+    angles = [0.1 * (k + 1) for k in range(array_len)]
 
     with pytest.raises(
         EmitError,
-        match=r"Index 3 is out of range .* 'rx_angles' of length 3",
+        match=(
+            rf"Index {array_len} is out of range .* "
+            rf"'rx_angles' of length {array_len}"
+        ),
     ):
         transpiler.transpile(
             rx_loop_indexed,
-            bindings={"rx_angles": [0.1, 0.2, 0.3], "num_rotations": 5},
+            bindings={"rx_angles": angles, "num_rotations": num_rotations},
         )
 
 
-def test_in_range_loop_unrolling_binds_each_element():
-    """In-range unrolling still bakes each bound angle into its own gate."""
+@pytest.mark.parametrize("seed", [0, 1, 42])
+@pytest.mark.parametrize("num_rotations", [1, 2, 3, 5])
+def test_in_range_loop_unrolling_binds_each_element(seed, num_rotations):
+    """In-range unrolling bakes each bound angle into its own gate.
+
+    Exercised across register sizes and randomized angles (including the
+    boundary angles 0 and pi) so the per-iteration binding is verified for
+    more than one fixed vector.
+    """
+    rng = np.random.default_rng(seed)
+    angles = rng.uniform(-np.pi, np.pi, size=num_rotations).tolist()
+    # Pin the boundary angles for the leading iterations where they fit.
+    for boundary_index, boundary_angle in ((0, 0.0), (1, np.pi)):
+        if boundary_index < num_rotations:
+            angles[boundary_index] = boundary_angle
     transpiler = QiskitTranspiler()
 
     exe = transpiler.transpile(
         rx_loop_indexed,
-        bindings={"rx_angles": [0.1, 0.2, 0.3], "num_rotations": 3},
+        bindings={"rx_angles": angles, "num_rotations": num_rotations},
     )
 
     circuit = exe.compiled_quantum[0].circuit
@@ -74,30 +100,31 @@ def test_in_range_loop_unrolling_binds_each_element():
         for inst in circuit.data
         if inst.operation.name == "rx"
     ]
-    assert emitted_angles == [0.1, 0.2, 0.3]
+    np.testing.assert_allclose(emitted_angles, angles, rtol=0, atol=1e-12)
 
 
-def test_runtime_parameter_array_keeps_per_element_parameters():
-    """A runtime parameter array still yields one runtime parameter per
-    unrolled element and stays bindable at sample time."""
+@pytest.mark.parametrize("num_rotations", [1, 2, 3])
+def test_runtime_parameter_array_keeps_per_element_parameters(num_rotations):
+    """A runtime parameter array yields one runtime parameter per unrolled
+    element and stays bindable at sample time, across register sizes."""
+    rng = np.random.default_rng(num_rotations)
+    angles = rng.uniform(-np.pi, np.pi, size=num_rotations).tolist()
     transpiler = QiskitTranspiler()
 
     exe = transpiler.transpile(
         rx_loop_indexed,
-        bindings={"num_rotations": 3},
+        bindings={"num_rotations": num_rotations},
         parameters=["rx_angles"],
     )
 
     circuit = exe.compiled_quantum[0].circuit
-    assert sorted(p.name for p in circuit.parameters) == [
-        "rx_angles[0]",
-        "rx_angles[1]",
-        "rx_angles[2]",
-    ]
+    assert {p.name for p in circuit.parameters} == {
+        f"rx_angles[{k}]" for k in range(num_rotations)
+    }
 
     job = exe.sample(
         transpiler.executor(),
-        bindings={"rx_angles": [0.1, 0.2, 0.3]},
+        bindings={"rx_angles": angles},
         shots=50,
     )
     assert len(job.result().results) > 0
@@ -108,14 +135,15 @@ def test_runtime_parameter_array_keeps_per_element_parameters():
 # ==============================================================================
 
 
-def _array_element(index: Value, name: str = "angles") -> Value:
-    """Create an element Value of a length-3 float array.
+def _array_element(index: Value, name: str = "angles", length: int = 3) -> Value:
+    """Create an element Value of a one-dimensional float array.
 
     Args:
         index (Value): Index Value for the element access. May be
             constant or symbolic.
         name (str): Parent array name used for binding lookup. Defaults
             to ``"angles"``.
+        length (int): Declared length of the parent array. Defaults to 3.
 
     Returns:
         Value: A Value representing ``name[index]``.
@@ -123,7 +151,7 @@ def _array_element(index: Value, name: str = "angles") -> Value:
     parent = ArrayValue(
         type=FloatType(),
         name=name,
-        shape=(Value(type=UIntType(), name="dim").with_const(3),),
+        shape=(Value(type=UIntType(), name="dim").with_const(length),),
     )
     return Value(
         type=FloatType(),
@@ -134,27 +162,31 @@ def _array_element(index: Value, name: str = "angles") -> Value:
 
 
 class TestIndexIntoBoundArray:
-    def test_out_of_range_concrete_index_raises(self):
-        """A concrete out-of-range index into a bound array raises EmitError."""
+    @pytest.mark.parametrize("oob_index", [3, 4, 10])
+    def test_out_of_range_concrete_index_raises(self, oob_index):
+        """A concrete out-of-range index into a bound array raises EmitError
+        naming the offending index and the array length."""
         resolver = ValueResolver()
-        element = _array_element(Value(type=UIntType(), name="i").with_const(5))
+        element = _array_element(Value(type=UIntType(), name="i").with_const(oob_index))
 
         with pytest.raises(
-            EmitError, match=r"Index 5 is out of range .* 'angles' of length 3"
+            EmitError,
+            match=rf"Index {oob_index} is out of range .* 'angles' of length 3",
         ):
             resolver.resolve_classical_value(
                 element, bindings={"angles": [0.1, 0.2, 0.3]}
             )
 
-    def test_in_range_concrete_index_resolves(self):
-        """Sanity check: an in-range concrete index resolves to the element."""
+    @pytest.mark.parametrize(("index", "expected"), [(0, 0.1), (1, 0.2), (2, 0.3)])
+    def test_in_range_concrete_index_resolves(self, index, expected):
+        """An in-range concrete index resolves to the corresponding element."""
         resolver = ValueResolver()
-        element = _array_element(Value(type=UIntType(), name="i").with_const(1))
+        element = _array_element(Value(type=UIntType(), name="i").with_const(index))
 
         resolved = resolver.resolve_classical_value(
             element, bindings={"angles": [0.1, 0.2, 0.3]}
         )
-        assert resolved == 0.2
+        assert resolved == pytest.approx(expected)
 
     def test_symbolic_index_stays_unresolved(self):
         """An unresolved symbolic index keeps falling back to ``None``."""
