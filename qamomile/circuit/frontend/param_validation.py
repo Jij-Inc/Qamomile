@@ -1,0 +1,340 @@
+"""Validate bound qkernel argument handles against declared parameter types.
+
+These predicates and validators classify a kernel parameter's declared
+annotation (scalar ``Qubit`` vs. ``Vector[Qubit]``, quantum vs. classical)
+and check that the handle bound to it at a call site matches that
+declaration. They are shared by the plain qkernel call path
+(``QKernel.__call__`` in :mod:`qamomile.circuit.frontend.qkernel`) and the
+controlled-gate call path (``ControlledGate`` in
+:mod:`qamomile.circuit.frontend.operation.control`). Keeping them in this
+neutral module means neither of those modules has to import the other just
+to reach these checks.
+"""
+
+from __future__ import annotations
+
+import types as _types
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
+
+from qamomile.circuit.frontend.func_to_block import is_array_type
+from qamomile.circuit.frontend.handle import Observable
+from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
+from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+
+if TYPE_CHECKING:
+    from qamomile.circuit.frontend.handle import Handle
+
+
+def _union_members(param_type: Any) -> tuple[Any, ...]:
+    """Return members when a parameter annotation is a union.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        tuple[Any, ...]: Union member annotations, or an empty tuple
+            when *param_type* is not a union annotation.
+    """
+    origin = get_origin(param_type)
+    if origin in (Union, _types.UnionType):
+        return get_args(param_type)
+    return ()
+
+
+def _array_element_type(param_type: Any) -> Any | None:
+    """Return the element handle type for an array annotation.
+
+    Args:
+        param_type (Any): A frontend annotation such as
+            ``Vector[Float]`` or ``Vector[Qubit]``.
+
+    Returns:
+        Any | None: The element handle type when *param_type* is an
+            array annotation, or ``None`` for scalar annotations.
+    """
+    if not is_array_type(param_type):
+        return None
+    args = get_args(param_type)
+    if args:
+        return args[0]
+    return getattr(param_type, "element_type", None)
+
+
+def _is_scalar_classical_param_decl(param_type: Any) -> bool:
+    """Return whether a parameter declaration is scalar classical.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for scalar ``Float`` / ``UInt`` declarations,
+            including scalar union forms such as ``float | Float``.
+    """
+    scalar_types = (Float, float, UInt, int)
+    if param_type in scalar_types:
+        return True
+    members = _union_members(param_type)
+    return bool(members) and all(member in scalar_types for member in members)
+
+
+def _is_uint_param_decl(param_type: Any) -> bool:
+    """Return whether a parameter declaration is integer-like.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for scalar ``UInt`` / ``int`` declarations,
+            including union forms whose members are all integer-like.
+    """
+    if param_type in (UInt, int):
+        return True
+    members = _union_members(param_type)
+    return bool(members) and all(member in (UInt, int) for member in members)
+
+
+def _is_quantum_param_decl(param_type: Any) -> bool:
+    """Return whether a qkernel parameter declaration is quantum.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for ``Qubit`` and ``Vector[Qubit]``-like
+            declarations, otherwise ``False``.
+    """
+    if param_type is Qubit:
+        return True
+    return _array_element_type(param_type) is Qubit
+
+
+def _is_classical_param_decl(param_type: Any) -> bool:
+    """Return whether a qkernel parameter declaration is classical.
+
+    Args:
+        param_type (Any): A resolved qkernel input annotation.
+
+    Returns:
+        bool: ``True`` for scalar ``Float`` / ``UInt`` declarations and
+            their array forms such as ``Vector[Float]``. Also returns
+            ``True`` for ``Observable`` handles.
+    """
+    if param_type is Observable:
+        return True
+    if _is_scalar_classical_param_decl(param_type):
+        return True
+    return _array_element_type(param_type) in (Float, float, UInt, int)
+
+
+def _is_quantum_handle(value: Any) -> bool:
+    """Return whether a runtime handle carries quantum data.
+
+    Args:
+        value (Any): A caller argument or bound qkernel argument.
+
+    Returns:
+        bool: ``True`` for scalar ``Qubit`` handles and arrays whose
+            element IR type is quantum.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if isinstance(value, Qubit):
+        return True
+    if isinstance(value, ArrayBase):
+        return value.value.type.is_quantum()
+    return False
+
+
+def _validate_classical_param_handle(
+    param_name: str,
+    declared: Any,
+    param_value: Handle,
+    context: str = "control()",
+) -> None:
+    """Validate that a handle matches a classical parameter declaration.
+
+    Args:
+        param_name (str): Kernel parameter name, used in error messages.
+        declared (Any): Resolved kernel input annotation.
+        param_value (Handle): Caller-supplied handle value.
+        context (str): Call-site label used to prefix the error message,
+            e.g. ``"control()"`` or ``"my_kernel()"``. Defaults to
+            ``"control()"`` so existing callers keep their wording.
+
+    Raises:
+        TypeError: If the supplied handle is quantum or does not match the
+            declared scalar, array, or observable parameter kind.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if _is_quantum_handle(param_value):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as a "
+            f"classical parameter but received quantum handle "
+            f"{type(param_value).__name__}. Pass a classical handle instead."
+        )
+
+    if declared is Observable:
+        if not isinstance(param_value, Observable):
+            raise TypeError(
+                f"{context}: parameter {param_name!r} is declared as "
+                f"Observable but received {type(param_value).__name__}. "
+                f"Pass an Observable handle from the enclosing qkernel."
+            )
+        return
+
+    element_type = _array_element_type(declared)
+    if element_type is not None:
+        if not isinstance(param_value, ArrayBase):
+            raise TypeError(
+                f"{context}: parameter {param_name!r} is declared as "
+                f"an array parameter but received "
+                f"{type(param_value).__name__}. Pass the corresponding "
+                f"Vector handle from the caller kernel instead."
+            )
+        expected_type = UIntType() if element_type in (UInt, int) else FloatType()
+        if param_value.value.type != expected_type:
+            raise TypeError(
+                f"{context}: parameter {param_name!r} expects "
+                f"{expected_type.label()} elements but received "
+                f"{param_value.value.type.label()} elements."
+            )
+        return
+
+    if _is_uint_param_decl(declared):
+        if not isinstance(param_value, UInt):
+            raise TypeError(
+                f"{context}: parameter {param_name!r} is declared as "
+                f"UInt/int but received {type(param_value).__name__}. "
+                f"Pass a UInt handle instead."
+            )
+        return
+
+    if not isinstance(param_value, Float):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as "
+            f"Float/float but received {type(param_value).__name__}. "
+            f"Pass a Float handle instead."
+        )
+
+
+def _validate_quantum_param_handle(
+    param_name: str,
+    declared: Any,
+    param_value: Handle,
+    context: str = "control()",
+    allow_broadcast: bool = False,
+) -> None:
+    """Validate that a handle matches a quantum parameter declaration.
+
+    Catches the arity mismatches that previously leaked an opaque
+    ``AttributeError`` (``'Qubit' object has no attribute 'shape'``) or
+    silently miscompiled. A classical handle bound to a quantum parameter
+    is rejected outright. The two arity directions are not symmetric:
+
+    * **An array declaration receiving a scalar ``Qubit``** (e.g. passing
+      a single qubit to a ``Vector[Qubit]`` target) is always rejected --
+      the callee indexes the register internally, so a lone qubit cannot
+      satisfy it.
+    * **A scalar ``Qubit`` declaration receiving a quantum array** is a
+      *broadcast* in the control path (the controlled gate is applied
+      once per target qubit -- see ``controlled_native_broadcast_target``)
+      but a silent miscompile in a plain ``CallBlockOperation`` call
+      (the whole register collapses onto one scalar dummy input).
+      ``allow_broadcast`` selects which contract applies.
+
+    Args:
+        param_name (str): Kernel parameter name, used in error messages.
+        declared (Any): Resolved kernel input annotation. Either scalar
+            ``Qubit`` or an array form such as ``Vector[Qubit]``.
+        param_value (Handle): Caller-supplied handle value.
+        context (str): Call-site label used to prefix the error message,
+            e.g. ``"control()"`` or ``"my_kernel()"``. Defaults to
+            ``"control()"``.
+        allow_broadcast (bool): When ``True``, a quantum array bound to a
+            scalar ``Qubit`` declaration is accepted as a per-element
+            broadcast (the control path). When ``False`` (a plain
+            qkernel call, which does not broadcast), the same shape is
+            rejected. Defaults to ``False``.
+
+    Raises:
+        TypeError: If the supplied handle is classical, or its arity
+            (scalar vs. array) does not match the declared quantum
+            parameter kind under the active broadcast contract.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if not _is_quantum_handle(param_value):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as a "
+            f"quantum parameter but received non-quantum handle "
+            f"{type(param_value).__name__}. Pass a Qubit or Vector[Qubit] "
+            f"handle instead."
+        )
+
+    if declared is Qubit:
+        if isinstance(param_value, Qubit):
+            return
+        # A quantum array bound to a scalar ``Qubit`` parameter broadcasts
+        # in the control path but silently miscompiles in a plain call.
+        if allow_broadcast and isinstance(param_value, ArrayBase):
+            return
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as a "
+            f"scalar Qubit but received {type(param_value).__name__}. "
+            f"Pass a single Qubit handle (e.g. index the register with "
+            f"qs[0]) instead."
+        )
+
+    # Array quantum declaration (``Vector[Qubit]`` / higher-rank register).
+    if not isinstance(param_value, ArrayBase):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as a quantum "
+            f"array (e.g. Vector[Qubit]) but received scalar "
+            f"{type(param_value).__name__}. Pass a Vector[Qubit] register "
+            f"instead -- allocate one with qmc.qubit_array(N, ...) at the "
+            f"call site, or pass an existing Vector handle."
+        )
+
+
+def _validate_param_handle(
+    param_name: str,
+    declared: Any,
+    param_value: Handle,
+    context: str = "control()",
+    allow_broadcast: bool = False,
+) -> None:
+    """Validate a bound handle against its qkernel parameter declaration.
+
+    Routes to the quantum or classical validator based on the declared
+    parameter kind. Structural-container declarations (``Tuple`` /
+    ``Dict``) and unannotated parameters are passed through unchecked --
+    their shape is enforced by the inline / segmentation passes instead.
+
+    Args:
+        param_name (str): Kernel parameter name, used in error messages.
+        declared (Any): Resolved kernel input annotation.
+        param_value (Handle): Caller-supplied handle bound to the
+            parameter.
+        context (str): Call-site label used to prefix the error message,
+            e.g. ``"control()"`` or ``"my_kernel()"``. Defaults to
+            ``"control()"``.
+        allow_broadcast (bool): Forwarded to
+            :func:`_validate_quantum_param_handle`; ``True`` lets a
+            quantum array bind to a scalar ``Qubit`` parameter as a
+            per-element broadcast (the control path). Has no effect on
+            classical parameters. Defaults to ``False``.
+
+    Raises:
+        TypeError: If *param_value* does not match the quantum or
+            classical declaration of *param_name*.
+    """
+    if _is_quantum_param_decl(declared):
+        _validate_quantum_param_handle(
+            param_name, declared, param_value, context, allow_broadcast=allow_broadcast
+        )
+    elif _is_classical_param_decl(declared):
+        _validate_classical_param_handle(param_name, declared, param_value, context)
+    # else: a structural container (``Tuple`` / ``Dict``) or an
+    # unannotated parameter -- there is no scalar/array arity contract to
+    # enforce here, so the handle passes through unchecked.
