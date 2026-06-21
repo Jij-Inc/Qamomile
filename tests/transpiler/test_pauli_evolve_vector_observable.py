@@ -220,7 +220,10 @@ class TestTrotterBackendPortability:
         gate_names = [type(g).__name__ for g in getattr(circuit, "gates", ())]
         assert gate_names, "QuriParts circuit should contain gates"
 
+    @pytest.mark.cudaq
     def test_cudaq(self):
+        """Transpiles on CUDA-Q; ``-m cudaq`` sessions only (see
+        tests/_cudaq_isolation.py for why default runs must not load cudaq)."""
         pytest.importorskip("cudaq")
         from qamomile.cudaq.transpiler import CudaqTranspiler  # noqa: I001
 

@@ -283,6 +283,7 @@ def _init_op_symbols() -> None:
             BinOpKind.MUL: "*",
             BinOpKind.DIV: "/",
             BinOpKind.FLOORDIV: "//",
+            BinOpKind.MOD: "%",
             BinOpKind.POW: "**",
         }
     )

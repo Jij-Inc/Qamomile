@@ -745,6 +745,108 @@ class TestRoundTripIRFeatures:
         assert content_hash(load_json(dump_json(block))) == content_hash(block)
 
 
+class TestCastCarrierKeyRoundTrip:
+    """Legacy composite cast/QFixed carrier keys survive serialization.
+
+    Carrier keys use the ``"<root_uuid>_<index>"`` spelling and live in
+    ``CastOperation.qubit_mapping`` and in the cast / QFixed metadata of the
+    cast result. The wire formats treat them as opaque strings, so a
+    round-trip must preserve them verbatim — and therefore preserve the
+    ``content_hash`` of a block carrying them.
+    """
+
+    @staticmethod
+    def _carrier_keys(block: Block) -> list[tuple[str, tuple[str, ...]]]:
+        """Collect every composite carrier key in a block, order-stable.
+
+        Args:
+            block (Block): Block to scan for cast/QFixed carrier keys.
+
+        Returns:
+            list[tuple[str, tuple[str, ...]]]: ``(source, keys)`` pairs for the
+                ``CastOperation.qubit_mapping`` and the cast / QFixed metadata
+                of each cast result, in operation order.
+        """
+        from qamomile.circuit.ir.operation.cast import CastOperation
+
+        collected: list[tuple[str, tuple[str, ...]]] = []
+        for op in block.operations:
+            if isinstance(op, CastOperation):
+                collected.append(("qubit_mapping", tuple(op.qubit_mapping)))
+            for result in op.results:
+                metadata = getattr(result, "metadata", None)
+                if metadata is None:
+                    continue
+                if metadata.cast is not None:
+                    collected.append(("cast", tuple(metadata.cast.qubit_uuids)))
+                if metadata.qfixed is not None:
+                    collected.append(("qfixed", tuple(metadata.qfixed.qubit_uuids)))
+        return collected
+
+    def test_whole_array_cast_carrier_keys_round_trip(self):
+        """A sub-kernel cast carrier survives all three wire formats.
+
+        Inlining ``sub(q)`` rebases the carrier keys onto the caller's array;
+        the round-trip must keep those rebased keys byte-identical.
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            return qmc.measure(qmc.cast(q, qmc.QFixed, int_bits=0))
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            anc = qmc.qubit("anc")
+            q = qmc.qubit_array(2, "q")
+            anc = qmc.x(anc)
+            return sub(q)
+
+        block = _to_affine(circuit)
+        original_keys = self._carrier_keys(block)
+        # The cast carries two carrier qubits, so the keys are non-empty.
+        assert any(keys for _, keys in original_keys), original_keys
+
+        for restored in (
+            from_dict(to_dict(block)),
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert content_hash(restored) == content_hash(block)
+            assert self._carrier_keys(restored) == original_keys
+
+    def test_slice_view_cast_carrier_keys_round_trip(self):
+        """Root-space carrier keys from a strided-view cast round-trip intact.
+
+        ``sub(q[1::2])`` folds the carrier indices into the root array's index
+        space (``_1`` / ``_3``); the round-trip must preserve that folding.
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            return qmc.measure(qmc.cast(q, qmc.QFixed, int_bits=0))
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            return sub(q[1::2])
+
+        block = _to_affine(circuit)
+        original_keys = self._carrier_keys(block)
+        # Every carrier key should be a composite ``<uuid>_<index>`` key whose
+        # index is in root space (1 or 3), proving the fold happened pre-encode.
+        flat = [key for _, keys in original_keys for key in keys]
+        assert flat, original_keys
+        assert all(key.rsplit("_", 1)[1] in {"1", "3"} for key in flat), flat
+
+        for restored in (
+            from_dict(to_dict(block)),
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert content_hash(restored) == content_hash(block)
+            assert self._carrier_keys(restored) == original_keys
+
+
 # ---------------------------------------------------------------------------
 # Schema version
 # ---------------------------------------------------------------------------

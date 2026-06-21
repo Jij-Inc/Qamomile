@@ -11,6 +11,11 @@ from typing import Any
 import numpy as np
 import pytest
 
+from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
+
 pytestmark = pytest.mark.cudaq
 
 cudaq = pytest.importorskip("cudaq")
@@ -21,6 +26,116 @@ from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     assert_inspect_source_matches_artifact,
 )
 from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402
+
+
+def _uint(name: str, const: int | None = None) -> Value:
+    """Create a UInt value for CUDA-Q controlled fallback tests.
+
+    Args:
+        name (str): Display name assigned to the IR value.
+        const (int | None): Optional constant payload for the value.
+
+    Returns:
+        Value: UInt IR value, constant when ``const`` is provided.
+    """
+    value = Value(type=UIntType(), name=name)
+    return value.with_const(const) if const is not None else value
+
+
+def _qubit_array(name: str, size: int) -> ArrayValue:
+    """Create a Vector[Qubit] IR value with a constant length.
+
+    Args:
+        name (str): Display name assigned to the vector.
+        size (int): Constant vector length.
+
+    Returns:
+        ArrayValue: Vector[Qubit] IR value with one constant shape dimension.
+    """
+    return ArrayValue(type=QubitType(), name=name, shape=(_uint(f"{name}_dim0", size),))
+
+
+def _qubit_element(parent: ArrayValue, index: Value | int, name: str) -> Value:
+    """Create a Vector[Qubit] element IR value.
+
+    Args:
+        parent (ArrayValue): Parent vector or slice view.
+        index (Value | int): Element index as an IR value or Python integer.
+        name (str): Display name assigned to the element.
+
+    Returns:
+        Value: Qubit element value referencing ``parent[index]``.
+    """
+    index_value = _uint(f"{name}_idx", index) if isinstance(index, int) else index
+    return Value(
+        type=QubitType(),
+        name=name,
+        parent_array=parent,
+        element_indices=(index_value,),
+    )
+
+
+def _x_gate_on(qubit: Value) -> GateOperation:
+    """Create an X gate on one IR qubit value.
+
+    Args:
+        qubit (Value): Qubit operand for the gate.
+
+    Returns:
+        GateOperation: Fixed X gate with a next-version qubit result.
+    """
+    return GateOperation.fixed(
+        gate_type=GateOperationType.X,
+        qubits=[qubit],
+        results=[qubit.next_version()],
+    )
+
+
+def _emit_controlled_ops_and_record_targets(
+    transpiler: Any,
+    operations: list[Any],
+    vector_slots: dict[str, list[int]],
+) -> list[list[int]]:
+    """Run CUDA-Q controlled fallback emission and record gate targets.
+
+    Args:
+        transpiler (Any): CUDA-Q transpiler used to create an emit pass.
+        operations (list[Any]): Controlled block operations to emit.
+        vector_slots (dict[str, list[int]]): Initial vector UUID to physical
+            qubit slots map.
+
+    Returns:
+        list[list[int]]: Gate target indices selected for each emitted gate.
+    """
+    emit_pass = transpiler._create_emit_pass()
+    qubit_map: dict[Any, int] = {}
+    calls: list[list[int]] = []
+
+    def record_gate(
+        circuit: Any,
+        op: GateOperation,
+        emitter: Any,
+        control_indices: list[int],
+        gate_target_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Record the target indices selected by the controlled fallback."""
+        del circuit, op, emitter, control_indices, bindings
+        calls.append(list(gate_target_indices))
+
+    emit_pass._emit_cudaq_multi_controlled_gate = record_gate
+    emit_pass._emit_cudaq_controlled_ops(
+        object(),
+        operations,
+        num_controls=1,
+        control_indices=[0],
+        target_indices=[10, 11, 12, 13],
+        qubit_map=qubit_map,
+        vector_slots=vector_slots,
+        emitter=object(),
+        bindings={},
+    )
+    return calls
 
 
 class TestCudaqTranspiler(TranspilerTestSuite):
@@ -143,6 +258,84 @@ class TestCudaqRuntimeControlFlow:
         exe = transpiler.transpile(circuit_with_while)
         circuit = exe.compiled_quantum[0].circuit
         assert circuit.execution_mode == ExecutionMode.RUNNABLE
+
+
+class TestCudaqControlledSliceElementFallback:
+    """Regression tests for CUDA-Q controlled fallback element resolution."""
+
+    def test_controlled_fallback_resolves_fixed_slice_element(self) -> None:
+        """Controlled fallback should resolve scalar elements of slice views."""
+        root = _qubit_array("q", 4)
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_uint("q_view_dim0", 2),),
+            slice_of=root,
+            slice_start=_uint("slice_start", 1),
+            slice_step=_uint("slice_step", 2),
+        )
+        element = _qubit_element(view, 1, "q_view[1]")
+        transpiler = CudaqTranspiler()
+
+        calls = _emit_controlled_ops_and_record_targets(
+            transpiler,
+            [_x_gate_on(element)],
+            {root.uuid: [10, 11, 12, 13]},
+        )
+
+        assert calls == [[13]]
+
+    def test_controlled_fallback_recomputes_loop_dependent_slice_slots(
+        self,
+    ) -> None:
+        """Loop-dependent slice bounds should not reuse stale slice slots."""
+        root = _qubit_array("q", 4)
+        loop_var = _uint("i")
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_view",
+            shape=(_uint("q_view_dim0", 2),),
+            slice_of=root,
+            slice_start=loop_var,
+            slice_step=_uint("slice_step", 2),
+        )
+        element = _qubit_element(view, 0, "q_view[0]")
+        loop = ForOperation(
+            operands=[_uint("start", 0), _uint("stop", 2), _uint("step", 1)],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[_x_gate_on(element)],
+        )
+        transpiler = CudaqTranspiler()
+
+        calls = _emit_controlled_ops_and_record_targets(
+            transpiler,
+            [loop],
+            {root.uuid: [10, 11, 12, 13]},
+        )
+
+        assert calls == [[10], [11]]
+
+    def test_controlled_fallback_reseeds_symbolic_vector_element(self) -> None:
+        """Loop-indexed root-vector elements should reseed on each iteration."""
+        root = _qubit_array("q", 4)
+        loop_var = _uint("i")
+        element = _qubit_element(root, loop_var, "q[i]")
+        loop = ForOperation(
+            operands=[_uint("start", 0), _uint("stop", 2), _uint("step", 1)],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[_x_gate_on(element)],
+        )
+        transpiler = CudaqTranspiler()
+
+        calls = _emit_controlled_ops_and_record_targets(
+            transpiler,
+            [loop],
+            {root.uuid: [10, 11, 12, 13]},
+        )
+
+        assert calls == [[10], [11]]
 
 
 class TestCudaqSourceInspectRegression:
