@@ -34,6 +34,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     ChemistryQPEMethod,
     FTQCCostModel,
+    compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     iter_ftqc_resource_quantity_specs,
@@ -201,6 +202,24 @@ for row in scdf.to_quantity_table():
     if row["quantity"] in {"qpe_iterations", "toffoli_gates", "physical_qubits"}:
         print(row["label"], row["value"], row["unit"])
 
+qubitized_savings = compare_ftqc_resource_estimates(
+    thc,
+    scdf,
+    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+)
+for row in qubitized_savings:
+    print(
+        row.label,
+        "ratio:",
+        sp.N(row.ratio, 4),
+        "reduction:",
+        sp.N(row.reduction, 4),
+    )
+
+assert qubitized_savings[0].quantity.value == "qpe_iterations"
+assert qubitized_savings[0].ratio == sp.Float("0.5")
+assert qubitized_savings[1].ratio == sp.Float("0.55")
+
 # %% [markdown]
 # ## Early-FTQC Trotter QPE
 #
@@ -232,6 +251,23 @@ assert uwc_trotter.logical_depth < plain_trotter.logical_depth
 print("Plain Trotter QPE depth proxy:", sp.N(plain_trotter.logical_depth, 4))
 print("UWC-style Trotter QPE depth proxy:", sp.N(uwc_trotter.logical_depth, 4))
 print("UWC-style T gates:", sp.N(uwc_trotter.t_gates, 4))
+
+trotter_savings = compare_ftqc_resource_estimates(
+    plain_trotter,
+    uwc_trotter,
+    quantities=("qpe_iterations", "logical_depth"),
+)
+for row in trotter_savings:
+    print(
+        row.label,
+        "ratio:",
+        sp.N(row.ratio, 4),
+        "reduction:",
+        sp.N(row.reduction, 4),
+    )
+
+assert trotter_savings[0].ratio == sp.Float("0.1")
+assert trotter_savings[1].ratio == sp.Float("0.05")
 
 # %% [markdown]
 # ## Result

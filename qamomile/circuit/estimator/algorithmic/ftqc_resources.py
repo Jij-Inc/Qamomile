@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
+from typing import Protocol
+
+import sympy as sp
 
 
 class FTQCResourceCategory(enum.StrEnum):
@@ -76,6 +79,23 @@ class FTQCResourceQuantity(enum.StrEnum):
     TOFFOLI_THROUGHPUT_PER_SECOND = "toffoli_throughput_per_second"
 
 
+class SupportsFTQCResourceValues(Protocol):
+    """Represent objects that expose canonical FTQC resource values.
+
+    Example:
+        >>> hasattr(object(), "resource_values")
+        False
+    """
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return resource values keyed by canonical FTQC quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Resource values.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class FTQCResourceQuantitySpec:
     """Describe one canonical FTQC resource quantity.
@@ -112,6 +132,63 @@ class FTQCResourceQuantitySpec:
             "unit": self.unit,
             "category": self.category.value,
             "description": self.description,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceComparisonRow:
+    """Compare one FTQC resource quantity between two estimates.
+
+    Attributes:
+        quantity (FTQCResourceQuantity): Compared resource quantity.
+        baseline (sp.Expr): Baseline estimate value.
+        candidate (sp.Expr): Candidate estimate value.
+        ratio (sp.Expr): Candidate divided by baseline.
+        reduction (sp.Expr): Fractional reduction, equal to
+            ``1 - candidate / baseline``.
+        label (str): Reader-facing quantity label.
+        unit (str): Resource unit.
+        category (FTQCResourceCategory): Modeling layer for the quantity.
+
+    Example:
+        >>> row = FTQCResourceComparisonRow(
+        ...     quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+        ...     baseline=10,
+        ...     candidate=4,
+        ...     ratio=sp.Rational(2, 5),
+        ...     reduction=sp.Rational(3, 5),
+        ...     label="Toffoli gates",
+        ...     unit="Toffoli gates",
+        ...     category=FTQCResourceCategory.LOGICAL,
+        ... )
+        >>> row.to_dict()["ratio"]
+        '2/5'
+    """
+
+    quantity: FTQCResourceQuantity
+    baseline: sp.Expr
+    candidate: sp.Expr
+    ratio: sp.Expr
+    reduction: sp.Expr
+    label: str
+    unit: str
+    category: FTQCResourceCategory
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the comparison row.
+
+        Returns:
+            dict[str, str]: JSON-friendly comparison metadata and values.
+        """
+        return {
+            "quantity": self.quantity.value,
+            "label": self.label,
+            "unit": self.unit,
+            "category": self.category.value,
+            "baseline": str(self.baseline),
+            "candidate": str(self.candidate),
+            "ratio": str(self.ratio),
+            "reduction": str(self.reduction),
         }
 
 
@@ -264,11 +341,134 @@ def describe_ftqc_resource_quantity(
     Raises:
         ValueError: If ``quantity`` is not a known FTQC resource quantity.
     """
+    normalized = _normalize_resource_quantity(quantity)
+    return _SPECS_BY_QUANTITY[normalized]
+
+
+def compare_ftqc_resource_estimates(
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+    *,
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+) -> tuple[FTQCResourceComparisonRow, ...]:
+    """Compare canonical FTQC quantities between two estimates.
+
+    Args:
+        baseline (SupportsFTQCResourceValues): Reference estimate, model, or
+            summary exposing ``resource_values()``.
+        candidate (SupportsFTQCResourceValues): Candidate estimate, model, or
+            summary exposing ``resource_values()``.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
+            to compare. Defaults to the intersection of quantities exposed by
+            both inputs, ordered by the canonical quantity catalog.
+
+    Returns:
+        tuple[FTQCResourceComparisonRow, ...]: Comparison rows containing
+            baseline values, candidate values, ratios, and fractional
+            reductions.
+
+    Raises:
+        ValueError: If a requested quantity is missing from either input or if
+            a baseline value is exactly zero.
+    """
+    baseline_values = baseline.resource_values()
+    candidate_values = candidate.resource_values()
+    selected = _normalize_comparison_quantities(
+        baseline_values,
+        candidate_values,
+        quantities,
+    )
+
+    rows = []
+    for quantity in selected:
+        baseline_value = sp.sympify(baseline_values[quantity])
+        candidate_value = sp.sympify(candidate_values[quantity])
+        if baseline_value.equals(0):
+            raise ValueError(
+                f"Cannot compare {quantity.value!r} against a zero baseline."
+            )
+        ratio = sp.simplify(candidate_value / baseline_value)
+        reduction = sp.simplify(1 - ratio)
+        spec = describe_ftqc_resource_quantity(quantity)
+        rows.append(
+            FTQCResourceComparisonRow(
+                quantity=quantity,
+                baseline=baseline_value,
+                candidate=candidate_value,
+                ratio=ratio,
+                reduction=reduction,
+                label=spec.label,
+                unit=spec.unit,
+                category=spec.category,
+            )
+        )
+    return tuple(rows)
+
+
+def _normalize_comparison_quantities(
+    baseline_values: dict[FTQCResourceQuantity, sp.Expr],
+    candidate_values: dict[FTQCResourceQuantity, sp.Expr],
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None,
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Normalize comparison quantity selection.
+
+    Args:
+        baseline_values (dict[FTQCResourceQuantity, sp.Expr]): Baseline
+            resource values.
+        candidate_values (dict[FTQCResourceQuantity, sp.Expr]): Candidate
+            resource values.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Requested
+            quantities or None for the canonical intersection.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Normalized quantities.
+
+    Raises:
+        ValueError: If a requested quantity is absent from either value map.
+    """
+    if quantities is None:
+        common = set(baseline_values) & set(candidate_values)
+        return tuple(
+            spec.quantity
+            for spec in FTQC_RESOURCE_QUANTITY_SPECS
+            if spec.quantity in common
+        )
+
+    normalized = tuple(
+        _normalize_resource_quantity(quantity) for quantity in quantities
+    )
+    missing = [
+        quantity.value
+        for quantity in normalized
+        if quantity not in baseline_values or quantity not in candidate_values
+    ]
+    if missing:
+        raise ValueError(
+            "Requested FTQC resource quantities are missing from the inputs: "
+            + ", ".join(missing)
+            + "."
+        )
+    return normalized
+
+
+def _normalize_resource_quantity(
+    quantity: str | FTQCResourceQuantity,
+) -> FTQCResourceQuantity:
+    """Normalize one resource quantity key.
+
+    Args:
+        quantity (str | FTQCResourceQuantity): Resource quantity key.
+
+    Returns:
+        FTQCResourceQuantity: Normalized quantity enum.
+
+    Raises:
+        ValueError: If ``quantity`` is not a known FTQC resource quantity.
+    """
     try:
-        normalized = FTQCResourceQuantity(quantity)
+        return FTQCResourceQuantity(quantity)
     except ValueError as exc:
         valid = ", ".join(item.value for item in FTQCResourceQuantity)
         raise ValueError(
             f"Unknown FTQC resource quantity {quantity!r}; valid: {valid}."
         ) from exc
-    return _SPECS_BY_QUANTITY[normalized]

@@ -12,6 +12,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     FTQCResourceCategory,
     FTQCResourceQuantity,
+    compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe_from_model,
     iter_ftqc_resource_quantity_specs,
@@ -87,3 +88,85 @@ def test_ftqc_models_expose_canonical_resource_values():
         == 0
     )
     assert estimate.to_quantity_table()[0]["quantity"] == "logical_qubits"
+
+
+def test_compare_ftqc_resource_estimates_reports_ratios_and_reductions():
+    """Comparison rows quantify savings for a lower-cost FTQC candidate."""
+    baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=baseline,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    candidate_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=candidate,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=11,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+
+    rows = compare_ftqc_resource_estimates(
+        baseline_estimate,
+        candidate_estimate,
+        quantities=(
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+        ),
+    )
+
+    assert rows[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+    assert sp.simplify(rows[0].ratio - sp.Rational(1, 2)) == 0
+    assert sp.simplify(rows[0].reduction - sp.Rational(1, 2)) == 0
+    assert sp.simplify(rows[1].ratio - sp.Rational(11, 20)) == 0
+    assert rows[1].to_dict()["unit"] == "Toffoli gates"
+
+
+def test_compare_ftqc_resource_estimates_defaults_to_common_quantities():
+    """Default comparison uses the canonical intersection of exposed values."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0) + qm_o.X(1))
+    rows = compare_ftqc_resource_estimates(
+        summary,
+        summary.with_lambda_scale(sp.Rational(1, 2)),
+    )
+
+    assert [row.quantity for row in rows] == [
+        FTQCResourceQuantity.N_SPIN_ORBITALS,
+        FTQCResourceQuantity.N_PAULI_TERMS,
+        FTQCResourceQuantity.LAMBDA_NORM,
+        FTQCResourceQuantity.MAX_LOCALITY,
+    ]
+    lambda_row = rows[2]
+    assert sp.simplify(lambda_row.ratio - sp.Rational(1, 2)) == 0
+
+
+def test_compare_ftqc_resource_estimates_rejects_missing_or_zero_baseline():
+    """Invalid comparison requests fail before returning misleading ratios."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0))
+
+    with pytest.raises(ValueError, match="missing"):
+        compare_ftqc_resource_estimates(
+            summary,
+            summary,
+            quantities=(FTQCResourceQuantity.TOFFOLI_GATES,),
+        )
+
+    with pytest.raises(ValueError, match="zero baseline"):
+        compare_ftqc_resource_estimates(
+            summary.with_lambda_scale(0),
+            summary,
+            quantities=(FTQCResourceQuantity.LAMBDA_NORM,),
+        )

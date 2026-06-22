@@ -27,8 +27,11 @@ from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
 )
 from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
     FTQCResourceCategory,
+    FTQCResourceComparisonRow,
     FTQCResourceQuantity,
     FTQCResourceQuantitySpec,
+    SupportsFTQCResourceValues,
+    compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
     iter_ftqc_resource_quantity_specs,
 )
@@ -44,11 +47,14 @@ __all__ = [
     "ChemistryQPEMethod",
     "ChemistryQPEModel",
     "FTQCResourceCategory",
+    "FTQCResourceComparisonRow",
     "FTQCCostModel",
     "FTQCResourceEstimate",
     "FTQCResourceQuantity",
     "FTQCResourceQuantitySpec",
     "PauliHamiltonianResource",
+    "SupportsFTQCResourceValues",
+    "compare_ftqc_resource_estimates",
     "describe_ftqc_resource_quantity",
     "estimate_qaoa",
     "estimate_qpe",
