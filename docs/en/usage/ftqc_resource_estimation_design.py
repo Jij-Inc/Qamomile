@@ -190,6 +190,41 @@ assert comparison[0].ratio == sp.Float("0.5")
 assert comparison[1].ratio == sp.Float("0.55")
 
 # %% [markdown]
+# ## Architecture Sensitivity
+#
+# Once an estimate exists, relift it with a different architecture model to
+# study hardware assumptions without rebuilding the algorithm model.
+
+# %%
+faster_architecture = SurfaceCodeCostModel(
+    code_distance=10,
+    physical_cycle_time_seconds=sp.Float("5e-8"),
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=1,
+    factory_count=8,
+    physical_qubits_per_factory=2500,
+    factory_cycles_per_toffoli=2,
+)
+relifted_baseline = baseline.with_cost_model(faster_architecture.to_cost_model())
+
+architecture_comparison = compare_ftqc_resource_estimates(
+    baseline,
+    relifted_baseline,
+    quantities=("physical_qubits", "runtime_seconds"),
+)
+
+for row in architecture_comparison:
+    print(row.label, "ratio:", sp.N(row.ratio, 4))
+
+assert relifted_baseline.logical_qubits == baseline.logical_qubits
+assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
+assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(7, 13)) == 0
+assert (
+    sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5"))
+    < sp.Float("1e-12")
+)
+
+# %% [markdown]
 # ## Early-FTQC Pattern
 #
 # Early-FTQC estimates may not be Toffoli-native. The same comparison API works
@@ -258,5 +293,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   remains backend-neutral.
 # - Surface-code assumptions can be modeled separately and converted into the
 #   cost model consumed by chemistry estimators.
+# - Existing logical estimates can be relifted under new architecture
+#   assumptions without rebuilding the algorithm estimate.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable
 #   savings tables without hard-coding a particular chemistry factorization.

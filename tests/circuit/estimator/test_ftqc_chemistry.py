@@ -130,6 +130,74 @@ def test_surface_code_cost_model_derives_architecture_knobs():
     assert sp.Abs(estimate.runtime_seconds - sp.Float("5e-4")) < sp.Float("1e-12")
 
 
+def test_cost_model_relifts_existing_estimate_without_changing_logical_work():
+    """Architecture relifting updates physical fields while preserving logical work."""
+    original_cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e6"),
+    )
+    replacement_cost = FTQCCostModel(
+        physical_qubits_per_logical=200,
+        logical_cycle_time_seconds=sp.Float("5e-7"),
+        factory_qubits=20,
+        toffoli_throughput_per_second=sp.Float("2e6"),
+    )
+    estimate = estimate_qubitized_chemistry_qpe(
+        n_spin_orbitals=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        logical_qubits=7,
+        cost_model=original_cost,
+    )
+
+    relifted = estimate.with_cost_model(replacement_cost)
+    relifted_via_model = replacement_cost.lift_estimate(estimate)
+
+    assert relifted.logical_qubits == estimate.logical_qubits
+    assert relifted.toffoli_gates == estimate.toffoli_gates
+    assert relifted.t_gates == estimate.t_gates
+    assert relifted.logical_depth == estimate.logical_depth
+    assert relifted.physical_qubits == 1420
+    assert sp.Abs(relifted.runtime_seconds - sp.Float("2e-5")) < sp.Float("1e-12")
+    assert relifted_via_model.physical_qubits == relifted.physical_qubits
+    assert relifted.assumptions["architecture_relift"].startswith("physical_qubits")
+
+
+def test_cost_model_relifts_t_gate_estimates_with_t_throughput_demand():
+    """Architecture relifting uses T counts when a model is not Toffoli-native."""
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e6"),
+    )
+    replacement = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-9"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e3"),
+    )
+    estimate = estimate_single_ancilla_trotter_qpe(
+        n_spin_orbitals=2,
+        n_pauli_terms=3,
+        lambda_norm=4,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        rotation_synthesis_t_gates=7,
+        cost_model=cost,
+    )
+
+    relifted = estimate.with_cost_model(replacement)
+
+    assert estimate.toffoli_gates == 0
+    assert estimate.t_gates == 840
+    assert sp.Abs(relifted.runtime_seconds - sp.Float("0.84")) < sp.Float("1e-12")
+
+
 def test_single_ancilla_trotter_qpe_models_unitary_weight_reduction():
     """Unitary-weight concentration reduces the lambda-driven QPE iterations."""
     baseline = estimate_single_ancilla_trotter_qpe(
@@ -168,6 +236,23 @@ def test_cost_model_rejects_zero_non_clifford_throughput():
             factory_qubits=0,
             toffoli_throughput_per_second=0,
         )
+
+
+def test_cost_model_rejects_negative_relift_inputs():
+    """Cost-model lifting rejects negative logical work before producing resources."""
+    model = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=1,
+        factory_qubits=0,
+        toffoli_throughput_per_second=1,
+    )
+
+    with pytest.raises(ValueError, match="logical_qubits"):
+        model.physical_qubits_for(-1)
+    with pytest.raises(ValueError, match="logical_depth"):
+        model.runtime_seconds_for(-1, 0)
+    with pytest.raises(ValueError, match="non_clifford_gates"):
+        model.runtime_seconds_for(0, -1)
 
 
 @pytest.mark.parametrize(

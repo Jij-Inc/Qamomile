@@ -176,6 +176,40 @@ assert comparison[0].ratio == sp.Float("0.5")
 assert comparison[1].ratio == sp.Float("0.55")
 
 # %% [markdown]
+# ## Architecture感度
+#
+# estimateを作った後で別のarchitecture modelへreliftすると、algorithm modelを作り直さずにhardware仮定を調べられます。
+
+# %%
+faster_architecture = SurfaceCodeCostModel(
+    code_distance=10,
+    physical_cycle_time_seconds=sp.Float("5e-8"),
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=1,
+    factory_count=8,
+    physical_qubits_per_factory=2500,
+    factory_cycles_per_toffoli=2,
+)
+relifted_baseline = baseline.with_cost_model(faster_architecture.to_cost_model())
+
+architecture_comparison = compare_ftqc_resource_estimates(
+    baseline,
+    relifted_baseline,
+    quantities=("physical_qubits", "runtime_seconds"),
+)
+
+for row in architecture_comparison:
+    print(row.label, "ratio:", sp.N(row.ratio, 4))
+
+assert relifted_baseline.logical_qubits == baseline.logical_qubits
+assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
+assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(7, 13)) == 0
+assert (
+    sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5"))
+    < sp.Float("1e-12")
+)
+
+# %% [markdown]
 # ## Early-FTQCのパターン
 #
 # Early-FTQC推定はToffoli-nativeとは限りません。同じ比較APIを、主にT gatesとlogical depthを報告するTrotter型modelにも使えます。
@@ -233,4 +267,5 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
+# - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。

@@ -150,6 +150,85 @@ class FTQCCostModel:
             ),
         }
 
+    def physical_qubits_for(self, logical_qubits: _SympyLike) -> sp.Expr:
+        """Lift logical-qubit count to physical qubits.
+
+        Args:
+            logical_qubits (sp.Expr | int | float): Logical qubit count to
+                lift with this architecture model.
+
+        Returns:
+            sp.Expr: Physical qubits including data patches and factories.
+
+        Raises:
+            ValueError: If ``logical_qubits`` is negative.
+        """
+        logical_expr = _as_expr(logical_qubits, "logical_qubits")
+        _validate_nonnegative(logical_expr, "logical_qubits")
+        return sp.simplify(
+            logical_expr
+            * _as_expr(
+                self.physical_qubits_per_logical,
+                "physical_qubits_per_logical",
+            )
+            + _as_expr(self.factory_qubits, "factory_qubits")
+        )
+
+    def runtime_seconds_for(
+        self,
+        logical_depth: _SympyLike,
+        non_clifford_gates: _SympyLike,
+    ) -> sp.Expr:
+        """Lift logical work to a wall-clock runtime proxy.
+
+        Args:
+            logical_depth (sp.Expr | int | float): Logical-depth proxy.
+            non_clifford_gates (sp.Expr | int | float): Toffoli-equivalent or
+                T-equivalent non-Clifford gate count served by factories.
+
+        Returns:
+            sp.Expr: Runtime proxy in seconds, as the maximum of logical-cycle
+                time and factory-throughput time.
+
+        Raises:
+            ValueError: If either input is negative.
+        """
+        depth_expr = _as_expr(logical_depth, "logical_depth")
+        non_clifford_expr = _as_expr(non_clifford_gates, "non_clifford_gates")
+        _validate_nonnegative(depth_expr, "logical_depth")
+        _validate_nonnegative(non_clifford_expr, "non_clifford_gates")
+        return sp.simplify(
+            sp.Max(
+                depth_expr
+                * _as_expr(
+                    self.logical_cycle_time_seconds,
+                    "logical_cycle_time_seconds",
+                ),
+                non_clifford_expr
+                / _as_expr(
+                    self.toffoli_throughput_per_second,
+                    "toffoli_throughput_per_second",
+                ),
+            )
+        )
+
+    def lift_estimate(
+        self,
+        estimate: FTQCResourceEstimate,
+    ) -> FTQCResourceEstimate:
+        """Recompute physical resources for an existing logical estimate.
+
+        Args:
+            estimate (FTQCResourceEstimate): Estimate whose logical qubits,
+                logical depth, and non-Clifford counts should be preserved
+                while replacing physical architecture assumptions.
+
+        Returns:
+            FTQCResourceEstimate: Copy of ``estimate`` with new
+                ``physical_qubits`` and ``runtime_seconds`` fields.
+        """
+        return estimate.with_cost_model(self)
+
 
 @dataclass(frozen=True)
 class SurfaceCodeCostModel:
@@ -546,6 +625,44 @@ class FTQCResourceEstimate:
             row["value"] = str(value)
             rows.append(row)
         return rows
+
+    def with_cost_model(self, cost_model: FTQCCostModel) -> FTQCResourceEstimate:
+        """Relift physical resources with a different architecture model.
+
+        The logical algorithm quantities are preserved. Physical qubits and
+        runtime are recomputed from ``cost_model`` using ``logical_qubits``,
+        ``logical_depth``, and the sum of Toffoli and T counts as the
+        non-Clifford throughput demand.
+
+        Args:
+            cost_model (FTQCCostModel): Architecture model used for the new
+                physical-qubit and runtime estimates.
+
+        Returns:
+            FTQCResourceEstimate: Estimate with identical logical resources
+                and updated physical resources.
+        """
+        assumptions = dict(self.assumptions)
+        assumptions["architecture_relift"] = (
+            "physical_qubits and runtime_seconds were recomputed from an "
+            "existing logical estimate with a replacement FTQCCostModel."
+        )
+        non_clifford_gates = sp.simplify(self.toffoli_gates + self.t_gates)
+        return _build_estimate(
+            algorithm=self.algorithm,
+            logical_qubits=self.logical_qubits,
+            physical_qubits=cost_model.physical_qubits_for(self.logical_qubits),
+            toffoli_gates=self.toffoli_gates,
+            t_gates=self.t_gates,
+            clifford_gates=self.clifford_gates,
+            qpe_iterations=self.qpe_iterations,
+            logical_depth=self.logical_depth,
+            runtime_seconds=cost_model.runtime_seconds_for(
+                self.logical_depth,
+                non_clifford_gates,
+            ),
+            assumptions=assumptions,
+        )
 
     def _map_exprs(self, fn: Callable[[sp.Expr], sp.Expr]) -> FTQCResourceEstimate:
         """Apply a function to each symbolic resource field.
@@ -1069,15 +1186,8 @@ def estimate_qubitized_chemistry_qpe(
     qpe_iterations = sp.simplify(lambda_expr / precision_expr)
     toffoli_gates = sp.simplify(qpe_iterations * walk_expr)
     logical_depth = toffoli_gates
-    physical_qubits = sp.simplify(
-        logical_expr * model.physical_qubits_per_logical + model.factory_qubits
-    )
-    runtime_seconds = sp.simplify(
-        sp.Max(
-            logical_depth * model.logical_cycle_time_seconds,
-            toffoli_gates / model.toffoli_throughput_per_second,
-        )
-    )
+    physical_qubits = model.physical_qubits_for(logical_expr)
+    runtime_seconds = model.runtime_seconds_for(logical_depth, toffoli_gates)
     assumptions = {
         "qpe_iterations": "Uses lambda_norm / precision as the walk-call proxy.",
         "method": method_enum.value,
@@ -1259,15 +1369,8 @@ def estimate_single_ancilla_trotter_qpe(
     t_gates = sp.simplify(logical_depth * rotation_t)
     toffoli_gates = sp.Integer(0)
     model = cost_model or FTQCCostModel()
-    physical_qubits = sp.simplify(
-        logical_expr * model.physical_qubits_per_logical + model.factory_qubits
-    )
-    runtime_seconds = sp.simplify(
-        sp.Max(
-            logical_depth * model.logical_cycle_time_seconds,
-            t_gates / model.toffoli_throughput_per_second,
-        )
-    )
+    physical_qubits = model.physical_qubits_for(logical_expr)
+    runtime_seconds = model.runtime_seconds_for(logical_depth, t_gates)
     assumptions = {
         "effective_lambda": "lambda_norm * unitary_weight_factor.",
         "qpe_style": "Single-ancilla Hadamard-test QPE with product-formula evolution.",
