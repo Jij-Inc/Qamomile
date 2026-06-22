@@ -100,18 +100,12 @@ catalog = [
 for row in catalog:
     print(row["quantity"], row["unit"], row["category"])
 
-assert FTQCResourceQuantity.LAMBDA_NORM.value in {
-    row["quantity"] for row in catalog
-}
-assert FTQCResourceQuantity.TOFFOLI_GATES.value in {
-    row["quantity"] for row in catalog
-}
+assert FTQCResourceQuantity.LAMBDA_NORM.value in {row["quantity"] for row in catalog}
+assert FTQCResourceQuantity.TOFFOLI_GATES.value in {row["quantity"] for row in catalog}
 assert FTQCResourceQuantity.RUNTIME_SECONDS.value in {
     row["quantity"] for row in catalog
 }
-assert FTQCResourceQuantity.CODE_DISTANCE.value in {
-    row["quantity"] for row in catalog
-}
+assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in catalog}
 
 # %% [markdown]
 # ## Minimal Example
@@ -145,9 +139,8 @@ cost_model = architecture.to_cost_model()
 
 assert architecture.physical_qubits_per_logical == 800
 assert architecture.factory_qubits == 20000
-assert (
-    sp.Abs(architecture.toffoli_throughput_per_second - sp.Float("2e6"))
-    < sp.Float("1e-9")
+assert sp.Abs(architecture.toffoli_throughput_per_second - sp.Float("2e6")) < sp.Float(
+    "1e-9"
 )
 
 baseline_model = ChemistryQPEModel(
@@ -190,6 +183,23 @@ assert comparison[0].ratio == sp.Float("0.5")
 assert comparison[1].ratio == sp.Float("0.55")
 
 # %% [markdown]
+# ## Reference Provenance
+#
+# Estimates also carry method-level research references. This is intentionally
+# separate from the numeric formulas: a report can show which papers motivated
+# the model without treating the synthetic example above as a molecule-specific
+# reproduction of those papers.
+
+# %%
+for reference in compressed.references:
+    print(reference.key, "-", reference.title)
+
+compressed_reference_keys = {reference.key for reference in compressed.references}
+assert "arXiv:2403.03502" in compressed_reference_keys
+assert "arXiv:2412.01338" in compressed_reference_keys
+assert compressed.to_dict()["references"][0]["url"].startswith("https://arxiv.org/")
+
+# %% [markdown]
 # ## Architecture Sensitivity
 #
 # Once an estimate exists, relift it with a different architecture model to
@@ -219,10 +229,7 @@ for row in architecture_comparison:
 assert relifted_baseline.logical_qubits == baseline.logical_qubits
 assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
 assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(7, 13)) == 0
-assert (
-    sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5"))
-    < sp.Float("1e-12")
-)
+assert sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5")) < sp.Float("1e-12")
 
 # %% [markdown]
 # ## Early-FTQC Pattern
@@ -293,6 +300,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   remains backend-neutral.
 # - Surface-code assumptions can be modeled separately and converted into the
 #   cost model consumed by chemistry estimators.
+# - Estimates carry research references so reports can audit which paper
+#   motivated a symbolic model.
 # - Existing logical estimates can be relifted under new architecture
 #   assumptions without rebuilding the algorithm estimate.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable

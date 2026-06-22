@@ -88,18 +88,12 @@ catalog = [
 for row in catalog:
     print(row["quantity"], row["unit"], row["category"])
 
-assert FTQCResourceQuantity.LAMBDA_NORM.value in {
-    row["quantity"] for row in catalog
-}
-assert FTQCResourceQuantity.TOFFOLI_GATES.value in {
-    row["quantity"] for row in catalog
-}
+assert FTQCResourceQuantity.LAMBDA_NORM.value in {row["quantity"] for row in catalog}
+assert FTQCResourceQuantity.TOFFOLI_GATES.value in {row["quantity"] for row in catalog}
 assert FTQCResourceQuantity.RUNTIME_SECONDS.value in {
     row["quantity"] for row in catalog
 }
-assert FTQCResourceQuantity.CODE_DISTANCE.value in {
-    row["quantity"] for row in catalog
-}
+assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in catalog}
 
 # %% [markdown]
 # ## 最小例
@@ -131,9 +125,8 @@ cost_model = architecture.to_cost_model()
 
 assert architecture.physical_qubits_per_logical == 800
 assert architecture.factory_qubits == 20000
-assert (
-    sp.Abs(architecture.toffoli_throughput_per_second - sp.Float("2e6"))
-    < sp.Float("1e-9")
+assert sp.Abs(architecture.toffoli_throughput_per_second - sp.Float("2e6")) < sp.Float(
+    "1e-9"
 )
 
 baseline_model = ChemistryQPEModel(
@@ -176,6 +169,20 @@ assert comparison[0].ratio == sp.Float("0.5")
 assert comparison[1].ratio == sp.Float("0.55")
 
 # %% [markdown]
+# ## Reference provenance
+#
+# estimateはmethod-levelの研究referenceも保持します。これは数式とは意図的に分けています。reportは、上のsynthetic exampleを特定分子の再現とみなさずに、どの論文がmodelの動機になったかを示せます。
+
+# %%
+for reference in compressed.references:
+    print(reference.key, "-", reference.title)
+
+compressed_reference_keys = {reference.key for reference in compressed.references}
+assert "arXiv:2403.03502" in compressed_reference_keys
+assert "arXiv:2412.01338" in compressed_reference_keys
+assert compressed.to_dict()["references"][0]["url"].startswith("https://arxiv.org/")
+
+# %% [markdown]
 # ## Architecture感度
 #
 # estimateを作った後で別のarchitecture modelへreliftすると、algorithm modelを作り直さずにhardware仮定を調べられます。
@@ -204,10 +211,7 @@ for row in architecture_comparison:
 assert relifted_baseline.logical_qubits == baseline.logical_qubits
 assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
 assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(7, 13)) == 0
-assert (
-    sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5"))
-    < sp.Float("1e-12")
-)
+assert sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5")) < sp.Float("1e-12")
 
 # %% [markdown]
 # ## Early-FTQCのパターン
@@ -267,5 +271,6 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
+# - estimateに研究referenceを保持し、どの論文がsymbolic modelの根拠になったかをreportでauditできるようにします。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。

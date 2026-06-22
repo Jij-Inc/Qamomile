@@ -10,6 +10,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCCostModel,
+    FTQCReference,
     SurfaceCodeCostModel,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
@@ -70,6 +71,66 @@ def test_qubitized_qpe_uses_representation_specific_logical_qubits():
     assert sparse.logical_qubits == n + sp.sqrt(sparsity)
     assert single.logical_qubits == n ** sp.Rational(3, 2)
     assert double.logical_qubits == n * sp.sqrt(rank)
+
+
+def test_qubitized_qpe_records_method_references():
+    """Method-specific estimates expose the papers that motivate the model."""
+    estimate = estimate_qubitized_chemistry_qpe(
+        n_spin_orbitals=20,
+        lambda_norm=100,
+        precision=1,
+        walk_cost_toffoli=10,
+        method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+        second_factor_rank=4,
+    )
+
+    reference_keys = {reference.key for reference in estimate.references}
+    serialized_keys = {
+        reference["key"] for reference in estimate.to_dict()["references"]
+    }
+
+    assert "arXiv:1902.02134" in reference_keys
+    assert "arXiv:2403.03502" in reference_keys
+    assert "arXiv:2412.01338" in reference_keys
+    assert serialized_keys == reference_keys
+
+
+def test_model_references_are_preserved_and_deduplicated():
+    """Model-specific sources are merged with method defaults by key."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0))
+    custom_reference = FTQCReference(
+        key="internal:toy-model",
+        title="Toy molecule calibration",
+        url="https://example.invalid/toy-model",
+        note="Documents synthetic benchmark inputs.",
+    )
+    duplicate_reference = FTQCReference(
+        key="arXiv:2403.03502",
+        title="Duplicate SCDF citation",
+        url="https://example.invalid/duplicate",
+    )
+    model = ChemistryQPEModel(
+        hamiltonian=summary,
+        method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+        walk_cost_toffoli=10,
+        second_factor_rank=4,
+        references=(custom_reference, duplicate_reference),
+    )
+
+    estimate = estimate_qubitized_chemistry_qpe_from_model(model, precision=1)
+    relifted = estimate.with_cost_model(
+        FTQCCostModel(
+            physical_qubits_per_logical=2,
+            logical_cycle_time_seconds=1,
+            factory_qubits=0,
+            toffoli_throughput_per_second=1,
+        )
+    )
+    reference_keys = [reference.key for reference in estimate.references]
+
+    assert reference_keys.count("arXiv:2403.03502") == 1
+    assert reference_keys[-1] == "internal:toy-model"
+    assert relifted.references == estimate.references
 
 
 def test_cost_model_lifts_logical_estimates_to_physical_runtime():
@@ -225,6 +286,9 @@ def test_single_ancilla_trotter_qpe_models_unitary_weight_reduction():
     assert concentrated.t_gates == 15000
     assert concentrated.logical_qubits == 21
     assert concentrated.logical_depth < baseline.logical_depth
+    assert any(
+        reference.key == "arXiv:2603.22778" for reference in concentrated.references
+    )
 
 
 def test_cost_model_rejects_zero_non_clifford_throughput():

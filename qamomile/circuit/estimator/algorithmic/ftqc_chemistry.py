@@ -47,6 +47,114 @@ class ChemistryQPEMethod(enum.StrEnum):
 
 
 @dataclass(frozen=True)
+class FTQCReference:
+    """Describe a research source behind an FTQC estimate.
+
+    Attributes:
+        key (str): Stable short key for the source, usually an arXiv
+            identifier or paper nickname.
+        title (str): Full title of the source.
+        url (str): Persistent source URL.
+        note (str): Short note explaining which model assumption the source
+            supports.
+
+    Example:
+        >>> reference = FTQCReference(
+        ...     key="arXiv:2403.03502",
+        ...     title="Reducing the runtime of fault-tolerant quantum simulations...",
+        ...     url="https://arxiv.org/abs/2403.03502",
+        ...     note="Introduces symmetry-compressed double factorization.",
+        ... )
+        >>> reference.to_dict()["key"]
+        'arXiv:2403.03502'
+    """
+
+    key: str
+    title: str
+    url: str
+    note: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the reference to string metadata.
+
+        Returns:
+            dict[str, str]: JSON-friendly reference metadata.
+        """
+        return {
+            "key": self.key,
+            "title": self.title,
+            "url": self.url,
+            "note": self.note,
+        }
+
+
+_LOW_RANK_QUBITIZATION_REFERENCE = FTQCReference(
+    key="arXiv:1902.02134",
+    title=(
+        "Qubitization of Arbitrary Basis Quantum Chemistry Leveraging "
+        "Sparsity and Low Rank Factorization"
+    ),
+    url="https://arxiv.org/abs/1902.02134",
+    note=(
+        "Provides sparse and low-rank qubitized chemistry cost models that "
+        "motivate representation-specific logical-resource scaling."
+    ),
+)
+_SCDF_REFERENCE = FTQCReference(
+    key="arXiv:2403.03502",
+    title=(
+        "Reducing the runtime of fault-tolerant quantum simulations in "
+        "chemistry through symmetry-compressed double factorization"
+    ),
+    url="https://arxiv.org/abs/2403.03502",
+    note=(
+        "Introduces symmetry-compressed double factorization and reports "
+        "Hamiltonian 1-norm and Toffoli-count reductions."
+    ),
+)
+_SYMMETRY_SHIFT_TENSOR_REFERENCE = FTQCReference(
+    key="arXiv:2412.01338",
+    title=(
+        "Simultaneously optimizing symmetry shifts and tensor factorizations "
+        "for cost-efficient Fault-Tolerant Quantum Simulations of electronic "
+        "Hamiltonians"
+    ),
+    url="https://arxiv.org/abs/2412.01338",
+    note=(
+        "Optimizes symmetry shifts together with tensor factorizations to "
+        "reduce block-encoding normalization."
+    ),
+)
+_UWC_REFERENCE = FTQCReference(
+    key="arXiv:2603.22778",
+    title=(
+        "Enabling Chemically Accurate Quantum Phase Estimation in the Early "
+        "Fault-Tolerant Regime"
+    ),
+    url="https://arxiv.org/abs/2603.22778",
+    note=(
+        "Models early-FTQC single-ancilla Trotter QPE with unitary weight "
+        "concentration and constrained physical-qubit budgets."
+    ),
+)
+_METHOD_REFERENCES: dict[ChemistryQPEMethod, tuple[FTQCReference, ...]] = {
+    ChemistryQPEMethod.SPARSE: (_LOW_RANK_QUBITIZATION_REFERENCE,),
+    ChemistryQPEMethod.SINGLE_FACTORIZATION: (_LOW_RANK_QUBITIZATION_REFERENCE,),
+    ChemistryQPEMethod.DOUBLE_FACTORIZATION: (_LOW_RANK_QUBITIZATION_REFERENCE,),
+    ChemistryQPEMethod.TENSOR_HYPERCONTRACTION: (
+        _LOW_RANK_QUBITIZATION_REFERENCE,
+        _SYMMETRY_SHIFT_TENSOR_REFERENCE,
+    ),
+    ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF: (
+        _LOW_RANK_QUBITIZATION_REFERENCE,
+        _SCDF_REFERENCE,
+        _SYMMETRY_SHIFT_TENSOR_REFERENCE,
+    ),
+    ChemistryQPEMethod.UNITARY_WEIGHT_CONCENTRATION: (_UWC_REFERENCE,),
+}
+
+
+@dataclass(frozen=True)
 class FTQCCostModel:
     """Describe an architecture-level FTQC cost model.
 
@@ -525,6 +633,8 @@ class FTQCResourceEstimate:
         parameters (dict[str, sp.Symbol]): Free symbols appearing in the
             estimate, keyed by display name.
         assumptions (dict[str, str]): Reader-facing notes about model choices.
+        references (tuple[FTQCReference, ...]): Research sources that motivate
+            the estimate's scaling model or resource assumptions.
 
     Example:
         >>> n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
@@ -544,6 +654,7 @@ class FTQCResourceEstimate:
     runtime_seconds: sp.Expr
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
     assumptions: dict[str, str] = field(default_factory=dict)
+    references: tuple[FTQCReference, ...] = ()
 
     def substitute(self, **values: int | float) -> FTQCResourceEstimate:
         """Substitute concrete values into all symbolic fields.
@@ -591,6 +702,7 @@ class FTQCResourceEstimate:
                 name: str(symbol) for name, symbol in self.parameters.items()
             },
             "assumptions": dict(self.assumptions),
+            "references": [reference.to_dict() for reference in self.references],
         }
 
     def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
@@ -662,6 +774,7 @@ class FTQCResourceEstimate:
                 non_clifford_gates,
             ),
             assumptions=assumptions,
+            references=self.references,
         )
 
     def _map_exprs(self, fn: Callable[[sp.Expr], sp.Expr]) -> FTQCResourceEstimate:
@@ -686,6 +799,7 @@ class FTQCResourceEstimate:
             runtime_seconds=fn(self.runtime_seconds),
             parameters=self.parameters,
             assumptions=self.assumptions,
+            references=self.references,
         )
 
 
@@ -821,6 +935,8 @@ class ChemistryQPEModel:
         logical_qubits (sp.Expr | None): Explicit logical-qubit count.
         truncation_error (sp.Expr): Hamiltonian representation error budget.
         description (str): Reader-facing model label.
+        references (tuple[FTQCReference, ...]): Additional model-specific
+            sources, such as molecule-specific resource-estimation papers.
 
     Raises:
         ValueError: If any positive-valued quantity is non-positive or if
@@ -850,6 +966,7 @@ class ChemistryQPEModel:
     logical_qubits: _SympyLike | None = None
     truncation_error: _SympyLike = 0
     description: str = ""
+    references: tuple[FTQCReference, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate model fields after dataclass construction.
@@ -934,6 +1051,7 @@ class ChemistryQPEModel:
                 _as_expr(self.truncation_error, "truncation_error")
             ),
             "description": self.description,
+            "references": [reference.to_dict() for reference in self.references],
         }
 
     def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
@@ -1125,6 +1243,7 @@ def estimate_qubitized_chemistry_qpe(
     second_factor_rank: sp.Expr | int | None = None,
     logical_qubits: sp.Expr | int | None = None,
     cost_model: FTQCCostModel | None = None,
+    references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate qubitized QPE resources for molecular Hamiltonians.
 
@@ -1152,6 +1271,9 @@ def estimate_qubitized_chemistry_qpe(
         cost_model (FTQCCostModel | None): Architecture model used to lift
             logical estimates to physical qubits and runtime. Defaults to a
             symbolic model.
+        references (tuple[FTQCReference, ...]): Additional research sources
+            to attach to the estimate. Method-level default references are
+            attached automatically.
 
     Returns:
         FTQCResourceEstimate: Symbolic FTQC resource estimate.
@@ -1207,6 +1329,10 @@ def estimate_qubitized_chemistry_qpe(
         logical_depth=logical_depth,
         runtime_seconds=runtime_seconds,
         assumptions=assumptions,
+        references=_combine_references(
+            _METHOD_REFERENCES[method_enum],
+            references,
+        ),
     )
 
 
@@ -1274,6 +1400,7 @@ def estimate_qubitized_chemistry_qpe_from_model(
         logical_depth=estimate.logical_depth,
         runtime_seconds=estimate.runtime_seconds,
         assumptions=assumptions,
+        references=_combine_references(estimate.references, model.references),
     )
 
 
@@ -1290,6 +1417,7 @@ def estimate_single_ancilla_trotter_qpe(
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
     cost_model: FTQCCostModel | None = None,
+    references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate early-FTQC single-ancilla Trotter QPE resources.
 
@@ -1319,6 +1447,9 @@ def estimate_single_ancilla_trotter_qpe(
             the Hadamard-test ancilla.
         cost_model (FTQCCostModel | None): Architecture model used to lift
             logical estimates to physical qubits and runtime.
+        references (tuple[FTQCReference, ...]): Additional research sources
+            to attach to the estimate. The early-FTQC unitary-weight
+            concentration source is attached automatically.
 
     Returns:
         FTQCResourceEstimate: Symbolic FTQC resource estimate.
@@ -1387,6 +1518,7 @@ def estimate_single_ancilla_trotter_qpe(
         logical_depth=logical_depth,
         runtime_seconds=runtime_seconds,
         assumptions=assumptions,
+        references=_combine_references((_UWC_REFERENCE,), references),
     )
 
 
@@ -1401,6 +1533,7 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
     cost_model: FTQCCostModel | None = None,
+    references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate single-ancilla Trotter QPE from a Hamiltonian summary.
 
@@ -1420,6 +1553,8 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
             Defaults to ``hamiltonian.n_spin_orbitals + 1``.
         cost_model (FTQCCostModel | None): Architecture model used to lift
             logical estimates to physical qubits and runtime.
+        references (tuple[FTQCReference, ...]): Additional research sources
+            to attach to the estimate.
 
     Returns:
         FTQCResourceEstimate: Symbolic FTQC resource estimate.
@@ -1436,6 +1571,7 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
         rotation_synthesis_t_gates=rotation_synthesis_t_gates,
         logical_qubits=logical_qubits,
         cost_model=cost_model,
+        references=references,
     )
 
 
@@ -1502,6 +1638,7 @@ def _build_estimate(
     logical_depth: sp.Expr,
     runtime_seconds: sp.Expr,
     assumptions: dict[str, str],
+    references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Create an estimate and collect its free symbolic parameters.
 
@@ -1516,6 +1653,8 @@ def _build_estimate(
         logical_depth (sp.Expr): Logical depth proxy.
         runtime_seconds (sp.Expr): Runtime estimate in seconds.
         assumptions (dict[str, str]): Notes about model assumptions.
+        references (tuple[FTQCReference, ...]): Research sources for the
+            scaling model.
 
     Returns:
         FTQCResourceEstimate: Estimate with collected parameters.
@@ -1547,7 +1686,31 @@ def _build_estimate(
         runtime_seconds=sp.simplify(runtime_seconds),
         parameters={str(symbol): symbol for symbol in sorted(symbols, key=str)},
         assumptions=assumptions,
+        references=_combine_references(references),
     )
+
+
+def _combine_references(
+    *groups: tuple[FTQCReference, ...],
+) -> tuple[FTQCReference, ...]:
+    """Merge reference groups while preserving first-seen order.
+
+    Args:
+        *groups (tuple[FTQCReference, ...]): Reference groups to merge.
+
+    Returns:
+        tuple[FTQCReference, ...]: Deduplicated references keyed by
+            ``FTQCReference.key``.
+    """
+    references: list[FTQCReference] = []
+    seen: set[str] = set()
+    for group in groups:
+        for reference in group:
+            if reference.key in seen:
+                continue
+            references.append(reference)
+            seen.add(reference.key)
+    return tuple(references)
 
 
 def _normalize_method(method: str | ChemistryQPEMethod) -> ChemistryQPEMethod:
