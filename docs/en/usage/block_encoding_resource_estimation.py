@@ -31,12 +31,17 @@
 # %%
 import sympy as sp
 
+import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     BlockEncodingResource,
+    ChemistryQPEMethod,
+    ChemistryQPEModel,
     FTQCCostModel,
     FTQCResourceQuantity,
+    block_encoding_from_chemistry_model,
     compare_ftqc_resource_estimates,
     estimate_qubitized_qpe_from_block_encoding,
+    summarize_pauli_hamiltonian,
 )
 
 # %% [markdown]
@@ -147,6 +152,44 @@ assert sp.simplify(comparison[1].ratio - sp.Rational(28, 47)) == 0
 assert sp.simplify(comparison[2].ratio - sp.Rational(25, 23)) == 0
 
 # %% [markdown]
+# ## Bridge from Chemistry Models
+#
+# Chemistry estimators often start from a Hamiltonian summary and a
+# representation-level walk cost. The bridge below turns that model into the
+# same block-encoding contract, so reports can compare chemistry-specific and
+# block-encoding views without duplicating inputs.
+
+# %%
+toy_chemistry = summarize_pauli_hamiltonian(
+    2 * qm_o.Z(0) + 3 * qm_o.X(1),
+    n_spin_orbitals=8,
+    source="toy_chemistry",
+)
+chemistry_model = ChemistryQPEModel(
+    hamiltonian=toy_chemistry.with_lambda_scale(sp.Rational(1, 2)),
+    method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+    walk_cost_toffoli=100,
+    second_factor_rank=4,
+    description="compressed chemistry toy",
+)
+
+chemistry_block = block_encoding_from_chemistry_model(chemistry_model)
+chemistry_estimate = estimate_qubitized_qpe_from_block_encoding(
+    chemistry_block,
+    precision=1,
+)
+
+print(chemistry_block.to_dict())
+
+assert chemistry_model.logical_qubit_count == 16
+assert chemistry_block.logical_qubits == 16
+assert sp.Abs(chemistry_estimate.qpe_iterations - 2.5) < sp.Float("1e-12")
+assert sp.Abs(chemistry_estimate.toffoli_gates - 250) < sp.Float("1e-12")
+assert any(
+    reference.key == "arXiv:2403.03502" for reference in chemistry_block.references
+)
+
+# %% [markdown]
 # ## Notes
 #
 # :::{note}
@@ -164,5 +207,7 @@ assert sp.simplify(comparison[2].ratio - sp.Rational(25, 23)) == 0
 #   reflection, ancilla, and QPE readout costs.
 # - Qubitized QPE composes the block-encoding walk cost with
 #   normalization-over-precision iterations.
+# - Chemistry QPE models can be converted into the same block-encoding
+#   contract for cross-view comparisons.
 # - Representation trade-offs can reduce total Toffoli count even when one
 #   subroutine becomes more expensive.

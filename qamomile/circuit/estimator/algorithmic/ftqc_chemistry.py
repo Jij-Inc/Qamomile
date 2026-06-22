@@ -154,6 +154,24 @@ _METHOD_REFERENCES: dict[ChemistryQPEMethod, tuple[FTQCReference, ...]] = {
 }
 
 
+def references_for_chemistry_qpe_method(
+    method: str | ChemistryQPEMethod,
+) -> tuple[FTQCReference, ...]:
+    """Return default research references for a chemistry QPE method.
+
+    Args:
+        method (str | ChemistryQPEMethod): Chemistry QPE method to inspect.
+
+    Returns:
+        tuple[FTQCReference, ...]: Default references associated with the
+            method's symbolic resource model.
+
+    Raises:
+        ValueError: If ``method`` is not a known chemistry QPE method.
+    """
+    return _METHOD_REFERENCES[_normalize_method(method)]
+
+
 @dataclass(frozen=True)
 class FTQCCostModel:
     """Describe an architecture-level FTQC cost model.
@@ -1020,6 +1038,27 @@ class ChemistryQPEModel:
             return self.hamiltonian.n_pauli_terms
         return None
 
+    @property
+    def logical_qubit_count(self) -> sp.Expr:
+        """Return the logical-qubit model used by chemistry QPE estimates.
+
+        Returns:
+            sp.Expr: Explicit logical-qubit count when supplied, otherwise
+            the representation-specific default.
+        """
+        if self.logical_qubits is not None:
+            return _as_expr(self.logical_qubits, "logical_qubits")
+        return _default_logical_qubits(
+            self.normalized_method,
+            self.hamiltonian.n_spin_orbitals,
+            sparsity=self.effective_sparsity,
+            second_factor_rank=(
+                None
+                if self.second_factor_rank is None
+                else _as_expr(self.second_factor_rank, "second_factor_rank")
+            ),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the model to a JSON-friendly dictionary.
 
@@ -1047,6 +1086,7 @@ class ChemistryQPEModel:
                 if self.logical_qubits is None
                 else str(_as_expr(self.logical_qubits, "logical_qubits"))
             ),
+            "logical_qubit_count": str(self.logical_qubit_count),
             "truncation_error": str(
                 _as_expr(self.truncation_error, "truncation_error")
             ),

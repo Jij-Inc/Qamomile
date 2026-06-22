@@ -28,12 +28,17 @@
 # %%
 import sympy as sp
 
+import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     BlockEncodingResource,
+    ChemistryQPEMethod,
+    ChemistryQPEModel,
     FTQCCostModel,
     FTQCResourceQuantity,
+    block_encoding_from_chemistry_model,
     compare_ftqc_resource_estimates,
     estimate_qubitized_qpe_from_block_encoding,
+    summarize_pauli_hamiltonian,
 )
 
 # %% [markdown]
@@ -137,6 +142,41 @@ assert sp.simplify(comparison[1].ratio - sp.Rational(28, 47)) == 0
 assert sp.simplify(comparison[2].ratio - sp.Rational(25, 23)) == 0
 
 # %% [markdown]
+# ## Chemistry modelからのbridge
+#
+# chemistry estimatorは、Hamiltonian summaryと表現レベルのwalk costから始まることがよくあります。下のbridgeは、そのmodelを同じblock-encoding contractへ変換します。これにより、chemistry-specificなviewとblock-encoding viewを、入力を重複させずに比較できます。
+
+# %%
+toy_chemistry = summarize_pauli_hamiltonian(
+    2 * qm_o.Z(0) + 3 * qm_o.X(1),
+    n_spin_orbitals=8,
+    source="toy_chemistry",
+)
+chemistry_model = ChemistryQPEModel(
+    hamiltonian=toy_chemistry.with_lambda_scale(sp.Rational(1, 2)),
+    method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+    walk_cost_toffoli=100,
+    second_factor_rank=4,
+    description="compressed chemistry toy",
+)
+
+chemistry_block = block_encoding_from_chemistry_model(chemistry_model)
+chemistry_estimate = estimate_qubitized_qpe_from_block_encoding(
+    chemistry_block,
+    precision=1,
+)
+
+print(chemistry_block.to_dict())
+
+assert chemistry_model.logical_qubit_count == 16
+assert chemistry_block.logical_qubits == 16
+assert sp.Abs(chemistry_estimate.qpe_iterations - 2.5) < sp.Float("1e-12")
+assert sp.Abs(chemistry_estimate.toffoli_gates - 250) < sp.Float("1e-12")
+assert any(
+    reference.key == "arXiv:2403.03502" for reference in chemistry_block.references
+)
+
+# %% [markdown]
 # ## Notes
 #
 # :::{note}
@@ -150,4 +190,5 @@ assert sp.simplify(comparison[2].ratio - sp.Rational(25, 23)) == 0
 #
 # - Block-encoding estimateでは、normalization、PREPARE、SELECT、reflection、ancilla、QPE readout costを分けて扱います。
 # - Qubitized QPEは、block-encodingのwalk costとnormalization-over-precision iterationを合成します。
+# - Chemistry QPE modelは同じblock-encoding contractへ変換でき、複数のviewを比較できます。
 # - あるsubroutineが高価になっても、representation trade-offによって総Toffoli countが下がる場合があります。

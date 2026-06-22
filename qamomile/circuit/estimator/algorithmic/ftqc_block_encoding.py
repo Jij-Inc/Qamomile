@@ -8,9 +8,11 @@ from typing import Any
 import sympy as sp
 
 from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
+    ChemistryQPEModel,
     FTQCCostModel,
     FTQCReference,
     FTQCResourceEstimate,
+    references_for_chemistry_qpe_method,
 )
 from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
     FTQCResourceQuantity,
@@ -287,6 +289,74 @@ def estimate_qubitized_qpe_from_block_encoding(
         ),
         assumptions=assumptions,
         references=references_for_estimate,
+    )
+
+
+def block_encoding_from_chemistry_model(
+    model: ChemistryQPEModel,
+    *,
+    prepare_cost_toffoli: _SympyLike = 0,
+    select_cost_toffoli: _SympyLike | None = None,
+    reflection_cost_toffoli: _SympyLike = 0,
+    ancilla_qubits: _SympyLike | None = None,
+    name: str | None = None,
+    references: tuple[FTQCReference, ...] = (),
+) -> BlockEncodingResource:
+    """Build a block-encoding resource from a chemistry QPE model.
+
+    Args:
+        model (ChemistryQPEModel): Chemistry QPE model to translate into a
+            block-encoding contract.
+        prepare_cost_toffoli (sp.Expr | int | float): Toffoli cost for one
+            PREPARE call. Defaults to zero, preserving the model's existing
+            aggregate walk cost as SELECT cost.
+        select_cost_toffoli (sp.Expr | int | float | None): Toffoli cost for
+            SELECT. Defaults to ``model.walk_cost_toffoli``.
+        reflection_cost_toffoli (sp.Expr | int | float): Toffoli cost for the
+            qubitization reflection. Defaults to zero.
+        ancilla_qubits (sp.Expr | int | float | None): Ancilla qubits used by
+            the block encoding. Defaults to ``model.logical_qubit_count -
+            model.hamiltonian.n_spin_orbitals``.
+        name (str | None): Optional block-encoding label. Defaults to
+            ``model.description`` when set, otherwise the method value.
+        references (tuple[FTQCReference, ...]): Additional references to carry
+            on the block-encoding model.
+
+    Returns:
+        BlockEncodingResource: Block-encoding contract derived from the
+            chemistry model.
+
+    Raises:
+        TypeError: If ``model`` is not a ``ChemistryQPEModel``.
+        ValueError: If any derived or supplied resource quantity is invalid.
+    """
+    if not isinstance(model, ChemistryQPEModel):
+        raise TypeError("model must be a ChemistryQPEModel instance.")
+
+    select_cost = (
+        _as_expr(model.walk_cost_toffoli, "walk_cost_toffoli")
+        if select_cost_toffoli is None
+        else _as_expr(select_cost_toffoli, "select_cost_toffoli")
+    )
+    ancilla = (
+        sp.simplify(model.logical_qubit_count - model.hamiltonian.n_spin_orbitals)
+        if ancilla_qubits is None
+        else _as_expr(ancilla_qubits, "ancilla_qubits")
+    )
+    label = name or model.description or model.normalized_method.value
+    return BlockEncodingResource(
+        system_qubits=model.hamiltonian.n_spin_orbitals,
+        normalization=model.hamiltonian.lambda_norm,
+        prepare_cost_toffoli=prepare_cost_toffoli,
+        select_cost_toffoli=select_cost,
+        reflection_cost_toffoli=reflection_cost_toffoli,
+        ancilla_qubits=ancilla,
+        name=label,
+        references=_combine_references(
+            references_for_chemistry_qpe_method(model.normalized_method),
+            model.references,
+            references,
+        ),
     )
 
 

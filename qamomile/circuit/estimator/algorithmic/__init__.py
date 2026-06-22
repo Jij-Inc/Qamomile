@@ -13,6 +13,7 @@ without needing the actual circuit implementation.
 
 from qamomile.circuit.estimator.algorithmic.ftqc_block_encoding import (
     BlockEncodingResource,
+    block_encoding_from_chemistry_model,
     estimate_qubitized_qpe_from_block_encoding,
 )
 from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
@@ -28,6 +29,7 @@ from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     estimate_single_ancilla_trotter_qpe,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     hamiltonian_from_openfermion_qubit_operator,
+    references_for_chemistry_qpe_method,
     summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
@@ -63,6 +65,7 @@ __all__ = [
     "PauliHamiltonianResource",
     "SurfaceCodeCostModel",
     "SupportsFTQCResourceValues",
+    "block_encoding_from_chemistry_model",
     "compare_ftqc_resource_estimates",
     "describe_ftqc_resource_quantity",
     "estimate_qaoa",
@@ -73,6 +76,7 @@ __all__ = [
     "estimate_single_ancilla_trotter_qpe",
     "estimate_single_ancilla_trotter_qpe_from_hamiltonian",
     "hamiltonian_from_openfermion_qubit_operator",
+    "references_for_chemistry_qpe_method",
     "iter_ftqc_resource_quantity_specs",
     "summarize_openfermion_qubit_operator",
     "summarize_pauli_hamiltonian",

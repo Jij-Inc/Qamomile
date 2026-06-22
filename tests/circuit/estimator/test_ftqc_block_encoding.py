@@ -5,12 +5,17 @@ from __future__ import annotations
 import pytest
 import sympy as sp
 
+import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     BlockEncodingResource,
+    ChemistryQPEMethod,
+    ChemistryQPEModel,
     FTQCCostModel,
     FTQCReference,
     FTQCResourceQuantity,
+    block_encoding_from_chemistry_model,
     estimate_qubitized_qpe_from_block_encoding,
+    summarize_pauli_hamiltonian,
 )
 
 
@@ -106,6 +111,70 @@ def test_qubitized_qpe_from_block_encoding_preserves_custom_references():
     assert keys.count("arXiv:1610.06546") == 1
     assert keys.count("internal:block-cost-v1") == 1
     assert estimate.to_dict()["references"][-1]["key"] == "internal:block-cost-v1"
+
+
+def test_block_encoding_from_chemistry_model_preserves_qpe_inputs():
+    """Chemistry models translate into block-encoding contracts for QPE."""
+    summary = summarize_pauli_hamiltonian(
+        2 * qm_o.Z(0) + 3 * qm_o.X(1),
+        n_spin_orbitals=8,
+        source="toy_chemistry",
+    )
+    model = ChemistryQPEModel(
+        hamiltonian=summary.with_lambda_scale(sp.Rational(1, 2)),
+        method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+        walk_cost_toffoli=100,
+        second_factor_rank=4,
+        description="compressed chemistry toy",
+    )
+
+    block = block_encoding_from_chemistry_model(model)
+    estimate = estimate_qubitized_qpe_from_block_encoding(
+        block,
+        precision=1,
+    )
+
+    assert model.logical_qubit_count == 16
+    assert block.name == "compressed chemistry toy"
+    assert sp.Abs(block.resource_values()[FTQCResourceQuantity.LAMBDA_NORM] - 2.5) < (
+        sp.Float("1e-12")
+    )
+    assert block._select_cost_toffoli == 100
+    assert block._ancilla_qubits == 8
+    assert sp.Abs(estimate.qpe_iterations - 2.5) < sp.Float("1e-12")
+    assert sp.Abs(estimate.toffoli_gates - 250) < sp.Float("1e-12")
+    assert any(reference.key == "arXiv:2403.03502" for reference in block.references)
+
+
+def test_block_encoding_from_chemistry_model_accepts_subroutine_split():
+    """Chemistry walk costs can be re-expressed as PREPARE/SELECT/reflection."""
+    summary = summarize_pauli_hamiltonian(
+        qm_o.Z(0) + qm_o.Z(1),
+        n_spin_orbitals=4,
+    )
+    model = ChemistryQPEModel(
+        hamiltonian=summary,
+        method=ChemistryQPEMethod.TENSOR_HYPERCONTRACTION,
+        walk_cost_toffoli=100,
+    )
+
+    block = block_encoding_from_chemistry_model(
+        model,
+        prepare_cost_toffoli=10,
+        select_cost_toffoli=70,
+        reflection_cost_toffoli=5,
+        name="split_walk",
+    )
+
+    assert block.name == "split_walk"
+    assert block.logical_qubits == 4
+    assert block.walk_cost_toffoli == 95
+
+
+def test_block_encoding_from_chemistry_model_rejects_non_model():
+    """The chemistry bridge fails early when called with unrelated objects."""
+    with pytest.raises(TypeError, match="ChemistryQPEModel"):
+        block_encoding_from_chemistry_model(object())
 
 
 @pytest.mark.parametrize(
