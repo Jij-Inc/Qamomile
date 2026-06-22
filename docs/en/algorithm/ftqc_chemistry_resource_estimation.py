@@ -35,13 +35,17 @@ from openfermion import QubitOperator
 
 import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
-    ChemistryQPEModel,
     ChemistryQPEMethod,
-    FTQCCostModel,
+    ChemistryQPEModel,
+    FTQCResourceQuantity,
+    SurfaceCodeDistanceBudget,
+    block_encoding_from_chemistry_model,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
+    estimate_qubitized_qpe_from_block_encoding,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     iter_ftqc_resource_quantity_specs,
+    summarize_ftqc_resource_comparison,
     summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
@@ -84,12 +88,25 @@ from qamomile.circuit.estimator.algorithmic import (
 n_spin_orbitals = 40
 precision = sp.Float("0.0016")  # about chemical accuracy in Hartree
 
-cost_model = FTQCCostModel(
-    physical_qubits_per_logical=800,
-    logical_cycle_time_seconds=sp.Float("1e-6"),
-    factory_qubits=20000,
-    toffoli_throughput_per_second=sp.Float("2e6"),
+distance_budget = SurfaceCodeDistanceBudget(
+    physical_error_rate=sp.Float("1e-3"),
+    threshold_error_rate=sp.Float("1e-2"),
+    target_logical_failure_probability=sp.Float("1e-9"),
+    logical_operation_budget=1000,
 )
+architecture = distance_budget.to_surface_code_cost_model(
+    physical_cycle_time_seconds=sp.Float("5e-8"),
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=1,
+    factory_count=4,
+    physical_qubits_per_factory=5000,
+    factory_cycles_per_toffoli=2,
+)
+cost_model = architecture.to_cost_model()
+
+assert distance_budget.code_distance == 21
+assert cost_model.physical_qubits_per_logical == 882
+assert cost_model.factory_qubits == 20000
 
 # %% [markdown]
 # ## Resource Quantities
@@ -106,12 +123,15 @@ quantity_catalog = [
     if spec.quantity.value
     in {
         "lambda_norm",
+        "target_precision",
         "qpe_iterations",
         "toffoli_gates",
         "t_gates",
         "logical_qubits",
         "physical_qubits",
         "runtime_seconds",
+        "logical_error_rate",
+        "code_distance",
     }
 ]
 
@@ -120,12 +140,15 @@ for row in quantity_catalog:
 
 assert {row["quantity"] for row in quantity_catalog} == {
     "lambda_norm",
+    "target_precision",
     "qpe_iterations",
     "toffoli_gates",
     "t_gates",
     "logical_qubits",
     "physical_qubits",
     "runtime_seconds",
+    "logical_error_rate",
+    "code_distance",
 }
 
 # %% [markdown]
@@ -248,6 +271,40 @@ assert qubitized_savings[0].quantity.value == "qpe_iterations"
 assert qubitized_savings[0].ratio == sp.Float("0.5")
 assert qubitized_savings[1].ratio == sp.Float("0.55")
 
+qubitized_summary = summarize_ftqc_resource_comparison(
+    thc,
+    scdf,
+    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+)
+
+assert qubitized_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+assert qubitized_summary.larger[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+
+# %% [markdown]
+# The same chemistry model can also be converted into a block-encoding
+# contract. This is the point where a future loader implementation can split
+# cost into PREPARE, SELECT, reflection, and workspace pieces without changing
+# the chemistry summary or the compiler IR.
+
+# %%
+scdf_block = block_encoding_from_chemistry_model(
+    scdf_model,
+    prepare_cost_toffoli=sp.Integer(200),
+    reflection_cost_toffoli=sp.Integer(50),
+    name="scdf_block_contract",
+)
+scdf_block_estimate = estimate_qubitized_qpe_from_block_encoding(
+    scdf_block,
+    precision=precision,
+    qpe_register_qubits=12,
+    cost_model=cost_model,
+)
+
+print(scdf_block.to_dict())
+assert scdf_block.walk_cost_toffoli == scdf_model.walk_cost_toffoli + 450
+assert scdf_block_estimate.target_precision == precision
+assert scdf_block_estimate.logical_qubits == scdf_block.logical_qubits + 12
+
 # %% [markdown]
 # ## Early-FTQC Trotter QPE
 #
@@ -343,5 +400,9 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 #   physical qubits, and runtime proxies.
 # - Compared qubitized QPE representations without lowering the Qamomile IR
 #   into backend-specific chemistry loading circuits.
+# - Selected surface-code distance from an explicit logical failure budget
+#   before lifting logical resources to physical resources.
+# - Converted a chemistry QPE model into a block-encoding contract so PREPARE,
+#   SELECT, reflection, and workspace costs can be reviewed separately.
 # - Demonstrated how a unitary-weight concentration factor can be modeled as a
 #   cost-driver reduction for early-FTQC single-ancilla Trotter QPE.
