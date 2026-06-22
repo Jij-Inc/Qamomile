@@ -5,11 +5,16 @@ from __future__ import annotations
 import pytest
 import sympy as sp
 
+import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
+    ChemistryQPEModel,
     FTQCCostModel,
     estimate_qubitized_chemistry_qpe,
+    estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe,
+    estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    summarize_pauli_hamiltonian,
 )
 
 
@@ -182,4 +187,83 @@ def test_single_ancilla_trotter_qpe_rejects_negative_reduction_factor():
             trotter_steps_per_sample=1,
             samples=1,
             unitary_weight_factor=-1,
+        )
+
+
+def test_summarize_pauli_hamiltonian_extracts_lcu_quantities():
+    """Hamiltonian summaries expose term count, locality, constant, and lambda."""
+    hamiltonian = 0.5 * qm_o.Z(0) + (1.25 + 0.75j) * qm_o.X(1) * qm_o.Y(2) + 3
+
+    summary = summarize_pauli_hamiltonian(hamiltonian, source="toy")
+    with_constant = summarize_pauli_hamiltonian(
+        hamiltonian,
+        include_constant=True,
+    )
+
+    assert summary.source == "toy"
+    assert summary.n_spin_orbitals == 3
+    assert summary.n_pauli_terms == 2
+    assert summary.max_locality == 2
+    assert sp.simplify(summary.constant - 3) == 0
+    expected_lambda = sp.Float("0.5") + sp.sqrt(sp.Float("2.125"))
+    assert sp.Abs(summary.lambda_norm - expected_lambda) < sp.Float("1e-12")
+    assert sp.Abs(with_constant.lambda_norm - summary.lambda_norm - 3) < sp.Float(
+        "1e-12"
+    )
+
+
+def test_summarize_pauli_hamiltonian_rejects_non_hamiltonian_input():
+    """The summary helper fails early on non-Qamomile Hamiltonian objects."""
+    with pytest.raises(TypeError, match="qamomile.observable.Hamiltonian"):
+        summarize_pauli_hamiltonian(object())
+
+
+def test_qubitized_qpe_from_model_uses_hamiltonian_metadata():
+    """Model-driven QPE estimates reuse Hamiltonian lambda and sparse term count."""
+    summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    model = ChemistryQPEModel(
+        hamiltonian=summary.with_lambda_scale(sp.Rational(1, 2), source="shifted"),
+        method=ChemistryQPEMethod.SPARSE,
+        walk_cost_toffoli=11,
+        truncation_error=sp.Float("1e-5"),
+        description="toy sparse model",
+    )
+
+    estimate = estimate_qubitized_chemistry_qpe_from_model(model, precision=1)
+
+    assert model.effective_sparsity == 2
+    assert estimate.logical_qubits == 2 + sp.sqrt(2)
+    assert sp.Abs(estimate.qpe_iterations - sp.Rational(5, 2)) < sp.Float("1e-12")
+    assert sp.Abs(estimate.toffoli_gates - sp.Rational(55, 2)) < sp.Float("1e-12")
+    assert estimate.assumptions["hamiltonian_source"] == "shifted"
+    assert sp.sympify(estimate.assumptions["truncation_error"]) == sp.Float("1e-5")
+
+
+def test_single_ancilla_trotter_qpe_from_hamiltonian_summary():
+    """Trotter QPE estimates can be driven directly by a Hamiltonian summary."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0) + 2 * qm_o.X(1))
+
+    estimate = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=3,
+        rotation_synthesis_t_gates=5,
+    )
+
+    assert estimate.logical_qubits == 3
+    assert sp.simplify(estimate.qpe_iterations - 3) == 0
+    assert sp.simplify(estimate.logical_depth - 36) == 0
+    assert sp.simplify(estimate.t_gates - 180) == 0
+
+
+def test_chemistry_qpe_model_rejects_negative_truncation_error():
+    """Representation error budgets cannot be negative."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0))
+
+    with pytest.raises(ValueError, match="truncation_error"):
+        ChemistryQPEModel(
+            hamiltonian=summary,
+            walk_cost_toffoli=1,
+            truncation_error=-1,
         )

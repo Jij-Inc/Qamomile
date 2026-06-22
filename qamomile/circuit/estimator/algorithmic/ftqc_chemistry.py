@@ -10,6 +10,7 @@ from typing import Any
 import sympy as sp
 
 _SympyLike = sp.Expr | int | float
+_CoefficientLike = _SympyLike | complex
 
 
 class ChemistryQPEMethod(enum.StrEnum):
@@ -230,6 +231,299 @@ class FTQCResourceEstimate:
         )
 
 
+@dataclass(frozen=True)
+class PauliHamiltonianResource:
+    """Summarize a Pauli-LCU Hamiltonian for FTQC resource estimates.
+
+    Attributes:
+        n_spin_orbitals (sp.Expr): Number of spin orbitals or qubits in the
+            encoded active-space Hamiltonian.
+        n_pauli_terms (sp.Expr): Number of non-identity Pauli terms in the
+            Hamiltonian representation.
+        lambda_norm (sp.Expr): Sum of absolute non-identity Pauli
+            coefficients used as the LCU normalization proxy.
+        max_locality (sp.Expr): Maximum number of non-identity Pauli factors
+            in any term.
+        constant (sp.Expr): Constant energy shift stored on the Hamiltonian.
+        constant_included (bool): Whether ``constant`` was included in
+            ``lambda_norm``.
+        source (str): Human-readable source label.
+
+    Raises:
+        ValueError: If a positive-valued quantity is non-positive or if a
+            nonnegative-valued quantity is negative.
+
+    Example:
+        >>> import qamomile.observable as qm_o
+        >>> hamiltonian = 0.5 * qm_o.Z(0) + 0.25 * qm_o.X(1)
+        >>> summary = summarize_pauli_hamiltonian(hamiltonian)
+        >>> summary.n_pauli_terms
+        2
+    """
+
+    n_spin_orbitals: sp.Expr
+    n_pauli_terms: sp.Expr
+    lambda_norm: sp.Expr
+    max_locality: sp.Expr
+    constant: sp.Expr = sp.Integer(0)
+    constant_included: bool = False
+    source: str = "pauli_lcu"
+
+    def __post_init__(self) -> None:
+        """Validate summary fields after dataclass construction.
+
+        Raises:
+            ValueError: If a positive-valued quantity is non-positive or if a
+                nonnegative-valued quantity is negative.
+        """
+        _validate_positive(self.n_spin_orbitals, "n_spin_orbitals")
+        _validate_nonnegative(self.n_pauli_terms, "n_pauli_terms")
+        _validate_nonnegative(self.lambda_norm, "lambda_norm")
+        _validate_nonnegative(self.max_locality, "max_locality")
+        _validate_nonnegative(sp.Abs(self.constant), "constant")
+
+    def with_lambda_scale(
+        self,
+        scale: _SympyLike,
+        *,
+        source: str | None = None,
+    ) -> PauliHamiltonianResource:
+        """Return a copy with the Hamiltonian normalization rescaled.
+
+        Args:
+            scale (sp.Expr | int | float): Multiplicative scale applied to
+                ``lambda_norm``. Values below one model transformations that
+                reduce the effective Hamiltonian weight.
+            source (str | None): Optional replacement source label. Defaults
+                to preserving ``self.source``.
+
+        Returns:
+            PauliHamiltonianResource: New summary with rescaled
+                ``lambda_norm``.
+
+        Raises:
+            ValueError: If ``scale`` is negative.
+        """
+        scale_expr = _as_expr(scale, "scale")
+        _validate_nonnegative(scale_expr, "scale")
+        return PauliHamiltonianResource(
+            n_spin_orbitals=self.n_spin_orbitals,
+            n_pauli_terms=self.n_pauli_terms,
+            lambda_norm=sp.simplify(self.lambda_norm * scale_expr),
+            max_locality=self.max_locality,
+            constant=self.constant,
+            constant_included=self.constant_included,
+            source=self.source if source is None else source,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the Hamiltonian summary to a JSON-friendly dictionary.
+
+        Returns:
+            dict[str, Any]: String-valued resource summary.
+        """
+        return {
+            "n_spin_orbitals": str(self.n_spin_orbitals),
+            "n_pauli_terms": str(self.n_pauli_terms),
+            "lambda_norm": str(self.lambda_norm),
+            "max_locality": str(self.max_locality),
+            "constant": str(self.constant),
+            "constant_included": self.constant_included,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class ChemistryQPEModel:
+    """Describe a concrete chemistry representation for QPE estimates.
+
+    Attributes:
+        hamiltonian (PauliHamiltonianResource): Pauli-LCU Hamiltonian summary.
+        method (ChemistryQPEMethod): QPE representation or optimization
+            strategy used to choose default logical-qubit scaling.
+        walk_cost_toffoli (sp.Expr): Toffoli cost for one qubitized walk.
+        sparsity (sp.Expr | None): Sparse-method nonzero term count. Defaults
+            to ``hamiltonian.n_pauli_terms`` when omitted.
+        second_factor_rank (sp.Expr | None): Average second factorization
+            rank for double-factorized methods.
+        logical_qubits (sp.Expr | None): Explicit logical-qubit count.
+        truncation_error (sp.Expr): Hamiltonian representation error budget.
+        description (str): Reader-facing model label.
+
+    Raises:
+        ValueError: If any positive-valued quantity is non-positive or if
+            ``truncation_error`` is negative.
+
+    Example:
+        >>> summary = PauliHamiltonianResource(
+        ...     n_spin_orbitals=4,
+        ...     n_pauli_terms=10,
+        ...     lambda_norm=20,
+        ...     max_locality=2,
+        ... )
+        >>> model = ChemistryQPEModel(
+        ...     summary,
+        ...     walk_cost_toffoli=100,
+        ...     method=ChemistryQPEMethod.SPARSE,
+        ... )
+        >>> model.effective_sparsity
+        10
+    """
+
+    hamiltonian: PauliHamiltonianResource
+    walk_cost_toffoli: _SympyLike
+    method: str | ChemistryQPEMethod = ChemistryQPEMethod.DOUBLE_FACTORIZATION
+    sparsity: _SympyLike | None = None
+    second_factor_rank: _SympyLike | None = None
+    logical_qubits: _SympyLike | None = None
+    truncation_error: _SympyLike = 0
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate model fields after dataclass construction.
+
+        Raises:
+            ValueError: If any positive-valued quantity is non-positive or if
+                ``truncation_error`` is negative.
+        """
+        _validate_positive(
+            _as_expr(self.walk_cost_toffoli, "walk_cost_toffoli"),
+            "walk_cost_toffoli",
+        )
+        if self.sparsity is not None:
+            _validate_positive(_as_expr(self.sparsity, "sparsity"), "sparsity")
+        if self.second_factor_rank is not None:
+            _validate_positive(
+                _as_expr(self.second_factor_rank, "second_factor_rank"),
+                "second_factor_rank",
+            )
+        if self.logical_qubits is not None:
+            _validate_positive(
+                _as_expr(self.logical_qubits, "logical_qubits"),
+                "logical_qubits",
+            )
+        _validate_nonnegative(
+            _as_expr(self.truncation_error, "truncation_error"),
+            "truncation_error",
+        )
+        _normalize_method(self.method)
+
+    @property
+    def normalized_method(self) -> ChemistryQPEMethod:
+        """Return the normalized QPE method.
+
+        Returns:
+            ChemistryQPEMethod: Normalized finite-set method.
+        """
+        return _normalize_method(self.method)
+
+    @property
+    def effective_sparsity(self) -> sp.Expr | None:
+        """Return sparse-method term count with a Hamiltonian fallback.
+
+        Returns:
+            sp.Expr | None: Explicit sparsity, Hamiltonian term count for the
+                sparse method, or None for non-sparse methods.
+        """
+        if self.sparsity is not None:
+            return _as_expr(self.sparsity, "sparsity")
+        if self.normalized_method == ChemistryQPEMethod.SPARSE:
+            return self.hamiltonian.n_pauli_terms
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the model to a JSON-friendly dictionary.
+
+        Returns:
+            dict[str, Any]: String-valued model metadata.
+        """
+        return {
+            "hamiltonian": self.hamiltonian.to_dict(),
+            "method": self.normalized_method.value,
+            "walk_cost_toffoli": str(
+                _as_expr(self.walk_cost_toffoli, "walk_cost_toffoli")
+            ),
+            "sparsity": (
+                None
+                if self.effective_sparsity is None
+                else str(self.effective_sparsity)
+            ),
+            "second_factor_rank": (
+                None
+                if self.second_factor_rank is None
+                else str(_as_expr(self.second_factor_rank, "second_factor_rank"))
+            ),
+            "logical_qubits": (
+                None
+                if self.logical_qubits is None
+                else str(_as_expr(self.logical_qubits, "logical_qubits"))
+            ),
+            "truncation_error": str(
+                _as_expr(self.truncation_error, "truncation_error")
+            ),
+            "description": self.description,
+        }
+
+
+def summarize_pauli_hamiltonian(
+    hamiltonian: Any,
+    *,
+    n_spin_orbitals: _SympyLike | None = None,
+    include_constant: bool = False,
+    source: str = "pauli_lcu",
+) -> PauliHamiltonianResource:
+    """Summarize a Qamomile Pauli Hamiltonian for FTQC estimates.
+
+    Args:
+        hamiltonian (Any): ``qamomile.observable.Hamiltonian`` instance to
+            summarize.
+        n_spin_orbitals (sp.Expr | int | float | None): Override for the
+            encoded active-space size. Defaults to ``hamiltonian.num_qubits``.
+        include_constant (bool): Whether to include the Hamiltonian constant
+            term in ``lambda_norm``. Defaults to False, modeling the constant
+            as a classical energy shift.
+        source (str): Human-readable source label for the summary.
+
+    Returns:
+        PauliHamiltonianResource: Hamiltonian summary containing term count,
+            lambda norm, constant, and max locality.
+
+    Raises:
+        TypeError: If ``hamiltonian`` is not a Qamomile Hamiltonian.
+        ValueError: If the orbital count or derived norm is invalid.
+    """
+    import qamomile.observable as qm_o
+
+    if not isinstance(hamiltonian, qm_o.Hamiltonian):
+        raise TypeError(
+            "hamiltonian must be a qamomile.observable.Hamiltonian instance."
+        )
+
+    n_expr = (
+        _as_expr(hamiltonian.num_qubits, "n_spin_orbitals")
+        if n_spin_orbitals is None
+        else _as_expr(n_spin_orbitals, "n_spin_orbitals")
+    )
+    lambda_norm = sp.Integer(0)
+    max_locality = 0
+    for operators, coeff in hamiltonian:
+        lambda_norm += _abs_as_expr(coeff)
+        max_locality = max(max_locality, len(operators))
+    constant = _as_expr(hamiltonian.constant, "constant")
+    if include_constant:
+        lambda_norm += _abs_as_expr(hamiltonian.constant)
+
+    return PauliHamiltonianResource(
+        n_spin_orbitals=n_expr,
+        n_pauli_terms=sp.Integer(len(hamiltonian)),
+        lambda_norm=sp.simplify(lambda_norm),
+        max_locality=sp.Integer(max_locality),
+        constant=constant,
+        constant_included=include_constant,
+        source=source,
+    )
+
+
 def estimate_qubitized_chemistry_qpe(
     n_spin_orbitals: sp.Expr | int,
     lambda_norm: _SympyLike,
@@ -329,6 +623,73 @@ def estimate_qubitized_chemistry_qpe(
         qpe_iterations=qpe_iterations,
         logical_depth=logical_depth,
         runtime_seconds=runtime_seconds,
+        assumptions=assumptions,
+    )
+
+
+def estimate_qubitized_chemistry_qpe_from_model(
+    model: ChemistryQPEModel,
+    precision: _SympyLike,
+    *,
+    cost_model: FTQCCostModel | None = None,
+) -> FTQCResourceEstimate:
+    """Estimate qubitized QPE resources from a chemistry model object.
+
+    Args:
+        model (ChemistryQPEModel): Hamiltonian representation model carrying
+            lambda norm, sparsity/rank metadata, and walk cost.
+        precision (sp.Expr | int | float): Target phase-estimation energy
+            precision.
+        cost_model (FTQCCostModel | None): Architecture model used to lift
+            logical estimates to physical qubits and runtime. Defaults to a
+            symbolic model.
+
+    Returns:
+        FTQCResourceEstimate: Symbolic FTQC resource estimate.
+
+    Raises:
+        ValueError: If the model or precision fields are invalid.
+    """
+    estimate = estimate_qubitized_chemistry_qpe(
+        n_spin_orbitals=model.hamiltonian.n_spin_orbitals,
+        lambda_norm=model.hamiltonian.lambda_norm,
+        precision=precision,
+        walk_cost_toffoli=_as_expr(model.walk_cost_toffoli, "walk_cost_toffoli"),
+        method=model.normalized_method,
+        sparsity=model.effective_sparsity,
+        second_factor_rank=(
+            None
+            if model.second_factor_rank is None
+            else _as_expr(model.second_factor_rank, "second_factor_rank")
+        ),
+        logical_qubits=(
+            None
+            if model.logical_qubits is None
+            else _as_expr(model.logical_qubits, "logical_qubits")
+        ),
+        cost_model=cost_model,
+    )
+    assumptions = dict(estimate.assumptions)
+    assumptions.update(
+        {
+            "hamiltonian_source": model.hamiltonian.source,
+            "truncation_error": str(
+                _as_expr(model.truncation_error, "truncation_error")
+            ),
+        }
+    )
+    if model.description:
+        assumptions["description"] = model.description
+    return _build_estimate(
+        algorithm=estimate.algorithm,
+        logical_qubits=estimate.logical_qubits,
+        physical_qubits=estimate.physical_qubits,
+        toffoli_gates=estimate.toffoli_gates,
+        t_gates=estimate.t_gates,
+        clifford_gates=estimate.clifford_gates,
+        qpe_iterations=estimate.qpe_iterations,
+        logical_depth=estimate.logical_depth,
+        runtime_seconds=estimate.runtime_seconds,
         assumptions=assumptions,
     )
 
@@ -450,6 +811,55 @@ def estimate_single_ancilla_trotter_qpe(
         logical_depth=logical_depth,
         runtime_seconds=runtime_seconds,
         assumptions=assumptions,
+    )
+
+
+def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+    hamiltonian: PauliHamiltonianResource,
+    precision: _SympyLike,
+    *,
+    trotter_steps_per_sample: sp.Expr | int,
+    samples: sp.Expr | int,
+    unitary_weight_factor: _SympyLike = 1,
+    randomized_compilation_factor: _SympyLike = 1,
+    rotation_synthesis_t_gates: sp.Expr | int = 1,
+    logical_qubits: sp.Expr | int | None = None,
+    cost_model: FTQCCostModel | None = None,
+) -> FTQCResourceEstimate:
+    """Estimate single-ancilla Trotter QPE from a Hamiltonian summary.
+
+    Args:
+        hamiltonian (PauliHamiltonianResource): Pauli-LCU Hamiltonian summary.
+        precision (sp.Expr | int | float): Target energy precision.
+        trotter_steps_per_sample (sp.Expr | int): Product-formula steps per
+            Hadamard-test sample.
+        samples (sp.Expr | int): Number of sampled time points or shots.
+        unitary_weight_factor (sp.Expr | int | float): Multiplicative
+            reduction in Hamiltonian weight. Defaults to one.
+        randomized_compilation_factor (sp.Expr | int | float): Multiplicative
+            cost factor for randomized compilation. Defaults to one.
+        rotation_synthesis_t_gates (sp.Expr | int): T-gate cost per Pauli
+            rotation. Defaults to one.
+        logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
+            Defaults to ``hamiltonian.n_spin_orbitals + 1``.
+        cost_model (FTQCCostModel | None): Architecture model used to lift
+            logical estimates to physical qubits and runtime.
+
+    Returns:
+        FTQCResourceEstimate: Symbolic FTQC resource estimate.
+    """
+    return estimate_single_ancilla_trotter_qpe(
+        n_spin_orbitals=hamiltonian.n_spin_orbitals,
+        n_pauli_terms=hamiltonian.n_pauli_terms,
+        lambda_norm=hamiltonian.lambda_norm,
+        precision=precision,
+        trotter_steps_per_sample=trotter_steps_per_sample,
+        samples=samples,
+        unitary_weight_factor=unitary_weight_factor,
+        randomized_compilation_factor=randomized_compilation_factor,
+        rotation_synthesis_t_gates=rotation_synthesis_t_gates,
+        logical_qubits=logical_qubits,
+        cost_model=cost_model,
     )
 
 
@@ -585,7 +995,7 @@ def _normalize_method(method: str | ChemistryQPEMethod) -> ChemistryQPEMethod:
         ) from exc
 
 
-def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
+def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
     """Convert a numeric or symbolic value to a SymPy expression.
 
     Args:
@@ -602,6 +1012,22 @@ def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
         return sp.sympify(value)
     except (TypeError, sp.SympifyError) as exc:
         raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
+
+
+def _abs_as_expr(value: _CoefficientLike) -> sp.Expr:
+    """Return the symbolic absolute value of a numeric expression.
+
+    Args:
+        value (sp.Expr | int | float | complex): Coefficient or constant to
+            convert.
+
+    Returns:
+        sp.Expr: Nonnegative SymPy absolute value.
+
+    Raises:
+        TypeError: If ``value`` cannot be sympified.
+    """
+    return sp.Abs(_as_expr(value, "value"))
 
 
 def _validate_positive(expr: sp.Expr, name: str) -> None:

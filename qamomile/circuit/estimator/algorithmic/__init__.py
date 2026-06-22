@@ -13,10 +13,15 @@ without needing the actual circuit implementation.
 
 from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     ChemistryQPEMethod,
+    ChemistryQPEModel,
     FTQCCostModel,
     FTQCResourceEstimate,
+    PauliHamiltonianResource,
     estimate_qubitized_chemistry_qpe,
+    estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe,
+    estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    summarize_pauli_hamiltonian,
 )
 from qamomile.circuit.estimator.algorithmic.hamiltonian_simulation import (
     estimate_qdrift,
@@ -28,12 +33,17 @@ from qamomile.circuit.estimator.algorithmic.qpe import estimate_qpe
 
 __all__ = [
     "ChemistryQPEMethod",
+    "ChemistryQPEModel",
     "FTQCCostModel",
     "FTQCResourceEstimate",
+    "PauliHamiltonianResource",
     "estimate_qaoa",
     "estimate_qpe",
     "estimate_qubitized_chemistry_qpe",
+    "estimate_qubitized_chemistry_qpe_from_model",
     "estimate_single_ancilla_trotter_qpe",
+    "estimate_single_ancilla_trotter_qpe_from_hamiltonian",
+    "summarize_pauli_hamiltonian",
     "estimate_trotter",
     "estimate_qsvt",
     "estimate_qdrift",

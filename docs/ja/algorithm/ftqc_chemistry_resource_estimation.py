@@ -28,11 +28,14 @@
 # %%
 import sympy as sp
 
+import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
+    ChemistryQPEModel,
     ChemistryQPEMethod,
     FTQCCostModel,
-    estimate_qubitized_chemistry_qpe,
-    estimate_single_ancilla_trotter_qpe,
+    estimate_qubitized_chemistry_qpe_from_model,
+    estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    summarize_pauli_hamiltonian,
 )
 
 # %% [markdown]
@@ -65,34 +68,62 @@ cost_model = FTQCCostModel(
 )
 
 # %% [markdown]
+# 小さなQamomile observableから始めます。実際の化学計算pipelineと同じ形にするためです。Hamiltonianを作る、または読み込み、LCU量を要約して、そのsummaryをFTQC Estimatorへ渡します。下のrescalingは、toy Hamiltonianを大きなactive-space modelの代わりとして使うためのものです。この係数が特定の分子を表すという主張ではありません。
+
+# %%
+toy_hamiltonian = 0.5 * qm_o.Z(0) + 0.25 * qm_o.X(1) * qm_o.X(2) + 0.125
+toy_summary = summarize_pauli_hamiltonian(
+    toy_hamiltonian,
+    n_spin_orbitals=n_spin_orbitals,
+    source="toy_pauli_lcu",
+)
+scaled_summary = toy_summary.with_lambda_scale(
+    sp.Float("2.0e5") / toy_summary.lambda_norm,
+    source="scaled_toy_pauli_lcu",
+)
+
+assert toy_summary.n_pauli_terms == 2
+assert toy_summary.constant == sp.Float("0.125")
+assert sp.simplify(scaled_summary.lambda_norm - sp.Float("2.0e5")) == 0
+
+# %% [markdown]
 # ## Qubitized QPE Comparison
 #
-# Qamomileはchemistry factorization costをIRの外側に保ちます。このEstimatorは、representation-dependent normalizationとone-walk Toffoli costを入力として受け取ります。
+# Qamomileはchemistry factorization costをIRの外側に保ちます。model-driven Estimatorは、Hamiltonian summaryとrepresentation-dependentなone-walk Toffoli costを入力として受け取ります。
 #
 # ```text
 # qpe_iterations = lambda_norm / precision
 # toffoli_gates = qpe_iterations * walk_cost_toffoli
 # ```
 #
-# これによりモデルを明確に保てます。Hamiltonian normalizationを下げること、walk circuitを下げること、physical architectureを変えることは、それぞれ別の設計選択です。
+# これによりモデルを明確に保てます。Hamiltonian normalizationを変えること、walk circuitを変えること、physical architectureを変えることは、それぞれ別の設計選択です。
 
 # %%
-thc = estimate_qubitized_chemistry_qpe(
-    n_spin_orbitals=n_spin_orbitals,
-    lambda_norm=sp.Float("2.0e5"),
-    precision=precision,
-    walk_cost_toffoli=sp.Integer(4_000),
+thc_model = ChemistryQPEModel(
+    hamiltonian=scaled_summary,
     method=ChemistryQPEMethod.TENSOR_HYPERCONTRACTION,
-    cost_model=cost_model,
+    walk_cost_toffoli=sp.Integer(4_000),
+    description="THC-style scaled toy model",
+)
+scdf_model = ChemistryQPEModel(
+    hamiltonian=scaled_summary.with_lambda_scale(
+        sp.Float("0.5"),
+        source="SCDF-style scaled toy model",
+    ),
+    method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+    walk_cost_toffoli=sp.Integer(4_400),
+    second_factor_rank=9,
+    description="SCDF-style scaled toy model",
 )
 
-scdf = estimate_qubitized_chemistry_qpe(
-    n_spin_orbitals=n_spin_orbitals,
-    lambda_norm=sp.Float("1.0e5"),
+thc = estimate_qubitized_chemistry_qpe_from_model(
+    thc_model,
     precision=precision,
-    walk_cost_toffoli=sp.Integer(4_400),
-    method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
-    second_factor_rank=9,
+    cost_model=cost_model,
+)
+scdf = estimate_qubitized_chemistry_qpe_from_model(
+    scdf_model,
+    precision=precision,
     cost_model=cost_model,
 )
 
@@ -101,6 +132,7 @@ assert scdf.toffoli_gates < thc.toffoli_gates
 
 print("THC Toffoli gates:", sp.N(thc.toffoli_gates, 4))
 print("SCDF-style Toffoli gates:", sp.N(scdf.toffoli_gates, 4))
+print("Toy Pauli terms:", toy_summary.n_pauli_terms)
 print("SCDF-style logical qubits:", scdf.logical_qubits)
 
 # %% [markdown]
@@ -109,20 +141,16 @@ print("SCDF-style logical qubits:", scdf.logical_qubits)
 # Early-FTQCの提案では、量子ビット数とdepthが強く制限される場合、qubitized walksよりも浅いsingle-ancilla QPEとPauli rotationsが好まれることがあります。下のunitary-weight concentration factorは、コストを支配するeffective weightを下げるspectrally invariantなHamiltonian transformationを表します。
 
 # %%
-plain_trotter = estimate_single_ancilla_trotter_qpe(
-    n_spin_orbitals=n_spin_orbitals,
-    n_pauli_terms=20_000,
-    lambda_norm=sp.Float("2.0e5"),
+plain_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+    scaled_summary,
     precision=precision,
     trotter_steps_per_sample=8,
     samples=128,
     cost_model=cost_model,
 )
 
-uwc_trotter = estimate_single_ancilla_trotter_qpe(
-    n_spin_orbitals=n_spin_orbitals,
-    n_pauli_terms=20_000,
-    lambda_norm=sp.Float("2.0e5"),
+uwc_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+    scaled_summary,
     precision=precision,
     trotter_steps_per_sample=8,
     samples=128,
