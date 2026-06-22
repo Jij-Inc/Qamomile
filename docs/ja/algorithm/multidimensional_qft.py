@@ -214,8 +214,6 @@ def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]
     N = Nqx + Nqy
     q = qmc.qubit_array(N, name="q")
     q = amplitude_encoding(q, inputs)  
-    # q = apply_partial_qft(q, start=0, length=Nqx)
-    # q = apply_partial_qft(q, start=Nqx, length=Nqy)
     q[0:Nqx] = qmc.qft(q[0:Nqx])
     q[Nqx:N] = qmc.qft(q[Nqx:N])
     return qmc.measure(q)
@@ -247,8 +245,8 @@ def compute_prob(result: SampleResult) -> np.ndarray:
     prob = np.zeros(f_padding.shape)
     total = sum(c for _, c in result.results)
     for bits, count in result.results:
-        kx = sum(bits[i] << (Nqx - 1 - i) for i in range(Nqx))
-        ky = sum(bits[Nqx + i] << (Nqy - 1 - i) for i in range(Nqy))
+        kx = sum([2**i*bits[i] for i in range(Nqx)])
+        ky = sum([2**(i-Nqx)*bits[i] for i in range(Nqx, Nqx+Nqy)])
         prob[kx, ky] += count / total
     return prob
 
