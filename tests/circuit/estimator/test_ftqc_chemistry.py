@@ -225,6 +225,41 @@ def test_surface_code_cost_model_derives_architecture_knobs():
     assert sp.Abs(estimate.runtime_seconds - sp.Float("5e-4")) < sp.Float("1e-12")
 
 
+def test_surface_code_model_is_preserved_on_resource_estimates():
+    """Architecture-lifted estimates retain canonical surface-code quantities."""
+    architecture = SurfaceCodeCostModel(
+        code_distance=7,
+        physical_cycle_time_seconds=sp.Float("2e-6"),
+        physical_qubits_per_logical_factor=2,
+        logical_cycle_factor=3,
+        factory_count=5,
+        physical_qubits_per_factory=1000,
+        factory_cycles_per_toffoli=4,
+    )
+
+    estimate = estimate_qubitized_chemistry_qpe(
+        n_spin_orbitals=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        logical_qubits=7,
+        cost_model=architecture,
+    )
+
+    values = estimate.resource_values()
+    serialized = estimate.to_dict()
+
+    assert estimate.physical_qubits == 5686
+    assert values[FTQCResourceQuantity.CODE_DISTANCE] == 7
+    assert values[FTQCResourceQuantity.PHYSICAL_CYCLE_TIME_SECONDS] == sp.Float("2e-6")
+    assert values[FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL] == 98
+    assert serialized["architecture_values"]["code_distance"] == "7"
+    assert serialized["architecture_values"]["factory_count"] == "5"
+    assert any(
+        row["quantity"] == "code_distance" for row in estimate.to_quantity_table()
+    )
+
+
 def test_surface_code_distance_budget_selects_odd_distance():
     """Distance budgets select the smallest odd code distance from error inputs."""
     budget = SurfaceCodeDistanceBudget(

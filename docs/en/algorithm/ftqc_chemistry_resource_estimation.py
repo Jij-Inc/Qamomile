@@ -102,11 +102,11 @@ architecture = distance_budget.to_surface_code_cost_model(
     physical_qubits_per_factory=5000,
     factory_cycles_per_toffoli=2,
 )
-cost_model = architecture.to_cost_model()
+cost_model = architecture
 
 assert distance_budget.code_distance == 21
-assert cost_model.physical_qubits_per_logical == 882
-assert cost_model.factory_qubits == 20000
+assert architecture.physical_qubits_per_logical == 882
+assert architecture.factory_qubits == 20000
 
 # %% [markdown]
 # ## Resource Quantities
@@ -243,6 +243,8 @@ scdf = estimate_qubitized_chemistry_qpe_from_model(
 
 assert scdf.qpe_iterations < thc.qpe_iterations
 assert scdf.toffoli_gates < thc.toffoli_gates
+assert scdf.resource_values()[FTQCResourceQuantity.CODE_DISTANCE] == 21
+assert scdf.to_dict()["architecture_values"]["code_distance"] == "21"
 
 print("THC Toffoli gates:", sp.N(thc.toffoli_gates, 4))
 print("SCDF-style Toffoli gates:", sp.N(scdf.toffoli_gates, 4))
@@ -402,6 +404,8 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 #   into backend-specific chemistry loading circuits.
 # - Selected surface-code distance from an explicit logical failure budget
 #   before lifting logical resources to physical resources.
+# - Kept architecture quantities such as code distance attached to each
+#   resource estimate for later report auditing.
 # - Converted a chemistry QPE model into a block-encoding contract so PREPARE,
 #   SELECT, reflection, and workspace costs can be reviewed separately.
 # - Demonstrated how a unitary-weight concentration factor can be modeled as a

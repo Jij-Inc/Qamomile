@@ -146,7 +146,7 @@ architecture = distance_budget.to_surface_code_cost_model(
     physical_qubits_per_factory=5000,
     factory_cycles_per_toffoli=2,
 )
-cost_model = architecture.to_cost_model()
+cost_model = architecture
 
 assert architecture.code_distance == 21
 assert architecture.physical_qubits_per_logical == 882
@@ -182,6 +182,9 @@ compressed = estimate_qubitized_chemistry_qpe_from_model(
     precision=sp.Float("0.0016"),
     cost_model=cost_model,
 )
+
+assert compressed.resource_values()[FTQCResourceQuantity.CODE_DISTANCE] == 21
+assert compressed.to_dict()["architecture_values"]["code_distance"] == "21"
 
 comparison = compare_ftqc_resource_estimates(
     baseline,
@@ -259,7 +262,7 @@ faster_architecture = SurfaceCodeCostModel(
     physical_qubits_per_factory=2500,
     factory_cycles_per_toffoli=2,
 )
-relifted_baseline = baseline.with_cost_model(faster_architecture.to_cost_model())
+relifted_baseline = baseline.with_cost_model(faster_architecture)
 
 architecture_comparison = compare_ftqc_resource_estimates(
     baseline,
@@ -272,6 +275,7 @@ for row in architecture_comparison:
 
 assert relifted_baseline.logical_qubits == baseline.logical_qubits
 assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
+assert relifted_baseline.resource_values()[FTQCResourceQuantity.CODE_DISTANCE] == 10
 assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(350, 691)) == 0
 assert sp.simplify(architecture_comparison[1].ratio - sp.Rational(10, 21)) == 0
 
@@ -334,6 +338,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
 # - Surface-code distanceは、logical failure budgetから選んだうえで、logical resourceをphysical量子ビットとruntimeへliftできます。
+# - code distanceなどのarchitecture quantityは各estimateに残るため、reportでphysical resource仮定をauditできます。
 # - estimateに研究referenceを保持し、どの論文がsymbolic modelの根拠になったかをreportでauditできるようにします。
 # - reportでcircuit-level estimateと同じ形が必要な場合は、FTQC estimateを共通のlogical `ResourceEstimate` objectとして見られます。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。

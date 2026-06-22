@@ -902,6 +902,9 @@ class SurfaceCodeCostModel:
         )
 
 
+_FTQCCostModelLike = FTQCCostModel | SurfaceCodeCostModel
+
+
 @dataclass(frozen=True)
 class FTQCResourceEstimate:
     """Represent algorithm-level FTQC resource estimates.
@@ -927,6 +930,9 @@ class FTQCResourceEstimate:
         assumptions (dict[str, str]): Reader-facing notes about model choices.
         references (tuple[FTQCReference, ...]): Research sources that motivate
             the estimate's scaling model or resource assumptions.
+        architecture_values (dict[FTQCResourceQuantity, sp.Expr]): Architecture
+            quantities used to lift logical resources to physical resources.
+            These are keyed by the canonical FTQC quantity catalog.
 
     Example:
         >>> n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
@@ -948,6 +954,9 @@ class FTQCResourceEstimate:
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
     assumptions: dict[str, str] = field(default_factory=dict)
     references: tuple[FTQCReference, ...] = ()
+    architecture_values: dict[FTQCResourceQuantity, sp.Expr] = field(
+        default_factory=dict
+    )
 
     def substitute(self, **values: int | float) -> FTQCResourceEstimate:
         """Substitute concrete values into all symbolic fields.
@@ -997,6 +1006,10 @@ class FTQCResourceEstimate:
             },
             "assumptions": dict(self.assumptions),
             "references": [reference.to_dict() for reference in self.references],
+            "architecture_values": {
+                quantity.value: str(value)
+                for quantity, value in self.architecture_values.items()
+            },
         }
 
     def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
@@ -1006,7 +1019,7 @@ class FTQCResourceEstimate:
             dict[FTQCResourceQuantity, sp.Expr]: Resource values for logical
                 and physical output quantities.
         """
-        return {
+        values = {
             FTQCResourceQuantity.LOGICAL_QUBITS: self.logical_qubits,
             FTQCResourceQuantity.PHYSICAL_QUBITS: self.physical_qubits,
             FTQCResourceQuantity.TOFFOLI_GATES: self.toffoli_gates,
@@ -1017,6 +1030,8 @@ class FTQCResourceEstimate:
             FTQCResourceQuantity.LOGICAL_DEPTH: self.logical_depth,
             FTQCResourceQuantity.RUNTIME_SECONDS: self.runtime_seconds,
         }
+        values.update(self.architecture_values)
+        return values
 
     def to_quantity_table(self) -> list[dict[str, str]]:
         """Serialize estimate values with quantity metadata.
@@ -1081,7 +1096,10 @@ class FTQCResourceEstimate:
             parameters=parameters,
         )
 
-    def with_cost_model(self, cost_model: FTQCCostModel) -> FTQCResourceEstimate:
+    def with_cost_model(
+        self,
+        cost_model: _FTQCCostModelLike,
+    ) -> FTQCResourceEstimate:
         """Relift physical resources with a different architecture model.
 
         The logical algorithm quantities are preserved. Physical qubits and
@@ -1090,35 +1108,39 @@ class FTQCResourceEstimate:
         non-Clifford throughput demand.
 
         Args:
-            cost_model (FTQCCostModel): Architecture model used for the new
-                physical-qubit and runtime estimates.
+            cost_model (FTQCCostModel | SurfaceCodeCostModel): Architecture
+                model used for the new physical-qubit and runtime estimates.
 
         Returns:
             FTQCResourceEstimate: Estimate with identical logical resources
                 and updated physical resources.
         """
+        normalized_cost_model, architecture_values = _normalize_cost_model(cost_model)
         assumptions = dict(self.assumptions)
         assumptions["architecture_relift"] = (
             "physical_qubits and runtime_seconds were recomputed from an "
-            "existing logical estimate with a replacement FTQCCostModel."
+            "existing logical estimate with a replacement architecture model."
         )
         non_clifford_gates = sp.simplify(self.toffoli_gates + self.t_gates)
         return _build_estimate(
             algorithm=self.algorithm,
             logical_qubits=self.logical_qubits,
-            physical_qubits=cost_model.physical_qubits_for(self.logical_qubits),
+            physical_qubits=normalized_cost_model.physical_qubits_for(
+                self.logical_qubits
+            ),
             toffoli_gates=self.toffoli_gates,
             t_gates=self.t_gates,
             clifford_gates=self.clifford_gates,
             qpe_iterations=self.qpe_iterations,
             target_precision=self.target_precision,
             logical_depth=self.logical_depth,
-            runtime_seconds=cost_model.runtime_seconds_for(
+            runtime_seconds=normalized_cost_model.runtime_seconds_for(
                 self.logical_depth,
                 non_clifford_gates,
             ),
             assumptions=assumptions,
             references=self.references,
+            architecture_values=architecture_values,
         )
 
     def _map_exprs(self, fn: Callable[[sp.Expr], sp.Expr]) -> FTQCResourceEstimate:
@@ -1145,6 +1167,10 @@ class FTQCResourceEstimate:
             parameters=self.parameters,
             assumptions=self.assumptions,
             references=self.references,
+            architecture_values={
+                quantity: fn(value)
+                for quantity, value in self.architecture_values.items()
+            },
         )
 
 
@@ -1613,7 +1639,7 @@ def estimate_qubitized_chemistry_qpe(
     sparsity: sp.Expr | int | None = None,
     second_factor_rank: sp.Expr | int | None = None,
     logical_qubits: sp.Expr | int | None = None,
-    cost_model: FTQCCostModel | None = None,
+    cost_model: _FTQCCostModelLike | None = None,
     references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate qubitized QPE resources for molecular Hamiltonians.
@@ -1639,9 +1665,9 @@ def estimate_qubitized_chemistry_qpe(
             symbolic ``Xi``.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
             When omitted, a representation-level scaling model is used.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime. Defaults to a
-            symbolic model.
+        cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
+            Architecture model used to lift logical estimates to physical
+            qubits and runtime. Defaults to a symbolic model.
         references (tuple[FTQCReference, ...]): Additional research sources
             to attach to the estimate. Method-level default references are
             attached automatically.
@@ -1675,7 +1701,7 @@ def estimate_qubitized_chemistry_qpe(
         logical_expr = _as_expr(logical_qubits, "logical_qubits")
         _validate_positive(logical_expr, "logical_qubits")
 
-    model = cost_model or FTQCCostModel()
+    model, architecture_values = _normalize_cost_model(cost_model)
     qpe_iterations = sp.simplify(lambda_expr / precision_expr)
     toffoli_gates = sp.simplify(qpe_iterations * walk_expr)
     logical_depth = toffoli_gates
@@ -1705,6 +1731,7 @@ def estimate_qubitized_chemistry_qpe(
             _METHOD_REFERENCES[method_enum],
             references,
         ),
+        architecture_values=architecture_values,
     )
 
 
@@ -1712,7 +1739,7 @@ def estimate_qubitized_chemistry_qpe_from_model(
     model: ChemistryQPEModel,
     precision: _SympyLike,
     *,
-    cost_model: FTQCCostModel | None = None,
+    cost_model: _FTQCCostModelLike | None = None,
 ) -> FTQCResourceEstimate:
     """Estimate qubitized QPE resources from a chemistry model object.
 
@@ -1721,9 +1748,9 @@ def estimate_qubitized_chemistry_qpe_from_model(
             lambda norm, sparsity/rank metadata, and walk cost.
         precision (sp.Expr | int | float): Target phase-estimation energy
             precision.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime. Defaults to a
-            symbolic model.
+        cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
+            Architecture model used to lift logical estimates to physical
+            qubits and runtime. Defaults to a symbolic model.
 
     Returns:
         FTQCResourceEstimate: Symbolic FTQC resource estimate.
@@ -1774,6 +1801,7 @@ def estimate_qubitized_chemistry_qpe_from_model(
         runtime_seconds=estimate.runtime_seconds,
         assumptions=assumptions,
         references=_combine_references(estimate.references, model.references),
+        architecture_values=estimate.architecture_values,
     )
 
 
@@ -1789,7 +1817,7 @@ def estimate_single_ancilla_trotter_qpe(
     randomized_compilation_factor: _SympyLike = 1,
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
-    cost_model: FTQCCostModel | None = None,
+    cost_model: _FTQCCostModelLike | None = None,
     references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate early-FTQC single-ancilla Trotter QPE resources.
@@ -1818,8 +1846,9 @@ def estimate_single_ancilla_trotter_qpe(
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
             Defaults to ``n_spin_orbitals + 1`` for the data register plus
             the Hadamard-test ancilla.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime.
+        cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
+            Architecture model used to lift logical estimates to physical
+            qubits and runtime.
         references (tuple[FTQCReference, ...]): Additional research sources
             to attach to the estimate. The early-FTQC unitary-weight
             concentration source is attached automatically.
@@ -1872,7 +1901,7 @@ def estimate_single_ancilla_trotter_qpe(
     logical_depth = sp.simplify(qpe_iterations * pauli_rotations)
     t_gates = sp.simplify(logical_depth * rotation_t)
     toffoli_gates = sp.Integer(0)
-    model = cost_model or FTQCCostModel()
+    model, architecture_values = _normalize_cost_model(cost_model)
     physical_qubits = model.physical_qubits_for(logical_expr)
     runtime_seconds = model.runtime_seconds_for(logical_depth, t_gates)
     assumptions = {
@@ -1893,6 +1922,7 @@ def estimate_single_ancilla_trotter_qpe(
         runtime_seconds=runtime_seconds,
         assumptions=assumptions,
         references=_combine_references((_UWC_REFERENCE,), references),
+        architecture_values=architecture_values,
     )
 
 
@@ -1906,7 +1936,7 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     randomized_compilation_factor: _SympyLike = 1,
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
-    cost_model: FTQCCostModel | None = None,
+    cost_model: _FTQCCostModelLike | None = None,
     references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate single-ancilla Trotter QPE from a Hamiltonian summary.
@@ -1925,8 +1955,9 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
             rotation. Defaults to one.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
             Defaults to ``hamiltonian.n_spin_orbitals + 1``.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime.
+        cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
+            Architecture model used to lift logical estimates to physical
+            qubits and runtime.
         references (tuple[FTQCReference, ...]): Additional research sources
             to attach to the estimate.
 
@@ -2014,6 +2045,7 @@ def _build_estimate(
     runtime_seconds: sp.Expr,
     assumptions: dict[str, str],
     references: tuple[FTQCReference, ...] = (),
+    architecture_values: dict[FTQCResourceQuantity, sp.Expr] | None = None,
 ) -> FTQCResourceEstimate:
     """Create an estimate and collect its free symbolic parameters.
 
@@ -2031,10 +2063,14 @@ def _build_estimate(
         assumptions (dict[str, str]): Notes about model assumptions.
         references (tuple[FTQCReference, ...]): Research sources for the
             scaling model.
+        architecture_values (dict[FTQCResourceQuantity, sp.Expr] | None):
+            Architecture quantities used to lift logical resources to physical
+            resources. Defaults to None.
 
     Returns:
         FTQCResourceEstimate: Estimate with collected parameters.
     """
+    architecture = dict(architecture_values or {})
     expressions = [
         logical_qubits,
         physical_qubits,
@@ -2045,6 +2081,7 @@ def _build_estimate(
         target_precision,
         logical_depth,
         runtime_seconds,
+        *architecture.values(),
     ]
     return FTQCResourceEstimate(
         algorithm=algorithm,
@@ -2060,7 +2097,37 @@ def _build_estimate(
         parameters=_collect_parameters(expressions),
         assumptions=assumptions,
         references=_combine_references(references),
+        architecture_values=architecture,
     )
+
+
+def _normalize_cost_model(
+    cost_model: _FTQCCostModelLike | None,
+) -> tuple[FTQCCostModel, dict[FTQCResourceQuantity, sp.Expr]]:
+    """Normalize an architecture model for estimator use.
+
+    Args:
+        cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
+            Architecture model supplied by the caller. ``None`` creates a
+            symbolic ``FTQCCostModel``.
+
+    Returns:
+        tuple[FTQCCostModel, dict[FTQCResourceQuantity, sp.Expr]]: The
+            low-level cost model used for lifting and the canonical
+            architecture quantities to keep on the estimate.
+
+    Raises:
+        TypeError: If ``cost_model`` is not a supported FTQC architecture
+            model.
+    """
+    if cost_model is None:
+        model = FTQCCostModel()
+        return model, model.resource_values()
+    if isinstance(cost_model, SurfaceCodeCostModel):
+        return cost_model.to_cost_model(), cost_model.resource_values()
+    if isinstance(cost_model, FTQCCostModel):
+        return cost_model, cost_model.resource_values()
+    raise TypeError("cost_model must be an FTQCCostModel or SurfaceCodeCostModel.")
 
 
 def _collect_parameters(

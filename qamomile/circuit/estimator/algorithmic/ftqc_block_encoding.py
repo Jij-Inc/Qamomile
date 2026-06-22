@@ -12,6 +12,7 @@ from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     FTQCCostModel,
     FTQCReference,
     FTQCResourceEstimate,
+    SurfaceCodeCostModel,
     references_for_chemistry_qpe_method,
 )
 from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
@@ -214,7 +215,7 @@ def estimate_qubitized_qpe_from_block_encoding(
     precision: _SympyLike,
     *,
     qpe_register_qubits: _SympyLike = 0,
-    cost_model: FTQCCostModel | None = None,
+    cost_model: FTQCCostModel | SurfaceCodeCostModel | None = None,
     references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate qubitized QPE resources from a block-encoding model.
@@ -228,9 +229,9 @@ def estimate_qubitized_qpe_from_block_encoding(
             used by an explicit QPE circuit. Defaults to zero so callers can
             separately decide whether phase-readout qubits are included in
             the block-encoding workspace.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime. Defaults to a
-            symbolic architecture model.
+        cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
+            Architecture model used to lift logical estimates to physical
+            qubits and runtime. Defaults to a symbolic architecture model.
         references (tuple[FTQCReference, ...]): Additional research sources
             to attach to the estimate.
 
@@ -250,7 +251,7 @@ def estimate_qubitized_qpe_from_block_encoding(
     toffoli_gates = sp.simplify(qpe_iterations * block_encoding.walk_cost_toffoli)
     logical_depth = toffoli_gates
     logical_qubits = sp.simplify(block_encoding.logical_qubits + qpe_qubits)
-    model = cost_model or FTQCCostModel()
+    model, architecture_values = _normalize_cost_model(cost_model)
     runtime_seconds = model.runtime_seconds_for(logical_depth, toffoli_gates)
     physical_qubits = model.physical_qubits_for(logical_qubits)
     assumptions = {
@@ -288,9 +289,11 @@ def estimate_qubitized_qpe_from_block_encoding(
             qpe_iterations,
             logical_depth,
             runtime_seconds,
+            *architecture_values.values(),
         ),
         assumptions=assumptions,
         references=references_for_estimate,
+        architecture_values=architecture_values,
     )
 
 
@@ -377,6 +380,34 @@ def _collect_parameters(*expressions: sp.Expr) -> dict[str, sp.Symbol]:
             if isinstance(symbol, sp.Symbol):
                 symbols.add(symbol)
     return {str(symbol): symbol for symbol in sorted(symbols, key=str)}
+
+
+def _normalize_cost_model(
+    cost_model: FTQCCostModel | SurfaceCodeCostModel | None,
+) -> tuple[FTQCCostModel, dict[FTQCResourceQuantity, sp.Expr]]:
+    """Normalize an architecture model for block-encoding estimates.
+
+    Args:
+        cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
+            Architecture model supplied by the caller. ``None`` creates a
+            symbolic ``FTQCCostModel``.
+
+    Returns:
+        tuple[FTQCCostModel, dict[FTQCResourceQuantity, sp.Expr]]: The
+            cost-model interface used for lifting and the canonical
+            architecture quantities retained on the estimate.
+
+    Raises:
+        TypeError: If ``cost_model`` is not a supported architecture model.
+    """
+    if cost_model is None:
+        model = FTQCCostModel()
+        return model, model.resource_values()
+    if isinstance(cost_model, SurfaceCodeCostModel):
+        return cost_model.to_cost_model(), cost_model.resource_values()
+    if isinstance(cost_model, FTQCCostModel):
+        return cost_model, cost_model.resource_values()
+    raise TypeError("cost_model must be an FTQCCostModel or SurfaceCodeCostModel.")
 
 
 def _combine_references(

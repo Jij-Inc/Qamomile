@@ -82,11 +82,11 @@ architecture = distance_budget.to_surface_code_cost_model(
     physical_qubits_per_factory=5000,
     factory_cycles_per_toffoli=2,
 )
-cost_model = architecture.to_cost_model()
+cost_model = architecture
 
 assert distance_budget.code_distance == 21
-assert cost_model.physical_qubits_per_logical == 882
-assert cost_model.factory_qubits == 20000
+assert architecture.physical_qubits_per_logical == 882
+assert architecture.factory_qubits == 20000
 
 # %% [markdown]
 # ## Resource Quantities
@@ -215,6 +215,8 @@ scdf = estimate_qubitized_chemistry_qpe_from_model(
 
 assert scdf.qpe_iterations < thc.qpe_iterations
 assert scdf.toffoli_gates < thc.toffoli_gates
+assert scdf.resource_values()[FTQCResourceQuantity.CODE_DISTANCE] == 21
+assert scdf.to_dict()["architecture_values"]["code_distance"] == "21"
 
 print("THC Toffoli gates:", sp.N(thc.toffoli_gates, 4))
 print("SCDF-style Toffoli gates:", sp.N(scdf.toffoli_gates, 4))
@@ -360,5 +362,6 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 # - FTQC化学計算のリソース量を、Hamiltonian normalization、QPE iterations、non-Clifford counts、論理量子ビット、物理量子ビット、runtime proxiesに分けて扱いました。
 # - Qamomile IRをbackend-specificなchemistry loading circuitsへloweringせずに、qubitized QPE representationsを比較しました。
 # - logical failure budgetからsurface-code distanceを選び、logical resourceをphysical resourceへliftしました。
+# - code distanceなどのarchitecture quantityを各resource estimateに残し、後続のreportでauditできるようにしました。
 # - chemistry QPE modelをblock-encoding contractへ変換し、PREPARE、SELECT、reflection、workspace costを分けてreviewできる形にしました。
 # - unitary-weight concentration factorを、early-FTQC single-ancilla Trotter QPEのcost-driver reductionとしてモデル化する方法を示しました。

@@ -13,6 +13,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     FTQCReference,
     FTQCResourceQuantity,
+    SurfaceCodeCostModel,
     block_encoding_from_chemistry_model,
     estimate_qubitized_qpe_from_block_encoding,
     summarize_pauli_hamiltonian,
@@ -81,6 +82,42 @@ def test_qubitized_qpe_from_block_encoding_tracks_walk_calls_and_costs():
     assert sp.Abs(estimate.runtime_seconds - sp.Float("0.00475")) < sp.Float("1e-12")
     assert estimate.assumptions["block_encoding"] == "toy_lcu"
     assert any(reference.key == "arXiv:1610.06546" for reference in estimate.references)
+
+
+def test_qubitized_qpe_from_block_encoding_preserves_surface_code_architecture():
+    """Block-encoding estimates retain surface-code architecture quantities."""
+    architecture = SurfaceCodeCostModel(
+        code_distance=5,
+        physical_cycle_time_seconds=sp.Float("1e-6"),
+        physical_qubits_per_logical_factor=2,
+        logical_cycle_factor=1,
+        factory_count=4,
+        physical_qubits_per_factory=1000,
+        factory_cycles_per_toffoli=10,
+    )
+    block = BlockEncodingResource(
+        system_qubits=6,
+        normalization=100,
+        prepare_cost_toffoli=20,
+        select_cost_toffoli=50,
+        reflection_cost_toffoli=5,
+        ancilla_qubits=3,
+        name="toy_lcu",
+    )
+
+    estimate = estimate_qubitized_qpe_from_block_encoding(
+        block,
+        precision=2,
+        qpe_register_qubits=4,
+        cost_model=architecture,
+    )
+
+    values = estimate.resource_values()
+
+    assert estimate.physical_qubits == 4650
+    assert values[FTQCResourceQuantity.CODE_DISTANCE] == 5
+    assert values[FTQCResourceQuantity.FACTORY_COUNT] == 4
+    assert estimate.to_dict()["architecture_values"]["code_distance"] == "5"
 
 
 def test_qubitized_qpe_from_block_encoding_preserves_custom_references():
