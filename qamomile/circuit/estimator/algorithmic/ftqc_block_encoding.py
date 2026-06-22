@@ -67,9 +67,11 @@ def _block_encoding_qpe_formulas() -> tuple[FTQCResourceFormula, ...]:
     """
     normalization = _positive_symbol(FTQCResourceQuantity.LAMBDA_NORM.value)
     target_precision = _positive_symbol(FTQCResourceQuantity.TARGET_PRECISION.value)
-    prepare_cost = _nonnegative_symbol("prepare_cost_toffoli")
-    select_cost = _nonnegative_symbol("select_cost_toffoli")
-    reflection_cost = _nonnegative_symbol("reflection_cost_toffoli")
+    prepare_cost = _nonnegative_symbol(FTQCResourceQuantity.PREPARE_COST_TOFFOLI.value)
+    select_cost = _nonnegative_symbol(FTQCResourceQuantity.SELECT_COST_TOFFOLI.value)
+    reflection_cost = _nonnegative_symbol(
+        FTQCResourceQuantity.REFLECTION_COST_TOFFOLI.value
+    )
     qpe_iterations = _nonnegative_symbol(FTQCResourceQuantity.QPE_ITERATIONS.value)
     walk_cost = _nonnegative_symbol(FTQCResourceQuantity.WALK_COST_TOFFOLI.value)
     toffoli_gates = _nonnegative_symbol(FTQCResourceQuantity.TOFFOLI_GATES.value)
@@ -89,6 +91,11 @@ def _block_encoding_qpe_formulas() -> tuple[FTQCResourceFormula, ...]:
         FTQCResourceFormula(
             quantity=FTQCResourceQuantity.WALK_COST_TOFFOLI,
             expression=2 * prepare_cost + select_cost + reflection_cost,
+            depends_on=(
+                FTQCResourceQuantity.PREPARE_COST_TOFFOLI,
+                FTQCResourceQuantity.SELECT_COST_TOFFOLI,
+                FTQCResourceQuantity.REFLECTION_COST_TOFFOLI,
+            ),
             description=(
                 "Compose one qubitized walk from PREPARE, inverse PREPARE, "
                 "SELECT, and reflection costs."
@@ -270,7 +277,12 @@ class BlockEncodingResource:
         """
         return {
             FTQCResourceQuantity.LOGICAL_QUBITS: self.logical_qubits,
+            FTQCResourceQuantity.SYSTEM_QUBITS: self._system_qubits,
             FTQCResourceQuantity.LAMBDA_NORM: self._normalization,
+            FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS: self._ancilla_qubits,
+            FTQCResourceQuantity.PREPARE_COST_TOFFOLI: self._prepare_cost_toffoli,
+            FTQCResourceQuantity.SELECT_COST_TOFFOLI: self._select_cost_toffoli,
+            FTQCResourceQuantity.REFLECTION_COST_TOFFOLI: self._reflection_cost_toffoli,
             FTQCResourceQuantity.WALK_COST_TOFFOLI: self.walk_cost_toffoli,
         }
 
@@ -370,6 +382,12 @@ def estimate_qubitized_qpe_from_block_encoding(
     toffoli_gates = sp.simplify(qpe_iterations * block_encoding.walk_cost_toffoli)
     logical_depth = toffoli_gates
     logical_qubits = sp.simplify(block_encoding.logical_qubits + qpe_qubits)
+    algorithm_values: dict[FTQCResourceQuantity, sp.Expr] = {
+        quantity: value
+        for quantity, value in block_encoding.resource_values().items()
+        if quantity != FTQCResourceQuantity.LOGICAL_QUBITS
+    }
+    algorithm_values[FTQCResourceQuantity.QPE_REGISTER_QUBITS] = qpe_qubits
     model, architecture_values = _normalize_cost_model(cost_model)
     runtime_seconds = model.runtime_seconds_for(logical_depth, toffoli_gates)
     physical_qubits = model.physical_qubits_for(logical_qubits)
@@ -408,11 +426,13 @@ def estimate_qubitized_qpe_from_block_encoding(
             qpe_iterations,
             logical_depth,
             runtime_seconds,
+            *algorithm_values.values(),
             *architecture_values.values(),
         ),
         assumptions=assumptions,
         references=references_for_estimate,
         formulas=_block_encoding_qpe_formulas(),
+        algorithm_values=algorithm_values,
         architecture_values=architecture_values,
     )
 

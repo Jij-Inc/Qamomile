@@ -42,6 +42,12 @@ class FTQCResourceQuantity(enum.StrEnum):
         MAX_LOCALITY: Maximum Pauli-string locality.
         TARGET_PRECISION: Target algorithmic energy or phase precision.
         TRUNCATION_ERROR: Representation-level approximation error budget.
+        SYSTEM_QUBITS: Logical system-register qubits encoded by a
+            block-encoding model.
+        BLOCK_ENCODING_ANCILLA_QUBITS: Ancilla and workspace qubits required
+            by a block encoding before QPE readout qubits are added.
+        QPE_REGISTER_QUBITS: Phase-readout qubits used by an explicit QPE
+            circuit.
         STATE_PREPARATION_SUCCESS_PROBABILITY: Success probability or squared
             overlap of the prepared state with the target eigenstate subspace.
         QPE_REPETITIONS: Expected number of QPE runs needed to obtain one
@@ -52,6 +58,12 @@ class FTQCResourceQuantity(enum.StrEnum):
             symmetry-filtering attempt.
         STATE_PREPARATION_LOGICAL_DEPTH: Logical-depth overhead of one
             state-preparation or symmetry-filtering attempt.
+        PREPARE_COST_TOFFOLI: Toffoli cost of one PREPARE or inverse PREPARE
+            subroutine call.
+        SELECT_COST_TOFFOLI: Toffoli cost of one SELECT or oracle subroutine
+            call.
+        REFLECTION_COST_TOFFOLI: Toffoli cost of the reflection subroutine used
+            by one qubitized walk.
         WALK_COST_TOFFOLI: Toffoli cost of one qubitized walk.
         QPE_ITERATIONS: Number of phase-estimation walk or time-evolution
             calls.
@@ -96,11 +108,17 @@ class FTQCResourceQuantity(enum.StrEnum):
     MAX_LOCALITY = "max_locality"
     TARGET_PRECISION = "target_precision"
     TRUNCATION_ERROR = "truncation_error"
+    SYSTEM_QUBITS = "system_qubits"
+    BLOCK_ENCODING_ANCILLA_QUBITS = "block_encoding_ancilla_qubits"
+    QPE_REGISTER_QUBITS = "qpe_register_qubits"
     STATE_PREPARATION_SUCCESS_PROBABILITY = "state_preparation_success_probability"
     QPE_REPETITIONS = "qpe_repetitions"
     STATE_PREPARATION_TOFFOLI = "state_preparation_toffoli"
     STATE_PREPARATION_T_GATES = "state_preparation_t_gates"
     STATE_PREPARATION_LOGICAL_DEPTH = "state_preparation_logical_depth"
+    PREPARE_COST_TOFFOLI = "prepare_cost_toffoli"
+    SELECT_COST_TOFFOLI = "select_cost_toffoli"
+    REFLECTION_COST_TOFFOLI = "reflection_cost_toffoli"
     WALK_COST_TOFFOLI = "walk_cost_toffoli"
     QPE_ITERATIONS = "qpe_iterations"
     LOGICAL_QUBITS = "logical_qubits"
@@ -483,6 +501,27 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "Representation-level approximation error budget before QPE sampling.",
     ),
     FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.SYSTEM_QUBITS,
+        "System qubits",
+        "qubits",
+        FTQCResourceCategory.PROBLEM,
+        "Logical system-register qubits encoded by a block-encoding model.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS,
+        "Block-encoding ancilla qubits",
+        "qubits",
+        FTQCResourceCategory.ALGORITHM,
+        "Ancilla and workspace qubits required by a block encoding before QPE readout.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.QPE_REGISTER_QUBITS,
+        "QPE register qubits",
+        "qubits",
+        FTQCResourceCategory.ALGORITHM,
+        "Phase-readout qubits used by an explicit QPE circuit.",
+    ),
+    FTQCResourceQuantitySpec(
         FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY,
         "State-preparation success probability",
         "probability",
@@ -516,6 +555,27 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "logical layers / run",
         FTQCResourceCategory.ALGORITHM,
         "Logical-depth overhead of one state-preparation or filtering attempt.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.PREPARE_COST_TOFFOLI,
+        "PREPARE cost",
+        "Toffoli gates / call",
+        FTQCResourceCategory.ALGORITHM,
+        "Toffoli cost of one PREPARE or inverse PREPARE subroutine call.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.SELECT_COST_TOFFOLI,
+        "SELECT cost",
+        "Toffoli gates / call",
+        FTQCResourceCategory.ALGORITHM,
+        "Toffoli cost of one SELECT or oracle subroutine call.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.REFLECTION_COST_TOFFOLI,
+        "Reflection cost",
+        "Toffoli gates / call",
+        FTQCResourceCategory.ALGORITHM,
+        "Toffoli cost of the reflection subroutine used by one qubitized walk.",
     ),
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.WALK_COST_TOFFOLI,

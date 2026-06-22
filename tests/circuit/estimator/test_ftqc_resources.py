@@ -39,9 +39,15 @@ def test_ftqc_quantity_specs_cover_core_resource_layers():
     assert FTQCResourceQuantity.LAMBDA_NORM in quantities
     assert FTQCResourceQuantity.TARGET_PRECISION in quantities
     assert FTQCResourceQuantity.TRUNCATION_ERROR in quantities
+    assert FTQCResourceQuantity.SYSTEM_QUBITS in quantities
+    assert FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS in quantities
+    assert FTQCResourceQuantity.QPE_REGISTER_QUBITS in quantities
     assert FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY in quantities
     assert FTQCResourceQuantity.QPE_REPETITIONS in quantities
     assert FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI in quantities
+    assert FTQCResourceQuantity.PREPARE_COST_TOFFOLI in quantities
+    assert FTQCResourceQuantity.SELECT_COST_TOFFOLI in quantities
+    assert FTQCResourceQuantity.REFLECTION_COST_TOFFOLI in quantities
     assert FTQCResourceQuantity.TOFFOLI_GATES in quantities
     assert FTQCResourceQuantity.LOGICAL_ERROR_RATE in quantities
     assert FTQCResourceQuantity.PHYSICAL_ERROR_RATE in quantities

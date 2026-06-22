@@ -73,6 +73,23 @@ print(block.to_dict())
 assert block.logical_qubits == 17
 assert block.walk_cost_toffoli == 188
 assert block.resource_values()[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 188
+assert block.resource_values()[FTQCResourceQuantity.PREPARE_COST_TOFFOLI] == 30
+assert block.resource_values()[FTQCResourceQuantity.SELECT_COST_TOFFOLI] == 120
+assert block.resource_values()[FTQCResourceQuantity.REFLECTION_COST_TOFFOLI] == 8
+
+# %% [markdown]
+# これらのsubroutine costもcanonical quantity keyで読めます。これにより、report側が`BlockEncodingResource`自体のfield名に依存しにくくなります。
+
+# %%
+for quantity in (
+    FTQCResourceQuantity.SYSTEM_QUBITS,
+    FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS,
+    FTQCResourceQuantity.PREPARE_COST_TOFFOLI,
+    FTQCResourceQuantity.SELECT_COST_TOFFOLI,
+    FTQCResourceQuantity.REFLECTION_COST_TOFFOLI,
+    FTQCResourceQuantity.WALK_COST_TOFFOLI,
+):
+    print(quantity.value, "=", block.resource_values()[quantity])
 
 # %% [markdown]
 # ## Qubitized QPE
@@ -103,6 +120,8 @@ assert estimate.toffoli_gates == 15040
 assert estimate.logical_qubits == 23
 assert estimate.physical_qubits == 4300
 assert estimate.assumptions["block_encoding"] == "toy_lcu"
+assert estimate.resource_values()[FTQCResourceQuantity.QPE_REGISTER_QUBITS] == 6
+assert estimate.to_dict()["algorithm_values"]["prepare_cost_toffoli"] == "30"
 assert any(reference.key == "arXiv:1610.06546" for reference in estimate.references)
 
 # %% [markdown]
@@ -189,6 +208,7 @@ assert any(
 # このnotebookでは、次のことを学びました。
 #
 # - Block-encoding estimateでは、normalization、PREPARE、SELECT、reflection、ancilla、QPE readout costを分けて扱います。
+# - PREPARE、SELECT、reflection、workspace、QPE readoutの量には、downstream report向けのcanonical resource keyがあります。
 # - Qubitized QPEは、block-encodingのwalk costとnormalization-over-precision iterationを合成します。
 # - Chemistry QPE modelは同じblock-encoding contractへ変換でき、複数のviewを比較できます。
 # - あるsubroutineが高価になっても、representation trade-offによって総Toffoli countが下がる場合があります。

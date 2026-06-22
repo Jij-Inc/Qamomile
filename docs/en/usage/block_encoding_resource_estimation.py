@@ -79,6 +79,24 @@ print(block.to_dict())
 assert block.logical_qubits == 17
 assert block.walk_cost_toffoli == 188
 assert block.resource_values()[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 188
+assert block.resource_values()[FTQCResourceQuantity.PREPARE_COST_TOFFOLI] == 30
+assert block.resource_values()[FTQCResourceQuantity.SELECT_COST_TOFFOLI] == 120
+assert block.resource_values()[FTQCResourceQuantity.REFLECTION_COST_TOFFOLI] == 8
+
+# %% [markdown]
+# These subroutine costs also use canonical quantity keys. That makes reports
+# less dependent on the field names of `BlockEncodingResource` itself.
+
+# %%
+for quantity in (
+    FTQCResourceQuantity.SYSTEM_QUBITS,
+    FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS,
+    FTQCResourceQuantity.PREPARE_COST_TOFFOLI,
+    FTQCResourceQuantity.SELECT_COST_TOFFOLI,
+    FTQCResourceQuantity.REFLECTION_COST_TOFFOLI,
+    FTQCResourceQuantity.WALK_COST_TOFFOLI,
+):
+    print(quantity.value, "=", block.resource_values()[quantity])
 
 # %% [markdown]
 # ## Qubitized QPE
@@ -111,6 +129,8 @@ assert estimate.toffoli_gates == 15040
 assert estimate.logical_qubits == 23
 assert estimate.physical_qubits == 4300
 assert estimate.assumptions["block_encoding"] == "toy_lcu"
+assert estimate.resource_values()[FTQCResourceQuantity.QPE_REGISTER_QUBITS] == 6
+assert estimate.to_dict()["algorithm_values"]["prepare_cost_toffoli"] == "30"
 assert any(reference.key == "arXiv:1610.06546" for reference in estimate.references)
 
 # %% [markdown]
@@ -205,6 +225,8 @@ assert any(
 #
 # - Block-encoding estimates separate normalization, PREPARE, SELECT,
 #   reflection, ancilla, and QPE readout costs.
+# - PREPARE, SELECT, reflection, workspace, and QPE readout quantities have
+#   canonical resource keys for downstream reports.
 # - Qubitized QPE composes the block-encoding walk cost with
 #   normalization-over-precision iterations.
 # - Chemistry QPE models can be converted into the same block-encoding

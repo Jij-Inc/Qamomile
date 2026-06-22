@@ -40,6 +40,16 @@ def test_block_encoding_resource_separates_prepare_select_and_reflection():
     assert block.logical_qubits == n + ancilla
     assert block.walk_cost_toffoli == 2 * prep + select + reflect
     assert block.resource_values()[FTQCResourceQuantity.LAMBDA_NORM] == alpha
+    assert block.resource_values()[FTQCResourceQuantity.SYSTEM_QUBITS] == n
+    assert (
+        block.resource_values()[FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS]
+        == ancilla
+    )
+    assert block.resource_values()[FTQCResourceQuantity.PREPARE_COST_TOFFOLI] == prep
+    assert block.resource_values()[FTQCResourceQuantity.SELECT_COST_TOFFOLI] == select
+    assert (
+        block.resource_values()[FTQCResourceQuantity.REFLECTION_COST_TOFFOLI] == reflect
+    )
     assert (
         block.resource_values()[FTQCResourceQuantity.WALK_COST_TOFFOLI]
         == 2 * prep + select + reflect
@@ -77,10 +87,16 @@ def test_qubitized_qpe_from_block_encoding_tracks_walk_calls_and_costs():
     assert estimate.qpe_iterations == 50
     assert estimate.target_precision == 2
     assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == 2
+    assert estimate.resource_values()[FTQCResourceQuantity.SYSTEM_QUBITS] == 6
+    assert estimate.resource_values()[FTQCResourceQuantity.PREPARE_COST_TOFFOLI] == 20
+    assert estimate.resource_values()[FTQCResourceQuantity.SELECT_COST_TOFFOLI] == 50
+    assert estimate.resource_values()[FTQCResourceQuantity.REFLECTION_COST_TOFFOLI] == 5
+    assert estimate.resource_values()[FTQCResourceQuantity.QPE_REGISTER_QUBITS] == 4
     assert estimate.toffoli_gates == 4750
     assert estimate.physical_qubits == 1310
     assert sp.Abs(estimate.runtime_seconds - sp.Float("0.00475")) < sp.Float("1e-12")
     assert estimate.assumptions["block_encoding"] == "toy_lcu"
+    assert estimate.to_dict()["algorithm_values"]["prepare_cost_toffoli"] == "20"
     assert any(reference.key == "arXiv:1610.06546" for reference in estimate.references)
 
 
