@@ -151,7 +151,7 @@ class BinaryModel(Generic[VT]):
         """
         expr = BinaryExpr(vartype=VarType.BINARY, constant=constant, coefficients={})
         for indices, coeff in hubo.items():
-            key = tuple(sorted(set(indices)))
+            key = BinaryExpr.reduce_indices(VarType.BINARY, indices)
             if len(key) != len(indices):
                 warnings.warn(
                     "Duplicate variable indices in HUBO term "
@@ -163,6 +163,65 @@ class BinaryModel(Generic[VT]):
                 expr.constant += coeff
                 continue
             expr.coefficients[key] = expr.coefficients.get(key, 0.0) + coeff
+        if simplify:
+            expr.coefficients = {
+                k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
+            }
+        return cls(expr)  # type: ignore
+
+    @classmethod
+    def from_higher_ising(
+        cls,
+        higher_ising: dict[tuple[int, ...], float],
+        constant: float = 0.0,
+        simplify: bool = False,
+    ) -> "BinaryModel":
+        """Create a SPIN BinaryModel from higher-order Ising coefficients.
+
+        Accepts Ising-style terms of arbitrary order (linear, quadratic, cubic,
+        quartic, and beyond) in a single coefficient dictionary. Duplicate
+        indices within a term are reduced using the identity ``s_i**2 = 1``
+        for SPIN variables: each pair of repeated indices cancels to a
+        constant factor, so e.g. ``(0, 0, 2)`` becomes ``(2,)`` and
+        ``(0, 0, 1, 1, 2)`` becomes ``(2,)``. A warning is emitted whenever
+        such reduction occurs.
+
+        Args:
+            higher_ising: Higher-order Ising coefficients mapping index
+                tuples to SPIN interaction strengths. Index tuples are
+                sorted; repeated indices are reduced via ``s_i**2 = 1``.
+                Empty tuples (``()``) are accumulated into the constant
+                term.
+            constant: Constant offset term. Defaults to 0.0.
+            simplify: If True, remove near-zero coefficients after
+                accumulation. Defaults to False.
+
+        Returns:
+            BinaryModel with SPIN vartype whose coefficients encode the
+            supplied higher-order Ising terms.
+
+        Example:
+            >>> model = BinaryModel.from_higher_ising(
+            ...     {(0,): 1.0, (0, 1): -2.0, (0, 1, 2): 0.5},
+            ...     constant=0.25,
+            ... )
+            >>> model.vartype
+            <VarType.SPIN: 'SPIN'>
+        """
+        expr = BinaryExpr(vartype=VarType.SPIN, constant=constant, coefficients={})
+        for indices, coeff in higher_ising.items():
+            reduced = BinaryExpr.reduce_indices(VarType.SPIN, indices)
+            if len(reduced) != len(indices):
+                warnings.warn(
+                    "Duplicate variable indices in higher Ising term "
+                    f"{indices} were reduced to {reduced} via s_i**2 = 1.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if len(reduced) == 0:
+                expr.constant += coeff
+                continue
+            expr.coefficients[reduced] = expr.coefficients.get(reduced, 0.0) + coeff
         if simplify:
             expr.coefficients = {
                 k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
@@ -213,12 +272,12 @@ class BinaryModel(Generic[VT]):
             ValueError: If state values are invalid for the vartype.
         """
         if self.vartype == VarType.SPIN:
-            if not np.allclose(np.abs(state), 1.0):
+            if not np.allclose(np.abs(state), 1.0):  # type: ignore[unreachable]
                 raise ValueError(
                     "All elements must be close to +1 or -1 for SPIN vartype."
                 )
         elif self.vartype == VarType.BINARY:
-            if not all(v in (0, 1) for v in state):
+            if not all(v in (0, 1) for v in state):  # type: ignore[unreachable]
                 raise ValueError("All elements must be 0 or 1 for BINARY vartype.")
 
         energy = self.constant

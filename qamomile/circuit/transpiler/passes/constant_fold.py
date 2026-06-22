@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
-    IndexSpecControlledU,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.value import Value, ValueBase
@@ -39,8 +42,28 @@ class ConstantFoldingPass(Pass[Block, Block]):
             Constant 1.0 -> no segment split
     """
 
-    def __init__(self, bindings: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        bindings: dict[str, Any] | None = None,
+        *,
+        strip_slice_ops: bool = True,
+    ):
+        """Create a constant-folding pass.
+
+        Args:
+            bindings: Compile-time parameter bindings used when folding
+                BinOps that reference declared parameters.
+            strip_slice_ops: When ``True`` (default), removes
+                ``SliceArrayOperation`` nodes after folding. Set to
+                ``False`` when a downstream pass — notably
+                ``SliceBorrowCheckPass`` — still needs to observe
+                slice declaration points in program order to decide
+                view liveness. A separate strip pass must then run
+                after the linearity check so segmentation still sees
+                a pure quantum-op stream.
+        """
         self._bindings = bindings or {}
+        self._strip_slice_ops = strip_slice_ops
 
     @property
     def name(self) -> str:
@@ -82,8 +105,52 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         folded_values[op.results[0].uuid] = folded
                         return None
 
-                # Substitute folded values in operands
-                return outer_self._substitute_folded_operands(op, folded_values)
+                # SliceArrayOperation is purely declarative: its result
+                # (a sliced ``ArrayValue``) already carries all required
+                # metadata (slice_of/slice_start/slice_step) for the
+                # emit-time resolver, and downstream ops reference that
+                # result directly.  Strip the op so segmentation sees a
+                # pure quantum-segment sequence without a classical op
+                # interleaved in the middle.  When ``strip_slice_ops``
+                # is ``False``, keep the op so ``SliceBorrowCheckPass``
+                # can use its position as the view's declaration point;
+                # a later strip pass must remove it before segmentation.
+                if isinstance(op, SliceArrayOperation):
+                    if outer_self._strip_slice_ops:
+                        return None
+                    # Fold the result's slice metadata too so the
+                    # linearity check can inspect the result directly.
+                    # Default operand substitution only walks
+                    # ``op.operands``; the result ArrayValue's
+                    # ``slice_start`` / ``slice_step`` are separate
+                    # references that need the same folding applied.
+                    return outer_self._substitute_slice_op_result(op, folded_values)
+
+                # ReleaseSliceViewOperation is the symmetric counterpart
+                # of SliceArrayOperation: a declarative marker that tells
+                # SliceBorrowCheckPass to drop the view's borrow.  The
+                # same strip / keep policy applies — when
+                # ``strip_slice_ops`` is True the marker is removed (it
+                # carries no information needed downstream), otherwise
+                # it survives to be observed by the linearity check and
+                # finally removed by StripSliceArrayOpsPass.
+                if isinstance(op, ReleaseSliceViewOperation):
+                    if outer_self._strip_slice_ops:
+                        return None
+                    return op
+
+                # Substitute folded values in operands and results.
+                # Results must also be folded so that, e.g.,
+                # MeasureVectorOperation's clbit-result ArrayValue has its
+                # shape folded after the BinOps that computed the slice
+                # length have been eliminated.  Without this the allocator
+                # sees a symbolic shape and emits zero clbits.
+                op_after_operands = outer_self._substitute_folded_operands(
+                    op, folded_values
+                )
+                return outer_self._substitute_folded_results(
+                    op_after_operands, folded_values
+                )
 
         transformer = ConstantFoldingTransformer()
         return transformer.transform_operations(operations)
@@ -126,6 +193,50 @@ class ConstantFoldingPass(Pass[Block, Block]):
             context=folded_values, bindings=self._bindings
         ).resolve(value)
 
+    def _substitute_slice_op_result(
+        self,
+        op: SliceArrayOperation,
+        folded_values: dict[str, Value],
+    ) -> SliceArrayOperation:
+        """Return a SliceArrayOperation whose result and operands are folded.
+
+        Default operand substitution only walks ``op.operands``.  The
+        ``SliceArrayOperation`` result is a sliced ``ArrayValue``
+        whose ``slice_start`` / ``slice_step`` / ``slice_of`` fields
+        reference the same Values as the operands do; without
+        explicitly folding those fields the result retains symbolic
+        BinOp values even after operand folding.  When the result is
+        still in the IR (``strip_slice_ops=False``),
+        ``SliceBorrowCheckPass`` inspects the result directly to
+        decide view coverage, so it must see folded bounds.
+
+        Args:
+            op: The slice declaration to fold.
+            folded_values: Map from BinOp uuid to its const-folded
+                replacement ``Value``.
+
+        Returns:
+            A new ``SliceArrayOperation`` with both operands and the
+            result's slice metadata substituted.  Returns ``op``
+            unchanged if no folding was needed.
+        """
+        from qamomile.circuit.ir.value import ArrayValue
+
+        new_op = cast(
+            SliceArrayOperation,
+            self._substitute_folded_operands(op, folded_values),
+        )
+        if not new_op.results or not isinstance(new_op.results[0], ArrayValue):
+            return new_op
+        result = new_op.results[0]
+        folded_result = self._substitute_in_value(result, folded_values)
+        if folded_result is result or not isinstance(folded_result, ArrayValue):
+            return new_op
+        return cast(
+            SliceArrayOperation,
+            dataclasses.replace(new_op, results=[folded_result]),
+        )
+
     @staticmethod
     def _evaluate_binop(
         kind: BinOpKind | None,
@@ -148,25 +259,149 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
         Walks ``element_indices`` to arbitrary depth so that nested
         array accesses like ``q[indices[uint_tmp]]`` have their
-        innermost symbolic index resolved when it is foldable.
+        innermost symbolic index resolved when it is foldable.  Also
+        propagates folded values into ArrayValue-specific fields —
+        ``parent_array`` (recursively), ``shape``, and slice metadata
+        (``slice_of`` / ``slice_start`` / ``slice_step``) — so that a
+        sliced ArrayValue whose bounds were BinOp results has those
+        bounds resolved to constants before emit.
         """
+        from qamomile.circuit.ir.value import ArrayValue
+
         if v.uuid in folded_values:
             return folded_values[v.uuid]
-        if not v.element_indices:
-            return v
-        new_indices: list[Value] = []
+
         changed = False
-        for idx in v.element_indices:
-            if isinstance(idx, Value):
-                new_idx = self._substitute_in_value(idx, folded_values)
-                if new_idx is not idx:
+
+        new_element_indices: tuple[Value, ...] = v.element_indices
+        if v.element_indices:
+            new_indices: list[Value] = []
+            for idx in v.element_indices:
+                if isinstance(idx, Value):
+                    new_idx = self._substitute_in_value(idx, folded_values)
+                    if new_idx is not idx:
+                        changed = True
+                    new_indices.append(new_idx)
+                else:
+                    new_indices.append(idx)
+            new_element_indices = tuple(new_indices)
+
+        # Chase parent_array so sliced ArrayValues reached indirectly
+        # (via element Value -> parent_array) also get their slice
+        # metadata folded.
+        new_parent_array = v.parent_array
+        if v.parent_array is not None:
+            sub_parent = self._substitute_in_value(v.parent_array, folded_values)
+            if isinstance(sub_parent, ArrayValue) and sub_parent is not v.parent_array:
+                new_parent_array = sub_parent
+                changed = True
+
+        if isinstance(v, ArrayValue):
+            new_shape: tuple[Value, ...] = v.shape
+            if v.shape:
+                new_shape_list: list[Value] = []
+                for dim in v.shape:
+                    sub_dim = self._substitute_in_value(dim, folded_values)
+                    if sub_dim is not dim:
+                        changed = True
+                    new_shape_list.append(sub_dim)
+                new_shape = tuple(new_shape_list)
+
+            new_slice_of = v.slice_of
+            if v.slice_of is not None:
+                sub_slice_of = self._substitute_in_value(v.slice_of, folded_values)
+                if (
+                    isinstance(sub_slice_of, ArrayValue)
+                    and sub_slice_of is not v.slice_of
+                ):
+                    new_slice_of = sub_slice_of
                     changed = True
-                new_indices.append(new_idx)
-            else:
-                new_indices.append(idx)
-        if not changed:
+
+            new_slice_start = v.slice_start
+            if v.slice_start is not None:
+                sub_slice_start = self._substitute_in_value(
+                    v.slice_start, folded_values
+                )
+                if sub_slice_start is not v.slice_start:
+                    new_slice_start = sub_slice_start
+                    changed = True
+
+            new_slice_step = v.slice_step
+            if v.slice_step is not None:
+                sub_slice_step = self._substitute_in_value(v.slice_step, folded_values)
+                if sub_slice_step is not v.slice_step:
+                    new_slice_step = sub_slice_step
+                    changed = True
+
+            if changed:
+                return dataclasses.replace(
+                    v,
+                    element_indices=new_element_indices,
+                    parent_array=new_parent_array,
+                    shape=new_shape,
+                    slice_of=new_slice_of,
+                    slice_start=new_slice_start,
+                    slice_step=new_slice_step,
+                )
             return v
-        return dataclasses.replace(v, element_indices=tuple(new_indices))
+
+        if changed:
+            return dataclasses.replace(
+                v,
+                element_indices=new_element_indices,
+                parent_array=new_parent_array,
+            )
+        return v
+
+    def _substitute_folded_results(
+        self,
+        op: Operation,
+        folded_values: dict[str, Value],
+    ) -> Operation:
+        """Substitute folded constants in an operation's result Values.
+
+        Complements :meth:`_substitute_folded_operands`: that method
+        folds the inputs to an operation while this one folds the
+        outputs.  Both are needed for operations whose result
+        ``ArrayValue`` carries a ``shape`` derived from BinOp nodes
+        that have since been folded.  The canonical case is
+        ``MeasureVectorOperation``: its clbit-result array has
+        ``shape=(slice_length,)`` where ``slice_length`` was a
+        symbolic expression; after the corresponding BinOps are
+        removed and their UUIDs land in ``folded_values``, the result
+        shape still references the original symbolic ``Value`` unless
+        this pass walks it.
+
+        Note: ``SliceArrayOperation`` is **not** handled here because
+        it returns early from
+        :meth:`_substitute_slice_op_result` which already covers
+        both operands and results.
+
+        Args:
+            op: Operation whose results to fold.
+            folded_values: UUID → folded ``Value`` map built by the pass.
+
+        Returns:
+            A new ``Operation`` with folded results, or ``op`` unchanged
+            if no result field required substitution.
+        """
+        if not op.results:
+            return op
+
+        new_results: list[Any] = []
+        changed = False
+        for r in op.results:
+            if isinstance(r, Value):
+                new_r = self._substitute_in_value(r, folded_values)
+                if new_r is not r:
+                    changed = True
+                new_results.append(new_r)
+            else:
+                new_results.append(r)
+
+        if changed:
+            return dataclasses.replace(op, results=new_results)
+        return op
 
     def _substitute_folded_operands(
         self,
@@ -179,8 +414,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
         operands (recursively, so nested array accesses like
         ``q[indices[uint_tmp]]`` are fully resolved).
 
-        For ``ControlledUOperation``, also folds ``num_controls``,
-        ``target_indices``, and ``controlled_indices`` fields.
+        For ``ControlledUOperation``, also folds ``num_controls`` and
+        ``control_indices`` fields.
         """
         new_operands: list[Any] = []
         changed = False
@@ -214,53 +449,85 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     extra_kwargs["power"] = new_power
                     changed = True
 
-            if isinstance(result_op, IndexSpecControlledU):
-                # Fold num_controls if symbolic.
-                if isinstance(result_op.num_controls, Value):
-                    new_nc = self._resolve_field_value(
-                        result_op.num_controls, folded_values
-                    )
-                    if new_nc is not result_op.num_controls:
-                        extra_kwargs["num_controls"] = new_nc
-                        changed = True
-                # Fold target_indices list.
-                if result_op.target_indices is not None:
-                    new_ti = self._fold_value_list(
-                        result_op.target_indices, folded_values
-                    )
-                    if new_ti is not None:
-                        extra_kwargs["target_indices"] = new_ti
-                        changed = True
-                # Fold controlled_indices list.
-                if result_op.controlled_indices is not None:
+            if isinstance(result_op, SymbolicControlledU):
+                # Always fold the ``control_indices`` Value list first
+                # so the IR carries constant ints when the bindings
+                # supply them.
+                if result_op.control_indices is not None:
                     new_ci = self._fold_value_list(
-                        result_op.controlled_indices, folded_values
+                        list(result_op.control_indices), folded_values
                     )
                     if new_ci is not None:
-                        extra_kwargs["controlled_indices"] = new_ci
+                        extra_kwargs["control_indices"] = tuple(new_ci)
                         changed = True
-            elif isinstance(result_op, SymbolicControlledU):
                 # Fold num_controls: Value -> int.  If resolved to int,
-                # promote to ConcreteControlledU.
+                # consider promoting to ConcreteControlledU.
                 new_nc = self._resolve_field_value(
                     result_op.num_controls, folded_values
                 )
                 if new_nc is not result_op.num_controls:
-                    if isinstance(new_nc, int):
+                    if (
+                        isinstance(new_nc, int)
+                        and result_op.control_indices is None
+                        and result_op.num_control_args == 1
+                    ):
                         # Promote to ConcreteControlledU.
+                        #
+                        # ``SymbolicControlledU`` carries the controls as a
+                        # single ``Vector[Qubit]`` operand (``operands[0]``)
+                        # plus individual target / param operands.  The
+                        # promoted ``ConcreteControlledU`` expects the
+                        # operand layout ``[ctrl_0, ..., ctrl_{nc-1}, tgt_0,
+                        # ..., params...]`` with one ``Value`` per control
+                        # qubit.  Expand both operands and results so the
+                        # layout matches the concrete subclass; without
+                        # this step ``control_operands`` aliases the first
+                        # target into the control slice and the emit path
+                        # produces a partial-arity controlled gate.
+                        #
+                        # Skipped when ``control_indices`` is non-``None``
+                        # because the pass-through semantics of non-selected
+                        # pool elements cannot be represented in the
+                        # promoted ``ConcreteControlledU`` operand layout
+                        # (no scalar slot stands for "this slot is part of
+                        # the control register but is not actually a
+                        # control on this op"); the
+                        # ``emit_controlled_u_with_symbolic_indices`` emit
+                        # path consumes the un-promoted form directly.
+                        current_operands = (
+                            new_operands if changed else list(result_op.operands)
+                        )
+                        current_results = list(result_op.results)
+                        new_operands, new_results = (
+                            self._expand_symbolic_controlled_operands(
+                                current_operands, current_results, new_nc
+                            )
+                        )
+                        changed = True
                         power = extra_kwargs.get("power", result_op.power)
                         result_op = ConcreteControlledU(
-                            operands=new_operands
-                            if changed
-                            else list(result_op.operands),
-                            results=list(result_op.results),
+                            operands=new_operands,
+                            results=new_results,
                             num_controls=new_nc,
                             power=power,
                             block=result_op.block,
                         )
                         extra_kwargs = {}  # Already applied
-                        changed = True
                     else:
+                        if isinstance(new_nc, int):
+                            # ``SymbolicControlledU.num_controls`` is
+                            # contractually a ``Value`` with a UUID
+                            # (serialize, if-lowering, and the IR
+                            # walkers depend on it).  When the
+                            # constant fold resolves it to an ``int``
+                            # but promotion to ``ConcreteControlledU``
+                            # is blocked (e.g. ``control_indices``
+                            # is set), bind the constant onto a fresh
+                            # copy of the original ``UInt`` ``Value``
+                            # so the IR shape stays
+                            # ``Value(..., const_value=<int>)`` rather
+                            # than a bare ``int``.
+                            new_nc = result_op.num_controls.with_const(new_nc)
                         extra_kwargs["num_controls"] = new_nc
                         changed = True
             # ConcreteControlledU: num_controls is already int, nothing to fold.
@@ -369,6 +636,119 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 f"ControlledU power must be strictly positive, got {value}."
             )
         return value
+
+    def _expand_symbolic_controlled_operands(
+        self,
+        operands: list[Any],
+        results: list[Any],
+        num_controls: int,
+    ) -> tuple[list[Any], list[Any]]:
+        """Expand a ``SymbolicControlledU`` operand/result layout into the
+        ``ConcreteControlledU`` per-qubit layout.
+
+        ``SymbolicControlledU`` carries the controls as one
+        ``Vector[Qubit]`` operand at index 0; the matching result is a
+        new-version ``ArrayValue`` at result index 0.  The promoted
+        ``ConcreteControlledU`` expects ``num_controls`` individual qubit
+        ``Value`` operands (and matching results) followed by the target
+        and parameter slots.  This helper builds those per-qubit
+        ``Value``\\ s, anchoring them to the original ``ArrayValue``\\ s
+        via ``parent_array`` so the emit-time qubit resolver finds the
+        physical qubit through the existing slice / array-element path.
+
+        Args:
+            operands (list[Any]): Operand list with ``operands[0]`` set to
+                the control ``ArrayValue``; the remaining entries are the
+                target qubits and classical parameters in their original
+                order.
+            results (list[Any]): Result list whose first entry is the
+                next-version control ``ArrayValue``; the remaining entries
+                are the target output qubits in their original order.
+            num_controls (int): Concrete (folded) number of control
+                qubits.  The control vector's length is assumed to match.
+
+        Returns:
+            tuple[list[Any], list[Any]]: A pair ``(new_operands,
+            new_results)`` carrying the expanded per-qubit layout.
+
+        Raises:
+            ValidationError: If the operand or result layout does not
+                match the ``SymbolicControlledU`` contract (missing
+                control ``ArrayValue`` at index 0), or if the control
+                ``Vector``'s length resolves to a concrete value that
+                disagrees with *num_controls*.
+        """
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue
+
+        if not operands or not isinstance(operands[0], ArrayValue):
+            raise ValidationError(
+                "SymbolicControlledU expected an ArrayValue at operands[0] "
+                "(the control Vector), but the layout did not match.  This "
+                "is a compiler bug; the SymbolicControlledU contract was "
+                "violated upstream of ConstantFoldingPass."
+            )
+        if not results or not isinstance(results[0], ArrayValue):
+            raise ValidationError(
+                "SymbolicControlledU expected an ArrayValue at results[0] "
+                "(the next-version control Vector), but the layout did "
+                "not match.  This is a compiler bug; the "
+                "SymbolicControlledU contract was violated upstream of "
+                "ConstantFoldingPass."
+            )
+
+        ctrl_vector_in = operands[0]
+        ctrl_vector_out = results[0]
+
+        # Verify the control Vector's length matches num_controls when both
+        # are resolvable to concrete integers.  Without this check, a
+        # mismatch silently uses the first num_controls elements of an
+        # over-sized Vector (rest of the Vector is dropped from the circuit)
+        # or, for an under-sized Vector, triggers a downstream allocator
+        # AssertionError whose surface message ("QInit was not allocated"
+        # — see ``_allocate_qubit_list``) hides the real cause.
+        if ctrl_vector_in.shape:
+            shape_const = ctrl_vector_in.shape[0].get_const()
+            if shape_const is not None:
+                vector_len = int(shape_const)
+                if vector_len != num_controls:
+                    raise ValidationError(
+                        f"SymbolicControlledU: control Vector "
+                        f"'{ctrl_vector_in.name}' has length {vector_len}, "
+                        f"but num_controls resolves to {num_controls}.  The "
+                        f"Vector passed as the first argument to a "
+                        f"symbolic-num_controls controlled gate must hold "
+                        f"exactly num_controls qubits."
+                    )
+
+        tail_operands = list(operands[1:])
+        tail_results = list(results[1:])
+
+        ctrl_operands: list[Any] = []
+        ctrl_results: list[Any] = []
+        for i in range(num_controls):
+            idx_value = Value(
+                type=UIntType(),
+                name=f"const_{i}",
+            ).with_const(i)
+            ctrl_operands.append(
+                Value(
+                    type=QubitType(),
+                    name=f"{ctrl_vector_in.name}[{i}]",
+                    parent_array=ctrl_vector_in,
+                    element_indices=(idx_value,),
+                )
+            )
+            ctrl_results.append(
+                Value(
+                    type=QubitType(),
+                    name=f"{ctrl_vector_out.name}[{i}]",
+                    parent_array=ctrl_vector_out,
+                    element_indices=(idx_value,),
+                )
+            )
+
+        return ctrl_operands + tail_operands, ctrl_results + tail_results
 
     def _fold_value_list(
         self,

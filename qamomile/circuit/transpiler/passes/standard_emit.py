@@ -14,7 +14,11 @@ from __future__ import annotations
 import re
 from typing import Any, Generic, TypeVar
 
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import (
+    Operation,
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     CompOp,
@@ -23,7 +27,9 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -34,10 +40,12 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
+    GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
@@ -70,6 +78,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     emit_controlled_u,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
+from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
+    emit_inverse_block,
+)
 from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import (
     emit_measure,
     emit_measure_qfixed,
@@ -111,7 +122,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self._composite_emitters = composite_emitters or []
 
         # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
-        self._allocator = ResourceAllocator()
+        self._allocator = ResourceAllocator(self._resolver)
         self._loop_analyzer = LoopAnalyzer()
         self._decomposer = CompositeDecomposer()
 
@@ -195,6 +206,23 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         for op in operations:
             if isinstance(op, QInitOperation):
                 continue
+            elif isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
+                # SliceArrayOperation / ReleaseSliceViewOperation are
+                # intentionally preserved through partial_eval /
+                # constant_fold so SliceBorrowCheckPass can validate
+                # view borrow / release post-fold; StripSliceArrayOpsPass
+                # (invoked from ``Transpiler.strip_slice_ops`` after the
+                # linearity check) is responsible for removing both
+                # before this point.  Reaching here means the strip
+                # stage was skipped or ran out of order — a
+                # compiler-internal invariant violation.  Fail loudly
+                # rather than silently emitting nothing.
+                raise RuntimeError(
+                    f"{type(op).__name__} reached emit — "
+                    f"StripSliceArrayOpsPass should have stripped it "
+                    f"after SliceBorrowCheckPass.  This is a "
+                    f"compiler bug; please report it."
+                )
             elif isinstance(op, GateOperation):
                 emit_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureOperation):
@@ -215,6 +243,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, CompositeGateOperation):
                 emit_composite_gate(self, circuit, op, qubit_map, bindings)
+            elif isinstance(op, InverseBlockOperation):
+                self._emit_inverse_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
@@ -314,6 +344,27 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     ) -> None:
         emit_pauli_evolve(self, circuit, op, qubit_map, bindings)
 
+    def _emit_inverse_block(
+        self,
+        circuit: T,
+        op: InverseBlockOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a first-class inverse block operation.
+
+        Args:
+            circuit (T): Backend circuit being built.
+            op (InverseBlockOperation): Inverse block operation to emit.
+            qubit_map (QubitMap): Current quantum value to physical qubit map.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If neither backend-native inverse emission nor the
+                fallback implementation can be emitted.
+        """
+        emit_inverse_block(self, circuit, op, qubit_map, bindings)
+
     def _emit_runtime_classical_expr(
         self,
         circuit: T,
@@ -406,10 +457,78 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bindings,
         )
 
+    def _emit_irreducible_multi_controlled_gate(
+        self,
+        circuit: T,
+        gate_type: GateOperationType,
+        control_indices: list[int],
+        target_idx: int,
+        angle: Any,
+    ) -> None:
+        """Backend hook: emit one irreducible multi-controlled gate.
+
+        The shared controlled fallback reduces multi-qubit gate types
+        structurally and covers up to two controls on X / Z via
+        Toffoli. Single-qubit gates that still carry two or more
+        controls after those reductions land here. Backends that can
+        realize an arbitrary multi-controlled single-qubit gate (e.g.
+        QURI Parts via a dense local unitary) override this method.
+
+        Args:
+            circuit (T): Backend circuit being built.
+            gate_type (GateOperationType): The single-qubit gate to
+                control.
+            control_indices (list[int]): Physical control qubits.
+            target_idx (int): Physical target qubit.
+            angle (Any): Resolved rotation angle for rotation-like
+                gates, or ``None`` for fixed gates.
+
+        Raises:
+            EmitError: Always, in the base implementation.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        raise EmitError(
+            f"Cannot emit {len(control_indices)}-controlled {gate_type.name}: "
+            f"the shared fallback reduces to Toffoli for up to two "
+            f"controls only, and backend {type(self).__name__!r} does "
+            f"not override ``_emit_irreducible_multi_controlled_gate``. "
+            f"Run this kernel on a backend with native multi-control "
+            f"support, or add the hook to the backend's emit pass.",
+            operation="ControlledGate",
+        )
+
     def _blockvalue_to_gate(
-        self, block_value: Any, num_qubits: int, bindings: dict[str, Any]
+        self,
+        block_value: Any,
+        num_qubits: int,
+        bindings: dict[str, Any],
+        input_operands: list[Any] | None = None,
+        operation_name: str = "ControlledUOperation",
     ) -> Any:
-        return blockvalue_to_gate(self, block_value, num_qubits, bindings)
+        """Convert a nested block into a reusable backend gate.
+
+        Args:
+            block_value (Any): Block-like object to emit into a temporary
+                backend circuit.
+            num_qubits (int): Number of qubits in the temporary circuit.
+            bindings (dict[str, Any]): Active emit bindings.
+            input_operands (list[Any] | None): Optional call-site operands
+                used to bind block inputs. Defaults to None.
+            operation_name (str): Operation name used in diagnostics when
+                input binding fails. Defaults to ``"ControlledUOperation"``.
+
+        Returns:
+            Any: Backend gate object, or None when conversion fails.
+        """
+        return blockvalue_to_gate(
+            self,
+            block_value,
+            num_qubits,
+            bindings,
+            input_operands=input_operands,
+            operation_name=operation_name,
+        )
 
     # ------------------------------------------------------------------
     # Helpers called from emit_support modules

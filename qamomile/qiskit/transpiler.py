@@ -6,7 +6,7 @@ into Qiskit QuantumCircuits.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence, cast
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -37,6 +38,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
     QubitAddress,
     QubitMap,
+    resolve_condition_address,
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
@@ -160,7 +162,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
     ) -> None:
         """Emit while loop using Qiskit's while_loop context manager."""
         if not op.operands:
-            raise ValueError("WhileOperation requires a condition operand")
+            raise EmitError(
+                "WhileOperation requires a condition operand.",
+                operation="WhileOperation",
+            )
 
         condition = op.operands[0]
         condition_value = condition.value if hasattr(condition, "value") else condition
@@ -212,16 +217,21 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         if stored is not None and not isinstance(stored, (bool, int, float)):
             return stored
 
-        condition_addr = QubitAddress(condition_uuid)
+        if isinstance(condition, Value):
+            condition_addr = resolve_condition_address(
+                condition, bindings, self._resolver
+            )
+        else:
+            condition_addr = QubitAddress(condition_uuid)
         if condition_addr in clbit_map:
             clbit_idx = clbit_map[condition_addr]
             return (circuit.clbits[clbit_idx], 1)
 
         raise EmitError(
-            "Runtime if-conditions must come from measurement results "
-            "or be bound before transpilation. The condition value was "
-            "neither resolved at compile time nor backed by a "
-            "measurement result."
+            "Runtime control-flow conditions (if / while) must come from "
+            "measurement results or be bound before transpilation. The "
+            "condition value was neither resolved at compile time nor "
+            "backed by a measurement result."
         )
 
     def _emit_runtime_classical_expr(
@@ -267,8 +277,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
               2. Constants: ``v.get_const()`` returns the IR-typed value
                  (Bit→bool, UInt→int, Float→float). No ``bool(...)``
                  coercion — that would clobber numeric arithmetic.
-              3. Clbit references: the canonical ``QubitAddress(v.uuid)``
-                 lookup in ``clbit_map``.
+              3. Clbit references: ``resolve_condition_address(v, ...)``
+                 keyed lookup in ``clbit_map`` — a scalar bit resolves to
+                 ``QubitAddress(v.uuid)`` while a measured ``Vector[Bit]``
+                 element resolves to ``QubitAddress(root_array.uuid,
+                 root_index)`` (walking ``parent_array`` / ``slice_of``).
               4. User parameters: read from the ``parameters`` typed slot
                  by parameter name (the only legitimate name path).
               5. Loop variables: read from the ``loop_vars`` typed slot
@@ -295,8 +308,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             if hasattr(v, "is_constant") and v.is_constant():
                 return v.get_const()
 
-            # 3. Clbit reference.
-            addr = QubitAddress(v.uuid)
+            # 3. Clbit reference. ``Vector[Bit]`` element accesses route
+            #    through ``QubitAddress(parent_array.uuid, index)``; scalar
+            #    bits use ``QubitAddress(v.uuid)``.
+            addr = resolve_condition_address(v, bindings, self._resolver)
             if addr in clbit_map:
                 return circuit.clbits[clbit_map[addr]]
 
@@ -336,6 +351,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 )
             result = expr.logic_not(inner)
         else:
+            assert kind is not None
             lhs = resolve_operand(op.operands[0])
             rhs = resolve_operand(op.operands[1])
             if lhs is None or rhs is None:
@@ -362,7 +378,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         Every arm of ``RuntimeOpKind`` (except ``NOT``, which is handled
         upstream) is dispatched here. Kinds without a Qiskit ``expr``
-        equivalent — currently ``FLOORDIV`` and ``POW`` — raise
+        equivalent — currently ``FLOORDIV``, ``MOD`` and ``POW`` — raise
         ``NotImplementedError`` rather than silently returning ``None``,
         so the contract gap is loud at emit time instead of producing a
         misleading "Unsupported kind" error.
@@ -397,7 +413,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 return expr.mul(lhs, rhs)
             case RuntimeOpKind.DIV:
                 return expr.div(lhs, rhs)
-            case RuntimeOpKind.FLOORDIV | RuntimeOpKind.POW:
+            case RuntimeOpKind.FLOORDIV | RuntimeOpKind.MOD | RuntimeOpKind.POW:
                 raise NotImplementedError(
                     f"RuntimeOpKind.{kind.name} is not supported by the Qiskit "
                     f"backend (Qiskit's classical expr has no equivalent). "
@@ -416,7 +432,16 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> Any:
-        """Build a Qiskit ``expr.Expr`` for a runtime classical predicate.
+        """Build a Qiskit ``expr.Expr`` for an unlowered runtime predicate.
+
+        Fallback path used by ``StandardEmitPass`` only when a
+        ``CompOp``/``CondOp``/``NotOp`` reaches emit without having been
+        rewritten to ``RuntimeClassicalExpr`` by ``ClassicalLoweringPass``
+        — i.e., predicates that depend on emit-time-bound values not
+        visible to the pre-emit lowering pass (e.g. computed from a loop
+        variable that wraps a measurement). The primary path is
+        ``_emit_runtime_classical_expr``; prefer extending the lowering
+        pass over adding new cases here.
 
         Recursively resolves operands to either Qiskit ``Clbit`` references
         (via ``clbit_map``), constants, or already-built sub-expressions
@@ -452,7 +477,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     return stored_v
                 if hasattr(v, "is_constant") and v.is_constant():
                     return bool(v.get_const())
-                addr = QubitAddress(v.uuid)
+                addr = (
+                    resolve_condition_address(v, bindings, self._resolver)
+                    if isinstance(v, Value)
+                    else QubitAddress(v.uuid)
+                )
                 if addr in clbit_map:
                     return circuit.clbits[clbit_map[addr]]
                 if isinstance(stored_v, (bool, int)):
@@ -484,7 +513,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 return expr.not_equal(lhs, rhs)
             return None
 
-        return None
+        return None  # type: ignore[unreachable]
 
     def _emit_pauli_evolve(
         self,
@@ -713,20 +742,21 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         # Check if this is V1 or V2 interface
         # V2 interface (new): run([(circuit, observable, params)])
         # V1 interface (old): run(circuits, observables, parameter_values)
+        estimator_run = cast(Any, self._estimator).run
         try:
             # Try V2 interface first
-            job = self._estimator.run([(circuit, sparse_pauli_op, param_values)])  # type: ignore[arg-type,call-arg,list-item]
+            job = estimator_run([(circuit, sparse_pauli_op, param_values)])
             result = job.result()
-            return float(result[0].data.evs)  # type: ignore[union-attr]
+            return float(result[0].data.evs)
         except (TypeError, AttributeError):
             # Fall back to V1 interface
-            job = self._estimator.run(  # type: ignore[call-arg,arg-type,list-item]
+            job = estimator_run(
                 [circuit],
                 [sparse_pauli_op],
-                [param_values] if param_values else None,  # type: ignore[arg-type,list-item]
+                [param_values] if param_values else None,
             )
             result = job.result()
-            return float(result.values[0])  # type: ignore[union-attr]
+            return float(result.values[0])
 
     def _ensure_measurements(self, circuit: "QuantumCircuit") -> "QuantumCircuit":
         """Ensure circuit has measurements, adding measure_all if needed."""

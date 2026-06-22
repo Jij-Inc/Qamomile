@@ -17,11 +17,14 @@ from typing import (
 import numpy as np
 
 from qamomile.circuit.frontend.ast_transform import (
+    RebindSourceKind,
+    RebindViolation,
     collect_quantum_rebind_violations,
     transform_control_flow,
 )
 from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
+    build_param_slots,
     create_dummy_input,
     func_to_block,
     handle_type_map,
@@ -33,12 +36,17 @@ from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
+from qamomile.circuit.frontend.handle.utils import get_size as _get_size
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
-from qamomile.circuit.transpiler.errors import FrontendTransformError
+from qamomile.circuit.transpiler.errors import (
+    FrontendTransformError,
+    QubitRebindError,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
@@ -108,6 +116,99 @@ def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
         if is_bool:
             return bit(value)
     return value
+
+
+def _const_int(value: Value | None) -> int | None:
+    """Return a compile-time integer constant from an IR value.
+
+    Args:
+        value (Value | None): IR value that may carry a constant.
+
+    Returns:
+        int | None: The integer constant when available and coercible,
+        otherwise ``None``.
+    """
+    if value is None:
+        return None
+    const = value.get_const()
+    if const is None:
+        return None
+    try:
+        return int(const)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_full_reslice_of_input(
+    output: ArrayValue,
+    formal_input: ArrayValue,
+) -> bool:
+    """Check whether ``output`` is only full-sliced from ``formal_input``.
+
+    The call-result wrapper uses this for the narrow case where a
+    sub-kernel receives a ``VectorView`` and returns ``view[:]`` (or an
+    equivalent chain of full re-slices).  Such an output is semantically
+    the same caller-side view after a new SSA version, even though the
+    callee's sliced ``ArrayValue`` points at the formal input lineage.
+
+    Args:
+        output (ArrayValue): Callee output array value.
+        formal_input (ArrayValue): Callee formal input array value.
+
+    Returns:
+        bool: ``True`` if every slice from ``output`` back to the
+        matching formal input is ``0:len:1`` with concrete lengths.
+    """
+    current = output
+    saw_slice = False
+    while current.slice_of is not None:
+        saw_slice = True
+        parent = current.slice_of
+        start = _const_int(current.slice_start)
+        step = _const_int(current.slice_step)
+        length = _const_int(current.shape[0] if current.shape else None)
+        parent_length = _const_int(parent.shape[0] if parent.shape else None)
+        if (
+            start != 0
+            or step != 1
+            or length is None
+            or parent_length is None
+            or length != parent_length
+        ):
+            return False
+        current = parent
+
+    return saw_slice and current.logical_id == formal_input.logical_id
+
+
+def _view_result_value_for_full_reslice(
+    callee_output: ArrayValue,
+    input_view: Vector[Any],
+) -> ArrayValue:
+    """Build the caller-side array value for a full re-sliced view output.
+
+    Args:
+        callee_output (ArrayValue): The formal-lineage output produced by
+            the callee block.
+        input_view (Vector[Any]): The caller-side view argument whose
+            coverage is being preserved.
+
+    Returns:
+        ArrayValue: A fresh SSA version that keeps the caller view's
+        slice metadata while using the callee output's display metadata.
+    """
+    source = input_view.value
+    return ArrayValue(
+        type=callee_output.type,
+        name=callee_output.name,
+        version=source.version + 1,
+        metadata=callee_output.metadata,
+        logical_id=source.logical_id,
+        shape=source.shape,
+        slice_of=source.slice_of,
+        slice_start=source.slice_start,
+        slice_step=source.slice_step,
+    )
 
 
 def _handle_types_equal(a: Any, b: Any) -> bool:
@@ -219,51 +320,153 @@ class QKernel(Generic[P, R]):
         # Lazy initialization for hierarchical Block
         self._block: Block | None = None
         self._block_building: bool = False
+        # Reentry guard for :meth:`__call__`'s call-time specialization
+        # path. While the specialized re-trace runs the kernel body,
+        # any self-call must fall back to the cached ``self.block`` to
+        # avoid unbounded re-tracing of self-recursive kernels.
+        self._specializing: bool = False
         # CallBlockOperations emitted by self-recursive calls during the
         # build get their ``block`` reference back-patched to ``self._block``
         # once ``func_to_block`` returns.  See _finalize_pending_self_calls.
         self._pending_self_calls: list[CallBlockOperation] = []
 
-        # AST-level quantum rebind analysis (deferred raise until build/block)
-        quantum_params = _get_quantum_param_names(input_types)
-        if quantum_params:
-            self._rebind_violations = collect_quantum_rebind_violations(
-                self.raw_func, quantum_params
-            )
-        else:
-            self._rebind_violations = []
-
-    def _check_rebind_violations(self) -> None:
-        if not self._rebind_violations:
-            return
-        from qamomile.circuit.transpiler.errors import QubitRebindError
-
-        v = self._rebind_violations[0]
-        if v.func_name:
-            pattern = f"{v.target_name} = {v.func_name}({v.source_name}, ...)"
-            fix = (
-                f"  - Use self-update: {v.target_name} = {v.func_name}({v.target_name}, ...)\n"
-                f"  - Use a new variable: new_var = {v.func_name}({v.source_name}, ...)"
-            )
-        else:
-            pattern = f"{v.target_name} = {v.source_name}"
-            fix = (
-                f"  - Use a new variable: new_var = {v.source_name}\n"
-                f"  - Remove the assignment if '{v.target_name}' is no longer needed"
-            )
-        raise QubitRebindError(
-            f"Forbidden quantum variable reassignment at line {v.lineno}: "
-            f"'{pattern}' overwrites quantum variable '{v.target_name}' "
-            f"with a value derived from different quantum variable "
-            f"'{v.source_name}'.\n\nTo fix, either:\n{fix}",
-            handle_name=v.target_name,
-            operation_name="assignment_rebind",
+        # AST-level quantum rebind analysis: a violation is a structural error
+        # in the kernel definition itself, so raise eagerly at decoration time
+        # rather than deferring to .block / build().
+        #
+        # The analyzer is run unconditionally rather than only when the kernel
+        # has quantum-typed parameters: its constructor-tracking logic (LHS of
+        # ``q = qm.qubit(...)`` / ``qm.qubit_array(...)``) seeds new origins
+        # from inside the body, so kernels that derive all of their quantum
+        # state from internal allocations are still subject to rebind checks.
+        violations = collect_quantum_rebind_violations(
+            self.raw_func, _get_quantum_param_names(input_types)
         )
+        if violations:
+            v = violations[0]
+            pattern, reason, fix = self._format_rebind_violation(v)
+            raise QubitRebindError(
+                f"Kernel '{self.name}': forbidden quantum variable reassignment "
+                f"at body line {v.lineno} (counting the first statement of "
+                f"the function body as line 1): "
+                f"'{pattern}' overwrites quantum variable '{v.target_name}' "
+                f"with {reason}.\n\nTo fix:\n{fix}",
+                handle_name=v.target_name,
+                operation_name="assignment_rebind",
+            )
+
+    @staticmethod
+    def _format_rebind_violation(v: RebindViolation) -> tuple[str, str, str]:
+        """Format a violation into ``(pattern, reason, fix)`` strings.
+
+        Separating formatting from the raise lets unit tests assert the
+        per-kind wording without going through ``QubitRebindError``.
+        Dispatch on ``v.source_kind`` is done via ``match`` against the
+        :class:`RebindSourceKind` enum members; the trailing ``case _:``
+        is an unreachable internal-invariant guard (the analyzer can
+        only produce one of the defined members).
+
+        Args:
+            v (RebindViolation): The violation record.
+
+        Returns:
+            tuple[str, str, str]: ``(pattern, reason, fix)`` where
+                ``pattern`` is a code-shaped illustration of the
+                offending assignment, ``reason`` explains why it is
+                rejected, and ``fix`` is a bullet list of remediation
+                suggestions (newline-separated, two-space-indented).
+        """
+        target = v.target_name
+        func = v.func_name
+        src = v.source_name
+        # Render the actual RHS source if the analyzer captured one
+        # (e.g. ``qs[i]`` for a Subscript source); otherwise fall back
+        # to the underlying source_name (``qs``).
+        src_expr = v.source_expr if v.source_expr is not None else src
+        match v.source_kind:
+            case RebindSourceKind.DIRECT_ALIAS:
+                if src is None:
+                    raise AssertionError(
+                        f"DIRECT_ALIAS violation for '{target}' has no "
+                        f"source_name; analyzer must set source_name for "
+                        f"this kind"
+                    )
+                pattern = f"{target} = {src_expr}"
+                reason = f"an alias of a different quantum variable '{src}'"
+                fix = (
+                    f"  - Use a new variable: new_var = {src_expr}\n"
+                    f"  - Remove the assignment if '{target}' is no longer needed"
+                )
+            case RebindSourceKind.QUANTUM_ARG:
+                if src is None:
+                    raise AssertionError(
+                        f"QUANTUM_ARG violation for '{target}' has no "
+                        f"source_name; analyzer must set source_name for "
+                        f"this kind"
+                    )
+                pattern = (
+                    f"{target} = {func}({src}, ...)"
+                    if func
+                    else f"{target} = ...({src}, ...)"
+                )
+                reason = f"a value derived from different quantum variable '{src}'"
+                self_update = (
+                    f"  - Use self-update: {target} = {func}({target}, ...)\n"
+                    if func
+                    else f"  - Use self-update: {target} = ...({target}, ...)\n"
+                )
+                new_var = (
+                    f"  - Use a new variable: new_var = {func}({src}, ...)"
+                    if func
+                    else f"  - Use a new variable: new_var = ...({src}, ...)"
+                )
+                fix = self_update + new_var
+            case RebindSourceKind.FRESH_ALLOCATION:
+                pattern = f"{target} = {func}(...)" if func else f"{target} = ...(...)"
+                reason = "a freshly allocated quantum value"
+                new_var = (
+                    f"  - Bind the new allocation to a new name: new_var = {func}(...)"
+                    if func
+                    else "  - Bind the new allocation to a new name: new_var = ...(...)"
+                )
+                fix = (
+                    f"{new_var}\n"
+                    f"  - Or remove the original '{target}' if it is no longer needed"
+                )
+            case RebindSourceKind.UNKNOWN_CALL:
+                pattern = f"{target} = {func}(...)" if func else f"{target} = ...(...)"
+                reason = (
+                    "a value that does not thread the original quantum variable "
+                    "through the call"
+                )
+                self_update = (
+                    f"  - Pass '{target}' into the call so it is self-updated: "
+                    f"{target} = {func}({target}, ...)\n"
+                    if func
+                    else f"  - Pass '{target}' into the call so it is self-updated\n"
+                )
+                fix = f"{self_update}  - Or bind the new value to a different name"
+            case RebindSourceKind.CHAINED_ASSIGNMENT:
+                pattern = f"{target} = ... = ..."
+                reason = (
+                    "a chained assignment, which cannot be verified as a "
+                    "self-update for every target"
+                )
+                fix = (
+                    f"  - Write a separate assignment for '{target}'\n"
+                    f"  - Avoid chained ``a = b = expr`` when any target is "
+                    f"a quantum variable"
+                )
+            case _:
+                # Defensive: every analyzer-produced source_kind is an
+                # enum member above. ``raise AssertionError`` (not
+                # ``assert``) so the invariant survives ``python -O``.
+                raise AssertionError(f"unhandled RebindSourceKind: {v.source_kind!r}")
+        return pattern, reason, fix
 
     @property
     def block(self) -> Block:
         """Compile the function to a hierarchical Block if not already compiled."""
-        self._check_rebind_violations()
         if self._block is None:
             if self._block_building:
                 # Re-entry from outside ``__call__``'s forward-ref branch.
@@ -355,6 +558,18 @@ class QKernel(Generic[P, R]):
         """
         Executes the kernel.
         If called within a tracing context, it emits a CallBlockOperation.
+
+        ``VectorView`` arguments flow through the same
+        ``CallBlockOperation`` path as plain ``Vector`` arguments: the
+        view's sliced ``ArrayValue`` (with its ``slice_of`` /
+        ``slice_start`` / ``slice_step`` metadata) is a first-class IR
+        Value, so it can be an operand of the call and be substituted
+        into the callee's dummy input by ``InlinePass``.  The emit-time
+        resolver walks the ``slice_of`` chain back to the root parent,
+        so the callee transparently operates on the slice's qubit
+        subset.  This also means self-recursive kernels with view
+        arguments (butterfly / divide-and-conquer patterns) work out of
+        the box — the forward-ref back-patching handles the recursion.
         """
         tracer = get_current_tracer()
 
@@ -374,7 +589,7 @@ class QKernel(Generic[P, R]):
                 )
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
-        inputs_map = {}
+        inputs_map: dict[str, Value] = {}
         # Track borrow provenance for input-derived quantum scalar handles.
         # After the call, return values with matching logical_id will have
         # their parent/indices restored so that borrow-return validation
@@ -412,10 +627,53 @@ class QKernel(Generic[P, R]):
                 key = parent._make_indices_key(indices)
                 parent._borrowed_indices.pop(key, None)
 
+        # Slice-view inputs need their bulk-borrow transferred onto the
+        # call's result handles under strict-return.  Stash the
+        # pre-consume metadata so the result-wrapping loop can pair
+        # each sliced result ``ArrayValue`` with its originating input
+        # view by ``(root_logical_id, slice_start_uuid, slice_step_uuid,
+        # length_uuid)``.  A single root may carry multiple disjoint
+        # views (e.g. ``q[0::2]`` and ``q[1::2]``), and even views that
+        # share ``start`` / ``step`` may have different lengths
+        # (``q[lo:hi]`` and ``q[lo:hi2]`` reuse the same ``lo`` /
+        # ``step`` ``UInt`` Values but differ in their ``shape[0]``
+        # Value), so the length uuid is needed to disambiguate.  The
+        # block's ``call`` helper builds each pass-through result via
+        # ``inputs[i].next_version()`` which preserves
+        # ``slice_start`` / ``slice_step`` / ``shape`` as the same
+        # underlying ``Value`` references — so the result-side uuids
+        # match the input-side uuids exactly.
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        InputViewKey = tuple[str, str | None, str | None, str | None]
+        input_view_metas: dict[InputViewKey, VectorView[Any]] = {}
+        for name, handle in bound_args.arguments.items():
+            if isinstance(handle, VectorView) and handle._should_enforce_linear():
+                root_av = handle.value
+                while root_av.slice_of is not None:
+                    root_av = root_av.slice_of
+                start_uuid = (
+                    handle._slice_start.value.uuid if handle._slice_start else None
+                )
+                step_uuid = (
+                    handle._slice_step.value.uuid if handle._slice_step else None
+                )
+                length_uuid = handle.value.shape[0].uuid if handle.value.shape else None
+                input_view_metas[
+                    (root_av.logical_id, start_uuid, step_uuid, length_uuid)
+                ] = handle
+
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
                 continue
-            # Consume quantum handles to enforce affine type
+            # ``VectorView`` argument consumption is deferred to
+            # ``_transfer_borrow_to`` after the call so the parent's
+            # borrow record can be rebound straight onto the result
+            # handle.  Everything else takes the regular ``consume``
+            # path to enforce affine type.
+            if isinstance(handle, VectorView) and handle._should_enforce_linear():
+                inputs_map[name] = handle.value
+                continue
             if handle._should_enforce_linear():
                 handle = handle.consume(operation_name=f"QKernel[{self.name}]")
             inputs_map[name] = handle.value
@@ -424,11 +682,50 @@ class QKernel(Generic[P, R]):
         # so emit a forward-ref CallBlockOperation that gets back-patched
         # once the build completes.  Skipping ``self.block`` here is what
         # breaks the otherwise-infinite re-trace loop.
+        block_ir_for_call: Block | None = None
+        formal_input_views: dict[str, tuple[ArrayValue, VectorView[Any]]] = {}
         if self._block_building:
             call_op = self._emit_self_call_forward_ref(inputs_map)
         else:
-            # Ensure the block IR is compiled
-            block_ir = self.block
+            # When the call site has fully resolved either the classical
+            # bindings or the ``Vector[Qubit]`` sizes, re-trace a
+            # specialized sub-block instead of reusing the cached
+            # symbolic ``self.block``. Shape-dependent stdlib helpers
+            # (``qmc.qft`` / ``qmc.iqft`` / ``qmc.qpe``) silently no-op
+            # when their input vector has a symbolic shape; specializing
+            # here is what makes those helpers emit the correct gate
+            # sequence when wrapped inside an outer kernel. The
+            # ``_specializing`` guard breaks the re-trace loop for
+            # self-recursive kernels (see ``_extract_calltime_specialization``).
+            block_ir = None
+            if not self._specializing:
+                spec = self._extract_calltime_specialization(bound_args.arguments)
+                if spec is not None:
+                    sub_parameters, sub_bindings, sub_qubit_sizes = spec
+                    self._specializing = True
+                    try:
+                        block_ir = self._build_specialized(
+                            parameters=sub_parameters,
+                            bindings=sub_bindings,
+                            qubit_sizes=sub_qubit_sizes,
+                        )
+                    finally:
+                        self._specializing = False
+            if block_ir is None:
+                block_ir = self.block
+
+            block_ir_for_call = block_ir
+            for label, formal_input in zip(block_ir.label_args, block_ir.input_values):
+                actual_handle = bound_args.arguments.get(label)
+                if (
+                    isinstance(actual_handle, VectorView)
+                    and isinstance(formal_input, ArrayValue)
+                    and actual_handle._should_enforce_linear()
+                ):
+                    formal_input_views[formal_input.logical_id] = (
+                        formal_input,
+                        actual_handle,
+                    )
 
             # Create the Call operation
             call_op = block_ir.call(**inputs_map)
@@ -444,7 +741,9 @@ class QKernel(Generic[P, R]):
             )
 
         wrapped_results: list[Any] = []
-        for val, handle_type in zip(results, self.output_types):
+        for result_idx, (val, handle_type) in enumerate(
+            zip(results, self.output_types)
+        ):
             if is_array_type(handle_type):
                 # Use _create_from_value to avoid __post_init__ side effects
                 actual_class = cast(
@@ -453,11 +752,70 @@ class QKernel(Generic[P, R]):
                 )
                 # Extract shape from ArrayValue if available
                 assert isinstance(val, ArrayValue)
+                # A callee may return a full re-slice of a view
+                # argument, e.g. ``return q[0:q.shape[0]]``.  The raw
+                # block output then points at the callee's formal input
+                # lineage, so exact caller-side metadata matching below
+                # would miss it and wrap the result as a plain
+                # ``Vector``.  When the slice chain is concretely
+                # ``0:len:1`` all the way back to a formal input that
+                # was supplied by a caller ``VectorView``, rewrite only
+                # this call result to the caller view's next SSA version.
+                # Partial or symbolic re-slices intentionally keep the
+                # previous behavior.
+                if block_ir_for_call is not None and val.slice_of is not None:
+                    for formal_input, input_view in formal_input_views.values():
+                        if _is_full_reslice_of_input(val, formal_input):
+                            val = _view_result_value_for_full_reslice(val, input_view)
+                            call_op.results[result_idx] = val
+                            break
                 if val.shape:
                     shape = tuple(UInt(value=dim_val) for dim_val in val.shape)
                 else:
                     # Fallback: empty shape (will need runtime resolution)
                     shape = ()
+
+                # If the result has slice metadata and we have a
+                # matching input view, wrap as ``VectorView`` and
+                # transfer the parent's bulk-borrow over.  Strict-
+                # return then demands the caller eventually slice-
+                # assign the wrapped result back to the parent.
+                if val.slice_of is not None:
+                    result_root_av = val
+                    while result_root_av.slice_of is not None:
+                        result_root_av = result_root_av.slice_of
+                    result_start_uuid = (
+                        val.slice_start.uuid if val.slice_start else None
+                    )
+                    result_step_uuid = val.slice_step.uuid if val.slice_step else None
+                    result_length_uuid = val.shape[0].uuid if val.shape else None
+                    meta_key = (
+                        result_root_av.logical_id,
+                        result_start_uuid,
+                        result_step_uuid,
+                        result_length_uuid,
+                    )
+                    in_view = input_view_metas.get(meta_key)
+                    if in_view is not None and in_view._slice_parent is not None:
+                        if shape:
+                            length = shape[0]
+                        elif val.shape:
+                            length = UInt(value=val.shape[0])
+                        else:
+                            raise RuntimeError(
+                                f"Slice result '{val.name}' has no shape metadata."
+                            )
+                        new_view = VectorView._wrap_unregistered(
+                            parent=in_view._slice_parent,
+                            sliced_av=val,
+                            length=length,
+                            start_uint=in_view._slice_start,
+                            step_uint=in_view._slice_step,
+                        )
+                        in_view._transfer_borrow_to(new_view, f"QKernel[{self.name}]")
+                        wrapped_results.append(new_view)
+                        continue
+
                 wrapped_results.append(
                     actual_class._create_from_value(value=val, shape=shape)
                 )
@@ -471,6 +829,19 @@ class QKernel(Generic[P, R]):
                     )
                 else:
                     wrapped_results.append(handle_type(value=val))
+
+        # Any ``VectorView`` input that did NOT get its borrow transferred
+        # to a matching sliced result must still be consumed — the call
+        # logically passed it to the callee, so leaving it live would
+        # break the affine / strict-return contract (use-after-move).
+        # Use the destructive "qkernel call (view dropped)" consume name
+        # so the covered parent slots become consumed-slot markers; the
+        # qubits are effectively spent inside the callee (e.g. measure /
+        # expval kernels) and re-touching them in the caller is rejected
+        # rather than silently working with a corrupted state.
+        for in_view in input_view_metas.values():
+            if not in_view._consumed:
+                in_view.consume(operation_name="qkernel call (view dropped)")
 
         # Return tuple or single value to match Python function signature
         if len(wrapped_results) == 1:
@@ -834,27 +1205,330 @@ class QKernel(Generic[P, R]):
 
         return estimate_resources(self.block, bindings=bindings)
 
+    def _extract_calltime_specialization(
+        self,
+        arguments: dict[str, Any],
+    ) -> tuple[list[str], dict[str, Any], dict[str, int]] | None:
+        """Extract call-time specialization data for a sub-kernel call.
+
+        Inspects each argument bound at the call site and decides whether
+        the sub-kernel body can be productively re-traced with concrete
+        information (constant classical values and / or known ``Vector
+        [Qubit]`` sizes). The triple returned mirrors the input contract
+        of :meth:`_create_traced_block` and is consumed by
+        :meth:`_build_specialized`.
+
+        The motivation is to make shape-dependent stdlib helpers
+        (``qmc.qft`` / ``qmc.iqft`` / ``qmc.qpe``) emit the correct gate
+        sequence when invoked through a sub-kernel call. Those helpers
+        silently fall back to a no-op when ``get_size`` of their input
+        register fails (because the shape is still symbolic in a
+        cached, never-specialized ``self.block``), so the outer
+        composition layer must re-trace the callee once the relevant
+        shapes are known.
+
+        Args:
+            arguments (dict[str, Any]): The bound-argument mapping from
+                parameter name to the caller's frontend
+                :class:`Handle`, as produced by
+                ``signature.bind(...).arguments`` in :meth:`__call__`.
+                Quantum handles in this mapping have already been
+                ``consume()``-d by :meth:`__call__` before this
+                extractor runs, but ``consume`` only updates the
+                affine-type ledger and leaves ``handle.value``
+                untouched, so the metadata reads this method performs
+                (``get_const``, ``get_const_array``, ``dict_runtime``,
+                ``get_size`` on quantum arrays) are still valid.
+
+        Returns:
+            tuple[list[str], dict[str, Any], dict[str, int]] | None:
+                On success, a triple
+                ``(parameters, bindings, qubit_sizes)`` where
+                ``parameters`` lists classical argument names that
+                remain symbolic at the call site, ``bindings`` maps
+                classical arguments to their compile-time-known Python
+                values, and ``qubit_sizes`` maps ``Vector[Qubit]``
+                argument names to their resolved first-axis sizes.
+                Arguments that cannot enter any of the three buckets
+                (scalar ``Qubit``, scalar ``Observable``, unbound
+                ``Vector[Observable]``, multi-dimensional qubit
+                arrays — ``Matrix[Qubit]`` / ``Tensor[Qubit]`` —
+                unbound ``Dict`` parameters, ``Tuple`` parameters,
+                and non-parameterizable classical types like
+                ``Bit`` / ``bool`` / ``Vector[Bit]`` / ``Vector[bool]``
+                without a compile-time constant) are deliberately
+                left out so that :meth:`_create_traced_block` handles
+                those argument positions via its standard path
+                (``_create_parameter_input`` for ``Observable``,
+                ``create_dummy_input`` fall-through for everything
+                else); specialization of the rest of the call proceeds
+                normally and inline-time substitution supplies the
+                caller's actual Value. Returns ``None`` in two cases:
+                (a) the extractor encounters an argument type that
+                does not match any of the modeled branches above (the
+                catch-all at the bottom of the loop), or (b) the
+                modeled branches contributed no useful information
+                (``bindings`` and ``qubit_sizes`` are both empty at
+                the end). In the ``None`` case ``__call__`` falls
+                back to ``self.block``.
+        """
+        parameters: list[str] = []
+        bindings: dict[str, Any] = {}
+        qubit_sizes: dict[str, int] = {}
+
+        for name, param in self.signature.parameters.items():
+            param_type = self.input_types.get(name, param.annotation)
+            handle = arguments.get(name)
+            # ``QKernel.__call__`` rejects non-``Handle`` arguments before
+            # this method is reached, so an offending ``handle`` here is
+            # a programmer error in the upstream call site, not a
+            # normal specialization-abort condition. Use ``assert``
+            # (Section L of CLAUDE.md: ``assert`` for internal
+            # invariants).
+            assert isinstance(handle, Handle), (
+                f"Internal invariant violated: argument {name!r} should "
+                f"already be a Handle by the time "
+                f"_extract_calltime_specialization runs (upstream check "
+                f"at __call__)."
+            )
+
+            # Scalar Qubit: no specialization-relevant info to extract;
+            # ``_create_traced_block`` will fall through to the regular
+            # ``create_dummy_input`` path, which yields a standalone
+            # symbolic Qubit dummy. The caller's Value is bound to that
+            # dummy at inline time, so behavior matches the symbolic
+            # block.
+            if param_type is Qubit:
+                continue
+
+            # Scalar Observable and unbound ``Vector[Observable]``:
+            # ``_create_traced_block`` already auto-tracks these as
+            # symbolic parameters regardless of the ``parameters`` list,
+            # so we let them flow through untouched. A *bound*
+            # ``Vector[Observable]`` (the caller passed concrete
+            # observables) falls into the classical-array branch below
+            # and gets baked in via ``bindings``.
+            if param_type is Observable:
+                continue
+            if (
+                is_array_type(param_type)
+                and _get_array_element_type(param_type) is Observable
+            ):
+                const_array = handle.value.get_const_array()
+                if const_array is not None:
+                    bindings[name] = const_array
+                continue
+
+            # Quantum array. ``Vector[Qubit]`` is the fully supported
+            # case: we extract the first-axis size via ``get_size`` and
+            # carry it in ``qubit_sizes`` so the callee re-traces with
+            # a concrete shape. ``Matrix[Qubit]`` / ``Tensor[Qubit]``
+            # are higher-rank registers; we do not yet extract their
+            # multi-dim shape nor have the ``create_dummy_input
+            # (shape=...)`` plumbing for them, so we treat them like
+            # ``Dict`` / ``Tuple`` — leave the argument out of all
+            # three buckets and ``continue``. ``_create_traced_block``
+            # falls through to ``create_dummy_input`` for that
+            # position (matching the cached block), and the rest of
+            # the call still benefits from specialization. The
+            # trade-off: if the callee applies shape-dependent stdlib
+            # to the higher-rank register, that op continues to
+            # silently no-op — same as the pre-#392 baseline for
+            # that specific case. Raising here instead would forbid
+            # any nested call that takes a ``Matrix[Qubit]`` /
+            # ``Tensor[Qubit]``, even kernels that never touch
+            # shape-dependent stdlib on it.
+            if (
+                is_array_type(param_type)
+                and _get_array_element_type(param_type) is Qubit
+            ):
+                if getattr(param_type, "__origin__", param_type) is not Vector:
+                    continue
+                # ``_get_size`` is declared over ``Vector``; the two
+                # checks above narrow ``handle`` to a ``Vector[Qubit]``,
+                # but the type system cannot see that — cast for the
+                # call.
+                try:
+                    size = _get_size(cast(Vector[Qubit], handle))
+                except ValueError:
+                    continue
+                qubit_sizes[name] = size
+                continue
+
+            # Classical scalar. Bind the compile-time constant when
+            # available. If not, list the name in ``parameters`` only
+            # when the type is parameterizable
+            # (``_validate_parameters`` admits ``UInt`` / ``Float`` /
+            # ``int`` / ``float`` and their arrays). For
+            # non-parameterizable types like ``Bit`` / ``bool``, neither
+            # bucket fits — but we ``continue`` past the argument
+            # rather than aborting the whole specialization:
+            # ``_create_traced_block``'s fall-through
+            # ``create_dummy_input`` path creates a symbolic dummy
+            # (matching the cached ``self.block``) and inline-time
+            # substitution supplies the caller's actual Value. The
+            # rest of the call still gets specialized.
+            if param_type in (int, UInt, float, Float, bool, Bit):
+                const_value = handle.value.get_const()
+                if const_value is not None:
+                    bindings[name] = const_value
+                elif self._is_parameterizable_type(param_type):
+                    parameters.append(name)
+                continue
+
+            # Classical array. Same approach as scalars: bind the const
+            # array when available, list as a runtime parameter when
+            # parameterizable, or ``continue`` and let
+            # ``_create_traced_block`` fall through for
+            # ``Vector[Bit]`` / ``Vector[bool]``.
+            if is_array_type(param_type):
+                const_array = handle.value.get_const_array()
+                if const_array is not None:
+                    bindings[name] = const_array
+                elif self._is_parameterizable_type(param_type):
+                    parameters.append(name)
+                continue
+
+            # Dict. ``handle.value.parameter_name()`` is set both for
+            # unbound dicts and for bound ones (see
+            # ``_create_bound_input``), so it can't distinguish the two.
+            # Use the presence of ``dict_runtime`` metadata instead — it
+            # is set if and only if the caller bound a concrete dict
+            # value, even if that dict is empty. When no metadata is
+            # present, ``continue`` without entering any bucket so
+            # ``_create_traced_block``'s fall-through ``create_dummy_input``
+            # path produces a symbolic Dict dummy (the same shape the
+            # cached ``self.block`` would carry). Specialization on
+            # other arguments still proceeds — only this Dict stays
+            # symbolic.
+            if is_dict_type(param_type):
+                if handle.value.metadata.dict_runtime is None:
+                    continue
+                bindings[name] = handle.value.get_bound_data()
+                continue
+
+            # ``Tuple``. We do not yet have a ``_create_bound_input``
+            # branch for tuples and ``Tuple`` is not parameterizable,
+            # so there is no bucket we can place a tuple argument into.
+            # ``continue`` is still safe: ``_create_traced_block``'s
+            # fall-through ``create_dummy_input`` path creates a
+            # symbolic ``TupleValue`` dummy, matching the cached block.
+            if is_tuple_type(param_type):
+                continue
+
+            # Anything else not modeled above: abort and let the cached
+            # symbolic block path handle the call.
+            return None
+
+        # Skip specialization when it would not change the traced
+        # body. Re-tracing with no new constants is wasted work and
+        # would only obscure the cached ``self.block`` path.
+        if not bindings and not qubit_sizes:
+            return None
+
+        return parameters, bindings, qubit_sizes
+
+    def _build_specialized(
+        self,
+        *,
+        parameters: list[str],
+        bindings: dict[str, Any],
+        qubit_sizes: dict[str, int],
+    ) -> Block:
+        """Trace a specialized sub-block for a call site.
+
+        Wraps :meth:`_create_traced_block` with the validations that
+        :meth:`build` performs (parameter-name validation, rebind-
+        violation check, output-name extraction) and disables
+        ``QInitOperation`` emission for ``qubit_sizes`` entries — the
+        caller's outer ``CallBlockOperation`` supplies those qubits, so
+        emitting an init here would double-allocate the register after
+        inlining.
+
+        Args:
+            parameters (list[str]): Classical argument names that
+                remain symbolic in the specialized block (typically
+                because the call site itself sees them as runtime
+                parameters of the outer kernel).
+            bindings (dict[str, Any]): Concrete Python values for
+                classical arguments, baked into the block at trace
+                time.
+            qubit_sizes (dict[str, int]): First-axis sizes for
+                ``Vector[Qubit]`` arguments. Each entry is realized as
+                a dummy input with a concrete shape (no
+                ``QInitOperation``).
+
+        Returns:
+            Block: The specialized hierarchical block, ready to be the
+                target of :meth:`Block.call` from the caller's tracer.
+        """
+        # Rebind-violation analysis runs eagerly in ``__init__`` (the
+        # ``collect_quantum_rebind_violations`` call there raises
+        # ``QubitRebindError`` immediately on any violation), so a
+        # kernel that reaches this point is already free of
+        # statically-detectable violations. No per-call check is
+        # needed here.
+        self._validate_parameters(parameters)
+        block = self._create_traced_block(
+            parameters,
+            bindings,
+            qubit_sizes=qubit_sizes,
+            emit_qubit_init=False,
+            emit_return_op=True,
+        )
+        block.output_names = self._extract_return_names() or []
+        return block
+
     def _create_traced_block(
         self,
         parameters: list[str],
         kwargs: dict[str, Any],
         qubit_sizes: dict[str, int] | None = None,
+        *,
+        emit_qubit_init: bool = True,
+        emit_return_op: bool = False,
     ) -> Block:
         """Trace the kernel and return a Block.
 
-        This is the shared implementation for :meth:`build` and
-        :meth:`_build_graph_with_qubit_arrays`.
+        This is the shared implementation for :meth:`build`,
+        :meth:`_build_graph_with_qubit_arrays`, and the call-time
+        specialization path used by :meth:`__call__`.
 
         Args:
-            parameters: Argument names to keep as unbound parameters.
-            kwargs: Concrete values for non-parameter arguments.
-            qubit_sizes: Optional mapping from Vector[Qubit] parameter names
-                to integer sizes.  When provided, the corresponding arguments
-                are created via ``qubit_array()`` instead of the normal dummy
-                input path.
+            parameters (list[str]): Argument names to keep as unbound
+                parameters.
+            kwargs (dict[str, Any]): Concrete values for non-parameter
+                arguments.
+            qubit_sizes (dict[str, int] | None): Optional mapping from
+                ``Vector[Qubit]`` parameter names to integer sizes. When
+                provided, the corresponding arguments are created with
+                concrete shape so shape-dependent stdlib helpers
+                (``qft`` / ``iqft`` / ``qpe``) emit the expected gate
+                sequence.
+            emit_qubit_init (bool): When True (default), entries in
+                ``qubit_sizes`` are realized via :func:`qubit_array`,
+                which emits a ``QInitOperation`` — appropriate for
+                top-level visualization / direct ``build()`` use. When
+                False, the dummy quantum array is created without a
+                ``QInitOperation`` because the call site will supply
+                the qubits through a ``CallBlockOperation``; emitting
+                an init in that case would double-allocate the
+                register after inlining.
+            emit_return_op (bool): When True, append a
+                ``ReturnOperation`` to the traced operations so the
+                inline pass can locate the cloned return Values when
+                this block is used as the target of a
+                ``CallBlockOperation`` (the call-time specialization
+                path). The default ``False`` preserves the historical
+                behavior of :meth:`build` (top-level entrypoint blocks
+                consumed by ``transpile()``), where downstream code
+                reads ``output_values`` directly and an explicit
+                ``ReturnOperation`` is unnecessary.
 
         Returns:
-            Block: The traced block.
+            Block: The traced block, with ``label_args`` populated so
+                the result is directly usable as the target of
+                :meth:`Block.call`.
         """
         if qubit_sizes is None:
             qubit_sizes = {}
@@ -893,7 +1567,20 @@ class QKernel(Generic[P, R]):
                         handle = self._create_parameter_input(param_type, name)
                     tracked_parameters[name] = handle.value
                 elif name in qubit_sizes:
-                    handle = qubit_array(qubit_sizes[name], name)
+                    if emit_qubit_init:
+                        handle = qubit_array(qubit_sizes[name], name)
+                    else:
+                        # Call-time specialization: the caller's
+                        # CallBlockOperation supplies the qubits, so we
+                        # must not emit a QInitOperation here. The
+                        # concrete shape lets stdlib helpers resolve
+                        # ``get_size`` to a real integer.
+                        handle = create_dummy_input(
+                            param_type,
+                            name,
+                            emit_init=False,
+                            shape=(qubit_sizes[name],),
+                        )
                 elif name in kwargs:
                     # Create bound value from kwargs
                     handle = self._create_bound_input(param_type, name, kwargs[name])
@@ -901,34 +1588,70 @@ class QKernel(Generic[P, R]):
                     # Use default value as bound value
                     handle = self._create_bound_input(param_type, name, param.default)
                 else:
-                    # Create dummy input (for Qubit types)
-                    handle = create_dummy_input(param_type, name)
+                    # Quantum-typed parameters (scalar ``Qubit`` and any
+                    # ``Vector[Qubit]`` that did not get a concrete
+                    # size). When ``emit_qubit_init`` is False (call-time
+                    # specialization) the caller supplies the qubits
+                    # via ``CallBlockOperation``, so we must not emit a
+                    # ``QInitOperation`` — doing so would double-
+                    # allocate the register after inlining.
+                    handle = create_dummy_input(
+                        param_type, name, emit_init=emit_qubit_init
+                    )
 
                 dummy_inputs[name] = handle
 
             # Execute the AST-transformed function with dummy inputs
             result = self.func(**dummy_inputs)
 
-        # Extract input/output values
+            # Extract output Values from the trace result. When
+            # ``emit_return_op`` is set we additionally emit a
+            # ReturnOperation so the inline pass can find the cloned
+            # return Values when this block is later used as a
+            # sub-call target (call-time specialization in
+            # ``QKernel.__call__``). Without an explicit
+            # ReturnOperation, ``_inline_call`` falls back to
+            # ``block.output_values`` whose Values still carry the
+            # ORIGINAL UUIDs — substitution then misses the caller-side
+            # references and downstream ops (e.g. ``qmc.measure``)
+            # lose their operand mapping.
+            output_values: list[Value] = []
+            if result is not None:
+                if isinstance(result, tuple):
+                    for r in result:
+                        if hasattr(r, "value"):
+                            output_values.append(r.value)
+                else:
+                    if hasattr(result, "value"):
+                        output_values.append(result.value)
+            if emit_return_op:
+                tracer.add_operation(
+                    ReturnOperation(operands=output_values, results=[])
+                )
+
+        # Extract input values for the Block. Outputs are populated
+        # inside the trace context above so the optional
+        # ReturnOperation can capture them.
         input_values = [h.value for h in dummy_inputs.values()]
 
-        output_values: list[Value] = []
-        if result is not None:
-            if isinstance(result, tuple):
-                for r in result:
-                    if hasattr(r, "value"):
-                        output_values.append(r.value)
-            else:
-                if hasattr(result, "value"):
-                    output_values.append(result.value)
+        param_slots = build_param_slots(
+            signature=self.signature,
+            input_types=self.input_types,
+            parameters=parameters,
+            kwargs=kwargs,
+            qubit_sizes=qubit_sizes,
+            bind_defaults=True,
+        )
 
         return Block(
             operations=tracer.operations,
+            label_args=list(dummy_inputs.keys()),
             input_values=input_values,
             output_values=output_values,
             name=self.name,
             parameters=tracked_parameters,
             kind=BlockKind.TRACED,
+            param_slots=param_slots,
         )
 
     def build(
@@ -982,8 +1705,6 @@ class QKernel(Generic[P, R]):
             result = transpiler.emit(graph, binding={"theta": 0.5})
             ```
         """
-        self._check_rebind_violations()
-
         if parameters is None:
             parameters = self._auto_detect_parameters(kwargs)
 

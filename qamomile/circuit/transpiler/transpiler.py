@@ -27,12 +27,16 @@ from qamomile.circuit.transpiler.passes.entrypoint_validation import (
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
     count_call_blocks,
+    count_unrollable_call_blocks,
 )
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
     ParameterShapeResolutionPass,
 )
 from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
+from qamomile.circuit.transpiler.passes.slice_borrow_check import (
+    SliceBorrowCheckPass,
+)
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
     SubstitutionPass,
@@ -288,11 +292,34 @@ class Transpiler(ABC, Generic[T]):
 
         Each iteration unrolls one layer of self-referential
         ``CallBlockOperation`` and then folds the base-case
-        ``IfOperation`` via ``partial_eval``.  Terminates when no
-        ``CallBlockOperation`` remains (success), when the call count
-        stops decreasing (symbolic driver — self-calls are left in the
-        IR and handled by downstream passes), or when ``MAX_UNROLL_DEPTH``
-        is reached (non-terminating recursion — raises).
+        ``IfOperation`` via ``partial_eval``. Terminates when no
+        ``CallBlockOperation`` remains (success), when every residual call
+        is trapped inside an operation-owned block where ``partial_eval``
+        cannot fold it (control / inverse of a recursive kernel — raises a
+        targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
+        (genuinely non-terminating top-level recursion — raises).
+
+        Args:
+            block (Block): The block to unroll. May be ``HIERARCHICAL``
+                (still containing self-referential ``CallBlockOperation``s)
+                or already ``AFFINE`` (returned unchanged).
+            bindings (dict[str, Any] | None): Compile-time bindings used by
+                ``partial_eval`` to fold the base-case condition. Defaults
+                to None, meaning no bindings are applied.
+
+        Returns:
+            Block: The fully unrolled, ``AFFINE`` block once no
+                ``CallBlockOperation`` remains. Returned unchanged when the
+                input already has no calls.
+
+        Raises:
+            FrontendTransformError: If every remaining ``CallBlockOperation``
+                is trapped inside a ``ControlledUOperation.block`` /
+                ``InverseBlockOperation`` block (a self-recursive kernel was
+                passed to ``qmc.control`` / ``qmc.inverse``), or if a
+                genuinely non-terminating top-level recursion does not
+                converge within ``MAX_UNROLL_DEPTH`` iterations. The two
+                cases carry distinct, cause-specific messages.
         """
         if count_call_blocks(block.operations) == 0:
             return block
@@ -307,6 +334,29 @@ class Transpiler(ABC, Generic[T]):
                 # to refresh the kind to AFFINE so downstream
                 # ``affine_validate`` is happy.
                 return self.inline(block)
+            # After a full inline + partial_eval iteration, if calls remain
+            # only inside operation-owned blocks (a ControlledUOperation's
+            # ``block`` or an InverseBlockOperation's nested blocks), no
+            # further iteration can make progress: ``inline`` already
+            # unrolled one layer there, but ``partial_eval`` never descends
+            # into those blocks to fold the base-case ``if``. This is the
+            # signature of a self-recursive @qkernel passed to
+            # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
+            # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
+            # blaming the bindings.
+            if count_unrollable_call_blocks(block.operations) == 0:
+                raise FrontendTransformError(
+                    "qmc.control / qmc.inverse was given a recursive "
+                    "@qkernel: after inlining, a CallBlockOperation still "
+                    "remains inside the controlled / inverted block, and "
+                    "partial_eval cannot fold its base-case `if` there "
+                    "(constant folding does not descend into a "
+                    "ControlledUOperation.block or an InverseBlockOperation "
+                    "block). Controlling or inverting a self-recursive "
+                    "kernel is not supported. Rewrite the kernel "
+                    "non-recursively (manually unrolled to the required "
+                    "depth) before passing it to qmc.control / qmc.inverse."
+                )
 
         raise FrontendTransformError(
             f"Recursive @qkernel did not terminate after "
@@ -363,6 +413,51 @@ class Transpiler(ABC, Generic[T]):
         IfOperations that would otherwise split quantum segments.
         """
         return CompileTimeIfLoweringPass(bindings).run(block)
+
+    def strip_slice_ops(self, block: Block) -> Block:
+        """Pass 1.95: Remove ``SliceArrayOperation`` nodes from the block.
+
+        ``PartialEvaluationPass`` keeps these declarative ops through
+        constant folding so :meth:`slice_borrow_check` can use them
+        as view-declaration markers. Once the linearity check has run,
+        segmentation and downstream passes expect a classical-op-free
+        quantum stream — this pass performs that cleanup.
+        """
+        from qamomile.circuit.transpiler.passes.strip_slice_ops import (
+            StripSliceArrayOpsPass,
+        )
+
+        return StripSliceArrayOpsPass().run(block)
+
+    def slice_borrow_check(self, block: Block) -> Block:
+        """Pass 1.9: Post-fold slice-view linearity checker.
+
+        Runs after :meth:`partial_eval` has resolved slice bounds to
+        concrete values.  Catches the slice-view linearity violations
+        that the trace-time frontend check cannot detect on its own —
+        specifically, slices whose bounds were *symbolic* at trace
+        time (so the frontend bulk-borrow tracker had to skip them)
+        and aliasing scenarios that only become visible once those
+        bounds are folded to constants:
+
+        1. A view whose newly-concrete coverage overlaps another live
+           view of the same root parent.
+        2. A view whose newly-concrete coverage hits a slot that was
+           consumed by a destructive view operation earlier in the
+           block.
+        3. A view that reaches the end of the block while still
+           recorded as the owner of the parent's slots (i.e. it was
+           never used or never released).
+
+        Direct element borrows (``q[i]``) emit no IR operation, so the
+        IR-level pass cannot observe them; the trace-time validation
+        in :func:`func_to_block._validate_returned_arrays` covers that
+        path.
+
+        The pass is a pass-through for the IR — it only raises on
+        violations and leaves the block unchanged on success.
+        """
+        return SliceBorrowCheckPass().run(block)
 
     def analyze(self, block: Block) -> Block:
         """Pass 2: Validate and analyze dependencies."""
@@ -500,6 +595,8 @@ class Transpiler(ABC, Generic[T]):
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
+        partially_evaluated = self.slice_borrow_check(partially_evaluated)
+        partially_evaluated = self.strip_slice_ops(partially_evaluated)
         analyzed = self.analyze(partially_evaluated)
         # Lower measurement-derived classical ops to ``RuntimeClassicalExpr``
         # so emit can dispatch them through a dedicated backend hook

@@ -4,8 +4,7 @@ When a converter is built from an ``ommx.v1.Instance``, ``decode()``
 returns an ``ommx.v1.SampleSet`` so feasibility, true (un-penalized)
 objective, and per-constraint evaluation are available through OMMX's
 own API. These tests cover that polymorphic return path plus the
-supporting ``MathematicalProblemConverter._binary_sampleset_to_ommx_samples``
-helper.
+supporting ``binary_sampleset_to_ommx_samples`` module helper.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import ommx.v1
 import pytest
 
 from qamomile.optimization.binary_model import BinarySampleSet, VarType
-from qamomile.optimization.converter import MathematicalProblemConverter
+from qamomile.optimization.converter import binary_sampleset_to_ommx_samples
 from qamomile.optimization.qaoa import QAOAConverter
 
 # --- Helper unit tests (no quantum execution) -------------------------------
@@ -30,7 +29,7 @@ def test_binary_sampleset_to_ommx_samples_preserves_counts_and_states():
         vartype=VarType.BINARY,
     )
 
-    ommx_samples = MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
+    ommx_samples = binary_sampleset_to_ommx_samples(ss)
 
     assert isinstance(ommx_samples, ommx.v1.Samples)
     assert ommx_samples.num_samples() == 5
@@ -58,7 +57,7 @@ def test_binary_sampleset_to_ommx_samples_skips_zero_occurrences():
         energy=[0.0, 0.0],
         vartype=VarType.BINARY,
     )
-    ommx_samples = MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
+    ommx_samples = binary_sampleset_to_ommx_samples(ss)
     assert ommx_samples.num_samples() == 2
 
 
@@ -67,7 +66,7 @@ def test_binary_sampleset_to_ommx_samples_empty_sampleset():
     ss = BinarySampleSet(
         samples=[], num_occurrences=[], energy=[], vartype=VarType.BINARY
     )
-    ommx_samples = MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
+    ommx_samples = binary_sampleset_to_ommx_samples(ss)
     assert ommx_samples.num_samples() == 0
     assert list(ommx_samples.sample_ids()) == []
 
@@ -81,7 +80,31 @@ def test_binary_sampleset_to_ommx_samples_rejects_spin_vartype():
         vartype=VarType.SPIN,
     )
     with pytest.raises(ValueError, match="BINARY"):
-        MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
+        binary_sampleset_to_ommx_samples(ss)
+
+
+def test_binary_sampleset_to_ommx_samples_rejects_mismatched_num_occurrences():
+    """Length mismatch between samples and num_occurrences raises ValueError."""
+    ss = BinarySampleSet(
+        samples=[{0: 1}, {0: 0}],
+        num_occurrences=[1],  # length 1, but 2 samples
+        energy=[0.0, 0.0],
+        vartype=VarType.BINARY,
+    )
+    with pytest.raises(ValueError, match="num_occurrences"):
+        binary_sampleset_to_ommx_samples(ss)
+
+
+def test_binary_sampleset_to_ommx_samples_rejects_mismatched_energy():
+    """Length mismatch between samples and energy raises ValueError."""
+    ss = BinarySampleSet(
+        samples=[{0: 1}, {0: 0}],
+        num_occurrences=[1, 1],
+        energy=[0.0],  # length 1, but 2 samples
+        vartype=VarType.BINARY,
+    )
+    with pytest.raises(ValueError, match="energy"):
+        binary_sampleset_to_ommx_samples(ss)
 
 
 # --- Caller-instance immutability regression --------------------------------
@@ -510,3 +533,75 @@ def test_qrao_decode_empty_list_returns_empty_result():
 
     assert isinstance(sample_set, ommx.v1.SampleSet)
     assert sample_set.sample_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: HUBO ommx.v1.Instance path (normalize_problem_input)
+# ---------------------------------------------------------------------------
+
+
+def _build_hubo_ommx_instance() -> ommx.v1.Instance:
+    """Build a small HUBO ommx.v1.Instance with one cubic term.
+
+    Returns:
+        ommx.v1.Instance: Instance with objective x0*x1*x2 + x1*x3 - x0,
+        which has a degree-3 term.
+    """
+    x = [ommx.v1.DecisionVariable.binary(i) for i in range(4)]
+    return ommx.v1.Instance.from_components(
+        decision_variables=x,
+        objective=x[0] * x[1] * x[2] + x[1] * x[3] - x[0],
+        constraints=[],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+
+
+def test_hubo_ommx_instance_builds_spin_model_with_higher_terms():
+    """A HUBO ommx.v1.Instance passed to QAOAConverter produces a spin model
+    with higher-order terms (regression for normalize_problem_input to_qubo bug).
+
+    Previously normalize_problem_input called to_qubo() which raised
+    RuntimeError for degree-3 terms.  After the fix it calls to_hubo() and
+    the cubic term survives into spin_model.higher.
+    """
+    instance = _build_hubo_ommx_instance()
+    converter = QAOAConverter(instance)
+
+    assert converter.spin_model.higher, "cubic term must appear in spin_model.higher"
+
+    # Verify that a degree-3 key survived into the spin model.  This directly
+    # checks the property broken before the fix, independently of BinaryModel.
+    assert any(len(k) == 3 for k in converter.spin_model.higher), (
+        "spin_model.higher must contain at least one degree-3 key"
+    )
+
+    # Cross-check that the cubic term survived the full normalize_problem_input
+    # → BinaryModel.from_hubo → change_vartype pipeline into spin_model.higher;
+    # this catches regressions in qamomile's conversion code, not ommx internals.
+    cubic_spin_keys = [k for k in converter.spin_model.higher if len(k) == 3]
+    assert len(cubic_spin_keys) == 1, (
+        f"expected exactly one cubic spin term, got {cubic_spin_keys}"
+    )
+    # Set comparison so index ordering within the tuple does not matter.
+    assert set(cubic_spin_keys[0]) == {0, 1, 2}, (
+        f"unexpected cubic spin variables {cubic_spin_keys[0]}"
+    )
+    # x0*x1*x2 (BINARY, coeff 1) expands to spin via prod((1-si)/2); the cubic
+    # spin coefficient is -1/8.
+    assert converter.spin_model.higher[cubic_spin_keys[0]] == pytest.approx(-1 / 8), (
+        f"x0*x1*x2 cubic spin coefficient must be -1/8, "
+        f"got {converter.spin_model.higher[cubic_spin_keys[0]]}"
+    )
+
+
+def test_hubo_ommx_instance_rejected_by_qrac_with_clear_error():
+    """A HUBO ommx.v1.Instance passed to a QRAC converter raises ValueError
+    (not the opaque RuntimeError from to_qubo) now that normalize_problem_input
+    uses to_hubo and the converter's own guard in __post_init__ is reached.
+    """
+    from qamomile.optimization.qrao import QRAC31Converter
+
+    instance = _build_hubo_ommx_instance()
+
+    with pytest.raises(ValueError, match=r"higher[\s-]order"):
+        QRAC31Converter(instance)

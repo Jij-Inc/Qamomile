@@ -6,16 +6,61 @@ This directory contains the documentation for Qamomile, built with **Jupyter Boo
 
 This documentation system uses a modern workflow where:
 
-- **Source files**: Python scripts (`.py`) with `# %% [markdown]` format (jupytext percent format)
-- **Build-time conversion**: Automatically converted to Jupyter Notebooks (`.ipynb`) via jupytext
-- **API reference**: Auto-generated from docstrings using `griffe`
+- **Source files**: Python scripts (`.py`) in jupytext format
+- **Paired notebooks**: `.ipynb` files are generated with jupytext and executed before pushing, so rendered docs can ship with committed outputs
+- **Build-dir synchronization**: [docs/build.sh](build.sh) `build` copies the docs into `_build_src/` and runs `jupytext --update` there after tag injection; this syncs cell sources in the build copy but does not execute notebooks or replace the pre-push `.ipynb` workflow
+- **API reference**: Generated from docstrings with `griffe` through
+  [docs/generate_api.py](generate_api.py). The generated Markdown is written
+  to gitignored `docs/api/`, copied into `docs/{en,ja}/api/` during builds,
+  and the API TOC region in each language's `myst.yml` is refreshed.
 - **Bilingual**: English (`en/`) and Japanese (`ja/`) documentation with identical structure
 
 ### Why This Approach?
 
-1. **Git-friendly**: Python scripts are easier to diff, merge, and review than JSON notebooks
-2. **IDE support**: Edit with full Python IDE features (linting, type checking, refactoring)
-3. **Jupyter Book 2.x**: Single `myst.yml` config, Python-based build (no Node.js)
+1. **Reviewable source**: `.py` files are the main authoring surface, so content and code changes can be reviewed without relying only on notebook JSON diffs
+2. **IDE support**: Edit source pages with full Python IDE features (linting, type checking, refactoring)
+3. **Jupyter Book 2.x**: MyST config files
+   ([en](en/myst.yml), [ja](ja/myst.yml)), Python-driven docs workflow
+
+## Authoring Policy
+
+The docs are reader-first, Qamomile-first, and testable. Each article should
+teach one clear purpose: a Qamomile workflow, an algorithm implemented with
+Qamomile, an integration boundary, or one usage detail. If a page needs two
+independent goals, split it into two pages.
+
+### Content principles
+
+- **One notebook for one purpose**: keep each notebook focused on a single outcome.
+- **Reader-first explanations**: prefer the shortest path that helps a user
+  understand and run the example. Move detailed mechanics into `usage/` pages.
+- **Verified claims only**: avoid unreviewed academic claims. When an algorithm
+  page needs theory, keep the statement narrow, cite or link the source, and
+  verify the implemented behavior with assertions or reference values.
+- **Qamomile-first examples**: use Qamomile qkernels, observables, converters,
+  drawings, resource estimates, and execution APIs wherever possible.
+- **Use MyST figures**: authored figures and screenshots should use MyST
+  `figure` directives so captions, alt text, and layout stay explicit.
+- **Commit static images as files**: when adding an image that is not generated
+  by Python during notebook execution (for example, not a matplotlib output),
+  add it as an image file and reference that file. Do not embed static images
+  as notebook blobs or base64 payloads.
+- **Docs as tests**: every runnable notebook should include assertions for the
+  important shapes, counts, or result properties. Keep runtime small enough for
+  [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py).
+- **No manual References section**: use MyST cross-references, citations, or
+  external links instead of hand-maintaining a References section.
+- **Use MyST notes for remarks**: tips, notes, and remarks should use
+  `:::{note}` blocks.
+
+### Skeletons
+
+Authoring templates live in [docs/skeletons/](skeletons/). They are
+intentionally outside [docs/en/](en/) and [docs/ja/](ja/), so they are not
+rendered, synced, or executed by the
+docs build. Page shape and section-specific outlines live in the skeletons
+themselves. See [docs/skeletons/README.md](skeletons/README.md) before creating a new
+notebook-style page.
 
 ### Notebook Execution Strategy
 
@@ -31,225 +76,149 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 >
 > Several tutorials (e.g. `algorithm/qaoa_graph_partition.py`,
 > `algorithm/qaoa_maxcut.py`, `algorithm/vqe_for_hydrogen.py`,
-> `tutorial/05_classical_flow_patterns.py`) read the
+> `tutorial/07_classical_flow_patterns.py`) read the
 > `QAMOMILE_DOCS_TEST` environment variable and switch to a **reduced
 > workload** (fewer optimizer iterations, fewer shots) when it equals
-> `"1"`. This flag exists only so that `tests/docs/test_tutorials.py`
+> `"1"`. This flag exists only so that
+> [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py)
 > can run quickly in CI — it is **not** the configuration we want to
 > ship in the rendered docs.
 >
-> When you execute notebooks for the actual docs build (locally,
-> via `./build.sh execute*` / `sync-build*`, or in any pre-push
-> workflow), make sure `QAMOMILE_DOCS_TEST` is **unset** (or not
-> equal to `"1"`) so the notebooks run with the full settings and
-> produce the high-quality outputs intended for readers.
+> When you execute notebooks for the actual docs build (locally, via
+> `./docs/build.sh page-build`, `./docs/build.sh execute`,
+> `./docs/build.sh execute-en`, `./docs/build.sh execute-ja`,
+> `./docs/build.sh sync-build`, `./docs/build.sh sync-build-en`,
+> `./docs/build.sh sync-build-ja`, `./docs/build.sh fresh-en`,
+> `./docs/build.sh fresh-ja`, or `./docs/build.sh serve-en` /
+> `./docs/build.sh serve-ja` when build output is missing, or in any
+> pre-push workflow), make sure `QAMOMILE_DOCS_TEST` is **unset** (or not
+> equal to `"1"`) so the notebooks run with the full settings and produce
+> the high-quality outputs intended for readers.
 
-**Future plan**: We are considering a GitHub Actions workflow that automatically detects `.py` changes on merge to `main`, converts and executes the notebooks, and commits the resulting `.ipynb` files back — eliminating the need for manual notebook management.
+## Directory Guide
 
-## Directory Structure
+| Path | Purpose |
+| --- | --- |
+| [docs/en/](en/) | English documentation source. |
+| [docs/ja/](ja/) | Japanese documentation source mirroring `docs/en/`. |
+| [docs/en/tutorial/](en/tutorial/) / [docs/ja/tutorial/](ja/tutorial/) | New-user tutorials for learning Qamomile workflows. |
+| [docs/en/algorithm/](en/algorithm/) / [docs/ja/algorithm/](ja/algorithm/) | Algorithm walkthroughs implemented with Qamomile. |
+| [docs/en/usage/](en/usage/) / [docs/ja/usage/](ja/usage/) | Focused usage notes for Qamomile features and API patterns. |
+| [docs/en/integration/](en/integration/) / [docs/ja/integration/](ja/integration/) | Integration guides for external SDKs, services, or packages. |
+| [docs/en/release_notes/](en/release_notes/) / [docs/ja/release_notes/](ja/release_notes/) | Versioned release notes. |
+| [docs/skeletons/](skeletons/) | Non-rendered authoring templates for new notebook-style pages. |
+| [docs/assets/](assets/) | Shared static assets such as images, CSS, and logos. |
+| `docs/api/` | Gitignored generated API reference Markdown produced by [docs/generate_api.py](generate_api.py). |
+| [docs/api_gen/](api_gen/) | API reference generation code built on `griffe`. |
+| [docs/scripts/](scripts/) | Build helper scripts for tag pages, injected UI, and post-build tweaks. |
+| `docs/_build_src/` | Gitignored build scratch tree populated by [docs/build.sh](build.sh). |
 
-```
-docs/
-├── README.md                    # This file
-├── Makefile                     # Build system (make targets)
-├── build.sh                     # Build script (shell alternative)
-├── generate_api.py              # API reference generator entry point
-├── index.html                   # Redirects to ./en/
-├── myst.yml                     # Top-level MyST stub
-│
-├── assets/                      # Shared images and resources (incl. custom-theme.css)
-├── api_gen/                     # API doc generation package (uses griffe)
-├── api/                         # Generated API reference (shared source)
-├── scripts/                     # Build helper scripts
-│                                #   - build_doc_tags.py: generate per-tag pages, inject chip blocks, inject section browse-by-tag clouds
-│                                #   - inject_colab_launch.py: post-build "open in Colab" button on every rendered HTML page
-│
-├── _build_src/                  # Build-time scratch tree (gitignored)
-│                                #   build.sh copies en/ and ja/ here, runs
-│                                #   build_doc_tags.py + jupytext --update against
-│                                #   the copy, then mystmd builds from this dir.
-│                                #   Source files never receive auto-managed
-│                                #   injections (chip blocks, browse-by-tag, etc.).
-│
-├── en/                          # English documentation (committed source)
-│   ├── myst.yml                 # Jupyter Book 2 config + TOC
-│   ├── index.md                 # Landing page
-│   ├── _build/                  # Build output, populated by build.sh from
-│   │                            #   _build_src/en/_build/ (gitignored)
-│   ├── api/                     # Copied from docs/api/ at build time (gitignored)
-│   ├── tutorial/                # SDK fundamentals (kernels, parameters, execution, …)
-│   ├── algorithm/               # Algorithm walkthroughs (QAOA, VQE, QEC, Hamiltonian sim, …)
-│   ├── usage/                   # Per-module how-to guides (BinaryModel, …)
-│   ├── integration/             # External-library / platform integration notes (qBraid; needs API key)
-│   ├── release_notes/           # Per-version changelog
-│   └── tags/                    # Auto-generated tag pages (gitignored; canonical
-│                                #   copies live in _build_src/<lang>/tags/)
-│
-└── ja/                          # Japanese documentation (mirrors en/ structure)
-```
+## Development Workflow
 
-## Quick Start
+### Setup
 
-### Prerequisites
+Run this once before editing or building docs:
 
 ```bash
 uv sync
 ```
 
-This installs `jupyter-book`, `jupytext`, `griffe`, and the rest of the dev dependencies. To execute notebooks that need optional extras:
+To execute notebooks that need optional extras:
 
 ```bash
 uv sync --extra OPTIONAL_DEPENDENCY    # e.g. quri_parts, cudaq-cu13
 ```
 
-### Building Documentation
-
-`build.sh` is the primary entry point; an equivalent `Makefile` is also available (`make <command>`).
-
-#### Typical workflow
-
-After editing a single `.py` file, re-sync the paired notebook, execute it, and serve the docs locally:
-
-```bash
-uv run jupytext --to ipynb --update docs/en/<section>/foo.py
-uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/foo.ipynb
-./build.sh serve-en    # browse at http://localhost:8000
-```
-
-That's the day-to-day loop. `build.sh` copies your source into a gitignored `_build_src/` scratch tree, injects tag-related auto-managed content (chip blocks, browse-by-tag clouds, per-tag pages) there, and runs mystmd from the scratch tree — so your committed source files never gain tag-related build-time content. API generation and copying are also bundled into `build`, so you don't need to run those steps yourself. (`generate_api.py` does write the API Reference TOC entries back into committed `myst.yml`; that's a separate, intentional channel — `build_doc_tags.py` itself does not touch `myst.yml`.)
-
-#### All `build.sh` commands
-
-| Command | Description |
-|---------|-------------|
-| `./build.sh build` | Build both languages (no sync). Bundles `generate_api` + `copy_api` |
-| `./build.sh build-en` | Build English only (no sync). Also runs `generate_api` + `copy_api` so a fresh clone works without first running `./build.sh build` |
-| `./build.sh build-ja` | Build Japanese only (no sync). Same as `build-en` for the other locale |
-| `./build.sh sync` | Convert all `.py` → `.ipynb` (both languages) |
-| `./build.sh sync-en` | Convert English `.py` → `.ipynb` |
-| `./build.sh sync-ja` | Convert Japanese `.py` → `.ipynb` |
-| `./build.sh execute` | Execute all `.ipynb` notebooks (both languages) |
-| `./build.sh execute-en` | Execute English `.ipynb` notebooks |
-| `./build.sh execute-ja` | Execute Japanese `.ipynb` notebooks |
-| `./build.sh sync-build` | Sync, execute, and build both languages |
-| `./build.sh sync-build-en` | Sync, execute, and build English |
-| `./build.sh sync-build-ja` | Sync, execute, and build Japanese |
-| `./build.sh clean` | Remove generated `.ipynb`, build outputs, and copied API docs |
-| `./build.sh clean-all` | Remove everything including execution cache |
-| `./build.sh serve-en` | Sync, build (if needed), and serve English docs (port 8000) |
-| `./build.sh serve-ja` | Sync, build (if needed), and serve Japanese docs (port 8000) |
-| `./build.sh fresh-en` | Clean, sync, rebuild, and serve English docs |
-| `./build.sh fresh-ja` | Clean, sync, rebuild, and serve Japanese docs |
-
-`./build.sh sync` alone produces `.ipynb` without outputs. Use `sync-build` (or run `execute` after `sync`) when you actually need executed notebooks.
-
-## API Reference Generation
-
-API generation and copying are automatically included in `./build.sh build` — no separate command is needed under normal use.
-
-For reference, the underlying flow:
-
-1. `generate_api.py` uses the `api_gen/` package (built on `griffe`) to introspect the `qamomile` package
-2. Generates MyST-compatible Markdown files into `docs/api/`
-3. During build, the generated files are copied to `en/api/` and `ja/api/`
-
-## Development Workflow
-
 ### Editing an existing page
 
 1. Edit the `.py` source — never the `.ipynb` directly.
-2. Re-sync and re-execute:
+2. Sync, execute, and build the edited page.
+
+   English page:
+
    ```bash
-   uv run jupytext --to ipynb --update docs/en/<section>/foo.py
-   uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/foo.ipynb
+   ./docs/build.sh page-build docs/en/<section>/foo.py
+   ./docs/build.sh serve-en    # browse English docs at http://localhost:8000
    ```
-3. Preview: `./build.sh serve-en` (or `serve-ja`).
+
+   Japanese page:
+
+   ```bash
+   ./docs/build.sh page-build docs/ja/<section>/foo.py
+   ./docs/build.sh serve-ja    # browse Japanese docs at http://localhost:8000
+   ```
+
+   `page-build` is for runnable pages. It updates and executes only the
+   specified paired `.ipynb` files, then rebuilds the affected language from
+   `_build_src/`, where tag-related content is injected and all section
+   sources are synced with jupytext. Do not use it for pages that need API
+   keys or other credentials unless those credentials are configured.
 
 ### Creating a new page
 
-1. **Create the `.py` file** in both `en/` and `ja/` with the standard
-   jupytext header, a frontmatter block carrying `tags`, then the H1
-   and content:
-
-   ```python
-   # ---
-   # jupyter:
-   #   jupytext:
-   #     text_representation:
-   #       extension: .py
-   #       format_name: percent
-   #       format_version: '1.3'
-   #       jupytext_version: 1.18.1
-   #   kernelspec:
-   #     display_name: Python 3
-   #     language: python
-   #     name: python3
-   # ---
-
-   # %% [markdown]
-   # ---
-   # tags: [algorithm, optimization, variational]
-   # ---
-   #
-   # # Your Page Title
-   # Content goes here...
-   ```
-
-   `tags:` values are language-agnostic — keep them identical between
-   `en/` and `ja/`. Tags must be in `ALLOWED_TAGS` (see
-   [Tags](#tags) below). Every article carries the **section tag**
-   that matches its containing directory (`tutorial`, `algorithm`,
-   `usage`, or `integration`) plus any topical tags that apply.
+1. **Start from the closest skeleton** in [docs/skeletons/](skeletons/) and copy it
+   into both `en/` and `ja/` under the matching section. Follow
+   [docs/skeletons/README.md](skeletons/README.md) for the page shape, tag placement, and
+   authoring conventions.
 
 2. **Update the section landing page** by adding a bullet/link in
-   the matching `<section>/index.md`. Each section's `index.md` is
-   hand-written and contains only the intro paragraph plus the
-   article list; the `## Browse by tag` heading and chip cloud are
-   synthesised into the build-dir copy automatically, so don't add
-   them yourself. The article ordering inside the section's
+   the matching `<section>/index.md`. Section index pages are
+   hand-written, so update the visible article list and any nearby
+   section-specific guidance as needed. Do not add a `## Browse by tag`
+   heading or tag chip cloud yourself; those are synthesised into the
+   build-dir copy automatically. The article ordering inside the
    sidebar nav is whatever your filename sorts to alphabetically
-   (mystmd discovers the .ipynb files via a glob in `myst.yml`); use
+   (mystmd discovers the .ipynb files via a glob in each language's
+   `myst.yml`: [en](en/myst.yml), [ja](ja/myst.yml)); use
    `01_`, `02_`, … prefixes if you need a curated order.
 
-3. **You don't need to touch `myst.yml`.** The toc uses
+3. **You don't need to touch `myst.yml`** ([en](en/myst.yml) /
+   [ja](ja/myst.yml)). The toc uses
    `pattern: <section>/*.ipynb`, so any new `.ipynb` you drop into
    the section is auto-discovered. (Per-tag pages and the per-tag
    listing are similarly discovered via `pattern: tags/*.md`.)
 
-4. **Add to test patterns** if the new page is in a directory not
-   yet covered by `tests/docs/test_tutorials.py`
-   `TUTORIAL_PATTERNS`. `integration/` is intentionally excluded
-   since those notebooks may need an API key.
+4. **Check docs-test coverage.** Pages under
+   `tutorial/`, `algorithm/`, `usage/`, and `integration/` are already
+   discovered by [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py)'s
+   `TUTORIAL_PATTERNS`.
+   If a page cannot run in CI because it needs credentials or remote
+   side effects, add that specific page to `SKIP_TUTORIALS` with a
+   reason. If it only needs optional packages, add the import module
+   names to `OPTIONAL_SKIP_MODULES` instead of skipping the whole
+   directory.
 
-5. **Generate and execute the `.ipynb`**:
-
-   ```bash
-   uv run jupytext --to ipynb --update docs/en/<section>/your_new_topic.py
-   uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/your_new_topic.ipynb
-   # repeat for ja/
-   ```
-
-6. **`git add` + commit + push.**
-
-7. **Build and verify**:
+5. **Sync, execute, and build the new runnable pages**:
 
    ```bash
-   ./build.sh build
-   ./build.sh serve-en
+   ./docs/build.sh page-build docs/en/<section>/your_new_topic.py docs/ja/<section>/your_new_topic.py
    ```
 
-   `build.sh` will copy your source into `_build_src/`, inject chip
-   blocks / browse-by-tag clouds / per-tag pages there, and build from
-   that scratch tree — your committed source stays clean.
+   `page-build` executes the specified pages. For integration pages that
+   need API keys or remote side effects, add an explicit docs-test skip and
+   execute the notebook only in an environment with the required credentials.
+
+6. **Preview locally**:
+
+   ```bash
+   ./docs/build.sh serve-en    # browse English docs at http://localhost:8000
+   # or
+   ./docs/build.sh serve-ja    # browse Japanese docs at http://localhost:8000
+   ```
+
+   `page-build` has already executed the specified page sources and rebuilt
+   the affected language from `_build_src/`, where chip blocks,
+   browse-by-tag clouds, and per-tag pages are injected — your committed
+   source stays clean.
+
+7. **`git add` + commit + push.**
 
 ### Adding a new section directory
 
 The four sections currently registered (`tutorial/`, `algorithm/`,
 `usage/`, `integration/`) live at the top level under
 `docs/<lang>/`. Adding a new one — at the same level — is supported
-and only needs config changes. Adding a nested subsection (a
-section inside another section) is **not** currently supported and
-would require code changes; details below.
+and only needs config changes.
 
 #### Adding a sibling section (e.g. a new `theory/`)
 
@@ -275,12 +244,14 @@ Update each of the following:
 
    - [First Article Title](first_article) — short description
    ```
-3. **Register the section in `docs/scripts/build_doc_tags.py`**:
+3. **Register the section in [docs/scripts/build_doc_tags.py](scripts/build_doc_tags.py)**:
    - Append `"<new>"` to `SECTIONS`.
+   - Add `"<new>"` to `ALLOWED_TAGS` as the section tag.
    - Add `"<new>": "<English title>"` to `STRINGS["en"]["section_titles"]`
      and `"<new>": "<Japanese title>"` to `STRINGS["ja"]["section_titles"]`
      so the section's name renders correctly on tag pages.
-4. **Add the section to each `myst.yml` toc** (en/ja), under the
+4. **Add the section to each `myst.yml` toc** ([en](en/myst.yml) /
+   [ja](ja/myst.yml)), under the
    hand-written part. Use a `pattern:` child so any future article
    in the section is auto-discovered without further toc edits:
    ```yaml
@@ -289,80 +260,48 @@ Update each of the following:
      children:
        - pattern: <new>/*.ipynb
    ```
-5. **Add a top-level link in `docs/{en,ja}/index.md`** alongside
-   the other section bullets.
-6. **Decide whether `build.sh` should auto-sync / auto-execute the
-   notebooks under this section**:
-   - *Yes* (default — articles are runnable in CI without external
-     resources): append `"<new>"` to `TARGET_DIRS` in both
-     `docs/build.sh` and `docs/Makefile`.
-   - *No* (notebooks need API keys, network, or other side effects
-     — like `integration/`): leave `TARGET_DIRS` alone. Update the
-     comment block above `TARGET_DIRS` in both files to mention
-     `<new>` as another excluded directory. Also list `<new>/` in
-     the "We will not execute the following directories" comment in
-     `tests/docs/test_tutorials.py`.
-7. **Update `tests/docs/test_tutorials.py`'s `TUTORIAL_PATTERNS`**
-   if the section's notebooks should be exercised by the docs
-   tests (mirrors the `TARGET_DIRS` decision above):
+5. **Add a top-level link in [docs/en/index.md](en/index.md) and
+   [docs/ja/index.md](ja/index.md)** alongside the other section bullets.
+6. **Register the section in [docs/build.sh](build.sh)**:
+   - Add `"<new>"` to `SYNC_DIRS` if its `.py` sources should be synced
+     to `.ipynb` during `sync`, `build`, and `page-build` workflows. This is
+     usually safe even for credentialed pages because jupytext sync does not
+     execute code.
+   - Add `"<new>"` to `TARGET_DIRS` only if the section's notebooks can be
+     bulk-executed without credentials, network access, or other side effects.
+     Sections like `integration/` stay out of `TARGET_DIRS` and rely on
+     page-level execution or docs-test skips for credentialed pages.
+7. **Update [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py)'s
+   `TUTORIAL_PATTERNS`**
+   if the section's notebooks should be exercised by the docs tests:
    ```python
    "docs/en/<new>/**/*.py",
    "docs/ja/<new>/**/*.py",
    "docs/en/<new>/**/*.ipynb",
    "docs/ja/<new>/**/*.ipynb",
    ```
-8. **Update the `Directory Structure` section of this README** to
+   Prefer adding the directory pattern and then skipping only the
+   specific credentialed or side-effecting pages via `SKIP_TUTORIALS`.
+8. **Update the `Directory Guide` section of this README** to
    mention the new directory.
 
-After step 4, run `./build.sh build` to verify the new section
+After these steps, run `./docs/build.sh build` to verify the new section
 appears in the rendered nav and that auto-managed content (chip
 blocks on articles, browse-by-tag cloud on the new `index.md`)
 shows up correctly inside `_build_src/`. The Tags toc itself is
-discovered via the existing `pattern: "tags/*.md"` entry in
-`myst.yml`, so it does not need touching.
-
-#### Adding a nested subsection (currently unsupported)
-
-The script's section model is flat:
-`docs/scripts/build_doc_tags.py` walks `<lang>/<section>/*.py` only
-at the top level — no recursion. The browse-by-tag classifier in
-`_classify_for_index` returns `same` or `cousin`; the legacy
-`descendant` / `ancestor` buckets were dropped when the layout
-flattened, but the comment notes "this is the place to teach the
-classifier about descendant and ancestor again".
-
-To enable nested sections you would need at least:
-
-1. Make `_walk_articles` recurse (`rglob("*.py")` instead of
-   `glob("*.py")`), and represent `Article.section` as a path-like
-   breadcrumb instead of a single string.
-2. Restore `descendant` / `ancestor` buckets in
-   `_classify_for_index` and `_BUCKET_ORDER`, plus the matching
-   localised labels in `STRINGS["en"]["bucket_labels"]` /
-   `STRINGS["ja"]["bucket_labels"]`.
-3. Update `myst.yml` toc to be nested (mystmd already supports
-   nested children).
-
-If you genuinely need nested sections, treat it as a small feature
-on `build_doc_tags.py` rather than a pure docs change.
+discovered via the existing `pattern: "tags/*.md"` entry in each
+language's `myst.yml` ([en](en/myst.yml), [ja](ja/myst.yml)), so it
+does not need touching.
 
 ### Tags
 
 Articles under `{tutorial,algorithm,usage,integration}/` (in both
-`en/` and `ja/`) are tag-filterable. Each `.py` declares its tags in
-the frontmatter at the top of its first markdown cell:
-
-```python
-# %% [markdown]
-# ---
-# tags: [optimization, variational]
-# ---
-#
-# # My Article
-```
+`en/` and `ja/`) are tag-filterable. Tags are declared in each article's
+jupytext frontmatter as shown in the skeletons.
 
 Tags are language-agnostic (same string for `en` and `ja`). The build
-pipeline runs `docs/scripts/build_doc_tags.py` against `_build_src/`
+pipeline runs [docs/scripts/build_doc_tags.py](scripts/build_doc_tags.py)
+against `_build_src/`
 (the scratch copy) and turns those declarations into:
 
 | Output | Where it ends up | In git? |
@@ -380,51 +319,35 @@ Where the script injects in the build-dir copy:
 | Section `index.md` | a whole `## Browse by tag` section is synthesised and inserted right before the first H2 (e.g. before `## All articles`) |
 
 The per-tag pages are picked up by mystmd via a single
-`- pattern: "tags/*.md"` toc entry in `myst.yml` (with
-`hidden: true`), so the script does **not** maintain any region
-inside `myst.yml`. The committed source therefore has zero
-auto-managed regions to track — articles, section index pages,
-and `myst.yml` are all hand-written.
+`- pattern: "tags/*.md"` toc entry in each language's `myst.yml`
+([en](en/myst.yml), [ja](ja/myst.yml)) with `hidden: true`, so the
+script does **not** maintain any region inside those files. The committed
+source therefore has no tag-managed regions to track — articles and
+section index pages stay hand-written. The API reference has a separate
+auto-generated TOC region in `myst.yml`, managed by
+[docs/generate_api.py](generate_api.py).
 
-`./build.sh build-{en,ja}` runs `setup_build_src` (copy → inject →
-jupytext sync) before MyST builds, so RTD and local builds stay in
-sync without manual steps. PRs that change tag taxonomy or article
-tags only diff the actual `tags:` frontmatter line, not the
-chip-block churn that comes with it.
+`./docs/build.sh build`, `./docs/build.sh build-en`, and
+`./docs/build.sh build-ja` run `setup_build_src` (copy → inject →
+jupytext sync) before MyST builds, so RTD and local builds stay in sync
+without manual steps. PRs that change tag taxonomy or article tags only
+diff the actual `tags:` frontmatter line, not the chip-block churn that
+comes with it.
 
 #### Tag whitelist
 
 Allowed tags live in `ALLOWED_TAGS` inside
-`docs/scripts/build_doc_tags.py`. The taxonomy is intentionally small.
+[docs/scripts/build_doc_tags.py](scripts/build_doc_tags.py). The taxonomy is intentionally small.
 The whitelist is **enforced by CI** via
-`tests/docs/test_tag_whitelist.py` — any PR that uses a tag outside
-the set fails the unit-test job. There is no pre-commit hook and no
-build-time validation: a stray tag in your local working tree will
-not crash the build, only the test fails on the PR.
+[tests/docs/test_tag_whitelist.py](../tests/docs/test_tag_whitelist.py) — any PR that uses a tag outside
+the set fails the unit-test job. If `test_tag_whitelist` fails on a PR,
+fix the typo in the article frontmatter, or extend `ALLOWED_TAGS` only
+when the new tag is intentional and approved.
 
 **Adding a new tag is a deliberate maintainer decision**, not a
 side-effect of writing an article. Stay within the existing set
-unless the project owner has explicitly approved the new tag — see
-`CLAUDE.md` for the full policy. Release notes (`release_notes/`) are
-intentionally out of scope and never tagged.
-
-## Jupytext Format
-
-All Python source files use the **percent format**:
-
-```python
-# %% [markdown]
-# Markdown cells start with this marker
-
-# %%
-# Python code cells start with this marker
-print("Hello, Quantum World!")
-```
-
-- **Metadata in header**: jupytext + kernelspec at top of file
-- **Cell markers**: `# %%` for code, `# %% [markdown]` for text
-- **Clean diffs**: git sees normal Python file changes
-- **IDE friendly**: full Python tooling support
+unless the project owner has explicitly approved the new tag. Release
+notes (`release_notes/`) are intentionally out of scope and never tagged.
 
 ## Troubleshooting
 
@@ -436,29 +359,12 @@ Ensure dev dependencies are installed in the active env:
 uv sync
 ```
 
-### Notebooks not updating after code changes
-
-Clear the execution cache, then re-sync:
-
-```bash
-./build.sh clean-all
-./build.sh sync-build
-```
-
 ### Port 8000 already in use
 
 ```bash
-pkill -f "python -m http.server"
-# or use a different port
-cd en/_build/html && python -m http.server 8001
+cd docs/en/_build/html
+uv run python -m http.server 8001
 ```
-
-### `test_tag_whitelist` fails on a PR
-
-The article carries a tag that isn't in `ALLOWED_TAGS`. Either fix
-the typo in the article's frontmatter, or — if the tag is genuinely
-new and approved — extend `ALLOWED_TAGS` in
-`docs/scripts/build_doc_tags.py` (see policy in `CLAUDE.md`).
 
 ## Additional Resources
 

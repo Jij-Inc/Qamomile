@@ -12,19 +12,21 @@ from .gate import (
     ControlledUOperation,
     GateOperation,
     GateOperationType,
-    IndexSpecControlledU,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
+from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
 
 __all__ = [
     "Operation",
     "ReturnOperation",
     "CompositeGateOperation",
+    "InverseBlockOperation",
     "CompositeGateType",
     "ResourceMetadata",
     "GateOperation",
@@ -35,7 +37,6 @@ __all__ = [
     "ControlledUOperation",
     "ConcreteControlledU",
     "SymbolicControlledU",
-    "IndexSpecControlledU",
     "DecodeQFixedOperation",
     "CastOperation",
     # Control flow operations
@@ -43,4 +44,7 @@ __all__ = [
     "HasNestedOps",
     # Expectation value operation
     "ExpvalOp",
+    # Slice operation
+    "SliceArrayOperation",
+    "ReleaseSliceViewOperation",
 ]

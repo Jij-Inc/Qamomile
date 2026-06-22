@@ -20,6 +20,12 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+# Tutorials that require credentials or remote side effects and are skipped in CI.
+SKIP_TUTORIALS: dict[str, str] = {
+    "en/integration/qbraid_executor": "Requires a qBraid API key.",
+    "ja/integration/qbraid_executor": "Requires a qBraid API key.",
+}
+
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/ja/tutorial/**/*.py",
@@ -33,16 +39,25 @@ TUTORIAL_PATTERNS = [
     "docs/ja/usage/**/*.py",
     "docs/en/usage/**/*.ipynb",
     "docs/ja/usage/**/*.ipynb",
+    "docs/en/integration/**/*.py",
+    "docs/ja/integration/**/*.py",
+    "docs/en/integration/**/*.ipynb",
+    "docs/ja/integration/**/*.ipynb",
     # We will not execute the following directories:
-    # - integration: they may require API keys and may have side effects.
     # - release_notes: markdown-only; nothing to execute.
 ]
 
 # Tutorials that require optional dependency groups (e.g. chemistry)
 # and should be skipped when those dependencies are not installed.
-OPTIONAL_SKIP_MODULES = {
-    "vqe_for_hydrogen": "openfermion",
-    "qsci": "quri_parts",
+OPTIONAL_SKIP_MODULES: dict[str, tuple[str, ...]] = {
+    "vqe_for_hydrogen": ("openfermion",),
+    "qsci": ("quri_parts",),
+    "quri_parts_support": ("quri_parts.qulacs",),
+    "hybrid_qnn": ("torch",),
+    "ommx_quantum_benchmarks_qaoa": (
+        "ommx_quantum_benchmarks",
+        "ommx_pyscipopt_adapter",
+    ),
 }
 
 
@@ -95,9 +110,14 @@ def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypa
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
 
-    for stem, module in OPTIONAL_SKIP_MODULES.items():
+    test_id = get_test_id(tutorial_file)
+    if test_id in SKIP_TUTORIALS:
+        pytest.skip(SKIP_TUTORIALS[test_id])
+
+    for stem, modules in OPTIONAL_SKIP_MODULES.items():
         if stem in tutorial_file.stem:
-            pytest.importorskip(module)
+            for module in modules:
+                pytest.importorskip(module)
 
     try:
         if tutorial_file.suffix == ".ipynb":

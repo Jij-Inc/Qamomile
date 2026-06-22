@@ -2378,16 +2378,16 @@ class TestBoundConstantIfConditionCudaq:
 
 
 class TestControlledHelperCudaq:
-    """Test qmc.controlled() helper kernels on CUDA-Q."""
+    """Test qmc.control() helper kernels on CUDA-Q."""
 
     def test_controlled_x_double_control_statevector(self):
-        """qmc.controlled(x_gate, num_controls=2) should act as Toffoli."""
+        """qmc.control(x_gate, num_controls=2) should act as Toffoli."""
 
         @qmc.qkernel
         def x_gate(q: qmc.Qubit) -> qmc.Qubit:
             return qmc.x(q)
 
-        ccx = qmc.controlled(x_gate, num_controls=2)
+        ccx = qmc.control(x_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2411,7 +2411,7 @@ class TestControlledHelperCudaq:
         def x_gate(q: qmc.Qubit) -> qmc.Qubit:
             return qmc.x(q)
 
-        ccx = qmc.controlled(x_gate, num_controls=2)
+        ccx = qmc.control(x_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2434,7 +2434,7 @@ class TestControlledHelperCudaq:
         def swap_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
             return qmc.swap(q0, q1)
 
-        cswap = qmc.controlled(swap_gate)
+        cswap = qmc.control(swap_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2458,7 +2458,7 @@ class TestControlledHelperCudaq:
         def swap_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
             return qmc.swap(q0, q1)
 
-        cswap = qmc.controlled(swap_gate)
+        cswap = qmc.control(swap_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2526,7 +2526,7 @@ class TestCudaqHelperKernelSemanticsContract:
             b = qmc.x(b)
             return a, b
 
-        cx2 = qmc.controlled(flip_second)
+        cx2 = qmc.control(flip_second)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2552,7 +2552,7 @@ class TestCudaqHelperKernelSemanticsContract:
             b = qmc.x(b)
             return a, b
 
-        cc = qmc.controlled(flip_second, num_controls=2)
+        cc = qmc.control(flip_second, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2571,8 +2571,8 @@ class TestCudaqHelperKernelSemanticsContract:
             f"Multi-control second-target helper: expected |1011>, got statevector {sv}"
         )
 
-    def test_helper_body_with_loop_multi_control_raises_emit_error(self):
-        """Multi-control helper body with ForOperation should raise EmitError."""
+    def test_helper_body_with_loop_multi_control_uses_cudaq_control(self):
+        """Multi-control helper body with ForOperation uses cudaq.control."""
 
         @qmc.qkernel
         def loop_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
@@ -2581,7 +2581,7 @@ class TestCudaqHelperKernelSemanticsContract:
                 q1 = qmc.x(q1)
             return q0, q1
 
-        cc = qmc.controlled(loop_gate, num_controls=2)
+        cc = qmc.control(loop_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2591,8 +2591,17 @@ class TestCudaqHelperKernelSemanticsContract:
             q[0], q[1], q[2], q[3] = cc(q[0], q[1], q[2], q[3])
             return qmc.measure(q)
 
-        with pytest.raises(EmitError, match="Unsupported operation"):
-            _transpile_and_get_circuit(circuit)
+        _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(4, 0b1111)
+        assert statevectors_equal(sv, expected)
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit, t1: cudaq.qubit):",
+            "x(t0)",
+            "x(t1)",
+            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2], q[3])",
+        )
 
     def test_existing_ccx_happy_path_regression(self):
         """Existing CCX (Toffoli) happy path must not regress."""
@@ -2601,7 +2610,7 @@ class TestCudaqHelperKernelSemanticsContract:
         def x_gate(q: qmc.Qubit) -> qmc.Qubit:
             return qmc.x(q)
 
-        ccx = qmc.controlled(x_gate, num_controls=2)
+        ccx = qmc.control(x_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2623,7 +2632,7 @@ class TestCudaqHelperKernelSemanticsContract:
         def swap_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
             return qmc.swap(q0, q1)
 
-        cswap = qmc.controlled(swap_gate)
+        cswap = qmc.control(swap_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2653,7 +2662,7 @@ class TestCudaqHelperKernelSemanticsContract:
                 q1 = qmc.x(q1)
             return q0, q1
 
-        c1 = qmc.controlled(loop_gate)
+        c1 = qmc.control(loop_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2670,39 +2679,6 @@ class TestCudaqHelperKernelSemanticsContract:
             f"Single-control loop helper: expected |111>, got statevector {sv}"
         )
 
-    def test_single_control_helper_with_loop_index_spec(self):
-        """Single-control loop helper via index-spec route should succeed.
-
-        Covers the _emit_controlled_u_with_index_spec entry path to ensure
-        the same routing fix applies through both controlled-U entry paths.
-        """
-
-        @qmc.qkernel
-        def loop_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            for i in qmc.range(1):
-                q0 = qmc.x(q0)
-                q1 = qmc.x(q1)
-            return q0, q1
-
-        c1 = qmc.controlled(loop_gate)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0] = qmc.x(q[0])
-            # Use controlled_indices to specify q[0] as the control
-            q = c1(q, controlled_indices=[0])
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
-        # ctrl=q0=1 -> loop body flips q1 and q2 -> |111>
-        expected = computational_basis_state(3, 0b111)
-        assert statevectors_equal(sv, expected), (
-            f"Single-control loop helper (index-spec): expected |111>, "
-            f"got statevector {sv}"
-        )
-
     def test_controlled_cnot_single_control(self):
         """Positional single-control helper with inner CX should act as Toffoli."""
 
@@ -2710,7 +2686,7 @@ class TestCudaqHelperKernelSemanticsContract:
         def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
             return qmc.cx(a, b)
 
-        c1 = qmc.controlled(cnot_gate)
+        c1 = qmc.control(cnot_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2736,7 +2712,7 @@ class TestCudaqHelperKernelSemanticsContract:
         def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
             return qmc.cx(a, b)
 
-        cccx = qmc.controlled(cnot_gate, num_controls=2)
+        cccx = qmc.control(cnot_gate, num_controls=2)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2754,57 +2730,6 @@ class TestCudaqHelperKernelSemanticsContract:
         expected = computational_basis_state(4, 0b1111)
         assert statevectors_equal(sv, expected), (
             f"Controlled CNOT (double, positional): expected |1111>, got {sv}"
-        )
-
-    def test_controlled_cnot_single_control_index_spec(self):
-        """Index-spec single-control helper with inner CX should act as Toffoli."""
-
-        @qmc.qkernel
-        def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            return qmc.cx(a, b)
-
-        c1 = qmc.controlled(cnot_gate)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0] = qmc.x(q[0])
-            q[1] = qmc.x(q[1])
-            q = c1(q, controlled_indices=[0])
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
-        # ctrl=q0, inner ctrl=q1, target=q2 -> Toffoli -> |111>
-        expected = computational_basis_state(3, 0b111)
-        assert statevectors_equal(sv, expected), (
-            f"Controlled CNOT (single, index-spec): expected |111>, got {sv}"
-        )
-
-    def test_controlled_cnot_double_control_index_spec(self):
-        """Index-spec multi-control helper with inner CX should act as C^3X."""
-
-        @qmc.qkernel
-        def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            return qmc.cx(a, b)
-
-        cccx = qmc.controlled(cnot_gate, num_controls=2)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(4, "q")
-            q[0] = qmc.x(q[0])
-            q[1] = qmc.x(q[1])
-            q[2] = qmc.x(q[2])
-            q = cccx(q, controlled_indices=[0, 1])
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
-        # C^3X with all controls ON -> |1111>
-        expected = computational_basis_state(4, 0b1111)
-        assert statevectors_equal(sv, expected), (
-            f"Controlled CNOT (double, index-spec): expected |1111>, got {sv}"
         )
 
 
@@ -3770,7 +3695,7 @@ class TestDeepNestedQKernelComposition:
 
 
 class TestControlledSubRoutines:
-    """controlled() should support high-level sub-routines on CUDA-Q."""
+    """control() should support high-level sub-routines on CUDA-Q."""
 
     def test_controlled_ry_control_on(self):
         """Controlled-RY with ctrl=|1> matches the CRY unitary."""
@@ -3780,7 +3705,7 @@ class TestControlledSubRoutines:
             q = qmc.ry(q, theta)
             return q
 
-        controlled_ry = qmc.controlled(ry_gate)
+        controlled_ry = qmc.control(ry_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3808,7 +3733,7 @@ class TestControlledSubRoutines:
             q = qmc.ry(q, theta)
             return q
 
-        controlled_ry = qmc.controlled(ry_gate)
+        controlled_ry = qmc.control(ry_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3830,7 +3755,7 @@ class TestControlledSubRoutines:
             q = qmc.rz(q, theta)
             return q
 
-        controlled_rz = qmc.controlled(rz_gate)
+        controlled_rz = qmc.control(rz_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3859,7 +3784,7 @@ class TestControlledSubRoutines:
             q = qmc.x(q)
             return q
 
-        controlled_hx = qmc.controlled(hx_gate)
+        controlled_hx = qmc.control(hx_gate)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3871,7 +3796,126 @@ class TestControlledSubRoutines:
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         assert qc.num_qubits == 2
         assert qc.execution_mode == ExecutionMode.STATIC
-        _assert_source_contains(qc, "def _qamomile_kernel():", "q = cudaq.qvector(2)")
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit):",
+            "h(t0)",
+            "x(t0)",
+            "def _qamomile_kernel():",
+            "q = cudaq.qvector(2)",
+            "cudaq.control(_qamomile_controlled_0, q[0], q[1])",
+        )
+
+    def test_controlled_parametric_kernel_uses_cudaq_control(self):
+        """A controlled parametric helper is emitted via cudaq.control."""
+
+        @qmc.qkernel
+        def ry_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            q = qmc.ry(q, theta)
+            return q
+
+        controlled_ry = qmc.control(ry_gate)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0], q[1] = controlled_ry(q[0], q[1], theta=theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
+            "ry(thetas[0], t0)",
+            "def _qamomile_kernel(thetas: list[float]):",
+            "cudaq.control(_qamomile_controlled_0, q[0], q[1], thetas)",
+        )
+
+    def test_nested_controlled_parametric_helper_forwards_thetas(self):
+        """A nested controlled helper forwards runtime parameters."""
+
+        @qmc.qkernel
+        def ry_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            q = qmc.ry(q, theta)
+            return q
+
+        controlled_ry = qmc.control(ry_gate)
+
+        @qmc.qkernel
+        def inner_controlled(
+            control: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            control, target = controlled_ry(control, target, theta=theta)
+            return control, target
+
+        nested_controlled = qmc.control(inner_controlled)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0], q[1], q[2] = nested_controlled(q[0], q[1], q[2], theta=theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
+            "ry(thetas[0], t0)",
+            "def _qamomile_controlled_1(t0: cudaq.qubit, t1: cudaq.qubit, thetas: list[float]):",
+            "cudaq.control(_qamomile_controlled_0, t0, t1, thetas)",
+            "cudaq.control(_qamomile_controlled_1, q[0], q[1], q[2], thetas)",
+        )
+
+    def test_controlled_multi_control_helper_uses_cudaq_control(self):
+        """A multi-control helper uses CUDA-Q's controlled-kernel API."""
+
+        @qmc.qkernel
+        def hx_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            q = qmc.x(q)
+            return q
+
+        controlled_hx = qmc.control(hx_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = controlled_hx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
+        _assert_source_contains(
+            qc,
+            "def _qamomile_controlled_0(t0: cudaq.qubit):",
+            "h(t0)",
+            "x(t0)",
+            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2])",
+        )
+
+    def test_identical_controlled_helpers_are_reused(self):
+        """Identical generated helper kernels share one CUDA-Q helper."""
+
+        @qmc.qkernel
+        def hx_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            q = qmc.x(q)
+            return q
+
+        controlled_hx = qmc.control(hx_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[0], q[1] = controlled_hx(q[0], q[1])
+            q[0], q[2] = controlled_hx(q[0], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
+        assert qc.source.count("def _qamomile_controlled_") == 1
+        assert qc.source.count("cudaq.control(_qamomile_controlled_0") == 2
 
     def test_controlled_power_2(self):
         """A powered controlled phase helper transpiles."""
@@ -3881,7 +3925,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -3904,7 +3948,7 @@ class TestControlledSubRoutines:
             q = qmc.p(q, theta)
             return q
 
-        cp_pow = qmc.controlled(p_gate)
+        cp_pow = qmc.control(p_gate)
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -4009,7 +4053,7 @@ class TestEntanglementAndParityPatterns:
         def swap_kernel(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
             return qmc.swap(q0, q1)
 
-        cswap = qmc.controlled(swap_kernel)
+        cswap = qmc.control(swap_kernel)
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:

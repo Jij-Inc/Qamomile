@@ -13,7 +13,9 @@ import sympy as sp
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -22,6 +24,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType
@@ -121,10 +124,13 @@ def _build_controlled_u_child_resolver(
     op: ControlledUOperation,
     resolver: ExprResolver,
 ) -> tuple[Block | None, ExprResolver | None]:
-    """Build child resolver for ControlledUOperation's inner block.
+    """Build a child resolver for the inner block of a ``ControlledUOperation``.
 
-    Handles both index_spec mode (qubit operands identified by index)
-    and the default mode (target_operands mapping).
+    Walks the inner block's input signature against the op's
+    ``target_operands`` so any ``ArrayValue`` size that the caller
+    bound by passing a sized argument is added to the resolver
+    context.  This lets downstream qubit-counting resolve the inner
+    block's symbolic ``Vector[Qubit]`` sizes from the call site.
 
     Returns:
         (controlled_block, child_resolver) or (None, None).
@@ -135,29 +141,23 @@ def _build_controlled_u_child_resolver(
         return None, None
 
     extra: dict[str, sp.Expr] = {}
-    if op.has_index_spec:
-        param_operands = op.operands[1:]
-        param_idx = 0
-        for formal_input in controlled_block.input_values:
-            if not formal_input.type.is_quantum():
-                if param_idx < len(param_operands):
-                    actual_arg = param_operands[param_idx]
-                    if isinstance(actual_arg, ArrayValue) and isinstance(
-                        formal_input, ArrayValue
-                    ):
-                        for df, da in zip(formal_input.shape, actual_arg.shape):
-                            extra[df.uuid] = resolver.resolve(da)
-                    param_idx += 1
-    else:
-        target_operands = op.target_operands
-        for formal_idx, formal_input in enumerate(controlled_block.input_values):
-            if formal_idx < len(target_operands):
-                actual_arg = target_operands[formal_idx]
-                if isinstance(actual_arg, ArrayValue) and isinstance(
-                    formal_input, ArrayValue
-                ):
-                    for df, da in zip(formal_input.shape, actual_arg.shape):
-                        extra[df.uuid] = resolver.resolve(da)
+    # ``op.target_operands`` includes both quantum sub-arg ``Value`` s
+    # and classical ``Value`` s, but we only need shape propagation
+    # for the ``Vector[Qubit]`` ones.  Filter both the formal inputs
+    # and the actuals to the quantum subset so the zip pairs the
+    # right things when the wrapped kernel's signature interleaves
+    # classical and quantum params (e.g. ``def sub(theta, q: Vector[Qubit])``
+    # -- the unfiltered zip used to pair ``theta`` formal with the
+    # ``q`` actual, missing the actual ``q`` formal entirely and
+    # leaving its symbolic shape unresolved).
+    quantum_formals = [
+        iv for iv in controlled_block.input_values if iv.type.is_quantum()
+    ]
+    quantum_actuals = [v for v in op.target_operands if v.type.is_quantum()]
+    for formal_input, actual_arg in zip(quantum_formals, quantum_actuals):
+        if isinstance(actual_arg, ArrayValue) and isinstance(formal_input, ArrayValue):
+            for df, da in zip(formal_input.shape, actual_arg.shape):
+                extra[df.uuid] = resolver.resolve(da)
 
     ctx = resolver.context
     ctx.update(extra)
@@ -206,6 +206,29 @@ def _count_composite_split(
     return total_alloc, False
 
 
+def _count_inverse_block_split(
+    op: InverseBlockOperation,
+    resolver: ExprResolver,
+) -> tuple[sp.Expr, bool]:
+    """Count reusable qubits from an inverse block implementation.
+
+    Args:
+        op (InverseBlockOperation): Inverse block operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+
+    Returns:
+        tuple[sp.Expr, bool]: Allocation count and whether it is reusable
+            across loop iterations.
+    """
+    impl = op.implementation_block
+    impl_alloc: sp.Expr = sp.Integer(0)
+    if isinstance(impl, Block):
+        impl_alloc = _count_from_operations(impl.operations, resolver)
+        if _is_clean_call(impl):
+            return impl_alloc, True
+    return impl_alloc, False
+
+
 def _count_composite_total(
     op: CompositeGateOperation,
     resolver: ExprResolver,
@@ -219,6 +242,26 @@ def _count_composite_total(
     if op.resource_metadata is not None:
         count += sp.Integer(op.resource_metadata.ancilla_qubits)
     return count
+
+
+def _count_inverse_block_total(
+    op: InverseBlockOperation,
+    resolver: ExprResolver,
+) -> sp.Expr:
+    """Count qubits from an inverse block implementation.
+
+    Args:
+        op (InverseBlockOperation): Inverse block operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+
+    Returns:
+        sp.Expr: Total additional qubit allocation required by the fallback
+            implementation block.
+    """
+    impl = op.implementation_block
+    if isinstance(impl, Block):
+        return _count_from_operations(impl.operations, resolver)
+    return sp.Integer(0)
 
 
 # ------------------------------------------------------------------ #
@@ -274,6 +317,13 @@ def _count_loop_body_split(
 
             case CompositeGateOperation():
                 alloc, is_reusable = _count_composite_split(op, resolver)
+                if is_reusable:
+                    reusable = sp.Max(reusable, alloc)
+                else:
+                    persistent += alloc  # type: ignore
+
+            case InverseBlockOperation():
+                alloc, is_reusable = _count_inverse_block_split(op, resolver)
                 if is_reusable:
                     reusable = sp.Max(reusable, alloc)
                 else:
@@ -407,6 +457,9 @@ def _count_from_operations(
 
             case CompositeGateOperation():
                 count += _count_composite_total(op, resolver)  # type: ignore
+
+            case InverseBlockOperation():
+                count += _count_inverse_block_total(op, resolver)  # type: ignore
 
             case PauliEvolveOp():
                 # PauliEvolveOp operates in-place; no new qubits.

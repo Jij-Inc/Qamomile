@@ -209,21 +209,15 @@ plt.show()
 # Qamomileの`QFT`クラスを用いて、多次元 QFT を実装しましょう。
 
 # %%
-def apply_partial_qft(qubits, start, length):
-    qft_gate = QFT(length)
-    qubit_args = [qubits[start+i] for i in range(length)]
-    result = qft_gate(*qubit_args)
-    for i in range(length):
-        qubits[start+i] = result[i]
-    return qubits
-
 @qmc.qkernel
 def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
     N = Nqx + Nqy
     q = qmc.qubit_array(N, name="q")
     q = amplitude_encoding(q, inputs)  
-    q = apply_partial_qft(q, start=0, length=Nqx)
-    q = apply_partial_qft(q, start=Nqx, length=Nqy)
+    # q = apply_partial_qft(q, start=0, length=Nqx)
+    # q = apply_partial_qft(q, start=Nqx, length=Nqy)
+    q[0:Nqx] = qmc.qft(q[0:Nqx])
+    q[Nqx:N] = qmc.qft(q[Nqx:N])
     return qmc.measure(q)
 
 

@@ -1,20 +1,17 @@
 ---
 name: local-review
-description: Review code on the current branch for Qamomile philosophy and convention compliance. Compares changed files against `main` (or a specified target branch) and evaluates them against Qamomile's design principles.
-argument-hint: <target-branch (default: main)>
+description: Review code on the current branch for Qamomile philosophy and convention compliance. Compares changed files against `main` and evaluates them against Qamomile's design principles.
 model: opus
 ---
 
 You are an expert code reviewer for the Qamomile quantum optimization SDK. Review the changes on the current branch against Qamomile's design philosophy and coding conventions.
-
-If `$ARGUMENTS` is provided, use it as the target branch. Otherwise, default to `main`.
 
 ## Severity Levels
 
 Use these labels consistently when reporting findings (referenced by rules below and re-applied in Step 6):
 
 - **P0 — Bug**: incorrect behavior, runtime error, linear-type violation, silent data corruption, breaking change in unchanged files, mutable default arg, bare `except` swallowing, float `==` in production code, missing exception chaining.
-- **P1 — Significant Design Issue**: layer-boundary / `@qkernel` / backend-pattern violation; missing / stale / unexecuted `.ipynb`; new docs not in test patterns; incomplete modifications (changed interface, callers not updated, `__all__` stale); missing tolerance in numerical asserts; missing tests or docs for a new feature; OMMX parity break; missing cross-backend execution coverage for new algorithm/stdlib.
+- **P1 — Significant Design Issue**: layer-boundary / `@qkernel` / backend-pattern violation; missing / stale / unexecuted `.ipynb`; new runnable docs not in test patterns; docs authoring-policy violation that can mislead readers or ship unverified claims; incomplete modifications (changed interface, callers not updated, `__all__` stale); missing tolerance in numerical asserts; missing tests or docs for a new feature; OMMX parity break; missing cross-backend execution coverage for new algorithm/stdlib.
 - **P2 — Moderate**: missing docstrings, un-parametrized tests, missing randomization, missing edge / negative tests, missing deterministic-test justification or completeness, raw-string dispatch on closed sets, unnecessary copies in hot paths, unjustified incidental HUBO/QUBO guard, plain `range(...)` in a qkernel body (use `qmc.range(...)` — `qmc` is the preferred `qamomile.circuit` alias; `qm.range(...)` works but is discouraged in new code).
 - **P3 — Minor**: style, naming, import ordering, per-call dict construction, suboptimal generator/list choice.
 
@@ -135,11 +132,19 @@ qBraid is out of scope (executor-only wrapper around Qiskit, requires API key). 
 
 ### I. Documentation
 
-- **Jupytext percent-format `.py` is the source of truth.** Every tutorial `.py` must have a committed `.ipynb` that (a) exists, (b) stays in sync when its `.py` changes, (c) contains execution outputs. Any of these failing is **P1**. An `.ipynb`-only change (no corresponding `.py` update) is **P2** — it bypasses the source-of-truth.
-- **Docs test coverage**: new tutorial paths (outside `integration/`) must be in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. Missing is **P1**.
-- **en/ja parity**: `docs/en/` and `docs/ja/` must share file structure and content — only the natural language differs. Missing or outdated counterpart is **P1**.
-- **Tag whitelist (`ALLOWED_TAGS` in `docs/scripts/build_doc_tags.py`)**: every `tags:` entry in an article's MyST frontmatter MUST already be in `ALLOWED_TAGS`. Adding a new tag to the whitelist as a side-effect of introducing an article is **P1** — the taxonomy is deliberately small and curated, and an unannounced expansion of it is precisely what the whitelist exists to prevent. If a new tag is genuinely needed, the PR should call it out explicitly and the `ALLOWED_TAGS` change should be a separate, documented decision (not a quiet line in a docs PR).
-- Jupyter Book 2 with MyST.
+- **Read the current docs guide first.** For any change under `docs/`, read `docs/README.md` before reviewing. Treat it as the source of truth for the docs build pipeline, authoring policy, skeleton usage, tag mechanism, and docs-test expectations. If this skill and `docs/README.md` disagree, prefer `docs/README.md` and flag this skill as stale.
+- **Authoring policy compliance**: notebook-style articles under `tutorial/`, `algorithm/`, `usage/`, and `integration/` must follow the reader-first, Qamomile-first, testable policy in `docs/README.md`'s "Authoring Policy" section. Flag as **P1** when a page ships unverified academic claims, misleading theory, or result claims without assertions/reference checks. Flag as **P2** when a page drifts from one clear purpose, hides ordinary usage behind excessive theory, avoids Qamomile-native APIs/drawings where they are available, or lacks take-home summary points.
+- **Skeleton-driven page shape**: new notebook-style pages should start from the closest template in `docs/skeletons/` and preserve the required shape there: tag frontmatter, H1 scope paragraph, commented Colab install cell, imports cell, section-specific body, and `## Summary`. Missing structure that makes the page hard to run or review is **P1**; smaller outline drift is **P2**. Do not require README to repeat the skeleton body outline.
+- **Jupytext percent-format `.py` is the authoring surface.** Runnable article `.py` files must have a committed paired `.ipynb` that (a) exists, (b) stays in sync when its `.py` changes, and (c) contains execution outputs intended for readers. Any of these failing is **P1**. An `.ipynb`-only article change without a corresponding `.py` update is **P2** because it bypasses the reviewable source.
+- **No reduced-output docs execution**: rendered docs outputs must not be produced with `QAMOMILE_DOCS_TEST=1`. If a PR updates notebook outputs that clearly came from test-mode shortcuts (reduced shots, reduced optimizer iterations, or placeholder results) without documenting that they are intentionally reader-facing, flag **P1**.
+- **Verify build-command guidance against the current implementation**: when a docs change describes docs build commands, targets, or execution behavior, do not infer correctness from the commit diff alone. Read the current `docs/build.sh` (especially `show_help`, `SYNC_DIRS`, `TARGET_DIRS`, `setup_build_src`, and command dispatch) and compare the changed prose against the implemented behavior. Flag nonexistent targets, removed Makefile guidance, stale command names, or claims that overstate what a target syncs/executes/builds.
+- **Docs test coverage**: new runnable pages under `tutorial/`, `algorithm/`, `usage/`, and `integration/` must be discovered by `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`; missing coverage is **P1**. Do not exclude `integration/` wholesale: skip only specific pages that require credentials or remote side effects via `SKIP_TUTORIALS`, and use `OPTIONAL_SKIP_MODULES` for optional package imports.
+- **en/ja parity**: rendered docs under `docs/en/` and `docs/ja/` must share file structure and content shape; only the natural language differs. Missing or outdated counterparts are **P1**. Non-rendered helper files such as `docs/skeletons/` are exempt from en/ja pairing.
+- **Section indexes and TOC**: section `index.md` files are hand-written and should list the visible articles. New ordinary articles in existing sections should not require `myst.yml` edits because the TOC uses `pattern:` entries; unnecessary manual TOC edits are **P2** if they risk stale navigation. New top-level sections still require the config updates described in `docs/README.md`.
+- **Auto-managed tag content stays out of committed source.** `build_doc_tags.py` injects chip blocks, browse-by-tag sections, and per-tag pages into `_build_src/`; committed `docs/en/` and `docs/ja/` sources should not contain those generated regions. Manually committed generated tag/chip content is **P1** when it causes churn or stale rendered navigation, otherwise **P2**.
+- **Tag whitelist (`ALLOWED_TAGS` in `docs/scripts/build_doc_tags.py`)**: every `tags:` entry in an article's MyST frontmatter MUST already be in `ALLOWED_TAGS`. Adding a new tag to the whitelist as a side-effect of introducing an article is **P1** unless the user explicitly requested the taxonomy change in the current task. If a new tag is genuinely needed, the PR should call it out explicitly and the `ALLOWED_TAGS` change should be a separate, documented decision.
+- **Figures and static assets**: authored figures and screenshots should use MyST `figure` directives with explicit captions/alt text. Static images that are not generated by Python execution must be committed as files under the docs assets structure and referenced by path; do not embed them as notebook blobs/base64. Blobbed static images are **P1** for large or reader-visible assets, otherwise **P2**.
+- **References and remarks**: do not hand-maintain a plain "References" section when MyST citations, cross-references, or external links can express the source. Tips, notes, and remarks should use MyST `note` blocks. Treat violations as **P2** when they affect maintainability or reader clarity, otherwise **P3**.
 
 ### J. Numerical Correctness
 
@@ -177,11 +182,48 @@ Applies to changes under `qamomile/optimization/`.
 ### Step 1: Gather Diff
 
 ```bash
-TARGET="${ARGUMENTS:-main}"
-git diff $TARGET...HEAD --stat
-git diff $TARGET...HEAD --name-status
-git log $TARGET...HEAD --oneline
+git diff main...HEAD --stat
+git diff main...HEAD --name-status
+git log main...HEAD --oneline
 ```
+
+### Step 1.5: Run Mechanical Checks (MANDATORY)
+
+Before any human-style review, run the mechanical checks that GitHub CI enforces on every PR. (CLAUDE.md's "Build and Development Commands" documents the same tools at a narrower `qamomile/`-only scope; this skill follows CI's wider `qamomile/ tests/` scope so the user sees what CI will see.) **These are non-negotiable — execute them on every invocation of this skill and surface every failure in the final report. Never skip them, never "trust the diff looks clean", never stop after one check reports violations.** Skipping these is itself a regression of the skill.
+
+```bash
+# Ruff lint + isort
+# (CI: .github/workflows/ruff.yml — "Lint with ruff (Linter & isort)")
+uv run ruff check qamomile/ tests/
+
+# Ruff formatter check
+# (CI: .github/workflows/ruff.yml — "Check formatting with ruff (Formatter)")
+uv run ruff format --check qamomile/ tests/
+
+# Type checking
+# (CLAUDE.md "Build and Development Commands")
+uv run zuban qamomile/
+```
+
+Run **all three** even if earlier ones fail — each surfaces a different class of regression and the reviewer / user needs the full picture in one pass. Do not paraphrase the output; quote each failing line (file:line + message) verbatim in the report so the user can jump to it.
+
+Severity mapping:
+
+- **ruff `check` violation** — severity follows the underlying rule. A real bug rule (`B006` mutable default, `F841` unused assignment masking a typo, `B008` mutable arg in function call) is **P0**. `E722` (bare `except`) and `B904` (missing `from e` on re-raise) are also **P0** directly — the Severity Levels rubric at the top of this document lists "bare `except` swallowing" and "missing exception chaining" as P0 without conditioning on other sections, and the mechanical mapping must match. A pure style nit (`E501` line length, `I001` import order) is **P3**. A missing-docstring rule (`D100`–`D107`) is **P2+** (CLAUDE.md "Docstring Convention (MANDATORY)").
+- **ruff `format` divergence** — **P3**. Mechanically fixable with `uv run ruff format qamomile/ tests/`; mention the one-liner in the recommendation.
+- **zuban type error** — **P2** by default. **P1+** if it reveals a behavioral bug, a contract mismatch with a public API, or a `None`-related foot-gun.
+
+Distinguish "the check ran and reported violations" (handled by the severity mapping above) from "the check could not be run at all". If a specific check tool fails to invoke — e.g., `zuban` is missing, a config file is broken, the formatter binary errors before reading any files — **continue with the remaining checks** and report the unrunnable tool as its own **P0** finding. A non-runnable check is functionally equivalent to a disabled one and the user must be told, but stopping early would hide the other tools' output that may still be actionable. **Only hard-stop the skill when `uv` itself is unavailable** so that none of the three commands can run; in that case Step 1.5 as a whole is uninvokable and the skill cannot produce a valid review — report that single P0 and exit.
+
+These checks scope to the whole `qamomile/` + `tests/` tree (matching CI), not just the diff. Pre-existing violations outside the diff still count, since the user will eventually be blocked by CI on them; report them too. **The "pre-existing on `main`" annotation is optional and only valid when you actually verified it on `main`.** If you want to label findings that way, run the same Step 1.5 commands against `main` in a temporary worktree and diff the outputs:
+
+```bash
+git worktree add /tmp/qamomile-base main
+( cd /tmp/qamomile-base && uv run ruff check qamomile/ tests/; uv run ruff format --check qamomile/ tests/; uv run zuban qamomile/ )
+git worktree remove /tmp/qamomile-base
+```
+
+If you skip the baseline, report each violation without claiming whether it is pre-existing — an unverified annotation is more misleading than no annotation at all.
 
 ### Step 2: Read Changed Files
 
@@ -224,5 +266,12 @@ Common root-cause patterns to watch for: **dead code** (multiple nits on code ne
 ### Step 6: Report
 
 For each finding, give: severity (using the **Severity Levels** rubric at the top of this document), `file:line`, code snippet, the violated section, a short explanation, a concrete recommendation with corrected code, and — for consolidated findings — a `Root cause of:` line listing subsumed surface issues. End with a severity-grouped summary table.
+
+**Mechanical-check section (MANDATORY)**: the report MUST contain a top-of-report block titled `## Mechanical checks` that lists the three Step 1.5 commands and, for each, one of:
+
+- ✅ `passed` (with the exit code and a one-line confirmation), or
+- ❌ `failed` (with the verbatim failing lines, and each failure also surfaced as a numbered finding below per the severity mapping in Step 1.5).
+
+Never omit this section, even when all three pass — a clean run is itself the evidence the user needs to satisfy CLAUDE.md's "Run `/local-review` before opening a PR" rule. If you do omit it, the skill output is not a valid local-review run.
 
 If Step 5.5 did not stabilize, append: "Note: some findings may have deeper interdependencies warranting further investigation."
