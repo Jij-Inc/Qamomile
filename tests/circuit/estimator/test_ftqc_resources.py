@@ -31,6 +31,8 @@ def test_ftqc_quantity_specs_cover_core_resource_layers():
     categories = {spec.category for spec in specs}
 
     assert FTQCResourceQuantity.LAMBDA_NORM in quantities
+    assert FTQCResourceQuantity.TARGET_PRECISION in quantities
+    assert FTQCResourceQuantity.TRUNCATION_ERROR in quantities
     assert FTQCResourceQuantity.TOFFOLI_GATES in quantities
     assert FTQCResourceQuantity.PHYSICAL_QUBITS in quantities
     assert FTQCResourceQuantity.CODE_DISTANCE in quantities
@@ -86,6 +88,7 @@ def test_ftqc_models_expose_canonical_resource_values():
         == 0
     )
     assert model.resource_values()[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 11
+    assert model.resource_values()[FTQCResourceQuantity.TRUNCATION_ERROR] == 0
     assert (
         cost.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL] == 100
     )
@@ -93,6 +96,7 @@ def test_ftqc_models_expose_canonical_resource_values():
         sp.simplify(estimate.resource_values()[FTQCResourceQuantity.TOFFOLI_GATES] - 55)
         == 0
     )
+    assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == 1
     assert estimate.to_quantity_table()[0]["quantity"] == "logical_qubits"
 
 

@@ -11,6 +11,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCCostModel,
     FTQCReference,
+    FTQCResourceQuantity,
     SurfaceCodeCostModel,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
@@ -36,8 +37,11 @@ def test_qubitized_qpe_tracks_lambda_precision_and_walk_cost():
 
     assert estimate.logical_qubits == n
     assert estimate.qpe_iterations == lam / eps
+    assert estimate.target_precision == eps
     assert estimate.toffoli_gates == lam * walk / eps
     assert {"lambda", "eps", "C_W"}.issubset(estimate.parameters)
+    assert estimate.to_dict()["target_precision"] == "eps"
+    assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == eps
 
 
 def test_qubitized_qpe_uses_representation_specific_logical_qubits():
@@ -131,6 +135,7 @@ def test_model_references_are_preserved_and_deduplicated():
     assert reference_keys.count("arXiv:2403.03502") == 1
     assert reference_keys[-1] == "internal:toy-model"
     assert relifted.references == estimate.references
+    assert relifted.target_precision == estimate.target_precision
 
 
 def test_cost_model_lifts_logical_estimates_to_physical_runtime():
@@ -447,6 +452,9 @@ def test_qubitized_qpe_from_model_uses_hamiltonian_metadata():
     assert sp.Abs(estimate.toffoli_gates - sp.Rational(55, 2)) < sp.Float("1e-12")
     assert estimate.assumptions["hamiltonian_source"] == "shifted"
     assert sp.sympify(estimate.assumptions["truncation_error"]) == sp.Float("1e-5")
+    assert model.resource_values()[FTQCResourceQuantity.TRUNCATION_ERROR] == sp.Float(
+        "1e-5"
+    )
 
 
 def test_single_ancilla_trotter_qpe_from_hamiltonian_summary():
@@ -463,6 +471,7 @@ def test_single_ancilla_trotter_qpe_from_hamiltonian_summary():
 
     assert estimate.logical_qubits == 3
     assert sp.simplify(estimate.qpe_iterations - 3) == 0
+    assert estimate.target_precision == 1
     assert sp.simplify(estimate.logical_depth - 36) == 0
     assert sp.simplify(estimate.t_gates - 180) == 0
 

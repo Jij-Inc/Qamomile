@@ -55,6 +55,9 @@ from qamomile.circuit.estimator.algorithmic import (
 #
 # - Hamiltonian summaries capture representation-level quantities such as
 #   `lambda_norm` and Pauli term count.
+# - Accuracy budgets such as target precision and truncation error are tracked
+#   as first-class quantities, because they explain why two cost estimates are
+#   comparable.
 # - Algorithm estimators turn those quantities into QPE iterations, Toffoli or
 #   T counts, logical qubits, logical depth, physical qubits, and runtime
 #   proxies.
@@ -102,6 +105,12 @@ for row in catalog:
     print(row["quantity"], row["unit"], row["category"])
 
 assert FTQCResourceQuantity.LAMBDA_NORM.value in {row["quantity"] for row in catalog}
+assert FTQCResourceQuantity.TARGET_PRECISION.value in {
+    row["quantity"] for row in catalog
+}
+assert FTQCResourceQuantity.TRUNCATION_ERROR.value in {
+    row["quantity"] for row in catalog
+}
 assert FTQCResourceQuantity.TOFFOLI_GATES.value in {row["quantity"] for row in catalog}
 assert FTQCResourceQuantity.RUNTIME_SECONDS.value in {
     row["quantity"] for row in catalog
@@ -316,8 +325,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # In this notebook, we learned:
 #
 # - Recent FTQC chemistry work motivates tracking Hamiltonian normalization,
-#   QPE iterations, non-Clifford counts, logical depth, physical qubits, and
-#   runtime separately.
+#   target precision, truncation error, QPE iterations, non-Clifford counts,
+#   logical depth, physical qubits, and runtime separately.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Surface-code assumptions can be modeled separately and converted into the

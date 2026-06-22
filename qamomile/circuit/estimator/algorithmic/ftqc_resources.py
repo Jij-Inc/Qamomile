@@ -40,6 +40,8 @@ class FTQCResourceQuantity(enum.StrEnum):
         N_PAULI_TERMS: Number of non-identity Pauli terms in an LCU model.
         LAMBDA_NORM: Hamiltonian normalization driving QPE walk calls.
         MAX_LOCALITY: Maximum Pauli-string locality.
+        TARGET_PRECISION: Target algorithmic energy or phase precision.
+        TRUNCATION_ERROR: Representation-level approximation error budget.
         WALK_COST_TOFFOLI: Toffoli cost of one qubitized walk.
         QPE_ITERATIONS: Number of phase-estimation walk or time-evolution
             calls.
@@ -73,6 +75,8 @@ class FTQCResourceQuantity(enum.StrEnum):
     N_PAULI_TERMS = "n_pauli_terms"
     LAMBDA_NORM = "lambda_norm"
     MAX_LOCALITY = "max_locality"
+    TARGET_PRECISION = "target_precision"
+    TRUNCATION_ERROR = "truncation_error"
     WALK_COST_TOFFOLI = "walk_cost_toffoli"
     QPE_ITERATIONS = "qpe_iterations"
     LOGICAL_QUBITS = "logical_qubits"
@@ -349,6 +353,20 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "Pauli factors",
         FTQCResourceCategory.PROBLEM,
         "Maximum number of non-identity Pauli factors in one term.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.TARGET_PRECISION,
+        "Target precision",
+        "energy",
+        FTQCResourceCategory.ALGORITHM,
+        "Requested QPE energy or phase precision that controls iteration count.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.TRUNCATION_ERROR,
+        "Truncation error",
+        "energy",
+        FTQCResourceCategory.PROBLEM,
+        "Representation-level approximation error budget before QPE sampling.",
     ),
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.WALK_COST_TOFFOLI,

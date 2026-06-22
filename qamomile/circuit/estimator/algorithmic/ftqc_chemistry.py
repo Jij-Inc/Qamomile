@@ -646,6 +646,8 @@ class FTQCResourceEstimate:
         clifford_gates (sp.Expr): Clifford gate estimate when available.
         qpe_iterations (sp.Expr): Number of phase-estimation walk or
             time-evolution calls.
+        target_precision (sp.Expr): Requested energy or phase precision that
+            controls the QPE iteration count.
         logical_depth (sp.Expr): Logical circuit depth proxy.
         runtime_seconds (sp.Expr): Runtime estimate in seconds.
         parameters (dict[str, sp.Symbol]): Free symbols appearing in the
@@ -668,6 +670,7 @@ class FTQCResourceEstimate:
     t_gates: sp.Expr
     clifford_gates: sp.Expr
     qpe_iterations: sp.Expr
+    target_precision: sp.Expr
     logical_depth: sp.Expr
     runtime_seconds: sp.Expr
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
@@ -714,6 +717,7 @@ class FTQCResourceEstimate:
             "t_gates": str(self.t_gates),
             "clifford_gates": str(self.clifford_gates),
             "qpe_iterations": str(self.qpe_iterations),
+            "target_precision": str(self.target_precision),
             "logical_depth": str(self.logical_depth),
             "runtime_seconds": str(self.runtime_seconds),
             "parameters": {
@@ -737,6 +741,7 @@ class FTQCResourceEstimate:
             FTQCResourceQuantity.T_GATES: self.t_gates,
             FTQCResourceQuantity.CLIFFORD_GATES: self.clifford_gates,
             FTQCResourceQuantity.QPE_ITERATIONS: self.qpe_iterations,
+            FTQCResourceQuantity.TARGET_PRECISION: self.target_precision,
             FTQCResourceQuantity.LOGICAL_DEPTH: self.logical_depth,
             FTQCResourceQuantity.RUNTIME_SECONDS: self.runtime_seconds,
         }
@@ -786,6 +791,7 @@ class FTQCResourceEstimate:
             t_gates=self.t_gates,
             clifford_gates=self.clifford_gates,
             qpe_iterations=self.qpe_iterations,
+            target_precision=self.target_precision,
             logical_depth=self.logical_depth,
             runtime_seconds=cost_model.runtime_seconds_for(
                 self.logical_depth,
@@ -813,6 +819,7 @@ class FTQCResourceEstimate:
             t_gates=fn(self.t_gates),
             clifford_gates=fn(self.clifford_gates),
             qpe_iterations=fn(self.qpe_iterations),
+            target_precision=fn(self.target_precision),
             logical_depth=fn(self.logical_depth),
             runtime_seconds=fn(self.runtime_seconds),
             parameters=self.parameters,
@@ -1106,6 +1113,10 @@ class ChemistryQPEModel:
             self.walk_cost_toffoli,
             "walk_cost_toffoli",
         )
+        values[FTQCResourceQuantity.TRUNCATION_ERROR] = _as_expr(
+            self.truncation_error,
+            "truncation_error",
+        )
         return values
 
 
@@ -1366,6 +1377,7 @@ def estimate_qubitized_chemistry_qpe(
         t_gates=sp.Integer(0),
         clifford_gates=sp.Integer(0),
         qpe_iterations=qpe_iterations,
+        target_precision=precision_expr,
         logical_depth=logical_depth,
         runtime_seconds=runtime_seconds,
         assumptions=assumptions,
@@ -1437,6 +1449,7 @@ def estimate_qubitized_chemistry_qpe_from_model(
         t_gates=estimate.t_gates,
         clifford_gates=estimate.clifford_gates,
         qpe_iterations=estimate.qpe_iterations,
+        target_precision=estimate.target_precision,
         logical_depth=estimate.logical_depth,
         runtime_seconds=estimate.runtime_seconds,
         assumptions=assumptions,
@@ -1555,6 +1568,7 @@ def estimate_single_ancilla_trotter_qpe(
         t_gates=t_gates,
         clifford_gates=sp.Integer(0),
         qpe_iterations=qpe_iterations,
+        target_precision=precision_expr,
         logical_depth=logical_depth,
         runtime_seconds=runtime_seconds,
         assumptions=assumptions,
@@ -1675,6 +1689,7 @@ def _build_estimate(
     t_gates: sp.Expr,
     clifford_gates: sp.Expr,
     qpe_iterations: sp.Expr,
+    target_precision: sp.Expr,
     logical_depth: sp.Expr,
     runtime_seconds: sp.Expr,
     assumptions: dict[str, str],
@@ -1690,6 +1705,7 @@ def _build_estimate(
         t_gates (sp.Expr): T count.
         clifford_gates (sp.Expr): Clifford count.
         qpe_iterations (sp.Expr): QPE iteration count.
+        target_precision (sp.Expr): Requested energy or phase precision.
         logical_depth (sp.Expr): Logical depth proxy.
         runtime_seconds (sp.Expr): Runtime estimate in seconds.
         assumptions (dict[str, str]): Notes about model assumptions.
@@ -1706,6 +1722,7 @@ def _build_estimate(
         t_gates,
         clifford_gates,
         qpe_iterations,
+        target_precision,
         logical_depth,
         runtime_seconds,
     ]
@@ -1722,6 +1739,7 @@ def _build_estimate(
         t_gates=sp.simplify(t_gates),
         clifford_gates=sp.simplify(clifford_gates),
         qpe_iterations=sp.simplify(qpe_iterations),
+        target_precision=sp.simplify(target_precision),
         logical_depth=sp.simplify(logical_depth),
         runtime_seconds=sp.simplify(runtime_seconds),
         parameters={str(symbol): symbol for symbol in sorted(symbols, key=str)},

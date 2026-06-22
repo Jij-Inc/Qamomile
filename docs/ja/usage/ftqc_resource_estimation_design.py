@@ -49,6 +49,7 @@ from qamomile.circuit.estimator.algorithmic import (
 # FTQC化学計算の論文では、compiler IRを変えるのではなく、Hamiltonian表現を変えることでcostを下げることがよくあります。そのためQamomileでは、この層をアルゴリズム上のメタデータとして扱います。
 #
 # - Hamiltonian summaryは`lambda_norm`やPauli項数など、表現レベルの量を保持します。
+# - target precisionやtruncation errorのようなaccuracy budgetもfirst-classなquantityとして追跡します。これにより、2つのcost estimateを比較してよい前提が見えます。
 # - アルゴリズム推定器はそれらの量をQPE反復回数、ToffoliまたはT count、logical量子ビット、logical depth、physical量子ビット、runtime proxyへ変換します。
 # - 具体的な回路loweringはbackend emitterが担当します。
 #
@@ -90,6 +91,12 @@ for row in catalog:
     print(row["quantity"], row["unit"], row["category"])
 
 assert FTQCResourceQuantity.LAMBDA_NORM.value in {row["quantity"] for row in catalog}
+assert FTQCResourceQuantity.TARGET_PRECISION.value in {
+    row["quantity"] for row in catalog
+}
+assert FTQCResourceQuantity.TRUNCATION_ERROR.value in {
+    row["quantity"] for row in catalog
+}
 assert FTQCResourceQuantity.TOFFOLI_GATES.value in {row["quantity"] for row in catalog}
 assert FTQCResourceQuantity.RUNTIME_SECONDS.value in {
     row["quantity"] for row in catalog
@@ -288,7 +295,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #
 # このnotebookでは、次のことを学びました。
 #
-# - 近年のFTQC化学計算研究から、Hamiltonian normalization、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
+# - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
 # - estimateに研究referenceを保持し、どの論文がsymbolic modelの根拠になったかをreportでauditできるようにします。

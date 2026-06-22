@@ -74,6 +74,8 @@ def test_qubitized_qpe_from_block_encoding_tracks_walk_calls_and_costs():
     assert block.walk_cost_toffoli == 95
     assert estimate.logical_qubits == 13
     assert estimate.qpe_iterations == 50
+    assert estimate.target_precision == 2
+    assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == 2
     assert estimate.toffoli_gates == 4750
     assert estimate.physical_qubits == 1310
     assert sp.Abs(estimate.runtime_seconds - sp.Float("0.00475")) < sp.Float("1e-12")
