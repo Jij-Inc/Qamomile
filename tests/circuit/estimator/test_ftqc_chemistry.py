@@ -10,6 +10,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCCostModel,
+    SurfaceCodeCostModel,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe,
@@ -95,6 +96,40 @@ def test_cost_model_lifts_logical_estimates_to_physical_runtime():
     assert estimate.runtime_seconds == sp.Rational(4, 5)
 
 
+def test_surface_code_cost_model_derives_architecture_knobs():
+    """Surface-code knobs derive the cost model used by FTQC estimators."""
+    architecture = SurfaceCodeCostModel(
+        code_distance=5,
+        physical_cycle_time_seconds=sp.Float("1e-6"),
+        physical_qubits_per_logical_factor=2,
+        logical_cycle_factor=1,
+        factory_count=4,
+        physical_qubits_per_factory=1000,
+        factory_cycles_per_toffoli=10,
+    )
+
+    cost_model = architecture.to_cost_model()
+    estimate = estimate_qubitized_chemistry_qpe(
+        n_spin_orbitals=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        logical_qubits=7,
+        cost_model=cost_model,
+    )
+
+    assert architecture.physical_qubits_per_logical == 50
+    assert sp.Abs(
+        architecture.logical_cycle_time_seconds - sp.Float("5e-6")
+    ) < sp.Float("1e-12")
+    assert architecture.factory_qubits == 4000
+    assert sp.Abs(
+        architecture.toffoli_throughput_per_second - sp.Float("8e5") / 10
+    ) < sp.Float("1e-12")
+    assert estimate.physical_qubits == 4350
+    assert sp.Abs(estimate.runtime_seconds - sp.Float("5e-4")) < sp.Float("1e-12")
+
+
 def test_single_ancilla_trotter_qpe_models_unitary_weight_reduction():
     """Unitary-weight concentration reduces the lambda-driven QPE iterations."""
     baseline = estimate_single_ancilla_trotter_qpe(
@@ -133,6 +168,30 @@ def test_cost_model_rejects_zero_non_clifford_throughput():
             factory_qubits=0,
             toffoli_throughput_per_second=0,
         )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"code_distance": 0}, "code_distance"),
+        ({"physical_cycle_time_seconds": 0}, "physical_cycle_time_seconds"),
+        (
+            {"physical_qubits_per_logical_factor": 0},
+            "physical_qubits_per_logical_factor",
+        ),
+        ({"logical_cycle_factor": 0}, "logical_cycle_factor"),
+        ({"factory_count": 0}, "factory_count"),
+        ({"physical_qubits_per_factory": -1}, "physical_qubits_per_factory"),
+        ({"factory_cycles_per_toffoli": 0}, "factory_cycles_per_toffoli"),
+    ],
+)
+def test_surface_code_cost_model_rejects_invalid_architecture_knobs(
+    kwargs: dict[str, object],
+    match: str,
+):
+    """Invalid surface-code architecture knobs fail before estimator use."""
+    with pytest.raises(ValueError, match=match):
+        SurfaceCodeCostModel(**kwargs)
 
 
 @pytest.mark.parametrize(

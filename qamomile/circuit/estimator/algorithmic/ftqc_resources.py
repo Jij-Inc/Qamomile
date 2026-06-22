@@ -54,6 +54,15 @@ class FTQCResourceQuantity(enum.StrEnum):
         LOGICAL_CYCLE_TIME_SECONDS: Logical layer or cycle time.
         FACTORY_QUBITS: Physical qubits reserved for factories.
         TOFFOLI_THROUGHPUT_PER_SECOND: Sustainable non-Clifford throughput.
+        CODE_DISTANCE: Surface-code distance.
+        PHYSICAL_CYCLE_TIME_SECONDS: Physical error-correction cycle time.
+        PHYSICAL_QUBITS_PER_LOGICAL_FACTOR: Constant factor multiplying
+            distance squared for one logical patch.
+        LOGICAL_CYCLE_FACTOR: Constant factor multiplying code distance for
+            one logical cycle.
+        FACTORY_COUNT: Number of non-Clifford factories.
+        PHYSICAL_QUBITS_PER_FACTORY: Physical qubits used by one factory.
+        FACTORY_CYCLES_PER_TOFFOLI: Logical cycles needed per factory output.
 
     Example:
         >>> FTQCResourceQuantity("lambda_norm")
@@ -77,6 +86,13 @@ class FTQCResourceQuantity(enum.StrEnum):
     LOGICAL_CYCLE_TIME_SECONDS = "logical_cycle_time_seconds"
     FACTORY_QUBITS = "factory_qubits"
     TOFFOLI_THROUGHPUT_PER_SECOND = "toffoli_throughput_per_second"
+    CODE_DISTANCE = "code_distance"
+    PHYSICAL_CYCLE_TIME_SECONDS = "physical_cycle_time_seconds"
+    PHYSICAL_QUBITS_PER_LOGICAL_FACTOR = "physical_qubits_per_logical_factor"
+    LOGICAL_CYCLE_FACTOR = "logical_cycle_factor"
+    FACTORY_COUNT = "factory_count"
+    PHYSICAL_QUBITS_PER_FACTORY = "physical_qubits_per_factory"
+    FACTORY_CYCLES_PER_TOFFOLI = "factory_cycles_per_toffoli"
 
 
 class SupportsFTQCResourceValues(Protocol):
@@ -311,6 +327,55 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "Toffoli gates / second",
         FTQCResourceCategory.ARCHITECTURE,
         "Sustainable non-Clifford throughput from factories or hardware.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.CODE_DISTANCE,
+        "Code distance",
+        "distance",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Surface-code distance used to lift logical resources to hardware.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.PHYSICAL_CYCLE_TIME_SECONDS,
+        "Physical cycle time",
+        "seconds",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Duration of one physical error-correction cycle.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL_FACTOR,
+        "Patch qubit factor",
+        "physical qubits / distance^2",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Constant multiplying code_distance^2 for one logical qubit patch.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.LOGICAL_CYCLE_FACTOR,
+        "Logical cycle factor",
+        "physical cycles / distance",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Constant multiplying code distance to model one logical cycle.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.FACTORY_COUNT,
+        "Factory count",
+        "factories",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Number of parallel non-Clifford factories.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.PHYSICAL_QUBITS_PER_FACTORY,
+        "Factory size",
+        "physical qubits / factory",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Physical qubits reserved for one non-Clifford factory.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.FACTORY_CYCLES_PER_TOFFOLI,
+        "Factory cycles per Toffoli",
+        "logical cycles / Toffoli",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Logical cycles required by one factory to produce a Toffoli resource.",
     ),
 )
 

@@ -12,6 +12,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     FTQCResourceCategory,
     FTQCResourceQuantity,
+    SurfaceCodeCostModel,
     compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe_from_model,
@@ -29,6 +30,8 @@ def test_ftqc_quantity_specs_cover_core_resource_layers():
     assert FTQCResourceQuantity.LAMBDA_NORM in quantities
     assert FTQCResourceQuantity.TOFFOLI_GATES in quantities
     assert FTQCResourceQuantity.PHYSICAL_QUBITS in quantities
+    assert FTQCResourceQuantity.CODE_DISTANCE in quantities
+    assert FTQCResourceQuantity.FACTORY_COUNT in quantities
     assert {
         FTQCResourceCategory.PROBLEM,
         FTQCResourceCategory.ALGORITHM,
@@ -88,6 +91,29 @@ def test_ftqc_models_expose_canonical_resource_values():
         == 0
     )
     assert estimate.to_quantity_table()[0]["quantity"] == "logical_qubits"
+
+
+def test_surface_code_model_exposes_raw_and_derived_resource_values():
+    """Surface-code models expose raw knobs and derived architecture values."""
+    architecture = SurfaceCodeCostModel(
+        code_distance=7,
+        physical_cycle_time_seconds=sp.Float("2e-6"),
+        physical_qubits_per_logical_factor=2,
+        logical_cycle_factor=3,
+        factory_count=5,
+        physical_qubits_per_factory=1000,
+        factory_cycles_per_toffoli=4,
+    )
+    values = architecture.resource_values()
+
+    assert values[FTQCResourceQuantity.CODE_DISTANCE] == 7
+    assert values[FTQCResourceQuantity.FACTORY_COUNT] == 5
+    assert values[FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL] == 98
+    assert values[FTQCResourceQuantity.FACTORY_QUBITS] == 5000
+    expected_throughput = sp.Float("5e6") / 168
+    assert sp.Abs(
+        values[FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND] - expected_throughput
+    ) < sp.Float("1e-12")
 
 
 def test_compare_ftqc_resource_estimates_reports_ratios_and_reductions():

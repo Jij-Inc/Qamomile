@@ -152,6 +152,280 @@ class FTQCCostModel:
 
 
 @dataclass(frozen=True)
+class SurfaceCodeCostModel:
+    """Lift surface-code architecture knobs into an FTQC cost model.
+
+    This model keeps surface-code assumptions explicit while still producing
+    the lower-level ``FTQCCostModel`` consumed by chemistry estimators.
+
+    Attributes:
+        code_distance (sp.Expr | int | float): Surface-code distance.
+        physical_cycle_time_seconds (sp.Expr | int | float): Duration of one
+            physical error-correction cycle, in seconds.
+        physical_qubits_per_logical_factor (sp.Expr | int | float): Constant
+            multiplying ``code_distance**2`` for one logical patch.
+        logical_cycle_factor (sp.Expr | int | float): Constant multiplying
+            code distance and physical cycle time for one logical cycle.
+        factory_count (sp.Expr | int | float): Number of parallel
+            non-Clifford factories.
+        physical_qubits_per_factory (sp.Expr | int | float): Physical qubits
+            reserved for one factory.
+        factory_cycles_per_toffoli (sp.Expr | int | float): Logical cycles
+            required for one factory to produce a Toffoli resource.
+
+    Raises:
+        ValueError: If any positive-valued field is non-positive or if
+            ``physical_qubits_per_factory`` is negative.
+
+    Example:
+        >>> model = SurfaceCodeCostModel(
+        ...     code_distance=15,
+        ...     physical_cycle_time_seconds=1e-6,
+        ...     factory_count=4,
+        ...     physical_qubits_per_factory=10000,
+        ...     factory_cycles_per_toffoli=5,
+        ... )
+        >>> model.to_cost_model().physical_qubits_per_logical
+        450
+    """
+
+    code_distance: _SympyLike = field(
+        default_factory=lambda: sp.Symbol("code_distance", positive=True)
+    )
+    physical_cycle_time_seconds: _SympyLike = field(
+        default_factory=lambda: sp.Symbol(
+            "physical_cycle_time_seconds",
+            positive=True,
+        )
+    )
+    physical_qubits_per_logical_factor: _SympyLike = 2
+    logical_cycle_factor: _SympyLike = 1
+    factory_count: _SympyLike = field(
+        default_factory=lambda: sp.Symbol("factory_count", positive=True)
+    )
+    physical_qubits_per_factory: _SympyLike = field(
+        default_factory=lambda: sp.Symbol(
+            "physical_qubits_per_factory",
+            nonnegative=True,
+        )
+    )
+    factory_cycles_per_toffoli: _SympyLike = field(
+        default_factory=lambda: sp.Symbol(
+            "factory_cycles_per_toffoli",
+            positive=True,
+        )
+    )
+
+    def __post_init__(self) -> None:
+        """Validate surface-code fields after dataclass construction.
+
+        Raises:
+            ValueError: If any positive-valued field is non-positive or if
+                ``physical_qubits_per_factory`` is negative.
+        """
+        for name, expr in [
+            ("code_distance", self._code_distance),
+            ("physical_cycle_time_seconds", self._physical_cycle_time_seconds),
+            (
+                "physical_qubits_per_logical_factor",
+                self._physical_qubits_per_logical_factor,
+            ),
+            ("logical_cycle_factor", self._logical_cycle_factor),
+            ("factory_count", self._factory_count),
+            ("factory_cycles_per_toffoli", self._factory_cycles_per_toffoli),
+        ]:
+            _validate_positive(expr, name)
+        _validate_nonnegative(
+            self._physical_qubits_per_factory,
+            "physical_qubits_per_factory",
+        )
+
+    @property
+    def physical_qubits_per_logical(self) -> sp.Expr:
+        """Return physical-qubit overhead for one logical patch.
+
+        Returns:
+            sp.Expr: ``physical_qubits_per_logical_factor * code_distance**2``.
+        """
+        return sp.simplify(
+            self._physical_qubits_per_logical_factor * self._code_distance**2
+        )
+
+    @property
+    def logical_cycle_time_seconds(self) -> sp.Expr:
+        """Return logical-cycle time implied by the surface-code model.
+
+        Returns:
+            sp.Expr: ``logical_cycle_factor * code_distance *
+                physical_cycle_time_seconds``.
+        """
+        return sp.simplify(
+            self._logical_cycle_factor
+            * self._code_distance
+            * self._physical_cycle_time_seconds
+        )
+
+    @property
+    def factory_qubits(self) -> sp.Expr:
+        """Return total physical qubits reserved for factories.
+
+        Returns:
+            sp.Expr: ``factory_count * physical_qubits_per_factory``.
+        """
+        return sp.simplify(self._factory_count * self._physical_qubits_per_factory)
+
+    @property
+    def toffoli_throughput_per_second(self) -> sp.Expr:
+        """Return sustained Toffoli-resource throughput.
+
+        Returns:
+            sp.Expr: Factory throughput in Toffoli resources per second.
+        """
+        return sp.simplify(
+            self._factory_count
+            / (self._factory_cycles_per_toffoli * self.logical_cycle_time_seconds)
+        )
+
+    def to_cost_model(self) -> FTQCCostModel:
+        """Convert surface-code knobs into the estimator cost model.
+
+        Returns:
+            FTQCCostModel: Derived model accepted by FTQC chemistry
+                estimators.
+        """
+        return FTQCCostModel(
+            physical_qubits_per_logical=self.physical_qubits_per_logical,
+            logical_cycle_time_seconds=self.logical_cycle_time_seconds,
+            factory_qubits=self.factory_qubits,
+            toffoli_throughput_per_second=self.toffoli_throughput_per_second,
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize raw and derived architecture quantities.
+
+        Returns:
+            dict[str, str]: JSON-friendly surface-code architecture model.
+        """
+        return {
+            "code_distance": str(self._code_distance),
+            "physical_cycle_time_seconds": str(self._physical_cycle_time_seconds),
+            "physical_qubits_per_logical_factor": str(
+                self._physical_qubits_per_logical_factor
+            ),
+            "logical_cycle_factor": str(self._logical_cycle_factor),
+            "factory_count": str(self._factory_count),
+            "physical_qubits_per_factory": str(self._physical_qubits_per_factory),
+            "factory_cycles_per_toffoli": str(self._factory_cycles_per_toffoli),
+            "physical_qubits_per_logical": str(self.physical_qubits_per_logical),
+            "logical_cycle_time_seconds": str(self.logical_cycle_time_seconds),
+            "factory_qubits": str(self.factory_qubits),
+            "toffoli_throughput_per_second": str(self.toffoli_throughput_per_second),
+        }
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return raw and derived architecture quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Surface-code inputs and
+                derived cost-model quantities keyed by the canonical catalog.
+        """
+        values = {
+            FTQCResourceQuantity.CODE_DISTANCE: self._code_distance,
+            FTQCResourceQuantity.PHYSICAL_CYCLE_TIME_SECONDS: (
+                self._physical_cycle_time_seconds
+            ),
+            FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL_FACTOR: (
+                self._physical_qubits_per_logical_factor
+            ),
+            FTQCResourceQuantity.LOGICAL_CYCLE_FACTOR: self._logical_cycle_factor,
+            FTQCResourceQuantity.FACTORY_COUNT: self._factory_count,
+            FTQCResourceQuantity.PHYSICAL_QUBITS_PER_FACTORY: (
+                self._physical_qubits_per_factory
+            ),
+            FTQCResourceQuantity.FACTORY_CYCLES_PER_TOFFOLI: (
+                self._factory_cycles_per_toffoli
+            ),
+        }
+        values.update(self.to_cost_model().resource_values())
+        return values
+
+    @property
+    def _code_distance(self) -> sp.Expr:
+        """Return ``code_distance`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted code distance.
+        """
+        return _as_expr(self.code_distance, "code_distance")
+
+    @property
+    def _physical_cycle_time_seconds(self) -> sp.Expr:
+        """Return ``physical_cycle_time_seconds`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted physical cycle time.
+        """
+        return _as_expr(
+            self.physical_cycle_time_seconds,
+            "physical_cycle_time_seconds",
+        )
+
+    @property
+    def _physical_qubits_per_logical_factor(self) -> sp.Expr:
+        """Return logical-patch factor as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted physical-qubit factor.
+        """
+        return _as_expr(
+            self.physical_qubits_per_logical_factor,
+            "physical_qubits_per_logical_factor",
+        )
+
+    @property
+    def _logical_cycle_factor(self) -> sp.Expr:
+        """Return logical-cycle factor as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted logical-cycle factor.
+        """
+        return _as_expr(self.logical_cycle_factor, "logical_cycle_factor")
+
+    @property
+    def _factory_count(self) -> sp.Expr:
+        """Return ``factory_count`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted factory count.
+        """
+        return _as_expr(self.factory_count, "factory_count")
+
+    @property
+    def _physical_qubits_per_factory(self) -> sp.Expr:
+        """Return ``physical_qubits_per_factory`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted factory size.
+        """
+        return _as_expr(
+            self.physical_qubits_per_factory,
+            "physical_qubits_per_factory",
+        )
+
+    @property
+    def _factory_cycles_per_toffoli(self) -> sp.Expr:
+        """Return ``factory_cycles_per_toffoli`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted factory cycle count.
+        """
+        return _as_expr(
+            self.factory_cycles_per_toffoli,
+            "factory_cycles_per_toffoli",
+        )
+
+
+@dataclass(frozen=True)
 class FTQCResourceEstimate:
     """Represent algorithm-level FTQC resource estimates.
 

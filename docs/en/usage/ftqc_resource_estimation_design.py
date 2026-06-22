@@ -35,9 +35,9 @@ import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
-    FTQCCostModel,
     FTQCResourceCategory,
     FTQCResourceQuantity,
+    SurfaceCodeCostModel,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
@@ -93,6 +93,7 @@ catalog = [
         FTQCResourceCategory.ALGORITHM,
         FTQCResourceCategory.LOGICAL,
         FTQCResourceCategory.PHYSICAL,
+        FTQCResourceCategory.ARCHITECTURE,
     }
 ]
 
@@ -106,6 +107,9 @@ assert FTQCResourceQuantity.TOFFOLI_GATES.value in {
     row["quantity"] for row in catalog
 }
 assert FTQCResourceQuantity.RUNTIME_SECONDS.value in {
+    row["quantity"] for row in catalog
+}
+assert FTQCResourceQuantity.CODE_DISTANCE.value in {
     row["quantity"] for row in catalog
 }
 
@@ -128,11 +132,22 @@ scaled_summary = summary.with_lambda_scale(
     source="scaled_toy_pauli_lcu",
 )
 
-cost_model = FTQCCostModel(
-    physical_qubits_per_logical=800,
-    logical_cycle_time_seconds=sp.Float("1e-6"),
-    factory_qubits=20000,
-    toffoli_throughput_per_second=sp.Float("2e6"),
+architecture = SurfaceCodeCostModel(
+    code_distance=20,
+    physical_cycle_time_seconds=sp.Float("5e-8"),
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=1,
+    factory_count=4,
+    physical_qubits_per_factory=5000,
+    factory_cycles_per_toffoli=2,
+)
+cost_model = architecture.to_cost_model()
+
+assert architecture.physical_qubits_per_logical == 800
+assert architecture.factory_qubits == 20000
+assert (
+    sp.Abs(architecture.toffoli_throughput_per_second - sp.Float("2e6"))
+    < sp.Float("1e-9")
 )
 
 baseline_model = ChemistryQPEModel(
@@ -226,6 +241,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - Add new problem metadata as structured summaries, not as IR operations.
 # - Add new measured quantities to the canonical catalog before exposing new
 #   report columns.
+# - Use structured architecture models such as `SurfaceCodeCostModel` before
+#   falling back to hand-written physical-resource knobs.
 # - Keep architecture assumptions explicit so physical-qubit and runtime
 #   estimates can be swapped without changing algorithm metadata.
 
@@ -239,5 +256,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   runtime separately.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
+# - Surface-code assumptions can be modeled separately and converted into the
+#   cost model consumed by chemistry estimators.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable
 #   savings tables without hard-coding a particular chemistry factorization.
