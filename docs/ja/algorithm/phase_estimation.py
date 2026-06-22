@@ -47,10 +47,10 @@ from qamomile.qiskit import QiskitTranspiler
 
 # %%
 theta = math.pi / 2
-expected_phase = theta / (2 * math.pi)
+expected_phase = sp.Rational(1, 4)
 counting_qubits = 3
 
-assert expected_phase == 0.25
+assert expected_phase == sp.Rational(1, 4)
 
 # %% [markdown]
 # ## 実装
