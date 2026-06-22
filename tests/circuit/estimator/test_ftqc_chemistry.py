@@ -9,6 +9,7 @@ import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
+    FTQCAccuracyBudget,
     FTQCCostModel,
     FTQCReference,
     FTQCResourceQuantity,
@@ -165,6 +166,50 @@ def test_model_references_are_preserved_and_deduplicated():
     assert reference_keys[-1] == "internal:toy-model"
     assert relifted.references == estimate.references
     assert relifted.target_precision == estimate.target_precision
+
+
+def test_accuracy_budget_allocates_precision_to_qpe_and_truncation():
+    """Accuracy budgets align total target precision with model truncation."""
+    summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    model = ChemistryQPEModel(
+        hamiltonian=summary,
+        method=ChemistryQPEMethod.SPARSE,
+        walk_cost_toffoli=11,
+    )
+    budget = FTQCAccuracyBudget(
+        target_precision=sp.Float("1.6e-3"),
+        truncation_error=sp.Float("1e-4"),
+        safety_margin=sp.Float("5e-5"),
+    )
+
+    budgeted_model = budget.with_model(model)
+    estimate = estimate_qubitized_chemistry_qpe_from_model(
+        budgeted_model,
+        precision=budget.qpe_precision,
+    )
+
+    assert sp.Abs(budget.qpe_precision - sp.Float("0.00145")) < sp.Float("1e-12")
+    assert budgeted_model.truncation_error == sp.Float("1e-4")
+    assert model.truncation_error == 0
+    assert estimate.target_precision == budget.qpe_precision
+    assert sp.sympify(estimate.assumptions["truncation_error"]) == sp.Float("1e-4")
+    assert budget.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == sp.Float(
+        "1.6e-3"
+    )
+    assert budget.to_dict()["qpe_precision"] == "0.00145000000000000"
+
+
+def test_accuracy_budget_rejects_overallocated_error_budget():
+    """Accuracy budgets reject non-positive precision left for QPE."""
+    with pytest.raises(ValueError, match="qpe_precision"):
+        FTQCAccuracyBudget(
+            target_precision=sp.Float("1e-3"),
+            truncation_error=sp.Float("8e-4"),
+            safety_margin=sp.Float("2e-4"),
+        )
+
+    with pytest.raises(TypeError, match="ChemistryQPEModel"):
+        FTQCAccuracyBudget(target_precision=1).with_model(object())
 
 
 def test_cost_model_lifts_logical_estimates_to_physical_runtime():

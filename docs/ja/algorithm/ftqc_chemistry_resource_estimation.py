@@ -33,6 +33,7 @@ import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
+    FTQCAccuracyBudget,
     FTQCResourceQuantity,
     SurfaceCodeDistanceBudget,
     block_encoding_from_chemistry_model,
@@ -66,7 +67,12 @@ from qamomile.circuit.estimator.algorithmic import (
 
 # %%
 n_spin_orbitals = 40
-precision = sp.Float("0.0016")  # Hartree単位のおおよそのchemical accuracy
+target_precision = sp.Float("0.0016")  # Hartree単位のおおよそのchemical accuracy
+accuracy_budget = FTQCAccuracyBudget(
+    target_precision=target_precision,
+    truncation_error=sp.Float("1e-4"),
+)
+qpe_precision = accuracy_budget.qpe_precision
 
 distance_budget = SurfaceCodeDistanceBudget(
     physical_error_rate=sp.Float("1e-3"),
@@ -87,6 +93,7 @@ cost_model = architecture
 assert distance_budget.code_distance == 21
 assert architecture.physical_qubits_per_logical == 882
 assert architecture.factory_qubits == 20000
+assert sp.Abs(qpe_precision - sp.Float("0.0015")) < sp.Float("1e-12")
 
 # %% [markdown]
 # ## Resource Quantities
@@ -178,38 +185,42 @@ assert openfermion_summary.constant == toy_summary.constant
 # Qamomileはchemistry factorization costをIRの外側に保ちます。model-driven Estimatorは、Hamiltonian summaryとrepresentation-dependentなone-walk Toffoli costを入力として受け取ります。
 #
 # ```text
-# qpe_iterations = lambda_norm / precision
+# qpe_iterations = lambda_norm / qpe_precision
 # toffoli_gates = qpe_iterations * walk_cost_toffoli
 # ```
 #
 # これによりモデルを明確に保てます。Hamiltonian normalizationを変えること、walk circuitを変えること、physical architectureを変えることは、それぞれ別の設計選択です。
 
 # %%
-thc_model = ChemistryQPEModel(
-    hamiltonian=scaled_summary,
-    method=ChemistryQPEMethod.TENSOR_HYPERCONTRACTION,
-    walk_cost_toffoli=sp.Integer(4_000),
-    description="THC-style scaled toy model",
+thc_model = accuracy_budget.with_model(
+    ChemistryQPEModel(
+        hamiltonian=scaled_summary,
+        method=ChemistryQPEMethod.TENSOR_HYPERCONTRACTION,
+        walk_cost_toffoli=sp.Integer(4_000),
+        description="THC-style scaled toy model",
+    )
 )
-scdf_model = ChemistryQPEModel(
-    hamiltonian=scaled_summary.with_lambda_scale(
-        sp.Float("0.5"),
-        source="SCDF-style scaled toy model",
-    ),
-    method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
-    walk_cost_toffoli=sp.Integer(4_400),
-    second_factor_rank=9,
-    description="SCDF-style scaled toy model",
+scdf_model = accuracy_budget.with_model(
+    ChemistryQPEModel(
+        hamiltonian=scaled_summary.with_lambda_scale(
+            sp.Float("0.5"),
+            source="SCDF-style scaled toy model",
+        ),
+        method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+        walk_cost_toffoli=sp.Integer(4_400),
+        second_factor_rank=9,
+        description="SCDF-style scaled toy model",
+    )
 )
 
 thc = estimate_qubitized_chemistry_qpe_from_model(
     thc_model,
-    precision=precision,
+    precision=qpe_precision,
     cost_model=cost_model,
 )
 scdf = estimate_qubitized_chemistry_qpe_from_model(
     scdf_model,
-    precision=precision,
+    precision=qpe_precision,
     cost_model=cost_model,
 )
 
@@ -243,7 +254,7 @@ for row in qubitized_savings:
 
 assert qubitized_savings[0].quantity.value == "qpe_iterations"
 assert qubitized_savings[0].ratio == sp.Float("0.5")
-assert qubitized_savings[1].ratio == sp.Float("0.55")
+assert sp.Abs(qubitized_savings[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
 
 qubitized_summary = summarize_ftqc_resource_comparison(
     thc,
@@ -266,14 +277,14 @@ scdf_block = block_encoding_from_chemistry_model(
 )
 scdf_block_estimate = estimate_qubitized_qpe_from_block_encoding(
     scdf_block,
-    precision=precision,
+    precision=qpe_precision,
     qpe_register_qubits=12,
     cost_model=cost_model,
 )
 
 print(scdf_block.to_dict())
 assert scdf_block.walk_cost_toffoli == scdf_model.walk_cost_toffoli + 450
-assert scdf_block_estimate.target_precision == precision
+assert scdf_block_estimate.target_precision == qpe_precision
 assert scdf_block_estimate.logical_qubits == scdf_block.logical_qubits + 12
 
 # %% [markdown]
@@ -284,7 +295,7 @@ assert scdf_block_estimate.logical_qubits == scdf_block.logical_qubits + 12
 # %%
 plain_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     scaled_summary,
-    precision=precision,
+    precision=qpe_precision,
     trotter_steps_per_sample=8,
     samples=128,
     cost_model=cost_model,
@@ -292,7 +303,7 @@ plain_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
 
 uwc_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     scaled_summary,
-    precision=precision,
+    precision=qpe_precision,
     trotter_steps_per_sample=8,
     samples=128,
     unitary_weight_factor=sp.Float("0.1"),
@@ -360,6 +371,7 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 # このノートブックでは、次のことを確認しました。
 #
 # - FTQC化学計算のリソース量を、Hamiltonian normalization、QPE iterations、non-Clifford counts、論理量子ビット、物理量子ビット、runtime proxiesに分けて扱いました。
+# - comparableなestimateを作る前に、total target precisionをtruncation errorとQPE precisionへ割り当てました。
 # - Qamomile IRをbackend-specificなchemistry loading circuitsへloweringせずに、qubitized QPE representationsを比較しました。
 # - logical failure budgetからsurface-code distanceを選び、logical resourceをphysical resourceへliftしました。
 # - code distanceなどのarchitecture quantityを各resource estimateに残し、後続のreportでauditできるようにしました。

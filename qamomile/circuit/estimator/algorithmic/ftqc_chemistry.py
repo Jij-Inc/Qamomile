@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import sympy as sp
@@ -1288,6 +1288,135 @@ class PauliHamiltonianResource:
             FTQCResourceQuantity.LAMBDA_NORM: self.lambda_norm,
             FTQCResourceQuantity.MAX_LOCALITY: self.max_locality,
         }
+
+
+@dataclass(frozen=True)
+class FTQCAccuracyBudget:
+    """Allocate a total FTQC energy-error budget across model components.
+
+    The budget separates representation error, such as tensor-factorization
+    truncation, from the precision left for phase estimation. This keeps
+    chemistry estimates comparable: two models can share the same total target
+    precision while spending different amounts on representation error.
+
+    Args:
+        target_precision (sp.Expr | int | float): Total energy-error budget.
+        truncation_error (sp.Expr | int | float): Error already spent by the
+            Hamiltonian representation before QPE. Defaults to zero.
+        safety_margin (sp.Expr | int | float): Optional unallocated margin
+            reserved for synthesis, fitting, or other modeled error sources.
+            Defaults to zero.
+
+    Raises:
+        ValueError: If the total target precision is non-positive, if either
+            non-QPE component is negative, or if the remaining QPE precision is
+            provably non-positive.
+
+    Example:
+        >>> budget = FTQCAccuracyBudget(
+        ...     target_precision=sp.Float("1.6e-3"),
+        ...     truncation_error=sp.Float("1e-4"),
+        ... )
+        >>> budget.qpe_precision
+        0.00150000000000000
+    """
+
+    target_precision: _SympyLike
+    truncation_error: _SympyLike = 0
+    safety_margin: _SympyLike = 0
+
+    def __post_init__(self) -> None:
+        """Validate the accuracy-budget fields after construction.
+
+        Raises:
+            ValueError: If any budget component violates the allocation
+                contract.
+        """
+        _validate_positive(self._target_precision, "target_precision")
+        _validate_nonnegative(self._truncation_error, "truncation_error")
+        _validate_nonnegative(self._safety_margin, "safety_margin")
+        _validate_positive(self.qpe_precision, "qpe_precision")
+
+    @property
+    def qpe_precision(self) -> sp.Expr:
+        """Return the precision remaining for QPE iterations.
+
+        Returns:
+            sp.Expr: ``target_precision - truncation_error - safety_margin``.
+        """
+        return sp.simplify(
+            self._target_precision - self._truncation_error - self._safety_margin
+        )
+
+    def with_model(self, model: ChemistryQPEModel) -> ChemistryQPEModel:
+        """Return a chemistry model carrying this budget's truncation error.
+
+        Args:
+            model (ChemistryQPEModel): Chemistry model whose representation
+                error should be aligned with this accuracy budget.
+
+        Returns:
+            ChemistryQPEModel: Copy of ``model`` with ``truncation_error`` set
+                to this budget's truncation error.
+
+        Raises:
+            TypeError: If ``model`` is not a ``ChemistryQPEModel``.
+        """
+        if not isinstance(model, ChemistryQPEModel):
+            raise TypeError("model must be a ChemistryQPEModel instance.")
+        return replace(model, truncation_error=self._truncation_error)
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the accuracy budget.
+
+        Returns:
+            dict[str, str]: JSON-friendly accuracy-budget values.
+        """
+        return {
+            "target_precision": str(self._target_precision),
+            "truncation_error": str(self._truncation_error),
+            "safety_margin": str(self._safety_margin),
+            "qpe_precision": str(self.qpe_precision),
+        }
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return accuracy-budget values keyed by canonical quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Target precision and
+                truncation-error quantities.
+        """
+        return {
+            FTQCResourceQuantity.TARGET_PRECISION: self._target_precision,
+            FTQCResourceQuantity.TRUNCATION_ERROR: self._truncation_error,
+        }
+
+    @property
+    def _target_precision(self) -> sp.Expr:
+        """Return ``target_precision`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted total target precision.
+        """
+        return _as_expr(self.target_precision, "target_precision")
+
+    @property
+    def _truncation_error(self) -> sp.Expr:
+        """Return ``truncation_error`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted truncation error.
+        """
+        return _as_expr(self.truncation_error, "truncation_error")
+
+    @property
+    def _safety_margin(self) -> sp.Expr:
+        """Return ``safety_margin`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted safety margin.
+        """
+        return _as_expr(self.safety_margin, "safety_margin")
 
 
 @dataclass(frozen=True)

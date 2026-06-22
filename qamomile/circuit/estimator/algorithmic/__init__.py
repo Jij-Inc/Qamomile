@@ -19,6 +19,7 @@ from qamomile.circuit.estimator.algorithmic.ftqc_block_encoding import (
 from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
+    FTQCAccuracyBudget,
     FTQCCostModel,
     FTQCReference,
     FTQCResourceEstimate,
@@ -64,6 +65,7 @@ __all__ = [
     "FTQCResourceComparisonRow",
     "FTQCResourceComparisonSummary",
     "FTQCCostModel",
+    "FTQCAccuracyBudget",
     "FTQCReference",
     "FTQCResourceEstimate",
     "FTQCResourceQuantity",

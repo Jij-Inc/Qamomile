@@ -32,6 +32,7 @@ import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
+    FTQCAccuracyBudget,
     FTQCResourceCategory,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
@@ -157,34 +158,48 @@ assert sp.Abs(
     "1e-9",
 )
 
-baseline_model = ChemistryQPEModel(
-    hamiltonian=scaled_summary,
-    method=ChemistryQPEMethod.TENSOR_HYPERCONTRACTION,
-    walk_cost_toffoli=sp.Integer(4_000),
+accuracy_budget = FTQCAccuracyBudget(
+    target_precision=sp.Float("0.0016"),
+    truncation_error=sp.Float("1e-4"),
 )
-compressed_model = ChemistryQPEModel(
-    hamiltonian=scaled_summary.with_lambda_scale(
-        sp.Float("0.5"),
-        source="compressed_scaled_toy_pauli_lcu",
-    ),
-    method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
-    walk_cost_toffoli=sp.Integer(4_400),
-    second_factor_rank=9,
+print(accuracy_budget.to_dict())
+assert sp.Abs(accuracy_budget.qpe_precision - sp.Float("0.0015")) < sp.Float("1e-12")
+
+baseline_model = accuracy_budget.with_model(
+    ChemistryQPEModel(
+        hamiltonian=scaled_summary,
+        method=ChemistryQPEMethod.TENSOR_HYPERCONTRACTION,
+        walk_cost_toffoli=sp.Integer(4_000),
+    )
+)
+compressed_model = accuracy_budget.with_model(
+    ChemistryQPEModel(
+        hamiltonian=scaled_summary.with_lambda_scale(
+            sp.Float("0.5"),
+            source="compressed_scaled_toy_pauli_lcu",
+        ),
+        method=ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF,
+        walk_cost_toffoli=sp.Integer(4_400),
+        second_factor_rank=9,
+    )
 )
 
 baseline = estimate_qubitized_chemistry_qpe_from_model(
     baseline_model,
-    precision=sp.Float("0.0016"),
+    precision=accuracy_budget.qpe_precision,
     cost_model=cost_model,
 )
 compressed = estimate_qubitized_chemistry_qpe_from_model(
     compressed_model,
-    precision=sp.Float("0.0016"),
+    precision=accuracy_budget.qpe_precision,
     cost_model=cost_model,
 )
 
 assert compressed.resource_values()[FTQCResourceQuantity.CODE_DISTANCE] == 21
 assert compressed.to_dict()["architecture_values"]["code_distance"] == "21"
+assert compressed_model.resource_values()[FTQCResourceQuantity.TRUNCATION_ERROR] == (
+    sp.Float("1e-4")
+)
 
 comparison = compare_ftqc_resource_estimates(
     baseline,
@@ -197,7 +212,7 @@ for row in comparison:
 
 assert comparison[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
 assert comparison[0].ratio == sp.Float("0.5")
-assert comparison[1].ratio == sp.Float("0.55")
+assert sp.Abs(comparison[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
 
 # %% [markdown]
 # 設計レビューでは、summary helperを使うと、同じ行をcandidateが小さい、大きい、変わらない、または現在の仮定ではsymbolicなまま、というグループに分けて読めます。`smaller`の先頭には、数値化できる範囲で削減率が大きい行が来ます。
@@ -276,8 +291,12 @@ for row in architecture_comparison:
 assert relifted_baseline.logical_qubits == baseline.logical_qubits
 assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
 assert relifted_baseline.resource_values()[FTQCResourceQuantity.CODE_DISTANCE] == 10
-assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(350, 691)) == 0
-assert sp.simplify(architecture_comparison[1].ratio - sp.Rational(10, 21)) == 0
+assert sp.Abs(architecture_comparison[0].ratio - sp.Rational(350, 691)) < sp.Float(
+    "1e-12"
+)
+assert sp.Abs(architecture_comparison[1].ratio - sp.Rational(10, 21)) < sp.Float(
+    "1e-12"
+)
 
 # %% [markdown]
 # ## Early-FTQCのパターン
@@ -336,6 +355,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
+# - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
 # - Surface-code distanceは、logical failure budgetから選んだうえで、logical resourceをphysical量子ビットとruntimeへliftできます。
 # - code distanceなどのarchitecture quantityは各estimateに残るため、reportでphysical resource仮定をauditできます。
