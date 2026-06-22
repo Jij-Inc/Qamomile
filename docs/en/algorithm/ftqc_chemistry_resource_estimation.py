@@ -31,6 +31,7 @@
 
 # %%
 import sympy as sp
+from openfermion import QubitOperator
 
 import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
@@ -39,6 +40,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
 
@@ -109,6 +111,28 @@ scaled_summary = toy_summary.with_lambda_scale(
 assert toy_summary.n_pauli_terms == 2
 assert toy_summary.constant == sp.Float("0.125")
 assert sp.simplify(scaled_summary.lambda_norm - sp.Float("2.0e5")) == 0
+
+# %% [markdown]
+# If your chemistry preprocessing already produces an OpenFermion
+# `QubitOperator`, summarize it through the same boundary. This keeps the
+# electronic-structure toolchain outside Qamomile's compiler IR while preserving
+# the cost-driving Hamiltonian metadata.
+
+# %%
+openfermion_hamiltonian = (
+    QubitOperator("Z0", 0.5)
+    + QubitOperator("X1 X2", 0.25)
+    + QubitOperator((), 0.125)
+)
+openfermion_summary = summarize_openfermion_qubit_operator(
+    openfermion_hamiltonian,
+    n_spin_orbitals=n_spin_orbitals,
+    source="openfermion_toy_pauli_lcu",
+)
+
+assert openfermion_summary.n_pauli_terms == toy_summary.n_pauli_terms
+assert openfermion_summary.lambda_norm == toy_summary.lambda_norm
+assert openfermion_summary.constant == toy_summary.constant
 
 # %% [markdown]
 # ## Qubitized QPE Comparison
