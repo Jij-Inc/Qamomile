@@ -52,6 +52,15 @@ class FTQCResourceQuantity(enum.StrEnum):
         CLIFFORD_GATES: Clifford gate count.
         PHYSICAL_QUBITS: Physical qubits under an architecture model.
         RUNTIME_SECONDS: Runtime proxy in seconds.
+        LOGICAL_ERROR_RATE: Logical error-rate proxy per operation or cycle.
+        TARGET_LOGICAL_FAILURE_PROBABILITY: Total allowed logical failure
+            probability for an architecture budget.
+        LOGICAL_OPERATION_BUDGET: Number of logical operations or cycles
+            sharing the failure budget.
+        PHYSICAL_ERROR_RATE: Physical error rate used by an architecture
+            sizing model.
+        THRESHOLD_ERROR_RATE: Threshold error rate used by an architecture
+            sizing model.
         PHYSICAL_QUBITS_PER_LOGICAL: Physical overhead per logical qubit.
         LOGICAL_CYCLE_TIME_SECONDS: Logical layer or cycle time.
         FACTORY_QUBITS: Physical qubits reserved for factories.
@@ -86,6 +95,11 @@ class FTQCResourceQuantity(enum.StrEnum):
     CLIFFORD_GATES = "clifford_gates"
     PHYSICAL_QUBITS = "physical_qubits"
     RUNTIME_SECONDS = "runtime_seconds"
+    LOGICAL_ERROR_RATE = "logical_error_rate"
+    TARGET_LOGICAL_FAILURE_PROBABILITY = "target_logical_failure_probability"
+    LOGICAL_OPERATION_BUDGET = "logical_operation_budget"
+    PHYSICAL_ERROR_RATE = "physical_error_rate"
+    THRESHOLD_ERROR_RATE = "threshold_error_rate"
     PHYSICAL_QUBITS_PER_LOGICAL = "physical_qubits_per_logical"
     LOGICAL_CYCLE_TIME_SECONDS = "logical_cycle_time_seconds"
     FACTORY_QUBITS = "factory_qubits"
@@ -430,6 +444,41 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "seconds",
         FTQCResourceCategory.PHYSICAL,
         "Wall-clock runtime proxy under the selected architecture model.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.LOGICAL_ERROR_RATE,
+        "Logical error rate",
+        "probability",
+        FTQCResourceCategory.PHYSICAL,
+        "Logical error-rate proxy under an architecture sizing model.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.TARGET_LOGICAL_FAILURE_PROBABILITY,
+        "Target logical failure probability",
+        "probability",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Total logical failure budget allocated to an FTQC estimate.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.LOGICAL_OPERATION_BUDGET,
+        "Logical operation budget",
+        "operations",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Number of logical operations or cycles sharing the failure budget.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.PHYSICAL_ERROR_RATE,
+        "Physical error rate",
+        "probability",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Physical error rate used by an architecture sizing model.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.THRESHOLD_ERROR_RATE,
+        "Threshold error rate",
+        "probability",
+        FTQCResourceCategory.ARCHITECTURE,
+        "Threshold error rate used by an architecture sizing model.",
     ),
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL,

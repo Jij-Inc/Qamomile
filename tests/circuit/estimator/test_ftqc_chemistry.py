@@ -13,6 +13,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCReference,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
+    SurfaceCodeDistanceBudget,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe,
@@ -194,6 +195,57 @@ def test_surface_code_cost_model_derives_architecture_knobs():
     ) < sp.Float("1e-12")
     assert estimate.physical_qubits == 4350
     assert sp.Abs(estimate.runtime_seconds - sp.Float("5e-4")) < sp.Float("1e-12")
+
+
+def test_surface_code_distance_budget_selects_odd_distance():
+    """Distance budgets select the smallest odd code distance from error inputs."""
+    budget = SurfaceCodeDistanceBudget(
+        physical_error_rate=sp.Float("1e-3"),
+        threshold_error_rate=sp.Float("1e-2"),
+        target_logical_failure_probability=sp.Float("1e-9"),
+        logical_operation_budget=1000,
+    )
+
+    architecture = budget.to_surface_code_cost_model(
+        physical_cycle_time_seconds=sp.Float("1e-6"),
+        physical_qubits_per_logical_factor=2,
+        logical_cycle_factor=1,
+        factory_count=4,
+        physical_qubits_per_factory=1000,
+        factory_cycles_per_toffoli=10,
+    )
+    values = budget.resource_values()
+
+    assert budget.code_distance == 21
+    assert sp.Abs(
+        budget.logical_failure_probability_per_operation - sp.Float("1e-12")
+    ) < sp.Float("1e-24")
+    assert sp.Abs(
+        budget.logical_error_rate_for_distance(budget.code_distance) - sp.Float("1e-12")
+    ) < sp.Float("1e-24")
+    assert values[FTQCResourceQuantity.CODE_DISTANCE] == 21
+    assert values[FTQCResourceQuantity.PHYSICAL_ERROR_RATE] == sp.Float("1e-3")
+    assert architecture.code_distance == 21
+    assert architecture.physical_qubits_per_logical == 882
+
+
+def test_surface_code_distance_budget_rejects_invalid_error_model():
+    """Distance budgets reject non-numeric or above-threshold error inputs."""
+    with pytest.raises(ValueError, match="below threshold"):
+        SurfaceCodeDistanceBudget(
+            physical_error_rate=sp.Float("1e-2"),
+            threshold_error_rate=sp.Float("1e-2"),
+            target_logical_failure_probability=sp.Float("1e-9"),
+            logical_operation_budget=1000,
+        )
+
+    with pytest.raises(ValueError, match="numeric"):
+        SurfaceCodeDistanceBudget(
+            physical_error_rate=sp.Symbol("p"),
+            threshold_error_rate=sp.Float("1e-2"),
+            target_logical_failure_probability=sp.Float("1e-9"),
+            logical_operation_budget=1000,
+        ).code_distance
 
 
 def test_cost_model_relifts_existing_estimate_without_changing_logical_work():

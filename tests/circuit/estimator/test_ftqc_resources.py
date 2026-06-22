@@ -34,6 +34,10 @@ def test_ftqc_quantity_specs_cover_core_resource_layers():
     assert FTQCResourceQuantity.TARGET_PRECISION in quantities
     assert FTQCResourceQuantity.TRUNCATION_ERROR in quantities
     assert FTQCResourceQuantity.TOFFOLI_GATES in quantities
+    assert FTQCResourceQuantity.LOGICAL_ERROR_RATE in quantities
+    assert FTQCResourceQuantity.PHYSICAL_ERROR_RATE in quantities
+    assert FTQCResourceQuantity.THRESHOLD_ERROR_RATE in quantities
+    assert FTQCResourceQuantity.TARGET_LOGICAL_FAILURE_PROBABILITY in quantities
     assert FTQCResourceQuantity.PHYSICAL_QUBITS in quantities
     assert FTQCResourceQuantity.CODE_DISTANCE in quantities
     assert FTQCResourceQuantity.FACTORY_COUNT in quantities

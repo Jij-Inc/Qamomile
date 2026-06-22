@@ -38,6 +38,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceCategory,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
+    SurfaceCodeDistanceBudget,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
@@ -136,8 +137,24 @@ scaled_summary = summary.with_lambda_scale(
     source="scaled_toy_pauli_lcu",
 )
 
-architecture = SurfaceCodeCostModel(
-    code_distance=20,
+distance_budget = SurfaceCodeDistanceBudget(
+    physical_error_rate=sp.Float("1e-3"),
+    threshold_error_rate=sp.Float("1e-2"),
+    target_logical_failure_probability=sp.Float("1e-9"),
+    logical_operation_budget=1000,
+)
+
+print(distance_budget.to_dict())
+assert distance_budget.code_distance == 21
+assert (
+    sp.Abs(
+        distance_budget.resource_values()[FTQCResourceQuantity.LOGICAL_ERROR_RATE]
+        - distance_budget.logical_failure_probability_per_operation
+    )
+    < sp.Float("1e-24")
+)
+
+architecture = distance_budget.to_surface_code_cost_model(
     physical_cycle_time_seconds=sp.Float("5e-8"),
     physical_qubits_per_logical_factor=2,
     logical_cycle_factor=1,
@@ -147,10 +164,13 @@ architecture = SurfaceCodeCostModel(
 )
 cost_model = architecture.to_cost_model()
 
-assert architecture.physical_qubits_per_logical == 800
+assert architecture.code_distance == 21
+assert architecture.physical_qubits_per_logical == 882
 assert architecture.factory_qubits == 20000
-assert sp.Abs(architecture.toffoli_throughput_per_second - sp.Float("2e6")) < sp.Float(
-    "1e-9"
+assert sp.Abs(
+    architecture.toffoli_throughput_per_second - sp.Float("4e7") / 21
+) < sp.Float(
+    "1e-9",
 )
 
 baseline_model = ChemistryQPEModel(
@@ -259,8 +279,8 @@ for row in architecture_comparison:
 
 assert relifted_baseline.logical_qubits == baseline.logical_qubits
 assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
-assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(7, 13)) == 0
-assert sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5")) < sp.Float("1e-12")
+assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(350, 691)) == 0
+assert sp.simplify(architecture_comparison[1].ratio - sp.Rational(10, 21)) == 0
 
 # %% [markdown]
 # ## Early-FTQC Pattern
@@ -331,6 +351,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   remains backend-neutral.
 # - Surface-code assumptions can be modeled separately and converted into the
 #   cost model consumed by chemistry estimators.
+# - Surface-code distance can be selected from a logical failure budget before
+#   lifting logical resources to physical qubits and runtime.
 # - Estimates carry research references so reports can audit which paper
 #   motivated a symbolic model.
 # - Existing logical estimates can be relifted under new architecture

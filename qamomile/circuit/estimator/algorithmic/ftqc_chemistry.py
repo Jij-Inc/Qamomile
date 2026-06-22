@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -354,6 +355,275 @@ class FTQCCostModel:
                 ``physical_qubits`` and ``runtime_seconds`` fields.
         """
         return estimate.with_cost_model(self)
+
+
+@dataclass(frozen=True)
+class SurfaceCodeDistanceBudget:
+    """Choose a surface-code distance from a logical failure budget.
+
+    This helper uses the explicit phenomenological proxy
+    ``prefactor * (physical_error_rate / threshold_error_rate)**((d + 1) / 2)``
+    for a distance-``d`` logical operation or cycle. It is intentionally a
+    sizing model rather than a decoder-specific claim.
+
+    Attributes:
+        physical_error_rate (sp.Expr | int | float): Physical error rate
+            below threshold.
+        threshold_error_rate (sp.Expr | int | float): Error threshold used by
+            the proxy model.
+        target_logical_failure_probability (sp.Expr | int | float): Total
+            logical failure budget.
+        logical_operation_budget (sp.Expr | int | float): Number of logical
+            operations or cycles sharing the total failure budget.
+        prefactor (sp.Expr | int | float): Leading constant in the logical
+            error proxy. Defaults to 0.1.
+
+    Raises:
+        ValueError: If any probability or operation count is non-positive, if
+            ``physical_error_rate`` is not below ``threshold_error_rate``, or
+            if ``prefactor`` is non-positive.
+
+    Example:
+        >>> budget = SurfaceCodeDistanceBudget(
+        ...     physical_error_rate=1e-3,
+        ...     threshold_error_rate=1e-2,
+        ...     target_logical_failure_probability=1e-9,
+        ...     logical_operation_budget=1000,
+        ... )
+        >>> budget.code_distance
+        21
+    """
+
+    physical_error_rate: _SympyLike
+    threshold_error_rate: _SympyLike
+    target_logical_failure_probability: _SympyLike
+    logical_operation_budget: _SympyLike
+    prefactor: _SympyLike = sp.Float("0.1")
+
+    def __post_init__(self) -> None:
+        """Validate distance-budget fields after dataclass construction.
+
+        Raises:
+            ValueError: If any field violates the probability-budget model.
+        """
+        for name, expr in [
+            ("physical_error_rate", self._physical_error_rate),
+            ("threshold_error_rate", self._threshold_error_rate),
+            (
+                "target_logical_failure_probability",
+                self._target_logical_failure_probability,
+            ),
+            ("logical_operation_budget", self._logical_operation_budget),
+            ("prefactor", self._prefactor),
+        ]:
+            _validate_positive(expr, name)
+
+        if (
+            self._physical_error_rate / self._threshold_error_rate
+        ).is_nonnegative is False:
+            raise ValueError("physical_error_rate / threshold_error_rate is invalid.")
+
+        ratio = _as_float(
+            self._physical_error_rate / self._threshold_error_rate,
+            "physical_error_rate / threshold_error_rate",
+        )
+        if ratio >= 1:
+            raise ValueError("physical_error_rate must be below threshold_error_rate.")
+
+    @property
+    def logical_failure_probability_per_operation(self) -> sp.Expr:
+        """Return the allocated logical failure budget per operation.
+
+        Returns:
+            sp.Expr: ``target_logical_failure_probability /
+            logical_operation_budget``.
+        """
+        return sp.simplify(
+            self._target_logical_failure_probability / self._logical_operation_budget
+        )
+
+    @property
+    def code_distance(self) -> int:
+        """Return the smallest odd distance satisfying the budget.
+
+        Returns:
+            int: Smallest odd positive surface-code distance whose proxy
+                logical error rate does not exceed the allocated budget.
+        """
+        ratio = _as_float(
+            self._physical_error_rate / self._threshold_error_rate,
+            "physical_error_rate / threshold_error_rate",
+        )
+        per_operation = _as_float(
+            self.logical_failure_probability_per_operation,
+            "logical_failure_probability_per_operation",
+        )
+        prefactor = _as_float(self._prefactor, "prefactor")
+        if per_operation >= prefactor:
+            return 1
+        raw_exponent = math.log(per_operation / prefactor) / math.log(ratio)
+        exponent = max(1, math.ceil(raw_exponent - 1e-12))
+        distance = 2 * exponent - 1
+        while _as_float(
+            self.logical_error_rate_for_distance(distance),
+            "logical_error_rate",
+        ) > per_operation * (1 + 1e-12):
+            distance += 2
+        return distance
+
+    def logical_error_rate_for_distance(self, distance: _SympyLike) -> sp.Expr:
+        """Estimate the logical error rate for a code distance.
+
+        Args:
+            distance (sp.Expr | int | float): Surface-code distance.
+
+        Returns:
+            sp.Expr: Logical error-rate proxy for one operation or cycle.
+
+        Raises:
+            ValueError: If ``distance`` is non-positive.
+        """
+        distance_expr = _as_expr(distance, "distance")
+        _validate_positive(distance_expr, "distance")
+        return sp.simplify(
+            self._prefactor
+            * (self._physical_error_rate / self._threshold_error_rate)
+            ** ((distance_expr + 1) / 2)
+        )
+
+    def to_surface_code_cost_model(
+        self,
+        *,
+        physical_cycle_time_seconds: _SympyLike,
+        physical_qubits_per_logical_factor: _SympyLike = 2,
+        logical_cycle_factor: _SympyLike = 1,
+        factory_count: _SympyLike,
+        physical_qubits_per_factory: _SympyLike,
+        factory_cycles_per_toffoli: _SympyLike,
+    ) -> SurfaceCodeCostModel:
+        """Build a surface-code cost model using the selected distance.
+
+        Args:
+            physical_cycle_time_seconds (sp.Expr | int | float): Duration of
+                one physical error-correction cycle.
+            physical_qubits_per_logical_factor (sp.Expr | int | float):
+                Constant multiplying ``code_distance**2`` for one logical
+                patch. Defaults to 2.
+            logical_cycle_factor (sp.Expr | int | float): Constant
+                multiplying code distance and physical cycle time. Defaults to
+                1.
+            factory_count (sp.Expr | int | float): Number of parallel
+                non-Clifford factories.
+            physical_qubits_per_factory (sp.Expr | int | float): Physical
+                qubits reserved for one factory.
+            factory_cycles_per_toffoli (sp.Expr | int | float): Logical cycles
+                needed by one factory to produce a Toffoli resource.
+
+        Returns:
+            SurfaceCodeCostModel: Cost model configured with ``code_distance``.
+        """
+        return SurfaceCodeCostModel(
+            code_distance=self.code_distance,
+            physical_cycle_time_seconds=physical_cycle_time_seconds,
+            physical_qubits_per_logical_factor=physical_qubits_per_logical_factor,
+            logical_cycle_factor=logical_cycle_factor,
+            factory_count=factory_count,
+            physical_qubits_per_factory=physical_qubits_per_factory,
+            factory_cycles_per_toffoli=factory_cycles_per_toffoli,
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the distance-budget model.
+
+        Returns:
+            dict[str, str]: JSON-friendly surface-code distance budget.
+        """
+        return {
+            "physical_error_rate": str(self._physical_error_rate),
+            "threshold_error_rate": str(self._threshold_error_rate),
+            "target_logical_failure_probability": str(
+                self._target_logical_failure_probability
+            ),
+            "logical_operation_budget": str(self._logical_operation_budget),
+            "prefactor": str(self._prefactor),
+            "logical_failure_probability_per_operation": str(
+                self.logical_failure_probability_per_operation
+            ),
+            "code_distance": str(self.code_distance),
+            "logical_error_rate": str(
+                self.logical_error_rate_for_distance(self.code_distance)
+            ),
+        }
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return distance-budget values keyed by canonical quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Error-budget and selected
+                distance quantities.
+        """
+        return {
+            FTQCResourceQuantity.PHYSICAL_ERROR_RATE: self._physical_error_rate,
+            FTQCResourceQuantity.THRESHOLD_ERROR_RATE: self._threshold_error_rate,
+            FTQCResourceQuantity.TARGET_LOGICAL_FAILURE_PROBABILITY: (
+                self._target_logical_failure_probability
+            ),
+            FTQCResourceQuantity.LOGICAL_OPERATION_BUDGET: (
+                self._logical_operation_budget
+            ),
+            FTQCResourceQuantity.CODE_DISTANCE: sp.Integer(self.code_distance),
+            FTQCResourceQuantity.LOGICAL_ERROR_RATE: (
+                self.logical_error_rate_for_distance(self.code_distance)
+            ),
+        }
+
+    @property
+    def _physical_error_rate(self) -> sp.Expr:
+        """Return ``physical_error_rate`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted physical error rate.
+        """
+        return _as_expr(self.physical_error_rate, "physical_error_rate")
+
+    @property
+    def _threshold_error_rate(self) -> sp.Expr:
+        """Return ``threshold_error_rate`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted threshold error rate.
+        """
+        return _as_expr(self.threshold_error_rate, "threshold_error_rate")
+
+    @property
+    def _target_logical_failure_probability(self) -> sp.Expr:
+        """Return ``target_logical_failure_probability`` as an expression.
+
+        Returns:
+            sp.Expr: Converted target logical failure probability.
+        """
+        return _as_expr(
+            self.target_logical_failure_probability,
+            "target_logical_failure_probability",
+        )
+
+    @property
+    def _logical_operation_budget(self) -> sp.Expr:
+        """Return ``logical_operation_budget`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted logical operation budget.
+        """
+        return _as_expr(self.logical_operation_budget, "logical_operation_budget")
+
+    @property
+    def _prefactor(self) -> sp.Expr:
+        """Return ``prefactor`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted logical-error prefactor.
+        """
+        return _as_expr(self.prefactor, "prefactor")
 
 
 @dataclass(frozen=True)
@@ -1809,6 +2079,32 @@ def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
         return sp.sympify(value)
     except (TypeError, sp.SympifyError) as exc:
         raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
+
+
+def _as_float(value: _CoefficientLike, name: str) -> float:
+    """Convert a numeric expression to a finite float.
+
+    Args:
+        value (sp.Expr | int | float | complex): Value to convert.
+        name (str): Field name used in error messages.
+
+    Returns:
+        float: Finite floating-point value.
+
+    Raises:
+        TypeError: If ``value`` cannot be sympified.
+        ValueError: If ``value`` is symbolic, complex, NaN, or infinite.
+    """
+    expr = _as_expr(value, name)
+    if expr.free_symbols:
+        raise ValueError(f"{name} must be numeric for distance selection.")
+    numeric = complex(sp.N(expr))
+    if abs(numeric.imag) > 0:
+        raise ValueError(f"{name} must be real.")
+    result = float(numeric.real)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite.")
+    return result
 
 
 def _abs_as_expr(value: _CoefficientLike) -> sp.Expr:

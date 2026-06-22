@@ -35,6 +35,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceCategory,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
+    SurfaceCodeDistanceBudget,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
@@ -120,8 +121,24 @@ scaled_summary = summary.with_lambda_scale(
     source="scaled_toy_pauli_lcu",
 )
 
-architecture = SurfaceCodeCostModel(
-    code_distance=20,
+distance_budget = SurfaceCodeDistanceBudget(
+    physical_error_rate=sp.Float("1e-3"),
+    threshold_error_rate=sp.Float("1e-2"),
+    target_logical_failure_probability=sp.Float("1e-9"),
+    logical_operation_budget=1000,
+)
+
+print(distance_budget.to_dict())
+assert distance_budget.code_distance == 21
+assert (
+    sp.Abs(
+        distance_budget.resource_values()[FTQCResourceQuantity.LOGICAL_ERROR_RATE]
+        - distance_budget.logical_failure_probability_per_operation
+    )
+    < sp.Float("1e-24")
+)
+
+architecture = distance_budget.to_surface_code_cost_model(
     physical_cycle_time_seconds=sp.Float("5e-8"),
     physical_qubits_per_logical_factor=2,
     logical_cycle_factor=1,
@@ -131,10 +148,13 @@ architecture = SurfaceCodeCostModel(
 )
 cost_model = architecture.to_cost_model()
 
-assert architecture.physical_qubits_per_logical == 800
+assert architecture.code_distance == 21
+assert architecture.physical_qubits_per_logical == 882
 assert architecture.factory_qubits == 20000
-assert sp.Abs(architecture.toffoli_throughput_per_second - sp.Float("2e6")) < sp.Float(
-    "1e-9"
+assert sp.Abs(
+    architecture.toffoli_throughput_per_second - sp.Float("4e7") / 21
+) < sp.Float(
+    "1e-9",
 )
 
 baseline_model = ChemistryQPEModel(
@@ -237,8 +257,8 @@ for row in architecture_comparison:
 
 assert relifted_baseline.logical_qubits == baseline.logical_qubits
 assert relifted_baseline.toffoli_gates == baseline.toffoli_gates
-assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(7, 13)) == 0
-assert sp.Abs(architecture_comparison[1].ratio - sp.Float("0.5")) < sp.Float("1e-12")
+assert sp.simplify(architecture_comparison[0].ratio - sp.Rational(350, 691)) == 0
+assert sp.simplify(architecture_comparison[1].ratio - sp.Rational(10, 21)) == 0
 
 # %% [markdown]
 # ## Early-FTQCのパターン
@@ -298,6 +318,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
+# - Surface-code distanceは、logical failure budgetから選んだうえで、logical resourceをphysical量子ビットとruntimeへliftできます。
 # - estimateに研究referenceを保持し、どの論文がsymbolic modelの根拠になったかをreportでauditできるようにします。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
