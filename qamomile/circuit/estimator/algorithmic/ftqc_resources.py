@@ -95,6 +95,27 @@ class FTQCResourceQuantity(enum.StrEnum):
     FACTORY_CYCLES_PER_TOFFOLI = "factory_cycles_per_toffoli"
 
 
+class FTQCResourceChangeDirection(enum.StrEnum):
+    """Classify how a candidate FTQC quantity changed versus baseline.
+
+    Attributes:
+        SMALLER: Candidate value is provably smaller than the baseline.
+        LARGER: Candidate value is provably larger than the baseline.
+        UNCHANGED: Candidate value is provably equal to the baseline.
+        SYMBOLIC: The sign of the symbolic change is not decidable from the
+            available assumptions.
+
+    Example:
+        >>> FTQCResourceChangeDirection("smaller")
+        <FTQCResourceChangeDirection.SMALLER: 'smaller'>
+    """
+
+    SMALLER = "smaller"
+    LARGER = "larger"
+    UNCHANGED = "unchanged"
+    SYMBOLIC = "symbolic"
+
+
 class SupportsFTQCResourceValues(Protocol):
     """Represent objects that expose canonical FTQC resource values.
 
@@ -205,6 +226,98 @@ class FTQCResourceComparisonRow:
             "candidate": str(self.candidate),
             "ratio": str(self.ratio),
             "reduction": str(self.reduction),
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceComparisonSummary:
+    """Group FTQC comparison rows by the sign of their resource change.
+
+    Attributes:
+        rows (tuple[FTQCResourceComparisonRow, ...]): All comparison rows in
+            the order returned by ``compare_ftqc_resource_estimates``.
+        smaller (tuple[FTQCResourceComparisonRow, ...]): Rows where the
+            candidate is provably smaller than the baseline. Rows are sorted by
+            descending fractional reduction when the reduction is numeric.
+        larger (tuple[FTQCResourceComparisonRow, ...]): Rows where the
+            candidate is provably larger than the baseline. Rows are sorted by
+            descending fractional increase when the increase is numeric.
+        unchanged (tuple[FTQCResourceComparisonRow, ...]): Rows where the
+            candidate and baseline are provably equal.
+        symbolic (tuple[FTQCResourceComparisonRow, ...]): Rows whose change
+            sign cannot be proven from the symbolic expression alone.
+
+    Example:
+        >>> row = FTQCResourceComparisonRow(
+        ...     quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+        ...     baseline=10,
+        ...     candidate=4,
+        ...     ratio=sp.Rational(2, 5),
+        ...     reduction=sp.Rational(3, 5),
+        ...     label="Toffoli gates",
+        ...     unit="Toffoli gates",
+        ...     category=FTQCResourceCategory.LOGICAL,
+        ... )
+        >>> FTQCResourceComparisonSummary.from_rows((row,)).smaller[0].quantity
+        <FTQCResourceQuantity.TOFFOLI_GATES: 'toffoli_gates'>
+    """
+
+    rows: tuple[FTQCResourceComparisonRow, ...]
+    smaller: tuple[FTQCResourceComparisonRow, ...]
+    larger: tuple[FTQCResourceComparisonRow, ...]
+    unchanged: tuple[FTQCResourceComparisonRow, ...]
+    symbolic: tuple[FTQCResourceComparisonRow, ...]
+
+    @classmethod
+    def from_rows(
+        cls,
+        rows: tuple[FTQCResourceComparisonRow, ...],
+    ) -> FTQCResourceComparisonSummary:
+        """Build a grouped summary from comparison rows.
+
+        Args:
+            rows (tuple[FTQCResourceComparisonRow, ...]): Comparison rows to
+                classify by the sign of ``reduction``.
+
+        Returns:
+            FTQCResourceComparisonSummary: Grouped comparison summary.
+        """
+        grouped: dict[FTQCResourceChangeDirection, list[FTQCResourceComparisonRow]] = {
+            FTQCResourceChangeDirection.SMALLER: [],
+            FTQCResourceChangeDirection.LARGER: [],
+            FTQCResourceChangeDirection.UNCHANGED: [],
+            FTQCResourceChangeDirection.SYMBOLIC: [],
+        }
+        for row in rows:
+            grouped[_classify_change(row.reduction)].append(row)
+
+        return cls(
+            rows=rows,
+            smaller=_sort_rows_by_change(grouped[FTQCResourceChangeDirection.SMALLER]),
+            larger=_sort_rows_by_change(grouped[FTQCResourceChangeDirection.LARGER]),
+            unchanged=tuple(grouped[FTQCResourceChangeDirection.UNCHANGED]),
+            symbolic=tuple(grouped[FTQCResourceChangeDirection.SYMBOLIC]),
+        )
+
+    def to_dict(self) -> dict[str, list[dict[str, str]] | dict[str, int]]:
+        """Serialize grouped comparison rows.
+
+        Returns:
+            dict[str, list[dict[str, str]] | dict[str, int]]: JSON-friendly
+                summary containing all rows, grouped rows, and group counts.
+        """
+        return {
+            "rows": [row.to_dict() for row in self.rows],
+            "smaller": [row.to_dict() for row in self.smaller],
+            "larger": [row.to_dict() for row in self.larger],
+            "unchanged": [row.to_dict() for row in self.unchanged],
+            "symbolic": [row.to_dict() for row in self.symbolic],
+            "counts": {
+                "smaller": len(self.smaller),
+                "larger": len(self.larger),
+                "unchanged": len(self.unchanged),
+                "symbolic": len(self.symbolic),
+            },
         }
 
 
@@ -470,6 +583,43 @@ def compare_ftqc_resource_estimates(
     return tuple(rows)
 
 
+def summarize_ftqc_resource_comparison(
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+    *,
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+) -> FTQCResourceComparisonSummary:
+    """Summarize FTQC resource changes between two estimates.
+
+    This is a convenience wrapper over ``compare_ftqc_resource_estimates`` for
+    reviews and reports that need to distinguish reductions, regressions,
+    unchanged quantities, and symbolic quantities whose sign is undecidable.
+
+    Args:
+        baseline (SupportsFTQCResourceValues): Reference estimate, model, or
+            summary exposing ``resource_values()``.
+        candidate (SupportsFTQCResourceValues): Candidate estimate, model, or
+            summary exposing ``resource_values()``.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
+            to compare. Defaults to the intersection of quantities exposed by
+            both inputs, ordered by the canonical quantity catalog.
+
+    Returns:
+        FTQCResourceComparisonSummary: Grouped comparison rows.
+
+    Raises:
+        ValueError: If a requested quantity is missing from either input or if
+            a baseline value is exactly zero.
+    """
+    return FTQCResourceComparisonSummary.from_rows(
+        compare_ftqc_resource_estimates(
+            baseline,
+            candidate,
+            quantities=quantities,
+        )
+    )
+
+
 def _normalize_comparison_quantities(
     baseline_values: dict[FTQCResourceQuantity, sp.Expr],
     candidate_values: dict[FTQCResourceQuantity, sp.Expr],
@@ -537,3 +687,47 @@ def _normalize_resource_quantity(
         raise ValueError(
             f"Unknown FTQC resource quantity {quantity!r}; valid: {valid}."
         ) from exc
+
+
+def _classify_change(reduction: sp.Expr) -> FTQCResourceChangeDirection:
+    """Classify a fractional reduction expression by sign.
+
+    Args:
+        reduction (sp.Expr): Fractional reduction, where positive means the
+            candidate is smaller than the baseline.
+
+    Returns:
+        FTQCResourceChangeDirection: Sign classification for the change.
+    """
+    simplified = sp.simplify(reduction)
+    if simplified.equals(0):
+        return FTQCResourceChangeDirection.UNCHANGED
+    if simplified.is_positive:
+        return FTQCResourceChangeDirection.SMALLER
+    if simplified.is_negative:
+        return FTQCResourceChangeDirection.LARGER
+    return FTQCResourceChangeDirection.SYMBOLIC
+
+
+def _sort_rows_by_change(
+    rows: list[FTQCResourceComparisonRow],
+) -> tuple[FTQCResourceComparisonRow, ...]:
+    """Sort rows by descending numeric fractional change when available.
+
+    Args:
+        rows (list[FTQCResourceComparisonRow]): Rows to sort.
+
+    Returns:
+        tuple[FTQCResourceComparisonRow, ...]: Rows with numerically comparable
+            changes first and symbolic ties left in their input order.
+    """
+    indexed_rows = list(enumerate(rows))
+
+    def key(item: tuple[int, FTQCResourceComparisonRow]) -> tuple[int, float, int]:
+        index, row = item
+        magnitude = sp.Abs(sp.simplify(row.reduction))
+        if magnitude.is_number:
+            return (0, -float(sp.N(magnitude)), index)
+        return (1, 0.0, index)
+
+    return tuple(row for _, row in sorted(indexed_rows, key=key))

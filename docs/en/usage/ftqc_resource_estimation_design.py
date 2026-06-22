@@ -42,6 +42,7 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     iter_ftqc_resource_quantity_specs,
+    summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
 )
 
@@ -183,6 +184,27 @@ assert comparison[0].ratio == sp.Float("0.5")
 assert comparison[1].ratio == sp.Float("0.55")
 
 # %% [markdown]
+# For design reviews, the summary helper groups the same rows by whether the
+# candidate is smaller, larger, unchanged, or still symbolic under the current
+# assumptions. The first `smaller` rows are the largest numeric reductions.
+
+# %%
+comparison_summary = summarize_ftqc_resource_comparison(
+    baseline,
+    compressed,
+    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+)
+
+for row in comparison_summary.smaller:
+    print("smaller:", row.label, "by", sp.N(row.reduction, 4))
+for row in comparison_summary.larger:
+    print("larger:", row.label, "by", sp.N(-row.reduction, 4))
+
+assert comparison_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+assert comparison_summary.larger[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+assert comparison_summary.symbolic == ()
+
+# %% [markdown]
 # ## Reference Provenance
 #
 # Estimates also carry method-level research references. This is intentionally
@@ -306,3 +328,5 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   assumptions without rebuilding the algorithm estimate.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable
 #   savings tables without hard-coding a particular chemistry factorization.
+# - `summarize_ftqc_resource_comparison` groups those rows into smaller,
+#   larger, unchanged, and symbolic changes for design review.

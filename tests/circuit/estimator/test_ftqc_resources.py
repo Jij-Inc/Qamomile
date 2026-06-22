@@ -11,12 +11,15 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCCostModel,
     FTQCResourceCategory,
+    FTQCResourceComparisonRow,
+    FTQCResourceComparisonSummary,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe_from_model,
     iter_ftqc_resource_quantity_specs,
+    summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
 )
 
@@ -196,3 +199,82 @@ def test_compare_ftqc_resource_estimates_rejects_missing_or_zero_baseline():
             summary,
             quantities=(FTQCResourceQuantity.LAMBDA_NORM,),
         )
+
+
+def test_summarize_ftqc_resource_comparison_groups_review_drivers():
+    """Comparison summaries group improvements, regressions, and ties."""
+    baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=baseline,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    candidate_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=candidate,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=30,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+
+    summary = summarize_ftqc_resource_comparison(
+        baseline_estimate,
+        candidate_estimate,
+        quantities=(
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+        ),
+    )
+
+    assert [row.quantity for row in summary.smaller] == [
+        FTQCResourceQuantity.QPE_ITERATIONS
+    ]
+    assert [row.quantity for row in summary.larger] == [
+        FTQCResourceQuantity.TOFFOLI_GATES
+    ]
+    assert [row.quantity for row in summary.unchanged] == [
+        FTQCResourceQuantity.LOGICAL_QUBITS
+    ]
+    assert summary.symbolic == ()
+    assert summary.to_dict()["counts"] == {
+        "smaller": 1,
+        "larger": 1,
+        "unchanged": 1,
+        "symbolic": 0,
+    }
+
+
+def test_comparison_summary_keeps_undecidable_symbolic_changes_separate():
+    """Symbolic comparison signs remain undecided until assumptions are added."""
+    x = sp.Symbol("x")
+    row = FTQCResourceComparisonRow(
+        quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+        baseline=1,
+        candidate=x,
+        ratio=x,
+        reduction=1 - x,
+        label="Toffoli gates",
+        unit="Toffoli gates",
+        category=FTQCResourceCategory.LOGICAL,
+    )
+
+    summary = FTQCResourceComparisonSummary.from_rows((row,))
+
+    assert summary.smaller == ()
+    assert summary.larger == ()
+    assert summary.unchanged == ()
+    assert summary.symbolic == (row,)

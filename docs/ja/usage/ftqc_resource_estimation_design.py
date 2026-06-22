@@ -39,6 +39,7 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     iter_ftqc_resource_quantity_specs,
+    summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
 )
 
@@ -169,6 +170,25 @@ assert comparison[0].ratio == sp.Float("0.5")
 assert comparison[1].ratio == sp.Float("0.55")
 
 # %% [markdown]
+# 設計レビューでは、summary helperを使うと、同じ行をcandidateが小さい、大きい、変わらない、または現在の仮定ではsymbolicなまま、というグループに分けて読めます。`smaller`の先頭には、数値化できる範囲で削減率が大きい行が来ます。
+
+# %%
+comparison_summary = summarize_ftqc_resource_comparison(
+    baseline,
+    compressed,
+    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+)
+
+for row in comparison_summary.smaller:
+    print("smaller:", row.label, "by", sp.N(row.reduction, 4))
+for row in comparison_summary.larger:
+    print("larger:", row.label, "by", sp.N(-row.reduction, 4))
+
+assert comparison_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+assert comparison_summary.larger[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+assert comparison_summary.symbolic == ()
+
+# %% [markdown]
 # ## Reference provenance
 #
 # estimateはmethod-levelの研究referenceも保持します。これは数式とは意図的に分けています。reportは、上のsynthetic exampleを特定分子の再現とみなさずに、どの論文がmodelの動機になったかを示せます。
@@ -274,3 +294,4 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - estimateに研究referenceを保持し、どの論文がsymbolic modelの根拠になったかをreportでauditできるようにします。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
+# - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
