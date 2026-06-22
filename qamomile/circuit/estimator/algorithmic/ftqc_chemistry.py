@@ -6,11 +6,12 @@ import enum
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
 
 from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
+    FTQCResourceFormula,
     FTQCResourceQuantity,
     describe_ftqc_resource_quantity,
 )
@@ -930,6 +931,8 @@ class FTQCResourceEstimate:
         assumptions (dict[str, str]): Reader-facing notes about model choices.
         references (tuple[FTQCReference, ...]): Research sources that motivate
             the estimate's scaling model or resource assumptions.
+        formulas (tuple[FTQCResourceFormula, ...]): Structured derivation
+            formulas for key resource quantities. Defaults to an empty tuple.
         architecture_values (dict[FTQCResourceQuantity, sp.Expr]): Architecture
             quantities used to lift logical resources to physical resources.
             These are keyed by the canonical FTQC quantity catalog.
@@ -954,6 +957,7 @@ class FTQCResourceEstimate:
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
     assumptions: dict[str, str] = field(default_factory=dict)
     references: tuple[FTQCReference, ...] = ()
+    formulas: tuple[FTQCResourceFormula, ...] = ()
     architecture_values: dict[FTQCResourceQuantity, sp.Expr] = field(
         default_factory=dict
     )
@@ -1006,6 +1010,7 @@ class FTQCResourceEstimate:
             },
             "assumptions": dict(self.assumptions),
             "references": [reference.to_dict() for reference in self.references],
+            "formulas": [formula.to_dict() for formula in self.formulas],
             "architecture_values": {
                 quantity.value: str(value)
                 for quantity, value in self.architecture_values.items()
@@ -1045,6 +1050,22 @@ class FTQCResourceEstimate:
             spec = describe_ftqc_resource_quantity(quantity)
             row = spec.to_dict()
             row["value"] = str(value)
+            rows.append(row)
+        return rows
+
+    def to_formula_table(self) -> list[dict[str, str | list[str]]]:
+        """Serialize derivation formulas with quantity metadata.
+
+        Returns:
+            list[dict[str, str | list[str]]]: Rows containing quantity
+                metadata plus ``expression``, ``depends_on``, ``description``,
+                and ``reference_keys`` fields.
+        """
+        rows = []
+        for formula in self.formulas:
+            spec = describe_ftqc_resource_quantity(formula.quantity)
+            row: dict[str, str | list[str]] = {**spec.to_dict()}
+            row.update(formula.to_dict())
             rows.append(row)
         return rows
 
@@ -1140,6 +1161,7 @@ class FTQCResourceEstimate:
             ),
             assumptions=assumptions,
             references=self.references,
+            formulas=self.formulas,
             architecture_values=architecture_values,
         )
 
@@ -1167,6 +1189,16 @@ class FTQCResourceEstimate:
             parameters=self.parameters,
             assumptions=self.assumptions,
             references=self.references,
+            formulas=tuple(
+                FTQCResourceFormula(
+                    quantity=formula.quantity,
+                    expression=fn(cast(sp.Expr, formula.expression)),
+                    depends_on=formula.depends_on,
+                    description=formula.description,
+                    reference_keys=formula.reference_keys,
+                )
+                for formula in self.formulas
+            ),
             architecture_values={
                 quantity: fn(value)
                 for quantity, value in self.architecture_values.items()
@@ -1860,6 +1892,7 @@ def estimate_qubitized_chemistry_qpe(
             _METHOD_REFERENCES[method_enum],
             references,
         ),
+        formulas=_qubitized_qpe_formulas(),
         architecture_values=architecture_values,
     )
 
@@ -1930,6 +1963,7 @@ def estimate_qubitized_chemistry_qpe_from_model(
         runtime_seconds=estimate.runtime_seconds,
         assumptions=assumptions,
         references=_combine_references(estimate.references, model.references),
+        formulas=estimate.formulas,
         architecture_values=estimate.architecture_values,
     )
 
@@ -2051,6 +2085,7 @@ def estimate_single_ancilla_trotter_qpe(
         runtime_seconds=runtime_seconds,
         assumptions=assumptions,
         references=_combine_references((_UWC_REFERENCE,), references),
+        formulas=_single_ancilla_trotter_formulas(),
         architecture_values=architecture_values,
     )
 
@@ -2160,6 +2195,182 @@ def _default_logical_qubits(
             raise ValueError(f"Unhandled chemistry QPE method: {method}")
 
 
+def _positive_symbol(name: str) -> sp.Symbol:
+    """Create a positive SymPy symbol for formula metadata.
+
+    Args:
+        name (str): Symbol display name.
+
+    Returns:
+        sp.Symbol: Positive symbol with the requested name.
+    """
+    return sp.Symbol(name, positive=True)
+
+
+def _nonnegative_symbol(name: str) -> sp.Symbol:
+    """Create a nonnegative SymPy symbol for formula metadata.
+
+    Args:
+        name (str): Symbol display name.
+
+    Returns:
+        sp.Symbol: Nonnegative symbol with the requested name.
+    """
+    return sp.Symbol(name, nonnegative=True)
+
+
+def _architecture_formulas(
+    non_clifford_quantity: FTQCResourceQuantity,
+) -> tuple[FTQCResourceFormula, ...]:
+    """Return formulas for lifting logical work to physical resources.
+
+    Args:
+        non_clifford_quantity (FTQCResourceQuantity): Non-Clifford resource
+            quantity served by the factory-throughput term.
+
+    Returns:
+        tuple[FTQCResourceFormula, ...]: Physical-qubit and runtime formulas.
+    """
+    logical_qubits = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_QUBITS.value)
+    logical_depth = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_DEPTH.value)
+    non_clifford = _nonnegative_symbol(non_clifford_quantity.value)
+    physical_qubits_per_logical = _positive_symbol(
+        FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL.value
+    )
+    factory_qubits = _nonnegative_symbol(FTQCResourceQuantity.FACTORY_QUBITS.value)
+    logical_cycle_time = _positive_symbol(
+        FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS.value
+    )
+    throughput = _positive_symbol(
+        FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND.value
+    )
+    return (
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.PHYSICAL_QUBITS,
+            expression=logical_qubits * physical_qubits_per_logical + factory_qubits,
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_QUBITS,
+                FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL,
+                FTQCResourceQuantity.FACTORY_QUBITS,
+            ),
+            description=(
+                "Lift logical qubits with the architecture overhead and add "
+                "factory qubits."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.RUNTIME_SECONDS,
+            expression=sp.Max(
+                logical_depth * logical_cycle_time,
+                non_clifford / throughput,
+            ),
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_DEPTH,
+                non_clifford_quantity,
+                FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS,
+                FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND,
+            ),
+            description=(
+                "Use the slower of logical-cycle execution and factory "
+                "throughput as the runtime proxy."
+            ),
+        ),
+    )
+
+
+def _qubitized_qpe_formulas() -> tuple[FTQCResourceFormula, ...]:
+    """Return derivation formulas for qubitized QPE estimates.
+
+    Returns:
+        tuple[FTQCResourceFormula, ...]: QPE iteration, Toffoli, logical-depth,
+            and architecture-lift formulas.
+    """
+    lambda_norm = _positive_symbol(FTQCResourceQuantity.LAMBDA_NORM.value)
+    target_precision = _positive_symbol(FTQCResourceQuantity.TARGET_PRECISION.value)
+    qpe_iterations = _nonnegative_symbol(FTQCResourceQuantity.QPE_ITERATIONS.value)
+    walk_cost = _positive_symbol(FTQCResourceQuantity.WALK_COST_TOFFOLI.value)
+    toffoli_gates = _nonnegative_symbol(FTQCResourceQuantity.TOFFOLI_GATES.value)
+    return (
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.QPE_ITERATIONS,
+            expression=lambda_norm / target_precision,
+            depends_on=(
+                FTQCResourceQuantity.LAMBDA_NORM,
+                FTQCResourceQuantity.TARGET_PRECISION,
+            ),
+            description="Use Hamiltonian normalization divided by QPE precision.",
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+            expression=qpe_iterations * walk_cost,
+            depends_on=(
+                FTQCResourceQuantity.QPE_ITERATIONS,
+                FTQCResourceQuantity.WALK_COST_TOFFOLI,
+            ),
+            description="Multiply walk calls by the Toffoli cost of one walk.",
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.LOGICAL_DEPTH,
+            expression=toffoli_gates,
+            depends_on=(FTQCResourceQuantity.TOFFOLI_GATES,),
+            description="Use Toffoli count as the logical-depth proxy.",
+        ),
+        *_architecture_formulas(FTQCResourceQuantity.TOFFOLI_GATES),
+    )
+
+
+def _single_ancilla_trotter_formulas() -> tuple[FTQCResourceFormula, ...]:
+    """Return derivation formulas for single-ancilla Trotter QPE estimates.
+
+    Returns:
+        tuple[FTQCResourceFormula, ...]: QPE iteration, logical-depth, T-count,
+            and architecture-lift formulas.
+    """
+    lambda_norm = _positive_symbol(FTQCResourceQuantity.LAMBDA_NORM.value)
+    target_precision = _positive_symbol(FTQCResourceQuantity.TARGET_PRECISION.value)
+    unitary_weight_factor = _nonnegative_symbol("unitary_weight_factor")
+    qpe_iterations = _nonnegative_symbol(FTQCResourceQuantity.QPE_ITERATIONS.value)
+    samples = _positive_symbol("samples")
+    steps = _positive_symbol("trotter_steps_per_sample")
+    terms = _positive_symbol(FTQCResourceQuantity.N_PAULI_TERMS.value)
+    randomized_factor = _nonnegative_symbol("randomized_compilation_factor")
+    logical_depth = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_DEPTH.value)
+    rotation_t = _positive_symbol("rotation_synthesis_t_gates")
+    return (
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.QPE_ITERATIONS,
+            expression=lambda_norm * unitary_weight_factor / target_precision,
+            depends_on=(
+                FTQCResourceQuantity.LAMBDA_NORM,
+                FTQCResourceQuantity.TARGET_PRECISION,
+            ),
+            description=(
+                "Scale the Hamiltonian normalization by the unitary-weight "
+                "factor before dividing by QPE precision."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.LOGICAL_DEPTH,
+            expression=qpe_iterations * samples * steps * terms * randomized_factor,
+            depends_on=(
+                FTQCResourceQuantity.QPE_ITERATIONS,
+                FTQCResourceQuantity.N_PAULI_TERMS,
+            ),
+            description=(
+                "Count sampled product-formula rotations across QPE calls, "
+                "samples, Trotter steps, terms, and randomization overhead."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.T_GATES,
+            expression=logical_depth * rotation_t,
+            depends_on=(FTQCResourceQuantity.LOGICAL_DEPTH,),
+            description="Multiply logical rotations by the synthesis T cost.",
+        ),
+        *_architecture_formulas(FTQCResourceQuantity.T_GATES),
+    )
+
+
 def _build_estimate(
     *,
     algorithm: str,
@@ -2174,6 +2385,7 @@ def _build_estimate(
     runtime_seconds: sp.Expr,
     assumptions: dict[str, str],
     references: tuple[FTQCReference, ...] = (),
+    formulas: tuple[FTQCResourceFormula, ...] = (),
     architecture_values: dict[FTQCResourceQuantity, sp.Expr] | None = None,
 ) -> FTQCResourceEstimate:
     """Create an estimate and collect its free symbolic parameters.
@@ -2192,6 +2404,8 @@ def _build_estimate(
         assumptions (dict[str, str]): Notes about model assumptions.
         references (tuple[FTQCReference, ...]): Research sources for the
             scaling model.
+        formulas (tuple[FTQCResourceFormula, ...]): Structured derivation
+            formulas to attach to the estimate. Defaults to an empty tuple.
         architecture_values (dict[FTQCResourceQuantity, sp.Expr] | None):
             Architecture quantities used to lift logical resources to physical
             resources. Defaults to None.
@@ -2226,6 +2440,7 @@ def _build_estimate(
         parameters=_collect_parameters(expressions),
         assumptions=assumptions,
         references=_combine_references(references),
+        formulas=formulas,
         architecture_values=architecture,
     )
 

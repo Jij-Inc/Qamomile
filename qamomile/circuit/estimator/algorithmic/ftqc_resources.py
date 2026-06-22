@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 import sympy as sp
 
@@ -187,6 +187,91 @@ class FTQCResourceQuantitySpec:
             "unit": self.unit,
             "category": self.category.value,
             "description": self.description,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceFormula:
+    """Describe how an FTQC resource quantity is derived.
+
+    Args:
+        quantity (str | FTQCResourceQuantity): Quantity produced by the
+            formula.
+        expression (sp.Expr | int | float): Symbolic expression for the
+            derivation. Symbols should use stable resource or model knob
+            names so reports can show the formula independently from a
+            concrete estimate value.
+        depends_on (tuple[str | FTQCResourceQuantity, ...]): Canonical
+            resource quantities referenced by the formula. Defaults to an
+            empty tuple for formulas that use only model-specific symbols.
+        description (str): Reader-facing explanation of the formula's role.
+            Defaults to an empty string.
+        reference_keys (tuple[str, ...]): Research reference keys that justify
+            the formula. Defaults to an empty tuple.
+
+    Raises:
+        TypeError: If ``expression`` cannot be converted to a SymPy
+            expression.
+        ValueError: If ``quantity`` or a dependency is not a known FTQC
+            resource quantity.
+
+    Example:
+        >>> formula = FTQCResourceFormula(
+        ...     quantity="qpe_iterations",
+        ...     expression=sp.Symbol("lambda_norm") / sp.Symbol("target_precision"),
+        ...     depends_on=("lambda_norm", "target_precision"),
+        ... )
+        >>> formula.to_dict()["quantity"]
+        'qpe_iterations'
+    """
+
+    quantity: str | FTQCResourceQuantity
+    expression: sp.Expr | int | float
+    depends_on: tuple[str | FTQCResourceQuantity, ...] = ()
+    description: str = ""
+    reference_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize formula fields after dataclass construction.
+
+        Raises:
+            TypeError: If ``expression`` cannot be sympified.
+            ValueError: If a quantity key is unknown.
+        """
+        object.__setattr__(
+            self,
+            "quantity",
+            _normalize_resource_quantity(self.quantity),
+        )
+        try:
+            expression = sp.sympify(self.expression)
+        except (TypeError, sp.SympifyError) as exc:
+            raise TypeError(
+                "expression must be a numeric or SymPy expression."
+            ) from exc
+        object.__setattr__(self, "expression", expression)
+        object.__setattr__(
+            self,
+            "depends_on",
+            tuple(
+                _normalize_resource_quantity(quantity) for quantity in self.depends_on
+            ),
+        )
+
+    def to_dict(self) -> dict[str, str | list[str]]:
+        """Serialize the formula.
+
+        Returns:
+            dict[str, str | list[str]]: JSON-friendly formula metadata.
+        """
+        quantity = cast(FTQCResourceQuantity, self.quantity)
+        depends_on = cast(tuple[FTQCResourceQuantity, ...], self.depends_on)
+        return {
+            "quantity": quantity.value,
+            "expression": str(self.expression),
+            "depends_on": [quantity.value for quantity in depends_on],
+            "description": self.description,
+            "reference_keys": list(self.reference_keys),
         }
 
 

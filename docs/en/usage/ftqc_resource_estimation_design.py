@@ -269,6 +269,30 @@ assert "arXiv:2412.01338" in compressed_reference_keys
 assert compressed.to_dict()["references"][0]["url"].startswith("https://arxiv.org/")
 
 # %% [markdown]
+# ## Formula Provenance
+#
+# Values are not enough for FTQC design review: reviewers also need to know
+# which symbolic formula produced each important resource. Estimates expose a
+# formula table whose rows use the same canonical quantity keys as
+# `resource_values()`.
+
+# %%
+formula_rows = compressed.to_formula_table()
+for row in formula_rows:
+    if row["quantity"] in {"qpe_iterations", "toffoli_gates", "runtime_seconds"}:
+        print(row["label"], "=", row["expression"])
+
+formula_by_quantity = {row["quantity"]: row for row in formula_rows}
+assert formula_by_quantity["qpe_iterations"]["expression"] == (
+    "lambda_norm/target_precision"
+)
+assert formula_by_quantity["toffoli_gates"]["depends_on"] == [
+    "qpe_iterations",
+    "walk_cost_toffoli",
+]
+assert "formulas" in compressed.to_dict()
+
+# %% [markdown]
 # ## Common Logical Resource Shape
 #
 # FTQC estimates can also expose their logical work through the same
@@ -392,6 +416,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation
 #   truncation error and QPE precision before estimates are compared.
+# - Formula provenance exposes the symbolic derivation behind important
+#   resource quantities.
 # - Surface-code assumptions can be modeled separately and converted into the
 #   cost model consumed by chemistry estimators.
 # - Surface-code distance can be selected from a logical failure budget before

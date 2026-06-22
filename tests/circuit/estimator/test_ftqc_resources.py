@@ -13,14 +13,20 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceCategory,
     FTQCResourceComparisonRow,
     FTQCResourceComparisonSummary,
+    FTQCResourceFormula,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
+    estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
+)
+from qamomile.circuit.estimator.algorithmic.ftqc_block_encoding import (
+    BlockEncodingResource,
+    estimate_qubitized_qpe_from_block_encoding,
 )
 
 
@@ -49,6 +55,39 @@ def test_ftqc_quantity_specs_cover_core_resource_layers():
         FTQCResourceCategory.ARCHITECTURE,
     }.issubset(categories)
     assert len(quantities) == len(specs)
+
+
+def test_ftqc_resource_formula_serializes_symbolic_derivations():
+    """Formula metadata records quantity dependencies and expression text."""
+    formula = FTQCResourceFormula(
+        quantity="qpe_iterations",
+        expression=sp.Symbol("lambda_norm") / sp.Symbol("target_precision"),
+        depends_on=("lambda_norm", "target_precision"),
+        description="QPE walk calls.",
+        reference_keys=("arXiv:1610.06546",),
+    )
+
+    assert formula.quantity == FTQCResourceQuantity.QPE_ITERATIONS
+    assert formula.depends_on == (
+        FTQCResourceQuantity.LAMBDA_NORM,
+        FTQCResourceQuantity.TARGET_PRECISION,
+    )
+    assert formula.to_dict() == {
+        "quantity": "qpe_iterations",
+        "expression": "lambda_norm/target_precision",
+        "depends_on": ["lambda_norm", "target_precision"],
+        "description": "QPE walk calls.",
+        "reference_keys": ["arXiv:1610.06546"],
+    }
+
+
+def test_ftqc_resource_formula_rejects_invalid_inputs():
+    """Formula metadata rejects unknown quantities and unsympifiable values."""
+    with pytest.raises(ValueError, match="Unknown FTQC resource quantity"):
+        FTQCResourceFormula(quantity="not-a-resource", expression=1)
+
+    with pytest.raises(TypeError, match="expression"):
+        FTQCResourceFormula(quantity="qpe_iterations", expression=object())
 
 
 def test_describe_ftqc_resource_quantity_normalizes_strings():
@@ -102,6 +141,60 @@ def test_ftqc_models_expose_canonical_resource_values():
     )
     assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == 1
     assert estimate.to_quantity_table()[0]["quantity"] == "logical_qubits"
+
+    formula_table = estimate.to_formula_table()
+    formula_by_quantity = {row["quantity"]: row for row in formula_table}
+
+    assert formula_by_quantity["qpe_iterations"]["expression"] == (
+        "lambda_norm/target_precision"
+    )
+    assert formula_by_quantity["toffoli_gates"]["depends_on"] == [
+        "qpe_iterations",
+        "walk_cost_toffoli",
+    ]
+    assert estimate.to_dict()["formulas"][0]["quantity"] == "qpe_iterations"
+
+
+def test_formula_tables_are_preserved_by_estimate_transforms():
+    """Estimate transforms preserve and transform formula metadata."""
+    lam, eps = sp.symbols("lambda_norm target_precision", positive=True)
+    estimate = estimate_qubitized_chemistry_qpe(
+        n_spin_orbitals=2,
+        lambda_norm=lam,
+        precision=eps,
+        walk_cost_toffoli=11,
+    )
+
+    substituted = estimate.substitute(lambda_norm=4, target_precision=2)
+
+    assert substituted.formulas[0].expression == 2
+    assert substituted.to_formula_table()[0]["expression"] == "2"
+    assert estimate.simplify().formulas[0].quantity == (
+        FTQCResourceQuantity.QPE_ITERATIONS
+    )
+
+
+def test_block_encoding_estimates_expose_formula_provenance():
+    """Block-encoding estimates expose walk and QPE formula provenance."""
+    block = BlockEncodingResource(
+        system_qubits=4,
+        normalization=100,
+        select_cost_toffoli=7,
+        prepare_cost_toffoli=5,
+        reflection_cost_toffoli=3,
+    )
+
+    estimate = estimate_qubitized_qpe_from_block_encoding(block, precision=2)
+    formulas = {formula.quantity: formula for formula in estimate.formulas}
+
+    assert formulas[FTQCResourceQuantity.WALK_COST_TOFFOLI].expression == (
+        2 * sp.Symbol("prepare_cost_toffoli", nonnegative=True)
+        + sp.Symbol("select_cost_toffoli", nonnegative=True)
+        + sp.Symbol("reflection_cost_toffoli", nonnegative=True)
+    )
+    assert formulas[FTQCResourceQuantity.QPE_ITERATIONS].reference_keys == (
+        "arXiv:1610.06546",
+    )
 
 
 def test_surface_code_model_exposes_raw_and_derived_resource_values():

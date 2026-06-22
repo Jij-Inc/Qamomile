@@ -248,6 +248,27 @@ assert "arXiv:2412.01338" in compressed_reference_keys
 assert compressed.to_dict()["references"][0]["url"].startswith("https://arxiv.org/")
 
 # %% [markdown]
+# ## Formula provenance
+#
+# FTQC設計レビューでは値だけでは不十分です。重要なresourceをどのsymbolic formulaで計算したかも確認する必要があります。estimateは`resource_values()`と同じcanonical quantity keyを使うformula tableを公開します。
+
+# %%
+formula_rows = compressed.to_formula_table()
+for row in formula_rows:
+    if row["quantity"] in {"qpe_iterations", "toffoli_gates", "runtime_seconds"}:
+        print(row["label"], "=", row["expression"])
+
+formula_by_quantity = {row["quantity"]: row for row in formula_rows}
+assert formula_by_quantity["qpe_iterations"]["expression"] == (
+    "lambda_norm/target_precision"
+)
+assert formula_by_quantity["toffoli_gates"]["depends_on"] == [
+    "qpe_iterations",
+    "walk_cost_toffoli",
+]
+assert "formulas" in compressed.to_dict()
+
+# %% [markdown]
 # ## 共通の論理リソース形状
 #
 # FTQC estimateは、circuit-levelの`estimate_resources()`と同じ`ResourceEstimate`形状でlogical workを公開することもできます。このviewはphysical量子ビットとruntimeを意図的に含めません。これらはarchitecture仮定に依存するため、FTQC estimate側に残します。
@@ -356,6 +377,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
+# - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
 # - Surface-code distanceは、logical failure budgetから選んだうえで、logical resourceをphysical量子ビットとruntimeへliftできます。
 # - code distanceなどのarchitecture quantityは各estimateに残るため、reportでphysical resource仮定をauditできます。

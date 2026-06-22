@@ -16,6 +16,7 @@ from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     references_for_chemistry_qpe_method,
 )
 from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
+    FTQCResourceFormula,
     FTQCResourceQuantity,
 )
 
@@ -31,6 +32,124 @@ _QUBITIZATION_REFERENCE = FTQCReference(
         "including PREPARE, SELECT, and reflection-style primitives."
     ),
 )
+
+
+def _positive_symbol(name: str) -> sp.Symbol:
+    """Create a positive SymPy symbol for formula metadata.
+
+    Args:
+        name (str): Symbol display name.
+
+    Returns:
+        sp.Symbol: Positive symbol with the requested name.
+    """
+    return sp.Symbol(name, positive=True)
+
+
+def _nonnegative_symbol(name: str) -> sp.Symbol:
+    """Create a nonnegative SymPy symbol for formula metadata.
+
+    Args:
+        name (str): Symbol display name.
+
+    Returns:
+        sp.Symbol: Nonnegative symbol with the requested name.
+    """
+    return sp.Symbol(name, nonnegative=True)
+
+
+def _block_encoding_qpe_formulas() -> tuple[FTQCResourceFormula, ...]:
+    """Return derivation formulas for block-encoding QPE estimates.
+
+    Returns:
+        tuple[FTQCResourceFormula, ...]: QPE iteration, walk-cost, Toffoli,
+            logical-depth, and architecture-lift formulas.
+    """
+    normalization = _positive_symbol(FTQCResourceQuantity.LAMBDA_NORM.value)
+    target_precision = _positive_symbol(FTQCResourceQuantity.TARGET_PRECISION.value)
+    prepare_cost = _nonnegative_symbol("prepare_cost_toffoli")
+    select_cost = _nonnegative_symbol("select_cost_toffoli")
+    reflection_cost = _nonnegative_symbol("reflection_cost_toffoli")
+    qpe_iterations = _nonnegative_symbol(FTQCResourceQuantity.QPE_ITERATIONS.value)
+    walk_cost = _nonnegative_symbol(FTQCResourceQuantity.WALK_COST_TOFFOLI.value)
+    toffoli_gates = _nonnegative_symbol(FTQCResourceQuantity.TOFFOLI_GATES.value)
+    logical_qubits = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_QUBITS.value)
+    logical_depth = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_DEPTH.value)
+    physical_qubits_per_logical = _positive_symbol(
+        FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL.value
+    )
+    factory_qubits = _nonnegative_symbol(FTQCResourceQuantity.FACTORY_QUBITS.value)
+    logical_cycle_time = _positive_symbol(
+        FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS.value
+    )
+    throughput = _positive_symbol(
+        FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND.value
+    )
+    return (
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.WALK_COST_TOFFOLI,
+            expression=2 * prepare_cost + select_cost + reflection_cost,
+            description=(
+                "Compose one qubitized walk from PREPARE, inverse PREPARE, "
+                "SELECT, and reflection costs."
+            ),
+            reference_keys=(_QUBITIZATION_REFERENCE.key,),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.QPE_ITERATIONS,
+            expression=normalization / target_precision,
+            depends_on=(
+                FTQCResourceQuantity.LAMBDA_NORM,
+                FTQCResourceQuantity.TARGET_PRECISION,
+            ),
+            description="Use block-encoding normalization divided by QPE precision.",
+            reference_keys=(_QUBITIZATION_REFERENCE.key,),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+            expression=qpe_iterations * walk_cost,
+            depends_on=(
+                FTQCResourceQuantity.QPE_ITERATIONS,
+                FTQCResourceQuantity.WALK_COST_TOFFOLI,
+            ),
+            description="Multiply walk calls by the Toffoli cost of one walk.",
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.LOGICAL_DEPTH,
+            expression=toffoli_gates,
+            depends_on=(FTQCResourceQuantity.TOFFOLI_GATES,),
+            description="Use Toffoli count as the logical-depth proxy.",
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.PHYSICAL_QUBITS,
+            expression=logical_qubits * physical_qubits_per_logical + factory_qubits,
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_QUBITS,
+                FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL,
+                FTQCResourceQuantity.FACTORY_QUBITS,
+            ),
+            description=(
+                "Lift logical qubits with architecture overhead and add factory qubits."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.RUNTIME_SECONDS,
+            expression=sp.Max(
+                logical_depth * logical_cycle_time,
+                toffoli_gates / throughput,
+            ),
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_DEPTH,
+                FTQCResourceQuantity.TOFFOLI_GATES,
+                FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS,
+                FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND,
+            ),
+            description=(
+                "Use the slower of logical-cycle execution and factory "
+                "throughput as the runtime proxy."
+            ),
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -293,6 +412,7 @@ def estimate_qubitized_qpe_from_block_encoding(
         ),
         assumptions=assumptions,
         references=references_for_estimate,
+        formulas=_block_encoding_qpe_formulas(),
         architecture_values=architecture_values,
     )
 
