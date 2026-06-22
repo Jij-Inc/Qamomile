@@ -316,9 +316,9 @@ not currently parse inline Markdown there.
 | Output | Where it ends up | In git? |
 |---|---|---|
 | Tag landing page | `_build_src/<lang>/tags/index.md` | no |
-| Per-tag pages | `_build_src/<lang>/tags/<tag>.md` (one per tag) | no |
+| Per-tag pages with article cards | `_build_src/<lang>/tags/<tag>.md` (one per tag) | no |
 | Inline tag chips at the top of each article | injected into the `.py`/`.ipynb` inside `_build_src/<lang>/<section>/` | no |
-| Section-index card tag chips and thumbnail slots | injected into cards inside `_build_src/<lang>/<section>/index.md` | no |
+| Section-index card tag chips, thumbnail slots, and header links | injected into cards inside `_build_src/<lang>/<section>/index.md` | no |
 | Browse-by-tag chip cloud on each section's `index.md` | injected into `_build_src/<lang>/<section>/index.md` | no |
 
 Where the script injects in the build-dir copy:
@@ -326,7 +326,8 @@ Where the script injects in the build-dir copy:
 | Where | How the script finds the spot |
 |---|---|
 | Article `.py` body | inserted right after the first H1 |
-| Section `index.md` cards | matched by each card's `:link:` target and the corresponding article slug |
+| Section `index.md` cards | matched by each card's `:link:` target (or an already linked header) and the corresponding article slug; generated output links the header so card tags can remain clickable |
+| Per-tag result cards | reuse the matching section `index.md` card body as the article summary |
 | Section `index.md` browse block | a whole `## Browse by tag` section is synthesised and inserted before the article card grid, or before the H2 that introduces that grid |
 
 The per-tag pages are picked up by mystmd via a single
