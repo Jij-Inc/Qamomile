@@ -68,7 +68,7 @@ from qamomile.circuit.estimator.algorithmic import (
 # | Symmetry-compressed double factorizationはqubitized chemistry QPEのHamiltonian 1-normとToffoli countを削減します([arXiv:2403.03502](https://arxiv.org/abs/2403.03502))。 | `lambda_norm`、QPE反復回数、walkあたりのToffoli cost、総Toffoli countを別々に追跡します。 |
 # | Simultaneous symmetry shiftsとtensor factorizationsは、electronic Hamiltonianのblock-encoding scaling constantを削減します([arXiv:2412.01338](https://arxiv.org/abs/2412.01338))。 | Hamiltonian normalizationを、emit済み回路の性質ではなく表現メタデータとして扱います。 |
 # | Symmetry-adapted filteringはQPE前のstate-preparation success probabilityを高める場合があります([arXiv:2601.08533](https://arxiv.org/abs/2601.08533))。 | success probability、期待QPE repetition、filtering overhead、T gates、runtimeを追跡します。 |
-# | Unitary weight concentrationを使うearly-FTQC single-ancilla QPEは、より小さいphysical量子ビットbudgetと限られたdepthを目標にします([arXiv:2603.22778](https://arxiv.org/abs/2603.22778))。 | Toffoli-nativeなqubitization costに加えて、T gates、logical depth、physical量子ビット、runtime、architecture knobを追跡します。 |
+# | Unitary weight concentrationを使うearly-FTQC single-ancilla QPEは、より小さいphysical量子ビットbudgetと限られたdepthを目標にします([arXiv:2603.22778](https://arxiv.org/abs/2603.22778))。 | Toffoli-nativeなqubitization costに加えて、T gates、logical depth、logical space-time volume、physical量子ビット、runtime、physical qubit-seconds、architecture knobを追跡します。 |
 #
 # これらはmodeling上の量です。特定の分子についてリソースを主張する前に、それぞれの論文の仮定に照らして検証する必要があります。
 
@@ -114,7 +114,13 @@ assert FTQCResourceQuantity.TRUNCATION_ERROR.value in {
     row["quantity"] for row in catalog
 }
 assert FTQCResourceQuantity.TOFFOLI_GATES.value in {row["quantity"] for row in catalog}
+assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME.value in {
+    row["quantity"] for row in catalog
+}
 assert FTQCResourceQuantity.RUNTIME_SECONDS.value in {
+    row["quantity"] for row in catalog
+}
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS.value in {
     row["quantity"] for row in catalog
 }
 assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in catalog}
@@ -218,7 +224,13 @@ assert compressed_model.resource_values()[FTQCResourceQuantity.TRUNCATION_ERROR]
 comparison = compare_ftqc_resource_estimates(
     baseline,
     compressed,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 
 for row in comparison:
@@ -227,6 +239,10 @@ for row in comparison:
 assert comparison[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
 assert comparison[0].ratio == sp.Float("0.5")
 assert sp.Abs(comparison[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
+assert comparison[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert compressed.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS] == (
+    compressed.physical_qubits * compressed.runtime_seconds
+)
 
 # %% [markdown]
 # 設計レビューでは、summary helperを使うと、同じ行をcandidateが小さい、大きい、変わらない、または現在の仮定ではsymbolicなまま、というグループに分けて読めます。`smaller`の先頭には、数値化できる範囲で削減率が大きい行が来ます。
@@ -235,7 +251,13 @@ assert sp.Abs(comparison[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
 comparison_summary = summarize_ftqc_resource_comparison(
     baseline,
     compressed,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 
 for row in comparison_summary.smaller:
@@ -388,7 +410,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #
 # このnotebookでは、次のことを学びました。
 #
-# - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
+# - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、logical space-time volume、physical量子ビット、runtime、physical qubit-secondsを分けて追跡する必要があることがわかります。
 # - `iter_ftqc_research_signals`は、研究方向をQamomileがreportするcanonical quantityへ対応づけます。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。

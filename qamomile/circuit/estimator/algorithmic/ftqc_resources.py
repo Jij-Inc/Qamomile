@@ -69,11 +69,13 @@ class FTQCResourceQuantity(enum.StrEnum):
             calls.
         LOGICAL_QUBITS: Logical qubits required by an algorithm.
         LOGICAL_DEPTH: Logical-depth proxy.
+        LOGICAL_SPACETIME_VOLUME: Logical qubit-layer volume proxy.
         TOFFOLI_GATES: Toffoli or Toffoli-equivalent non-Clifford count.
         T_GATES: T-gate or T-equivalent count.
         CLIFFORD_GATES: Clifford gate count.
         PHYSICAL_QUBITS: Physical qubits under an architecture model.
         RUNTIME_SECONDS: Runtime proxy in seconds.
+        PHYSICAL_QUBIT_SECONDS: Physical qubit-seconds space-time cost.
         LOGICAL_ERROR_RATE: Logical error-rate proxy per operation or cycle.
         TARGET_LOGICAL_FAILURE_PROBABILITY: Total allowed logical failure
             probability for an architecture budget.
@@ -123,11 +125,13 @@ class FTQCResourceQuantity(enum.StrEnum):
     QPE_ITERATIONS = "qpe_iterations"
     LOGICAL_QUBITS = "logical_qubits"
     LOGICAL_DEPTH = "logical_depth"
+    LOGICAL_SPACETIME_VOLUME = "logical_spacetime_volume"
     TOFFOLI_GATES = "toffoli_gates"
     T_GATES = "t_gates"
     CLIFFORD_GATES = "clifford_gates"
     PHYSICAL_QUBITS = "physical_qubits"
     RUNTIME_SECONDS = "runtime_seconds"
+    PHYSICAL_QUBIT_SECONDS = "physical_qubit_seconds"
     LOGICAL_ERROR_RATE = "logical_error_rate"
     TARGET_LOGICAL_FAILURE_PROBABILITY = "target_logical_failure_probability"
     LOGICAL_OPERATION_BUDGET = "logical_operation_budget"
@@ -650,6 +654,13 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "Logical circuit-depth proxy after algorithmic repetition factors.",
     ),
     FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+        "Logical space-time volume",
+        "logical qubit-layers",
+        FTQCResourceCategory.LOGICAL,
+        "Product of logical qubits and logical-depth proxy.",
+    ),
+    FTQCResourceQuantitySpec(
         FTQCResourceQuantity.TOFFOLI_GATES,
         "Toffoli gates",
         "Toffoli gates",
@@ -683,6 +694,13 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "seconds",
         FTQCResourceCategory.PHYSICAL,
         "Wall-clock runtime proxy under the selected architecture model.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        "Physical qubit-seconds",
+        "physical qubit-seconds",
+        FTQCResourceCategory.PHYSICAL,
+        "Product of physical qubits and wall-clock runtime proxy.",
     ),
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.LOGICAL_ERROR_RATE,
@@ -842,6 +860,7 @@ FTQC_RESEARCH_SIGNALS = (
             FTQCResourceQuantity.TOFFOLI_GATES,
             FTQCResourceQuantity.LOGICAL_QUBITS,
             FTQCResourceQuantity.RUNTIME_SECONDS,
+            FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
         ),
         design_note=(
             "Keep factorization ranks, normalization, and walk cost on the "
@@ -905,8 +924,10 @@ FTQC_RESEARCH_SIGNALS = (
             FTQCResourceQuantity.QPE_ITERATIONS,
             FTQCResourceQuantity.T_GATES,
             FTQCResourceQuantity.LOGICAL_DEPTH,
+            FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
             FTQCResourceQuantity.PHYSICAL_QUBITS,
             FTQCResourceQuantity.RUNTIME_SECONDS,
+            FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
         ),
         design_note=(
             "Track T gates, logical depth, and architecture knobs alongside "

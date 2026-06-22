@@ -249,6 +249,12 @@ def test_state_preparation_budget_scales_expected_qpe_work():
     assert repeated.physical_qubits == estimate.physical_qubits
     assert sp.Abs(repeated.runtime_seconds - sp.Float("0.00296")) < sp.Float("1e-12")
     assert repeated.resource_values()[
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+    ] == (repeated.logical_qubits * repeated.logical_depth)
+    assert repeated.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS] == (
+        repeated.physical_qubits * repeated.runtime_seconds
+    )
+    assert repeated.resource_values()[
         FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY
     ] == sp.Rational(1, 4)
     assert repeated.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS] == 4

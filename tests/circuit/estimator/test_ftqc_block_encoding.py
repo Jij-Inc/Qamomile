@@ -87,6 +87,9 @@ def test_qubitized_qpe_from_block_encoding_tracks_walk_calls_and_costs():
     assert estimate.qpe_iterations == 50
     assert estimate.target_precision == 2
     assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == 2
+    assert estimate.resource_values()[
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+    ] == (13 * 4750)
     assert estimate.resource_values()[FTQCResourceQuantity.SYSTEM_QUBITS] == 6
     assert estimate.resource_values()[FTQCResourceQuantity.PREPARE_COST_TOFFOLI] == 20
     assert estimate.resource_values()[FTQCResourceQuantity.SELECT_COST_TOFFOLI] == 50
@@ -95,6 +98,10 @@ def test_qubitized_qpe_from_block_encoding_tracks_walk_calls_and_costs():
     assert estimate.toffoli_gates == 4750
     assert estimate.physical_qubits == 1310
     assert sp.Abs(estimate.runtime_seconds - sp.Float("0.00475")) < sp.Float("1e-12")
+    assert sp.Abs(
+        estimate.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS]
+        - sp.Float("6.2225")
+    ) < sp.Float("1e-12")
     assert estimate.assumptions["block_encoding"] == "toy_lcu"
     assert estimate.to_dict()["algorithm_values"]["prepare_cost_toffoli"] == "20"
     assert any(reference.key == "arXiv:1610.06546" for reference in estimate.references)

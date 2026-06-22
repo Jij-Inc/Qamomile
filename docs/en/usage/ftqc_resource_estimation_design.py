@@ -81,7 +81,7 @@ from qamomile.circuit.estimator.algorithmic import (
 # | Symmetry-compressed double factorization reduces the Hamiltonian 1-norm and Toffoli count for qubitized chemistry QPE ([arXiv:2403.03502](https://arxiv.org/abs/2403.03502)). | Track `lambda_norm`, QPE iterations, per-walk Toffoli cost, and total Toffoli count separately. |
 # | Simultaneous symmetry shifts and tensor factorizations reduce the block-encoding scaling constant for electronic Hamiltonians ([arXiv:2412.01338](https://arxiv.org/abs/2412.01338)). | Treat Hamiltonian normalization as representation metadata, not as an emitted-circuit property. |
 # | Symmetry-adapted filtering can increase state-preparation success probability before QPE ([arXiv:2601.08533](https://arxiv.org/abs/2601.08533)). | Track success probability, expected QPE repetitions, filtering overhead, T gates, and runtime. |
-# | Early-FTQC single-ancilla QPE with unitary weight concentration targets smaller physical-qubit budgets and limited depth ([arXiv:2603.22778](https://arxiv.org/abs/2603.22778)). | Track T gates, logical depth, physical qubits, runtime, and architecture knobs in addition to Toffoli-native qubitization costs. |
+# | Early-FTQC single-ancilla QPE with unitary weight concentration targets smaller physical-qubit budgets and limited depth ([arXiv:2603.22778](https://arxiv.org/abs/2603.22778)). | Track T gates, logical depth, logical space-time volume, physical qubits, runtime, physical qubit-seconds, and architecture knobs in addition to Toffoli-native qubitization costs. |
 #
 # These are modeling quantities. They should be validated against each paper's
 # assumptions before being used as a molecule-specific resource claim.
@@ -129,7 +129,13 @@ assert FTQCResourceQuantity.TRUNCATION_ERROR.value in {
     row["quantity"] for row in catalog
 }
 assert FTQCResourceQuantity.TOFFOLI_GATES.value in {row["quantity"] for row in catalog}
+assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME.value in {
+    row["quantity"] for row in catalog
+}
 assert FTQCResourceQuantity.RUNTIME_SECONDS.value in {
+    row["quantity"] for row in catalog
+}
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS.value in {
     row["quantity"] for row in catalog
 }
 assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in catalog}
@@ -235,7 +241,13 @@ assert compressed_model.resource_values()[FTQCResourceQuantity.TRUNCATION_ERROR]
 comparison = compare_ftqc_resource_estimates(
     baseline,
     compressed,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 
 for row in comparison:
@@ -244,6 +256,10 @@ for row in comparison:
 assert comparison[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
 assert comparison[0].ratio == sp.Float("0.5")
 assert sp.Abs(comparison[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
+assert comparison[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert compressed.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS] == (
+    compressed.physical_qubits * compressed.runtime_seconds
+)
 
 # %% [markdown]
 # For design reviews, the summary helper groups the same rows by whether the
@@ -254,7 +270,13 @@ assert sp.Abs(comparison[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
 comparison_summary = summarize_ftqc_resource_comparison(
     baseline,
     compressed,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 
 for row in comparison_summary.smaller:
@@ -426,7 +448,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #
 # - Recent FTQC chemistry work motivates tracking Hamiltonian normalization,
 #   target precision, truncation error, QPE iterations, non-Clifford counts,
-#   logical depth, physical qubits, and runtime separately.
+#   logical depth, logical space-time volume, physical qubits, runtime, and
+#   physical qubit-seconds separately.
 # - `iter_ftqc_research_signals` maps research directions to the canonical
 #   quantities that Qamomile reports.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR

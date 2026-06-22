@@ -50,7 +50,9 @@ def test_ftqc_quantity_specs_cover_core_resource_layers():
     assert FTQCResourceQuantity.PREPARE_COST_TOFFOLI in quantities
     assert FTQCResourceQuantity.SELECT_COST_TOFFOLI in quantities
     assert FTQCResourceQuantity.REFLECTION_COST_TOFFOLI in quantities
+    assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in quantities
     assert FTQCResourceQuantity.TOFFOLI_GATES in quantities
+    assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in quantities
     assert FTQCResourceQuantity.LOGICAL_ERROR_RATE in quantities
     assert FTQCResourceQuantity.PHYSICAL_ERROR_RATE in quantities
     assert FTQCResourceQuantity.THRESHOLD_ERROR_RATE in quantities
@@ -83,6 +85,7 @@ def test_ftqc_research_signals_map_sources_to_quantity_catalog():
     scdf = signal_by_key["arXiv:2403.03502"]
     assert FTQCResourceQuantity.LAMBDA_NORM in scdf.quantities
     assert FTQCResourceQuantity.TOFFOLI_GATES in scdf.quantities
+    assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in scdf.quantities
 
     state_preparation = signal_by_key["arXiv:2601.08533"]
     assert (
@@ -93,6 +96,8 @@ def test_ftqc_research_signals_map_sources_to_quantity_catalog():
     assert state_preparation.to_dict()["quantities"][0] == (
         "state_preparation_success_probability"
     )
+    early_ftqc = signal_by_key["arXiv:2603.22778"]
+    assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in early_ftqc.quantities
 
 
 def test_ftqc_resource_formula_serializes_symbolic_derivations():
@@ -178,6 +183,12 @@ def test_ftqc_models_expose_canonical_resource_values():
         == 0
     )
     assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == 1
+    assert estimate.resource_values()[
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+    ] == (estimate.logical_qubits * estimate.logical_depth)
+    assert estimate.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS] == (
+        estimate.physical_qubits * estimate.runtime_seconds
+    )
     assert estimate.to_quantity_table()[0]["quantity"] == "logical_qubits"
 
     formula_table = estimate.to_formula_table()
@@ -189,6 +200,14 @@ def test_ftqc_models_expose_canonical_resource_values():
     assert formula_by_quantity["toffoli_gates"]["depends_on"] == [
         "qpe_iterations",
         "walk_cost_toffoli",
+    ]
+    assert formula_by_quantity["logical_spacetime_volume"]["depends_on"] == [
+        "logical_qubits",
+        "logical_depth",
+    ]
+    assert formula_by_quantity["physical_qubit_seconds"]["depends_on"] == [
+        "physical_qubits",
+        "runtime_seconds",
     ]
     assert estimate.to_dict()["formulas"][0]["quantity"] == "qpe_iterations"
 

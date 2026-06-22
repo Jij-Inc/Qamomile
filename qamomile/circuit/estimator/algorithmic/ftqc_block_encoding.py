@@ -77,6 +77,8 @@ def _block_encoding_qpe_formulas() -> tuple[FTQCResourceFormula, ...]:
     toffoli_gates = _nonnegative_symbol(FTQCResourceQuantity.TOFFOLI_GATES.value)
     logical_qubits = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_QUBITS.value)
     logical_depth = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_DEPTH.value)
+    physical_qubits = _nonnegative_symbol(FTQCResourceQuantity.PHYSICAL_QUBITS.value)
+    runtime_seconds = _nonnegative_symbol(FTQCResourceQuantity.RUNTIME_SECONDS.value)
     physical_qubits_per_logical = _positive_symbol(
         FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL.value
     )
@@ -154,6 +156,27 @@ def _block_encoding_qpe_formulas() -> tuple[FTQCResourceFormula, ...]:
             description=(
                 "Use the slower of logical-cycle execution and factory "
                 "throughput as the runtime proxy."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+            expression=logical_qubits * logical_depth,
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_QUBITS,
+                FTQCResourceQuantity.LOGICAL_DEPTH,
+            ),
+            description="Multiply logical qubits by logical-depth proxy.",
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+            expression=physical_qubits * runtime_seconds,
+            depends_on=(
+                FTQCResourceQuantity.PHYSICAL_QUBITS,
+                FTQCResourceQuantity.RUNTIME_SECONDS,
+            ),
+            description=(
+                "Multiply physical qubits by runtime as a hardware "
+                "space-time cost proxy."
             ),
         ),
     )
