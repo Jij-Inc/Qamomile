@@ -230,6 +230,21 @@ assert "arXiv:2412.01338" in compressed_reference_keys
 assert compressed.to_dict()["references"][0]["url"].startswith("https://arxiv.org/")
 
 # %% [markdown]
+# ## 共通の論理リソース形状
+#
+# FTQC estimateは、circuit-levelの`estimate_resources()`と同じ`ResourceEstimate`形状でlogical workを公開することもできます。このviewはphysical量子ビットとruntimeを意図的に含めません。これらはarchitecture仮定に依存するため、FTQC estimate側に残します。
+
+# %%
+logical_view = compressed.to_logical_resource_estimate()
+
+print(logical_view)
+assert logical_view.qubits == compressed.logical_qubits
+assert logical_view.gates.total == compressed.toffoli_gates
+assert logical_view.gates.multi_qubit == compressed.toffoli_gates
+assert logical_view.gates.oracle_calls["qpe_iterations"] == compressed.qpe_iterations
+assert "physical_qubits_per_logical" not in logical_view.parameters
+
+# %% [markdown]
 # ## Architecture感度
 #
 # estimateを作った後で別のarchitecture modelへreliftすると、algorithm modelを作り直さずにhardware仮定を調べられます。
@@ -320,6 +335,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - Surface-code仮定は別にmodel化し、chemistry推定器が使うcost modelへ変換できます。
 # - Surface-code distanceは、logical failure budgetから選んだうえで、logical resourceをphysical量子ビットとruntimeへliftできます。
 # - estimateに研究referenceを保持し、どの論文がsymbolic modelの根拠になったかをreportでauditできるようにします。
+# - reportでcircuit-level estimateと同じ形が必要な場合は、FTQC estimateを共通のlogical `ResourceEstimate` objectとして見られます。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。

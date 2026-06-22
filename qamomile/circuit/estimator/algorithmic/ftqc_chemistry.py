@@ -14,6 +14,8 @@ from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
     FTQCResourceQuantity,
     describe_ftqc_resource_quantity,
 )
+from qamomile.circuit.estimator.gate_counter import GateCount
+from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
@@ -1031,6 +1033,54 @@ class FTQCResourceEstimate:
             rows.append(row)
         return rows
 
+    def to_logical_resource_estimate(self) -> ResourceEstimate:
+        """Convert logical FTQC work into the common resource-estimate shape.
+
+        The returned estimate intentionally contains only logical-circuit-like
+        quantities. Physical qubits, runtime, architecture assumptions, and
+        research references remain on ``FTQCResourceEstimate`` so callers do
+        not accidentally treat architecture-lifted resources as circuit gate
+        counts.
+
+        Returns:
+            ResourceEstimate: Existing circuit-resource container populated
+                with logical qubits, non-Clifford counts, Clifford counts, and
+                QPE iteration count as an oracle-call proxy.
+        """
+        total_gates = sp.simplify(
+            self.toffoli_gates + self.t_gates + self.clifford_gates
+        )
+        gates = GateCount(
+            total=total_gates,
+            single_qubit=sp.simplify(self.t_gates + self.clifford_gates),
+            two_qubit=sp.Integer(0),
+            multi_qubit=self.toffoli_gates,
+            t_gates=self.t_gates,
+            clifford_gates=self.clifford_gates,
+            rotation_gates=sp.Integer(0),
+            oracle_calls={"qpe_iterations": self.qpe_iterations},
+            oracle_queries={},
+        )
+        parameters = _collect_parameters(
+            (
+                self.logical_qubits,
+                gates.total,
+                gates.single_qubit,
+                gates.two_qubit,
+                gates.multi_qubit,
+                gates.t_gates,
+                gates.clifford_gates,
+                gates.rotation_gates,
+                *gates.oracle_calls.values(),
+                *gates.oracle_queries.values(),
+            )
+        )
+        return ResourceEstimate(
+            qubits=self.logical_qubits,
+            gates=gates,
+            parameters=parameters,
+        )
+
     def with_cost_model(self, cost_model: FTQCCostModel) -> FTQCResourceEstimate:
         """Relift physical resources with a different architecture model.
 
@@ -1996,11 +2046,6 @@ def _build_estimate(
         logical_depth,
         runtime_seconds,
     ]
-    symbols: set[sp.Symbol] = set()
-    for expr in expressions:
-        for symbol in expr.free_symbols:
-            if isinstance(symbol, sp.Symbol):
-                symbols.add(symbol)
     return FTQCResourceEstimate(
         algorithm=algorithm,
         logical_qubits=sp.simplify(logical_qubits),
@@ -2012,10 +2057,31 @@ def _build_estimate(
         target_precision=sp.simplify(target_precision),
         logical_depth=sp.simplify(logical_depth),
         runtime_seconds=sp.simplify(runtime_seconds),
-        parameters={str(symbol): symbol for symbol in sorted(symbols, key=str)},
+        parameters=_collect_parameters(expressions),
         assumptions=assumptions,
         references=_combine_references(references),
     )
+
+
+def _collect_parameters(
+    expressions: tuple[sp.Expr, ...] | list[sp.Expr],
+) -> dict[str, sp.Symbol]:
+    """Collect free SymPy symbols from resource expressions.
+
+    Args:
+        expressions (tuple[sp.Expr, ...] | list[sp.Expr]): Resource
+            expressions whose free symbols should become substitution
+            parameters.
+
+    Returns:
+        dict[str, sp.Symbol]: Free symbols keyed by their display name.
+    """
+    symbols: set[sp.Symbol] = set()
+    for expr in expressions:
+        for symbol in expr.free_symbols:
+            if isinstance(symbol, sp.Symbol):
+                symbols.add(symbol)
+    return {str(symbol): symbol for symbol in sorted(symbols, key=str)}
 
 
 def _combine_references(

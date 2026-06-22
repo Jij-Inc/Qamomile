@@ -251,6 +251,24 @@ assert "arXiv:2412.01338" in compressed_reference_keys
 assert compressed.to_dict()["references"][0]["url"].startswith("https://arxiv.org/")
 
 # %% [markdown]
+# ## Common Logical Resource Shape
+#
+# FTQC estimates can also expose their logical work through the same
+# `ResourceEstimate` shape used by circuit-level `estimate_resources()`. This
+# view deliberately omits physical qubits and runtime, which remain on the
+# FTQC estimate because they depend on architecture assumptions.
+
+# %%
+logical_view = compressed.to_logical_resource_estimate()
+
+print(logical_view)
+assert logical_view.qubits == compressed.logical_qubits
+assert logical_view.gates.total == compressed.toffoli_gates
+assert logical_view.gates.multi_qubit == compressed.toffoli_gates
+assert logical_view.gates.oracle_calls["qpe_iterations"] == compressed.qpe_iterations
+assert "physical_qubits_per_logical" not in logical_view.parameters
+
+# %% [markdown]
 # ## Architecture Sensitivity
 #
 # Once an estimate exists, relift it with a different architecture model to
@@ -355,6 +373,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   lifting logical resources to physical qubits and runtime.
 # - Estimates carry research references so reports can audit which paper
 #   motivated a symbolic model.
+# - FTQC estimates can be viewed as common logical `ResourceEstimate` objects
+#   when reports need the same shape as circuit-level estimates.
 # - Existing logical estimates can be relifted under new architecture
 #   assumptions without rebuilding the algorithm estimate.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable

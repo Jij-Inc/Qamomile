@@ -45,6 +45,34 @@ def test_qubitized_qpe_tracks_lambda_precision_and_walk_cost():
     assert estimate.resource_values()[FTQCResourceQuantity.TARGET_PRECISION] == eps
 
 
+def test_ftqc_estimate_converts_to_common_logical_resource_estimate():
+    """FTQC estimates expose logical work through the shared resource shape."""
+    n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
+
+    estimate = estimate_qubitized_chemistry_qpe(
+        n,
+        lambda_norm=lam,
+        precision=eps,
+        walk_cost_toffoli=walk,
+        logical_qubits=n,
+    )
+
+    logical = estimate.to_logical_resource_estimate()
+    concrete = logical.substitute(**{"n": 10, "lambda": 100, "eps": 2, "C_W": 5})
+
+    assert logical.qubits == estimate.logical_qubits
+    assert logical.gates.total == lam * walk / eps
+    assert logical.gates.multi_qubit == estimate.toffoli_gates
+    assert logical.gates.t_gates == 0
+    assert logical.gates.clifford_gates == 0
+    assert logical.gates.oracle_calls["qpe_iterations"] == estimate.qpe_iterations
+    assert set(logical.parameters) == {"C_W", "eps", "lambda", "n"}
+    assert "physical_qubits_per_logical" not in logical.parameters
+    assert concrete.qubits == 10
+    assert concrete.gates.total == 250
+    assert concrete.gates.oracle_calls["qpe_iterations"] == 50
+
+
 def test_qubitized_qpe_uses_representation_specific_logical_qubits():
     """Representation defaults follow the chemistry-resource scaling table."""
     n, sparsity, rank = sp.symbols("n S Xi", positive=True)
