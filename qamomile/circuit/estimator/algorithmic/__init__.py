@@ -11,6 +11,10 @@ these provide theoretical estimates based on algorithm parameters
 without needing the actual circuit implementation.
 """
 
+from qamomile.circuit.estimator.algorithmic.ftqc_block_encoding import (
+    BlockEncodingResource,
+    estimate_qubitized_qpe_from_block_encoding,
+)
 from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
@@ -48,6 +52,7 @@ from qamomile.circuit.estimator.algorithmic.qpe import estimate_qpe
 __all__ = [
     "ChemistryQPEMethod",
     "ChemistryQPEModel",
+    "BlockEncodingResource",
     "FTQCResourceCategory",
     "FTQCResourceComparisonRow",
     "FTQCCostModel",
@@ -63,6 +68,7 @@ __all__ = [
     "estimate_qaoa",
     "estimate_qpe",
     "estimate_qubitized_chemistry_qpe",
+    "estimate_qubitized_qpe_from_block_encoding",
     "estimate_qubitized_chemistry_qpe_from_model",
     "estimate_single_ancilla_trotter_qpe",
     "estimate_single_ancilla_trotter_qpe_from_hamiltonian",
