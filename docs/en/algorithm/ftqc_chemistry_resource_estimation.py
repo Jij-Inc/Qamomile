@@ -40,6 +40,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    iter_ftqc_resource_quantity_specs,
     summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
@@ -88,6 +89,43 @@ cost_model = FTQCCostModel(
     factory_qubits=20000,
     toffoli_throughput_per_second=sp.Float("2e6"),
 )
+
+# %% [markdown]
+# ## Resource Quantities
+#
+# Symbolic FTQC estimates should keep problem quantities, logical work, and
+# physical assumptions separate. Qamomile exposes the canonical quantity
+# catalog so downstream reports can use stable keys while still showing
+# reader-facing labels, units, and modeling layers.
+
+# %%
+quantity_catalog = [
+    spec.to_dict()
+    for spec in iter_ftqc_resource_quantity_specs()
+    if spec.quantity.value
+    in {
+        "lambda_norm",
+        "qpe_iterations",
+        "toffoli_gates",
+        "t_gates",
+        "logical_qubits",
+        "physical_qubits",
+        "runtime_seconds",
+    }
+]
+
+for row in quantity_catalog:
+    print(row["quantity"], row["unit"], row["category"])
+
+assert {row["quantity"] for row in quantity_catalog} == {
+    "lambda_norm",
+    "qpe_iterations",
+    "toffoli_gates",
+    "t_gates",
+    "logical_qubits",
+    "physical_qubits",
+    "runtime_seconds",
+}
 
 # %% [markdown]
 # We start from a small Qamomile observable so the workflow has the same shape
@@ -186,6 +224,10 @@ print("THC Toffoli gates:", sp.N(thc.toffoli_gates, 4))
 print("SCDF-style Toffoli gates:", sp.N(scdf.toffoli_gates, 4))
 print("Toy Pauli terms:", toy_summary.n_pauli_terms)
 print("SCDF-style logical qubits:", scdf.logical_qubits)
+
+for row in scdf.to_quantity_table():
+    if row["quantity"] in {"qpe_iterations", "toffoli_gates", "physical_qubits"}:
+        print(row["label"], row["value"], row["unit"])
 
 # %% [markdown]
 # ## Early-FTQC Trotter QPE

@@ -25,6 +25,13 @@ from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
+from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
+    FTQCResourceCategory,
+    FTQCResourceQuantity,
+    FTQCResourceQuantitySpec,
+    describe_ftqc_resource_quantity,
+    iter_ftqc_resource_quantity_specs,
+)
 from qamomile.circuit.estimator.algorithmic.hamiltonian_simulation import (
     estimate_qdrift,
     estimate_qsvt,
@@ -36,9 +43,13 @@ from qamomile.circuit.estimator.algorithmic.qpe import estimate_qpe
 __all__ = [
     "ChemistryQPEMethod",
     "ChemistryQPEModel",
+    "FTQCResourceCategory",
     "FTQCCostModel",
     "FTQCResourceEstimate",
+    "FTQCResourceQuantity",
+    "FTQCResourceQuantitySpec",
     "PauliHamiltonianResource",
+    "describe_ftqc_resource_quantity",
     "estimate_qaoa",
     "estimate_qpe",
     "estimate_qubitized_chemistry_qpe",
@@ -46,6 +57,7 @@ __all__ = [
     "estimate_single_ancilla_trotter_qpe",
     "estimate_single_ancilla_trotter_qpe_from_hamiltonian",
     "hamiltonian_from_openfermion_qubit_operator",
+    "iter_ftqc_resource_quantity_specs",
     "summarize_openfermion_qubit_operator",
     "summarize_pauli_hamiltonian",
     "estimate_trotter",

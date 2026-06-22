@@ -36,6 +36,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    iter_ftqc_resource_quantity_specs,
     summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
@@ -68,6 +69,43 @@ cost_model = FTQCCostModel(
     factory_qubits=20000,
     toffoli_throughput_per_second=sp.Float("2e6"),
 )
+
+# %% [markdown]
+# ## Resource Quantities
+#
+# symbolicなFTQC estimatesでは、problem quantities、logical work、physical
+# assumptionsを分けて扱うべきです。Qamomileはcanonical quantity catalogを公開
+# しているので、downstream reportsは安定したkeyを使いつつ、読者向けのlabel、
+# unit、modeling layerも表示できます。
+
+# %%
+quantity_catalog = [
+    spec.to_dict()
+    for spec in iter_ftqc_resource_quantity_specs()
+    if spec.quantity.value
+    in {
+        "lambda_norm",
+        "qpe_iterations",
+        "toffoli_gates",
+        "t_gates",
+        "logical_qubits",
+        "physical_qubits",
+        "runtime_seconds",
+    }
+]
+
+for row in quantity_catalog:
+    print(row["quantity"], row["unit"], row["category"])
+
+assert {row["quantity"] for row in quantity_catalog} == {
+    "lambda_norm",
+    "qpe_iterations",
+    "toffoli_gates",
+    "t_gates",
+    "logical_qubits",
+    "physical_qubits",
+    "runtime_seconds",
+}
 
 # %% [markdown]
 # 小さなQamomile observableから始めます。実際の化学計算pipelineと同じ形にするためです。Hamiltonianを作る、または読み込み、LCU量を要約して、そのsummaryをFTQC Estimatorへ渡します。下のrescalingは、toy Hamiltonianを大きなactive-space modelの代わりとして使うためのものです。この係数が特定の分子を表すという主張ではありません。
@@ -158,6 +196,10 @@ print("THC Toffoli gates:", sp.N(thc.toffoli_gates, 4))
 print("SCDF-style Toffoli gates:", sp.N(scdf.toffoli_gates, 4))
 print("Toy Pauli terms:", toy_summary.n_pauli_terms)
 print("SCDF-style logical qubits:", scdf.logical_qubits)
+
+for row in scdf.to_quantity_table():
+    if row["quantity"] in {"qpe_iterations", "toffoli_gates", "physical_qubits"}:
+        print(row["label"], row["value"], row["unit"])
 
 # %% [markdown]
 # ## Early-FTQC Trotter QPE

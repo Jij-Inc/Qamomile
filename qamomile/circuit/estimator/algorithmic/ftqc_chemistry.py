@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING, Any
 
 import sympy as sp
 
+from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
+    FTQCResourceQuantity,
+    describe_ftqc_resource_quantity,
+)
+
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
 
@@ -120,6 +125,31 @@ class FTQCCostModel:
             "toffoli_throughput_per_second",
         )
 
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return architecture knobs keyed by canonical FTQC quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Architecture-model values.
+        """
+        return {
+            FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL: _as_expr(
+                self.physical_qubits_per_logical,
+                "physical_qubits_per_logical",
+            ),
+            FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS: _as_expr(
+                self.logical_cycle_time_seconds,
+                "logical_cycle_time_seconds",
+            ),
+            FTQCResourceQuantity.FACTORY_QUBITS: _as_expr(
+                self.factory_qubits,
+                "factory_qubits",
+            ),
+            FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND: _as_expr(
+                self.toffoli_throughput_per_second,
+                "toffoli_throughput_per_second",
+            ),
+        }
+
 
 @dataclass(frozen=True)
 class FTQCResourceEstimate:
@@ -209,6 +239,39 @@ class FTQCResourceEstimate:
             },
             "assumptions": dict(self.assumptions),
         }
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return estimate values keyed by canonical FTQC quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Resource values for logical
+                and physical output quantities.
+        """
+        return {
+            FTQCResourceQuantity.LOGICAL_QUBITS: self.logical_qubits,
+            FTQCResourceQuantity.PHYSICAL_QUBITS: self.physical_qubits,
+            FTQCResourceQuantity.TOFFOLI_GATES: self.toffoli_gates,
+            FTQCResourceQuantity.T_GATES: self.t_gates,
+            FTQCResourceQuantity.CLIFFORD_GATES: self.clifford_gates,
+            FTQCResourceQuantity.QPE_ITERATIONS: self.qpe_iterations,
+            FTQCResourceQuantity.LOGICAL_DEPTH: self.logical_depth,
+            FTQCResourceQuantity.RUNTIME_SECONDS: self.runtime_seconds,
+        }
+
+    def to_quantity_table(self) -> list[dict[str, str]]:
+        """Serialize estimate values with quantity metadata.
+
+        Returns:
+            list[dict[str, str]]: Rows containing ``quantity``, ``label``,
+                ``category``, ``unit``, ``value``, and ``description``.
+        """
+        rows = []
+        for quantity, value in self.resource_values().items():
+            spec = describe_ftqc_resource_quantity(quantity)
+            row = spec.to_dict()
+            row["value"] = str(value)
+            rows.append(row)
+        return rows
 
     def _map_exprs(self, fn: Callable[[sp.Expr], sp.Expr]) -> FTQCResourceEstimate:
         """Apply a function to each symbolic resource field.
@@ -334,6 +397,20 @@ class PauliHamiltonianResource:
             "constant": str(self.constant),
             "constant_included": self.constant_included,
             "source": self.source,
+        }
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return Hamiltonian metadata keyed by canonical FTQC quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Problem-level Hamiltonian
+                quantities that feed algorithmic FTQC estimates.
+        """
+        return {
+            FTQCResourceQuantity.N_SPIN_ORBITALS: self.n_spin_orbitals,
+            FTQCResourceQuantity.N_PAULI_TERMS: self.n_pauli_terms,
+            FTQCResourceQuantity.LAMBDA_NORM: self.lambda_norm,
+            FTQCResourceQuantity.MAX_LOCALITY: self.max_locality,
         }
 
 
@@ -467,6 +544,20 @@ class ChemistryQPEModel:
             ),
             "description": self.description,
         }
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return model inputs keyed by canonical FTQC quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Hamiltonian metadata plus
+                the representation-level walk cost.
+        """
+        values = self.hamiltonian.resource_values()
+        values[FTQCResourceQuantity.WALK_COST_TOFFOLI] = _as_expr(
+            self.walk_cost_toffoli,
+            "walk_cost_toffoli",
+        )
+        return values
 
 
 def summarize_pauli_hamiltonian(
