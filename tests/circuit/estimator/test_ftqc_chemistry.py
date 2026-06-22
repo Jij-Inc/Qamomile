@@ -14,6 +14,8 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    hamiltonian_from_openfermion_qubit_operator,
+    summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
 
@@ -267,3 +269,71 @@ def test_chemistry_qpe_model_rejects_negative_truncation_error():
             walk_cost_toffoli=1,
             truncation_error=-1,
         )
+
+
+def test_openfermion_qubit_operator_conversion_preserves_terms():
+    """OpenFermion qubit operators convert into Qamomile Hamiltonians."""
+    openfermion = pytest.importorskip("openfermion")
+
+    operator = (
+        openfermion.QubitOperator("Z0", 0.5)
+        + openfermion.QubitOperator("X1 Y2", -1.25j)
+        + openfermion.QubitOperator((), 0.75)
+    )
+
+    hamiltonian = hamiltonian_from_openfermion_qubit_operator(
+        operator,
+        num_qubits=5,
+    )
+
+    assert hamiltonian.num_qubits == 5
+    assert sp.sympify(hamiltonian.constant) == sp.Float("0.75")
+    assert len(hamiltonian) == 2
+    assert hamiltonian.terms[(qm_o.PauliOperator(qm_o.Pauli.Z, 0),)] == 0.5
+    assert (
+        hamiltonian.terms[
+            (
+                qm_o.PauliOperator(qm_o.Pauli.X, 1),
+                qm_o.PauliOperator(qm_o.Pauli.Y, 2),
+            )
+        ]
+        == -1.25j
+    )
+
+
+def test_openfermion_qubit_operator_summary_extracts_lcu_metadata():
+    """OpenFermion summaries feed the FTQC Hamiltonian-resource model."""
+    openfermion = pytest.importorskip("openfermion")
+    operator = (
+        openfermion.QubitOperator("Z0", 0.5)
+        + openfermion.QubitOperator("X1 Y2", -1.25j)
+        + openfermion.QubitOperator((), 0.75)
+    )
+
+    summary = summarize_openfermion_qubit_operator(
+        operator,
+        n_spin_orbitals=8,
+        include_constant=True,
+        source="h2_jordan_wigner",
+    )
+
+    assert summary.source == "h2_jordan_wigner"
+    assert summary.n_spin_orbitals == 8
+    assert summary.n_pauli_terms == 2
+    assert summary.max_locality == 2
+    assert sp.simplify(summary.lambda_norm - sp.Float("2.5")) == 0
+    assert summary.constant_included is True
+
+
+def test_openfermion_qubit_operator_conversion_rejects_malformed_input():
+    """Malformed OpenFermion-style inputs fail before resource estimation."""
+    with pytest.raises(TypeError, match="terms mapping"):
+        hamiltonian_from_openfermion_qubit_operator(object())
+
+    class BadOperator:
+        """Hold malformed OpenFermion-like terms for validation tests."""
+
+        terms = {((0, "A"),): 1.0}
+
+    with pytest.raises(ValueError, match="Unsupported OpenFermion Pauli label"):
+        hamiltonian_from_openfermion_qubit_operator(BadOperator())
