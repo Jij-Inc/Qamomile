@@ -10,6 +10,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCCostModel,
+    FTQCResearchSignal,
     FTQCResourceCategory,
     FTQCResourceComparisonRow,
     FTQCResourceComparisonSummary,
@@ -20,6 +21,7 @@ from qamomile.circuit.estimator.algorithmic import (
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
+    iter_ftqc_research_signals,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
@@ -64,6 +66,33 @@ def test_ftqc_quantity_specs_cover_core_resource_layers():
         FTQCResourceCategory.ARCHITECTURE,
     }.issubset(categories)
     assert len(quantities) == len(specs)
+
+
+def test_ftqc_research_signals_map_sources_to_quantity_catalog():
+    """Research signals explain why FTQC quantities are tracked."""
+    signals = iter_ftqc_research_signals()
+    signal_by_key = {signal.reference_key: signal for signal in signals}
+
+    assert all(isinstance(signal, FTQCResearchSignal) for signal in signals)
+    assert len(signal_by_key) == len(signals)
+    assert "arXiv:2403.03502" in signal_by_key
+    assert "arXiv:2601.08533" in signal_by_key
+    assert "arXiv:2603.22778" in signal_by_key
+    assert all(signal.url.startswith("https://arxiv.org/abs/") for signal in signals)
+
+    scdf = signal_by_key["arXiv:2403.03502"]
+    assert FTQCResourceQuantity.LAMBDA_NORM in scdf.quantities
+    assert FTQCResourceQuantity.TOFFOLI_GATES in scdf.quantities
+
+    state_preparation = signal_by_key["arXiv:2601.08533"]
+    assert (
+        FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY
+        in state_preparation.quantities
+    )
+    assert FTQCResourceQuantity.QPE_REPETITIONS in state_preparation.quantities
+    assert state_preparation.to_dict()["quantities"][0] == (
+        "state_preparation_success_probability"
+    )
 
 
 def test_ftqc_resource_formula_serializes_symbolic_derivations():

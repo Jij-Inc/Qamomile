@@ -40,6 +40,7 @@ from qamomile.circuit.estimator.algorithmic import (
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    iter_ftqc_research_signals,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
@@ -60,15 +61,28 @@ from qamomile.circuit.estimator.algorithmic import (
 # %% [markdown]
 # ## 研究上のシグナル
 #
-# 現在のquantity catalogは、近年のFTQC化学計算研究で使われているcost driverに合わせています。
+# 現在のquantity catalogは、近年のFTQC化学計算研究で使われているcost driverに合わせています。Qamomileはこの対応をstructured research signalとして公開しているため、reportで「なぜそのquantityを測るのか」を示せます。
 #
 # | Research direction | Cost signal for Qamomile |
 # | --- | --- |
 # | Symmetry-compressed double factorizationはqubitized chemistry QPEのHamiltonian 1-normとToffoli countを削減します([arXiv:2403.03502](https://arxiv.org/abs/2403.03502))。 | `lambda_norm`、QPE反復回数、walkあたりのToffoli cost、総Toffoli countを別々に追跡します。 |
 # | Simultaneous symmetry shiftsとtensor factorizationsは、electronic Hamiltonianのblock-encoding scaling constantを削減します([arXiv:2412.01338](https://arxiv.org/abs/2412.01338))。 | Hamiltonian normalizationを、emit済み回路の性質ではなく表現メタデータとして扱います。 |
+# | Symmetry-adapted filteringはQPE前のstate-preparation success probabilityを高める場合があります([arXiv:2601.08533](https://arxiv.org/abs/2601.08533))。 | success probability、期待QPE repetition、filtering overhead、T gates、runtimeを追跡します。 |
 # | Unitary weight concentrationを使うearly-FTQC single-ancilla QPEは、より小さいphysical量子ビットbudgetと限られたdepthを目標にします([arXiv:2603.22778](https://arxiv.org/abs/2603.22778))。 | Toffoli-nativeなqubitization costに加えて、T gates、logical depth、physical量子ビット、runtime、architecture knobを追跡します。 |
 #
 # これらはmodeling上の量です。特定の分子についてリソースを主張する前に、それぞれの論文の仮定に照らして検証する必要があります。
+
+# %%
+research_signals = [signal.to_dict() for signal in iter_ftqc_research_signals()]
+for signal in research_signals:
+    print(signal["reference_key"], "->", ", ".join(signal["quantities"][:4]))
+
+signal_by_key = {signal["reference_key"]: signal for signal in research_signals}
+assert "lambda_norm" in signal_by_key["arXiv:2403.03502"]["quantities"]
+assert "state_preparation_success_probability" in signal_by_key["arXiv:2601.08533"][
+    "quantities"
+]
+assert "t_gates" in signal_by_key["arXiv:2603.22778"]["quantities"]
 
 # %% [markdown]
 # ## Quantity Catalog
@@ -375,6 +389,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # このnotebookでは、次のことを学びました。
 #
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、physical量子ビット、runtimeを分けて追跡する必要があることがわかります。
+# - `iter_ftqc_research_signals`は、研究方向をQamomileがreportするcanonical quantityへ対応づけます。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。

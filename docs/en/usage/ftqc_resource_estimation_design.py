@@ -43,6 +43,7 @@ from qamomile.circuit.estimator.algorithmic import (
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    iter_ftqc_research_signals,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
@@ -72,16 +73,30 @@ from qamomile.circuit.estimator.algorithmic import (
 # ## Research Signals
 #
 # The current quantity catalog follows the cost drivers used in recent FTQC
-# chemistry work:
+# chemistry work. Qamomile exposes that mapping as structured research signals
+# so reports can show why a quantity is being measured:
 #
 # | Research direction | Cost signal for Qamomile |
 # | --- | --- |
 # | Symmetry-compressed double factorization reduces the Hamiltonian 1-norm and Toffoli count for qubitized chemistry QPE ([arXiv:2403.03502](https://arxiv.org/abs/2403.03502)). | Track `lambda_norm`, QPE iterations, per-walk Toffoli cost, and total Toffoli count separately. |
 # | Simultaneous symmetry shifts and tensor factorizations reduce the block-encoding scaling constant for electronic Hamiltonians ([arXiv:2412.01338](https://arxiv.org/abs/2412.01338)). | Treat Hamiltonian normalization as representation metadata, not as an emitted-circuit property. |
+# | Symmetry-adapted filtering can increase state-preparation success probability before QPE ([arXiv:2601.08533](https://arxiv.org/abs/2601.08533)). | Track success probability, expected QPE repetitions, filtering overhead, T gates, and runtime. |
 # | Early-FTQC single-ancilla QPE with unitary weight concentration targets smaller physical-qubit budgets and limited depth ([arXiv:2603.22778](https://arxiv.org/abs/2603.22778)). | Track T gates, logical depth, physical qubits, runtime, and architecture knobs in addition to Toffoli-native qubitization costs. |
 #
 # These are modeling quantities. They should be validated against each paper's
 # assumptions before being used as a molecule-specific resource claim.
+
+# %%
+research_signals = [signal.to_dict() for signal in iter_ftqc_research_signals()]
+for signal in research_signals:
+    print(signal["reference_key"], "->", ", ".join(signal["quantities"][:4]))
+
+signal_by_key = {signal["reference_key"]: signal for signal in research_signals}
+assert "lambda_norm" in signal_by_key["arXiv:2403.03502"]["quantities"]
+assert "state_preparation_success_probability" in signal_by_key["arXiv:2601.08533"][
+    "quantities"
+]
+assert "t_gates" in signal_by_key["arXiv:2603.22778"]["quantities"]
 
 # %% [markdown]
 # ## Quantity Catalog
@@ -412,6 +427,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - Recent FTQC chemistry work motivates tracking Hamiltonian normalization,
 #   target precision, truncation error, QPE iterations, non-Clifford counts,
 #   logical depth, physical qubits, and runtime separately.
+# - `iter_ftqc_research_signals` maps research directions to the canonical
+#   quantities that Qamomile reports.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation

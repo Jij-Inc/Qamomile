@@ -224,6 +224,50 @@ class FTQCResourceQuantitySpec:
 
 
 @dataclass(frozen=True)
+class FTQCResearchSignal:
+    """Map one research direction to Qamomile resource quantities.
+
+    Attributes:
+        reference_key (str): Stable citation key, usually an arXiv identifier.
+        title (str): Reader-facing title of the research source or direction.
+        url (str): Persistent URL for the source.
+        cost_driver (str): Short explanation of the resource driver that the
+            source changes or highlights.
+        quantities (tuple[FTQCResourceQuantity, ...]): Canonical Qamomile
+            quantities that should be inspected when modeling this direction.
+        design_note (str): Guidance for how Qamomile should represent the
+            signal without prematurely lowering it into backend circuits.
+
+    Example:
+        >>> signal = iter_ftqc_research_signals()[0]
+        >>> signal.to_dict()["reference_key"].startswith("arXiv:")
+        True
+    """
+
+    reference_key: str
+    title: str
+    url: str
+    cost_driver: str
+    quantities: tuple[FTQCResourceQuantity, ...]
+    design_note: str
+
+    def to_dict(self) -> dict[str, str | list[str]]:
+        """Serialize the research signal.
+
+        Returns:
+            dict[str, str | list[str]]: JSON-friendly research signal metadata.
+        """
+        return {
+            "reference_key": self.reference_key,
+            "title": self.title,
+            "url": self.url,
+            "cost_driver": self.cost_driver,
+            "quantities": [quantity.value for quantity in self.quantities],
+            "design_note": self.design_note,
+        }
+
+
+@dataclass(frozen=True)
 class FTQCResourceFormula:
     """Describe how an FTQC resource quantity is derived.
 
@@ -755,6 +799,131 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
 )
 
 _SPECS_BY_QUANTITY = {spec.quantity: spec for spec in FTQC_RESOURCE_QUANTITY_SPECS}
+
+
+FTQC_RESEARCH_SIGNALS = (
+    FTQCResearchSignal(
+        reference_key="arXiv:1610.06546",
+        title="Hamiltonian simulation by qubitization",
+        url="https://arxiv.org/abs/1610.06546",
+        cost_driver=(
+            "Qubitized walks compose block-encoding PREPARE, SELECT, and "
+            "reflection primitives before QPE repeats the walk."
+        ),
+        quantities=(
+            FTQCResourceQuantity.LAMBDA_NORM,
+            FTQCResourceQuantity.PREPARE_COST_TOFFOLI,
+            FTQCResourceQuantity.SELECT_COST_TOFFOLI,
+            FTQCResourceQuantity.REFLECTION_COST_TOFFOLI,
+            FTQCResourceQuantity.WALK_COST_TOFFOLI,
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+        ),
+        design_note=(
+            "Represent the block encoding as algorithmic metadata until a "
+            "loader implementation is ready to emit concrete circuits."
+        ),
+    ),
+    FTQCResearchSignal(
+        reference_key="arXiv:2403.03502",
+        title=(
+            "Symmetry-compressed double factorization for fault-tolerant "
+            "chemistry simulation"
+        ),
+        url="https://arxiv.org/abs/2403.03502",
+        cost_driver=(
+            "Symmetry-compressed factorization reduces Hamiltonian normalization "
+            "and Toffoli-dominated qubitized QPE cost."
+        ),
+        quantities=(
+            FTQCResourceQuantity.LAMBDA_NORM,
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.WALK_COST_TOFFOLI,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+        ),
+        design_note=(
+            "Keep factorization ranks, normalization, and walk cost on the "
+            "chemistry model rather than baking them into IR gates."
+        ),
+    ),
+    FTQCResearchSignal(
+        reference_key="arXiv:2412.01338",
+        title=(
+            "Symmetry shifts with tensor factorizations for cost-efficient "
+            "electronic Hamiltonians"
+        ),
+        url="https://arxiv.org/abs/2412.01338",
+        cost_driver=(
+            "Joint symmetry-shift and tensor-factorization optimization reduces "
+            "the block-encoding scaling constant."
+        ),
+        quantities=(
+            FTQCResourceQuantity.LAMBDA_NORM,
+            FTQCResourceQuantity.TRUNCATION_ERROR,
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+        ),
+        design_note=(
+            "Model symmetry-shift effects as representation metadata with an "
+            "explicit accuracy budget."
+        ),
+    ),
+    FTQCResearchSignal(
+        reference_key="arXiv:2601.08533",
+        title="Symmetry-adapted state preparation for FTQC chemistry",
+        url="https://arxiv.org/abs/2601.08533",
+        cost_driver=(
+            "Symmetry filtering can increase QPE success probability while "
+            "adding a smaller state-preparation overhead."
+        ),
+        quantities=(
+            FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY,
+            FTQCResourceQuantity.QPE_REPETITIONS,
+            FTQCResourceQuantity.STATE_PREPARATION_T_GATES,
+            FTQCResourceQuantity.STATE_PREPARATION_LOGICAL_DEPTH,
+            FTQCResourceQuantity.T_GATES,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+        ),
+        design_note=(
+            "Represent overlap and filtering success as an algorithmic budget "
+            "that scales expected QPE work."
+        ),
+    ),
+    FTQCResearchSignal(
+        reference_key="arXiv:2603.22778",
+        title="Chemically accurate QPE in the early fault-tolerant regime",
+        url="https://arxiv.org/abs/2603.22778",
+        cost_driver=(
+            "Single-ancilla Trotter QPE and unitary-weight concentration trade "
+            "block-encoding style costs for T gates, depth, and physical-qubit "
+            "constraints."
+        ),
+        quantities=(
+            FTQCResourceQuantity.LAMBDA_NORM,
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.T_GATES,
+            FTQCResourceQuantity.LOGICAL_DEPTH,
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+        ),
+        design_note=(
+            "Track T gates, logical depth, and architecture knobs alongside "
+            "Toffoli-native qubitization estimates."
+        ),
+    ),
+)
+
+
+def iter_ftqc_research_signals() -> tuple[FTQCResearchSignal, ...]:
+    """Return research signals that motivate Qamomile FTQC quantities.
+
+    Returns:
+        tuple[FTQCResearchSignal, ...]: Survey entries mapping research
+            directions to canonical FTQC quantity keys.
+    """
+    return FTQC_RESEARCH_SIGNALS
 
 
 def iter_ftqc_resource_quantity_specs() -> tuple[FTQCResourceQuantitySpec, ...]:
