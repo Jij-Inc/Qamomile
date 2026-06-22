@@ -19,7 +19,7 @@
 #
 # # FTQC化学計算のリソース推定
 #
-# このノートブックでは、Qamomileでfault-tolerantな量子化学計算のリソースモデルを比較する方法を示します。完全な論理回路がまだない段階で重要になる、Hamiltonian normalization、phase-estimation iterations、ToffoliまたはT counts、論理量子ビット、物理量子ビット、runtime proxiesに注目します。
+# このノートブックでは、Qamomileでfault-tolerantな量子化学計算のリソースモデルを比較する方法を示します。完全な論理回路がまだない段階で重要になる、Hamiltonian normalization、phase-estimation iterations、ToffoliまたはT counts、論理量子ビット、物理量子ビット、logical space-time volume、physical qubit-seconds、runtime proxiesに注目します。
 
 # %%
 # 最新のQamomileをpipでインストールします！
@@ -42,6 +42,7 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_qubitized_qpe_from_block_encoding,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    iter_ftqc_research_signals,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_openfermion_qubit_operator,
@@ -53,7 +54,7 @@ from qamomile.circuit.estimator.algorithmic import (
 #
 # Fault-tolerantな化学計算アルゴリズムは、NISQのvariationalな例とは異なるリソース量で比較されることが多くあります。qubitized QPEでは、Hamiltonian block-encoding normalizationがwalk callsの回数を決め、per-walk implementationがToffoli countを決めます。近年の化学計算向け提案では、backend-levelのgate decompositionだけを変えるのではなく、Hamiltonian representationを変えることでこれらのコストを下げようとします。
 #
-# 例として、symmetry-compressed double factorization([arXiv:2403.03502](https://arxiv.org/abs/2403.03502))、simultaneous symmetry shifts and tensor factorizations([arXiv:2412.01338](https://arxiv.org/abs/2412.01338))、unitary weight concentrationを使うearly-FTQC single-ancilla QPE([arXiv:2603.22778](https://arxiv.org/abs/2603.22778))があります。symmetry-adapted filtering([arXiv:2601.08533](https://arxiv.org/abs/2601.08533))のようなstate-preparation改善も、期待されるQPE試行回数を変えます。以下のEstimatorは意図的にsymbolicです。具体的なHamiltonian-loading circuitに進む前に、提案したrepresentationがコストを支配する量をどう変えるかを確認できます。
+# 例として、symmetry-compressed double factorization([arXiv:2403.03502](https://arxiv.org/abs/2403.03502))、simultaneous symmetry shifts and tensor factorizations([arXiv:2412.01338](https://arxiv.org/abs/2412.01338))、unitary weight concentrationを使うearly-FTQC single-ancilla QPE([arXiv:2603.22778](https://arxiv.org/abs/2603.22778))があります。symmetry-adapted filtering([arXiv:2601.08533](https://arxiv.org/abs/2601.08533))のようなstate-preparation改善も、期待されるQPE試行回数を変えます。これらの提案はalgorithmic work、logical depth、論理量子ビット、hardware runtimeをそれぞれ異なる形で交換するため、logical qubit-layersやphysical qubit-secondsのようなspace-time量がレビュー対象として役立ちます。以下のEstimatorは意図的にsymbolicです。具体的なHamiltonian-loading circuitに進む前に、提案したrepresentationがコストを支配する量をどう変えるかを確認できます。
 
 # %% [markdown]
 # ## Problem Settings
@@ -118,7 +119,9 @@ quantity_catalog = [
         "toffoli_gates",
         "t_gates",
         "logical_qubits",
+        "logical_spacetime_volume",
         "physical_qubits",
+        "physical_qubit_seconds",
         "runtime_seconds",
         "logical_error_rate",
         "code_distance",
@@ -137,11 +140,32 @@ assert {row["quantity"] for row in quantity_catalog} == {
     "toffoli_gates",
     "t_gates",
     "logical_qubits",
+    "logical_spacetime_volume",
     "physical_qubits",
+    "physical_qubit_seconds",
     "runtime_seconds",
     "logical_error_rate",
     "code_distance",
 }
+
+# %% [markdown]
+# research-signal catalogは、近年の論文と、Qamomile modelが公開すべき量を対応づけます。これにより、このチュートリアルは文章だけの主張ではなく、小さく確認可能なcontractに基づきます。
+
+# %%
+signal_by_key = {
+    signal.reference_key: signal for signal in iter_ftqc_research_signals()
+}
+scdf_signal = signal_by_key["arXiv:2403.03502"]
+early_ftqc_signal = signal_by_key["arXiv:2603.22778"]
+
+print(scdf_signal.title)
+print([quantity.value for quantity in scdf_signal.quantities])
+print(early_ftqc_signal.title)
+print([quantity.value for quantity in early_ftqc_signal.quantities])
+
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in scdf_signal.quantities
+assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in early_ftqc_signal.quantities
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in early_ftqc_signal.quantities
 
 # %% [markdown]
 # 小さなQamomile observableから始めます。実際の化学計算pipelineと同じ形にするためです。Hamiltonianを作る、または読み込み、LCU量を要約して、そのsummaryをFTQC Estimatorへ渡します。下のrescalingは、toy Hamiltonianを大きなactive-space modelの代わりとして使うためのものです。この係数が特定の分子を表すという主張ではありません。
@@ -240,13 +264,25 @@ print("Toy Pauli terms:", toy_summary.n_pauli_terms)
 print("SCDF-style logical qubits:", scdf.logical_qubits)
 
 for row in scdf.to_quantity_table():
-    if row["quantity"] in {"qpe_iterations", "toffoli_gates", "physical_qubits"}:
+    if row["quantity"] in {
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    }:
         print(row["label"], row["value"], row["unit"])
 
 qubitized_savings = compare_ftqc_resource_estimates(
     thc,
     scdf,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 for row in qubitized_savings:
     print(
@@ -260,11 +296,18 @@ for row in qubitized_savings:
 assert qubitized_savings[0].quantity.value == "qpe_iterations"
 assert qubitized_savings[0].ratio == sp.Float("0.5")
 assert sp.Abs(qubitized_savings[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
+assert qubitized_savings[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 
 qubitized_summary = summarize_ftqc_resource_comparison(
     thc,
     scdf,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 
 assert qubitized_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
@@ -293,7 +336,14 @@ symmetry_filtered_scdf = symmetry_filtered_budget.apply(scdf)
 preparation_savings = compare_ftqc_resource_estimates(
     weak_overlap_scdf,
     symmetry_filtered_scdf,
-    quantities=("qpe_repetitions", "qpe_iterations", "toffoli_gates", "runtime_seconds"),
+    quantities=(
+        "qpe_repetitions",
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "runtime_seconds",
+        "physical_qubit_seconds",
+    ),
 )
 
 for row in preparation_savings:
@@ -303,6 +353,9 @@ assert weak_overlap_scdf.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS]
 assert (
     symmetry_filtered_scdf.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS] == 2
 )
+assert symmetry_filtered_scdf.resource_values()[
+    FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+] == (symmetry_filtered_scdf.logical_qubits * symmetry_filtered_scdf.logical_depth)
 assert symmetry_filtered_scdf.qpe_iterations == scdf.qpe_iterations * 2
 assert symmetry_filtered_scdf.toffoli_gates < weak_overlap_scdf.toffoli_gates
 assert "state_preparation_success_probability" in symmetry_filtered_scdf.to_dict()[
@@ -366,7 +419,7 @@ print("UWC-style T gates:", sp.N(uwc_trotter.t_gates, 4))
 trotter_savings = compare_ftqc_resource_estimates(
     plain_trotter,
     uwc_trotter,
-    quantities=("qpe_iterations", "logical_depth"),
+    quantities=("qpe_iterations", "logical_depth", "logical_spacetime_volume"),
 )
 for row in trotter_savings:
     print(
@@ -379,11 +432,12 @@ for row in trotter_savings:
 
 assert trotter_savings[0].ratio == sp.Float("0.1")
 assert trotter_savings[1].ratio == sp.Float("0.05")
+assert trotter_savings[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 
 # %% [markdown]
 # ## Result
 #
-# 推定結果を小さな表にまとめます。重要なのは、各列が別々の設計上の意味を持つことです。Hamiltonian representationの変更は`qpe_iterations`とper-step costに効くべきで、hardware modelの変更は`physical_qubits`とruntimeに効くべきです。
+# 推定結果を小さな表にまとめます。重要なのは、各列が別々の設計上の意味を持つことです。Hamiltonian representationの変更は`qpe_iterations`とper-step costに効くべきで、hardware modelの変更は`physical_qubits`、runtime、physical qubit-secondsに効くべきです。
 
 # %%
 rows = [
@@ -402,19 +456,30 @@ for name, estimate in rows:
             "qpe_iterations": sp.N(estimate.qpe_iterations, 4),
             "toffoli_gates": sp.N(estimate.toffoli_gates, 4),
             "t_gates": sp.N(estimate.t_gates, 4),
+            "logical_spacetime_volume": sp.N(
+                estimate.resource_values()[FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME],
+                4,
+            ),
             "runtime_seconds": sp.N(estimate.runtime_seconds, 4),
+            "physical_qubit_seconds": sp.N(
+                estimate.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS],
+                4,
+            ),
         },
     )
 
 assert scdf.physical_qubits > thc.physical_qubits
 assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
+assert uwc_trotter.resource_values()[
+    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
+] < plain_trotter.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS]
 
 # %% [markdown]
 # ## Summary
 #
 # このノートブックでは、次のことを確認しました。
 #
-# - FTQC化学計算のリソース量を、Hamiltonian normalization、QPE iterations、non-Clifford counts、論理量子ビット、物理量子ビット、runtime proxiesに分けて扱いました。
+# - FTQC化学計算のリソース量を、Hamiltonian normalization、QPE iterations、non-Clifford counts、論理量子ビット、logical space-time volume、物理量子ビット、runtime proxies、physical qubit-secondsに分けて扱いました。
 # - comparableなestimateを作る前に、total target precisionをtruncation errorとQPE precisionへ割り当てました。
 # - state-preparation success probabilityを、QPE resourceの明示的な期待repetition factorとしてモデル化しました。
 # - Qamomile IRをbackend-specificなchemistry loading circuitsへloweringせずに、qubitized QPE representationsを比較しました。
@@ -422,3 +487,4 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 # - code distanceなどのarchitecture quantityを各resource estimateに残し、後続のreportでauditできるようにしました。
 # - chemistry QPE modelをblock-encoding contractへ変換し、PREPARE、SELECT、reflection、workspace costを分けてreviewできる形にしました。
 # - unitary-weight concentration factorを、early-FTQC single-ancilla Trotter QPEのcost-driver reductionとしてモデル化する方法を示しました。
+# - 近年のFTQC化学計算のresearch signalを、このチュートリアルで比較するcanonical quantitiesへ結びつけました。

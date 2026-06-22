@@ -23,7 +23,8 @@
 # models with Qamomile. It focuses on algorithm-level quantities that matter
 # before a full logical circuit is available: Hamiltonian normalization,
 # phase-estimation iterations, Toffoli or T counts, logical qubits, physical
-# qubits, and runtime proxies.
+# qubits, logical space-time volume, physical qubit-seconds, and runtime
+# proxies.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -46,6 +47,7 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_qubitized_qpe_from_block_encoding,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    iter_ftqc_research_signals,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_openfermion_qubit_operator,
@@ -70,10 +72,12 @@ from qamomile.circuit.estimator.algorithmic import (
 # ([arXiv:2603.22778](https://arxiv.org/abs/2603.22778)). State-preparation
 # improvements such as symmetry-adapted filtering
 # ([arXiv:2601.08533](https://arxiv.org/abs/2601.08533)) can also change the
-# expected number of QPE attempts. The estimators below are deliberately
-# symbolic. They let you test how a proposed representation changes the
-# cost-driving quantities before committing to a concrete Hamiltonian-loading
-# circuit.
+# expected number of QPE attempts. Because these proposals trade algorithmic
+# work, logical depth, logical qubits, and hardware runtime differently,
+# space-time quantities such as logical qubit-layers and physical qubit-seconds
+# are useful review targets. The estimators below are deliberately symbolic.
+# They let you test how a proposed representation changes the cost-driving
+# quantities before committing to a concrete Hamiltonian-loading circuit.
 
 # %% [markdown]
 # ## Problem Settings
@@ -141,7 +145,9 @@ quantity_catalog = [
         "toffoli_gates",
         "t_gates",
         "logical_qubits",
+        "logical_spacetime_volume",
         "physical_qubits",
+        "physical_qubit_seconds",
         "runtime_seconds",
         "logical_error_rate",
         "code_distance",
@@ -160,11 +166,34 @@ assert {row["quantity"] for row in quantity_catalog} == {
     "toffoli_gates",
     "t_gates",
     "logical_qubits",
+    "logical_spacetime_volume",
     "physical_qubits",
+    "physical_qubit_seconds",
     "runtime_seconds",
     "logical_error_rate",
     "code_distance",
 }
+
+# %% [markdown]
+# The research-signal catalog maps recent papers to the quantities they ask a
+# Qamomile model to expose. This keeps the tutorial grounded in a small,
+# inspectable contract instead of prose-only claims.
+
+# %%
+signal_by_key = {
+    signal.reference_key: signal for signal in iter_ftqc_research_signals()
+}
+scdf_signal = signal_by_key["arXiv:2403.03502"]
+early_ftqc_signal = signal_by_key["arXiv:2603.22778"]
+
+print(scdf_signal.title)
+print([quantity.value for quantity in scdf_signal.quantities])
+print(early_ftqc_signal.title)
+print([quantity.value for quantity in early_ftqc_signal.quantities])
+
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in scdf_signal.quantities
+assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in early_ftqc_signal.quantities
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in early_ftqc_signal.quantities
 
 # %% [markdown]
 # We start from a small Qamomile observable so the workflow has the same shape
@@ -271,13 +300,25 @@ print("Toy Pauli terms:", toy_summary.n_pauli_terms)
 print("SCDF-style logical qubits:", scdf.logical_qubits)
 
 for row in scdf.to_quantity_table():
-    if row["quantity"] in {"qpe_iterations", "toffoli_gates", "physical_qubits"}:
+    if row["quantity"] in {
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    }:
         print(row["label"], row["value"], row["unit"])
 
 qubitized_savings = compare_ftqc_resource_estimates(
     thc,
     scdf,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 for row in qubitized_savings:
     print(
@@ -291,11 +332,18 @@ for row in qubitized_savings:
 assert qubitized_savings[0].quantity.value == "qpe_iterations"
 assert qubitized_savings[0].ratio == sp.Float("0.5")
 assert sp.Abs(qubitized_savings[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
+assert qubitized_savings[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 
 qubitized_summary = summarize_ftqc_resource_comparison(
     thc,
     scdf,
-    quantities=("qpe_iterations", "toffoli_gates", "physical_qubits"),
+    quantities=(
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "physical_qubits",
+        "physical_qubit_seconds",
+    ),
 )
 
 assert qubitized_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
@@ -328,7 +376,14 @@ symmetry_filtered_scdf = symmetry_filtered_budget.apply(scdf)
 preparation_savings = compare_ftqc_resource_estimates(
     weak_overlap_scdf,
     symmetry_filtered_scdf,
-    quantities=("qpe_repetitions", "qpe_iterations", "toffoli_gates", "runtime_seconds"),
+    quantities=(
+        "qpe_repetitions",
+        "qpe_iterations",
+        "toffoli_gates",
+        "logical_spacetime_volume",
+        "runtime_seconds",
+        "physical_qubit_seconds",
+    ),
 )
 
 for row in preparation_savings:
@@ -338,6 +393,9 @@ assert weak_overlap_scdf.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS]
 assert (
     symmetry_filtered_scdf.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS] == 2
 )
+assert symmetry_filtered_scdf.resource_values()[
+    FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+] == (symmetry_filtered_scdf.logical_qubits * symmetry_filtered_scdf.logical_depth)
 assert symmetry_filtered_scdf.qpe_iterations == scdf.qpe_iterations * 2
 assert symmetry_filtered_scdf.toffoli_gates < weak_overlap_scdf.toffoli_gates
 assert "state_preparation_success_probability" in symmetry_filtered_scdf.to_dict()[
@@ -408,7 +466,7 @@ print("UWC-style T gates:", sp.N(uwc_trotter.t_gates, 4))
 trotter_savings = compare_ftqc_resource_estimates(
     plain_trotter,
     uwc_trotter,
-    quantities=("qpe_iterations", "logical_depth"),
+    quantities=("qpe_iterations", "logical_depth", "logical_spacetime_volume"),
 )
 for row in trotter_savings:
     print(
@@ -421,6 +479,7 @@ for row in trotter_savings:
 
 assert trotter_savings[0].ratio == sp.Float("0.1")
 assert trotter_savings[1].ratio == sp.Float("0.05")
+assert trotter_savings[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 
 # %% [markdown]
 # ## Result
@@ -428,7 +487,8 @@ assert trotter_savings[1].ratio == sp.Float("0.05")
 # We can put the estimates into a compact table. The important point is that
 # each column has a distinct design meaning: changing the Hamiltonian
 # representation should affect `qpe_iterations` and per-step cost, while
-# changing the hardware model should affect `physical_qubits` and runtime.
+# changing the hardware model should affect `physical_qubits`, runtime, and
+# physical qubit-seconds.
 
 # %%
 rows = [
@@ -447,12 +507,23 @@ for name, estimate in rows:
             "qpe_iterations": sp.N(estimate.qpe_iterations, 4),
             "toffoli_gates": sp.N(estimate.toffoli_gates, 4),
             "t_gates": sp.N(estimate.t_gates, 4),
+            "logical_spacetime_volume": sp.N(
+                estimate.resource_values()[FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME],
+                4,
+            ),
             "runtime_seconds": sp.N(estimate.runtime_seconds, 4),
+            "physical_qubit_seconds": sp.N(
+                estimate.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS],
+                4,
+            ),
         },
     )
 
 assert scdf.physical_qubits > thc.physical_qubits
 assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
+assert uwc_trotter.resource_values()[
+    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
+] < plain_trotter.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS]
 
 # %% [markdown]
 # ## Summary
@@ -461,7 +532,8 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 #
 # - Separated FTQC chemistry resource quantities into Hamiltonian
 #   normalization, QPE iterations, non-Clifford counts, logical qubits,
-#   physical qubits, and runtime proxies.
+#   logical space-time volume, physical qubits, runtime proxies, and physical
+#   qubit-seconds.
 # - Allocated a total target precision into truncation error and QPE precision
 #   before building comparable estimates.
 # - Modeled state-preparation success probability as an explicit expected
@@ -476,3 +548,5 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 #   SELECT, reflection, and workspace costs can be reviewed separately.
 # - Demonstrated how a unitary-weight concentration factor can be modeled as a
 #   cost-driver reduction for early-FTQC single-ancilla Trotter QPE.
+# - Connected recent FTQC chemistry research signals to the canonical
+#   quantities that the tutorial compares.
