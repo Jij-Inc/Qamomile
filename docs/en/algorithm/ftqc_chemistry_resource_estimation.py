@@ -39,6 +39,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCAccuracyBudget,
     FTQCResourceQuantity,
+    QPEStatePreparationBudget,
     SurfaceCodeDistanceBudget,
     block_encoding_from_chemistry_model,
     compare_ftqc_resource_estimates,
@@ -66,10 +67,13 @@ from qamomile.circuit.estimator.algorithmic import (
 # shifts and tensor factorizations
 # ([arXiv:2412.01338](https://arxiv.org/abs/2412.01338)), and early-FTQC
 # single-ancilla QPE with unitary weight concentration
-# ([arXiv:2603.22778](https://arxiv.org/abs/2603.22778)). The estimators below
-# are deliberately symbolic. They let you test how a proposed representation
-# changes the cost-driving quantities before committing to a concrete
-# Hamiltonian-loading circuit.
+# ([arXiv:2603.22778](https://arxiv.org/abs/2603.22778)). State-preparation
+# improvements such as symmetry-adapted filtering
+# ([arXiv:2601.08533](https://arxiv.org/abs/2601.08533)) can also change the
+# expected number of QPE attempts. The estimators below are deliberately
+# symbolic. They let you test how a proposed representation changes the
+# cost-driving quantities before committing to a concrete Hamiltonian-loading
+# circuit.
 
 # %% [markdown]
 # ## Problem Settings
@@ -131,6 +135,8 @@ quantity_catalog = [
     in {
         "lambda_norm",
         "target_precision",
+        "state_preparation_success_probability",
+        "qpe_repetitions",
         "qpe_iterations",
         "toffoli_gates",
         "t_gates",
@@ -148,6 +154,8 @@ for row in quantity_catalog:
 assert {row["quantity"] for row in quantity_catalog} == {
     "lambda_norm",
     "target_precision",
+    "state_preparation_success_probability",
+    "qpe_repetitions",
     "qpe_iterations",
     "toffoli_gates",
     "t_gates",
@@ -294,6 +302,49 @@ assert qubitized_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATI
 assert qubitized_summary.larger[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
 
 # %% [markdown]
+# ## State-Preparation Success Budget
+#
+# QPE cost also depends on whether the prepared state has enough overlap with
+# the target eigenstate. A symmetry filter or better trial-state preparation
+# can raise the success probability, while adding a small per-attempt overhead.
+# `QPEStatePreparationBudget` keeps that assumption explicit and scales the
+# expected repeated QPE work.
+
+# %%
+weak_overlap_budget = QPEStatePreparationBudget(
+    success_probability=sp.Rational(1, 8),
+    description="unfiltered trial state",
+)
+symmetry_filtered_budget = QPEStatePreparationBudget(
+    success_probability=sp.Rational(1, 2),
+    state_preparation_t_gates=sp.Integer(1_000_000),
+    state_preparation_logical_depth=sp.Integer(1_000_000),
+    description="symmetry-filtered trial state",
+)
+
+weak_overlap_scdf = weak_overlap_budget.apply(scdf)
+symmetry_filtered_scdf = symmetry_filtered_budget.apply(scdf)
+
+preparation_savings = compare_ftqc_resource_estimates(
+    weak_overlap_scdf,
+    symmetry_filtered_scdf,
+    quantities=("qpe_repetitions", "qpe_iterations", "toffoli_gates", "runtime_seconds"),
+)
+
+for row in preparation_savings:
+    print(row.label, "ratio:", sp.N(row.ratio, 4), "reduction:", sp.N(row.reduction, 4))
+
+assert weak_overlap_scdf.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS] == 8
+assert (
+    symmetry_filtered_scdf.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS] == 2
+)
+assert symmetry_filtered_scdf.qpe_iterations == scdf.qpe_iterations * 2
+assert symmetry_filtered_scdf.toffoli_gates < weak_overlap_scdf.toffoli_gates
+assert "state_preparation_success_probability" in symmetry_filtered_scdf.to_dict()[
+    "algorithm_values"
+]
+
+# %% [markdown]
 # The same chemistry model can also be converted into a block-encoding
 # contract. This is the point where a future loader implementation can split
 # cost into PREPARE, SELECT, reflection, and workspace pieces without changing
@@ -413,6 +464,8 @@ assert uwc_trotter.physical_qubits == plain_trotter.physical_qubits
 #   physical qubits, and runtime proxies.
 # - Allocated a total target precision into truncation error and QPE precision
 #   before building comparable estimates.
+# - Modeled state-preparation success probability as an explicit expected
+#   repetition factor for QPE resources.
 # - Compared qubitized QPE representations without lowering the Qamomile IR
 #   into backend-specific chemistry loading circuits.
 # - Selected surface-code distance from an explicit logical failure budget

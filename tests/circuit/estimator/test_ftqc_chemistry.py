@@ -13,6 +13,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     FTQCReference,
     FTQCResourceQuantity,
+    QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     estimate_qubitized_chemistry_qpe,
@@ -210,6 +211,67 @@ def test_accuracy_budget_rejects_overallocated_error_budget():
 
     with pytest.raises(TypeError, match="ChemistryQPEModel"):
         FTQCAccuracyBudget(target_precision=1).with_model(object())
+
+
+def test_state_preparation_budget_scales_expected_qpe_work():
+    """State-preparation success budgets scale repeated QPE attempts."""
+    summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=summary,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    budget = QPEStatePreparationBudget(
+        success_probability=sp.Rational(1, 4),
+        state_preparation_toffoli=20,
+        state_preparation_t_gates=4,
+        state_preparation_logical_depth=30,
+        description="symmetry-filtered trial state",
+    )
+
+    repeated = budget.apply(estimate)
+
+    assert budget.qpe_repetitions == 4
+    assert repeated.qpe_iterations == estimate.qpe_iterations * 4
+    assert repeated.toffoli_gates == (estimate.toffoli_gates + 20) * 4
+    assert repeated.t_gates == 16
+    assert repeated.logical_depth == (estimate.logical_depth + 30) * 4
+    assert repeated.physical_qubits == estimate.physical_qubits
+    assert sp.Abs(repeated.runtime_seconds - sp.Float("0.00296")) < sp.Float("1e-12")
+    assert repeated.resource_values()[
+        FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY
+    ] == sp.Rational(1, 4)
+    assert repeated.resource_values()[FTQCResourceQuantity.QPE_REPETITIONS] == 4
+    assert repeated.to_dict()["algorithm_values"]["qpe_repetitions"] == "4"
+    assert (
+        repeated.assumptions["state_preparation_description"]
+        == "symmetry-filtered trial state"
+    )
+
+
+def test_state_preparation_budget_rejects_invalid_probabilities():
+    """State-preparation success budgets reject invalid probability inputs."""
+    with pytest.raises(ValueError, match="success_probability"):
+        QPEStatePreparationBudget(success_probability=0)
+
+    with pytest.raises(ValueError, match="at most one"):
+        QPEStatePreparationBudget(success_probability=sp.Rational(3, 2))
+
+    with pytest.raises(ValueError, match="state_preparation_toffoli"):
+        QPEStatePreparationBudget(success_probability=1, state_preparation_toffoli=-1)
+
+    with pytest.raises(TypeError, match="FTQCResourceEstimate"):
+        QPEStatePreparationBudget(success_probability=1).apply(object())
 
 
 def test_cost_model_lifts_logical_estimates_to_physical_runtime():

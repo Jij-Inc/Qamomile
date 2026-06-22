@@ -933,6 +933,10 @@ class FTQCResourceEstimate:
             the estimate's scaling model or resource assumptions.
         formulas (tuple[FTQCResourceFormula, ...]): Structured derivation
             formulas for key resource quantities. Defaults to an empty tuple.
+        algorithm_values (dict[FTQCResourceQuantity, sp.Expr]): Additional
+            algorithm-level quantities, such as success probabilities and
+            repetition factors, keyed by the canonical FTQC catalog. Defaults
+            to an empty dictionary.
         architecture_values (dict[FTQCResourceQuantity, sp.Expr]): Architecture
             quantities used to lift logical resources to physical resources.
             These are keyed by the canonical FTQC quantity catalog.
@@ -958,6 +962,7 @@ class FTQCResourceEstimate:
     assumptions: dict[str, str] = field(default_factory=dict)
     references: tuple[FTQCReference, ...] = ()
     formulas: tuple[FTQCResourceFormula, ...] = ()
+    algorithm_values: dict[FTQCResourceQuantity, sp.Expr] = field(default_factory=dict)
     architecture_values: dict[FTQCResourceQuantity, sp.Expr] = field(
         default_factory=dict
     )
@@ -1011,6 +1016,10 @@ class FTQCResourceEstimate:
             "assumptions": dict(self.assumptions),
             "references": [reference.to_dict() for reference in self.references],
             "formulas": [formula.to_dict() for formula in self.formulas],
+            "algorithm_values": {
+                quantity.value: str(value)
+                for quantity, value in self.algorithm_values.items()
+            },
             "architecture_values": {
                 quantity.value: str(value)
                 for quantity, value in self.architecture_values.items()
@@ -1035,6 +1044,7 @@ class FTQCResourceEstimate:
             FTQCResourceQuantity.LOGICAL_DEPTH: self.logical_depth,
             FTQCResourceQuantity.RUNTIME_SECONDS: self.runtime_seconds,
         }
+        values.update(self.algorithm_values)
         values.update(self.architecture_values)
         return values
 
@@ -1162,6 +1172,7 @@ class FTQCResourceEstimate:
             assumptions=assumptions,
             references=self.references,
             formulas=self.formulas,
+            algorithm_values=self.algorithm_values,
             architecture_values=architecture_values,
         )
 
@@ -1199,10 +1210,233 @@ class FTQCResourceEstimate:
                 )
                 for formula in self.formulas
             ),
+            algorithm_values={
+                quantity: fn(value) for quantity, value in self.algorithm_values.items()
+            },
             architecture_values={
                 quantity: fn(value)
                 for quantity, value in self.architecture_values.items()
             },
+        )
+
+
+@dataclass(frozen=True)
+class QPEStatePreparationBudget:
+    """Model QPE repetitions caused by state-preparation success probability.
+
+    The budget keeps eigenstate overlap, symmetry filtering, or other
+    state-preparation success assumptions outside the circuit IR while still
+    making their cost visible in FTQC estimates.
+
+    Args:
+        success_probability (sp.Expr | int | float): Probability that one QPE
+            attempt starts in the target eigenstate subspace. This is often an
+            overlap-squared or post-filtering success proxy.
+        state_preparation_toffoli (sp.Expr | int | float): Toffoli overhead
+            paid by one state-preparation or filtering attempt. Defaults to
+            zero.
+        state_preparation_t_gates (sp.Expr | int | float): T-gate overhead
+            paid by one state-preparation or filtering attempt. Defaults to
+            zero.
+        state_preparation_logical_depth (sp.Expr | int | float): Logical-depth
+            overhead paid by one state-preparation or filtering attempt.
+            Defaults to zero.
+        description (str): Reader-facing note describing the preparation
+            model. Defaults to an empty string.
+        references (tuple[FTQCReference, ...]): Research references supporting
+            the preparation model. Defaults to an empty tuple.
+
+    Raises:
+        ValueError: If ``success_probability`` is non-positive or provably
+            larger than one, or if any overhead is negative.
+
+    Example:
+        >>> budget = QPEStatePreparationBudget(success_probability=sp.Rational(1, 4))
+        >>> budget.qpe_repetitions
+        4
+    """
+
+    success_probability: _SympyLike
+    state_preparation_toffoli: _SympyLike = 0
+    state_preparation_t_gates: _SympyLike = 0
+    state_preparation_logical_depth: _SympyLike = 0
+    description: str = ""
+    references: tuple[FTQCReference, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the state-preparation budget after construction.
+
+        Raises:
+            ValueError: If any field violates the success-budget contract.
+        """
+        _validate_probability(self._success_probability, "success_probability")
+        _validate_nonnegative(
+            self._state_preparation_toffoli,
+            "state_preparation_toffoli",
+        )
+        _validate_nonnegative(
+            self._state_preparation_t_gates,
+            "state_preparation_t_gates",
+        )
+        _validate_nonnegative(
+            self._state_preparation_logical_depth,
+            "state_preparation_logical_depth",
+        )
+
+    @property
+    def qpe_repetitions(self) -> sp.Expr:
+        """Return expected QPE attempts needed for one successful sample.
+
+        Returns:
+            sp.Expr: ``1 / success_probability``.
+        """
+        return sp.simplify(1 / self._success_probability)
+
+    def apply(self, estimate: FTQCResourceEstimate) -> FTQCResourceEstimate:
+        """Apply the success budget to an FTQC resource estimate.
+
+        The returned estimate scales QPE calls, non-Clifford work, logical
+        depth, and runtime by the expected repetition factor. State-preparation
+        overhead is added once per repeated attempt before scaling.
+
+        Args:
+            estimate (FTQCResourceEstimate): Base estimate for one QPE attempt.
+
+        Returns:
+            FTQCResourceEstimate: Estimate including expected repeated QPE
+                attempts caused by imperfect state preparation.
+
+        Raises:
+            TypeError: If ``estimate`` is not an ``FTQCResourceEstimate``.
+        """
+        if not isinstance(estimate, FTQCResourceEstimate):
+            raise TypeError("estimate must be an FTQCResourceEstimate instance.")
+
+        repetitions = self.qpe_repetitions
+        toffoli_gates = sp.simplify(
+            (estimate.toffoli_gates + self._state_preparation_toffoli) * repetitions
+        )
+        t_gates = sp.simplify(
+            (estimate.t_gates + self._state_preparation_t_gates) * repetitions
+        )
+        clifford_gates = sp.simplify(estimate.clifford_gates * repetitions)
+        qpe_iterations = sp.simplify(estimate.qpe_iterations * repetitions)
+        logical_depth = sp.simplify(
+            (estimate.logical_depth + self._state_preparation_logical_depth)
+            * repetitions
+        )
+        cost_model = _cost_model_from_resource_values(estimate.architecture_values)
+        assumptions = dict(estimate.assumptions)
+        assumptions["state_preparation_success_probability"] = str(
+            self._success_probability
+        )
+        if self.description:
+            assumptions["state_preparation_description"] = self.description
+
+        algorithm_values = dict(estimate.algorithm_values)
+        algorithm_values.update(self.resource_values())
+        formulas = _replace_formulas(
+            estimate.formulas,
+            _qpe_state_preparation_formulas(),
+        )
+        return _build_estimate(
+            algorithm=f"{estimate.algorithm}:state_preparation_budget",
+            logical_qubits=estimate.logical_qubits,
+            physical_qubits=estimate.physical_qubits,
+            toffoli_gates=toffoli_gates,
+            t_gates=t_gates,
+            clifford_gates=clifford_gates,
+            qpe_iterations=qpe_iterations,
+            target_precision=estimate.target_precision,
+            logical_depth=logical_depth,
+            runtime_seconds=cost_model.runtime_seconds_for(
+                logical_depth,
+                sp.simplify(toffoli_gates + t_gates),
+            ),
+            assumptions=assumptions,
+            references=_combine_references(estimate.references, self.references),
+            formulas=formulas,
+            algorithm_values=algorithm_values,
+            architecture_values=estimate.architecture_values,
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the state-preparation budget.
+
+        Returns:
+            dict[str, str]: JSON-friendly budget values.
+        """
+        return {
+            "success_probability": str(self._success_probability),
+            "qpe_repetitions": str(self.qpe_repetitions),
+            "state_preparation_toffoli": str(self._state_preparation_toffoli),
+            "state_preparation_t_gates": str(self._state_preparation_t_gates),
+            "state_preparation_logical_depth": str(
+                self._state_preparation_logical_depth
+            ),
+            "description": self.description,
+        }
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return state-preparation values keyed by canonical quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Success probability,
+                repetition factor, and per-attempt overheads.
+        """
+        return {
+            FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY: (
+                self._success_probability
+            ),
+            FTQCResourceQuantity.QPE_REPETITIONS: self.qpe_repetitions,
+            FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI: (
+                self._state_preparation_toffoli
+            ),
+            FTQCResourceQuantity.STATE_PREPARATION_T_GATES: (
+                self._state_preparation_t_gates
+            ),
+            FTQCResourceQuantity.STATE_PREPARATION_LOGICAL_DEPTH: (
+                self._state_preparation_logical_depth
+            ),
+        }
+
+    @property
+    def _success_probability(self) -> sp.Expr:
+        """Return ``success_probability`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted success probability.
+        """
+        return _as_expr(self.success_probability, "success_probability")
+
+    @property
+    def _state_preparation_toffoli(self) -> sp.Expr:
+        """Return ``state_preparation_toffoli`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted Toffoli overhead.
+        """
+        return _as_expr(self.state_preparation_toffoli, "state_preparation_toffoli")
+
+    @property
+    def _state_preparation_t_gates(self) -> sp.Expr:
+        """Return ``state_preparation_t_gates`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted T-gate overhead.
+        """
+        return _as_expr(self.state_preparation_t_gates, "state_preparation_t_gates")
+
+    @property
+    def _state_preparation_logical_depth(self) -> sp.Expr:
+        """Return ``state_preparation_logical_depth`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted logical-depth overhead.
+        """
+        return _as_expr(
+            self.state_preparation_logical_depth,
+            "state_preparation_logical_depth",
         )
 
 
@@ -2371,6 +2605,163 @@ def _single_ancilla_trotter_formulas() -> tuple[FTQCResourceFormula, ...]:
     )
 
 
+def _qpe_state_preparation_formulas() -> tuple[FTQCResourceFormula, ...]:
+    """Return formulas for state-preparation success overhead.
+
+    Returns:
+        tuple[FTQCResourceFormula, ...]: Repetition, total QPE-call,
+            non-Clifford, and depth formulas adjusted by success probability.
+    """
+    success_probability = _positive_symbol(
+        FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY.value
+    )
+    qpe_repetitions = _positive_symbol(FTQCResourceQuantity.QPE_REPETITIONS.value)
+    qpe_iterations = _nonnegative_symbol(FTQCResourceQuantity.QPE_ITERATIONS.value)
+    base_toffoli = _nonnegative_symbol("base_toffoli_gates")
+    base_t_gates = _nonnegative_symbol("base_t_gates")
+    base_depth = _nonnegative_symbol("base_logical_depth")
+    logical_qubits = _nonnegative_symbol(FTQCResourceQuantity.LOGICAL_QUBITS.value)
+    physical_qubits_per_logical = _positive_symbol(
+        FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL.value
+    )
+    factory_qubits = _nonnegative_symbol(FTQCResourceQuantity.FACTORY_QUBITS.value)
+    logical_cycle_time = _positive_symbol(
+        FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS.value
+    )
+    throughput = _positive_symbol(
+        FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND.value
+    )
+    preparation_toffoli = _nonnegative_symbol(
+        FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI.value
+    )
+    preparation_t_gates = _nonnegative_symbol(
+        FTQCResourceQuantity.STATE_PREPARATION_T_GATES.value
+    )
+    preparation_depth = _nonnegative_symbol(
+        FTQCResourceQuantity.STATE_PREPARATION_LOGICAL_DEPTH.value
+    )
+    return (
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.QPE_REPETITIONS,
+            expression=1 / success_probability,
+            depends_on=(FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY,),
+            description=(
+                "Use the inverse success probability as the expected number "
+                "of QPE attempts."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.QPE_ITERATIONS,
+            expression=qpe_iterations * qpe_repetitions,
+            depends_on=(
+                FTQCResourceQuantity.QPE_ITERATIONS,
+                FTQCResourceQuantity.QPE_REPETITIONS,
+            ),
+            description="Scale QPE walk calls by expected repeated attempts.",
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+            expression=(base_toffoli + preparation_toffoli) * qpe_repetitions,
+            depends_on=(
+                FTQCResourceQuantity.TOFFOLI_GATES,
+                FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI,
+                FTQCResourceQuantity.QPE_REPETITIONS,
+            ),
+            description=(
+                "Add state-preparation Toffoli overhead per attempt before "
+                "scaling by expected repetitions."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.T_GATES,
+            expression=(base_t_gates + preparation_t_gates) * qpe_repetitions,
+            depends_on=(
+                FTQCResourceQuantity.T_GATES,
+                FTQCResourceQuantity.STATE_PREPARATION_T_GATES,
+                FTQCResourceQuantity.QPE_REPETITIONS,
+            ),
+            description=(
+                "Add state-preparation T overhead per attempt before scaling "
+                "by expected repetitions."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.LOGICAL_DEPTH,
+            expression=(base_depth + preparation_depth) * qpe_repetitions,
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_DEPTH,
+                FTQCResourceQuantity.STATE_PREPARATION_LOGICAL_DEPTH,
+                FTQCResourceQuantity.QPE_REPETITIONS,
+            ),
+            description=(
+                "Add state-preparation depth overhead per attempt before "
+                "scaling by expected repetitions."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.PHYSICAL_QUBITS,
+            expression=logical_qubits * physical_qubits_per_logical + factory_qubits,
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_QUBITS,
+                FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL,
+                FTQCResourceQuantity.FACTORY_QUBITS,
+            ),
+            description=(
+                "State-preparation repetitions do not add logical qubits, so "
+                "physical qubits are lifted from the same logical footprint."
+            ),
+        ),
+        FTQCResourceFormula(
+            quantity=FTQCResourceQuantity.RUNTIME_SECONDS,
+            expression=sp.Max(
+                (base_depth + preparation_depth) * qpe_repetitions * logical_cycle_time,
+                (
+                    (base_toffoli + preparation_toffoli) * qpe_repetitions
+                    + (base_t_gates + preparation_t_gates) * qpe_repetitions
+                )
+                / throughput,
+            ),
+            depends_on=(
+                FTQCResourceQuantity.LOGICAL_DEPTH,
+                FTQCResourceQuantity.TOFFOLI_GATES,
+                FTQCResourceQuantity.T_GATES,
+                FTQCResourceQuantity.QPE_REPETITIONS,
+                FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS,
+                FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND,
+            ),
+            description=(
+                "Use the slower of repeated logical-depth execution and "
+                "factory throughput for repeated Toffoli plus T work."
+            ),
+        ),
+    )
+
+
+def _replace_formulas(
+    existing: tuple[FTQCResourceFormula, ...],
+    replacements: tuple[FTQCResourceFormula, ...],
+) -> tuple[FTQCResourceFormula, ...]:
+    """Replace formulas with matching quantities while preserving order.
+
+    Args:
+        existing (tuple[FTQCResourceFormula, ...]): Existing formula list.
+        replacements (tuple[FTQCResourceFormula, ...]): Replacement formulas.
+
+    Returns:
+        tuple[FTQCResourceFormula, ...]: Existing formulas with matching
+            quantities removed, followed by replacements.
+    """
+    replacement_quantities = {formula.quantity for formula in replacements}
+    return (
+        tuple(
+            formula
+            for formula in existing
+            if formula.quantity not in replacement_quantities
+        )
+        + replacements
+    )
+
+
 def _build_estimate(
     *,
     algorithm: str,
@@ -2386,6 +2777,7 @@ def _build_estimate(
     assumptions: dict[str, str],
     references: tuple[FTQCReference, ...] = (),
     formulas: tuple[FTQCResourceFormula, ...] = (),
+    algorithm_values: dict[FTQCResourceQuantity, sp.Expr] | None = None,
     architecture_values: dict[FTQCResourceQuantity, sp.Expr] | None = None,
 ) -> FTQCResourceEstimate:
     """Create an estimate and collect its free symbolic parameters.
@@ -2406,6 +2798,9 @@ def _build_estimate(
             scaling model.
         formulas (tuple[FTQCResourceFormula, ...]): Structured derivation
             formulas to attach to the estimate. Defaults to an empty tuple.
+        algorithm_values (dict[FTQCResourceQuantity, sp.Expr] | None):
+            Additional algorithm-level quantities exposed by the estimate.
+            Defaults to None.
         architecture_values (dict[FTQCResourceQuantity, sp.Expr] | None):
             Architecture quantities used to lift logical resources to physical
             resources. Defaults to None.
@@ -2413,6 +2808,7 @@ def _build_estimate(
     Returns:
         FTQCResourceEstimate: Estimate with collected parameters.
     """
+    algorithm_extras = dict(algorithm_values or {})
     architecture = dict(architecture_values or {})
     expressions = [
         logical_qubits,
@@ -2424,6 +2820,7 @@ def _build_estimate(
         target_precision,
         logical_depth,
         runtime_seconds,
+        *algorithm_extras.values(),
         *architecture.values(),
     ]
     return FTQCResourceEstimate(
@@ -2441,6 +2838,7 @@ def _build_estimate(
         assumptions=assumptions,
         references=_combine_references(references),
         formulas=formulas,
+        algorithm_values=algorithm_extras,
         architecture_values=architecture,
     )
 
@@ -2472,6 +2870,48 @@ def _normalize_cost_model(
     if isinstance(cost_model, FTQCCostModel):
         return cost_model, cost_model.resource_values()
     raise TypeError("cost_model must be an FTQCCostModel or SurfaceCodeCostModel.")
+
+
+def _cost_model_from_resource_values(
+    values: dict[FTQCResourceQuantity, sp.Expr],
+) -> FTQCCostModel:
+    """Build an ``FTQCCostModel`` from canonical architecture values.
+
+    Args:
+        values (dict[FTQCResourceQuantity, sp.Expr]): Architecture values from
+            an existing estimate.
+
+    Returns:
+        FTQCCostModel: Cost model reconstructed from canonical quantities.
+    """
+    default_model = FTQCCostModel()
+    return FTQCCostModel(
+        physical_qubits_per_logical=values.get(
+            FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL,
+            _as_expr(
+                default_model.physical_qubits_per_logical,
+                "physical_qubits_per_logical",
+            ),
+        ),
+        logical_cycle_time_seconds=values.get(
+            FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS,
+            _as_expr(
+                default_model.logical_cycle_time_seconds,
+                "logical_cycle_time_seconds",
+            ),
+        ),
+        factory_qubits=values.get(
+            FTQCResourceQuantity.FACTORY_QUBITS,
+            _as_expr(default_model.factory_qubits, "factory_qubits"),
+        ),
+        toffoli_throughput_per_second=values.get(
+            FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND,
+            _as_expr(
+                default_model.toffoli_throughput_per_second,
+                "toffoli_throughput_per_second",
+            ),
+        ),
+    )
 
 
 def _collect_parameters(
@@ -2626,3 +3066,19 @@ def _validate_nonnegative(expr: sp.Expr, name: str) -> None:
     """
     if expr.is_nonnegative is False:
         raise ValueError(f"{name} must be nonnegative.")
+
+
+def _validate_probability(expr: sp.Expr, name: str) -> None:
+    """Validate that an expression is in ``(0, 1]`` when decidable.
+
+    Args:
+        expr (sp.Expr): Probability expression to validate.
+        name (str): Field name used in error messages.
+
+    Raises:
+        ValueError: If SymPy can prove that ``expr`` is non-positive or larger
+            than one.
+    """
+    _validate_positive(expr, name)
+    if sp.simplify(expr - 1).is_positive:
+        raise ValueError(f"{name} must be at most one.")

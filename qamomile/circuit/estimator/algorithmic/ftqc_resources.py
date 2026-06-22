@@ -42,6 +42,16 @@ class FTQCResourceQuantity(enum.StrEnum):
         MAX_LOCALITY: Maximum Pauli-string locality.
         TARGET_PRECISION: Target algorithmic energy or phase precision.
         TRUNCATION_ERROR: Representation-level approximation error budget.
+        STATE_PREPARATION_SUCCESS_PROBABILITY: Success probability or squared
+            overlap of the prepared state with the target eigenstate subspace.
+        QPE_REPETITIONS: Expected number of QPE runs needed to obtain one
+            successful sample.
+        STATE_PREPARATION_TOFFOLI: Toffoli overhead of one state-preparation
+            or symmetry-filtering attempt.
+        STATE_PREPARATION_T_GATES: T-gate overhead of one state-preparation or
+            symmetry-filtering attempt.
+        STATE_PREPARATION_LOGICAL_DEPTH: Logical-depth overhead of one
+            state-preparation or symmetry-filtering attempt.
         WALK_COST_TOFFOLI: Toffoli cost of one qubitized walk.
         QPE_ITERATIONS: Number of phase-estimation walk or time-evolution
             calls.
@@ -86,6 +96,11 @@ class FTQCResourceQuantity(enum.StrEnum):
     MAX_LOCALITY = "max_locality"
     TARGET_PRECISION = "target_precision"
     TRUNCATION_ERROR = "truncation_error"
+    STATE_PREPARATION_SUCCESS_PROBABILITY = "state_preparation_success_probability"
+    QPE_REPETITIONS = "qpe_repetitions"
+    STATE_PREPARATION_TOFFOLI = "state_preparation_toffoli"
+    STATE_PREPARATION_T_GATES = "state_preparation_t_gates"
+    STATE_PREPARATION_LOGICAL_DEPTH = "state_preparation_logical_depth"
     WALK_COST_TOFFOLI = "walk_cost_toffoli"
     QPE_ITERATIONS = "qpe_iterations"
     LOGICAL_QUBITS = "logical_qubits"
@@ -466,6 +481,41 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
         "energy",
         FTQCResourceCategory.PROBLEM,
         "Representation-level approximation error budget before QPE sampling.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY,
+        "State-preparation success probability",
+        "probability",
+        FTQCResourceCategory.ALGORITHM,
+        "Probability that one prepared state lands in the target QPE subspace.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.QPE_REPETITIONS,
+        "QPE repetitions",
+        "runs",
+        FTQCResourceCategory.ALGORITHM,
+        "Expected repeated QPE runs needed for one successful sample.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI,
+        "State-preparation Toffoli overhead",
+        "Toffoli gates / run",
+        FTQCResourceCategory.ALGORITHM,
+        "Toffoli overhead of one state-preparation or filtering attempt.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.STATE_PREPARATION_T_GATES,
+        "State-preparation T overhead",
+        "T gates / run",
+        FTQCResourceCategory.ALGORITHM,
+        "T-gate overhead of one state-preparation or filtering attempt.",
+    ),
+    FTQCResourceQuantitySpec(
+        FTQCResourceQuantity.STATE_PREPARATION_LOGICAL_DEPTH,
+        "State-preparation depth overhead",
+        "logical layers / run",
+        FTQCResourceCategory.ALGORITHM,
+        "Logical-depth overhead of one state-preparation or filtering attempt.",
     ),
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.WALK_COST_TOFFOLI,
