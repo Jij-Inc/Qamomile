@@ -544,6 +544,14 @@ BROWSE_END = "<!-- END browse-by-tag -->"
 BROWSE_BLOCK_RE = re.compile(
     re.escape(BROWSE_BEGIN) + r"[\s\S]*?" + re.escape(BROWSE_END),
 )
+BROWSE_SECTION_RE = re.compile(
+    r"\n*^## [^\n]+\n(?:[ \t]*\n)*"
+    + re.escape(BROWSE_BEGIN)
+    + r"[\s\S]*?"
+    + re.escape(BROWSE_END)
+    + r"\n*",
+    re.MULTILINE,
+)
 GRID_DIRECTIVE_RE = re.compile(r"^:{3,}\{grid\}(?:\s|$)", re.MULTILINE)
 H2_RE = re.compile(r"^## ", re.MULTILINE)
 
@@ -615,19 +623,9 @@ def _render_browse_by_tag_block(
     return "\n\n".join(lines)
 
 
-def _strip_browse_by_tag_section(text: str, heading: str) -> str:
+def _strip_browse_by_tag_section(text: str) -> str:
     """Remove an existing auto-managed browse-by-tag section from ``text``."""
-    section_re = re.compile(
-        r"\n*^## "
-        + re.escape(heading)
-        + r"\n\n"
-        + re.escape(BROWSE_BEGIN)
-        + r"[\s\S]*?"
-        + re.escape(BROWSE_END)
-        + r"\n*",
-        re.MULTILINE,
-    )
-    stripped, count = section_re.subn("\n\n", text, count=1)
+    stripped, count = BROWSE_SECTION_RE.subn("\n\n", text, count=1)
     if count:
         return stripped
     return BROWSE_BLOCK_RE.sub("", text, count=1)
@@ -675,7 +673,7 @@ def _inject_browse_by_tag(
     heading = str(strings["browse_by_tag"])
     section_md = f"## {heading}\n\n{BROWSE_BEGIN}\n{block_body}\n{BROWSE_END}\n\n"
 
-    stripped_text = _strip_browse_by_tag_section(text, heading).strip()
+    stripped_text = _strip_browse_by_tag_section(text).strip()
     insert_at = _browse_by_tag_insert_at(stripped_text)
     if insert_at is None:
         new_text = stripped_text.rstrip() + "\n\n" + section_md
@@ -726,7 +724,11 @@ def _card_link_slug(link: str) -> str | None:
     targets that do not represent an article in the current section.
     """
     cleaned = link.strip()
-    if not cleaned or re.match(r"^[a-z]+://", cleaned):
+    if (
+        not cleaned
+        or cleaned.startswith("//")
+        or re.match(r"^[a-z][a-z0-9+.-]*:", cleaned, re.IGNORECASE)
+    ):
         return None
     cleaned = cleaned.split("#", 1)[0].split("?", 1)[0].strip("/")
     if not cleaned:

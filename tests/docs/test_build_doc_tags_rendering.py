@@ -121,3 +121,52 @@ Build a QAOA circuit with `qaoa_state`.
     assert bodies == {
         "qaoa_maxcut": "Build a QAOA circuit with <code>qaoa_state</code>."
     }
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://example.com/docs",
+        "mailto:docs@example.com",
+        "tel:+8100000000",
+        "urn:isbn:9780000000000",
+        "//example.com/docs",
+    ],
+)
+def test_card_link_slug_ignores_external_links(link: str) -> None:
+    """Card link slug extraction should ignore URI-style external links."""
+    mod = _load_build_doc_tags()
+
+    assert mod._card_link_slug(link) is None
+
+
+def test_card_link_slug_keeps_sibling_article_links() -> None:
+    """Card link slug extraction should keep local article links."""
+    mod = _load_build_doc_tags()
+
+    assert mod._card_link_slug("qaoa_maxcut.ipynb?view=card#overview") == "qaoa_maxcut"
+
+
+def test_strip_browse_by_tag_section_removes_stale_heading() -> None:
+    """Browse-by-tag stripping should remove headings with old localized text."""
+    mod = _load_build_doc_tags()
+    text = f"""# Algorithms
+
+Intro text.
+
+## Old tag heading
+
+{mod.BROWSE_BEGIN}
+chips
+{mod.BROWSE_END}
+
+::::{{grid}} 1 1 1 1
+::::
+"""
+
+    stripped = mod._strip_browse_by_tag_section(text)
+
+    assert "Old tag heading" not in stripped
+    assert mod.BROWSE_BEGIN not in stripped
+    assert mod.BROWSE_END not in stripped
+    assert "::::{grid} 1 1 1 1" in stripped
