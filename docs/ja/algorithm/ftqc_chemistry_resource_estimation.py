@@ -40,6 +40,7 @@ from qamomile.circuit.estimator.algorithmic import (
     QPEStatePreparationBudget,
     SurfaceCodeDistanceBudget,
     block_encoding_from_chemistry_model,
+    build_ftqc_research_signal_report,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_qubitized_qpe_from_block_encoding,
@@ -468,6 +469,18 @@ assert trotter_savings[3].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOL
 assert "lambda_norm=0.100000000000000" in uwc_trotter.assumptions[
     "resource_reduction_factors"
 ]
+
+uwc_signal_report = build_ftqc_research_signal_report(
+    "arXiv:2603.22778",
+    plain_trotter,
+    uwc_trotter,
+    baseline_label="Plain Trotter QPE",
+    candidate_label="UWC-style Trotter QPE",
+)
+print(uwc_signal_report.to_dict()["quantities"])
+
+assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
+assert "lambda_norm" not in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
 # ## Result

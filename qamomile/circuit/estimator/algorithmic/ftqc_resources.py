@@ -2034,6 +2034,29 @@ def iter_ftqc_research_signals() -> tuple[FTQCResearchSignal, ...]:
     return FTQC_RESEARCH_SIGNALS
 
 
+def describe_ftqc_research_signal(reference_key: str) -> FTQCResearchSignal:
+    """Return metadata for one FTQC research signal.
+
+    Args:
+        reference_key (str): Stable research-signal key, such as an arXiv
+            identifier.
+
+    Returns:
+        FTQCResearchSignal: Research signal metadata, including canonical
+            quantities and recommended review profiles.
+
+    Raises:
+        ValueError: If ``reference_key`` is not known.
+    """
+    for signal in FTQC_RESEARCH_SIGNALS:
+        if signal.reference_key == reference_key:
+            return signal
+    available = ", ".join(signal.reference_key for signal in FTQC_RESEARCH_SIGNALS)
+    raise ValueError(
+        f"Unknown FTQC research signal {reference_key!r}. Available keys: {available}."
+    )
+
+
 def iter_ftqc_resource_quantity_specs() -> tuple[FTQCResourceQuantitySpec, ...]:
     """Return the canonical FTQC resource quantity specifications.
 
@@ -2287,6 +2310,67 @@ def build_ftqc_resource_comparison_report(
         candidate_label=candidate_label,
         profile=normalized_profile,
         summary=summary,
+    )
+
+
+def build_ftqc_research_signal_report(
+    reference_key: str,
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+    *,
+    title: str = "",
+    baseline_label: str = "baseline",
+    candidate_label: str = "candidate",
+    require_all_quantities: bool = False,
+) -> FTQCResourceComparisonReport:
+    """Build a comparison report scoped to one FTQC research signal.
+
+    Research signals may list both problem-level drivers, such as
+    ``lambda_norm``, and output resources, such as ``logical_depth``. Concrete
+    estimates do not always expose every problem driver. By default this helper
+    compares the signal quantities exposed by both inputs. Set
+    ``require_all_quantities`` to true when auditing whether a model exposes
+    the full signal contract.
+
+    Args:
+        reference_key (str): Research-signal key used to select quantities.
+        baseline (SupportsFTQCResourceValues): Reference estimate, model, or
+            summary exposing ``resource_values()``.
+        candidate (SupportsFTQCResourceValues): Candidate estimate, model, or
+            summary exposing ``resource_values()``.
+        title (str): Reader-facing report title. Defaults to an empty string,
+            which derives a title from the research signal.
+        baseline_label (str): Label for the baseline estimate. Defaults to
+            ``"baseline"``.
+        candidate_label (str): Label for the candidate estimate. Defaults to
+            ``"candidate"``.
+        require_all_quantities (bool): Whether every research-signal quantity
+            must be present on both inputs. Defaults to False.
+
+    Returns:
+        FTQCResourceComparisonReport: Report over the selected research-signal
+            quantities.
+
+    Raises:
+        ValueError: If ``reference_key`` is unknown, no research-signal
+            quantities are exposed by both inputs, a required quantity is
+            missing, or a selected baseline value is zero.
+    """
+    signal = describe_ftqc_research_signal(reference_key)
+    quantities = _select_research_signal_quantities(
+        signal,
+        baseline.resource_values(),
+        candidate.resource_values(),
+        require_all_quantities=require_all_quantities,
+    )
+    report_title = title or f"{signal.reference_key} resource signal review"
+    return build_ftqc_resource_comparison_report(
+        baseline,
+        candidate,
+        title=report_title,
+        baseline_label=baseline_label,
+        candidate_label=candidate_label,
+        quantities=quantities,
     )
 
 
@@ -2659,6 +2743,62 @@ def _combine_resource_values(
             f"{quantity.value!r}: {current} vs {incoming}."
         )
     assert False, f"Unhandled FTQC resource aggregation rule: {rule!r}."
+
+
+def _select_research_signal_quantities(
+    signal: FTQCResearchSignal,
+    baseline_values: dict[FTQCResourceQuantity, sp.Expr],
+    candidate_values: dict[FTQCResourceQuantity, sp.Expr],
+    *,
+    require_all_quantities: bool,
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Select comparable quantities for one research signal.
+
+    Args:
+        signal (FTQCResearchSignal): Research signal whose quantities should
+            scope the comparison.
+        baseline_values (dict[FTQCResourceQuantity, sp.Expr]): Resource values
+            exposed by the baseline input.
+        candidate_values (dict[FTQCResourceQuantity, sp.Expr]): Resource
+            values exposed by the candidate input.
+        require_all_quantities (bool): Whether to reject any missing
+            research-signal quantity.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Research-signal quantities available
+            on both inputs, preserving signal order.
+
+    Raises:
+        ValueError: If a required quantity is missing or no comparable
+            quantities remain.
+    """
+    baseline_missing = [
+        quantity for quantity in signal.quantities if quantity not in baseline_values
+    ]
+    candidate_missing = [
+        quantity for quantity in signal.quantities if quantity not in candidate_values
+    ]
+    if require_all_quantities and (baseline_missing or candidate_missing):
+        missing = [
+            f"baseline={','.join(quantity.value for quantity in baseline_missing)}",
+            f"candidate={','.join(quantity.value for quantity in candidate_missing)}",
+        ]
+        raise ValueError(
+            "Missing FTQC research-signal quantities for "
+            f"{signal.reference_key!r}: {'; '.join(missing)}."
+        )
+
+    quantities = tuple(
+        quantity
+        for quantity in signal.quantities
+        if quantity in baseline_values and quantity in candidate_values
+    )
+    if not quantities:
+        raise ValueError(
+            "No comparable FTQC research-signal quantities are exposed by both "
+            f"inputs for {signal.reference_key!r}."
+        )
+    return quantities
 
 
 def _classify_change(reduction: sp.Expr) -> FTQCResourceChangeDirection:

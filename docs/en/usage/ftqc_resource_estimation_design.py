@@ -48,6 +48,7 @@ from qamomile.circuit.estimator.algorithmic import (
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
@@ -717,6 +718,29 @@ assert (
     uwc_trotter.assumptions["resource_reduction_description"]
     == "unitary weight concentration"
 )
+
+# %% [markdown]
+# A research-signal report scopes the comparison to the quantities motivated by
+# a specific paper. Concrete estimates may not expose every problem-level
+# driver from the signal, so the default report uses the signal quantities
+# available on both estimates.
+
+# %%
+uwc_signal_report = build_ftqc_research_signal_report(
+    "arXiv:2603.22778",
+    plain_trotter,
+    uwc_trotter,
+    baseline_label="Plain Trotter",
+    candidate_label="UWC Trotter",
+)
+print(uwc_signal_report.to_dict()["title"])
+print(uwc_signal_report.to_dict()["quantities"])
+
+assert uwc_signal_report.summary.rows[0].quantity == (
+    FTQCResourceQuantity.QPE_ITERATIONS
+)
+assert "lambda_norm" not in uwc_signal_report.to_dict()["quantities"]
+assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
 # ## Budget Constraints

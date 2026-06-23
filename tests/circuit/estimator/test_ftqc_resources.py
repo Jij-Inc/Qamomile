@@ -29,15 +29,19 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceProfileSpec,
     FTQCResourceQuantity,
     FTQCResourceReviewFinding,
+    HamiltonianResourceReduction,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_review_findings,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
+    describe_ftqc_research_signal,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
+    estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     evaluate_ftqc_resource_constraints,
     ftqc_resource_profile_quantities,
     iter_ftqc_research_signals,
@@ -969,6 +973,75 @@ def test_build_ftqc_resource_comparison_report_labels_profiled_rows():
     assert row_table[0]["baseline_label"] == "Sparse"
     assert row_table[0]["candidate_label"] == "Compressed"
     assert row_table[0]["quantity"] == "qpe_iterations"
+
+
+def test_build_ftqc_research_signal_report_selects_available_quantities():
+    """Research-signal reports compare available quantities and audit gaps."""
+    summary = summarize_pauli_hamiltonian(
+        qm_o.Z(0) + 2 * qm_o.Z(1) + 3 * qm_o.Z(2),
+        source="plain_trotter_lcu",
+    )
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        rotation_synthesis_t_gates=3,
+        cost_model=cost,
+    )
+    candidate = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        randomized_compilation_factor=sp.Rational(1, 2),
+        rotation_synthesis_t_gates=3,
+        resource_reduction=HamiltonianResourceReduction(
+            lambda_norm_factor=sp.Rational(1, 10)
+        ),
+        cost_model=cost,
+    )
+
+    signal = describe_ftqc_research_signal("arXiv:2603.22778")
+    report = build_ftqc_research_signal_report(
+        "arXiv:2603.22778",
+        baseline,
+        candidate,
+        baseline_label="Plain Trotter",
+        candidate_label="UWC Trotter",
+    )
+    row_quantities = [row.quantity for row in report.summary.rows]
+    row_table = report.to_row_table()
+
+    assert signal.profiles == (
+        FTQCResourceProfile.CHEMISTRY_QPE,
+        FTQCResourceProfile.SPACETIME,
+        FTQCResourceProfile.ARCHITECTURE,
+    )
+    assert report.title == "arXiv:2603.22778 resource signal review"
+    assert report.profile is None
+    assert row_quantities[0] == FTQCResourceQuantity.QPE_ITERATIONS
+    assert FTQCResourceQuantity.LAMBDA_NORM not in row_quantities
+    assert FTQCResourceQuantity.T_GATES in row_quantities
+    assert row_table[0]["baseline_label"] == "Plain Trotter"
+    assert row_table[0]["candidate_label"] == "UWC Trotter"
+
+    with pytest.raises(ValueError, match="lambda_norm"):
+        build_ftqc_research_signal_report(
+            "arXiv:2603.22778",
+            baseline,
+            candidate,
+            require_all_quantities=True,
+        )
+
+    with pytest.raises(ValueError, match="Unknown FTQC research signal"):
+        describe_ftqc_research_signal("arXiv:0000.00000")
 
 
 def test_ftqc_resource_review_findings_prioritize_savings_and_tradeoffs():
