@@ -15,13 +15,18 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceComparisonRow,
     FTQCResourceComparisonSummary,
     FTQCResourceFormula,
+    FTQCResourceProfile,
+    FTQCResourceProfileSpec,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
+    SurfaceCodeDistanceBudget,
     compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
+    ftqc_resource_profile_quantities,
     iter_ftqc_research_signals,
+    iter_ftqc_resource_profile_specs,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
@@ -98,6 +103,72 @@ def test_ftqc_research_signals_map_sources_to_quantity_catalog():
     )
     early_ftqc = signal_by_key["arXiv:2603.22778"]
     assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in early_ftqc.quantities
+
+
+def test_ftqc_resource_profiles_group_review_quantities():
+    """Resource profiles provide reusable quantity bundles for reviews."""
+    profiles = iter_ftqc_resource_profile_specs()
+    profile_by_key = {profile.profile: profile for profile in profiles}
+    quantity_catalog = {spec.quantity for spec in iter_ftqc_resource_quantity_specs()}
+
+    assert all(isinstance(profile, FTQCResourceProfileSpec) for profile in profiles)
+    assert set(profile_by_key) == {
+        FTQCResourceProfile.CHEMISTRY_QPE,
+        FTQCResourceProfile.BLOCK_ENCODING,
+        FTQCResourceProfile.SPACETIME,
+        FTQCResourceProfile.ERROR_BUDGET,
+        FTQCResourceProfile.ARCHITECTURE,
+    }
+    assert all(
+        quantity in quantity_catalog
+        for profile in profiles
+        for quantity in profile.quantities
+    )
+
+    chemistry_profile = profile_by_key[FTQCResourceProfile.CHEMISTRY_QPE]
+    assert FTQCResourceQuantity.LAMBDA_NORM in chemistry_profile.quantities
+    assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in chemistry_profile.quantities
+    assert chemistry_profile.to_dict()["profile"] == "chemistry_qpe"
+    assert ftqc_resource_profile_quantities("spacetime") == (
+        FTQCResourceQuantity.LOGICAL_QUBITS,
+        FTQCResourceQuantity.LOGICAL_DEPTH,
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+        FTQCResourceQuantity.PHYSICAL_QUBITS,
+        FTQCResourceQuantity.RUNTIME_SECONDS,
+        FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    )
+
+
+def test_ftqc_resource_profiles_match_concrete_resource_objects():
+    """Focused resource profiles match the objects that expose their values."""
+    distance_budget = SurfaceCodeDistanceBudget(
+        physical_error_rate=sp.Float("1e-3"),
+        threshold_error_rate=sp.Float("1e-2"),
+        target_logical_failure_probability=sp.Float("1e-2"),
+        logical_operation_budget=sp.Integer(10**8),
+    )
+    architecture = SurfaceCodeCostModel(
+        code_distance=7,
+        physical_cycle_time_seconds=sp.Float("2e-6"),
+        physical_qubits_per_logical_factor=2,
+        logical_cycle_factor=3,
+        factory_count=5,
+        physical_qubits_per_factory=1000,
+        factory_cycles_per_toffoli=4,
+    )
+
+    assert set(ftqc_resource_profile_quantities(FTQCResourceProfile.ERROR_BUDGET)) <= (
+        set(distance_budget.resource_values())
+    )
+    assert set(ftqc_resource_profile_quantities(FTQCResourceProfile.ARCHITECTURE)) <= (
+        set(architecture.resource_values())
+    )
+
+
+def test_ftqc_resource_profile_rejects_unknown_key():
+    """Unknown resource profile keys fail with finite-set diagnostics."""
+    with pytest.raises(ValueError, match="Unknown FTQC resource profile"):
+        ftqc_resource_profile_quantities("not-a-profile")
 
 
 def test_ftqc_resource_formula_serializes_symbolic_derivations():
@@ -320,6 +391,48 @@ def test_compare_ftqc_resource_estimates_reports_ratios_and_reductions():
     assert sp.simplify(rows[0].reduction - sp.Rational(1, 2)) == 0
     assert sp.simplify(rows[1].ratio - sp.Rational(11, 20)) == 0
     assert rows[1].to_dict()["unit"] == "Toffoli gates"
+
+
+def test_compare_ftqc_resource_estimates_accepts_profile_quantities():
+    """Comparison helpers accept quantities returned by standard profiles."""
+    baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=baseline,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    candidate_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=candidate,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=11,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+
+    rows = compare_ftqc_resource_estimates(
+        baseline_estimate,
+        candidate_estimate,
+        quantities=ftqc_resource_profile_quantities(FTQCResourceProfile.SPACETIME),
+    )
+
+    assert [row.quantity for row in rows] == list(
+        ftqc_resource_profile_quantities("spacetime")
+    )
+    assert rows[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+    assert rows[-1].quantity == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
 
 
 def test_compare_ftqc_resource_estimates_defaults_to_common_quantities():

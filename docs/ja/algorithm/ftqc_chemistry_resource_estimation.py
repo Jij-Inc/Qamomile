@@ -34,6 +34,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCAccuracyBudget,
+    FTQCResourceProfile,
     FTQCResourceQuantity,
     QPEStatePreparationBudget,
     SurfaceCodeDistanceBudget,
@@ -42,7 +43,9 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_qubitized_qpe_from_block_encoding,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    ftqc_resource_profile_quantities,
     iter_ftqc_research_signals,
+    iter_ftqc_resource_profile_specs,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_openfermion_qubit_operator,
@@ -147,6 +150,28 @@ assert {row["quantity"] for row in quantity_catalog} == {
     "logical_error_rate",
     "code_distance",
 }
+
+# %% [markdown]
+# Qamomileは標準review profileも提供します。これはよく使うaudit上の問いに対応する、小さなquantity bundleです。profileは新しいresourceを計算するものではなく、比較すべき列に名前を付けます。
+
+# %%
+profile_catalog = {
+    spec.profile: spec.to_dict() for spec in iter_ftqc_resource_profile_specs()
+}
+space_time_quantities = ftqc_resource_profile_quantities(
+    FTQCResourceProfile.SPACETIME
+)
+
+print(profile_catalog[FTQCResourceProfile.SPACETIME]["quantities"])
+
+assert space_time_quantities == (
+    FTQCResourceQuantity.LOGICAL_QUBITS,
+    FTQCResourceQuantity.LOGICAL_DEPTH,
+    FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+    FTQCResourceQuantity.PHYSICAL_QUBITS,
+    FTQCResourceQuantity.RUNTIME_SECONDS,
+    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+)
 
 # %% [markdown]
 # research-signal catalogは、近年の論文と、Qamomile modelが公開すべき量を対応づけます。これにより、このチュートリアルは文章だけの主張ではなく、小さく確認可能なcontractに基づきます。
@@ -263,26 +288,20 @@ print("SCDF-style Toffoli gates:", sp.N(scdf.toffoli_gates, 4))
 print("Toy Pauli terms:", toy_summary.n_pauli_terms)
 print("SCDF-style logical qubits:", scdf.logical_qubits)
 
+qubitized_quantities = (
+    FTQCResourceQuantity.QPE_ITERATIONS,
+    FTQCResourceQuantity.TOFFOLI_GATES,
+    *space_time_quantities,
+)
+
 for row in scdf.to_quantity_table():
-    if row["quantity"] in {
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "physical_qubits",
-        "physical_qubit_seconds",
-    }:
+    if row["quantity"] in {quantity.value for quantity in qubitized_quantities}:
         print(row["label"], row["value"], row["unit"])
 
 qubitized_savings = compare_ftqc_resource_estimates(
     thc,
     scdf,
-    quantities=(
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "physical_qubits",
-        "physical_qubit_seconds",
-    ),
+    quantities=qubitized_quantities,
 )
 for row in qubitized_savings:
     print(
@@ -296,22 +315,20 @@ for row in qubitized_savings:
 assert qubitized_savings[0].quantity.value == "qpe_iterations"
 assert qubitized_savings[0].ratio == sp.Float("0.5")
 assert sp.Abs(qubitized_savings[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
-assert qubitized_savings[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert qubitized_savings[4].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 
 qubitized_summary = summarize_ftqc_resource_comparison(
     thc,
     scdf,
-    quantities=(
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "physical_qubits",
-        "physical_qubit_seconds",
-    ),
+    quantities=qubitized_quantities,
 )
 
 assert qubitized_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
-assert qubitized_summary.larger[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+assert qubitized_summary.larger[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
+assert any(
+    row.quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+    for row in qubitized_summary.larger
+)
 
 # %% [markdown]
 # ## State-preparation success budget
@@ -337,12 +354,10 @@ preparation_savings = compare_ftqc_resource_estimates(
     weak_overlap_scdf,
     symmetry_filtered_scdf,
     quantities=(
-        "qpe_repetitions",
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "runtime_seconds",
-        "physical_qubit_seconds",
+        FTQCResourceQuantity.QPE_REPETITIONS,
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+        *space_time_quantities,
     ),
 )
 
@@ -419,7 +434,7 @@ print("UWC-style T gates:", sp.N(uwc_trotter.t_gates, 4))
 trotter_savings = compare_ftqc_resource_estimates(
     plain_trotter,
     uwc_trotter,
-    quantities=("qpe_iterations", "logical_depth", "logical_spacetime_volume"),
+    quantities=(FTQCResourceQuantity.QPE_ITERATIONS, *space_time_quantities),
 )
 for row in trotter_savings:
     print(
@@ -431,8 +446,8 @@ for row in trotter_savings:
     )
 
 assert trotter_savings[0].ratio == sp.Float("0.1")
-assert trotter_savings[1].ratio == sp.Float("0.05")
-assert trotter_savings[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert trotter_savings[2].ratio == sp.Float("0.05")
+assert trotter_savings[3].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 
 # %% [markdown]
 # ## Result
@@ -488,3 +503,4 @@ assert uwc_trotter.resource_values()[
 # - chemistry QPE modelをblock-encoding contractへ変換し、PREPARE、SELECT、reflection、workspace costを分けてreviewできる形にしました。
 # - unitary-weight concentration factorを、early-FTQC single-ancilla Trotter QPEのcost-driver reductionとしてモデル化する方法を示しました。
 # - 近年のFTQC化学計算のresearch signalを、このチュートリアルで比較するcanonical quantitiesへ結びつけました。
+# - 標準の`FTQCResourceProfile`を使い、space-time比較で同じquantity setを使うようにしました。

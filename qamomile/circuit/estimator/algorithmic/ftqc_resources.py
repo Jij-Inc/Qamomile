@@ -171,6 +171,28 @@ class FTQCResourceChangeDirection(enum.StrEnum):
     SYMBOLIC = "symbolic"
 
 
+class FTQCResourceProfile(enum.StrEnum):
+    """Name standard FTQC resource review profiles.
+
+    Attributes:
+        CHEMISTRY_QPE: End-to-end chemistry QPE comparison quantities.
+        BLOCK_ENCODING: Block-encoding subroutine quantities.
+        SPACETIME: Logical and physical space-time quantities.
+        ERROR_BUDGET: Surface-code error-budget and distance quantities.
+        ARCHITECTURE: Architecture knobs and derived architecture quantities.
+
+    Example:
+        >>> FTQCResourceProfile("spacetime")
+        <FTQCResourceProfile.SPACETIME: 'spacetime'>
+    """
+
+    CHEMISTRY_QPE = "chemistry_qpe"
+    BLOCK_ENCODING = "block_encoding"
+    SPACETIME = "spacetime"
+    ERROR_BUDGET = "error_budget"
+    ARCHITECTURE = "architecture"
+
+
 class SupportsFTQCResourceValues(Protocol):
     """Represent objects that expose canonical FTQC resource values.
 
@@ -224,6 +246,43 @@ class FTQCResourceQuantitySpec:
             "unit": self.unit,
             "category": self.category.value,
             "description": self.description,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceProfileSpec:
+    """Describe a standard FTQC resource review profile.
+
+    Attributes:
+        profile (FTQCResourceProfile): Machine-readable profile key.
+        label (str): Reader-facing profile label.
+        description (str): Short explanation of the review question covered
+            by the profile.
+        quantities (tuple[FTQCResourceQuantity, ...]): Ordered canonical
+            resource quantities included in the profile.
+
+    Example:
+        >>> spec = iter_ftqc_resource_profile_specs()[0]
+        >>> spec.to_dict()["profile"]
+        'chemistry_qpe'
+    """
+
+    profile: FTQCResourceProfile
+    label: str
+    description: str
+    quantities: tuple[FTQCResourceQuantity, ...]
+
+    def to_dict(self) -> dict[str, str | list[str]]:
+        """Serialize the profile specification.
+
+        Returns:
+            dict[str, str | list[str]]: JSON-friendly profile metadata.
+        """
+        return {
+            "profile": self.profile.value,
+            "label": self.label,
+            "description": self.description,
+            "quantities": [quantity.value for quantity in self.quantities],
         }
 
 
@@ -819,6 +878,110 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
 _SPECS_BY_QUANTITY = {spec.quantity: spec for spec in FTQC_RESOURCE_QUANTITY_SPECS}
 
 
+FTQC_RESOURCE_PROFILE_SPECS: tuple[FTQCResourceProfileSpec, ...] = (
+    FTQCResourceProfileSpec(
+        profile=FTQCResourceProfile.CHEMISTRY_QPE,
+        label="Chemistry QPE review",
+        description=(
+            "Compare Hamiltonian normalization, phase-estimation work, "
+            "non-Clifford counts, logical footprint, and physical space-time "
+            "costs for chemistry QPE variants."
+        ),
+        quantities=(
+            FTQCResourceQuantity.LAMBDA_NORM,
+            FTQCResourceQuantity.TARGET_PRECISION,
+            FTQCResourceQuantity.TRUNCATION_ERROR,
+            FTQCResourceQuantity.QPE_REPETITIONS,
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+            FTQCResourceQuantity.T_GATES,
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+            FTQCResourceQuantity.LOGICAL_DEPTH,
+            FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+            FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        ),
+    ),
+    FTQCResourceProfileSpec(
+        profile=FTQCResourceProfile.BLOCK_ENCODING,
+        label="Block-encoding subroutines",
+        description=(
+            "Inspect system, ancilla, PREPARE, SELECT, reflection, walk, and "
+            "QPE readout quantities before lowering a loader to concrete IR."
+        ),
+        quantities=(
+            FTQCResourceQuantity.SYSTEM_QUBITS,
+            FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS,
+            FTQCResourceQuantity.QPE_REGISTER_QUBITS,
+            FTQCResourceQuantity.PREPARE_COST_TOFFOLI,
+            FTQCResourceQuantity.SELECT_COST_TOFFOLI,
+            FTQCResourceQuantity.REFLECTION_COST_TOFFOLI,
+            FTQCResourceQuantity.WALK_COST_TOFFOLI,
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+        ),
+    ),
+    FTQCResourceProfileSpec(
+        profile=FTQCResourceProfile.SPACETIME,
+        label="Space-time footprint",
+        description=(
+            "Review logical qubit-layers and physical qubit-seconds alongside "
+            "their qubit, depth, and runtime factors."
+        ),
+        quantities=(
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+            FTQCResourceQuantity.LOGICAL_DEPTH,
+            FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+            FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        ),
+    ),
+    FTQCResourceProfileSpec(
+        profile=FTQCResourceProfile.ERROR_BUDGET,
+        label="Surface-code error budget",
+        description=(
+            "Audit physical error assumptions, target logical failure "
+            "probability, operation budget, selected code distance, and "
+            "resulting logical error rate."
+        ),
+        quantities=(
+            FTQCResourceQuantity.PHYSICAL_ERROR_RATE,
+            FTQCResourceQuantity.THRESHOLD_ERROR_RATE,
+            FTQCResourceQuantity.TARGET_LOGICAL_FAILURE_PROBABILITY,
+            FTQCResourceQuantity.LOGICAL_OPERATION_BUDGET,
+            FTQCResourceQuantity.CODE_DISTANCE,
+            FTQCResourceQuantity.LOGICAL_ERROR_RATE,
+        ),
+    ),
+    FTQCResourceProfileSpec(
+        profile=FTQCResourceProfile.ARCHITECTURE,
+        label="Architecture lift",
+        description=(
+            "Audit the patch overhead, cycle time, and factory assumptions "
+            "used to lift logical work after a code distance is selected."
+        ),
+        quantities=(
+            FTQCResourceQuantity.CODE_DISTANCE,
+            FTQCResourceQuantity.PHYSICAL_CYCLE_TIME_SECONDS,
+            FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL_FACTOR,
+            FTQCResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL,
+            FTQCResourceQuantity.LOGICAL_CYCLE_FACTOR,
+            FTQCResourceQuantity.LOGICAL_CYCLE_TIME_SECONDS,
+            FTQCResourceQuantity.FACTORY_COUNT,
+            FTQCResourceQuantity.PHYSICAL_QUBITS_PER_FACTORY,
+            FTQCResourceQuantity.FACTORY_QUBITS,
+            FTQCResourceQuantity.FACTORY_CYCLES_PER_TOFFOLI,
+            FTQCResourceQuantity.TOFFOLI_THROUGHPUT_PER_SECOND,
+        ),
+    ),
+)
+
+_PROFILE_SPECS_BY_PROFILE = {spec.profile: spec for spec in FTQC_RESOURCE_PROFILE_SPECS}
+
+
 FTQC_RESEARCH_SIGNALS = (
     FTQCResearchSignal(
         reference_key="arXiv:1610.06546",
@@ -955,6 +1118,39 @@ def iter_ftqc_resource_quantity_specs() -> tuple[FTQCResourceQuantitySpec, ...]:
             reader-friendly order from problem inputs to physical outputs.
     """
     return FTQC_RESOURCE_QUANTITY_SPECS
+
+
+def iter_ftqc_resource_profile_specs() -> tuple[FTQCResourceProfileSpec, ...]:
+    """Return the standard FTQC resource review profile specifications.
+
+    Returns:
+        tuple[FTQCResourceProfileSpec, ...]: Profile specifications in a
+            reader-friendly order from end-to-end review to focused audits.
+    """
+    return FTQC_RESOURCE_PROFILE_SPECS
+
+
+def ftqc_resource_profile_quantities(
+    profile: str | FTQCResourceProfile,
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Return canonical quantities for one FTQC review profile.
+
+    Args:
+        profile (str | FTQCResourceProfile): Profile key or enum value.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Ordered canonical quantities for the
+            requested profile.
+
+    Raises:
+        ValueError: If ``profile`` is not a known FTQC resource profile.
+
+    Example:
+        >>> ftqc_resource_profile_quantities("spacetime")[0]
+        <FTQCResourceQuantity.LOGICAL_QUBITS: 'logical_qubits'>
+    """
+    normalized = _normalize_resource_profile(profile)
+    return _PROFILE_SPECS_BY_PROFILE[normalized].quantities
 
 
 def describe_ftqc_resource_quantity(
@@ -1138,6 +1334,29 @@ def _normalize_resource_quantity(
         valid = ", ".join(item.value for item in FTQCResourceQuantity)
         raise ValueError(
             f"Unknown FTQC resource quantity {quantity!r}; valid: {valid}."
+        ) from exc
+
+
+def _normalize_resource_profile(
+    profile: str | FTQCResourceProfile,
+) -> FTQCResourceProfile:
+    """Normalize one resource review profile key.
+
+    Args:
+        profile (str | FTQCResourceProfile): Resource profile key.
+
+    Returns:
+        FTQCResourceProfile: Normalized profile enum.
+
+    Raises:
+        ValueError: If ``profile`` is not a known FTQC resource profile.
+    """
+    try:
+        return FTQCResourceProfile(profile)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in FTQCResourceProfile)
+        raise ValueError(
+            f"Unknown FTQC resource profile {profile!r}; valid: {valid}."
         ) from exc
 
 

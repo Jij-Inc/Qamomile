@@ -37,13 +37,16 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCAccuracyBudget,
     FTQCResourceCategory,
+    FTQCResourceProfile,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    ftqc_resource_profile_quantities,
     iter_ftqc_research_signals,
+    iter_ftqc_resource_profile_specs,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
@@ -139,6 +142,25 @@ assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS.value in {
     row["quantity"] for row in catalog
 }
 assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in catalog}
+
+# %% [markdown]
+# Standard review profiles provide reusable quantity bundles for recurring
+# questions such as "what is the space-time footprint?" They keep reports from
+# hand-copying ad hoc column lists while leaving comparison functions generic.
+
+# %%
+profile_catalog = {
+    spec.profile: spec.to_dict() for spec in iter_ftqc_resource_profile_specs()
+}
+space_time_quantities = ftqc_resource_profile_quantities(
+    FTQCResourceProfile.SPACETIME
+)
+
+print(profile_catalog[FTQCResourceProfile.SPACETIME]["description"])
+print(profile_catalog[FTQCResourceProfile.SPACETIME]["quantities"])
+
+assert FTQCResourceProfile.CHEMISTRY_QPE in profile_catalog
+assert space_time_quantities[-1] == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
 
 # %% [markdown]
 # ## Minimal Example
@@ -242,11 +264,9 @@ comparison = compare_ftqc_resource_estimates(
     baseline,
     compressed,
     quantities=(
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "physical_qubits",
-        "physical_qubit_seconds",
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+        *space_time_quantities,
     ),
 )
 
@@ -256,7 +276,7 @@ for row in comparison:
 assert comparison[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
 assert comparison[0].ratio == sp.Float("0.5")
 assert sp.Abs(comparison[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
-assert comparison[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert comparison[4].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 assert compressed.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS] == (
     compressed.physical_qubits * compressed.runtime_seconds
 )
@@ -271,11 +291,9 @@ comparison_summary = summarize_ftqc_resource_comparison(
     baseline,
     compressed,
     quantities=(
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "physical_qubits",
-        "physical_qubit_seconds",
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+        *space_time_quantities,
     ),
 )
 
@@ -285,7 +303,11 @@ for row in comparison_summary.larger:
     print("larger:", row.label, "by", sp.N(-row.reduction, 4))
 
 assert comparison_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
-assert comparison_summary.larger[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+assert comparison_summary.larger[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
+assert any(
+    row.quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+    for row in comparison_summary.larger
+)
 assert comparison_summary.symbolic == ()
 
 # %% [markdown]
@@ -452,6 +474,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   physical qubit-seconds separately.
 # - `iter_ftqc_research_signals` maps research directions to the canonical
 #   quantities that Qamomile reports.
+# - `ftqc_resource_profile_quantities` gives reusable quantity bundles such as
+#   the space-time profile for design reviews.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation

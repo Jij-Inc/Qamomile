@@ -34,13 +34,16 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCAccuracyBudget,
     FTQCResourceCategory,
+    FTQCResourceProfile,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
+    ftqc_resource_profile_quantities,
     iter_ftqc_research_signals,
+    iter_ftqc_resource_profile_specs,
     iter_ftqc_resource_quantity_specs,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
@@ -124,6 +127,23 @@ assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS.value in {
     row["quantity"] for row in catalog
 }
 assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in catalog}
+
+# %% [markdown]
+# 標準review profileは、「space-time footprintは何か」のように繰り返し使う問いに対するquantity bundleです。reportごとにad hocな列listを手で写す必要を減らしつつ、comparison関数はgenericなまま保てます。
+
+# %%
+profile_catalog = {
+    spec.profile: spec.to_dict() for spec in iter_ftqc_resource_profile_specs()
+}
+space_time_quantities = ftqc_resource_profile_quantities(
+    FTQCResourceProfile.SPACETIME
+)
+
+print(profile_catalog[FTQCResourceProfile.SPACETIME]["description"])
+print(profile_catalog[FTQCResourceProfile.SPACETIME]["quantities"])
+
+assert FTQCResourceProfile.CHEMISTRY_QPE in profile_catalog
+assert space_time_quantities[-1] == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
 
 # %% [markdown]
 # ## 最小例
@@ -225,11 +245,9 @@ comparison = compare_ftqc_resource_estimates(
     baseline,
     compressed,
     quantities=(
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "physical_qubits",
-        "physical_qubit_seconds",
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+        *space_time_quantities,
     ),
 )
 
@@ -239,7 +257,7 @@ for row in comparison:
 assert comparison[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
 assert comparison[0].ratio == sp.Float("0.5")
 assert sp.Abs(comparison[1].ratio - sp.Float("0.55")) < sp.Float("1e-12")
-assert comparison[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert comparison[4].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
 assert compressed.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS] == (
     compressed.physical_qubits * compressed.runtime_seconds
 )
@@ -252,11 +270,9 @@ comparison_summary = summarize_ftqc_resource_comparison(
     baseline,
     compressed,
     quantities=(
-        "qpe_iterations",
-        "toffoli_gates",
-        "logical_spacetime_volume",
-        "physical_qubits",
-        "physical_qubit_seconds",
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+        *space_time_quantities,
     ),
 )
 
@@ -266,7 +282,11 @@ for row in comparison_summary.larger:
     print("larger:", row.label, "by", sp.N(-row.reduction, 4))
 
 assert comparison_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
-assert comparison_summary.larger[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+assert comparison_summary.larger[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
+assert any(
+    row.quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+    for row in comparison_summary.larger
+)
 assert comparison_summary.symbolic == ()
 
 # %% [markdown]
@@ -412,6 +432,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、logical space-time volume、physical量子ビット、runtime、physical qubit-secondsを分けて追跡する必要があることがわかります。
 # - `iter_ftqc_research_signals`は、研究方向をQamomileがreportするcanonical quantityへ対応づけます。
+# - `ftqc_resource_profile_quantities`を使うと、space-time profileのような再利用可能なquantity bundleを設計レビューに使えます。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。
