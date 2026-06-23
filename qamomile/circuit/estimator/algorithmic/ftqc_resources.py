@@ -390,6 +390,87 @@ class FTQCResearchSignal:
 
 
 @dataclass(frozen=True)
+class FTQCResearchSignalCoverage:
+    """Describe how one estimate covers a research-signal contract.
+
+    Attributes:
+        reference_key (str): Research-signal key being audited.
+        title (str): Reader-facing title for the signal.
+        available (tuple[FTQCResourceQuantity, ...]): Signal quantities
+            exposed by the estimate.
+        missing (tuple[FTQCResourceQuantity, ...]): Signal quantities not
+            exposed by the estimate.
+        total (int): Number of quantities in the research signal.
+
+    Example:
+        >>> coverage = FTQCResearchSignalCoverage(
+        ...     reference_key="arXiv:example",
+        ...     title="Toy signal",
+        ...     available=(FTQCResourceQuantity.LAMBDA_NORM,),
+        ...     missing=(FTQCResourceQuantity.QPE_ITERATIONS,),
+        ...     total=2,
+        ... )
+        >>> coverage.is_complete
+        False
+    """
+
+    reference_key: str
+    title: str
+    available: tuple[FTQCResourceQuantity, ...]
+    missing: tuple[FTQCResourceQuantity, ...]
+    total: int
+
+    def __post_init__(self) -> None:
+        """Validate coverage counts after dataclass construction.
+
+        Raises:
+            ValueError: If ``total`` is not positive or does not match the
+                number of available plus missing quantities.
+        """
+        if self.total <= 0:
+            raise ValueError("total must be positive.")
+        observed_total = len(self.available) + len(self.missing)
+        if observed_total != self.total:
+            raise ValueError(
+                "total must equal the number of available and missing quantities."
+            )
+
+    @property
+    def is_complete(self) -> bool:
+        """Return whether every signal quantity is exposed.
+
+        Returns:
+            bool: True when no research-signal quantities are missing.
+        """
+        return not self.missing
+
+    @property
+    def coverage_fraction(self) -> sp.Rational:
+        """Return the covered fraction of the signal contract.
+
+        Returns:
+            sp.Rational: ``len(available) / total`` as an exact rational.
+        """
+        return sp.Rational(len(self.available), self.total)
+
+    def to_dict(self) -> dict[str, str | bool | list[str]]:
+        """Serialize the coverage audit.
+
+        Returns:
+            dict[str, str | bool | list[str]]: JSON-friendly audit metadata,
+                quantity lists, and completion status.
+        """
+        return {
+            "reference_key": self.reference_key,
+            "title": self.title,
+            "available": [quantity.value for quantity in self.available],
+            "missing": [quantity.value for quantity in self.missing],
+            "coverage_fraction": str(self.coverage_fraction),
+            "is_complete": self.is_complete,
+        }
+
+
+@dataclass(frozen=True)
 class FTQCResourceFormula:
     """Describe how an FTQC resource quantity is derived.
 
@@ -2054,6 +2135,43 @@ def describe_ftqc_research_signal(reference_key: str) -> FTQCResearchSignal:
     available = ", ".join(signal.reference_key for signal in FTQC_RESEARCH_SIGNALS)
     raise ValueError(
         f"Unknown FTQC research signal {reference_key!r}. Available keys: {available}."
+    )
+
+
+def audit_ftqc_research_signal_coverage(
+    reference_key: str,
+    estimate: SupportsFTQCResourceValues,
+) -> FTQCResearchSignalCoverage:
+    """Audit which research-signal quantities an estimate exposes.
+
+    This helper is a design-time check: it answers whether a symbolic estimate
+    has the canonical quantities needed to review a paper's resource claim
+    before a comparison report is built.
+
+    Args:
+        reference_key (str): Research-signal key used to select quantities.
+        estimate (SupportsFTQCResourceValues): Estimate, model, or summary
+            exposing ``resource_values()``.
+
+    Returns:
+        FTQCResearchSignalCoverage: Available and missing quantities for the
+            requested research signal.
+
+    Raises:
+        ValueError: If ``reference_key`` is unknown.
+    """
+    signal = describe_ftqc_research_signal(reference_key)
+    values = estimate.resource_values()
+    available = tuple(quantity for quantity in signal.quantities if quantity in values)
+    missing = tuple(
+        quantity for quantity in signal.quantities if quantity not in values
+    )
+    return FTQCResearchSignalCoverage(
+        reference_key=signal.reference_key,
+        title=signal.title,
+        available=available,
+        missing=missing,
+        total=len(signal.quantities),
     )
 
 

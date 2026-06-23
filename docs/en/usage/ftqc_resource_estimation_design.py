@@ -48,6 +48,7 @@ from qamomile.circuit.estimator.algorithmic import (
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
@@ -720,9 +721,32 @@ assert (
 )
 
 # %% [markdown]
+# Before requiring a full paper signal, audit whether an estimate exposes every
+# required quantity. A Hamiltonian summary contains the problem driver but does
+# not yet contain algorithm or architecture outputs. The completed Trotter
+# estimate covers the UWC signal contract.
+
+# %%
+partial_signal_coverage = audit_ftqc_research_signal_coverage(
+    "arXiv:2603.22778",
+    summary,
+)
+uwc_signal_coverage = audit_ftqc_research_signal_coverage(
+    "arXiv:2603.22778",
+    uwc_trotter,
+)
+print(partial_signal_coverage.to_dict()["missing"])
+print(uwc_signal_coverage.to_dict()["coverage_fraction"])
+
+assert not partial_signal_coverage.is_complete
+assert "qpe_iterations" in partial_signal_coverage.to_dict()["missing"]
+assert uwc_signal_coverage.is_complete
+assert uwc_signal_coverage.coverage_fraction == 1
+
+# %% [markdown]
 # A research-signal report scopes the comparison to the quantities motivated by
-# a specific paper. The Hamiltonian-driven Trotter estimator exposes its
-# problem-level drivers, so this report can require the full signal contract.
+# a specific paper. Since the Hamiltonian-driven Trotter estimates pass the
+# coverage audit, this report can require the full signal contract.
 
 # %%
 uwc_signal_report = build_ftqc_research_signal_report(

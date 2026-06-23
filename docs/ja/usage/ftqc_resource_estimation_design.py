@@ -45,6 +45,7 @@ from qamomile.circuit.estimator.algorithmic import (
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
@@ -664,7 +665,27 @@ assert (
 )
 
 # %% [markdown]
-# research-signal reportは、特定の論文が動機づけるquantityに比較対象を絞ります。Hamiltonianから作るTrotter estimatorはproblem-level driverも公開するため、ここではsignal contract全体を要求できます。
+# paper signal全体を要求する前に、estimateが必要なquantityをすべて公開しているかをauditします。Hamiltonian summaryはproblem driverを持ちますが、algorithmやarchitectureの出力はまだ持ちません。完成したTrotter estimateはUWC signal contractを満たします。
+
+# %%
+partial_signal_coverage = audit_ftqc_research_signal_coverage(
+    "arXiv:2603.22778",
+    summary,
+)
+uwc_signal_coverage = audit_ftqc_research_signal_coverage(
+    "arXiv:2603.22778",
+    uwc_trotter,
+)
+print(partial_signal_coverage.to_dict()["missing"])
+print(uwc_signal_coverage.to_dict()["coverage_fraction"])
+
+assert not partial_signal_coverage.is_complete
+assert "qpe_iterations" in partial_signal_coverage.to_dict()["missing"]
+assert uwc_signal_coverage.is_complete
+assert uwc_signal_coverage.coverage_fraction == 1
+
+# %% [markdown]
+# research-signal reportは、特定の論文が動機づけるquantityに比較対象を絞ります。Hamiltonianから作るTrotter estimateはcoverage auditを通るため、ここではsignal contract全体を要求できます。
 
 # %%
 uwc_signal_report = build_ftqc_research_signal_report(

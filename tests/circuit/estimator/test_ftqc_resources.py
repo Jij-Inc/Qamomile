@@ -11,6 +11,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCCostModel,
     FTQCResearchSignal,
+    FTQCResearchSignalCoverage,
     FTQCResourceAggregationRule,
     FTQCResourceBudgetReport,
     FTQCResourceCategory,
@@ -32,6 +33,7 @@ from qamomile.circuit.estimator.algorithmic import (
     HamiltonianResourceReduction,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_review_findings,
@@ -1042,6 +1044,59 @@ def test_build_ftqc_research_signal_report_selects_available_quantities():
 
     with pytest.raises(ValueError, match="Unknown FTQC research signal"):
         describe_ftqc_research_signal("arXiv:0000.00000")
+
+
+def test_audit_ftqc_research_signal_coverage_marks_missing_quantities():
+    """Research-signal coverage audits partial and complete FTQC estimates."""
+    summary = summarize_pauli_hamiltonian(
+        qm_o.Z(0) + 2 * qm_o.Z(1),
+        source="partial_lcu_summary",
+    )
+    partial = audit_ftqc_research_signal_coverage("arXiv:2603.22778", summary)
+
+    assert isinstance(partial, FTQCResearchSignalCoverage)
+    assert partial.reference_key == "arXiv:2603.22778"
+    assert not partial.is_complete
+    assert partial.available == (FTQCResourceQuantity.LAMBDA_NORM,)
+    assert FTQCResourceQuantity.QPE_ITERATIONS in partial.missing
+    assert partial.coverage_fraction == sp.Rational(1, 8)
+    assert partial.to_dict()["missing"][0] == "qpe_iterations"
+    with pytest.raises(ValueError, match="total must be positive"):
+        FTQCResearchSignalCoverage(
+            reference_key="arXiv:bad",
+            title="Bad coverage",
+            available=(),
+            missing=(),
+            total=0,
+        )
+
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    complete_estimate = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        randomized_compilation_factor=sp.Rational(1, 2),
+        rotation_synthesis_t_gates=3,
+        resource_reduction=HamiltonianResourceReduction(
+            lambda_norm_factor=sp.Rational(1, 10)
+        ),
+        cost_model=cost,
+    )
+    complete = audit_ftqc_research_signal_coverage(
+        "arXiv:2603.22778",
+        complete_estimate,
+    )
+
+    assert complete.is_complete
+    assert complete.missing == ()
+    assert complete.coverage_fraction == 1
+    assert complete.to_dict()["is_complete"] is True
 
 
 def test_ftqc_resource_review_findings_prioritize_savings_and_tradeoffs():
