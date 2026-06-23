@@ -30,6 +30,7 @@ import sympy as sp
 
 import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
+    BlockEncodingResource,
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCAccuracyBudget,
@@ -52,6 +53,7 @@ from qamomile.circuit.estimator.algorithmic import (
     iter_ftqc_research_signals,
     iter_ftqc_resource_profile_specs,
     iter_ftqc_resource_quantity_specs,
+    plan_qubitized_qpe_from_block_encoding,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
 )
@@ -217,6 +219,37 @@ plan_budget = evaluate_ftqc_resource_constraints(
 assert parallel_runtime_plan.resource_values()[FTQCResourceQuantity.RUNTIME_SECONDS] == 40
 assert plan_budget.satisfied[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
 assert plan_budget.violated[0].quantity == FTQCResourceQuantity.TOFFOLI_GATES
+
+# %% [markdown]
+# block-encoding modelから直接planを作ることもできます。このplanは再利用するblock-encoding contractと、繰り返されるqubitized-walk stepを分けます。そのため、loader circuitが存在しない段階でも、PREPARE、SELECT、reflection、walk cost、QPE反復回数をreviewできます。
+
+# %%
+block_encoding = BlockEncodingResource(
+    system_qubits=40,
+    normalization=sp.Float("2.0e5"),
+    select_cost_toffoli=4_000,
+    prepare_cost_toffoli=500,
+    reflection_cost_toffoli=100,
+    ancilla_qubits=80,
+    name="toy_lcu_loader",
+)
+block_plan = plan_qubitized_qpe_from_block_encoding(
+    block_encoding,
+    precision=sp.Float("0.0015"),
+    qpe_register_qubits=12,
+)
+block_plan_values = block_plan.resource_values()
+
+for step in block_plan.to_dict()["steps"]:
+    print(step["name"], step["repetitions"])
+
+assert block_plan.steps[0].name == "block_encoding_contract"
+assert block_plan.steps[1].name == "qubitized_walk_qpe"
+assert block_plan_values[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 5100
+assert block_plan_values[FTQCResourceQuantity.LOGICAL_QUBITS] == 132
+assert block_plan_values[FTQCResourceQuantity.TOFFOLI_GATES] == (
+    block_plan_values[FTQCResourceQuantity.QPE_ITERATIONS] * 5100
+)
 
 # %% [markdown]
 # ## 最小例
@@ -580,6 +613,7 @@ assert budget_report.to_dict()["counts"] == {
 # - `iter_ftqc_research_signals`は、研究方向をQamomileがreportするcanonical quantityへ対応づけます。
 # - `FTQCResourceProfile`を使うと、space-time profileのような再利用可能なquantity bundleをcomparison helperへ直接渡せます。
 # - `FTQCResourcePlan`を使うと、具体的な回路実装ができる前に抽象的なFTQC subroutineを合成できます。
+# - `plan_qubitized_qpe_from_block_encoding`は、block-encoding contractをPREPARE/SELECT/reflection/QPE resource planへ変換します。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。

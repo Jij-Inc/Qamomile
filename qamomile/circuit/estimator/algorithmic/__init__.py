@@ -15,6 +15,7 @@ from qamomile.circuit.estimator.algorithmic.ftqc_block_encoding import (
     BlockEncodingResource,
     block_encoding_from_chemistry_model,
     estimate_qubitized_qpe_from_block_encoding,
+    plan_qubitized_qpe_from_block_encoding,
 )
 from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
     ChemistryQPEMethod,
@@ -124,6 +125,7 @@ __all__ = [
     "estimate_qubitized_chemistry_qpe",
     "estimate_qubitized_qpe_from_block_encoding",
     "estimate_qubitized_chemistry_qpe_from_model",
+    "plan_qubitized_qpe_from_block_encoding",
     "estimate_single_ancilla_trotter_qpe",
     "estimate_single_ancilla_trotter_qpe_from_hamiltonian",
     "hamiltonian_from_openfermion_qubit_operator",

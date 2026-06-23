@@ -33,6 +33,7 @@ import sympy as sp
 
 import qamomile.observable as qm_o
 from qamomile.circuit.estimator.algorithmic import (
+    BlockEncodingResource,
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCAccuracyBudget,
@@ -55,6 +56,7 @@ from qamomile.circuit.estimator.algorithmic import (
     iter_ftqc_research_signals,
     iter_ftqc_resource_profile_specs,
     iter_ftqc_resource_quantity_specs,
+    plan_qubitized_qpe_from_block_encoding,
     summarize_ftqc_resource_comparison,
     summarize_pauli_hamiltonian,
 )
@@ -241,6 +243,40 @@ plan_budget = evaluate_ftqc_resource_constraints(
 assert parallel_runtime_plan.resource_values()[FTQCResourceQuantity.RUNTIME_SECONDS] == 40
 assert plan_budget.satisfied[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
 assert plan_budget.violated[0].quantity == FTQCResourceQuantity.TOFFOLI_GATES
+
+# %% [markdown]
+# A block-encoding model can also produce a plan directly. The plan separates
+# the reusable block-encoding contract from the repeated qubitized-walk step,
+# so reviewers can inspect PREPARE, SELECT, reflection, walk cost, and QPE
+# iterations before a loader circuit exists.
+
+# %%
+block_encoding = BlockEncodingResource(
+    system_qubits=40,
+    normalization=sp.Float("2.0e5"),
+    select_cost_toffoli=4_000,
+    prepare_cost_toffoli=500,
+    reflection_cost_toffoli=100,
+    ancilla_qubits=80,
+    name="toy_lcu_loader",
+)
+block_plan = plan_qubitized_qpe_from_block_encoding(
+    block_encoding,
+    precision=sp.Float("0.0015"),
+    qpe_register_qubits=12,
+)
+block_plan_values = block_plan.resource_values()
+
+for step in block_plan.to_dict()["steps"]:
+    print(step["name"], step["repetitions"])
+
+assert block_plan.steps[0].name == "block_encoding_contract"
+assert block_plan.steps[1].name == "qubitized_walk_qpe"
+assert block_plan_values[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 5100
+assert block_plan_values[FTQCResourceQuantity.LOGICAL_QUBITS] == 132
+assert block_plan_values[FTQCResourceQuantity.TOFFOLI_GATES] == (
+    block_plan_values[FTQCResourceQuantity.QPE_ITERATIONS] * 5100
+)
 
 # %% [markdown]
 # ## Minimal Example
@@ -637,6 +673,8 @@ assert budget_report.to_dict()["counts"] == {
 #   space-time profile and can be passed directly to comparison helpers.
 # - `FTQCResourcePlan` composes abstract FTQC subroutines before a concrete
 #   circuit implementation exists.
+# - `plan_qubitized_qpe_from_block_encoding` turns a block-encoding contract
+#   into a PREPARE/SELECT/reflection/QPE resource plan.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation

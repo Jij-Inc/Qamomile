@@ -49,6 +49,7 @@ from qamomile.circuit.estimator.algorithmic import (
 from qamomile.circuit.estimator.algorithmic.ftqc_block_encoding import (
     BlockEncodingResource,
     estimate_qubitized_qpe_from_block_encoding,
+    plan_qubitized_qpe_from_block_encoding,
 )
 
 
@@ -464,6 +465,64 @@ def test_block_encoding_estimates_expose_formula_provenance():
     assert formulas[FTQCResourceQuantity.QPE_ITERATIONS].reference_keys == (
         "arXiv:1610.06546",
     )
+
+
+def test_block_encoding_qpe_plan_matches_logical_estimate_resources():
+    """Block-encoding plans expose subroutines matching logical estimates."""
+    block = BlockEncodingResource(
+        system_qubits=4,
+        normalization=100,
+        select_cost_toffoli=7,
+        prepare_cost_toffoli=5,
+        reflection_cost_toffoli=3,
+        ancilla_qubits=2,
+        name="toy_block",
+    )
+
+    plan = plan_qubitized_qpe_from_block_encoding(
+        block,
+        precision=2,
+        qpe_register_qubits=3,
+    )
+    estimate = estimate_qubitized_qpe_from_block_encoding(
+        block,
+        precision=2,
+        qpe_register_qubits=3,
+    )
+    plan_values = plan.resource_values()
+
+    assert len(plan.steps) == 2
+    assert plan.steps[0].name == "block_encoding_contract"
+    assert plan.steps[1].name == "qubitized_walk_qpe"
+    assert plan.steps[1].repetitions == 50
+    assert plan_values[FTQCResourceQuantity.QPE_ITERATIONS] == (estimate.qpe_iterations)
+    assert plan_values[FTQCResourceQuantity.TOFFOLI_GATES] == estimate.toffoli_gates
+    assert plan_values[FTQCResourceQuantity.LOGICAL_DEPTH] == estimate.logical_depth
+    assert plan_values[FTQCResourceQuantity.LOGICAL_QUBITS] == (estimate.logical_qubits)
+    assert plan_values[FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME] == (
+        estimate.logical_qubits * estimate.logical_depth
+    )
+    assert plan_values[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 20
+    assert plan.to_dict()["steps"][1]["label"] == "Repeated qubitized walk"
+
+
+def test_block_encoding_qpe_plan_rejects_invalid_precision_inputs():
+    """Block-encoding QPE plans reject invalid precision and readout sizes."""
+    block = BlockEncodingResource(
+        system_qubits=4,
+        normalization=100,
+        select_cost_toffoli=7,
+    )
+
+    with pytest.raises(ValueError, match="precision"):
+        plan_qubitized_qpe_from_block_encoding(block, precision=0)
+
+    with pytest.raises(ValueError, match="qpe_register_qubits"):
+        plan_qubitized_qpe_from_block_encoding(
+            block,
+            precision=1,
+            qpe_register_qubits=-1,
+        )
 
 
 def test_surface_code_model_exposes_raw_and_derived_resource_values():

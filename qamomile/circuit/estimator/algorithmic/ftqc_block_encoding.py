@@ -17,6 +17,8 @@ from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
 )
 from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
     FTQCResourceFormula,
+    FTQCResourcePlan,
+    FTQCResourcePlanStep,
     FTQCResourceQuantity,
 )
 
@@ -362,6 +364,110 @@ class BlockEncodingResource:
             sp.Expr: Converted ancilla-qubit count.
         """
         return _as_expr(self.ancilla_qubits, "ancilla_qubits")
+
+
+def plan_qubitized_qpe_from_block_encoding(
+    block_encoding: BlockEncodingResource,
+    precision: _SympyLike,
+    *,
+    qpe_register_qubits: _SympyLike = 0,
+    title: str | None = None,
+) -> FTQCResourcePlan:
+    """Build an abstract resource plan for block-encoding QPE.
+
+    The plan exposes the reusable block-encoding contract separately from the
+    repeated qubitized-walk step. This gives design reviews a subroutine-level
+    view of PREPARE, SELECT, reflection, walk cost, QPE iterations, and logical
+    footprint before any loader is lowered into concrete Qamomile IR.
+
+    Args:
+        block_encoding (BlockEncodingResource): Block-encoding subroutine
+            metadata, including normalization and per-walk costs.
+        precision (sp.Expr | int | float): Target energy precision in the
+            same units as ``block_encoding.normalization``.
+        qpe_register_qubits (sp.Expr | int | float): Optional readout qubits
+            used by an explicit QPE circuit. Defaults to zero.
+        title (str | None): Optional reader-facing plan title. Defaults to a
+            label derived from ``block_encoding.name``.
+
+    Returns:
+        FTQCResourcePlan: Abstract resource plan whose aggregate logical
+            quantities match the corresponding block-encoding QPE estimate
+            before architecture lifting.
+
+    Raises:
+        TypeError: If ``precision`` or ``qpe_register_qubits`` cannot be
+            converted to SymPy expressions.
+        ValueError: If ``precision`` is non-positive or
+            ``qpe_register_qubits`` is negative.
+
+    Example:
+        >>> block = BlockEncodingResource(
+        ...     system_qubits=4,
+        ...     normalization=100,
+        ...     select_cost_toffoli=20,
+        ...     prepare_cost_toffoli=5,
+        ... )
+        >>> plan = plan_qubitized_qpe_from_block_encoding(block, precision=2)
+        >>> plan.resource_values()[FTQCResourceQuantity.QPE_ITERATIONS]
+        50
+    """
+    precision_expr = _as_expr(precision, "precision")
+    qpe_qubits = _as_expr(qpe_register_qubits, "qpe_register_qubits")
+    _validate_positive(precision_expr, "precision")
+    _validate_nonnegative(qpe_qubits, "qpe_register_qubits")
+
+    qpe_iterations = sp.simplify(block_encoding._normalization / precision_expr)
+    logical_qubits = sp.simplify(block_encoding.logical_qubits + qpe_qubits)
+    walk_spacetime = sp.simplify(logical_qubits * block_encoding.walk_cost_toffoli)
+
+    return FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "block_encoding_contract",
+                {
+                    FTQCResourceQuantity.SYSTEM_QUBITS: block_encoding._system_qubits,
+                    FTQCResourceQuantity.LAMBDA_NORM: block_encoding._normalization,
+                    FTQCResourceQuantity.TARGET_PRECISION: precision_expr,
+                    FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS: (
+                        block_encoding._ancilla_qubits
+                    ),
+                    FTQCResourceQuantity.QPE_REGISTER_QUBITS: qpe_qubits,
+                    FTQCResourceQuantity.PREPARE_COST_TOFFOLI: (
+                        block_encoding._prepare_cost_toffoli
+                    ),
+                    FTQCResourceQuantity.SELECT_COST_TOFFOLI: (
+                        block_encoding._select_cost_toffoli
+                    ),
+                    FTQCResourceQuantity.REFLECTION_COST_TOFFOLI: (
+                        block_encoding._reflection_cost_toffoli
+                    ),
+                    FTQCResourceQuantity.WALK_COST_TOFFOLI: (
+                        block_encoding.walk_cost_toffoli
+                    ),
+                    FTQCResourceQuantity.LOGICAL_QUBITS: logical_qubits,
+                },
+                label="Block-encoding contract",
+            ),
+            FTQCResourcePlanStep(
+                "qubitized_walk_qpe",
+                {
+                    FTQCResourceQuantity.QPE_ITERATIONS: 1,
+                    FTQCResourceQuantity.TOFFOLI_GATES: (
+                        block_encoding.walk_cost_toffoli
+                    ),
+                    FTQCResourceQuantity.LOGICAL_DEPTH: (
+                        block_encoding.walk_cost_toffoli
+                    ),
+                    FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME: walk_spacetime,
+                    FTQCResourceQuantity.LOGICAL_QUBITS: logical_qubits,
+                },
+                repetitions=qpe_iterations,
+                label="Repeated qubitized walk",
+            ),
+        ),
+        title=title or f"Qubitized QPE plan: {block_encoding.name}",
+    )
 
 
 def estimate_qubitized_qpe_from_block_encoding(
