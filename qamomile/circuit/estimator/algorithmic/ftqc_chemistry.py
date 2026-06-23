@@ -12,6 +12,8 @@ import sympy as sp
 
 from qamomile.circuit.estimator.algorithmic.ftqc_resources import (
     FTQCResourceFormula,
+    FTQCResourcePlan,
+    FTQCResourcePlanStep,
     FTQCResourceQuantity,
     describe_ftqc_resource_quantity,
 )
@@ -1366,6 +1368,98 @@ class QPEStatePreparationBudget:
             architecture_values=estimate.architecture_values,
         )
 
+    def apply_to_plan(
+        self,
+        plan: FTQCResourcePlan,
+        *,
+        title: str | None = None,
+        state_preparation_step_name: str = "state_preparation_budget",
+        repeated_attempt_step_name: str = "repeated_qpe_attempt",
+    ) -> FTQCResourcePlan:
+        """Apply the success budget to an abstract FTQC resource plan.
+
+        The returned plan keeps the state-preparation budget as its own
+        reviewable step, then repeats the base plan's aggregate QPE attempt by
+        ``1 / success_probability``. Gate counts and logical depth include the
+        per-attempt preparation overhead before repetition scaling.
+
+        Args:
+            plan (FTQCResourcePlan): Base resource plan for one QPE attempt.
+            title (str | None): Optional title for the returned plan. Defaults
+                to ``"<plan.title> with state-preparation budget"``.
+            state_preparation_step_name (str): Stable name for the metadata
+                step that records success probability and preparation
+                overheads. Defaults to ``"state_preparation_budget"``.
+            repeated_attempt_step_name (str): Stable name for the repeated
+                base-attempt step. Defaults to ``"repeated_qpe_attempt"``.
+
+        Returns:
+            FTQCResourcePlan: Plan including state-preparation success
+                probability, per-attempt overheads, and expected repeated QPE
+                attempts.
+
+        Raises:
+            TypeError: If ``plan`` is not an ``FTQCResourcePlan``.
+            ValueError: If ``plan`` has inconsistent resource values.
+
+        Example:
+            >>> step = FTQCResourcePlanStep("qpe", {"toffoli_gates": 10})
+            >>> plan = FTQCResourcePlan((step,))
+            >>> budget = QPEStatePreparationBudget(sp.Rational(1, 2), 3)
+            >>> budget.apply_to_plan(plan).resource_values()[
+            ...     FTQCResourceQuantity.TOFFOLI_GATES
+            ... ]
+            26
+        """
+        if not isinstance(plan, FTQCResourcePlan):
+            raise TypeError("plan must be an FTQCResourcePlan instance.")
+
+        base_values = dict(plan.resource_values())
+        repeated_values = self._resource_values_for_repeated_attempt(base_values)
+        formulas_by_quantity = {
+            cast(FTQCResourceQuantity, formula.quantity): formula
+            for formula in _qpe_state_preparation_formulas()
+        }
+        reference_keys = tuple(reference.key for reference in self.references)
+        budget_formulas = (
+            formulas_by_quantity[FTQCResourceQuantity.QPE_REPETITIONS],
+            formulas_by_quantity[FTQCResourceQuantity.TOFFOLI_GATES],
+            formulas_by_quantity[FTQCResourceQuantity.T_GATES],
+            formulas_by_quantity[FTQCResourceQuantity.LOGICAL_DEPTH],
+            formulas_by_quantity[FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME],
+        )
+        budget_values: dict[
+            str | FTQCResourceQuantity,
+            sp.Expr | int | float,
+        ] = {quantity: value for quantity, value in self.resource_values().items()}
+        repeated_step_values: dict[
+            str | FTQCResourceQuantity,
+            sp.Expr | int | float,
+        ] = {quantity: value for quantity, value in repeated_values.items()}
+
+        return FTQCResourcePlan(
+            (
+                FTQCResourcePlanStep(
+                    state_preparation_step_name,
+                    budget_values,
+                    label=(self.description or "State-preparation success budget"),
+                    formulas=(
+                        formulas_by_quantity[FTQCResourceQuantity.QPE_REPETITIONS],
+                    ),
+                    reference_keys=reference_keys,
+                ),
+                FTQCResourcePlanStep(
+                    repeated_attempt_step_name,
+                    repeated_step_values,
+                    repetitions=self.qpe_repetitions,
+                    label="Repeated QPE attempt",
+                    formulas=(*plan.formulas(), *budget_formulas),
+                    reference_keys=(*plan.reference_keys(), *reference_keys),
+                ),
+            ),
+            title=title or f"{plan.title} with state-preparation budget",
+        )
+
     def to_dict(self) -> dict[str, str]:
         """Serialize the state-preparation budget.
 
@@ -1405,6 +1499,46 @@ class QPEStatePreparationBudget:
                 self._state_preparation_logical_depth
             ),
         }
+
+    def _resource_values_for_repeated_attempt(
+        self,
+        base_values: dict[FTQCResourceQuantity, sp.Expr],
+    ) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return base plan values plus preparation overhead for one attempt.
+
+        Args:
+            base_values (dict[FTQCResourceQuantity, sp.Expr]): Aggregate
+                resource values from the base one-attempt plan.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Resource values for one QPE
+                attempt after adding state-preparation overhead to additive
+                gate-count and logical-depth quantities.
+        """
+        repeated_values = dict(base_values)
+        if FTQCResourceQuantity.QPE_REPETITIONS in repeated_values:
+            del repeated_values[FTQCResourceQuantity.QPE_REPETITIONS]
+
+        repeated_values[FTQCResourceQuantity.TOFFOLI_GATES] = sp.simplify(
+            repeated_values.get(FTQCResourceQuantity.TOFFOLI_GATES, sp.Integer(0))
+            + self._state_preparation_toffoli
+        )
+        repeated_values[FTQCResourceQuantity.T_GATES] = sp.simplify(
+            repeated_values.get(FTQCResourceQuantity.T_GATES, sp.Integer(0))
+            + self._state_preparation_t_gates
+        )
+        repeated_values[FTQCResourceQuantity.LOGICAL_DEPTH] = sp.simplify(
+            repeated_values.get(FTQCResourceQuantity.LOGICAL_DEPTH, sp.Integer(0))
+            + self._state_preparation_logical_depth
+        )
+        if FTQCResourceQuantity.LOGICAL_QUBITS in repeated_values:
+            repeated_values[FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME] = (
+                sp.simplify(
+                    repeated_values[FTQCResourceQuantity.LOGICAL_QUBITS]
+                    * repeated_values[FTQCResourceQuantity.LOGICAL_DEPTH]
+                )
+            )
+        return repeated_values
 
     @property
     def _success_probability(self) -> sp.Expr:

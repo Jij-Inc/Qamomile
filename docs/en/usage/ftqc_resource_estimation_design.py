@@ -44,6 +44,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     build_ftqc_resource_comparison_report,
@@ -298,6 +299,36 @@ assert block_plan_dict["reference_keys"] == ["arXiv:1610.06546"]
 assert block_plan_dict["steps"][0]["formulas"][0]["reference_keys"] == [
     "arXiv:1610.06546"
 ]
+
+# %% [markdown]
+# State-preparation success probability can be layered onto the same plan. This
+# keeps trial-state overlap or filtering assumptions visible without requiring
+# a concrete state-preparation circuit.
+
+# %%
+preparation_budget = QPEStatePreparationBudget(
+    success_probability=sp.Rational(1, 5),
+    state_preparation_toffoli=100,
+    state_preparation_t_gates=20,
+    state_preparation_logical_depth=50,
+    description="symmetry-filtered trial state",
+)
+filtered_block_plan = preparation_budget.apply_to_plan(block_plan)
+filtered_block_values = filtered_block_plan.resource_values()
+
+for step in filtered_block_plan.to_dict()["steps"]:
+    print(step["name"], step["repetitions"])
+
+assert filtered_block_values[FTQCResourceQuantity.QPE_REPETITIONS] == 5
+assert filtered_block_values[FTQCResourceQuantity.QPE_ITERATIONS] == (
+    block_plan_values[FTQCResourceQuantity.QPE_ITERATIONS] * 5
+)
+assert filtered_block_values[FTQCResourceQuantity.TOFFOLI_GATES] == (
+    (block_plan_values[FTQCResourceQuantity.TOFFOLI_GATES] + 100) * 5
+)
+assert filtered_block_values[FTQCResourceQuantity.LOGICAL_DEPTH] == (
+    (block_plan_values[FTQCResourceQuantity.LOGICAL_DEPTH] + 50) * 5
+)
 
 # %% [markdown]
 # ## Minimal Example
@@ -696,6 +727,8 @@ assert budget_report.to_dict()["counts"] == {
 #   circuit implementation exists.
 # - `plan_qubitized_qpe_from_block_encoding` turns a block-encoding contract
 #   into a PREPARE/SELECT/reflection/QPE resource plan.
+# - `QPEStatePreparationBudget.apply_to_plan` layers success probability and
+#   per-attempt preparation overhead onto an abstract QPE plan.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation

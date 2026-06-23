@@ -12,6 +12,8 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCAccuracyBudget,
     FTQCCostModel,
     FTQCReference,
+    FTQCResourcePlan,
+    FTQCResourcePlanStep,
     FTQCResourceQuantity,
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
@@ -265,6 +267,64 @@ def test_state_preparation_budget_scales_expected_qpe_work():
     )
 
 
+def test_state_preparation_budget_scales_resource_plan_attempts():
+    """State-preparation success budgets compose with abstract QPE plans."""
+    base_plan = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "qpe_attempt",
+                {
+                    FTQCResourceQuantity.QPE_ITERATIONS: 5,
+                    FTQCResourceQuantity.TOFFOLI_GATES: 10,
+                    FTQCResourceQuantity.T_GATES: 2,
+                    FTQCResourceQuantity.LOGICAL_DEPTH: 11,
+                    FTQCResourceQuantity.LOGICAL_QUBITS: 4,
+                },
+            ),
+        ),
+        title="Toy QPE plan",
+    )
+    reference = FTQCReference(
+        key="internal:trial-state",
+        title="Trial-state preparation model",
+        url="https://example.invalid/trial-state",
+    )
+    budget = QPEStatePreparationBudget(
+        success_probability=sp.Rational(1, 4),
+        state_preparation_toffoli=3,
+        state_preparation_t_gates=5,
+        state_preparation_logical_depth=7,
+        description="symmetry-filtered trial state",
+        references=(reference,),
+    )
+
+    repeated_plan = budget.apply_to_plan(base_plan)
+    values = repeated_plan.resource_values()
+
+    assert repeated_plan.title == "Toy QPE plan with state-preparation budget"
+    assert repeated_plan.steps[0].name == "state_preparation_budget"
+    assert repeated_plan.steps[1].name == "repeated_qpe_attempt"
+    assert values[FTQCResourceQuantity.QPE_REPETITIONS] == 4
+    assert values[FTQCResourceQuantity.QPE_ITERATIONS] == 20
+    assert values[FTQCResourceQuantity.TOFFOLI_GATES] == 52
+    assert values[FTQCResourceQuantity.T_GATES] == 28
+    assert values[FTQCResourceQuantity.LOGICAL_DEPTH] == 72
+    assert values[FTQCResourceQuantity.LOGICAL_QUBITS] == 4
+    assert values[FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME] == 288
+    assert values[FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI] == 3
+    assert repeated_plan.reference_keys() == ("internal:trial-state",)
+    assert repeated_plan.to_dict()["steps"][0]["label"] == (
+        "symmetry-filtered trial state"
+    )
+    assert {formula.quantity for formula in repeated_plan.formulas()} >= {
+        FTQCResourceQuantity.QPE_REPETITIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+        FTQCResourceQuantity.T_GATES,
+        FTQCResourceQuantity.LOGICAL_DEPTH,
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+    }
+
+
 def test_state_preparation_budget_rejects_invalid_probabilities():
     """State-preparation success budgets reject invalid probability inputs."""
     with pytest.raises(ValueError, match="success_probability"):
@@ -278,6 +338,9 @@ def test_state_preparation_budget_rejects_invalid_probabilities():
 
     with pytest.raises(TypeError, match="FTQCResourceEstimate"):
         QPEStatePreparationBudget(success_probability=1).apply(object())
+
+    with pytest.raises(TypeError, match="FTQCResourcePlan"):
+        QPEStatePreparationBudget(success_probability=1).apply_to_plan(object())
 
 
 def test_cost_model_lifts_logical_estimates_to_physical_runtime():

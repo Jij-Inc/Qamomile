@@ -41,6 +41,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     build_ftqc_resource_comparison_report,
@@ -269,6 +270,34 @@ assert block_plan_dict["reference_keys"] == ["arXiv:1610.06546"]
 assert block_plan_dict["steps"][0]["formulas"][0]["reference_keys"] == [
     "arXiv:1610.06546"
 ]
+
+# %% [markdown]
+# state-preparation success probabilityは、同じplanへ重ねられます。これにより、具体的なstate-preparation回路がなくても、trial-state overlapやfiltering仮定を見える形で保持できます。
+
+# %%
+preparation_budget = QPEStatePreparationBudget(
+    success_probability=sp.Rational(1, 5),
+    state_preparation_toffoli=100,
+    state_preparation_t_gates=20,
+    state_preparation_logical_depth=50,
+    description="symmetry-filtered trial state",
+)
+filtered_block_plan = preparation_budget.apply_to_plan(block_plan)
+filtered_block_values = filtered_block_plan.resource_values()
+
+for step in filtered_block_plan.to_dict()["steps"]:
+    print(step["name"], step["repetitions"])
+
+assert filtered_block_values[FTQCResourceQuantity.QPE_REPETITIONS] == 5
+assert filtered_block_values[FTQCResourceQuantity.QPE_ITERATIONS] == (
+    block_plan_values[FTQCResourceQuantity.QPE_ITERATIONS] * 5
+)
+assert filtered_block_values[FTQCResourceQuantity.TOFFOLI_GATES] == (
+    (block_plan_values[FTQCResourceQuantity.TOFFOLI_GATES] + 100) * 5
+)
+assert filtered_block_values[FTQCResourceQuantity.LOGICAL_DEPTH] == (
+    (block_plan_values[FTQCResourceQuantity.LOGICAL_DEPTH] + 50) * 5
+)
 
 # %% [markdown]
 # ## 最小例
@@ -633,6 +662,7 @@ assert budget_report.to_dict()["counts"] == {
 # - `FTQCResourceProfile`を使うと、space-time profileのような再利用可能なquantity bundleをcomparison helperへ直接渡せます。
 # - `FTQCResourcePlan`を使うと、具体的な回路実装ができる前に抽象的なFTQC subroutineを合成できます。
 # - `plan_qubitized_qpe_from_block_encoding`は、block-encoding contractをPREPARE/SELECT/reflection/QPE resource planへ変換します。
+# - `QPEStatePreparationBudget.apply_to_plan`は、success probabilityとattemptごとのpreparation overheadを抽象的なQPE planへ重ねます。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。
