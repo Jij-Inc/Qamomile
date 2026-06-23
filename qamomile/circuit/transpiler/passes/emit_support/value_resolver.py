@@ -546,13 +546,15 @@ class ValueResolver:
 
         Raises:
             EmitError: If every index resolved to a concrete int and the
-                root array's container holds compile-time data, but an
-                index is out of range for that data. Falling back to
-                ``None`` here instead used to let loop-unrolled accesses
-                past the bound length (``theta[i]`` with
-                ``i >= len(theta)``) reach symbolic-parameter creation,
-                where every out-of-range iteration silently shared one
-                phantom runtime parameter.
+                root array's container holds compile-time data, but the
+                access fails against that data — either an out-of-range
+                index (``IndexError``; e.g. a loop-unrolled ``theta[i]``
+                with ``i >= len(theta)``) or a shape mismatch (``KeyError``
+                /``TypeError``; the bound value is not an int-indexable
+                array of the expected shape). Falling back to ``None`` in
+                these cases would let the element reach symbolic-parameter
+                creation, where every failing access silently shared one
+                phantom runtime parameter (or a silent ``0.0``).
         """
         parent = v.parent_array
         # Only element Values carry a parent array; scalar Values cannot be
@@ -608,10 +610,28 @@ class ValueResolver:
                     f"elements symbolic.",
                     operation="array element resolution",
                 ) from exc
-            except (KeyError, TypeError):
-                # Missing keys and non-indexable containers stay
-                # unresolved rather than guessed.
-                return None
+            except (KeyError, TypeError) as exc:
+                # The same guards that make an IndexError here a genuine
+                # out-of-range access also make a KeyError / TypeError a
+                # genuine shape mismatch: the root array is not a runtime
+                # parameter, its container is resolved compile-time data,
+                # and every index is a concrete non-negative int. A
+                # KeyError (the container is a dict) or TypeError (the
+                # container is a scalar over-indexed by a deeper index, or
+                # an otherwise non-indexable bound object) therefore means
+                # the bound data is not an int-indexable array of the
+                # expected shape. Returning None would fall through to the
+                # same phantom-parameter / silent-0.0 hazard as the
+                # out-of-range case, so fail fast instead.
+                raise EmitError(
+                    f"Compile-time bound array '{root_parent.name}' could "
+                    f"not be indexed at index {i}: the bound value is not "
+                    f"an indexable array of the expected shape (got "
+                    f"{type(container).__name__}). Bind a correctly shaped "
+                    f"array for '{root_parent.name}', or declare it in "
+                    f"`parameters` to keep its elements symbolic.",
+                    operation="array element resolution",
+                ) from exc
         return container
 
     def _resolve_array_element_location(

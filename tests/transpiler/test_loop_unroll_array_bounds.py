@@ -220,3 +220,29 @@ class TestIndexIntoBoundArray:
             resolver.resolve_classical_value(
                 element, bindings={"angles": np.array(5.0)}
             )
+
+    def test_dict_container_raises_shape_mismatch_emit_error(self):
+        """A dict bound where an array is expected raises a shape-mismatch
+        ``EmitError`` (a ``KeyError`` from int indexing must not fall
+        through to phantom-parameter creation)."""
+        resolver = ValueResolver()
+        element = _array_element(Value(type=UIntType(), name="i").with_const(0))
+
+        with pytest.raises(
+            EmitError,
+            match=r"'angles' could not be indexed at index 0.*not an indexable",
+        ):
+            resolver.resolve_classical_value(element, bindings={"angles": {1: 0.1}})
+
+    def test_non_indexable_container_raises_shape_mismatch_emit_error(self):
+        """A scalar bound where an array is expected raises a shape-mismatch
+        ``EmitError`` (a ``TypeError`` from indexing a non-subscriptable
+        value must not fall through to phantom-parameter creation)."""
+        resolver = ValueResolver()
+        element = _array_element(Value(type=UIntType(), name="i").with_const(0))
+
+        with pytest.raises(
+            EmitError,
+            match=r"'angles' could not be indexed at index 0.*got float",
+        ):
+            resolver.resolve_classical_value(element, bindings={"angles": 5.0})
