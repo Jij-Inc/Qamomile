@@ -34,12 +34,14 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCAccuracyBudget,
     FTQCResourceCategory,
+    FTQCResourceConstraint,
     FTQCResourceProfile,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
+    evaluate_ftqc_resource_constraints,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     ftqc_resource_profile_quantities,
@@ -447,6 +449,45 @@ assert trotter_comparison[0].ratio == sp.Float("0.1")
 assert trotter_comparison[1].ratio == sp.Float("0.05")
 
 # %% [markdown]
+# ## Budget constraints
+#
+# early-FTQCの研究では、別のreview questionも重要です。estimateがphysical量子ビットやruntimeのbudgetに収まるか、という問いです。budget reportを使うと、同じcanonical resource valueを明示的なconstraintと照合できます。architecture仮定がまだsymbolicな場合、marginは未判断のまま残ります。
+
+# %%
+budget_report = evaluate_ftqc_resource_constraints(
+    uwc_trotter,
+    (
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            100_000,
+            label="Early-FTQC physical-qubit budget",
+        ),
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+            60 * 60,
+            label="One-hour runtime budget",
+        ),
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.LOGICAL_DEPTH,
+            plain_trotter.logical_depth,
+            label="No worse than plain Trotter depth",
+        ),
+    ),
+    title="Synthetic early-FTQC budget",
+)
+
+for result in budget_report.results:
+    print(result.status, result.label, "margin:", sp.N(result.margin, 4))
+
+assert budget_report.satisfied[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+assert budget_report.violated[0].quantity == FTQCResourceQuantity.RUNTIME_SECONDS
+assert budget_report.to_dict()["counts"] == {
+    "satisfied": 2,
+    "violated": 1,
+    "symbolic": 0,
+}
+
+# %% [markdown]
 # ## Notes
 #
 # :::{note}
@@ -480,3 +521,4 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
 # - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、優先順位つきfinding、grouped countをreview artifactとしてまとめられます。
+# - `evaluate_ftqc_resource_constraints`を使うと、estimateをphysical量子ビット、runtime、depthなどの明示的なresource budgetと照合できます。

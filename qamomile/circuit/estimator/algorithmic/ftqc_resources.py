@@ -171,6 +171,42 @@ class FTQCResourceChangeDirection(enum.StrEnum):
     SYMBOLIC = "symbolic"
 
 
+class FTQCResourceConstraintSense(enum.StrEnum):
+    """Name the comparison sense for an FTQC resource constraint.
+
+    Attributes:
+        AT_MOST: The resource value must be less than or equal to the limit.
+        AT_LEAST: The resource value must be greater than or equal to the
+            limit.
+
+    Example:
+        >>> FTQCResourceConstraintSense("at_most")
+        <FTQCResourceConstraintSense.AT_MOST: 'at_most'>
+    """
+
+    AT_MOST = "at_most"
+    AT_LEAST = "at_least"
+
+
+class FTQCResourceConstraintStatus(enum.StrEnum):
+    """Classify whether an FTQC resource constraint is met.
+
+    Attributes:
+        SATISFIED: The constraint is provably satisfied.
+        VIOLATED: The constraint is provably violated.
+        SYMBOLIC: The constraint cannot be decided from the symbolic
+            expression under the current assumptions.
+
+    Example:
+        >>> FTQCResourceConstraintStatus("satisfied")
+        <FTQCResourceConstraintStatus.SATISFIED: 'satisfied'>
+    """
+
+    SATISFIED = "satisfied"
+    VIOLATED = "violated"
+    SYMBOLIC = "symbolic"
+
+
 class FTQCResourceProfile(enum.StrEnum):
     """Name standard FTQC resource review profiles.
 
@@ -630,6 +666,236 @@ class FTQCResourceReviewFinding:
             "reduction": str(self.reduction),
             "headline": self.headline,
             "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceConstraint:
+    """Declare a symbolic budget constraint for one FTQC resource quantity.
+
+    Args:
+        quantity (str | FTQCResourceQuantity): Canonical resource quantity to
+            constrain.
+        limit (sp.Expr | int | float): Symbolic or numeric constraint limit.
+        sense (str | FTQCResourceConstraintSense): Constraint direction.
+            ``AT_MOST`` means the resource value may not exceed ``limit``;
+            ``AT_LEAST`` means it must meet or exceed ``limit``. Defaults to
+            ``AT_MOST``.
+        label (str): Optional reader-facing label for this constraint.
+            Defaults to an empty string, meaning the quantity label is used.
+
+    Raises:
+        TypeError: If ``limit`` cannot be converted to a SymPy expression.
+        ValueError: If ``quantity`` or ``sense`` is unknown.
+
+    Example:
+        >>> constraint = FTQCResourceConstraint("physical_qubits", 100_000)
+        >>> constraint.quantity
+        <FTQCResourceQuantity.PHYSICAL_QUBITS: 'physical_qubits'>
+    """
+
+    quantity: str | FTQCResourceQuantity
+    limit: sp.Expr | int | float
+    sense: str | FTQCResourceConstraintSense = FTQCResourceConstraintSense.AT_MOST
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize constraint fields after dataclass construction.
+
+        Raises:
+            TypeError: If ``limit`` cannot be sympified.
+            ValueError: If a closed-set key is unknown.
+        """
+        object.__setattr__(
+            self,
+            "quantity",
+            _normalize_resource_quantity(self.quantity),
+        )
+        object.__setattr__(
+            self,
+            "sense",
+            _normalize_constraint_sense(self.sense),
+        )
+        object.__setattr__(
+            self,
+            "limit",
+            _sympify_resource_expr(self.limit, "limit"),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the resource constraint.
+
+        Returns:
+            dict[str, str]: JSON-friendly constraint metadata.
+        """
+        quantity = cast(FTQCResourceQuantity, self.quantity)
+        sense = cast(FTQCResourceConstraintSense, self.sense)
+        return {
+            "quantity": quantity.value,
+            "limit": str(self.limit),
+            "sense": sense.value,
+            "label": self.label,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceConstraintResult:
+    """Describe the result of evaluating one FTQC resource constraint.
+
+    Attributes:
+        quantity (FTQCResourceQuantity): Constrained resource quantity.
+        status (FTQCResourceConstraintStatus): Whether the constraint is met,
+            violated, or symbolic.
+        sense (FTQCResourceConstraintSense): Constraint comparison direction.
+        value (sp.Expr): Resource value from the evaluated estimate.
+        limit (sp.Expr): Constraint limit.
+        margin (sp.Expr): Signed headroom. Positive or zero means the
+            constraint is satisfied; negative means it is violated.
+        label (str): Reader-facing constraint label.
+        unit (str): Resource unit.
+        category (FTQCResourceCategory): Modeling layer for the quantity.
+
+    Example:
+        >>> result = FTQCResourceConstraintResult(
+        ...     quantity=FTQCResourceQuantity.PHYSICAL_QUBITS,
+        ...     status=FTQCResourceConstraintStatus.SATISFIED,
+        ...     sense=FTQCResourceConstraintSense.AT_MOST,
+        ...     value=10,
+        ...     limit=100,
+        ...     margin=90,
+        ...     label="Physical qubits",
+        ...     unit="physical qubits",
+        ...     category=FTQCResourceCategory.PHYSICAL,
+        ... )
+        >>> result.to_dict()["status"]
+        'satisfied'
+    """
+
+    quantity: FTQCResourceQuantity
+    status: FTQCResourceConstraintStatus
+    sense: FTQCResourceConstraintSense
+    value: sp.Expr
+    limit: sp.Expr
+    margin: sp.Expr
+    label: str
+    unit: str
+    category: FTQCResourceCategory
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the constraint result.
+
+        Returns:
+            dict[str, str]: JSON-friendly result metadata and values.
+        """
+        return {
+            "quantity": self.quantity.value,
+            "status": self.status.value,
+            "sense": self.sense.value,
+            "value": str(self.value),
+            "limit": str(self.limit),
+            "margin": str(self.margin),
+            "label": self.label,
+            "unit": self.unit,
+            "category": self.category.value,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceBudgetReport:
+    """Group FTQC resource constraint results for a budget review.
+
+    Attributes:
+        title (str): Reader-facing report title.
+        results (tuple[FTQCResourceConstraintResult, ...]): Evaluated
+            constraints in input order.
+        satisfied (tuple[FTQCResourceConstraintResult, ...]): Constraints that
+            are provably satisfied.
+        violated (tuple[FTQCResourceConstraintResult, ...]): Constraints that
+            are provably violated.
+        symbolic (tuple[FTQCResourceConstraintResult, ...]): Constraints whose
+            status cannot be decided from the symbolic expression.
+
+    Example:
+        >>> constraint = FTQCResourceConstraint("physical_qubits", 100)
+        >>> report = FTQCResourceBudgetReport.from_results(
+        ...     "Toy budget",
+        ...     (
+        ...         FTQCResourceConstraintResult(
+        ...             quantity=FTQCResourceQuantity.PHYSICAL_QUBITS,
+        ...             status=FTQCResourceConstraintStatus.SATISFIED,
+        ...             sense=FTQCResourceConstraintSense.AT_MOST,
+        ...             value=10,
+        ...             limit=constraint.limit,
+        ...             margin=90,
+        ...             label="Physical qubits",
+        ...             unit="physical qubits",
+        ...             category=FTQCResourceCategory.PHYSICAL,
+        ...         ),
+        ...     ),
+        ... )
+        >>> report.to_dict()["counts"]["satisfied"]
+        1
+    """
+
+    title: str
+    results: tuple[FTQCResourceConstraintResult, ...]
+    satisfied: tuple[FTQCResourceConstraintResult, ...]
+    violated: tuple[FTQCResourceConstraintResult, ...]
+    symbolic: tuple[FTQCResourceConstraintResult, ...]
+
+    @classmethod
+    def from_results(
+        cls,
+        title: str,
+        results: tuple[FTQCResourceConstraintResult, ...],
+    ) -> FTQCResourceBudgetReport:
+        """Build a grouped budget report from constraint results.
+
+        Args:
+            title (str): Reader-facing report title.
+            results (tuple[FTQCResourceConstraintResult, ...]): Evaluated
+                constraints to group.
+
+        Returns:
+            FTQCResourceBudgetReport: Grouped budget report.
+        """
+        grouped: dict[
+            FTQCResourceConstraintStatus,
+            list[FTQCResourceConstraintResult],
+        ] = {
+            FTQCResourceConstraintStatus.SATISFIED: [],
+            FTQCResourceConstraintStatus.VIOLATED: [],
+            FTQCResourceConstraintStatus.SYMBOLIC: [],
+        }
+        for result in results:
+            grouped[result.status].append(result)
+
+        return cls(
+            title=title,
+            results=results,
+            satisfied=tuple(grouped[FTQCResourceConstraintStatus.SATISFIED]),
+            violated=tuple(grouped[FTQCResourceConstraintStatus.VIOLATED]),
+            symbolic=tuple(grouped[FTQCResourceConstraintStatus.SYMBOLIC]),
+        )
+
+    def to_dict(self) -> dict[str, str | list[dict[str, str]] | dict[str, int]]:
+        """Serialize grouped budget results.
+
+        Returns:
+            dict[str, str | list[dict[str, str]] | dict[str, int]]: JSON-friendly
+                report metadata, rows, grouped rows, and counts.
+        """
+        return {
+            "title": self.title,
+            "results": [result.to_dict() for result in self.results],
+            "satisfied": [result.to_dict() for result in self.satisfied],
+            "violated": [result.to_dict() for result in self.violated],
+            "symbolic": [result.to_dict() for result in self.symbolic],
+            "counts": {
+                "satisfied": len(self.satisfied),
+                "violated": len(self.violated),
+                "symbolic": len(self.symbolic),
+            },
         }
 
 
@@ -1584,6 +1850,59 @@ def build_ftqc_resource_review_findings(
     return tuple(_review_finding_from_row(row, direction) for direction, row in rows)
 
 
+def evaluate_ftqc_resource_constraints(
+    estimate: SupportsFTQCResourceValues,
+    constraints: tuple[FTQCResourceConstraint, ...],
+    *,
+    title: str = "FTQC resource budget",
+) -> FTQCResourceBudgetReport:
+    """Evaluate FTQC resource values against symbolic budget constraints.
+
+    Args:
+        estimate (SupportsFTQCResourceValues): Estimate, model, or summary
+            exposing ``resource_values()``.
+        constraints (tuple[FTQCResourceConstraint, ...]): Constraints to
+            evaluate in order.
+        title (str): Reader-facing report title. Defaults to
+            ``"FTQC resource budget"``.
+
+    Returns:
+        FTQCResourceBudgetReport: Grouped constraint results.
+
+    Raises:
+        ValueError: If a constraint quantity is missing from ``estimate``.
+    """
+    values = estimate.resource_values()
+    results = []
+    for constraint in constraints:
+        quantity = cast(FTQCResourceQuantity, constraint.quantity)
+        if quantity not in values:
+            raise ValueError(
+                "Requested FTQC resource constraint is missing from the input: "
+                f"{quantity.value}."
+            )
+        value = _sympify_resource_expr(values[quantity], quantity.value)
+        limit = cast(sp.Expr, constraint.limit)
+        sense = cast(FTQCResourceConstraintSense, constraint.sense)
+        margin = _constraint_margin(value, limit, sense)
+        spec = describe_ftqc_resource_quantity(quantity)
+        results.append(
+            FTQCResourceConstraintResult(
+                quantity=quantity,
+                status=_classify_constraint_margin(margin),
+                sense=sense,
+                value=value,
+                limit=limit,
+                margin=margin,
+                label=constraint.label or spec.label,
+                unit=spec.unit,
+                category=spec.category,
+            )
+        )
+
+    return FTQCResourceBudgetReport.from_results(title, tuple(results))
+
+
 def _select_comparison_quantities(
     baseline_values: dict[FTQCResourceQuantity, sp.Expr],
     candidate_values: dict[FTQCResourceQuantity, sp.Expr],
@@ -1743,6 +2062,48 @@ def _normalize_resource_profile(
         ) from exc
 
 
+def _normalize_constraint_sense(
+    sense: str | FTQCResourceConstraintSense,
+) -> FTQCResourceConstraintSense:
+    """Normalize one FTQC resource constraint sense.
+
+    Args:
+        sense (str | FTQCResourceConstraintSense): Constraint sense key.
+
+    Returns:
+        FTQCResourceConstraintSense: Normalized sense enum.
+
+    Raises:
+        ValueError: If ``sense`` is not a known constraint sense.
+    """
+    try:
+        return FTQCResourceConstraintSense(sense)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in FTQCResourceConstraintSense)
+        raise ValueError(
+            f"Unknown FTQC resource constraint sense {sense!r}; valid: {valid}."
+        ) from exc
+
+
+def _sympify_resource_expr(value: sp.Expr | int | float, name: str) -> sp.Expr:
+    """Convert a resource expression to SymPy.
+
+    Args:
+        value (sp.Expr | int | float): Resource value to convert.
+        name (str): Field name used in diagnostics.
+
+    Returns:
+        sp.Expr: SymPy expression.
+
+    Raises:
+        TypeError: If ``value`` cannot be converted to a SymPy expression.
+    """
+    try:
+        return sp.sympify(value)
+    except (TypeError, sp.SympifyError) as exc:
+        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
+
+
 def _classify_change(reduction: sp.Expr) -> FTQCResourceChangeDirection:
     """Classify a fractional reduction expression by sign.
 
@@ -1761,6 +2122,47 @@ def _classify_change(reduction: sp.Expr) -> FTQCResourceChangeDirection:
     if simplified.is_negative:
         return FTQCResourceChangeDirection.LARGER
     return FTQCResourceChangeDirection.SYMBOLIC
+
+
+def _constraint_margin(
+    value: sp.Expr,
+    limit: sp.Expr,
+    sense: FTQCResourceConstraintSense,
+) -> sp.Expr:
+    """Return signed constraint headroom.
+
+    Args:
+        value (sp.Expr): Evaluated resource value.
+        limit (sp.Expr): Constraint limit.
+        sense (FTQCResourceConstraintSense): Constraint direction.
+
+    Returns:
+        sp.Expr: Signed headroom where nonnegative means the constraint is met.
+    """
+    if sense == FTQCResourceConstraintSense.AT_MOST:
+        return sp.simplify(limit - value)
+    if sense == FTQCResourceConstraintSense.AT_LEAST:
+        return sp.simplify(value - limit)
+    assert False, f"Unhandled FTQC resource constraint sense: {sense!r}."
+
+
+def _classify_constraint_margin(
+    margin: sp.Expr,
+) -> FTQCResourceConstraintStatus:
+    """Classify a resource constraint margin by sign.
+
+    Args:
+        margin (sp.Expr): Signed headroom where nonnegative means satisfied.
+
+    Returns:
+        FTQCResourceConstraintStatus: Constraint status.
+    """
+    simplified = sp.simplify(margin)
+    if simplified.equals(0) or simplified.is_nonnegative:
+        return FTQCResourceConstraintStatus.SATISFIED
+    if simplified.is_negative:
+        return FTQCResourceConstraintStatus.VIOLATED
+    return FTQCResourceConstraintStatus.SYMBOLIC
 
 
 def _sort_rows_by_change(

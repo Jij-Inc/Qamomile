@@ -37,12 +37,14 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCAccuracyBudget,
     FTQCResourceCategory,
+    FTQCResourceConstraint,
     FTQCResourceProfile,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
+    evaluate_ftqc_resource_constraints,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     ftqc_resource_profile_quantities,
@@ -482,6 +484,48 @@ assert trotter_comparison[0].ratio == sp.Float("0.1")
 assert trotter_comparison[1].ratio == sp.Float("0.05")
 
 # %% [markdown]
+# ## Budget Constraints
+#
+# Early-FTQC studies often ask a different review question: does an estimate fit
+# inside a physical-qubit or runtime budget? A budget report evaluates the same
+# canonical resource values against explicit constraints and keeps symbolic
+# margins undecided until architecture assumptions are bound.
+
+# %%
+budget_report = evaluate_ftqc_resource_constraints(
+    uwc_trotter,
+    (
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            100_000,
+            label="Early-FTQC physical-qubit budget",
+        ),
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+            60 * 60,
+            label="One-hour runtime budget",
+        ),
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.LOGICAL_DEPTH,
+            plain_trotter.logical_depth,
+            label="No worse than plain Trotter depth",
+        ),
+    ),
+    title="Synthetic early-FTQC budget",
+)
+
+for result in budget_report.results:
+    print(result.status, result.label, "margin:", sp.N(result.margin, 4))
+
+assert budget_report.satisfied[0].quantity == FTQCResourceQuantity.PHYSICAL_QUBITS
+assert budget_report.violated[0].quantity == FTQCResourceQuantity.RUNTIME_SECONDS
+assert budget_report.to_dict()["counts"] == {
+    "satisfied": 2,
+    "violated": 1,
+    "symbolic": 0,
+}
+
+# %% [markdown]
 # ## Notes
 #
 # :::{note}
@@ -538,3 +582,5 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   larger, unchanged, and symbolic changes for design review.
 # - `build_ftqc_resource_comparison_report` packages labels, profile, rows,
 #   prioritized findings, and grouped counts for review artifacts.
+# - `evaluate_ftqc_resource_constraints` checks estimates against explicit
+#   physical-qubit, runtime, depth, or other resource budgets.

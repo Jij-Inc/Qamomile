@@ -11,11 +11,16 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCCostModel,
     FTQCResearchSignal,
+    FTQCResourceBudgetReport,
     FTQCResourceCategory,
     FTQCResourceChangeDirection,
     FTQCResourceComparisonReport,
     FTQCResourceComparisonRow,
     FTQCResourceComparisonSummary,
+    FTQCResourceConstraint,
+    FTQCResourceConstraintResult,
+    FTQCResourceConstraintSense,
+    FTQCResourceConstraintStatus,
     FTQCResourceFormula,
     FTQCResourceProfile,
     FTQCResourceProfileSpec,
@@ -29,6 +34,7 @@ from qamomile.circuit.estimator.algorithmic import (
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
+    evaluate_ftqc_resource_constraints,
     ftqc_resource_profile_quantities,
     iter_ftqc_research_signals,
     iter_ftqc_resource_profile_specs,
@@ -802,6 +808,117 @@ def test_ftqc_resource_review_findings_handle_symbolic_and_unchanged_rows():
         build_ftqc_resource_review_findings(summary, max_improvements=-1)
     with pytest.raises(ValueError, match="max_tradeoffs"):
         build_ftqc_resource_review_findings(summary, max_tradeoffs=-1)
+
+
+def test_evaluate_ftqc_resource_constraints_groups_budget_statuses():
+    """Resource budget reports classify satisfied and violated constraints."""
+    summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=summary,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    constraints = (
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            estimate.physical_qubits + 1,
+            label="Physical-qubit budget",
+        ),
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+            estimate.runtime_seconds / 2,
+        ),
+        FTQCResourceConstraint(
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+            estimate.logical_qubits,
+            sense=FTQCResourceConstraintSense.AT_LEAST,
+        ),
+    )
+
+    report = evaluate_ftqc_resource_constraints(
+        estimate,
+        constraints,
+        title="Toy early-FTQC budget",
+    )
+    report_dict = report.to_dict()
+
+    assert isinstance(report, FTQCResourceBudgetReport)
+    assert all(
+        isinstance(result, FTQCResourceConstraintResult) for result in report.results
+    )
+    assert [result.status for result in report.results] == [
+        FTQCResourceConstraintStatus.SATISFIED,
+        FTQCResourceConstraintStatus.VIOLATED,
+        FTQCResourceConstraintStatus.SATISFIED,
+    ]
+    assert report.results[0].label == "Physical-qubit budget"
+    assert report.results[0].margin == 1
+    assert report.results[1].sense == FTQCResourceConstraintSense.AT_MOST
+    assert report.results[2].sense == FTQCResourceConstraintSense.AT_LEAST
+    assert report_dict["title"] == "Toy early-FTQC budget"
+    assert report_dict["counts"] == {
+        "satisfied": 2,
+        "violated": 1,
+        "symbolic": 0,
+    }
+    assert report_dict["violated"][0]["quantity"] == "runtime_seconds"
+
+
+def test_evaluate_ftqc_resource_constraints_keeps_symbolic_budgets():
+    """Symbolic budget margins stay undecided until architecture values bind."""
+    summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=summary,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+    )
+
+    report = evaluate_ftqc_resource_constraints(
+        estimate,
+        (
+            FTQCResourceConstraint(
+                FTQCResourceQuantity.PHYSICAL_QUBITS,
+                100_000,
+            ),
+        ),
+    )
+
+    assert report.satisfied == ()
+    assert report.violated == ()
+    assert report.symbolic[0].status == FTQCResourceConstraintStatus.SYMBOLIC
+    assert report.symbolic[0].margin == (
+        100_000 - estimate.resource_values()[FTQCResourceQuantity.PHYSICAL_QUBITS]
+    )
+
+
+def test_ftqc_resource_constraints_reject_invalid_inputs():
+    """Constraint helpers reject invalid senses, limits, and missing values."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0))
+
+    with pytest.raises(ValueError, match="constraint sense"):
+        FTQCResourceConstraint("physical_qubits", 10, sense="near")
+
+    with pytest.raises(TypeError, match="limit"):
+        FTQCResourceConstraint("physical_qubits", object())
+
+    with pytest.raises(ValueError, match="missing"):
+        evaluate_ftqc_resource_constraints(
+            summary,
+            (FTQCResourceConstraint(FTQCResourceQuantity.PHYSICAL_QUBITS, 10),),
+        )
 
 
 def test_comparison_summary_keeps_undecidable_symbolic_changes_separate():
