@@ -243,6 +243,9 @@ block_plan_values = block_plan.resource_values()
 for step in block_plan.to_dict()["steps"]:
     print(step["name"], step["repetitions"])
 
+for formula in block_plan.to_dict()["formulas"]:
+    print(formula["quantity"], "<-", ", ".join(formula["depends_on"]))
+
 assert block_plan.steps[0].name == "block_encoding_contract"
 assert block_plan.steps[1].name == "qubitized_walk_qpe"
 assert block_plan_values[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 5100
@@ -250,6 +253,22 @@ assert block_plan_values[FTQCResourceQuantity.LOGICAL_QUBITS] == 132
 assert block_plan_values[FTQCResourceQuantity.TOFFOLI_GATES] == (
     block_plan_values[FTQCResourceQuantity.QPE_ITERATIONS] * 5100
 )
+assert block_plan.reference_keys() == ("arXiv:1610.06546",)
+assert block_plan.to_dict()["formulas"][0]["quantity"] == "walk_cost_toffoli"
+
+# %% [markdown]
+# plan provenanceは、circuit loweringとは意図的に分けています。reviewでは、PREPARE/SELECT実装を具体的なQamomile量子カーネルにするか決める前に、導出式とcitation keyを確認できます。
+
+# %%
+block_plan_dict = block_plan.to_dict()
+
+print(block_plan_dict["reference_keys"])
+print(block_plan_dict["steps"][0]["formulas"][0]["description"])
+
+assert block_plan_dict["reference_keys"] == ["arXiv:1610.06546"]
+assert block_plan_dict["steps"][0]["formulas"][0]["reference_keys"] == [
+    "arXiv:1610.06546"
+]
 
 # %% [markdown]
 # ## 最小例

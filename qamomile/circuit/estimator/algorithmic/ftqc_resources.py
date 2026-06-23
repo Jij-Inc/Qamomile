@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import sympy as sp
 
@@ -709,10 +709,15 @@ class FTQCResourcePlanStep:
             override for this step. Defaults to canonical quantity rules.
         label (str): Optional reader-facing subroutine label. Defaults to
             ``name`` when serialized.
+        formulas (tuple[FTQCResourceFormula, ...]): Symbolic formulas that
+            justify this step's resources. Defaults to an empty tuple.
+        reference_keys (tuple[str, ...]): Research or design-reference keys
+            supporting this step. Defaults to an empty tuple.
 
     Raises:
         TypeError: If ``resources`` or ``repetitions`` cannot be converted to
-            SymPy expressions.
+            SymPy expressions, if ``formulas`` contains non-formula items, or
+            if ``reference_keys`` contains non-string items.
         ValueError: If a quantity or aggregation rule is unknown, or if
             ``repetitions`` is negative when decidable.
 
@@ -737,15 +742,25 @@ class FTQCResourcePlanStep:
         | None
     ) = None
     label: str = ""
+    formulas: tuple[FTQCResourceFormula, ...] = ()
+    reference_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize step fields after dataclass construction.
 
         Raises:
-            TypeError: If resource values cannot be sympified.
+            TypeError: If resource values cannot be sympified, formulas are
+                not ``FTQCResourceFormula`` instances, or reference keys are
+                not strings.
             ValueError: If a closed-set key is unknown or repetitions are
                 negative when decidable.
         """
+        if not all(
+            isinstance(formula, FTQCResourceFormula) for formula in self.formulas
+        ):
+            raise TypeError("formulas must contain only FTQCResourceFormula instances.")
+        if not all(isinstance(key, str) for key in self.reference_keys):
+            raise TypeError("reference_keys must contain only strings.")
         normalized_resources = {
             _normalize_resource_quantity(quantity): _sympify_resource_expr(
                 value,
@@ -764,6 +779,8 @@ class FTQCResourcePlanStep:
         object.__setattr__(self, "resources", normalized_resources)
         object.__setattr__(self, "repetitions", repetitions)
         object.__setattr__(self, "aggregation", normalized_aggregation)
+        object.__setattr__(self, "formulas", tuple(self.formulas))
+        object.__setattr__(self, "reference_keys", tuple(self.reference_keys))
 
     def aggregation_rule_for(
         self,
@@ -809,12 +826,12 @@ class FTQCResourcePlanStep:
                 values[quantity] = value
         return values
 
-    def to_dict(self) -> dict[str, str | list[dict[str, str]]]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize the plan step.
 
         Returns:
-            dict[str, str | list[dict[str, str]]]: JSON-friendly subroutine
-                metadata and resource values.
+            dict[str, Any]: JSON-friendly subroutine metadata, resource
+                values, formulas, and references.
         """
         rows = []
         resources = cast(dict[FTQCResourceQuantity, sp.Expr], self.resources)
@@ -837,6 +854,8 @@ class FTQCResourcePlanStep:
             "label": self.label or self.name,
             "repetitions": str(self.repetitions),
             "resources": rows,
+            "formulas": [formula.to_dict() for formula in self.formulas],
+            "reference_keys": list(self.reference_keys),
         }
 
 
@@ -955,6 +974,69 @@ class FTQCResourcePlan:
                 )
         return values
 
+    def formulas(self) -> tuple[FTQCResourceFormula, ...]:
+        """Return step formulas with duplicate formulas removed.
+
+        Formulas are deduplicated by their serialized content while preserving
+        the first occurrence. This keeps report metadata compact when multiple
+        steps cite the same derivation.
+
+        Returns:
+            tuple[FTQCResourceFormula, ...]: Formulas referenced by plan steps.
+        """
+        formulas: list[FTQCResourceFormula] = []
+        seen: set[
+            tuple[str, str, tuple[FTQCResourceQuantity, ...], str, tuple[str, ...]]
+        ] = set()
+        for step in self.steps:
+            for formula in step.formulas:
+                quantity = cast(FTQCResourceQuantity, formula.quantity)
+                depends_on = cast(tuple[FTQCResourceQuantity, ...], formula.depends_on)
+                key = (
+                    quantity.value,
+                    str(formula.expression),
+                    depends_on,
+                    formula.description,
+                    formula.reference_keys,
+                )
+                if key in seen:
+                    continue
+                formulas.append(formula)
+                seen.add(key)
+        return tuple(formulas)
+
+    def reference_keys(self) -> tuple[str, ...]:
+        """Return reference keys used by plan steps and formulas.
+
+        Returns:
+            tuple[str, ...]: Deduplicated reference keys preserving first-seen
+                order.
+        """
+        references: list[str] = []
+        seen: set[str] = set()
+        for step in self.steps:
+            for key in (*step.reference_keys, *self._formula_reference_keys(step)):
+                if key in seen:
+                    continue
+                references.append(key)
+                seen.add(key)
+        return tuple(references)
+
+    def _formula_reference_keys(
+        self,
+        step: FTQCResourcePlanStep,
+    ) -> tuple[str, ...]:
+        """Return reference keys cited by one plan step's formulas.
+
+        Args:
+            step (FTQCResourcePlanStep): Step whose formulas should be
+                inspected.
+
+        Returns:
+            tuple[str, ...]: Reference keys cited by the step's formulas.
+        """
+        return tuple(key for formula in step.formulas for key in formula.reference_keys)
+
     def to_quantity_table(self) -> list[dict[str, str]]:
         """Return aggregate plan resources as table rows.
 
@@ -983,17 +1065,12 @@ class FTQCResourcePlan:
             )
         return rows
 
-    def to_dict(
-        self,
-    ) -> dict[
-        str, str | list[dict[str, str]] | list[dict[str, str | list[dict[str, str]]]]
-    ]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize the resource plan.
 
         Returns:
-            dict[str, str | list[dict[str, str]] | list[dict[str, str |
-                list[dict[str, str]]]]]: JSON-friendly plan metadata, steps,
-                and aggregate resource rows.
+            dict[str, Any]: JSON-friendly plan metadata, steps, aggregate
+                resource rows, formulas, and references.
 
         Raises:
             ValueError: If a consistent quantity has conflicting values across
@@ -1003,6 +1080,8 @@ class FTQCResourcePlan:
             "title": self.title,
             "steps": [step.to_dict() for step in self.steps],
             "resources": self.to_quantity_table(),
+            "formulas": [formula.to_dict() for formula in self.formulas()],
+            "reference_keys": list(self.reference_keys()),
         }
 
 

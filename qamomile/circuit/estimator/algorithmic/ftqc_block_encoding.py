@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import sympy as sp
 
@@ -420,6 +420,14 @@ def plan_qubitized_qpe_from_block_encoding(
     qpe_iterations = sp.simplify(block_encoding._normalization / precision_expr)
     logical_qubits = sp.simplify(block_encoding.logical_qubits + qpe_qubits)
     walk_spacetime = sp.simplify(logical_qubits * block_encoding.walk_cost_toffoli)
+    formulas_by_quantity = {
+        cast(FTQCResourceQuantity, formula.quantity): formula
+        for formula in _block_encoding_qpe_formulas()
+    }
+    block_reference_keys = (
+        _QUBITIZATION_REFERENCE.key,
+        *(reference.key for reference in block_encoding.references),
+    )
 
     return FTQCResourcePlan(
         (
@@ -448,6 +456,11 @@ def plan_qubitized_qpe_from_block_encoding(
                     FTQCResourceQuantity.LOGICAL_QUBITS: logical_qubits,
                 },
                 label="Block-encoding contract",
+                formulas=(
+                    formulas_by_quantity[FTQCResourceQuantity.WALK_COST_TOFFOLI],
+                    formulas_by_quantity[FTQCResourceQuantity.QPE_ITERATIONS],
+                ),
+                reference_keys=block_reference_keys,
             ),
             FTQCResourcePlanStep(
                 "qubitized_walk_qpe",
@@ -464,6 +477,12 @@ def plan_qubitized_qpe_from_block_encoding(
                 },
                 repetitions=qpe_iterations,
                 label="Repeated qubitized walk",
+                formulas=(
+                    formulas_by_quantity[FTQCResourceQuantity.TOFFOLI_GATES],
+                    formulas_by_quantity[FTQCResourceQuantity.LOGICAL_DEPTH],
+                    formulas_by_quantity[FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME],
+                ),
+                reference_keys=(_QUBITIZATION_REFERENCE.key,),
             ),
         ),
         title=title or f"Qubitized QPE plan: {block_encoding.name}",

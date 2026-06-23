@@ -265,6 +265,8 @@ def test_ftqc_resource_plan_composes_abstract_subroutines():
     )
     assert plan.to_quantity_table()[0]["quantity"] == "target_precision"
     assert plan.to_dict()["steps"][0]["label"] == "State preparation and filtering"
+    assert plan.formulas() == ()
+    assert plan.reference_keys() == ()
 
     budget = evaluate_ftqc_resource_constraints(
         plan,
@@ -344,6 +346,61 @@ def test_ftqc_resource_plan_rejects_invalid_composition_inputs():
 
     with pytest.raises(TypeError, match="FTQCResourcePlanStep"):
         FTQCResourcePlan((object(),))  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="formulas"):
+        FTQCResourcePlanStep(
+            "bad",
+            {"toffoli_gates": 1},
+            formulas=(object(),),  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(TypeError, match="reference_keys"):
+        FTQCResourcePlanStep(
+            "bad",
+            {"toffoli_gates": 1},
+            reference_keys=(object(),),  # type: ignore[arg-type]
+        )
+
+
+def test_ftqc_resource_plan_serializes_step_provenance():
+    """Plans preserve formulas and reference keys for review reports."""
+    formula = FTQCResourceFormula(
+        quantity="toffoli_gates",
+        expression=sp.Symbol("qpe_iterations") * sp.Symbol("walk_cost_toffoli"),
+        depends_on=("qpe_iterations", "walk_cost_toffoli"),
+        description="Multiply walk calls by per-walk Toffoli cost.",
+        reference_keys=("arXiv:1610.06546",),
+    )
+    repeated_formula = FTQCResourceFormula(
+        quantity="toffoli_gates",
+        expression=sp.Symbol("qpe_iterations") * sp.Symbol("walk_cost_toffoli"),
+        depends_on=("qpe_iterations", "walk_cost_toffoli"),
+        description="Multiply walk calls by per-walk Toffoli cost.",
+        reference_keys=("arXiv:1610.06546",),
+    )
+    prepare = FTQCResourcePlanStep(
+        "prepare",
+        {"toffoli_gates": 10},
+        formulas=(formula,),
+        reference_keys=("internal:loader",),
+    )
+    walk = FTQCResourcePlanStep(
+        "walk",
+        {"toffoli_gates": 20},
+        formulas=(repeated_formula,),
+        reference_keys=("arXiv:1610.06546",),
+    )
+    plan = FTQCResourcePlan((prepare, walk))
+
+    assert plan.formulas() == (formula,)
+    assert plan.reference_keys() == ("internal:loader", "arXiv:1610.06546")
+    serialized = plan.to_dict()
+    assert serialized["formulas"][0]["quantity"] == "toffoli_gates"
+    assert serialized["steps"][0]["formulas"][0]["depends_on"] == [
+        "qpe_iterations",
+        "walk_cost_toffoli",
+    ]
+    assert serialized["reference_keys"] == ["internal:loader", "arXiv:1610.06546"]
 
 
 def test_describe_ftqc_resource_quantity_normalizes_strings():
@@ -504,6 +561,17 @@ def test_block_encoding_qpe_plan_matches_logical_estimate_resources():
     )
     assert plan_values[FTQCResourceQuantity.WALK_COST_TOFFOLI] == 20
     assert plan.to_dict()["steps"][1]["label"] == "Repeated qubitized walk"
+    assert plan.reference_keys() == ("arXiv:1610.06546",)
+    assert [formula.quantity for formula in plan.formulas()] == [
+        FTQCResourceQuantity.WALK_COST_TOFFOLI,
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+        FTQCResourceQuantity.LOGICAL_DEPTH,
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+    ]
+    assert plan.to_dict()["steps"][0]["formulas"][0]["quantity"] == (
+        "walk_cost_toffoli"
+    )
 
 
 def test_block_encoding_qpe_plan_rejects_invalid_precision_inputs():
