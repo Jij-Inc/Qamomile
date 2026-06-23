@@ -41,6 +41,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    HamiltonianResourceReduction,
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
@@ -297,6 +298,53 @@ assert filtered_block_values[FTQCResourceQuantity.TOFFOLI_GATES] == (
 )
 assert filtered_block_values[FTQCResourceQuantity.LOGICAL_DEPTH] == (
     (block_plan_values[FTQCResourceQuantity.LOGICAL_DEPTH] + 50) * 5
+)
+
+# %% [markdown]
+# ## Hamiltonian Resource Reductions
+#
+# 最近の化学計算アルゴリズムでは、具体的な回路が存在する前にHamiltonian表現を改善することがよくあります。`HamiltonianResourceReduction`は、その表現レベルのfactorを明示的に記録します。そのためreviewでは、「Hamiltonian normalizationが小さくなった」ことと、「backendがemitしたgateが少なくなった」ことを区別できます。
+
+# %%
+reduction_hamiltonian = qm_o.Z(0) + 2 * qm_o.Z(1) + 3 * qm_o.Z(2)
+reduction_summary = summarize_pauli_hamiltonian(
+    reduction_hamiltonian,
+    n_spin_orbitals=12,
+    source="plain_lcu_for_reduction",
+).with_lambda_scale(100)
+plain_model = ChemistryQPEModel(
+    hamiltonian=reduction_summary,
+    method=ChemistryQPEMethod.SPARSE,
+    walk_cost_toffoli=4_000,
+    sparsity=10_000,
+)
+uwc_reduction = HamiltonianResourceReduction(
+    lambda_norm_factor=sp.Rational(1, 5),
+    pauli_term_factor=sp.Rational(1, 2),
+    walk_cost_factor=sp.Rational(3, 4),
+    sparsity_factor=sp.Rational(2, 5),
+    description="unitary weight concentration",
+)
+uwc_model = uwc_reduction.apply_to_model(plain_model)
+
+plain_estimate = estimate_qubitized_chemistry_qpe_from_model(
+    plain_model,
+    precision=sp.Float("0.0015"),
+)
+uwc_estimate = estimate_qubitized_chemistry_qpe_from_model(
+    uwc_model,
+    precision=sp.Float("0.0015"),
+)
+
+print(uwc_reduction.to_dict())
+print(uwc_model.to_dict()["description"])
+
+assert uwc_model.hamiltonian.lambda_norm == reduction_summary.lambda_norm / 5
+assert uwc_model.walk_cost_toffoli == 3_000
+assert uwc_model.effective_sparsity == 4_000
+assert uwc_estimate.qpe_iterations == plain_estimate.qpe_iterations / 5
+assert uwc_estimate.toffoli_gates == plain_estimate.toffoli_gates * sp.Rational(
+    3, 20
 )
 
 # %% [markdown]
@@ -663,6 +711,7 @@ assert budget_report.to_dict()["counts"] == {
 # - `FTQCResourcePlan`を使うと、具体的な回路実装ができる前に抽象的なFTQC subroutineを合成できます。
 # - `plan_qubitized_qpe_from_block_encoding`は、block-encoding contractをPREPARE/SELECT/reflection/QPE resource planへ変換します。
 # - `QPEStatePreparationBudget.apply_to_plan`は、success probabilityとattemptごとのpreparation overheadを抽象的なQPE planへ重ねます。
+# - `HamiltonianResourceReduction`は、unitary weight concentrationのような表現レベルの改善factorを、circuit IRを変えずに記録します。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。

@@ -1581,6 +1581,297 @@ class QPEStatePreparationBudget:
 
 
 @dataclass(frozen=True)
+class HamiltonianResourceReduction:
+    """Model representation-level reductions in Hamiltonian resource drivers.
+
+    The reduction records algorithmic transformations such as symmetry shifts,
+    tensor-factorization improvements, or unitary-weight concentration without
+    lowering them into circuit IR. Each factor multiplies an existing resource
+    driver, so values below one model cost reductions while preserving the
+    source Hamiltonian's abstract meaning.
+
+    Args:
+        lambda_norm_factor (sp.Expr | int | float): Multiplicative factor for
+            the Hamiltonian normalization. Defaults to one.
+        pauli_term_factor (sp.Expr | int | float): Multiplicative factor for
+            the Pauli/LCU term count. Defaults to one.
+        walk_cost_factor (sp.Expr | int | float): Multiplicative factor for
+            the chemistry model's per-walk Toffoli cost. Defaults to one.
+        sparsity_factor (sp.Expr | int | float): Multiplicative factor for an
+            explicit sparse-method term count. Defaults to one.
+        second_factor_rank_factor (sp.Expr | int | float): Multiplicative
+            factor for an explicit second-factor rank. Defaults to one.
+        logical_qubit_factor (sp.Expr | int | float): Multiplicative factor
+            for explicit logical-qubit overrides. Defaults to one.
+        truncation_error (sp.Expr | int | float | None): Optional replacement
+            representation error introduced by the transformed Hamiltonian.
+            Defaults to None, preserving the model's existing value.
+        source (str): Source label for transformed Hamiltonian summaries.
+            Defaults to an empty string, which appends ``":reduced"`` to the
+            original source.
+        description (str): Reader-facing note explaining the transformation.
+            Defaults to an empty string.
+        references (tuple[FTQCReference, ...]): Research sources supporting
+            the reduction factors. Defaults to an empty tuple.
+
+    Raises:
+        TypeError: If ``references`` contains non-reference items.
+        ValueError: If any scale factor is non-positive or if
+            ``truncation_error`` is negative.
+
+    Example:
+        >>> reduction = HamiltonianResourceReduction(
+        ...     lambda_norm_factor=sp.Rational(3, 4),
+        ...     description="symmetry-shifted factorization",
+        ... )
+        >>> reduction.apply_to_hamiltonian(
+        ...     PauliHamiltonianResource(4, 10, 100, 2)
+        ... ).lambda_norm
+        75
+    """
+
+    lambda_norm_factor: _SympyLike = 1
+    pauli_term_factor: _SympyLike = 1
+    walk_cost_factor: _SympyLike = 1
+    sparsity_factor: _SympyLike = 1
+    second_factor_rank_factor: _SympyLike = 1
+    logical_qubit_factor: _SympyLike = 1
+    truncation_error: _SympyLike | None = None
+    source: str = ""
+    description: str = ""
+    references: tuple[FTQCReference, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate reduction factors after dataclass construction.
+
+        Raises:
+            TypeError: If ``references`` contains non-reference items.
+            ValueError: If any factor or truncation error is invalid.
+        """
+        for name, expr in [
+            ("lambda_norm_factor", self._lambda_norm_factor),
+            ("pauli_term_factor", self._pauli_term_factor),
+            ("walk_cost_factor", self._walk_cost_factor),
+            ("sparsity_factor", self._sparsity_factor),
+            ("second_factor_rank_factor", self._second_factor_rank_factor),
+            ("logical_qubit_factor", self._logical_qubit_factor),
+        ]:
+            _validate_positive(expr, name)
+        if self.truncation_error is not None:
+            _validate_nonnegative(self._truncation_error, "truncation_error")
+        if not all(
+            isinstance(reference, FTQCReference) for reference in self.references
+        ):
+            raise TypeError("references must contain only FTQCReference instances.")
+
+    def apply_to_hamiltonian(
+        self,
+        hamiltonian: PauliHamiltonianResource,
+    ) -> PauliHamiltonianResource:
+        """Apply representation reductions to a Hamiltonian summary.
+
+        Args:
+            hamiltonian (PauliHamiltonianResource): Hamiltonian summary whose
+                LCU normalization and term count should be rescaled.
+
+        Returns:
+            PauliHamiltonianResource: Transformed summary with rescaled
+                Hamiltonian resource drivers.
+
+        Raises:
+            TypeError: If ``hamiltonian`` is not a
+                ``PauliHamiltonianResource``.
+        """
+        if not isinstance(hamiltonian, PauliHamiltonianResource):
+            raise TypeError("hamiltonian must be a PauliHamiltonianResource instance.")
+
+        return PauliHamiltonianResource(
+            n_spin_orbitals=hamiltonian.n_spin_orbitals,
+            n_pauli_terms=sp.simplify(
+                hamiltonian.n_pauli_terms * self._pauli_term_factor
+            ),
+            lambda_norm=sp.simplify(hamiltonian.lambda_norm * self._lambda_norm_factor),
+            max_locality=hamiltonian.max_locality,
+            constant=hamiltonian.constant,
+            constant_included=hamiltonian.constant_included,
+            source=self.source or f"{hamiltonian.source}:reduced",
+        )
+
+    def apply_to_model(self, model: ChemistryQPEModel) -> ChemistryQPEModel:
+        """Apply representation reductions to a chemistry QPE model.
+
+        Args:
+            model (ChemistryQPEModel): Chemistry model whose Hamiltonian and
+                representation-specific cost drivers should be transformed.
+
+        Returns:
+            ChemistryQPEModel: Copy of ``model`` with rescaled Hamiltonian,
+                walk-cost, sparse/rank/logical-qubit overrides, references,
+                and optional truncation error.
+
+        Raises:
+            TypeError: If ``model`` is not a ``ChemistryQPEModel``.
+        """
+        if not isinstance(model, ChemistryQPEModel):
+            raise TypeError("model must be a ChemistryQPEModel instance.")
+
+        return replace(
+            model,
+            hamiltonian=self.apply_to_hamiltonian(model.hamiltonian),
+            walk_cost_toffoli=sp.simplify(
+                _as_expr(model.walk_cost_toffoli, "walk_cost_toffoli")
+                * self._walk_cost_factor
+            ),
+            sparsity=self._scale_optional(model.sparsity, self._sparsity_factor),
+            second_factor_rank=self._scale_optional(
+                model.second_factor_rank,
+                self._second_factor_rank_factor,
+            ),
+            logical_qubits=self._scale_optional(
+                model.logical_qubits,
+                self._logical_qubit_factor,
+            ),
+            truncation_error=(
+                model.truncation_error
+                if self.truncation_error is None
+                else self._truncation_error
+            ),
+            description=_combine_descriptions(model.description, self.description),
+            references=_combine_references(model.references, self.references),
+        )
+
+    def to_dict(self) -> dict[str, str | list[dict[str, str]] | None]:
+        """Serialize the reduction model.
+
+        Returns:
+            dict[str, str | list[dict[str, str]] | None]: JSON-friendly
+                reduction factors, optional truncation error, description, and
+                references.
+        """
+        return {
+            "lambda_norm_factor": str(self._lambda_norm_factor),
+            "pauli_term_factor": str(self._pauli_term_factor),
+            "walk_cost_factor": str(self._walk_cost_factor),
+            "sparsity_factor": str(self._sparsity_factor),
+            "second_factor_rank_factor": str(self._second_factor_rank_factor),
+            "logical_qubit_factor": str(self._logical_qubit_factor),
+            "truncation_error": (
+                None if self.truncation_error is None else str(self._truncation_error)
+            ),
+            "source": self.source,
+            "description": self.description,
+            "references": [reference.to_dict() for reference in self.references],
+        }
+
+    def resource_factors(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return reduction factors keyed by affected resource quantities.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Multiplicative factors for
+                canonical quantities touched by the reduction model.
+        """
+        values = {
+            FTQCResourceQuantity.LAMBDA_NORM: self._lambda_norm_factor,
+            FTQCResourceQuantity.N_PAULI_TERMS: self._pauli_term_factor,
+            FTQCResourceQuantity.WALK_COST_TOFFOLI: self._walk_cost_factor,
+            FTQCResourceQuantity.LOGICAL_QUBITS: self._logical_qubit_factor,
+        }
+        if self.truncation_error is not None:
+            values[FTQCResourceQuantity.TRUNCATION_ERROR] = self._truncation_error
+        return values
+
+    def _scale_optional(
+        self,
+        value: _SympyLike | None,
+        factor: sp.Expr,
+    ) -> sp.Expr | None:
+        """Scale an optional model quantity.
+
+        Args:
+            value (sp.Expr | int | float | None): Optional value to scale.
+            factor (sp.Expr): Multiplicative factor to apply when ``value`` is
+                present.
+
+        Returns:
+            sp.Expr | None: Scaled expression or None when ``value`` is None.
+        """
+        if value is None:
+            return None
+        return sp.simplify(_as_expr(value, "value") * factor)
+
+    @property
+    def _lambda_norm_factor(self) -> sp.Expr:
+        """Return ``lambda_norm_factor`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted Hamiltonian-normalization scale factor.
+        """
+        return _as_expr(self.lambda_norm_factor, "lambda_norm_factor")
+
+    @property
+    def _pauli_term_factor(self) -> sp.Expr:
+        """Return ``pauli_term_factor`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted Pauli-term scale factor.
+        """
+        return _as_expr(self.pauli_term_factor, "pauli_term_factor")
+
+    @property
+    def _walk_cost_factor(self) -> sp.Expr:
+        """Return ``walk_cost_factor`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted walk-cost scale factor.
+        """
+        return _as_expr(self.walk_cost_factor, "walk_cost_factor")
+
+    @property
+    def _sparsity_factor(self) -> sp.Expr:
+        """Return ``sparsity_factor`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted sparsity scale factor.
+        """
+        return _as_expr(self.sparsity_factor, "sparsity_factor")
+
+    @property
+    def _second_factor_rank_factor(self) -> sp.Expr:
+        """Return ``second_factor_rank_factor`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted second-rank scale factor.
+        """
+        return _as_expr(
+            self.second_factor_rank_factor,
+            "second_factor_rank_factor",
+        )
+
+    @property
+    def _logical_qubit_factor(self) -> sp.Expr:
+        """Return ``logical_qubit_factor`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted logical-qubit scale factor.
+        """
+        return _as_expr(self.logical_qubit_factor, "logical_qubit_factor")
+
+    @property
+    def _truncation_error(self) -> sp.Expr:
+        """Return ``truncation_error`` as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted truncation error.
+
+        Raises:
+            ValueError: If ``truncation_error`` is None.
+        """
+        if self.truncation_error is None:
+            raise ValueError("truncation_error is not set.")
+        return _as_expr(self.truncation_error, "truncation_error")
+
+
+@dataclass(frozen=True)
 class PauliHamiltonianResource:
     """Summarize a Pauli-LCU Hamiltonian for FTQC resource estimates.
 
@@ -3143,6 +3434,20 @@ def _combine_references(
             references.append(reference)
             seen.add(reference.key)
     return tuple(references)
+
+
+def _combine_descriptions(base: str, extra: str) -> str:
+    """Merge optional reader-facing descriptions.
+
+    Args:
+        base (str): Existing model description.
+        extra (str): Additional reduction description.
+
+    Returns:
+        str: Combined description with empty parts removed.
+    """
+    parts = [part for part in (base, extra) if part]
+    return "; ".join(parts)
 
 
 def _normalize_method(method: str | ChemistryQPEMethod) -> ChemistryQPEMethod:

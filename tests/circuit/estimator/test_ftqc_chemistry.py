@@ -15,6 +15,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourcePlan,
     FTQCResourcePlanStep,
     FTQCResourceQuantity,
+    HamiltonianResourceReduction,
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
@@ -215,6 +216,85 @@ def test_accuracy_budget_rejects_overallocated_error_budget():
         FTQCAccuracyBudget(target_precision=1).with_model(object())
 
 
+def test_hamiltonian_resource_reduction_scales_problem_drivers():
+    """Hamiltonian reductions rescale lambda and term-count metadata."""
+    summary = summarize_pauli_hamiltonian(
+        2 * qm_o.Z(0) + 3 * qm_o.X(1) + qm_o.Y(2),
+        source="plain_lcu",
+    )
+    reduction = HamiltonianResourceReduction(
+        lambda_norm_factor=sp.Rational(3, 5),
+        pauli_term_factor=sp.Rational(1, 3),
+        source="symmetry_shifted_lcu",
+        description="simultaneous symmetry shifts",
+    )
+
+    reduced = reduction.apply_to_hamiltonian(summary)
+    factors = reduction.resource_factors()
+
+    assert sp.simplify(summary.lambda_norm - 6) == 0
+    assert reduced.source == "symmetry_shifted_lcu"
+    assert sp.Abs(reduced.lambda_norm - sp.Rational(18, 5)) < sp.Float("1e-12")
+    assert reduced.n_pauli_terms == 1
+    assert reduced.max_locality == summary.max_locality
+    assert factors[FTQCResourceQuantity.LAMBDA_NORM] == sp.Rational(3, 5)
+    assert reduction.to_dict()["description"] == "simultaneous symmetry shifts"
+
+
+def test_hamiltonian_resource_reduction_updates_chemistry_model_estimates():
+    """Representation reductions turn research cost drivers into estimates."""
+    summary = summarize_pauli_hamiltonian(
+        qm_o.Z(0) + 2 * qm_o.Z(1) + 3 * qm_o.Z(2) + 4 * qm_o.Z(3) + 5 * qm_o.Z(4),
+        source="plain_sparse_lcu",
+    )
+    reference = FTQCReference(
+        key="arXiv:2603.22778",
+        title="Early FTQC chemistry resource model",
+        url="https://arxiv.org/abs/2603.22778",
+    )
+    baseline_model = ChemistryQPEModel(
+        hamiltonian=summary,
+        method=ChemistryQPEMethod.SPARSE,
+        walk_cost_toffoli=20,
+        sparsity=50,
+        truncation_error=sp.Float("1e-5"),
+        description="plain sparse LCU",
+    )
+    reduction = HamiltonianResourceReduction(
+        lambda_norm_factor=sp.Rational(1, 5),
+        pauli_term_factor=sp.Rational(1, 2),
+        walk_cost_factor=sp.Rational(1, 2),
+        sparsity_factor=sp.Rational(2, 5),
+        truncation_error=sp.Float("2e-5"),
+        description="unitary weight concentration",
+        references=(reference,),
+    )
+
+    reduced_model = reduction.apply_to_model(baseline_model)
+    baseline = estimate_qubitized_chemistry_qpe_from_model(
+        baseline_model,
+        precision=1,
+    )
+    reduced = estimate_qubitized_chemistry_qpe_from_model(
+        reduced_model,
+        precision=1,
+    )
+
+    assert sp.simplify(baseline_model.hamiltonian.lambda_norm - 15) == 0
+    assert sp.Abs(reduced_model.hamiltonian.lambda_norm - 3) < sp.Float("1e-12")
+    assert reduced_model.hamiltonian.n_pauli_terms == sp.Rational(5, 2)
+    assert reduced_model.walk_cost_toffoli == 10
+    assert reduced_model.effective_sparsity == 20
+    assert reduced_model.truncation_error == sp.Float("2e-5")
+    assert reduced_model.description == (
+        "plain sparse LCU; unitary weight concentration"
+    )
+    assert [item.key for item in reduced_model.references] == ["arXiv:2603.22778"]
+    assert reduced.qpe_iterations == baseline.qpe_iterations / 5
+    assert reduced.toffoli_gates == baseline.toffoli_gates / 10
+    assert reduced.logical_qubits < baseline.logical_qubits
+
+
 def test_state_preparation_budget_scales_expected_qpe_work():
     """State-preparation success budgets scale repeated QPE attempts."""
     summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
@@ -341,6 +421,25 @@ def test_state_preparation_budget_rejects_invalid_probabilities():
 
     with pytest.raises(TypeError, match="FTQCResourcePlan"):
         QPEStatePreparationBudget(success_probability=1).apply_to_plan(object())
+
+
+def test_hamiltonian_resource_reduction_rejects_invalid_inputs():
+    """Hamiltonian reductions reject invalid scale factors and target types."""
+    with pytest.raises(ValueError, match="lambda_norm_factor"):
+        HamiltonianResourceReduction(lambda_norm_factor=0)
+
+    with pytest.raises(ValueError, match="truncation_error"):
+        HamiltonianResourceReduction(truncation_error=-1)
+
+    with pytest.raises(TypeError, match="FTQCReference"):
+        HamiltonianResourceReduction(references=(object(),))
+
+    reduction = HamiltonianResourceReduction()
+    with pytest.raises(TypeError, match="PauliHamiltonianResource"):
+        reduction.apply_to_hamiltonian(object())
+
+    with pytest.raises(TypeError, match="ChemistryQPEModel"):
+        reduction.apply_to_model(object())
 
 
 def test_cost_model_lifts_logical_estimates_to_physical_runtime():

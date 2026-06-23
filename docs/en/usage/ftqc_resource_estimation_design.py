@@ -44,6 +44,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    HamiltonianResourceReduction,
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
@@ -328,6 +329,57 @@ assert filtered_block_values[FTQCResourceQuantity.TOFFOLI_GATES] == (
 )
 assert filtered_block_values[FTQCResourceQuantity.LOGICAL_DEPTH] == (
     (block_plan_values[FTQCResourceQuantity.LOGICAL_DEPTH] + 50) * 5
+)
+
+# %% [markdown]
+# ## Hamiltonian Resource Reductions
+#
+# Recent chemistry algorithms often improve the Hamiltonian representation
+# before any circuit exists. `HamiltonianResourceReduction` records those
+# representation-level factors explicitly, so a review can distinguish "the
+# Hamiltonian normalization got smaller" from "the backend emitted fewer
+# gates."
+
+# %%
+reduction_hamiltonian = qm_o.Z(0) + 2 * qm_o.Z(1) + 3 * qm_o.Z(2)
+reduction_summary = summarize_pauli_hamiltonian(
+    reduction_hamiltonian,
+    n_spin_orbitals=12,
+    source="plain_lcu_for_reduction",
+).with_lambda_scale(100)
+plain_model = ChemistryQPEModel(
+    hamiltonian=reduction_summary,
+    method=ChemistryQPEMethod.SPARSE,
+    walk_cost_toffoli=4_000,
+    sparsity=10_000,
+)
+uwc_reduction = HamiltonianResourceReduction(
+    lambda_norm_factor=sp.Rational(1, 5),
+    pauli_term_factor=sp.Rational(1, 2),
+    walk_cost_factor=sp.Rational(3, 4),
+    sparsity_factor=sp.Rational(2, 5),
+    description="unitary weight concentration",
+)
+uwc_model = uwc_reduction.apply_to_model(plain_model)
+
+plain_estimate = estimate_qubitized_chemistry_qpe_from_model(
+    plain_model,
+    precision=sp.Float("0.0015"),
+)
+uwc_estimate = estimate_qubitized_chemistry_qpe_from_model(
+    uwc_model,
+    precision=sp.Float("0.0015"),
+)
+
+print(uwc_reduction.to_dict())
+print(uwc_model.to_dict()["description"])
+
+assert uwc_model.hamiltonian.lambda_norm == reduction_summary.lambda_norm / 5
+assert uwc_model.walk_cost_toffoli == 3_000
+assert uwc_model.effective_sparsity == 4_000
+assert uwc_estimate.qpe_iterations == plain_estimate.qpe_iterations / 5
+assert uwc_estimate.toffoli_gates == plain_estimate.toffoli_gates * sp.Rational(
+    3, 20
 )
 
 # %% [markdown]
@@ -729,6 +781,8 @@ assert budget_report.to_dict()["counts"] == {
 #   into a PREPARE/SELECT/reflection/QPE resource plan.
 # - `QPEStatePreparationBudget.apply_to_plan` layers success probability and
 #   per-attempt preparation overhead onto an abstract QPE plan.
+# - `HamiltonianResourceReduction` records representation-level improvement
+#   factors such as unitary weight concentration without changing circuit IR.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation
