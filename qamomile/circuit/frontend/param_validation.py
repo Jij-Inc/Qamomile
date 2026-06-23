@@ -269,13 +269,19 @@ def _validate_quantum_param_handle(
     * **An array declaration receiving a scalar ``Qubit``** (e.g. passing
       a single qubit to a ``Vector[Qubit]`` target) is always rejected --
       the callee indexes the register internally, so a lone qubit cannot
-      satisfy it.
+      satisfy it. The concrete array kind must also match the declared
+      rank: a ``Vector[Qubit]`` declaration accepts ``Vector`` /
+      ``VectorView`` but not a higher-rank ``Matrix`` / ``Tensor``, and
+      vice versa.
     * **A scalar ``Qubit`` declaration receiving a quantum array** is a
       *broadcast* in the control path (the controlled gate is applied
       once per target qubit -- see ``controlled_native_broadcast_target``)
       but a silent miscompile in a plain ``CallBlockOperation`` call
       (the whole register collapses onto one scalar dummy input).
-      ``allow_broadcast`` selects which contract applies.
+      ``allow_broadcast`` selects which contract applies. Only a 1-D
+      ``Vector`` / ``VectorView`` is a valid broadcast source; a
+      higher-rank ``Matrix`` / ``Tensor`` is rejected even when
+      ``allow_broadcast`` is set.
 
     Args:
         param_name (str): Kernel parameter name, used in error messages.
@@ -296,7 +302,7 @@ def _validate_quantum_param_handle(
             (scalar vs. array) does not match the declared quantum
             parameter kind under the active broadcast contract.
     """
-    from qamomile.circuit.frontend.handle.array import ArrayBase
+    from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 
     if not _is_quantum_handle(param_value):
         raise TypeError(
@@ -311,7 +317,11 @@ def _validate_quantum_param_handle(
             return
         # A quantum array bound to a scalar ``Qubit`` parameter broadcasts
         # in the control path but silently miscompiles in a plain call.
-        if allow_broadcast and isinstance(param_value, ArrayBase):
+        # Only 1-D ``Vector`` / ``VectorView`` (``VectorView`` subclasses
+        # ``Vector``) broadcasts are supported: the control-path expansion
+        # assumes 1-D register semantics, so a higher-rank ``Matrix`` /
+        # ``Tensor`` is not a valid broadcast target and is rejected.
+        if allow_broadcast and isinstance(param_value, Vector):
             return
         raise TypeError(
             f"{context}: parameter {param_name!r} is declared as a "
@@ -328,6 +338,24 @@ def _validate_quantum_param_handle(
             f"{type(param_value).__name__}. Pass a Vector[Qubit] register "
             f"instead -- allocate one with qmc.qubit_array(N, ...) at the "
             f"call site, or pass an existing Vector handle."
+        )
+
+    # The concrete array kind must match the declared rank. A
+    # ``Vector[Qubit]`` declaration accepts ``Vector`` / ``VectorView``
+    # (``VectorView`` subclasses ``Vector``) but not a higher-rank
+    # ``Matrix`` / ``Tensor``, and a ``Matrix[Qubit]`` / ``Tensor[Qubit]``
+    # declaration rejects a 1-D ``Vector``. Many call sites assume 1-D
+    # indexing for ``Vector[Qubit]``, so a rank mismatch left unchecked
+    # would surface as a later failure or miscompile.
+    declared_origin = getattr(declared, "__origin__", declared)
+    if isinstance(declared_origin, type) and not isinstance(
+        param_value, declared_origin
+    ):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as "
+            f"{declared_origin.__name__}[Qubit] but received a "
+            f"{type(param_value).__name__} handle of a different rank. "
+            f"Pass a {declared_origin.__name__}[Qubit] handle instead."
         )
 
 
