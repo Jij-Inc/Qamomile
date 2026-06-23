@@ -1,6 +1,6 @@
 """Quantum-chemistry helpers built on Qamomile's core abstractions."""
 
-from qamomile.chemistry.ftqc import (
+from qamomile.chemistry.resource_estimation import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
     PauliHamiltonianResource,
