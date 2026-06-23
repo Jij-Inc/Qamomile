@@ -75,7 +75,7 @@ from qamomile.circuit.estimator.algorithmic import (
 # %% [markdown]
 # ## 研究上のシグナル
 #
-# 現在のquantity catalogは、近年のFTQC化学計算研究で使われているcost driverに合わせています。Qamomileはこの対応をstructured research signalとして公開しているため、reportで「なぜそのquantityを測るのか」を示せます。
+# 現在のquantity catalogは、近年のFTQC化学計算研究で使われているcost driverに合わせています。Qamomileはこの対応をstructured research signalとして公開しているため、reportで「なぜそのquantityを測るのか」と、最初に使うべきreview profileを示せます。
 #
 # | Research direction | Cost signal for Qamomile |
 # | --- | --- |
@@ -89,7 +89,13 @@ from qamomile.circuit.estimator.algorithmic import (
 # %%
 research_signals = [signal.to_dict() for signal in iter_ftqc_research_signals()]
 for signal in research_signals:
-    print(signal["reference_key"], "->", ", ".join(signal["quantities"][:4]))
+    print(
+        signal["reference_key"],
+        "->",
+        ", ".join(signal["profiles"]),
+        "|",
+        ", ".join(signal["quantities"][:4]),
+    )
 
 signal_by_key = {signal["reference_key"]: signal for signal in research_signals}
 assert "lambda_norm" in signal_by_key["arXiv:2403.03502"]["quantities"]
@@ -97,6 +103,7 @@ assert "state_preparation_success_probability" in signal_by_key["arXiv:2601.0853
     "quantities"
 ]
 assert "t_gates" in signal_by_key["arXiv:2603.22778"]["quantities"]
+assert "spacetime" in signal_by_key["arXiv:2603.22778"]["profiles"]
 
 # %% [markdown]
 # ## Quantity Catalog

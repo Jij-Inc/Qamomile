@@ -175,7 +175,7 @@ assert space_time_quantities == (
 )
 
 # %% [markdown]
-# research-signal catalogは、近年の論文と、Qamomile modelが公開すべき量を対応づけます。これにより、このチュートリアルは文章だけの主張ではなく、小さく確認可能なcontractに基づきます。
+# research-signal catalogは、近年の論文と、Qamomile modelが公開すべき量、さらに最初に確認すべきreview profileを対応づけます。これにより、このチュートリアルは文章だけの主張ではなく、小さく確認可能なcontractに基づきます。
 
 # %%
 signal_by_key = {
@@ -186,12 +186,15 @@ early_ftqc_signal = signal_by_key["arXiv:2603.22778"]
 
 print(scdf_signal.title)
 print([quantity.value for quantity in scdf_signal.quantities])
+print([profile.value for profile in scdf_signal.profiles])
 print(early_ftqc_signal.title)
 print([quantity.value for quantity in early_ftqc_signal.quantities])
+print([profile.value for profile in early_ftqc_signal.profiles])
 
 assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in scdf_signal.quantities
 assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in early_ftqc_signal.quantities
 assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in early_ftqc_signal.quantities
+assert FTQCResourceProfile.SPACETIME in early_ftqc_signal.profiles
 
 # %% [markdown]
 # 小さなQamomile observableから始めます。実際の化学計算pipelineと同じ形にするためです。Hamiltonianを作る、または読み込み、LCU量を要約して、そのsummaryをFTQC Estimatorへ渡します。下のrescalingは、toy Hamiltonianを大きなactive-space modelの代わりとして使うためのものです。この係数が特定の分子を表すという主張ではありません。

@@ -205,8 +205,9 @@ assert space_time_quantities == (
 
 # %% [markdown]
 # The research-signal catalog maps recent papers to the quantities they ask a
-# Qamomile model to expose. This keeps the tutorial grounded in a small,
-# inspectable contract instead of prose-only claims.
+# Qamomile model to expose, plus the review profiles that should be inspected
+# first. This keeps the tutorial grounded in a small, inspectable contract
+# instead of prose-only claims.
 
 # %%
 signal_by_key = {
@@ -217,12 +218,15 @@ early_ftqc_signal = signal_by_key["arXiv:2603.22778"]
 
 print(scdf_signal.title)
 print([quantity.value for quantity in scdf_signal.quantities])
+print([profile.value for profile in scdf_signal.profiles])
 print(early_ftqc_signal.title)
 print([quantity.value for quantity in early_ftqc_signal.quantities])
+print([profile.value for profile in early_ftqc_signal.profiles])
 
 assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in scdf_signal.quantities
 assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in early_ftqc_signal.quantities
 assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in early_ftqc_signal.quantities
+assert FTQCResourceProfile.SPACETIME in early_ftqc_signal.profiles
 
 # %% [markdown]
 # We start from a small Qamomile observable so the workflow has the same shape

@@ -355,6 +355,8 @@ class FTQCResearchSignal:
             quantities that should be inspected when modeling this direction.
         design_note (str): Guidance for how Qamomile should represent the
             signal without prematurely lowering it into backend circuits.
+        profiles (tuple[FTQCResourceProfile, ...]): Standard review profiles
+            that cover this research signal. Defaults to an empty tuple.
 
     Example:
         >>> signal = iter_ftqc_research_signals()[0]
@@ -368,6 +370,7 @@ class FTQCResearchSignal:
     cost_driver: str
     quantities: tuple[FTQCResourceQuantity, ...]
     design_note: str
+    profiles: tuple[FTQCResourceProfile, ...] = ()
 
     def to_dict(self) -> dict[str, str | list[str]]:
         """Serialize the research signal.
@@ -382,6 +385,7 @@ class FTQCResearchSignal:
             "cost_driver": self.cost_driver,
             "quantities": [quantity.value for quantity in self.quantities],
             "design_note": self.design_note,
+            "profiles": [profile.value for profile in self.profiles],
         }
 
 
@@ -1788,7 +1792,11 @@ FTQC_RESOURCE_PROFILE_SPECS: tuple[FTQCResourceProfileSpec, ...] = (
             FTQCResourceQuantity.LAMBDA_NORM,
             FTQCResourceQuantity.TARGET_PRECISION,
             FTQCResourceQuantity.TRUNCATION_ERROR,
+            FTQCResourceQuantity.STATE_PREPARATION_SUCCESS_PROBABILITY,
             FTQCResourceQuantity.QPE_REPETITIONS,
+            FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI,
+            FTQCResourceQuantity.STATE_PREPARATION_T_GATES,
+            FTQCResourceQuantity.STATE_PREPARATION_LOGICAL_DEPTH,
             FTQCResourceQuantity.QPE_ITERATIONS,
             FTQCResourceQuantity.TOFFOLI_GATES,
             FTQCResourceQuantity.T_GATES,
@@ -1901,6 +1909,10 @@ FTQC_RESEARCH_SIGNALS = (
             "Represent the block encoding as algorithmic metadata until a "
             "loader implementation is ready to emit concrete circuits."
         ),
+        profiles=(
+            FTQCResourceProfile.BLOCK_ENCODING,
+            FTQCResourceProfile.CHEMISTRY_QPE,
+        ),
     ),
     FTQCResearchSignal(
         reference_key="arXiv:2403.03502",
@@ -1926,6 +1938,11 @@ FTQC_RESEARCH_SIGNALS = (
             "Keep factorization ranks, normalization, and walk cost on the "
             "chemistry model rather than baking them into IR gates."
         ),
+        profiles=(
+            FTQCResourceProfile.BLOCK_ENCODING,
+            FTQCResourceProfile.CHEMISTRY_QPE,
+            FTQCResourceProfile.SPACETIME,
+        ),
     ),
     FTQCResearchSignal(
         reference_key="arXiv:2412.01338",
@@ -1948,6 +1965,7 @@ FTQC_RESEARCH_SIGNALS = (
             "Model symmetry-shift effects as representation metadata with an "
             "explicit accuracy budget."
         ),
+        profiles=(FTQCResourceProfile.CHEMISTRY_QPE,),
     ),
     FTQCResearchSignal(
         reference_key="arXiv:2601.08533",
@@ -1968,6 +1986,10 @@ FTQC_RESEARCH_SIGNALS = (
         design_note=(
             "Represent overlap and filtering success as an algorithmic budget "
             "that scales expected QPE work."
+        ),
+        profiles=(
+            FTQCResourceProfile.CHEMISTRY_QPE,
+            FTQCResourceProfile.SPACETIME,
         ),
     ),
     FTQCResearchSignal(
@@ -1992,6 +2014,11 @@ FTQC_RESEARCH_SIGNALS = (
         design_note=(
             "Track T gates, logical depth, and architecture knobs alongside "
             "Toffoli-native qubitization estimates."
+        ),
+        profiles=(
+            FTQCResourceProfile.CHEMISTRY_QPE,
+            FTQCResourceProfile.SPACETIME,
+            FTQCResourceProfile.ARCHITECTURE,
         ),
     ),
 )

@@ -102,11 +102,23 @@ def test_ftqc_research_signals_map_sources_to_quantity_catalog():
     assert "arXiv:2601.08533" in signal_by_key
     assert "arXiv:2603.22778" in signal_by_key
     assert all(signal.url.startswith("https://arxiv.org/abs/") for signal in signals)
+    profile_catalog = {
+        profile.profile: set(profile.quantities)
+        for profile in iter_ftqc_resource_profile_specs()
+    }
 
     scdf = signal_by_key["arXiv:2403.03502"]
     assert FTQCResourceQuantity.LAMBDA_NORM in scdf.quantities
     assert FTQCResourceQuantity.TOFFOLI_GATES in scdf.quantities
     assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in scdf.quantities
+    assert scdf.profiles == (
+        FTQCResourceProfile.BLOCK_ENCODING,
+        FTQCResourceProfile.CHEMISTRY_QPE,
+        FTQCResourceProfile.SPACETIME,
+    )
+    assert set(scdf.quantities).issubset(
+        set().union(*(profile_catalog[profile] for profile in scdf.profiles))
+    )
 
     state_preparation = signal_by_key["arXiv:2601.08533"]
     assert (
@@ -117,8 +129,25 @@ def test_ftqc_research_signals_map_sources_to_quantity_catalog():
     assert state_preparation.to_dict()["quantities"][0] == (
         "state_preparation_success_probability"
     )
+    assert state_preparation.to_dict()["profiles"] == [
+        "chemistry_qpe",
+        "spacetime",
+    ]
+    assert set(state_preparation.quantities).issubset(
+        set().union(
+            *(profile_catalog[profile] for profile in state_preparation.profiles)
+        )
+    )
     early_ftqc = signal_by_key["arXiv:2603.22778"]
     assert FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME in early_ftqc.quantities
+    assert early_ftqc.profiles == (
+        FTQCResourceProfile.CHEMISTRY_QPE,
+        FTQCResourceProfile.SPACETIME,
+        FTQCResourceProfile.ARCHITECTURE,
+    )
+    assert set(early_ftqc.quantities).issubset(
+        set().union(*(profile_catalog[profile] for profile in early_ftqc.profiles))
+    )
 
 
 def test_ftqc_resource_profiles_group_review_quantities():
