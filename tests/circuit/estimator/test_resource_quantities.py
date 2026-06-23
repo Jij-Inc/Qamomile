@@ -16,8 +16,10 @@ from qamomile.resource_estimation import (
     compare_resource_values,
     describe_resource_quantity,
     estimate_physical_resources,
+    estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
     iter_resource_quantity_specs,
+    resource_values_from_estimate,
     summarize_pauli_hamiltonian,
 )
 
@@ -152,6 +154,80 @@ def test_compare_physical_estimates_uses_canonical_values():
     assert sp.simplify(rows[0].ratio - sp.Rational(1, 2)) == 0
     assert rows[1].quantity == ResourceQuantity.NON_CLIFFORD_COUNT
     assert sp.simplify(rows[1].ratio - sp.Rational(1, 2)) == 0
+
+
+def test_logical_estimates_expose_canonical_values_for_comparison():
+    """Logical ResourceEstimate objects compare without physical lifting."""
+    baseline = estimate_qubitized_qpe_resources(
+        n_qubits=16,
+        lambda_norm=100,
+        precision=sp.Rational(1, 2),
+        walk_cost_toffoli=20,
+        representation=HamiltonianRepresentation.DOUBLE_FACTORIZATION,
+        second_factor_rank=4,
+    )
+    candidate = estimate_qubitized_qpe_resources(
+        n_qubits=16,
+        lambda_norm=25,
+        precision=sp.Rational(1, 2),
+        walk_cost_toffoli=10,
+        representation=HamiltonianRepresentation.DOUBLE_FACTORIZATION,
+        second_factor_rank=4,
+    )
+    values = resource_values_from_estimate(candidate)
+    rows = compare_resource_values(
+        baseline,
+        candidate,
+        quantities=(
+            ResourceQuantity.QPE_ITERATIONS,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+            ResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+        ),
+    )
+
+    assert values["logical_qubits"] == candidate.qubits
+    assert values["logical_depth"] == candidate.gates.total
+    assert values["qpe_iterations"] == candidate.gates.oracle_calls["qpe_iterations"]
+    assert rows[0].quantity == ResourceQuantity.QPE_ITERATIONS
+    assert sp.simplify(rows[0].ratio - sp.Rational(1, 4)) == 0
+    assert rows[1].quantity == ResourceQuantity.NON_CLIFFORD_COUNT
+    assert sp.simplify(rows[1].ratio - sp.Rational(1, 8)) == 0
+    assert rows[2].quantity == ResourceQuantity.LOGICAL_SPACETIME_VOLUME
+    assert sp.simplify(rows[2].ratio - sp.Rational(1, 8)) == 0
+
+
+def test_compare_resource_values_accepts_mappings_and_rejects_bad_estimate_overrides():
+    """Raw mappings are valid providers, while negative logical overrides fail."""
+    baseline = {
+        ResourceQuantity.LOGICAL_QUBITS: sp.Integer(10),
+        "logical_depth": sp.Integer(100),
+    }
+    candidate = {
+        "logical_qubits": sp.Integer(5),
+        ResourceQuantity.LOGICAL_DEPTH: sp.Integer(25),
+    }
+    rows = compare_resource_values(
+        baseline,
+        candidate,
+        quantities=(ResourceQuantity.LOGICAL_QUBITS, ResourceQuantity.LOGICAL_DEPTH),
+    )
+    logical = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=10,
+        precision=1,
+        walk_cost_toffoli=2,
+    )
+
+    assert [row.quantity for row in rows] == [
+        ResourceQuantity.LOGICAL_QUBITS,
+        ResourceQuantity.LOGICAL_DEPTH,
+    ]
+    assert rows[0].ratio == sp.Rational(1, 2)
+    assert rows[1].ratio == sp.Rational(1, 4)
+    with pytest.raises(ValueError, match="logical_depth"):
+        resource_values_from_estimate(logical, logical_depth=-1)
+    with pytest.raises(TypeError, match="resource value providers"):
+        compare_resource_values(object(), candidate)
 
 
 def test_physical_estimate_exposes_spacetime_values():

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import enum
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
 import sympy as sp
+
+from qamomile.circuit.estimator import ResourceEstimate
+
+_SympyLike = sp.Expr | int | float
 
 
 class ResourceCategory(enum.StrEnum):
@@ -486,18 +491,25 @@ def describe_resource_quantity(
 
 
 def compare_resource_values(
-    baseline: SupportsResourceValues,
-    candidate: SupportsResourceValues,
+    baseline: SupportsResourceValues
+    | Mapping[str | ResourceQuantity, sp.Expr]
+    | ResourceEstimate,
+    candidate: SupportsResourceValues
+    | Mapping[str | ResourceQuantity, sp.Expr]
+    | ResourceEstimate,
     *,
     quantities: tuple[str | ResourceQuantity, ...] | None = None,
 ) -> tuple[ResourceComparisonRow, ...]:
     """Compare canonical quantities between two value providers.
 
     Args:
-        baseline (SupportsResourceValues): Reference object exposing
-            ``resource_values()``.
-        candidate (SupportsResourceValues): Candidate object exposing
-            ``resource_values()``.
+        baseline (SupportsResourceValues | Mapping[str | ResourceQuantity,
+            sp.Expr] | ResourceEstimate): Reference resource values. Accepts
+            an object exposing ``resource_values()``, a mapping keyed by
+            canonical quantities, or a logical Qamomile ``ResourceEstimate``.
+        candidate (SupportsResourceValues | Mapping[str | ResourceQuantity,
+            sp.Expr] | ResourceEstimate): Candidate resource values. Accepts
+            the same shapes as ``baseline``.
         quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
             compare. Defaults to the intersection of quantities exposed by both
             inputs, ordered by the canonical quantity catalog.
@@ -509,9 +521,10 @@ def compare_resource_values(
     Raises:
         ValueError: If a requested quantity is missing from either input or if
             a baseline value is exactly zero.
+        TypeError: If either input cannot be interpreted as resource values.
     """
-    baseline_values = _normalize_resource_values(baseline.resource_values())
-    candidate_values = _normalize_resource_values(candidate.resource_values())
+    baseline_values = _coerce_resource_values(baseline)
+    candidate_values = _coerce_resource_values(candidate)
     selected = _normalize_comparison_quantities(
         baseline_values,
         candidate_values,
@@ -544,13 +557,98 @@ def compare_resource_values(
     return tuple(rows)
 
 
+def resource_values_from_estimate(
+    estimate: ResourceEstimate,
+    *,
+    logical_depth: _SympyLike | None = None,
+    non_clifford_count: _SympyLike | None = None,
+) -> dict[str, sp.Expr]:
+    """Convert a logical resource estimate to canonical resource values.
+
+    Args:
+        estimate (ResourceEstimate): Logical Qamomile resource estimate.
+        logical_depth (sp.Expr | int | float | None): Optional logical-depth
+            proxy. Defaults to ``estimate.gates.total``.
+        non_clifford_count (sp.Expr | int | float | None): Optional
+            non-Clifford workload. Defaults to ``estimate.gates.t_gates +
+            estimate.gates.multi_qubit``.
+
+    Returns:
+        dict[str, sp.Expr]: Canonical logical resource values suitable for
+            ``compare_resource_values``.
+
+    Raises:
+        TypeError: If ``estimate`` is not a ``ResourceEstimate`` or an
+            override cannot be converted to a SymPy expression.
+        ValueError: If an override is provably negative.
+    """
+    if not isinstance(estimate, ResourceEstimate):
+        raise TypeError("estimate must be a ResourceEstimate instance.")
+
+    depth_expr = (
+        estimate.gates.total
+        if logical_depth is None
+        else _as_expr(logical_depth, "logical_depth")
+    )
+    non_clifford_expr = (
+        sp.simplify(estimate.gates.t_gates + estimate.gates.multi_qubit)
+        if non_clifford_count is None
+        else _as_expr(non_clifford_count, "non_clifford_count")
+    )
+    _validate_nonnegative(depth_expr, "logical_depth")
+    _validate_nonnegative(non_clifford_expr, "non_clifford_count")
+
+    values = {
+        "logical_qubits": estimate.qubits,
+        "logical_depth": sp.simplify(depth_expr),
+        "logical_spacetime_volume": sp.simplify(estimate.qubits * depth_expr),
+        "non_clifford_count": sp.simplify(non_clifford_expr),
+        "t_gates": estimate.gates.t_gates,
+        "multi_qubit_gates": estimate.gates.multi_qubit,
+    }
+    if "qpe_iterations" in estimate.gates.oracle_calls:
+        values["qpe_iterations"] = estimate.gates.oracle_calls["qpe_iterations"]
+    return values
+
+
+def _coerce_resource_values(
+    provider: SupportsResourceValues
+    | Mapping[str | ResourceQuantity, sp.Expr]
+    | ResourceEstimate,
+) -> dict[ResourceQuantity, sp.Expr]:
+    """Return normalized resource values from any supported provider.
+
+    Args:
+        provider (SupportsResourceValues | Mapping[str | ResourceQuantity,
+            sp.Expr] | ResourceEstimate): Provider to normalize.
+
+    Returns:
+        dict[ResourceQuantity, sp.Expr]: Resource values keyed by enum.
+
+    Raises:
+        TypeError: If ``provider`` has no supported resource-value shape.
+        ValueError: If any resource key is not known.
+    """
+    if isinstance(provider, ResourceEstimate):
+        return _normalize_resource_values(resource_values_from_estimate(provider))
+    if isinstance(provider, Mapping):
+        return _normalize_resource_values(provider)
+    resource_values = getattr(provider, "resource_values", None)
+    if callable(resource_values):
+        return _normalize_resource_values(resource_values())
+    raise TypeError(
+        "resource value providers must expose resource_values(), be a mapping, "
+        "or be a ResourceEstimate."
+    )
+
+
 def _normalize_resource_values(
-    values: dict[str | ResourceQuantity, sp.Expr],
+    values: Mapping[str | ResourceQuantity, sp.Expr],
 ) -> dict[ResourceQuantity, sp.Expr]:
     """Normalize resource-value dictionary keys.
 
     Args:
-        values (dict[str | ResourceQuantity, sp.Expr]): Resource values keyed
+        values (Mapping[str | ResourceQuantity, sp.Expr]): Resource values keyed
             by canonical strings or enum values.
 
     Returns:
@@ -628,3 +726,36 @@ def _normalize_resource_quantity(
         raise ValueError(
             f"Unknown resource quantity {quantity!r}; valid: {valid}."
         ) from exc
+
+
+def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
+    """Convert a numeric or symbolic value to a SymPy expression.
+
+    Args:
+        value (sp.Expr | int | float): Value to convert.
+        name (str): Field name used in error messages.
+
+    Returns:
+        sp.Expr: Converted SymPy expression.
+
+    Raises:
+        TypeError: If ``value`` cannot be converted by SymPy.
+    """
+    try:
+        return sp.sympify(value)
+    except (TypeError, sp.SympifyError) as exc:
+        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
+
+
+def _validate_nonnegative(expr: sp.Expr, name: str) -> None:
+    """Validate that an expression is nonnegative when decidable.
+
+    Args:
+        expr (sp.Expr): Expression to validate.
+        name (str): Field name used in error messages.
+
+    Raises:
+        ValueError: If SymPy can prove that ``expr`` is negative.
+    """
+    if expr.is_nonnegative is False:
+        raise ValueError(f"{name} must be nonnegative.")

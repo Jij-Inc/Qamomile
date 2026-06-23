@@ -39,6 +39,7 @@ from qamomile.resource_estimation.quantities import (
     compare_resource_values,
     describe_resource_quantity,
     iter_resource_quantity_specs,
+    resource_values_from_estimate,
 )
 
 __all__ = [
@@ -68,6 +69,7 @@ __all__ = [
     "hamiltonian_from_openfermion_qubit_operator",
     "iter_resource_quantity_specs",
     "qubits_counter",
+    "resource_values_from_estimate",
     "summarize_openfermion_qubit_operator",
     "summarize_pauli_hamiltonian",
 ]
