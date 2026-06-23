@@ -565,6 +565,75 @@ class FTQCResourceComparisonSummary:
 
 
 @dataclass(frozen=True)
+class FTQCResourceReviewFinding:
+    """Describe one review finding from an FTQC resource comparison.
+
+    Attributes:
+        direction (FTQCResourceChangeDirection): Change class for the finding.
+        quantity (FTQCResourceQuantity): Compared resource quantity.
+        label (str): Reader-facing quantity label.
+        unit (str): Resource unit.
+        category (FTQCResourceCategory): Modeling layer for the quantity.
+        baseline (sp.Expr): Baseline estimate value.
+        candidate (sp.Expr): Candidate estimate value.
+        ratio (sp.Expr): Candidate divided by baseline.
+        reduction (sp.Expr): Fractional reduction, equal to
+            ``1 - candidate / baseline``.
+        headline (str): Short reader-facing review headline.
+        detail (str): Compact value-level explanation for reports.
+
+    Example:
+        >>> row = FTQCResourceComparisonRow(
+        ...     quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+        ...     baseline=10,
+        ...     candidate=4,
+        ...     ratio=sp.Rational(2, 5),
+        ...     reduction=sp.Rational(3, 5),
+        ...     label="Toffoli gates",
+        ...     unit="Toffoli gates",
+        ...     category=FTQCResourceCategory.LOGICAL,
+        ... )
+        >>> finding = build_ftqc_resource_review_findings(
+        ...     FTQCResourceComparisonSummary.from_rows((row,)),
+        ... )[0]
+        >>> finding.direction
+        <FTQCResourceChangeDirection.SMALLER: 'smaller'>
+    """
+
+    direction: FTQCResourceChangeDirection
+    quantity: FTQCResourceQuantity
+    label: str
+    unit: str
+    category: FTQCResourceCategory
+    baseline: sp.Expr
+    candidate: sp.Expr
+    ratio: sp.Expr
+    reduction: sp.Expr
+    headline: str
+    detail: str
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the review finding.
+
+        Returns:
+            dict[str, str]: JSON-friendly finding metadata and values.
+        """
+        return {
+            "direction": self.direction.value,
+            "quantity": self.quantity.value,
+            "label": self.label,
+            "unit": self.unit,
+            "category": self.category.value,
+            "baseline": str(self.baseline),
+            "candidate": str(self.candidate),
+            "ratio": str(self.ratio),
+            "reduction": str(self.reduction),
+            "headline": self.headline,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
 class FTQCResourceComparisonReport:
     """Package an FTQC comparison summary with review metadata.
 
@@ -614,8 +683,8 @@ class FTQCResourceComparisonReport:
 
         Returns:
             dict[str, str | None | list[str] | list[dict[str, str]] | dict[str, int]]:
-                JSON-friendly report metadata, selected quantities, rows, and
-                grouped-count summary.
+                JSON-friendly report metadata, selected quantities, rows,
+                prioritized findings, and grouped-count summary.
         """
         summary = self.summary.to_dict()
         return {
@@ -629,6 +698,7 @@ class FTQCResourceComparisonReport:
             "larger": summary["larger"],
             "unchanged": summary["unchanged"],
             "symbolic": summary["symbolic"],
+            "findings": [finding.to_dict() for finding in self.to_review_findings()],
             "counts": summary["counts"],
         }
 
@@ -646,6 +716,41 @@ class FTQCResourceComparisonReport:
             serialized["candidate_label"] = self.candidate_label
             rows.append(serialized)
         return rows
+
+    def to_review_findings(
+        self,
+        *,
+        max_improvements: int = 3,
+        max_tradeoffs: int = 3,
+        include_symbolic: bool = True,
+        include_unchanged: bool = False,
+    ) -> tuple[FTQCResourceReviewFinding, ...]:
+        """Return prioritized review findings for this report.
+
+        Args:
+            max_improvements (int): Maximum number of reducing quantities to
+                include. Defaults to 3.
+            max_tradeoffs (int): Maximum number of increasing quantities to
+                include. Defaults to 3.
+            include_symbolic (bool): Whether to include undecidable symbolic
+                changes after numeric findings. Defaults to True.
+            include_unchanged (bool): Whether to include unchanged quantities
+                after symbolic findings. Defaults to False.
+
+        Returns:
+            tuple[FTQCResourceReviewFinding, ...]: Prioritized findings for
+                report review.
+
+        Raises:
+            ValueError: If either maximum is negative.
+        """
+        return build_ftqc_resource_review_findings(
+            self.summary,
+            max_improvements=max_improvements,
+            max_tradeoffs=max_tradeoffs,
+            include_symbolic=include_symbolic,
+            include_unchanged=include_unchanged,
+        )
 
 
 FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
@@ -1421,6 +1526,64 @@ def build_ftqc_resource_comparison_report(
     )
 
 
+def build_ftqc_resource_review_findings(
+    summary: FTQCResourceComparisonSummary,
+    *,
+    max_improvements: int = 3,
+    max_tradeoffs: int = 3,
+    include_symbolic: bool = True,
+    include_unchanged: bool = False,
+) -> tuple[FTQCResourceReviewFinding, ...]:
+    """Build prioritized findings from an FTQC comparison summary.
+
+    The returned tuple is ordered for design review: largest reductions first,
+    largest regressions or tradeoffs second, then symbolic and unchanged rows
+    when requested. This keeps numeric progress visible while preserving
+    undecidable symbolic quantities for follow-up modeling.
+
+    Args:
+        summary (FTQCResourceComparisonSummary): Grouped comparison rows to
+            turn into review findings.
+        max_improvements (int): Maximum number of reducing quantities to
+            include. Defaults to 3.
+        max_tradeoffs (int): Maximum number of increasing quantities to
+            include. Defaults to 3.
+        include_symbolic (bool): Whether to include undecidable symbolic
+            changes after numeric findings. Defaults to True.
+        include_unchanged (bool): Whether to include unchanged quantities
+            after symbolic findings. Defaults to False.
+
+    Returns:
+        tuple[FTQCResourceReviewFinding, ...]: Prioritized review findings.
+
+    Raises:
+        ValueError: If either maximum is negative.
+    """
+    if max_improvements < 0:
+        raise ValueError("max_improvements must be non-negative.")
+    if max_tradeoffs < 0:
+        raise ValueError("max_tradeoffs must be non-negative.")
+
+    rows: list[tuple[FTQCResourceChangeDirection, FTQCResourceComparisonRow]] = [
+        (FTQCResourceChangeDirection.SMALLER, row)
+        for row in summary.smaller[:max_improvements]
+    ]
+    rows.extend(
+        (FTQCResourceChangeDirection.LARGER, row)
+        for row in summary.larger[:max_tradeoffs]
+    )
+    if include_symbolic:
+        rows.extend(
+            (FTQCResourceChangeDirection.SYMBOLIC, row) for row in summary.symbolic
+        )
+    if include_unchanged:
+        rows.extend(
+            (FTQCResourceChangeDirection.UNCHANGED, row) for row in summary.unchanged
+        )
+
+    return tuple(_review_finding_from_row(row, direction) for direction, row in rows)
+
+
 def _select_comparison_quantities(
     baseline_values: dict[FTQCResourceQuantity, sp.Expr],
     candidate_values: dict[FTQCResourceQuantity, sp.Expr],
@@ -1622,3 +1785,60 @@ def _sort_rows_by_change(
         return (1, 0.0, index)
 
     return tuple(row for _, row in sorted(indexed_rows, key=key))
+
+
+def _review_finding_from_row(
+    row: FTQCResourceComparisonRow,
+    direction: FTQCResourceChangeDirection,
+) -> FTQCResourceReviewFinding:
+    """Build a review finding for one comparison row.
+
+    Args:
+        row (FTQCResourceComparisonRow): Comparison row to describe.
+        direction (FTQCResourceChangeDirection): Change class already assigned
+            by the summary.
+
+    Returns:
+        FTQCResourceReviewFinding: Reader-facing finding for reports.
+    """
+    headline = _review_finding_headline(row, direction)
+    detail = (
+        f"{row.quantity.value}: baseline={row.baseline}, "
+        f"candidate={row.candidate}, ratio={row.ratio}, "
+        f"reduction={row.reduction}."
+    )
+    return FTQCResourceReviewFinding(
+        direction=direction,
+        quantity=row.quantity,
+        label=row.label,
+        unit=row.unit,
+        category=row.category,
+        baseline=row.baseline,
+        candidate=row.candidate,
+        ratio=row.ratio,
+        reduction=row.reduction,
+        headline=headline,
+        detail=detail,
+    )
+
+
+def _review_finding_headline(
+    row: FTQCResourceComparisonRow,
+    direction: FTQCResourceChangeDirection,
+) -> str:
+    """Return a short headline for a review finding.
+
+    Args:
+        row (FTQCResourceComparisonRow): Comparison row to describe.
+        direction (FTQCResourceChangeDirection): Change class for the row.
+
+    Returns:
+        str: Reader-facing headline.
+    """
+    if direction == FTQCResourceChangeDirection.SMALLER:
+        return f"Candidate reduces {row.label}."
+    if direction == FTQCResourceChangeDirection.LARGER:
+        return f"Candidate increases {row.label}."
+    if direction == FTQCResourceChangeDirection.UNCHANGED:
+        return f"Candidate leaves {row.label} unchanged."
+    return f"Candidate change for {row.label} remains symbolic."

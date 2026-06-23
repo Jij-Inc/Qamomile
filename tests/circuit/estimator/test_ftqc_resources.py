@@ -12,6 +12,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     FTQCResearchSignal,
     FTQCResourceCategory,
+    FTQCResourceChangeDirection,
     FTQCResourceComparisonReport,
     FTQCResourceComparisonRow,
     FTQCResourceComparisonSummary,
@@ -19,9 +20,11 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceProfile,
     FTQCResourceProfileSpec,
     FTQCResourceQuantity,
+    FTQCResourceReviewFinding,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     build_ftqc_resource_comparison_report,
+    build_ftqc_resource_review_findings,
     compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe,
@@ -674,6 +677,131 @@ def test_build_ftqc_resource_comparison_report_labels_profiled_rows():
     assert row_table[0]["baseline_label"] == "Sparse"
     assert row_table[0]["candidate_label"] == "Compressed"
     assert row_table[0]["quantity"] == "qpe_iterations"
+
+
+def test_ftqc_resource_review_findings_prioritize_savings_and_tradeoffs():
+    """Review findings surface largest savings before resource tradeoffs."""
+    baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=baseline,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    candidate_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=candidate,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=30,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    report = build_ftqc_resource_comparison_report(
+        baseline_estimate,
+        candidate_estimate,
+        quantities=(
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.TOFFOLI_GATES,
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+        ),
+    )
+
+    findings = report.to_review_findings(max_improvements=1, max_tradeoffs=1)
+    report_dict = report.to_dict()
+
+    assert all(isinstance(finding, FTQCResourceReviewFinding) for finding in findings)
+    assert [finding.direction for finding in findings] == [
+        FTQCResourceChangeDirection.SMALLER,
+        FTQCResourceChangeDirection.LARGER,
+    ]
+    assert findings[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+    assert findings[0].headline == "Candidate reduces QPE iterations."
+    assert findings[0].detail == (
+        "qpe_iterations: baseline=5.00000000000000, "
+        "candidate=2.50000000000000, ratio=0.500000000000000, "
+        "reduction=0.500000000000000."
+    )
+    assert findings[1].quantity == FTQCResourceQuantity.TOFFOLI_GATES
+    assert findings[1].to_dict()["direction"] == "larger"
+    assert report_dict["findings"][0]["quantity"] == "qpe_iterations"
+
+
+def test_ftqc_resource_review_findings_handle_symbolic_and_unchanged_rows():
+    """Review findings can keep symbolic follow-ups and unchanged quantities."""
+    symbolic = sp.Symbol("x")
+    rows = (
+        FTQCResourceComparisonRow(
+            quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+            baseline=10,
+            candidate=4,
+            ratio=sp.Rational(2, 5),
+            reduction=sp.Rational(3, 5),
+            label="Toffoli gates",
+            unit="Toffoli gates",
+            category=FTQCResourceCategory.LOGICAL,
+        ),
+        FTQCResourceComparisonRow(
+            quantity=FTQCResourceQuantity.LOGICAL_QUBITS,
+            baseline=5,
+            candidate=7,
+            ratio=sp.Rational(7, 5),
+            reduction=sp.Rational(-2, 5),
+            label="Logical qubits",
+            unit="logical qubits",
+            category=FTQCResourceCategory.LOGICAL,
+        ),
+        FTQCResourceComparisonRow(
+            quantity=FTQCResourceQuantity.RUNTIME_SECONDS,
+            baseline=1,
+            candidate=symbolic,
+            ratio=symbolic,
+            reduction=1 - symbolic,
+            label="Runtime",
+            unit="seconds",
+            category=FTQCResourceCategory.PHYSICAL,
+        ),
+        FTQCResourceComparisonRow(
+            quantity=FTQCResourceQuantity.PHYSICAL_QUBITS,
+            baseline=100,
+            candidate=100,
+            ratio=1,
+            reduction=0,
+            label="Physical qubits",
+            unit="physical qubits",
+            category=FTQCResourceCategory.PHYSICAL,
+        ),
+    )
+    summary = FTQCResourceComparisonSummary.from_rows(rows)
+
+    findings = build_ftqc_resource_review_findings(
+        summary,
+        include_symbolic=True,
+        include_unchanged=True,
+    )
+
+    assert [finding.direction for finding in findings] == [
+        FTQCResourceChangeDirection.SMALLER,
+        FTQCResourceChangeDirection.LARGER,
+        FTQCResourceChangeDirection.SYMBOLIC,
+        FTQCResourceChangeDirection.UNCHANGED,
+    ]
+    assert findings[2].headline == "Candidate change for Runtime remains symbolic."
+    assert findings[3].headline == "Candidate leaves Physical qubits unchanged."
+    with pytest.raises(ValueError, match="max_improvements"):
+        build_ftqc_resource_review_findings(summary, max_improvements=-1)
+    with pytest.raises(ValueError, match="max_tradeoffs"):
+        build_ftqc_resource_review_findings(summary, max_tradeoffs=-1)
 
 
 def test_comparison_summary_keeps_undecidable_symbolic_changes_separate():

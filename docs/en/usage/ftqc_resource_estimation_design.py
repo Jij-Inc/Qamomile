@@ -314,7 +314,8 @@ assert comparison_summary.symbolic == ()
 # %% [markdown]
 # When you need a self-contained artifact for a design review, build a report.
 # It preserves the labels, selected profile, ordered rows, and grouped summary
-# counts together.
+# counts together. The report can also produce prioritized findings: largest
+# savings first, then the largest resource tradeoffs.
 
 # %%
 comparison_report = build_ftqc_resource_comparison_report(
@@ -330,14 +331,22 @@ comparison_report = build_ftqc_resource_comparison_report(
     profile=FTQCResourceProfile.SPACETIME,
 )
 report_rows = comparison_report.to_row_table()
+review_findings = comparison_report.to_review_findings(
+    max_improvements=2,
+    max_tradeoffs=2,
+)
 
 print(comparison_report.to_dict()["title"])
 print(comparison_report.to_dict()["counts"])
+for finding in review_findings:
+    print(finding.direction, "-", finding.headline)
 
 assert comparison_report.profile == FTQCResourceProfile.SPACETIME
 assert report_rows[0]["baseline_label"] == "THC-style"
 assert report_rows[0]["candidate_label"] == "Compressed"
 assert report_rows[0]["quantity"] == "qpe_iterations"
+assert review_findings[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+assert comparison_report.to_dict()["findings"][0]["direction"] == "smaller"
 
 # %% [markdown]
 # ## Reference Provenance
@@ -528,4 +537,4 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - `summarize_ftqc_resource_comparison` groups those rows into smaller,
 #   larger, unchanged, and symbolic changes for design review.
 # - `build_ftqc_resource_comparison_report` packages labels, profile, rows,
-#   and grouped counts for review artifacts.
+#   prioritized findings, and grouped counts for review artifacts.

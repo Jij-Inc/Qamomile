@@ -291,7 +291,7 @@ assert any(
 assert comparison_summary.symbolic == ()
 
 # %% [markdown]
-# 設計レビュー用の自己完結したartifactが必要な場合は、reportを作ります。label、選択したprofile、行の順序、grouped summary countをまとめて保持できます。
+# 設計レビュー用の自己完結したartifactが必要な場合は、reportを作ります。label、選択したprofile、行の順序、grouped summary countをまとめて保持できます。reportからは優先順位つきfindingも作れます。最初に大きな削減、次に大きなresource tradeoffが並びます。
 
 # %%
 comparison_report = build_ftqc_resource_comparison_report(
@@ -307,14 +307,22 @@ comparison_report = build_ftqc_resource_comparison_report(
     profile=FTQCResourceProfile.SPACETIME,
 )
 report_rows = comparison_report.to_row_table()
+review_findings = comparison_report.to_review_findings(
+    max_improvements=2,
+    max_tradeoffs=2,
+)
 
 print(comparison_report.to_dict()["title"])
 print(comparison_report.to_dict()["counts"])
+for finding in review_findings:
+    print(finding.direction, "-", finding.headline)
 
 assert comparison_report.profile == FTQCResourceProfile.SPACETIME
 assert report_rows[0]["baseline_label"] == "THC-style"
 assert report_rows[0]["candidate_label"] == "Compressed"
 assert report_rows[0]["quantity"] == "qpe_iterations"
+assert review_findings[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+assert comparison_report.to_dict()["findings"][0]["direction"] == "smaller"
 
 # %% [markdown]
 # ## Reference provenance
@@ -471,4 +479,4 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
-# - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、grouped countをreview artifactとしてまとめられます。
+# - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、優先順位つきfinding、grouped countをreview artifactとしてまとめられます。
