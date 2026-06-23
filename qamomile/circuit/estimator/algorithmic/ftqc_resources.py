@@ -1645,6 +1645,108 @@ class FTQCResourceComparisonReport:
         )
 
 
+@dataclass(frozen=True)
+class FTQCResourceDriverReport:
+    """Package a formula-scoped FTQC resource driver comparison.
+
+    Attributes:
+        title (str): Reader-facing report title.
+        baseline_label (str): Label for the baseline estimate.
+        candidate_label (str): Label for the candidate estimate.
+        targets (tuple[FTQCResourceQuantity, ...]): Target output quantities
+            whose formula dependencies scoped the report.
+        summary (FTQCResourceComparisonSummary): Grouped comparison rows for
+            available target and driver quantities.
+
+    Example:
+        >>> row = FTQCResourceComparisonRow(
+        ...     quantity=FTQCResourceQuantity.T_GATES,
+        ...     baseline=10,
+        ...     candidate=2,
+        ...     ratio=sp.Rational(1, 5),
+        ...     reduction=sp.Rational(4, 5),
+        ...     label="T gates",
+        ...     unit="T gates",
+        ...     category=FTQCResourceCategory.LOGICAL,
+        ... )
+        >>> report = FTQCResourceDriverReport(
+        ...     title="Toy driver report",
+        ...     baseline_label="baseline",
+        ...     candidate_label="candidate",
+        ...     targets=(FTQCResourceQuantity.T_GATES,),
+        ...     summary=FTQCResourceComparisonSummary.from_rows((row,)),
+        ... )
+        >>> report.to_row_table()[0]["is_target"]
+        True
+    """
+
+    title: str
+    baseline_label: str
+    candidate_label: str
+    targets: tuple[FTQCResourceQuantity, ...]
+    summary: FTQCResourceComparisonSummary
+
+    def __post_init__(self) -> None:
+        """Validate driver-report targets after dataclass construction.
+
+        Raises:
+            ValueError: If ``targets`` is empty.
+        """
+        if not self.targets:
+            raise ValueError("targets must not be empty.")
+        object.__setattr__(self, "targets", tuple(self.targets))
+
+    def to_row_table(self) -> list[dict[str, str | bool]]:
+        """Return driver rows with target markers and estimate labels.
+
+        Returns:
+            list[dict[str, str | bool]]: Rows containing serialized comparison
+                values plus baseline, candidate, and target-marker columns.
+        """
+        target_set = set(self.targets)
+        rows = []
+        for row in self.summary.rows:
+            serialized: dict[str, str | bool] = dict(row.to_dict())
+            serialized["baseline_label"] = self.baseline_label
+            serialized["candidate_label"] = self.candidate_label
+            serialized["is_target"] = row.quantity in target_set
+            rows.append(serialized)
+        return rows
+
+    def to_dict(
+        self,
+    ) -> dict[
+        str,
+        str
+        | list[str]
+        | list[dict[str, str]]
+        | list[dict[str, str | bool]]
+        | dict[str, int],
+    ]:
+        """Serialize report metadata and driver rows.
+
+        Returns:
+            dict[str, str | list[str] | list[dict[str, str]] |
+                list[dict[str, str | bool]] | dict[str, int]]: JSON-friendly
+                report metadata, target quantities, row table, prioritized
+                findings, and grouped counts.
+        """
+        counts = cast(dict[str, int], self.summary.to_dict()["counts"])
+        return {
+            "title": self.title,
+            "baseline_label": self.baseline_label,
+            "candidate_label": self.candidate_label,
+            "targets": [quantity.value for quantity in self.targets],
+            "quantities": [row.quantity.value for row in self.summary.rows],
+            "rows": self.to_row_table(),
+            "findings": [
+                finding.to_dict()
+                for finding in build_ftqc_resource_review_findings(self.summary)
+            ],
+            "counts": counts,
+        }
+
+
 FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.N_SPIN_ORBITALS,
@@ -2661,6 +2763,69 @@ def build_ftqc_research_signal_report(
     )
 
 
+def build_ftqc_resource_driver_report(
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+    *,
+    targets: tuple[str | FTQCResourceQuantity, ...],
+    title: str = "FTQC resource driver report",
+    baseline_label: str = "baseline",
+    candidate_label: str = "candidate",
+    include_targets: bool = True,
+) -> FTQCResourceDriverReport:
+    """Build a comparison report scoped by formula dependencies.
+
+    This helper starts from target output quantities, follows any
+    ``FTQCResourceFormula.depends_on`` links exposed by either estimate, and
+    compares the available dependency closure. It is useful for explaining
+    which symbolic cost drivers changed when a recent FTQC paper reports a
+    better physical-qubit or runtime estimate.
+
+    Args:
+        baseline (SupportsFTQCResourceValues): Reference estimate, model, or
+            plan exposing ``resource_values()`` and optionally formulas.
+        candidate (SupportsFTQCResourceValues): Candidate estimate, model, or
+            plan exposing ``resource_values()`` and optionally formulas.
+        targets (tuple[str | FTQCResourceQuantity, ...]): Output quantities to
+            explain through formula dependencies.
+        title (str): Reader-facing report title. Defaults to
+            ``"FTQC resource driver report"``.
+        baseline_label (str): Label for the baseline estimate. Defaults to
+            ``"baseline"``.
+        candidate_label (str): Label for the candidate estimate. Defaults to
+            ``"candidate"``.
+        include_targets (bool): Whether target quantities themselves should
+            appear in the comparison rows. Defaults to True.
+
+    Returns:
+        FTQCResourceDriverReport: Formula-scoped comparison report.
+
+    Raises:
+        ValueError: If ``targets`` is empty, a target quantity is unknown, no
+            comparable driver quantities remain, or a selected baseline value
+            is zero.
+    """
+    normalized_targets = _normalize_driver_targets(targets)
+    quantities = _select_driver_report_quantities(
+        baseline,
+        candidate,
+        targets=normalized_targets,
+        include_targets=include_targets,
+    )
+    summary = summarize_ftqc_resource_comparison(
+        baseline,
+        candidate,
+        quantities=quantities,
+    )
+    return FTQCResourceDriverReport(
+        title=title,
+        baseline_label=baseline_label,
+        candidate_label=candidate_label,
+        targets=normalized_targets,
+        summary=summary,
+    )
+
+
 def build_ftqc_resource_review_findings(
     summary: FTQCResourceComparisonSummary,
     *,
@@ -2770,6 +2935,169 @@ def evaluate_ftqc_resource_constraints(
         )
 
     return FTQCResourceBudgetReport.from_results(title, tuple(results))
+
+
+def _normalize_driver_targets(
+    targets: tuple[str | FTQCResourceQuantity, ...],
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Normalize target quantities for a driver report.
+
+    Args:
+        targets (tuple[str | FTQCResourceQuantity, ...]): Requested driver
+            report target quantities.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Deduplicated normalized targets.
+
+    Raises:
+        ValueError: If ``targets`` is empty or contains an unknown quantity.
+    """
+    if not targets:
+        raise ValueError("targets must not be empty.")
+    return _dedupe_resource_quantities(
+        tuple(_normalize_resource_quantity(target) for target in targets)
+    )
+
+
+def _select_driver_report_quantities(
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+    *,
+    targets: tuple[FTQCResourceQuantity, ...],
+    include_targets: bool,
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Select comparable formula-driver quantities for a report.
+
+    Args:
+        baseline (SupportsFTQCResourceValues): Baseline resource object.
+        candidate (SupportsFTQCResourceValues): Candidate resource object.
+        targets (tuple[FTQCResourceQuantity, ...]): Normalized report targets.
+        include_targets (bool): Whether target quantities stay in the output
+            selection.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Comparable driver quantities.
+
+    Raises:
+        ValueError: If no comparable driver quantity remains.
+    """
+    baseline_values = baseline.resource_values()
+    candidate_values = candidate.resource_values()
+    closure = _driver_dependency_closure(baseline, candidate, targets)
+    selected = tuple(
+        quantity
+        for quantity in closure
+        if (include_targets or quantity not in targets)
+        and quantity in baseline_values
+        and quantity in candidate_values
+    )
+    if not selected:
+        target_labels = ", ".join(quantity.value for quantity in targets)
+        raise ValueError(
+            "No comparable FTQC driver quantities are available for targets: "
+            f"{target_labels}."
+        )
+    return selected
+
+
+def _driver_dependency_closure(
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+    targets: tuple[FTQCResourceQuantity, ...],
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Return target formula dependencies in dependency-first order.
+
+    Args:
+        baseline (SupportsFTQCResourceValues): Baseline resource object.
+        candidate (SupportsFTQCResourceValues): Candidate resource object.
+        targets (tuple[FTQCResourceQuantity, ...]): Target quantities to
+            explain.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Deduplicated dependency closure.
+    """
+    dependencies = _formula_dependency_map(baseline, candidate)
+    ordered: list[FTQCResourceQuantity] = []
+    visiting: set[FTQCResourceQuantity] = set()
+    seen: set[FTQCResourceQuantity] = set()
+
+    def visit(quantity: FTQCResourceQuantity) -> None:
+        """Append dependencies before the requested quantity.
+
+        Args:
+            quantity (FTQCResourceQuantity): Quantity to visit.
+        """
+        if quantity in seen:
+            return
+        if quantity in visiting:
+            ordered.append(quantity)
+            seen.add(quantity)
+            return
+        visiting.add(quantity)
+        for dependency in dependencies.get(quantity, ()):
+            visit(dependency)
+        visiting.remove(quantity)
+        if quantity not in seen:
+            ordered.append(quantity)
+            seen.add(quantity)
+
+    for target in targets:
+        visit(target)
+    return tuple(ordered)
+
+
+def _formula_dependency_map(
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+) -> dict[FTQCResourceQuantity, tuple[FTQCResourceQuantity, ...]]:
+    """Collect formula dependencies from two resource objects.
+
+    Args:
+        baseline (SupportsFTQCResourceValues): Baseline resource object.
+        candidate (SupportsFTQCResourceValues): Candidate resource object.
+
+    Returns:
+        dict[FTQCResourceQuantity, tuple[FTQCResourceQuantity, ...]]:
+            Formula dependencies keyed by produced quantity.
+    """
+    dependencies: dict[FTQCResourceQuantity, tuple[FTQCResourceQuantity, ...]] = {}
+    for formula in (*_resource_formulas(baseline), *_resource_formulas(candidate)):
+        quantity = cast(FTQCResourceQuantity, formula.quantity)
+        depends_on = cast(tuple[FTQCResourceQuantity, ...], formula.depends_on)
+        if quantity in dependencies:
+            dependencies[quantity] = _dedupe_resource_quantities(
+                (*dependencies[quantity], *depends_on)
+            )
+        else:
+            dependencies[quantity] = depends_on
+    return dependencies
+
+
+def _resource_formulas(
+    estimate: SupportsFTQCResourceValues,
+) -> tuple[FTQCResourceFormula, ...]:
+    """Return formula metadata exposed by a resource object.
+
+    Args:
+        estimate (SupportsFTQCResourceValues): Resource object that may expose
+            a ``formulas`` tuple or ``formulas()`` method.
+
+    Returns:
+        tuple[FTQCResourceFormula, ...]: Formula metadata, or an empty tuple
+            when the object has no formula metadata.
+
+    Raises:
+        TypeError: If the exposed formula metadata contains non-formula items.
+    """
+    raw_formulas = getattr(estimate, "formulas", ())
+    if raw_formulas is None:
+        return ()
+    if callable(raw_formulas):
+        raw_formulas = raw_formulas()
+    formulas = tuple(raw_formulas)
+    if not all(isinstance(formula, FTQCResourceFormula) for formula in formulas):
+        raise TypeError("formulas must contain only FTQCResourceFormula instances.")
+    return formulas
 
 
 def _select_comparison_quantities(

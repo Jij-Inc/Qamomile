@@ -24,6 +24,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceConstraintResult,
     FTQCResourceConstraintSense,
     FTQCResourceConstraintStatus,
+    FTQCResourceDriverReport,
     FTQCResourceFormula,
     FTQCResourcePlan,
     FTQCResourcePlanStep,
@@ -38,6 +39,7 @@ from qamomile.circuit.estimator.algorithmic import (
     audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
+    build_ftqc_resource_driver_report,
     build_ftqc_resource_review_findings,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
@@ -1046,6 +1048,78 @@ def test_build_ftqc_research_signal_report_selects_available_quantities():
 
     with pytest.raises(ValueError, match="Unknown FTQC research signal"):
         describe_ftqc_research_signal("arXiv:0000.00000")
+
+
+def test_build_ftqc_resource_driver_report_traces_formula_dependencies():
+    """Driver reports compare target dependencies exposed by formulas."""
+    summary = summarize_pauli_hamiltonian(
+        qm_o.Z(0) + 2 * qm_o.Z(1) + 3 * qm_o.Z(2),
+        source="plain_trotter_lcu",
+    )
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        rotation_synthesis_t_gates=3,
+        cost_model=cost,
+    )
+    candidate = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        randomized_compilation_factor=sp.Rational(1, 2),
+        rotation_synthesis_t_gates=3,
+        resource_reduction=HamiltonianResourceReduction(
+            lambda_norm_factor=sp.Rational(1, 10)
+        ),
+        cost_model=cost,
+    )
+
+    report = build_ftqc_resource_driver_report(
+        baseline,
+        candidate,
+        targets=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+        title="UWC Trotter driver report",
+        baseline_label="Plain Trotter",
+        candidate_label="UWC Trotter",
+    )
+    row_by_quantity = {row.quantity: row for row in report.summary.rows}
+    table = report.to_row_table()
+
+    assert isinstance(report, FTQCResourceDriverReport)
+    assert report.targets == (FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,)
+    assert FTQCResourceQuantity.LAMBDA_NORM in row_by_quantity
+    assert FTQCResourceQuantity.QPE_ITERATIONS in row_by_quantity
+    assert FTQCResourceQuantity.T_GATES in row_by_quantity
+    assert FTQCResourceQuantity.RUNTIME_SECONDS in row_by_quantity
+    assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in row_by_quantity
+    assert sp.Abs(
+        row_by_quantity[FTQCResourceQuantity.LAMBDA_NORM].ratio - sp.Rational(1, 10)
+    ) < sp.Float("1e-12")
+    assert table[-1]["quantity"] == "physical_qubit_seconds"
+    assert table[-1]["is_target"] is True
+    assert report.to_dict()["targets"] == ["physical_qubit_seconds"]
+
+    drivers_only = build_ftqc_resource_driver_report(
+        baseline,
+        candidate,
+        targets=("physical_qubit_seconds",),
+        include_targets=False,
+    )
+    assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS not in {
+        row.quantity for row in drivers_only.summary.rows
+    }
+
+    with pytest.raises(ValueError, match="targets must not be empty"):
+        build_ftqc_resource_driver_report(baseline, candidate, targets=())
 
 
 def test_audit_ftqc_research_signal_coverage_marks_missing_quantities():

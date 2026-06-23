@@ -49,6 +49,7 @@ from qamomile.circuit.estimator.algorithmic import (
     audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
+    build_ftqc_resource_driver_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
@@ -718,6 +719,34 @@ assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
+# driver reportは、target output quantityから始めて、estimateが公開しているformula metadataの依存関係をたどります。physical qubit-secondsのような最終metricが改善したとき、その上流にあるどのsymbolic driverが変わったのかをreviewしやすくなります。
+
+# %%
+uwc_driver_report = build_ftqc_resource_driver_report(
+    plain_trotter,
+    uwc_trotter,
+    targets=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+    title="UWC Trotter driver report",
+    baseline_label="Plain Trotter",
+    candidate_label="UWC Trotter",
+)
+for row in uwc_driver_report.to_row_table():
+    print(
+        row["quantity"],
+        "target=",
+        row["is_target"],
+        "ratio=",
+        sp.N(sp.sympify(row["ratio"]), 4),
+    )
+
+driver_quantities = {row.quantity for row in uwc_driver_report.summary.rows}
+assert FTQCResourceQuantity.LAMBDA_NORM in driver_quantities
+assert FTQCResourceQuantity.QPE_ITERATIONS in driver_quantities
+assert FTQCResourceQuantity.T_GATES in driver_quantities
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in driver_quantities
+assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
+
+# %% [markdown]
 # ## Budget constraints
 #
 # early-FTQCの研究では、別のreview questionも重要です。estimateがphysical量子ビットやruntimeのbudgetに収まるか、という問いです。budget reportを使うと、同じcanonical resource valueを明示的なconstraintと照合できます。architecture仮定がまだsymbolicな場合、marginは未判断のまま残ります。
@@ -794,4 +823,5 @@ assert budget_report.to_dict()["counts"] == {
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
 # - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、優先順位つきfinding、grouped countをreview artifactとしてまとめられます。
+# - `build_ftqc_resource_driver_report`を使うと、target output quantityからformula dependencyをたどり、変化した上流のcost driverを確認できます。
 # - `evaluate_ftqc_resource_constraints`を使うと、estimateをphysical量子ビット、runtime、depthなどの明示的なresource budgetと照合できます。

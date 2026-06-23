@@ -52,6 +52,7 @@ from qamomile.circuit.estimator.algorithmic import (
     audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
+    build_ftqc_resource_driver_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
@@ -779,6 +780,37 @@ assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
+# A driver report starts from a target output quantity and follows the formula
+# metadata exposed by the estimates. This is useful when a paper-level claim
+# improves a final metric such as physical qubit-seconds, but the review needs
+# to see which symbolic drivers changed upstream.
+
+# %%
+uwc_driver_report = build_ftqc_resource_driver_report(
+    plain_trotter,
+    uwc_trotter,
+    targets=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+    title="UWC Trotter driver report",
+    baseline_label="Plain Trotter",
+    candidate_label="UWC Trotter",
+)
+for row in uwc_driver_report.to_row_table():
+    print(
+        row["quantity"],
+        "target=",
+        row["is_target"],
+        "ratio=",
+        sp.N(sp.sympify(row["ratio"]), 4),
+    )
+
+driver_quantities = {row.quantity for row in uwc_driver_report.summary.rows}
+assert FTQCResourceQuantity.LAMBDA_NORM in driver_quantities
+assert FTQCResourceQuantity.QPE_ITERATIONS in driver_quantities
+assert FTQCResourceQuantity.T_GATES in driver_quantities
+assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in driver_quantities
+assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
+
+# %% [markdown]
 # ## Budget Constraints
 #
 # Early-FTQC studies often ask a different review question: does an estimate fit
@@ -885,5 +917,7 @@ assert budget_report.to_dict()["counts"] == {
 #   larger, unchanged, and symbolic changes for design review.
 # - `build_ftqc_resource_comparison_report` packages labels, profile, rows,
 #   prioritized findings, and grouped counts for review artifacts.
+# - `build_ftqc_resource_driver_report` traces formula dependencies from a
+#   target output quantity to the upstream cost drivers that changed.
 # - `evaluate_ftqc_resource_constraints` checks estimates against explicit
 #   physical-qubit, runtime, depth, or other resource budgets.
