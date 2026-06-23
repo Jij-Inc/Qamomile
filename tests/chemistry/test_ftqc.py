@@ -13,11 +13,11 @@ from qamomile.chemistry import (
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
-    summarize_pauli_hamiltonian,
 )
 from qamomile.resource_estimation import (
     FTQCCostModel,
     estimate_physical_resources,
+    summarize_pauli_hamiltonian,
 )
 
 
@@ -194,34 +194,6 @@ def test_single_ancilla_trotter_qpe_rejects_negative_reduction_factor():
         )
 
 
-def test_summarize_pauli_hamiltonian_extracts_lcu_quantities():
-    """Hamiltonian summaries expose term count, locality, constant, and lambda."""
-    hamiltonian = 0.5 * qm_o.Z(0) + (1.25 + 0.75j) * qm_o.X(1) * qm_o.Y(2) + 3
-
-    summary = summarize_pauli_hamiltonian(hamiltonian, source="toy")
-    with_constant = summarize_pauli_hamiltonian(
-        hamiltonian,
-        include_constant=True,
-    )
-
-    assert summary.source == "toy"
-    assert summary.n_spin_orbitals == 3
-    assert summary.n_pauli_terms == 2
-    assert summary.max_locality == 2
-    assert sp.simplify(summary.constant - 3) == 0
-    expected_lambda = sp.Float("0.5") + sp.sqrt(sp.Float("2.125"))
-    assert sp.Abs(summary.lambda_norm - expected_lambda) < sp.Float("1e-12")
-    assert sp.Abs(with_constant.lambda_norm - summary.lambda_norm - 3) < sp.Float(
-        "1e-12"
-    )
-
-
-def test_summarize_pauli_hamiltonian_rejects_non_hamiltonian_input():
-    """The summary helper fails early on non-Qamomile Hamiltonian objects."""
-    with pytest.raises(TypeError, match="qamomile.observable.Hamiltonian"):
-        summarize_pauli_hamiltonian(object())
-
-
 def test_qubitized_qpe_from_model_uses_hamiltonian_metadata():
     """Model-driven QPE estimates reuse Hamiltonian lambda and sparse term count."""
     summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
@@ -243,6 +215,34 @@ def test_qubitized_qpe_from_model_uses_hamiltonian_metadata():
     assert sp.Abs(estimate.gates.multi_qubit - 27.5) < sp.Float("1e-12")
     assert model.to_dict()["hamiltonian"]["source"] == "shifted"
     assert sp.sympify(model.to_dict()["truncation_error"]) == sp.Float("1e-5")
+
+
+def test_chemistry_estimation_composes_generic_resource_primitives():
+    """Chemistry estimates compose Hamiltonian summaries and physical lifts."""
+    hamiltonian = 2 * qm_o.Z(0) + 3 * qm_o.X(1)
+    summary = summarize_pauli_hamiltonian(hamiltonian)
+    chemistry_model = ChemistryQPEModel(
+        hamiltonian=summary,
+        method=ChemistryQPEMethod.SPARSE,
+        walk_cost_toffoli=10,
+    )
+    logical = estimate_qubitized_chemistry_qpe_from_model(
+        chemistry_model,
+        precision=1,
+    )
+    physical = estimate_physical_resources(
+        logical,
+        FTQCCostModel(
+            physical_qubits_per_logical=100,
+            logical_cycle_time_seconds=0.01,
+            factory_qubits=20,
+            non_clifford_throughput_per_second=50,
+        ),
+    )
+
+    assert logical.qubits == 2 + sp.sqrt(2)
+    assert sp.Abs(logical.gates.multi_qubit - 50) < sp.Float("1e-12")
+    assert sp.Abs(physical.non_clifford_count - 50) < sp.Float("1e-12")
 
 
 def test_single_ancilla_trotter_qpe_from_hamiltonian_summary():

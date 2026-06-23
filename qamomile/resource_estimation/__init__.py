@@ -12,14 +12,20 @@ from qamomile.resource_estimation.ftqc import (
     FTQCPhysicalResourceEstimate,
     estimate_physical_resources,
 )
+from qamomile.resource_estimation.hamiltonian import (
+    PauliHamiltonianResource,
+    summarize_pauli_hamiltonian,
+)
 
 __all__ = [
     "FTQCCostModel",
     "FTQCPhysicalResourceEstimate",
     "GateCount",
+    "PauliHamiltonianResource",
     "ResourceEstimate",
     "count_gates",
     "estimate_physical_resources",
     "estimate_resources",
     "qubits_counter",
+    "summarize_pauli_hamiltonian",
 ]

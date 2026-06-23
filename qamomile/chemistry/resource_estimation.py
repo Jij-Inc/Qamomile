@@ -8,10 +8,13 @@ from typing import Any
 
 import sympy as sp
 
-from qamomile.resource_estimation import GateCount, ResourceEstimate
+from qamomile.resource_estimation import (
+    GateCount,
+    PauliHamiltonianResource,
+    ResourceEstimate,
+)
 
 _SympyLike = sp.Expr | int | float
-_CoefficientLike = _SympyLike | complex
 
 
 class ChemistryQPEMethod(enum.StrEnum):
@@ -39,111 +42,12 @@ class ChemistryQPEMethod(enum.StrEnum):
 
 
 @dataclass(frozen=True)
-class PauliHamiltonianResource:
-    """Summarize a Pauli-LCU Hamiltonian for chemistry resource estimates.
-
-    Attributes:
-        n_spin_orbitals (sp.Expr): Number of spin orbitals or encoded qubits.
-        n_pauli_terms (sp.Expr): Number of non-identity Pauli terms.
-        lambda_norm (sp.Expr): Sum of absolute non-identity Pauli
-            coefficients used as the LCU normalization proxy.
-        max_locality (sp.Expr): Maximum number of non-identity Pauli factors
-            in any Hamiltonian term.
-        constant (sp.Expr): Constant energy shift stored on the Hamiltonian.
-        constant_included (bool): Whether ``constant`` was included in
-            ``lambda_norm``.
-        source (str): Human-readable source label.
-
-    Raises:
-        ValueError: If a positive-valued quantity is non-positive or if a
-            nonnegative-valued quantity is negative.
-
-    Example:
-        >>> import qamomile.observable as qm_o
-        >>> hamiltonian = 0.5 * qm_o.Z(0) + 0.25 * qm_o.X(1)
-        >>> summary = summarize_pauli_hamiltonian(hamiltonian)
-        >>> summary.n_pauli_terms
-        2
-    """
-
-    n_spin_orbitals: sp.Expr
-    n_pauli_terms: sp.Expr
-    lambda_norm: sp.Expr
-    max_locality: sp.Expr
-    constant: sp.Expr = sp.Integer(0)
-    constant_included: bool = False
-    source: str = "pauli_lcu"
-
-    def __post_init__(self) -> None:
-        """Validate summary fields after dataclass construction.
-
-        Raises:
-            ValueError: If a positive-valued quantity is non-positive or if a
-                nonnegative-valued quantity is negative.
-        """
-        _validate_positive(self.n_spin_orbitals, "n_spin_orbitals")
-        _validate_nonnegative(self.n_pauli_terms, "n_pauli_terms")
-        _validate_nonnegative(self.lambda_norm, "lambda_norm")
-        _validate_nonnegative(self.max_locality, "max_locality")
-        _validate_nonnegative(sp.Abs(self.constant), "constant")
-
-    def with_lambda_scale(
-        self,
-        scale: _SympyLike,
-        *,
-        source: str | None = None,
-    ) -> PauliHamiltonianResource:
-        """Return a copy with the Hamiltonian normalization rescaled.
-
-        Args:
-            scale (sp.Expr | int | float): Multiplicative scale applied to
-                ``lambda_norm``. Values below one model transformations that
-                reduce the effective Hamiltonian weight.
-            source (str | None): Optional replacement source label. Defaults
-                to preserving ``self.source``.
-
-        Returns:
-            PauliHamiltonianResource: New summary with rescaled
-                ``lambda_norm``.
-
-        Raises:
-            ValueError: If ``scale`` is negative.
-        """
-        scale_expr = _as_expr(scale, "scale")
-        _validate_nonnegative(scale_expr, "scale")
-        return PauliHamiltonianResource(
-            n_spin_orbitals=self.n_spin_orbitals,
-            n_pauli_terms=self.n_pauli_terms,
-            lambda_norm=sp.simplify(self.lambda_norm * scale_expr),
-            max_locality=self.max_locality,
-            constant=self.constant,
-            constant_included=self.constant_included,
-            source=self.source if source is None else source,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the Hamiltonian summary to a JSON-friendly dictionary.
-
-        Returns:
-            dict[str, Any]: String-valued resource summary.
-        """
-        return {
-            "n_spin_orbitals": str(self.n_spin_orbitals),
-            "n_pauli_terms": str(self.n_pauli_terms),
-            "lambda_norm": str(self.lambda_norm),
-            "max_locality": str(self.max_locality),
-            "constant": str(self.constant),
-            "constant_included": self.constant_included,
-            "source": self.source,
-        }
-
-
-@dataclass(frozen=True)
 class ChemistryQPEModel:
     """Describe a chemistry representation used by QPE resource estimates.
 
     Attributes:
-        hamiltonian (PauliHamiltonianResource): Pauli-LCU Hamiltonian summary.
+        hamiltonian (PauliHamiltonianResource): Generic Pauli Hamiltonian
+            resource summary.
         walk_cost_toffoli (sp.Expr | int | float): Toffoli cost for one
             qubitized walk operator call.
         method (str | ChemistryQPEMethod): QPE representation or optimization
@@ -164,7 +68,7 @@ class ChemistryQPEModel:
 
     Example:
         >>> summary = PauliHamiltonianResource(
-        ...     n_spin_orbitals=4,
+        ...     n_qubits=4,
         ...     n_pauli_terms=10,
         ...     lambda_norm=20,
         ...     max_locality=2,
@@ -275,65 +179,6 @@ class ChemistryQPEModel:
         }
 
 
-def summarize_pauli_hamiltonian(
-    hamiltonian: Any,
-    *,
-    n_spin_orbitals: _SympyLike | None = None,
-    include_constant: bool = False,
-    source: str = "pauli_lcu",
-) -> PauliHamiltonianResource:
-    """Summarize a Qamomile Pauli Hamiltonian for chemistry estimates.
-
-    Args:
-        hamiltonian (Any): ``qamomile.observable.Hamiltonian`` instance to
-            summarize.
-        n_spin_orbitals (sp.Expr | int | float | None): Override for the
-            encoded active-space size. Defaults to ``hamiltonian.num_qubits``.
-        include_constant (bool): Whether to include the Hamiltonian constant
-            term in ``lambda_norm``. Defaults to False, modeling the constant
-            as a classical energy shift.
-        source (str): Human-readable source label for the summary.
-
-    Returns:
-        PauliHamiltonianResource: Hamiltonian summary containing term count,
-            lambda norm, constant, and max locality.
-
-    Raises:
-        TypeError: If ``hamiltonian`` is not a Qamomile Hamiltonian.
-        ValueError: If the orbital count or derived norm is invalid.
-    """
-    import qamomile.observable as qm_o
-
-    if not isinstance(hamiltonian, qm_o.Hamiltonian):
-        raise TypeError(
-            "hamiltonian must be a qamomile.observable.Hamiltonian instance."
-        )
-
-    n_expr = (
-        _as_expr(hamiltonian.num_qubits, "n_spin_orbitals")
-        if n_spin_orbitals is None
-        else _as_expr(n_spin_orbitals, "n_spin_orbitals")
-    )
-    lambda_norm = sp.Integer(0)
-    max_locality = 0
-    for operators, coeff in hamiltonian:
-        lambda_norm += _abs_as_expr(coeff)
-        max_locality = max(max_locality, len(operators))
-    constant = _as_expr(hamiltonian.constant, "constant")
-    if include_constant:
-        lambda_norm += _abs_as_expr(hamiltonian.constant)
-
-    return PauliHamiltonianResource(
-        n_spin_orbitals=n_expr,
-        n_pauli_terms=sp.Integer(len(hamiltonian)),
-        lambda_norm=sp.simplify(lambda_norm),
-        max_locality=sp.Integer(max_locality),
-        constant=constant,
-        constant_included=include_constant,
-        source=source,
-    )
-
-
 def estimate_qubitized_chemistry_qpe(
     n_spin_orbitals: sp.Expr | int,
     lambda_norm: _SympyLike,
@@ -434,7 +279,7 @@ def estimate_qubitized_chemistry_qpe_from_model(
     if not isinstance(model, ChemistryQPEModel):
         raise TypeError("model must be a ChemistryQPEModel instance.")
     return estimate_qubitized_chemistry_qpe(
-        n_spin_orbitals=model.hamiltonian.n_spin_orbitals,
+        n_spin_orbitals=model.hamiltonian.n_qubits,
         lambda_norm=model.hamiltonian.lambda_norm,
         precision=precision,
         walk_cost_toffoli=_as_expr(model.walk_cost_toffoli, "walk_cost_toffoli"),
@@ -578,7 +423,7 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
         rotation_synthesis_t_gates (sp.Expr | int): T-gate cost per Pauli
             rotation. Defaults to one.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
-            Defaults to ``hamiltonian.n_spin_orbitals + 1``.
+            Defaults to ``hamiltonian.n_qubits + 1``.
 
     Returns:
         ResourceEstimate: Architecture-independent logical resource estimate.
@@ -590,7 +435,7 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     if not isinstance(hamiltonian, PauliHamiltonianResource):
         raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
     return estimate_single_ancilla_trotter_qpe(
-        n_spin_orbitals=hamiltonian.n_spin_orbitals,
+        n_spin_orbitals=hamiltonian.n_qubits,
         n_pauli_terms=hamiltonian.n_pauli_terms,
         lambda_norm=hamiltonian.lambda_norm,
         precision=precision,
@@ -716,11 +561,11 @@ def _normalize_method(method: str | ChemistryQPEMethod) -> ChemistryQPEMethod:
         ) from exc
 
 
-def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
+def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
     """Convert a numeric or symbolic value to a SymPy expression.
 
     Args:
-        value (sp.Expr | int | float | complex): Value to convert.
+        value (sp.Expr | int | float): Value to convert.
         name (str): Field name used in error messages.
 
     Returns:
@@ -733,24 +578,6 @@ def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
         return sp.sympify(value)
     except (TypeError, sp.SympifyError) as exc:
         raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
-
-
-def _abs_as_expr(value: _CoefficientLike) -> sp.Expr:
-    """Return the symbolic absolute value of a numeric coefficient.
-
-    Args:
-        value (sp.Expr | int | float | complex): Coefficient to convert.
-
-    Returns:
-        sp.Expr: Absolute value represented as a SymPy expression.
-
-    Raises:
-        TypeError: If ``value`` cannot be converted into a SymPy expression.
-    """
-    expr = _as_expr(value, "coefficient")
-    if expr.is_number:
-        return sp.Abs(expr)
-    return sp.Abs(expr)
 
 
 def _validate_positive(expr: sp.Expr, name: str) -> None:
