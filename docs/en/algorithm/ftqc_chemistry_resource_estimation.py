@@ -180,7 +180,8 @@ assert {row["quantity"] for row in quantity_catalog} == {
 # %% [markdown]
 # Qamomile also provides standard review profiles: small reusable bundles of
 # quantities for common audit questions. The profile does not compute new
-# resources; it names the columns to compare.
+# resources; it names the columns to compare and can be passed directly to
+# comparison helpers.
 
 # %%
 profile_catalog = {
@@ -339,7 +340,11 @@ for row in scdf.to_quantity_table():
 qubitized_savings = compare_ftqc_resource_estimates(
     thc,
     scdf,
-    quantities=qubitized_quantities,
+    quantities=(
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+    ),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 for row in qubitized_savings:
     print(
@@ -358,7 +363,11 @@ assert qubitized_savings[4].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_V
 qubitized_summary = summarize_ftqc_resource_comparison(
     thc,
     scdf,
-    quantities=qubitized_quantities,
+    quantities=(
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+    ),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 
 assert qubitized_summary.smaller[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
@@ -399,8 +408,8 @@ preparation_savings = compare_ftqc_resource_estimates(
         FTQCResourceQuantity.QPE_REPETITIONS,
         FTQCResourceQuantity.QPE_ITERATIONS,
         FTQCResourceQuantity.TOFFOLI_GATES,
-        *space_time_quantities,
     ),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 
 for row in preparation_savings:
@@ -483,7 +492,8 @@ print("UWC-style T gates:", sp.N(uwc_trotter.t_gates, 4))
 trotter_savings = compare_ftqc_resource_estimates(
     plain_trotter,
     uwc_trotter,
-    quantities=(FTQCResourceQuantity.QPE_ITERATIONS, *space_time_quantities),
+    quantities=(FTQCResourceQuantity.QPE_ITERATIONS,),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 for row in trotter_savings:
     print(

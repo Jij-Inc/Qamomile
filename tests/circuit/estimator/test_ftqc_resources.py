@@ -393,8 +393,8 @@ def test_compare_ftqc_resource_estimates_reports_ratios_and_reductions():
     assert rows[1].to_dict()["unit"] == "Toffoli gates"
 
 
-def test_compare_ftqc_resource_estimates_accepts_profile_quantities():
-    """Comparison helpers accept quantities returned by standard profiles."""
+def test_compare_ftqc_resource_estimates_accepts_profile():
+    """Comparison helpers accept standard profiles directly."""
     baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
     candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
     cost = FTQCCostModel(
@@ -425,7 +425,7 @@ def test_compare_ftqc_resource_estimates_accepts_profile_quantities():
     rows = compare_ftqc_resource_estimates(
         baseline_estimate,
         candidate_estimate,
-        quantities=ftqc_resource_profile_quantities(FTQCResourceProfile.SPACETIME),
+        profile=FTQCResourceProfile.SPACETIME,
     )
 
     assert [row.quantity for row in rows] == list(
@@ -433,6 +433,56 @@ def test_compare_ftqc_resource_estimates_accepts_profile_quantities():
     )
     assert rows[2].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
     assert rows[-1].quantity == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
+
+
+def test_compare_ftqc_resource_estimates_appends_profile_without_duplicates():
+    """Explicit quantities are kept before profile quantities without repeats."""
+    baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=baseline,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    candidate_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=candidate,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=11,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+
+    rows = compare_ftqc_resource_estimates(
+        baseline_estimate,
+        candidate_estimate,
+        quantities=(
+            FTQCResourceQuantity.QPE_ITERATIONS,
+            FTQCResourceQuantity.LOGICAL_QUBITS,
+        ),
+        profile="spacetime",
+    )
+
+    assert [row.quantity for row in rows] == [
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.LOGICAL_QUBITS,
+        FTQCResourceQuantity.LOGICAL_DEPTH,
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+        FTQCResourceQuantity.PHYSICAL_QUBITS,
+        FTQCResourceQuantity.RUNTIME_SECONDS,
+        FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ]
 
 
 def test_compare_ftqc_resource_estimates_defaults_to_common_quantities():
@@ -527,6 +577,45 @@ def test_summarize_ftqc_resource_comparison_groups_review_drivers():
         "unchanged": 1,
         "symbolic": 0,
     }
+
+
+def test_summarize_ftqc_resource_comparison_accepts_profile():
+    """Comparison summaries accept standard review profiles directly."""
+    baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=baseline,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    candidate_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=candidate,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=11,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+
+    summary = summarize_ftqc_resource_comparison(
+        baseline_estimate,
+        candidate_estimate,
+        profile=FTQCResourceProfile.SPACETIME,
+    )
+
+    assert summary.rows[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
+    assert summary.rows[-1].quantity == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
 
 
 def test_comparison_summary_keeps_undecidable_symbolic_changes_separate():

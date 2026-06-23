@@ -129,7 +129,7 @@ assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS.value in {
 assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in catalog}
 
 # %% [markdown]
-# 標準review profileは、「space-time footprintは何か」のように繰り返し使う問いに対するquantity bundleです。reportごとにad hocな列listを手で写す必要を減らしつつ、comparison関数はgenericなまま保てます。
+# 標準review profileは、「space-time footprintは何か」のように繰り返し使う問いに対するquantity bundleです。reportごとにad hocな列listを手で写す必要を減らし、comparison helperへ直接渡せます。
 
 # %%
 profile_catalog = {
@@ -247,8 +247,8 @@ comparison = compare_ftqc_resource_estimates(
     quantities=(
         FTQCResourceQuantity.QPE_ITERATIONS,
         FTQCResourceQuantity.TOFFOLI_GATES,
-        *space_time_quantities,
     ),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 
 for row in comparison:
@@ -272,8 +272,8 @@ comparison_summary = summarize_ftqc_resource_comparison(
     quantities=(
         FTQCResourceQuantity.QPE_ITERATIONS,
         FTQCResourceQuantity.TOFFOLI_GATES,
-        *space_time_quantities,
     ),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 
 for row in comparison_summary.smaller:
@@ -432,7 +432,7 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、logical space-time volume、physical量子ビット、runtime、physical qubit-secondsを分けて追跡する必要があることがわかります。
 # - `iter_ftqc_research_signals`は、研究方向をQamomileがreportするcanonical quantityへ対応づけます。
-# - `ftqc_resource_profile_quantities`を使うと、space-time profileのような再利用可能なquantity bundleを設計レビューに使えます。
+# - `FTQCResourceProfile`を使うと、space-time profileのような再利用可能なquantity bundleをcomparison helperへ直接渡せます。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。

@@ -146,7 +146,7 @@ assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in c
 # %% [markdown]
 # Standard review profiles provide reusable quantity bundles for recurring
 # questions such as "what is the space-time footprint?" They keep reports from
-# hand-copying ad hoc column lists while leaving comparison functions generic.
+# hand-copying ad hoc column lists, and comparison helpers accept them directly.
 
 # %%
 profile_catalog = {
@@ -266,8 +266,8 @@ comparison = compare_ftqc_resource_estimates(
     quantities=(
         FTQCResourceQuantity.QPE_ITERATIONS,
         FTQCResourceQuantity.TOFFOLI_GATES,
-        *space_time_quantities,
     ),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 
 for row in comparison:
@@ -293,8 +293,8 @@ comparison_summary = summarize_ftqc_resource_comparison(
     quantities=(
         FTQCResourceQuantity.QPE_ITERATIONS,
         FTQCResourceQuantity.TOFFOLI_GATES,
-        *space_time_quantities,
     ),
+    profile=FTQCResourceProfile.SPACETIME,
 )
 
 for row in comparison_summary.smaller:
@@ -474,8 +474,8 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   physical qubit-seconds separately.
 # - `iter_ftqc_research_signals` maps research directions to the canonical
 #   quantities that Qamomile reports.
-# - `ftqc_resource_profile_quantities` gives reusable quantity bundles such as
-#   the space-time profile for design reviews.
+# - `FTQCResourceProfile` gives reusable quantity bundles such as the
+#   space-time profile and can be passed directly to comparison helpers.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation

@@ -1176,6 +1176,7 @@ def compare_ftqc_resource_estimates(
     candidate: SupportsFTQCResourceValues,
     *,
     quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+    profile: str | FTQCResourceProfile | None = None,
 ) -> tuple[FTQCResourceComparisonRow, ...]:
     """Compare canonical FTQC quantities between two estimates.
 
@@ -1185,8 +1186,12 @@ def compare_ftqc_resource_estimates(
         candidate (SupportsFTQCResourceValues): Candidate estimate, model, or
             summary exposing ``resource_values()``.
         quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
-            to compare. Defaults to the intersection of quantities exposed by
-            both inputs, ordered by the canonical quantity catalog.
+            to compare before any profile quantities. Defaults to the
+            intersection of quantities exposed by both inputs when ``profile``
+            is None.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile whose quantities are appended after ``quantities`` with
+            duplicates removed. Defaults to None.
 
     Returns:
         tuple[FTQCResourceComparisonRow, ...]: Comparison rows containing
@@ -1199,10 +1204,11 @@ def compare_ftqc_resource_estimates(
     """
     baseline_values = baseline.resource_values()
     candidate_values = candidate.resource_values()
-    selected = _normalize_comparison_quantities(
+    selected = _select_comparison_quantities(
         baseline_values,
         candidate_values,
         quantities,
+        profile,
     )
 
     rows = []
@@ -1236,6 +1242,7 @@ def summarize_ftqc_resource_comparison(
     candidate: SupportsFTQCResourceValues,
     *,
     quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+    profile: str | FTQCResourceProfile | None = None,
 ) -> FTQCResourceComparisonSummary:
     """Summarize FTQC resource changes between two estimates.
 
@@ -1249,8 +1256,12 @@ def summarize_ftqc_resource_comparison(
         candidate (SupportsFTQCResourceValues): Candidate estimate, model, or
             summary exposing ``resource_values()``.
         quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
-            to compare. Defaults to the intersection of quantities exposed by
-            both inputs, ordered by the canonical quantity catalog.
+            to compare before any profile quantities. Defaults to the
+            intersection of quantities exposed by both inputs when ``profile``
+            is None.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile whose quantities are appended after ``quantities`` with
+            duplicates removed. Defaults to None.
 
     Returns:
         FTQCResourceComparisonSummary: Grouped comparison rows.
@@ -1264,7 +1275,53 @@ def summarize_ftqc_resource_comparison(
             baseline,
             candidate,
             quantities=quantities,
+            profile=profile,
         )
+    )
+
+
+def _select_comparison_quantities(
+    baseline_values: dict[FTQCResourceQuantity, sp.Expr],
+    candidate_values: dict[FTQCResourceQuantity, sp.Expr],
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None,
+    profile: str | FTQCResourceProfile | None,
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Select quantities from explicit requests and optional review profile.
+
+    Args:
+        baseline_values (dict[FTQCResourceQuantity, sp.Expr]): Baseline
+            resource values.
+        candidate_values (dict[FTQCResourceQuantity, sp.Expr]): Candidate
+            resource values.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Explicit
+            requested quantities.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile to append after explicit quantities.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Normalized quantities.
+
+    Raises:
+        ValueError: If a requested quantity is absent from either value map, or
+            if ``profile`` is not a known FTQC resource profile.
+    """
+    if profile is None:
+        return _normalize_comparison_quantities(
+            baseline_values,
+            candidate_values,
+            quantities,
+        )
+
+    profile_quantities = ftqc_resource_profile_quantities(profile)
+    if quantities is None:
+        selected = profile_quantities
+    else:
+        selected = (*quantities, *profile_quantities)
+
+    return _normalize_comparison_quantities(
+        baseline_values,
+        candidate_values,
+        selected,
     )
 
 
@@ -1297,8 +1354,8 @@ def _normalize_comparison_quantities(
             if spec.quantity in common
         )
 
-    normalized = tuple(
-        _normalize_resource_quantity(quantity) for quantity in quantities
+    normalized = _dedupe_resource_quantities(
+        tuple(_normalize_resource_quantity(quantity) for quantity in quantities)
     )
     missing = [
         quantity.value
@@ -1312,6 +1369,28 @@ def _normalize_comparison_quantities(
             + "."
         )
     return normalized
+
+
+def _dedupe_resource_quantities(
+    quantities: tuple[FTQCResourceQuantity, ...],
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Remove duplicate resource quantities while preserving input order.
+
+    Args:
+        quantities (tuple[FTQCResourceQuantity, ...]): Normalized resource
+            quantities.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: First occurrence of each quantity.
+    """
+    seen: set[FTQCResourceQuantity] = set()
+    deduped = []
+    for quantity in quantities:
+        if quantity in seen:
+            continue
+        seen.add(quantity)
+        deduped.append(quantity)
+    return tuple(deduped)
 
 
 def _normalize_resource_quantity(
