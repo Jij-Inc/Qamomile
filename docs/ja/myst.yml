@@ -53,6 +53,7 @@ project:
     - title: API Reference
       file: api/index
       children:
+        - file: api/chemistry
         - file: api/circuit/index
           children:
             - file: api/circuit/algorithm
@@ -89,6 +90,7 @@ project:
             - file: api/quri_parts/exceptions
             - file: api/quri_parts/observable
             - file: api/quri_parts/transpiler
+        - file: api/resource_estimation
 # --- End API Reference ---
 
 site:

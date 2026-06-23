@@ -11,13 +11,6 @@ these provide theoretical estimates based on algorithm parameters
 without needing the actual circuit implementation.
 """
 
-from qamomile.circuit.estimator.algorithmic.ftqc_chemistry import (
-    ChemistryQPEMethod,
-    FTQCCostModel,
-    FTQCResourceEstimate,
-    estimate_qubitized_chemistry_qpe,
-    estimate_single_ancilla_trotter_qpe,
-)
 from qamomile.circuit.estimator.algorithmic.hamiltonian_simulation import (
     estimate_qdrift,
     estimate_qsvt,
@@ -27,13 +20,8 @@ from qamomile.circuit.estimator.algorithmic.qaoa import estimate_qaoa
 from qamomile.circuit.estimator.algorithmic.qpe import estimate_qpe
 
 __all__ = [
-    "ChemistryQPEMethod",
-    "FTQCCostModel",
-    "FTQCResourceEstimate",
     "estimate_qaoa",
     "estimate_qpe",
-    "estimate_qubitized_chemistry_qpe",
-    "estimate_single_ancilla_trotter_qpe",
     "estimate_trotter",
     "estimate_qsvt",
     "estimate_qdrift",
