@@ -48,6 +48,7 @@ from qamomile.circuit.estimator.algorithmic import (
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    audit_ftqc_research_signal_catalog,
     audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
@@ -742,6 +743,17 @@ assert not partial_signal_coverage.is_complete
 assert "qpe_iterations" in partial_signal_coverage.to_dict()["missing"]
 assert uwc_signal_coverage.is_complete
 assert uwc_signal_coverage.coverage_fraction == 1
+
+signal_catalog_report = audit_ftqc_research_signal_catalog(
+    uwc_trotter,
+    reference_keys=("arXiv:2603.22778", "arXiv:2601.08533"),
+    estimate_label="UWC Trotter",
+)
+for row in signal_catalog_report.to_row_table():
+    print(row["reference_key"], row["coverage_fraction"], row["missing"])
+
+assert signal_catalog_report.complete[0].reference_key == "arXiv:2603.22778"
+assert signal_catalog_report.incomplete[0].reference_key == "arXiv:2601.08533"
 
 # %% [markdown]
 # A research-signal report scopes the comparison to the quantities motivated by

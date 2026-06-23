@@ -12,6 +12,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     FTQCResearchSignal,
     FTQCResearchSignalCoverage,
+    FTQCResearchSignalCoverageReport,
     FTQCResourceAggregationRule,
     FTQCResourceBudgetReport,
     FTQCResourceCategory,
@@ -33,6 +34,7 @@ from qamomile.circuit.estimator.algorithmic import (
     HamiltonianResourceReduction,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    audit_ftqc_research_signal_catalog,
     audit_ftqc_research_signal_coverage,
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
@@ -1097,6 +1099,52 @@ def test_audit_ftqc_research_signal_coverage_marks_missing_quantities():
     assert complete.missing == ()
     assert complete.coverage_fraction == 1
     assert complete.to_dict()["is_complete"] is True
+
+
+def test_audit_ftqc_research_signal_catalog_groups_signal_coverage():
+    """Coverage catalog reports complete and incomplete research signals."""
+    summary = summarize_pauli_hamiltonian(
+        qm_o.Z(0) + 2 * qm_o.Z(1),
+        source="catalog_lcu_summary",
+    )
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    estimate = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        randomized_compilation_factor=sp.Rational(1, 2),
+        rotation_synthesis_t_gates=3,
+        resource_reduction=HamiltonianResourceReduction(
+            lambda_norm_factor=sp.Rational(1, 10)
+        ),
+        cost_model=cost,
+    )
+
+    report = audit_ftqc_research_signal_catalog(
+        estimate,
+        reference_keys=("arXiv:2603.22778", "arXiv:2601.08533"),
+        title="Toy signal coverage",
+        estimate_label="UWC Trotter",
+    )
+    rows = report.to_row_table()
+
+    assert isinstance(report, FTQCResearchSignalCoverageReport)
+    assert report.complete[0].reference_key == "arXiv:2603.22778"
+    assert report.incomplete[0].reference_key == "arXiv:2601.08533"
+    assert rows[0]["estimate_label"] == "UWC Trotter"
+    assert rows[0]["is_complete"] is True
+    assert rows[1]["missing"].startswith("state_preparation_success_probability")
+    assert report.to_dict()["counts"] == {"complete": 1, "incomplete": 1}
+    with pytest.raises(ValueError, match="reference_keys must not be empty"):
+        audit_ftqc_research_signal_catalog(estimate, reference_keys=())
+    with pytest.raises(ValueError, match="coverages must not be empty"):
+        FTQCResearchSignalCoverageReport("Empty", "estimate", ())
 
 
 def test_ftqc_resource_review_findings_prioritize_savings_and_tradeoffs():

@@ -8,6 +8,14 @@ from typing import Any, Protocol, cast
 
 import sympy as sp
 
+_CoverageReportDict = dict[
+    str,
+    str
+    | list[dict[str, str | bool]]
+    | list[dict[str, str | bool | list[str]]]
+    | dict[str, int],
+]
+
 
 class FTQCResourceCategory(enum.StrEnum):
     """Group FTQC resource quantities by modeling layer.
@@ -467,6 +475,123 @@ class FTQCResearchSignalCoverage:
             "missing": [quantity.value for quantity in self.missing],
             "coverage_fraction": str(self.coverage_fraction),
             "is_complete": self.is_complete,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResearchSignalCoverageReport:
+    """Group research-signal coverage audits for one estimate.
+
+    Attributes:
+        title (str): Reader-facing report title.
+        estimate_label (str): Label for the audited estimate.
+        coverages (tuple[FTQCResearchSignalCoverage, ...]): Coverage audits
+            in research-signal order.
+
+    Example:
+        >>> coverage = FTQCResearchSignalCoverage(
+        ...     reference_key="arXiv:example",
+        ...     title="Toy signal",
+        ...     available=(FTQCResourceQuantity.LAMBDA_NORM,),
+        ...     missing=(),
+        ...     total=1,
+        ... )
+        >>> report = FTQCResearchSignalCoverageReport(
+        ...     "Toy coverage",
+        ...     "estimate",
+        ...     (coverage,),
+        ... )
+        >>> report.to_dict()["counts"]["complete"]
+        1
+    """
+
+    title: str
+    estimate_label: str
+    coverages: tuple[FTQCResearchSignalCoverage, ...]
+
+    def __post_init__(self) -> None:
+        """Validate report rows after dataclass construction.
+
+        Raises:
+            TypeError: If ``coverages`` contains non-coverage items.
+            ValueError: If ``coverages`` is empty.
+        """
+        if not self.coverages:
+            raise ValueError("coverages must not be empty.")
+        if not all(
+            isinstance(coverage, FTQCResearchSignalCoverage)
+            for coverage in self.coverages
+        ):
+            raise TypeError(
+                "coverages must contain only FTQCResearchSignalCoverage instances."
+            )
+        object.__setattr__(self, "coverages", tuple(self.coverages))
+
+    @property
+    def complete(self) -> tuple[FTQCResearchSignalCoverage, ...]:
+        """Return research signals with complete quantity coverage.
+
+        Returns:
+            tuple[FTQCResearchSignalCoverage, ...]: Complete coverage rows.
+        """
+        return tuple(coverage for coverage in self.coverages if coverage.is_complete)
+
+    @property
+    def incomplete(self) -> tuple[FTQCResearchSignalCoverage, ...]:
+        """Return research signals with missing quantities.
+
+        Returns:
+            tuple[FTQCResearchSignalCoverage, ...]: Incomplete coverage rows.
+        """
+        return tuple(
+            coverage for coverage in self.coverages if not coverage.is_complete
+        )
+
+    def to_row_table(self) -> list[dict[str, str | bool]]:
+        """Return coverage audits as table rows.
+
+        Returns:
+            list[dict[str, str | bool]]: Rows with estimate label, signal key,
+                coverage fraction, completion status, and quantity lists.
+        """
+        rows = []
+        for coverage in self.coverages:
+            rows.append(
+                {
+                    "estimate_label": self.estimate_label,
+                    "reference_key": coverage.reference_key,
+                    "title": coverage.title,
+                    "coverage_fraction": str(coverage.coverage_fraction),
+                    "is_complete": coverage.is_complete,
+                    "available": ", ".join(
+                        quantity.value for quantity in coverage.available
+                    ),
+                    "missing": ", ".join(
+                        quantity.value for quantity in coverage.missing
+                    ),
+                }
+            )
+        return rows
+
+    def to_dict(self) -> _CoverageReportDict:
+        """Serialize grouped coverage audits.
+
+        Returns:
+            dict[str, str | list[dict[str, str | bool]] |
+                list[dict[str, str | bool | list[str]]] | dict[str, int]]:
+                JSON-friendly report metadata, rows, grouped coverage audits,
+                and group counts.
+        """
+        return {
+            "title": self.title,
+            "estimate_label": self.estimate_label,
+            "rows": self.to_row_table(),
+            "complete": [coverage.to_dict() for coverage in self.complete],
+            "incomplete": [coverage.to_dict() for coverage in self.incomplete],
+            "counts": {
+                "complete": len(self.complete),
+                "incomplete": len(self.incomplete),
+            },
         }
 
 
@@ -2172,6 +2297,50 @@ def audit_ftqc_research_signal_coverage(
         available=available,
         missing=missing,
         total=len(signal.quantities),
+    )
+
+
+def audit_ftqc_research_signal_catalog(
+    estimate: SupportsFTQCResourceValues,
+    *,
+    reference_keys: tuple[str, ...] | None = None,
+    title: str = "FTQC research signal coverage",
+    estimate_label: str = "estimate",
+) -> FTQCResearchSignalCoverageReport:
+    """Audit one estimate against a catalog of FTQC research signals.
+
+    Args:
+        estimate (SupportsFTQCResourceValues): Estimate, model, or summary
+            exposing ``resource_values()``.
+        reference_keys (tuple[str, ...] | None): Optional subset of research
+            signal keys to audit. Defaults to None, auditing the full catalog.
+        title (str): Reader-facing report title. Defaults to
+            ``"FTQC research signal coverage"``.
+        estimate_label (str): Label for the audited estimate. Defaults to
+            ``"estimate"``.
+
+    Returns:
+        FTQCResearchSignalCoverageReport: Coverage report for the requested
+            research signals.
+
+    Raises:
+        ValueError: If any requested research-signal key is unknown or if the
+            requested key list is empty.
+    """
+    if reference_keys is None:
+        keys = tuple(signal.reference_key for signal in FTQC_RESEARCH_SIGNALS)
+    elif not reference_keys:
+        raise ValueError("reference_keys must not be empty.")
+    else:
+        keys = reference_keys
+
+    return FTQCResearchSignalCoverageReport(
+        title=title,
+        estimate_label=estimate_label,
+        coverages=tuple(
+            audit_ftqc_research_signal_coverage(reference_key, estimate)
+            for reference_key in keys
+        ),
     )
 
 
