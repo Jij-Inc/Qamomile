@@ -36,14 +36,18 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCAccuracyBudget,
+    FTQCResourceAggregationRule,
     FTQCResourceCategory,
     FTQCResourceConstraint,
+    FTQCResourcePlan,
+    FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
+    default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
@@ -164,6 +168,79 @@ print(profile_catalog[FTQCResourceProfile.SPACETIME]["quantities"])
 
 assert FTQCResourceProfile.CHEMISTRY_QPE in profile_catalog
 assert space_time_quantities[-1] == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
+
+# %% [markdown]
+# ## Compositional Algorithm Plans
+#
+# Before a new FTQC algorithm has a concrete Qamomile circuit, model it as a
+# sequence of abstract subroutines. A resource plan composes canonical
+# quantities with explicit aggregation rules: counts, depth, runtime, and
+# space-time costs add across sequential steps; qubit footprints use the peak;
+# problem metadata and architecture knobs must stay consistent.
+
+# %%
+prepare_step = FTQCResourcePlanStep(
+    "prepare_filter",
+    {
+        FTQCResourceQuantity.LOGICAL_QUBITS: 12,
+        FTQCResourceQuantity.TOFFOLI_GATES: 7,
+        FTQCResourceQuantity.LOGICAL_DEPTH: 11,
+        FTQCResourceQuantity.TARGET_PRECISION: sp.Float("0.001"),
+    },
+    repetitions=3,
+    label="State preparation and filtering",
+)
+qpe_step = FTQCResourcePlanStep(
+    "phase_estimation",
+    {
+        "logical_qubits": 18,
+        "toffoli_gates": 100,
+        "logical_depth": 120,
+        "runtime_seconds": 20,
+        "physical_qubits": 4000,
+        "target_precision": sp.Float("0.001"),
+    },
+    repetitions=2,
+)
+resource_plan = FTQCResourcePlan(
+    (prepare_step, qpe_step),
+    title="Filtered QPE plan",
+)
+
+for row in resource_plan.to_quantity_table():
+    print(row["quantity"], row["aggregation"], row["value"])
+
+plan_values = resource_plan.resource_values()
+assert plan_values[FTQCResourceQuantity.TOFFOLI_GATES] == 221
+assert plan_values[FTQCResourceQuantity.LOGICAL_DEPTH] == 273
+assert plan_values[FTQCResourceQuantity.LOGICAL_QUBITS] == 18
+assert default_ftqc_resource_aggregation_rule("logical_qubits") == (
+    FTQCResourceAggregationRule.PEAK
+)
+
+# %% [markdown]
+# The same plan object exposes `resource_values()`, so comparison and budget
+# helpers can consume it exactly like a chemistry estimate. If a resource
+# should be combined as a peak across steps, override the plan-level rule for
+# that quantity; each step's own repetition scaling still applies first.
+
+# %%
+parallel_runtime_plan = FTQCResourcePlan(
+    (prepare_step, qpe_step),
+    aggregation={"runtime_seconds": FTQCResourceAggregationRule.PEAK},
+)
+plan_budget = evaluate_ftqc_resource_constraints(
+    resource_plan,
+    (
+        FTQCResourceConstraint("logical_qubits", 20),
+        FTQCResourceConstraint("toffoli_gates", 200),
+    ),
+    title="Toy plan budget",
+)
+
+assert parallel_runtime_plan.resource_values()[FTQCResourceQuantity.RUNTIME_SECONDS] == 40
+assert plan_budget.satisfied[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
+assert plan_budget.violated[0].quantity == FTQCResourceQuantity.TOFFOLI_GATES
 
 # %% [markdown]
 # ## Minimal Example
@@ -558,6 +635,8 @@ assert budget_report.to_dict()["counts"] == {
 #   quantities that Qamomile reports.
 # - `FTQCResourceProfile` gives reusable quantity bundles such as the
 #   space-time profile and can be passed directly to comparison helpers.
+# - `FTQCResourcePlan` composes abstract FTQC subroutines before a concrete
+#   circuit implementation exists.
 # - Qamomile keeps those quantities in algorithmic metadata so the circuit IR
 #   remains backend-neutral.
 # - Accuracy budgets split a total target precision into representation

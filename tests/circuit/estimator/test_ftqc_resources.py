@@ -11,6 +11,7 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEModel,
     FTQCCostModel,
     FTQCResearchSignal,
+    FTQCResourceAggregationRule,
     FTQCResourceBudgetReport,
     FTQCResourceCategory,
     FTQCResourceChangeDirection,
@@ -22,6 +23,8 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceConstraintSense,
     FTQCResourceConstraintStatus,
     FTQCResourceFormula,
+    FTQCResourcePlan,
+    FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceProfileSpec,
     FTQCResourceQuantity,
@@ -31,6 +34,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_review_findings,
     compare_ftqc_resource_estimates,
+    default_ftqc_resource_aggregation_rule,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
@@ -213,6 +217,132 @@ def test_ftqc_resource_formula_rejects_invalid_inputs():
 
     with pytest.raises(TypeError, match="expression"):
         FTQCResourceFormula(quantity="qpe_iterations", expression=object())
+
+
+def test_ftqc_resource_plan_composes_abstract_subroutines():
+    """Resource plans compose repeated FTQC subroutines without circuit lowering."""
+    prepare = FTQCResourcePlanStep(
+        "prepare_filter",
+        {
+            FTQCResourceQuantity.LOGICAL_QUBITS: 12,
+            FTQCResourceQuantity.TOFFOLI_GATES: 7,
+            FTQCResourceQuantity.LOGICAL_DEPTH: 11,
+            FTQCResourceQuantity.TARGET_PRECISION: sp.Float("0.001"),
+        },
+        repetitions=3,
+        label="State preparation and filtering",
+    )
+    phase_estimation = FTQCResourcePlanStep(
+        "phase_estimation",
+        {
+            "logical_qubits": 18,
+            "toffoli_gates": 100,
+            "logical_depth": 120,
+            "runtime_seconds": 20,
+            "physical_qubits": 4000,
+            "target_precision": sp.Float("0.001"),
+        },
+        repetitions=2,
+    )
+
+    plan = FTQCResourcePlan(
+        (prepare, phase_estimation),
+        title="Filtered QPE plan",
+    )
+    values = plan.resource_values()
+
+    assert values[FTQCResourceQuantity.TOFFOLI_GATES] == 221
+    assert values[FTQCResourceQuantity.LOGICAL_DEPTH] == 273
+    assert values[FTQCResourceQuantity.LOGICAL_QUBITS] == 18
+    assert values[FTQCResourceQuantity.PHYSICAL_QUBITS] == 4000
+    assert values[FTQCResourceQuantity.TARGET_PRECISION] == sp.Float("0.001")
+    assert default_ftqc_resource_aggregation_rule("logical_qubits") == (
+        FTQCResourceAggregationRule.PEAK
+    )
+    assert default_ftqc_resource_aggregation_rule("toffoli_gates") == (
+        FTQCResourceAggregationRule.ADD
+    )
+    assert plan.to_quantity_table()[0]["quantity"] == "target_precision"
+    assert plan.to_dict()["steps"][0]["label"] == "State preparation and filtering"
+
+    budget = evaluate_ftqc_resource_constraints(
+        plan,
+        (
+            FTQCResourceConstraint("logical_qubits", 20),
+            FTQCResourceConstraint("toffoli_gates", 200),
+        ),
+    )
+
+    assert budget.satisfied[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
+    assert budget.violated[0].quantity == FTQCResourceQuantity.TOFFOLI_GATES
+
+
+def test_ftqc_resource_plan_supports_symbolic_repetition_and_overrides():
+    """Plans keep symbolic repetition factors and custom aggregation rules."""
+    success_probability = sp.Symbol("p_success", positive=True)
+    per_attempt_toffoli = sp.Symbol("t_attempt", nonnegative=True)
+    filtering = FTQCResourcePlanStep(
+        "filtering",
+        {
+            "toffoli_gates": per_attempt_toffoli,
+            "runtime_seconds": 10,
+            "logical_qubits": sp.Symbol("filter_qubits", positive=True),
+        },
+        repetitions=1 / success_probability,
+    )
+    verification = FTQCResourcePlanStep(
+        "verification",
+        {
+            "runtime_seconds": 20,
+            "logical_qubits": sp.Symbol("verify_qubits", positive=True),
+        },
+    )
+    plan = FTQCResourcePlan(
+        (filtering, verification),
+        aggregation={"runtime_seconds": FTQCResourceAggregationRule.PEAK},
+    )
+    values = plan.resource_values()
+
+    assert (
+        sp.simplify(
+            values[FTQCResourceQuantity.TOFFOLI_GATES]
+            - per_attempt_toffoli / success_probability
+        )
+        == 0
+    )
+    assert values[FTQCResourceQuantity.RUNTIME_SECONDS] == sp.Max(
+        20,
+        10 / success_probability,
+    )
+    assert values[FTQCResourceQuantity.LOGICAL_QUBITS] == sp.Max(
+        sp.Symbol("filter_qubits", positive=True),
+        sp.Symbol("verify_qubits", positive=True),
+    )
+
+
+def test_ftqc_resource_plan_rejects_invalid_composition_inputs():
+    """Resource plans reject unknown rules and inconsistent metadata."""
+    with pytest.raises(ValueError, match="aggregation rule"):
+        FTQCResourcePlanStep(
+            "bad",
+            {"toffoli_gates": 1},
+            aggregation={"toffoli_gates": "not-a-rule"},
+        )
+
+    with pytest.raises(ValueError, match="repetitions"):
+        FTQCResourcePlanStep("bad", {"toffoli_gates": 1}, repetitions=-1)
+
+    plan = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep("a", {"target_precision": sp.Float("0.001")}),
+            FTQCResourcePlanStep("b", {"target_precision": sp.Float("0.002")}),
+        )
+    )
+    with pytest.raises(ValueError, match="Conflicting FTQC resource values"):
+        plan.resource_values()
+
+    with pytest.raises(TypeError, match="FTQCResourcePlanStep"):
+        FTQCResourcePlan((object(),))  # type: ignore[arg-type]
 
 
 def test_describe_ftqc_resource_quantity_normalizes_strings():

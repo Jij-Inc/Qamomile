@@ -207,6 +207,25 @@ class FTQCResourceConstraintStatus(enum.StrEnum):
     SYMBOLIC = "symbolic"
 
 
+class FTQCResourceAggregationRule(enum.StrEnum):
+    """Name how a quantity composes across FTQC subroutine steps.
+
+    Attributes:
+        ADD: Add the quantity across repeated or sequential subroutines.
+        PEAK: Keep the maximum value across repeated or sequential
+            subroutines.
+        CONSISTENT: Require all contributing steps to provide the same value.
+
+    Example:
+        >>> FTQCResourceAggregationRule("add")
+        <FTQCResourceAggregationRule.ADD: 'add'>
+    """
+
+    ADD = "add"
+    PEAK = "peak"
+    CONSISTENT = "consistent"
+
+
 class FTQCResourceProfile(enum.StrEnum):
     """Name standard FTQC resource review profiles.
 
@@ -666,6 +685,324 @@ class FTQCResourceReviewFinding:
             "reduction": str(self.reduction),
             "headline": self.headline,
             "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourcePlanStep:
+    """Describe one abstract FTQC algorithm subroutine resource step.
+
+    A step records resource quantities before the compiler commits to a
+    concrete circuit implementation. Repetition scales additive quantities
+    such as non-Clifford counts and logical depth, while peak quantities such
+    as logical qubits remain peak values unless callers override the rule.
+
+    Args:
+        name (str): Stable subroutine name, such as ``"PREPARE"`` or
+            ``"filtered_qpe"``.
+        resources (dict[str | FTQCResourceQuantity, sp.Expr | int | float]):
+            Per-step resource values keyed by canonical FTQC quantity.
+        repetitions (sp.Expr | int | float): Number of times this step is
+            expected to run. Defaults to one.
+        aggregation (dict[str | FTQCResourceQuantity, str |
+            FTQCResourceAggregationRule]): Optional per-quantity aggregation
+            override for this step. Defaults to canonical quantity rules.
+        label (str): Optional reader-facing subroutine label. Defaults to
+            ``name`` when serialized.
+
+    Raises:
+        TypeError: If ``resources`` or ``repetitions`` cannot be converted to
+            SymPy expressions.
+        ValueError: If a quantity or aggregation rule is unknown, or if
+            ``repetitions`` is negative when decidable.
+
+    Example:
+        >>> step = FTQCResourcePlanStep(
+        ...     "walk",
+        ...     {"toffoli_gates": 10, "logical_qubits": 4},
+        ...     repetitions=3,
+        ... )
+        >>> step.resource_values()[FTQCResourceQuantity.TOFFOLI_GATES]
+        30
+    """
+
+    name: str
+    resources: dict[str | FTQCResourceQuantity, sp.Expr | int | float]
+    repetitions: sp.Expr | int | float = 1
+    aggregation: (
+        dict[
+            str | FTQCResourceQuantity,
+            str | FTQCResourceAggregationRule,
+        ]
+        | None
+    ) = None
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize step fields after dataclass construction.
+
+        Raises:
+            TypeError: If resource values cannot be sympified.
+            ValueError: If a closed-set key is unknown or repetitions are
+                negative when decidable.
+        """
+        normalized_resources = {
+            _normalize_resource_quantity(quantity): _sympify_resource_expr(
+                value,
+                str(quantity),
+            )
+            for quantity, value in self.resources.items()
+        }
+        repetitions = _sympify_resource_expr(self.repetitions, "repetitions")
+        if repetitions.is_negative:
+            raise ValueError("repetitions must be non-negative.")
+        aggregation = self.aggregation or {}
+        normalized_aggregation = {
+            _normalize_resource_quantity(quantity): _normalize_aggregation_rule(rule)
+            for quantity, rule in aggregation.items()
+        }
+        object.__setattr__(self, "resources", normalized_resources)
+        object.__setattr__(self, "repetitions", repetitions)
+        object.__setattr__(self, "aggregation", normalized_aggregation)
+
+    def aggregation_rule_for(
+        self,
+        quantity: str | FTQCResourceQuantity,
+    ) -> FTQCResourceAggregationRule:
+        """Return the aggregation rule for one step quantity.
+
+        Args:
+            quantity (str | FTQCResourceQuantity): Quantity key to inspect.
+
+        Returns:
+            FTQCResourceAggregationRule: Step-specific or default aggregation
+                rule.
+
+        Raises:
+            ValueError: If ``quantity`` is not a known FTQC resource quantity.
+        """
+        normalized = _normalize_resource_quantity(quantity)
+        aggregation = cast(
+            dict[FTQCResourceQuantity, FTQCResourceAggregationRule],
+            self.aggregation,
+        )
+        return aggregation.get(
+            normalized, default_ftqc_resource_aggregation_rule(normalized)
+        )
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return repetition-adjusted step resources.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Canonical resource values for
+                this step. Additive quantities are multiplied by
+                ``repetitions``; peak and consistent quantities are left as
+                per-step values.
+        """
+        values = {}
+        resources = cast(dict[FTQCResourceQuantity, sp.Expr], self.resources)
+        repetitions = cast(sp.Expr, self.repetitions)
+        for quantity, value in resources.items():
+            if self.aggregation_rule_for(quantity) == FTQCResourceAggregationRule.ADD:
+                values[quantity] = sp.simplify(value * repetitions)
+            else:
+                values[quantity] = value
+        return values
+
+    def to_dict(self) -> dict[str, str | list[dict[str, str]]]:
+        """Serialize the plan step.
+
+        Returns:
+            dict[str, str | list[dict[str, str]]]: JSON-friendly subroutine
+                metadata and resource values.
+        """
+        rows = []
+        resources = cast(dict[FTQCResourceQuantity, sp.Expr], self.resources)
+        for quantity, raw_value in resources.items():
+            adjusted_value = self.resource_values()[quantity]
+            spec = describe_ftqc_resource_quantity(quantity)
+            rows.append(
+                {
+                    "quantity": quantity.value,
+                    "label": spec.label,
+                    "unit": spec.unit,
+                    "category": spec.category.value,
+                    "value": str(adjusted_value),
+                    "per_step_value": str(raw_value),
+                    "aggregation": self.aggregation_rule_for(quantity).value,
+                }
+            )
+        return {
+            "name": self.name,
+            "label": self.label or self.name,
+            "repetitions": str(self.repetitions),
+            "resources": rows,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourcePlan:
+    """Compose abstract FTQC subroutine steps into one resource model.
+
+    The plan is intentionally an estimator-level abstraction. It lets papers
+    and tutorials model algorithms built from PREPARE, SELECT, filtering,
+    QPE, or architecture-lift steps without introducing low-level IR gates
+    before an implementation strategy is selected.
+
+    Args:
+        steps (tuple[FTQCResourcePlanStep, ...]): Ordered subroutine steps.
+        title (str): Reader-facing plan title. Defaults to
+            ``"FTQC resource plan"``.
+        aggregation (dict[str | FTQCResourceQuantity, str |
+            FTQCResourceAggregationRule] | None): Optional plan-level
+            aggregation override used when combining steps. Defaults to
+            canonical quantity rules.
+
+    Raises:
+        TypeError: If any item in ``steps`` is not an
+            ``FTQCResourcePlanStep``.
+        ValueError: If an aggregation key is unknown or if a consistent
+            quantity has conflicting values across steps.
+
+    Example:
+        >>> step = FTQCResourcePlanStep("walk", {"toffoli_gates": 10}, 2)
+        >>> plan = FTQCResourcePlan((step,))
+        >>> plan.resource_values()[FTQCResourceQuantity.TOFFOLI_GATES]
+        20
+    """
+
+    steps: tuple[FTQCResourcePlanStep, ...]
+    title: str = "FTQC resource plan"
+    aggregation: (
+        dict[
+            str | FTQCResourceQuantity,
+            str | FTQCResourceAggregationRule,
+        ]
+        | None
+    ) = None
+
+    def __post_init__(self) -> None:
+        """Normalize plan fields after dataclass construction.
+
+        Raises:
+            TypeError: If any step is not an ``FTQCResourcePlanStep``.
+            ValueError: If an aggregation key or rule is unknown.
+        """
+        if not all(isinstance(step, FTQCResourcePlanStep) for step in self.steps):
+            raise TypeError("steps must contain only FTQCResourcePlanStep instances.")
+        aggregation = self.aggregation or {}
+        normalized_aggregation = {
+            _normalize_resource_quantity(quantity): _normalize_aggregation_rule(rule)
+            for quantity, rule in aggregation.items()
+        }
+        object.__setattr__(self, "steps", tuple(self.steps))
+        object.__setattr__(self, "aggregation", normalized_aggregation)
+
+    def aggregation_rule_for(
+        self,
+        quantity: str | FTQCResourceQuantity,
+        step: FTQCResourcePlanStep | None = None,
+    ) -> FTQCResourceAggregationRule:
+        """Return the plan-level aggregation rule for one quantity.
+
+        Args:
+            quantity (str | FTQCResourceQuantity): Quantity key to inspect.
+            step (FTQCResourcePlanStep | None): Optional step whose rule should
+                be used when the plan has no explicit override. Defaults to
+                None.
+
+        Returns:
+            FTQCResourceAggregationRule: Plan, step, or default aggregation
+                rule.
+
+        Raises:
+            ValueError: If ``quantity`` is not a known FTQC resource quantity.
+        """
+        normalized = _normalize_resource_quantity(quantity)
+        aggregation = cast(
+            dict[FTQCResourceQuantity, FTQCResourceAggregationRule],
+            self.aggregation,
+        )
+        if normalized in aggregation:
+            return aggregation[normalized]
+        if step is not None:
+            return step.aggregation_rule_for(normalized)
+        return default_ftqc_resource_aggregation_rule(normalized)
+
+    def resource_values(self) -> dict[FTQCResourceQuantity, sp.Expr]:
+        """Return aggregate resources for the plan.
+
+        Returns:
+            dict[FTQCResourceQuantity, sp.Expr]: Canonical resource values
+                aggregated across all steps.
+
+        Raises:
+            ValueError: If a consistent quantity has conflicting values across
+                steps.
+        """
+        values: dict[FTQCResourceQuantity, sp.Expr] = {}
+        for step in self.steps:
+            for quantity, value in step.resource_values().items():
+                rule = self.aggregation_rule_for(quantity, step)
+                if quantity not in values:
+                    values[quantity] = value
+                    continue
+                values[quantity] = _combine_resource_values(
+                    quantity,
+                    values[quantity],
+                    value,
+                    rule,
+                )
+        return values
+
+    def to_quantity_table(self) -> list[dict[str, str]]:
+        """Return aggregate plan resources as table rows.
+
+        Returns:
+            list[dict[str, str]]: Rows containing quantity metadata,
+                aggregate values, and aggregation rules.
+
+        Raises:
+            ValueError: If a consistent quantity has conflicting values across
+                steps.
+        """
+        values = self.resource_values()
+        rows = []
+        for spec in FTQC_RESOURCE_QUANTITY_SPECS:
+            if spec.quantity not in values:
+                continue
+            rows.append(
+                {
+                    "quantity": spec.quantity.value,
+                    "label": spec.label,
+                    "unit": spec.unit,
+                    "category": spec.category.value,
+                    "value": str(values[spec.quantity]),
+                    "aggregation": self.aggregation_rule_for(spec.quantity).value,
+                }
+            )
+        return rows
+
+    def to_dict(
+        self,
+    ) -> dict[
+        str, str | list[dict[str, str]] | list[dict[str, str | list[dict[str, str]]]]
+    ]:
+        """Serialize the resource plan.
+
+        Returns:
+            dict[str, str | list[dict[str, str]] | list[dict[str, str |
+                list[dict[str, str]]]]]: JSON-friendly plan metadata, steps,
+                and aggregate resource rows.
+
+        Raises:
+            ValueError: If a consistent quantity has conflicting values across
+                steps.
+        """
+        return {
+            "title": self.title,
+            "steps": [step.to_dict() for step in self.steps],
+            "resources": self.to_quantity_table(),
         }
 
 
@@ -1333,6 +1670,32 @@ FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
 _SPECS_BY_QUANTITY = {spec.quantity: spec for spec in FTQC_RESOURCE_QUANTITY_SPECS}
 
 
+_FTQC_ADDITIVE_RESOURCE_QUANTITIES = {
+    FTQCResourceQuantity.QPE_REPETITIONS,
+    FTQCResourceQuantity.STATE_PREPARATION_TOFFOLI,
+    FTQCResourceQuantity.STATE_PREPARATION_T_GATES,
+    FTQCResourceQuantity.STATE_PREPARATION_LOGICAL_DEPTH,
+    FTQCResourceQuantity.QPE_ITERATIONS,
+    FTQCResourceQuantity.LOGICAL_DEPTH,
+    FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+    FTQCResourceQuantity.TOFFOLI_GATES,
+    FTQCResourceQuantity.T_GATES,
+    FTQCResourceQuantity.CLIFFORD_GATES,
+    FTQCResourceQuantity.RUNTIME_SECONDS,
+    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+}
+
+
+_FTQC_PEAK_RESOURCE_QUANTITIES = {
+    FTQCResourceQuantity.SYSTEM_QUBITS,
+    FTQCResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS,
+    FTQCResourceQuantity.QPE_REGISTER_QUBITS,
+    FTQCResourceQuantity.LOGICAL_QUBITS,
+    FTQCResourceQuantity.PHYSICAL_QUBITS,
+    FTQCResourceQuantity.FACTORY_QUBITS,
+}
+
+
 FTQC_RESOURCE_PROFILE_SPECS: tuple[FTQCResourceProfileSpec, ...] = (
     FTQCResourceProfileSpec(
         profile=FTQCResourceProfile.CHEMISTRY_QPE,
@@ -1624,6 +1987,35 @@ def describe_ftqc_resource_quantity(
     """
     normalized = _normalize_resource_quantity(quantity)
     return _SPECS_BY_QUANTITY[normalized]
+
+
+def default_ftqc_resource_aggregation_rule(
+    quantity: str | FTQCResourceQuantity,
+) -> FTQCResourceAggregationRule:
+    """Return the default subroutine-composition rule for one quantity.
+
+    Args:
+        quantity (str | FTQCResourceQuantity): Quantity key to inspect.
+
+    Returns:
+        FTQCResourceAggregationRule: Default aggregation rule. Counts, depth,
+            runtime, and space-time volume add across sequential steps; qubit
+            footprints use peak aggregation; problem and architecture
+            metadata must remain consistent across steps.
+
+    Raises:
+        ValueError: If ``quantity`` is not a known FTQC resource quantity.
+
+    Example:
+        >>> default_ftqc_resource_aggregation_rule("logical_qubits")
+        <FTQCResourceAggregationRule.PEAK: 'peak'>
+    """
+    normalized = _normalize_resource_quantity(quantity)
+    if normalized in _FTQC_ADDITIVE_RESOURCE_QUANTITIES:
+        return FTQCResourceAggregationRule.ADD
+    if normalized in _FTQC_PEAK_RESOURCE_QUANTITIES:
+        return FTQCResourceAggregationRule.PEAK
+    return FTQCResourceAggregationRule.CONSISTENT
 
 
 def compare_ftqc_resource_estimates(
@@ -2085,6 +2477,29 @@ def _normalize_constraint_sense(
         ) from exc
 
 
+def _normalize_aggregation_rule(
+    rule: str | FTQCResourceAggregationRule,
+) -> FTQCResourceAggregationRule:
+    """Normalize one FTQC resource aggregation rule.
+
+    Args:
+        rule (str | FTQCResourceAggregationRule): Aggregation rule key.
+
+    Returns:
+        FTQCResourceAggregationRule: Normalized aggregation rule enum.
+
+    Raises:
+        ValueError: If ``rule`` is not a known aggregation rule.
+    """
+    try:
+        return FTQCResourceAggregationRule(rule)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in FTQCResourceAggregationRule)
+        raise ValueError(
+            f"Unknown FTQC resource aggregation rule {rule!r}; valid: {valid}."
+        ) from exc
+
+
 def _sympify_resource_expr(value: sp.Expr | int | float, name: str) -> sp.Expr:
     """Convert a resource expression to SymPy.
 
@@ -2102,6 +2517,42 @@ def _sympify_resource_expr(value: sp.Expr | int | float, name: str) -> sp.Expr:
         return sp.sympify(value)
     except (TypeError, sp.SympifyError) as exc:
         raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
+
+
+def _combine_resource_values(
+    quantity: FTQCResourceQuantity,
+    current: sp.Expr,
+    incoming: sp.Expr,
+    rule: FTQCResourceAggregationRule,
+) -> sp.Expr:
+    """Combine two resource values with an aggregation rule.
+
+    Args:
+        quantity (FTQCResourceQuantity): Quantity being combined.
+        current (sp.Expr): Existing aggregate value.
+        incoming (sp.Expr): New step value.
+        rule (FTQCResourceAggregationRule): Aggregation rule to apply.
+
+    Returns:
+        sp.Expr: Combined resource value.
+
+    Raises:
+        ValueError: If ``rule`` is ``CONSISTENT`` and the two values are not
+            provably equal.
+    """
+    if rule == FTQCResourceAggregationRule.ADD:
+        return sp.simplify(current + incoming)
+    if rule == FTQCResourceAggregationRule.PEAK:
+        return sp.simplify(sp.Max(current, incoming))
+    if rule == FTQCResourceAggregationRule.CONSISTENT:
+        difference = sp.simplify(current - incoming)
+        if difference.equals(0):
+            return current
+        raise ValueError(
+            "Conflicting FTQC resource values for consistent quantity "
+            f"{quantity.value!r}: {current} vs {incoming}."
+        )
+    assert False, f"Unhandled FTQC resource aggregation rule: {rule!r}."
 
 
 def _classify_change(reduction: sp.Expr) -> FTQCResourceChangeDirection:

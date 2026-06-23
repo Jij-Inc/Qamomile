@@ -33,14 +33,18 @@ from qamomile.circuit.estimator.algorithmic import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
     FTQCAccuracyBudget,
+    FTQCResourceAggregationRule,
     FTQCResourceCategory,
     FTQCResourceConstraint,
+    FTQCResourcePlan,
+    FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
     build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
+    default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
@@ -147,6 +151,72 @@ print(profile_catalog[FTQCResourceProfile.SPACETIME]["quantities"])
 
 assert FTQCResourceProfile.CHEMISTRY_QPE in profile_catalog
 assert space_time_quantities[-1] == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
+
+# %% [markdown]
+# ## Compositional Algorithm Plans
+#
+# 新しいFTQCアルゴリズムに具体的なQamomile回路がまだない段階では、抽象的なsubroutine列としてmodel化します。resource planはcanonical quantityを明示的なaggregation ruleで合成します。count、depth、runtime、space-time costは逐次stepで加算し、量子ビットfootprintはピークを取り、問題メタデータとarchitecture knobは一貫していることを要求します。
+
+# %%
+prepare_step = FTQCResourcePlanStep(
+    "prepare_filter",
+    {
+        FTQCResourceQuantity.LOGICAL_QUBITS: 12,
+        FTQCResourceQuantity.TOFFOLI_GATES: 7,
+        FTQCResourceQuantity.LOGICAL_DEPTH: 11,
+        FTQCResourceQuantity.TARGET_PRECISION: sp.Float("0.001"),
+    },
+    repetitions=3,
+    label="State preparation and filtering",
+)
+qpe_step = FTQCResourcePlanStep(
+    "phase_estimation",
+    {
+        "logical_qubits": 18,
+        "toffoli_gates": 100,
+        "logical_depth": 120,
+        "runtime_seconds": 20,
+        "physical_qubits": 4000,
+        "target_precision": sp.Float("0.001"),
+    },
+    repetitions=2,
+)
+resource_plan = FTQCResourcePlan(
+    (prepare_step, qpe_step),
+    title="Filtered QPE plan",
+)
+
+for row in resource_plan.to_quantity_table():
+    print(row["quantity"], row["aggregation"], row["value"])
+
+plan_values = resource_plan.resource_values()
+assert plan_values[FTQCResourceQuantity.TOFFOLI_GATES] == 221
+assert plan_values[FTQCResourceQuantity.LOGICAL_DEPTH] == 273
+assert plan_values[FTQCResourceQuantity.LOGICAL_QUBITS] == 18
+assert default_ftqc_resource_aggregation_rule("logical_qubits") == (
+    FTQCResourceAggregationRule.PEAK
+)
+
+# %% [markdown]
+# 同じplan objectは`resource_values()`を公開するため、comparison helperやbudget helperは化学計算estimateと同じように扱えます。resourceをstep間のピークとして合成したい場合は、そのquantityに対してplan-level ruleをoverrideします。各step自身のrepetition scalingは先に適用されます。
+
+# %%
+parallel_runtime_plan = FTQCResourcePlan(
+    (prepare_step, qpe_step),
+    aggregation={"runtime_seconds": FTQCResourceAggregationRule.PEAK},
+)
+plan_budget = evaluate_ftqc_resource_constraints(
+    resource_plan,
+    (
+        FTQCResourceConstraint("logical_qubits", 20),
+        FTQCResourceConstraint("toffoli_gates", 200),
+    ),
+    title="Toy plan budget",
+)
+
+assert parallel_runtime_plan.resource_values()[FTQCResourceQuantity.RUNTIME_SECONDS] == 40
+assert plan_budget.satisfied[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
+assert plan_budget.violated[0].quantity == FTQCResourceQuantity.TOFFOLI_GATES
 
 # %% [markdown]
 # ## 最小例
@@ -509,6 +579,7 @@ assert budget_report.to_dict()["counts"] == {
 # - 近年のFTQC化学計算研究から、Hamiltonian normalization、target precision、truncation error、QPE反復回数、non-Clifford count、logical depth、logical space-time volume、physical量子ビット、runtime、physical qubit-secondsを分けて追跡する必要があることがわかります。
 # - `iter_ftqc_research_signals`は、研究方向をQamomileがreportするcanonical quantityへ対応づけます。
 # - `FTQCResourceProfile`を使うと、space-time profileのような再利用可能なquantity bundleをcomparison helperへ直接渡せます。
+# - `FTQCResourcePlan`を使うと、具体的な回路実装ができる前に抽象的なFTQC subroutineを合成できます。
 # - Qamomileはこれらの量をアルゴリズム上のメタデータとして保持するため、circuit IRはbackend-neutralに保たれます。
 # - accuracy budgetを使うと、estimateを比較する前にtotal target precisionをrepresentation truncation errorとQPE precisionへ分けられます。
 # - Formula provenanceにより、重要なresource quantityの背後にあるsymbolic derivationを公開できます。
