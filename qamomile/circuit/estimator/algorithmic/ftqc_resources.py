@@ -564,6 +564,90 @@ class FTQCResourceComparisonSummary:
         }
 
 
+@dataclass(frozen=True)
+class FTQCResourceComparisonReport:
+    """Package an FTQC comparison summary with review metadata.
+
+    Attributes:
+        title (str): Reader-facing report title.
+        baseline_label (str): Label for the baseline estimate.
+        candidate_label (str): Label for the candidate estimate.
+        profile (FTQCResourceProfile | None): Standard review profile used to
+            select comparison quantities, or None when no profile was used.
+        summary (FTQCResourceComparisonSummary): Grouped comparison rows.
+
+    Example:
+        >>> row = FTQCResourceComparisonRow(
+        ...     quantity=FTQCResourceQuantity.TOFFOLI_GATES,
+        ...     baseline=10,
+        ...     candidate=4,
+        ...     ratio=sp.Rational(2, 5),
+        ...     reduction=sp.Rational(3, 5),
+        ...     label="Toffoli gates",
+        ...     unit="Toffoli gates",
+        ...     category=FTQCResourceCategory.LOGICAL,
+        ... )
+        >>> report = FTQCResourceComparisonReport(
+        ...     title="Toy report",
+        ...     baseline_label="baseline",
+        ...     candidate_label="candidate",
+        ...     profile=None,
+        ...     summary=FTQCResourceComparisonSummary.from_rows((row,)),
+        ... )
+        >>> report.to_dict()["counts"]["smaller"]
+        1
+    """
+
+    title: str
+    baseline_label: str
+    candidate_label: str
+    profile: FTQCResourceProfile | None
+    summary: FTQCResourceComparisonSummary
+
+    def to_dict(
+        self,
+    ) -> dict[
+        str,
+        str | None | list[str] | list[dict[str, str]] | dict[str, int],
+    ]:
+        """Serialize report metadata and comparison rows.
+
+        Returns:
+            dict[str, str | None | list[str] | list[dict[str, str]] | dict[str, int]]:
+                JSON-friendly report metadata, selected quantities, rows, and
+                grouped-count summary.
+        """
+        summary = self.summary.to_dict()
+        return {
+            "title": self.title,
+            "baseline_label": self.baseline_label,
+            "candidate_label": self.candidate_label,
+            "profile": None if self.profile is None else self.profile.value,
+            "quantities": [row.quantity.value for row in self.summary.rows],
+            "rows": summary["rows"],
+            "smaller": summary["smaller"],
+            "larger": summary["larger"],
+            "unchanged": summary["unchanged"],
+            "symbolic": summary["symbolic"],
+            "counts": summary["counts"],
+        }
+
+    def to_row_table(self) -> list[dict[str, str]]:
+        """Return comparison rows with report labels attached.
+
+        Returns:
+            list[dict[str, str]]: Rows containing the serialized comparison
+                plus ``baseline_label`` and ``candidate_label`` columns.
+        """
+        rows = []
+        for row in self.summary.rows:
+            serialized = row.to_dict()
+            serialized["baseline_label"] = self.baseline_label
+            serialized["candidate_label"] = self.candidate_label
+            rows.append(serialized)
+        return rows
+
+
 FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.N_SPIN_ORBITALS,
@@ -1277,6 +1361,63 @@ def summarize_ftqc_resource_comparison(
             quantities=quantities,
             profile=profile,
         )
+    )
+
+
+def build_ftqc_resource_comparison_report(
+    baseline: SupportsFTQCResourceValues,
+    candidate: SupportsFTQCResourceValues,
+    *,
+    title: str = "FTQC resource comparison",
+    baseline_label: str = "baseline",
+    candidate_label: str = "candidate",
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+    profile: str | FTQCResourceProfile | None = None,
+) -> FTQCResourceComparisonReport:
+    """Build a labeled FTQC resource comparison report.
+
+    Args:
+        baseline (SupportsFTQCResourceValues): Reference estimate, model, or
+            summary exposing ``resource_values()``.
+        candidate (SupportsFTQCResourceValues): Candidate estimate, model, or
+            summary exposing ``resource_values()``.
+        title (str): Reader-facing report title. Defaults to
+            ``"FTQC resource comparison"``.
+        baseline_label (str): Label for the baseline estimate. Defaults to
+            ``"baseline"``.
+        candidate_label (str): Label for the candidate estimate. Defaults to
+            ``"candidate"``.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
+            to compare before any profile quantities. Defaults to the
+            intersection of quantities exposed by both inputs when ``profile``
+            is None.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile whose quantities are appended after ``quantities`` with
+            duplicates removed. Defaults to None.
+
+    Returns:
+        FTQCResourceComparisonReport: Report metadata and grouped comparison
+            summary.
+
+    Raises:
+        ValueError: If a requested quantity is missing from either input, if a
+            baseline value is exactly zero, or if ``profile`` is unknown.
+    """
+    summary = summarize_ftqc_resource_comparison(
+        baseline,
+        candidate,
+        quantities=quantities,
+        profile=profile,
+    )
+    normalized_profile = (
+        None if profile is None else _normalize_resource_profile(profile)
+    )
+    return FTQCResourceComparisonReport(
+        title=title,
+        baseline_label=baseline_label,
+        candidate_label=candidate_label,
+        profile=normalized_profile,
+        summary=summary,
     )
 
 

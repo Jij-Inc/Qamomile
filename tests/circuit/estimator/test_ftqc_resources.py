@@ -12,6 +12,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCCostModel,
     FTQCResearchSignal,
     FTQCResourceCategory,
+    FTQCResourceComparisonReport,
     FTQCResourceComparisonRow,
     FTQCResourceComparisonSummary,
     FTQCResourceFormula,
@@ -20,6 +21,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
     describe_ftqc_resource_quantity,
     estimate_qubitized_chemistry_qpe,
@@ -616,6 +618,62 @@ def test_summarize_ftqc_resource_comparison_accepts_profile():
 
     assert summary.rows[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
     assert summary.rows[-1].quantity == FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
+
+
+def test_build_ftqc_resource_comparison_report_labels_profiled_rows():
+    """Comparison reports preserve labels, profile, rows, and group counts."""
+    baseline = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    candidate = baseline.with_lambda_scale(sp.Rational(1, 2), source="compressed")
+    cost = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Float("1e-6"),
+        factory_qubits=10,
+        toffoli_throughput_per_second=sp.Float("1e5"),
+    )
+    baseline_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=baseline,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+    candidate_estimate = estimate_qubitized_chemistry_qpe_from_model(
+        ChemistryQPEModel(
+            hamiltonian=candidate,
+            method=ChemistryQPEMethod.SPARSE,
+            walk_cost_toffoli=11,
+        ),
+        precision=1,
+        cost_model=cost,
+    )
+
+    report = build_ftqc_resource_comparison_report(
+        baseline_estimate,
+        candidate_estimate,
+        title="Sparse versus compressed",
+        baseline_label="Sparse",
+        candidate_label="Compressed",
+        quantities=(FTQCResourceQuantity.QPE_ITERATIONS,),
+        profile="spacetime",
+    )
+    report_dict = report.to_dict()
+    row_table = report.to_row_table()
+
+    assert isinstance(report, FTQCResourceComparisonReport)
+    assert report.profile == FTQCResourceProfile.SPACETIME
+    assert report.summary.rows[0].quantity == FTQCResourceQuantity.QPE_ITERATIONS
+    assert report.summary.rows[-1].quantity == (
+        FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS
+    )
+    assert report_dict["title"] == "Sparse versus compressed"
+    assert report_dict["profile"] == "spacetime"
+    assert report_dict["quantities"][0] == "qpe_iterations"
+    assert report_dict["counts"]["smaller"] == len(report.summary.smaller)
+    assert row_table[0]["baseline_label"] == "Sparse"
+    assert row_table[0]["candidate_label"] == "Compressed"
+    assert row_table[0]["quantity"] == "qpe_iterations"
 
 
 def test_comparison_summary_keeps_undecidable_symbolic_changes_separate():

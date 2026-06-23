@@ -38,6 +38,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
@@ -290,6 +291,32 @@ assert any(
 assert comparison_summary.symbolic == ()
 
 # %% [markdown]
+# 設計レビュー用の自己完結したartifactが必要な場合は、reportを作ります。label、選択したprofile、行の順序、grouped summary countをまとめて保持できます。
+
+# %%
+comparison_report = build_ftqc_resource_comparison_report(
+    baseline,
+    compressed,
+    title="Toy factorization comparison",
+    baseline_label="THC-style",
+    candidate_label="Compressed",
+    quantities=(
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+    ),
+    profile=FTQCResourceProfile.SPACETIME,
+)
+report_rows = comparison_report.to_row_table()
+
+print(comparison_report.to_dict()["title"])
+print(comparison_report.to_dict()["counts"])
+
+assert comparison_report.profile == FTQCResourceProfile.SPACETIME
+assert report_rows[0]["baseline_label"] == "THC-style"
+assert report_rows[0]["candidate_label"] == "Compressed"
+assert report_rows[0]["quantity"] == "qpe_iterations"
+
+# %% [markdown]
 # ## Reference provenance
 #
 # estimateはmethod-levelの研究referenceも保持します。これは数式とは意図的に分けています。reportは、上のsynthetic exampleを特定分子の再現とみなさずに、どの論文がmodelの動機になったかを示せます。
@@ -444,3 +471,4 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
+# - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、grouped countをreview artifactとしてまとめられます。

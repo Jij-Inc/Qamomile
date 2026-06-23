@@ -41,6 +41,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceQuantity,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
+    build_ftqc_resource_comparison_report,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
@@ -311,6 +312,34 @@ assert any(
 assert comparison_summary.symbolic == ()
 
 # %% [markdown]
+# When you need a self-contained artifact for a design review, build a report.
+# It preserves the labels, selected profile, ordered rows, and grouped summary
+# counts together.
+
+# %%
+comparison_report = build_ftqc_resource_comparison_report(
+    baseline,
+    compressed,
+    title="Toy factorization comparison",
+    baseline_label="THC-style",
+    candidate_label="Compressed",
+    quantities=(
+        FTQCResourceQuantity.QPE_ITERATIONS,
+        FTQCResourceQuantity.TOFFOLI_GATES,
+    ),
+    profile=FTQCResourceProfile.SPACETIME,
+)
+report_rows = comparison_report.to_row_table()
+
+print(comparison_report.to_dict()["title"])
+print(comparison_report.to_dict()["counts"])
+
+assert comparison_report.profile == FTQCResourceProfile.SPACETIME
+assert report_rows[0]["baseline_label"] == "THC-style"
+assert report_rows[0]["candidate_label"] == "Compressed"
+assert report_rows[0]["quantity"] == "qpe_iterations"
+
+# %% [markdown]
 # ## Reference Provenance
 #
 # Estimates also carry method-level research references. This is intentionally
@@ -498,3 +527,5 @@ assert trotter_comparison[1].ratio == sp.Float("0.05")
 #   savings tables without hard-coding a particular chemistry factorization.
 # - `summarize_ftqc_resource_comparison` groups those rows into smaller,
 #   larger, unchanged, and symbolic changes for design review.
+# - `build_ftqc_resource_comparison_report` packages labels, profile, rows,
+#   and grouped counts for review artifacts.
