@@ -1937,6 +1937,281 @@ class FTQCResourceParetoReport:
         }
 
 
+@dataclass(frozen=True)
+class FTQCResourceScenario:
+    """Describe one symbolic FTQC resource-evaluation scenario.
+
+    Args:
+        label (str): Reader-facing scenario label.
+        substitutions (dict[str | sp.Symbol, sp.Expr | int | float]):
+            Symbol substitutions applied to selected resource expressions.
+            String keys are converted to SymPy symbols.
+
+    Raises:
+        TypeError: If a substitution value cannot be converted to a SymPy
+            expression.
+        ValueError: If ``label`` is empty.
+
+    Example:
+        >>> scenario = FTQCResourceScenario(
+        ...     "fast factory",
+        ...     {"toffoli_throughput": 1_000_000},
+        ... )
+        >>> scenario.to_dict()["substitutions"]["toffoli_throughput"]
+        '1000000'
+    """
+
+    label: str
+    substitutions: dict[str | sp.Symbol, sp.Expr | int | float]
+
+    def __post_init__(self) -> None:
+        """Normalize scenario fields after dataclass construction.
+
+        Raises:
+            TypeError: If a substitution value cannot be sympified.
+            ValueError: If ``label`` is empty.
+        """
+        if not self.label:
+            raise ValueError("label must not be empty.")
+        normalized = {
+            _normalize_substitution_symbol(symbol): _sympify_resource_expr(
+                value,
+                str(symbol),
+            )
+            for symbol, value in self.substitutions.items()
+        }
+        object.__setattr__(self, "substitutions", normalized)
+
+    def to_dict(self) -> dict[str, str | dict[str, str]]:
+        """Serialize the scenario.
+
+        Returns:
+            dict[str, str | dict[str, str]]: JSON-friendly label and
+                substitution mapping.
+        """
+        substitutions = cast(dict[sp.Symbol, sp.Expr], self.substitutions)
+        return {
+            "label": self.label,
+            "substitutions": {
+                str(symbol): str(value) for symbol, value in substitutions.items()
+            },
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceScenarioRow:
+    """Describe selected resource values under one scenario.
+
+    Args:
+        label (str): Reader-facing scenario label.
+        values (dict[str | FTQCResourceQuantity, sp.Expr | int | float]):
+            Scenario-evaluated resource values keyed by canonical quantity.
+        unresolved_symbols (tuple[str, ...]): Remaining free-symbol names after
+            substitutions are applied. Defaults to an empty tuple.
+
+    Raises:
+        TypeError: If any value cannot be converted to a SymPy expression.
+        ValueError: If ``label`` is empty or a resource key is unknown.
+
+    Example:
+        >>> row = FTQCResourceScenarioRow(
+        ...     "toy",
+        ...     {"runtime_seconds": 10},
+        ... )
+        >>> row.unresolved_symbols
+        ()
+    """
+
+    label: str
+    values: dict[str | FTQCResourceQuantity, sp.Expr | int | float]
+    unresolved_symbols: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize scenario-row fields after dataclass construction.
+
+        Raises:
+            TypeError: If any value cannot be converted to a SymPy expression.
+            ValueError: If ``label`` is empty or a resource key is unknown.
+        """
+        if not self.label:
+            raise ValueError("label must not be empty.")
+        normalized_values = {
+            _normalize_resource_quantity(quantity): _sympify_resource_expr(
+                value,
+                str(quantity),
+            )
+            for quantity, value in self.values.items()
+        }
+        object.__setattr__(self, "values", normalized_values)
+        object.__setattr__(
+            self,
+            "unresolved_symbols",
+            tuple(self.unresolved_symbols),
+        )
+
+    @property
+    def is_fully_resolved(self) -> bool:
+        """Return whether all selected values are concrete under the scenario.
+
+        Returns:
+            bool: True when no free symbols remain.
+        """
+        return not self.unresolved_symbols
+
+    def to_dict(self) -> dict[str, str | bool | list[str] | dict[str, str]]:
+        """Serialize the scenario row.
+
+        Returns:
+            dict[str, str | bool | list[str] | dict[str, str]]: JSON-friendly
+                scenario values and unresolved-symbol metadata.
+        """
+        values = cast(dict[FTQCResourceQuantity, sp.Expr], self.values)
+        return {
+            "label": self.label,
+            "values": {
+                quantity.value: str(value) for quantity, value in values.items()
+            },
+            "is_fully_resolved": self.is_fully_resolved,
+            "unresolved_symbols": list(self.unresolved_symbols),
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceScenarioReport:
+    """Package scenario-evaluated FTQC resource values.
+
+    Args:
+        title (str): Reader-facing report title.
+        quantities (tuple[str | FTQCResourceQuantity, ...]): Quantities
+            evaluated in each scenario.
+        scenarios (tuple[FTQCResourceScenario, ...]): Scenario definitions in
+            input order.
+        rows (tuple[FTQCResourceScenarioRow, ...]): Evaluated rows in scenario
+            order.
+
+    Raises:
+        TypeError: If scenarios or rows contain incorrect item types.
+        ValueError: If quantities, scenarios, or rows are empty, a quantity key
+            is unknown, a row omits a selected quantity, or row count does not
+            match scenario count.
+
+    Example:
+        >>> scenario = FTQCResourceScenario("toy", {"x": 2})
+        >>> report = FTQCResourceScenarioReport(
+        ...     title="Toy scenarios",
+        ...     quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
+        ...     scenarios=(scenario,),
+        ...     rows=(FTQCResourceScenarioRow("toy", {"runtime_seconds": 2}),),
+        ... )
+        >>> report.rows[0].is_fully_resolved
+        True
+    """
+
+    title: str
+    quantities: tuple[str | FTQCResourceQuantity, ...]
+    scenarios: tuple[FTQCResourceScenario, ...]
+    rows: tuple[FTQCResourceScenarioRow, ...]
+
+    def __post_init__(self) -> None:
+        """Validate scenario-report fields after dataclass construction.
+
+        Raises:
+            TypeError: If scenarios or rows contain incorrect item types.
+            ValueError: If quantities, scenarios, or rows are empty, a
+                quantity key is unknown, a row omits a selected quantity, or
+                row count does not match scenario count.
+        """
+        if not self.quantities:
+            raise ValueError("quantities must not be empty.")
+        if not self.scenarios:
+            raise ValueError("scenarios must not be empty.")
+        if not self.rows:
+            raise ValueError("rows must not be empty.")
+        if len(self.rows) != len(self.scenarios):
+            raise ValueError("rows must match scenarios one-to-one.")
+        if not all(
+            isinstance(scenario, FTQCResourceScenario) for scenario in self.scenarios
+        ):
+            raise TypeError("scenarios must contain only FTQCResourceScenario items.")
+        if not all(isinstance(row, FTQCResourceScenarioRow) for row in self.rows):
+            raise TypeError("rows must contain only FTQCResourceScenarioRow items.")
+        normalized_quantities = tuple(
+            _normalize_resource_quantity(quantity) for quantity in self.quantities
+        )
+        for row in self.rows:
+            values = cast(dict[FTQCResourceQuantity, sp.Expr], row.values)
+            missing = [
+                quantity.value
+                for quantity in normalized_quantities
+                if quantity not in values
+            ]
+            if missing:
+                raise ValueError(
+                    f"row {row.label!r} is missing selected scenario quantities: "
+                    + ", ".join(missing)
+                    + "."
+                )
+        object.__setattr__(self, "quantities", normalized_quantities)
+        object.__setattr__(self, "scenarios", tuple(self.scenarios))
+        object.__setattr__(self, "rows", tuple(self.rows))
+
+    def to_row_table(self) -> list[dict[str, str | bool]]:
+        """Return scenario rows as a flat table.
+
+        Returns:
+            list[dict[str, str | bool]]: Rows with one column per selected
+                quantity plus resolution metadata.
+        """
+        rows = []
+        quantities = cast(tuple[FTQCResourceQuantity, ...], self.quantities)
+        for row in self.rows:
+            values = cast(dict[FTQCResourceQuantity, sp.Expr], row.values)
+            serialized: dict[str, str | bool] = {
+                "label": row.label,
+                "is_fully_resolved": row.is_fully_resolved,
+                "unresolved_symbols": ", ".join(row.unresolved_symbols),
+            }
+            for quantity in quantities:
+                serialized[quantity.value] = str(values[quantity])
+            rows.append(serialized)
+        return rows
+
+    def to_dict(
+        self,
+    ) -> dict[
+        str,
+        str
+        | list[str]
+        | list[dict[str, str | dict[str, str]]]
+        | list[dict[str, str | bool]]
+        | list[dict[str, str | bool | list[str] | dict[str, str]]]
+        | dict[str, int],
+    ]:
+        """Serialize report metadata and evaluated scenario rows.
+
+        Returns:
+            dict[str, str | list[str] | list[dict[str, str | dict[str, str]]] |
+                list[dict[str, str | bool]] |
+                list[dict[str, str | bool | list[str] | dict[str, str]]] |
+                dict[str, int]]: JSON-friendly scenario report.
+        """
+        unresolved_rows = [
+            row.to_dict() for row in self.rows if not row.is_fully_resolved
+        ]
+        quantities = cast(tuple[FTQCResourceQuantity, ...], self.quantities)
+        return {
+            "title": self.title,
+            "quantities": [quantity.value for quantity in quantities],
+            "scenarios": [scenario.to_dict() for scenario in self.scenarios],
+            "rows": self.to_row_table(),
+            "unresolved": unresolved_rows,
+            "counts": {
+                "resolved": len(self.rows) - len(unresolved_rows),
+                "unresolved": len(unresolved_rows),
+            },
+        }
+
+
 FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.N_SPIN_ORBITALS,
@@ -3089,6 +3364,77 @@ def build_ftqc_resource_pareto_report(
     )
 
 
+def build_ftqc_resource_scenario_report(
+    estimate: SupportsFTQCResourceValues,
+    scenarios: tuple[FTQCResourceScenario, ...],
+    *,
+    title: str = "FTQC resource scenario report",
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+    profile: str | FTQCResourceProfile | None = None,
+) -> FTQCResourceScenarioReport:
+    """Evaluate a symbolic FTQC estimate under multiple scenarios.
+
+    This helper substitutes scenario values into selected resource expressions
+    without changing the underlying estimate. It is useful for architecture
+    sensitivity reviews, where physical qubit counts, runtimes, and
+    qubit-seconds should be compared under several hardware assumptions.
+
+    Args:
+        estimate (SupportsFTQCResourceValues): Estimate, model, or plan
+            exposing ``resource_values()``.
+        scenarios (tuple[FTQCResourceScenario, ...]): Symbol-substitution
+            scenarios to evaluate in order.
+        title (str): Reader-facing report title. Defaults to
+            ``"FTQC resource scenario report"``.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
+            to inspect before optional profile quantities. Defaults to all
+            quantities exposed by ``estimate`` when ``profile`` is None.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile whose quantities are appended after ``quantities`` with
+            duplicates removed. Defaults to None.
+
+    Returns:
+        FTQCResourceScenarioReport: Scenario-evaluated resource report.
+
+    Raises:
+        TypeError: If ``scenarios`` contains non-scenario items.
+        ValueError: If ``scenarios`` is empty, a selected quantity is missing,
+            or a profile key is unknown.
+    """
+    if not scenarios:
+        raise ValueError("scenarios must not be empty.")
+    if not all(isinstance(scenario, FTQCResourceScenario) for scenario in scenarios):
+        raise TypeError("scenarios must contain only FTQCResourceScenario items.")
+
+    values = estimate.resource_values()
+    selected = _select_scenario_quantities(values, quantities, profile)
+    rows = []
+    for scenario in scenarios:
+        substitutions = cast(dict[sp.Symbol, sp.Expr], scenario.substitutions)
+        evaluated_values: dict[str | FTQCResourceQuantity, sp.Expr | int | float] = {
+            quantity: _substitute_resource_expression(
+                _sympify_resource_expr(values[quantity], quantity.value),
+                substitutions,
+            )
+            for quantity in selected
+        }
+        evaluated_exprs = cast(dict[FTQCResourceQuantity, sp.Expr], evaluated_values)
+        rows.append(
+            FTQCResourceScenarioRow(
+                label=scenario.label,
+                values=evaluated_values,
+                unresolved_symbols=_free_symbol_names(tuple(evaluated_exprs.values())),
+            )
+        )
+
+    return FTQCResourceScenarioReport(
+        title=title,
+        quantities=selected,
+        scenarios=scenarios,
+        rows=tuple(rows),
+    )
+
+
 def build_ftqc_resource_review_findings(
     summary: FTQCResourceComparisonSummary,
     *,
@@ -3510,6 +3856,124 @@ def _select_pareto_quantities(
             "candidate: " + ", ".join(missing) + "."
         )
     return normalized
+
+
+def _select_scenario_quantities(
+    values: dict[FTQCResourceQuantity, sp.Expr],
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None,
+    profile: str | FTQCResourceProfile | None,
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Select quantities available on one scenario-evaluated estimate.
+
+    Args:
+        values (dict[FTQCResourceQuantity, sp.Expr]): Resource values exposed
+            by the estimate.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Explicit
+            requested quantities.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Normalized selected quantities.
+
+    Raises:
+        ValueError: If a requested quantity is absent from ``values`` or if no
+            selected quantity remains.
+    """
+    if profile is None:
+        selected = quantities
+    elif quantities is None:
+        selected = ftqc_resource_profile_quantities(profile)
+    else:
+        selected = (*quantities, *ftqc_resource_profile_quantities(profile))
+
+    if selected is None:
+        normalized = tuple(
+            spec.quantity
+            for spec in FTQC_RESOURCE_QUANTITY_SPECS
+            if spec.quantity in values
+        )
+    else:
+        normalized = _dedupe_resource_quantities(
+            tuple(_normalize_resource_quantity(quantity) for quantity in selected)
+        )
+    if not normalized:
+        raise ValueError("No FTQC resource quantities are available.")
+
+    missing = [quantity.value for quantity in normalized if quantity not in values]
+    if missing:
+        raise ValueError(
+            "Requested FTQC scenario quantities are missing from the input: "
+            + ", ".join(missing)
+            + "."
+        )
+    return normalized
+
+
+def _normalize_substitution_symbol(symbol: str | sp.Symbol) -> sp.Symbol:
+    """Normalize a scenario substitution key to a SymPy symbol.
+
+    Args:
+        symbol (str | sp.Symbol): Symbol name or Symbol object.
+
+    Returns:
+        sp.Symbol: Normalized symbol.
+
+    Raises:
+        TypeError: If ``symbol`` is neither a string nor a SymPy symbol.
+        ValueError: If ``symbol`` is an empty string.
+    """
+    if isinstance(symbol, sp.Symbol):
+        return symbol
+    if isinstance(symbol, str):
+        if not symbol:
+            raise ValueError("substitution symbol names must not be empty.")
+        return sp.Symbol(symbol)
+    raise TypeError("substitution keys must be strings or SymPy symbols.")
+
+
+def _substitute_resource_expression(
+    expression: sp.Expr,
+    substitutions: dict[sp.Symbol, sp.Expr],
+) -> sp.Expr:
+    """Apply exact and name-matched symbol substitutions to an expression.
+
+    Args:
+        expression (sp.Expr): Resource expression to substitute.
+        substitutions (dict[sp.Symbol, sp.Expr]): Scenario substitutions
+            keyed by normalized symbols.
+
+    Returns:
+        sp.Expr: Simplified expression after applying substitutions.
+    """
+    substitutions_by_name = {
+        str(symbol): value for symbol, value in substitutions.items()
+    }
+    effective_substitutions = {
+        symbol: substitutions_by_name[str(symbol)]
+        for symbol in expression.free_symbols
+        if str(symbol) in substitutions_by_name
+    }
+    return sp.simplify(
+        expression.subs(
+            cast(dict[sp.Basic | complex, sp.Expr | complex], effective_substitutions)
+        )
+    )
+
+
+def _free_symbol_names(expressions: tuple[sp.Expr, ...]) -> tuple[str, ...]:
+    """Return sorted free-symbol names from expressions.
+
+    Args:
+        expressions (tuple[sp.Expr, ...]): Expressions to inspect.
+
+    Returns:
+        tuple[str, ...]: Sorted names of remaining free symbols.
+    """
+    names = {
+        str(symbol) for expression in expressions for symbol in expression.free_symbols
+    }
+    return tuple(sorted(names))
 
 
 def _dedupe_resource_quantities(

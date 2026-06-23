@@ -34,6 +34,9 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceProfileSpec,
     FTQCResourceQuantity,
     FTQCResourceReviewFinding,
+    FTQCResourceScenario,
+    FTQCResourceScenarioReport,
+    FTQCResourceScenarioRow,
     HamiltonianResourceReduction,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
@@ -44,6 +47,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_driver_report,
     build_ftqc_resource_pareto_report,
     build_ftqc_resource_review_findings,
+    build_ftqc_resource_scenario_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     describe_ftqc_research_signal,
@@ -1244,6 +1248,121 @@ def test_build_ftqc_resource_pareto_report_keeps_symbolic_rows_on_frontier():
                 ("symbolic", FTQCResourcePlan((symbolic,))),
             ),
             quantities=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+        )
+
+
+def test_build_ftqc_resource_scenario_report_substitutes_symbolic_values():
+    """Scenario reports evaluate symbolic estimates under assumption sets."""
+    physical_qubits, runtime = sp.symbols("physical_qubits runtime", positive=True)
+    plan = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "architecture_lift",
+                {
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: physical_qubits,
+                    FTQCResourceQuantity.RUNTIME_SECONDS: runtime,
+                    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS: (
+                        physical_qubits * runtime
+                    ),
+                },
+            ),
+        ),
+        title="Symbolic architecture lift",
+    )
+    conservative = FTQCResourceScenario(
+        "conservative",
+        {
+            "physical_qubits": 100_000,
+            "runtime": 3600,
+        },
+    )
+    optimistic = FTQCResourceScenario(
+        "optimistic",
+        {
+            physical_qubits: 50_000,
+            runtime: 900,
+        },
+    )
+
+    report = build_ftqc_resource_scenario_report(
+        plan,
+        (conservative, optimistic),
+        quantities=(
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+            FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        ),
+        title="Architecture sensitivity",
+    )
+    row_table = report.to_row_table()
+    report_dict = report.to_dict()
+
+    assert isinstance(report, FTQCResourceScenarioReport)
+    assert all(isinstance(row, FTQCResourceScenarioRow) for row in report.rows)
+    assert report.scenarios == (conservative, optimistic)
+    assert all(row.is_fully_resolved for row in report.rows)
+    assert row_table[0]["label"] == "conservative"
+    assert row_table[0]["physical_qubit_seconds"] == "360000000"
+    assert row_table[1]["physical_qubit_seconds"] == "45000000"
+    assert report_dict["counts"] == {"resolved": 2, "unresolved": 0}
+    assert report_dict["scenarios"][0]["substitutions"]["runtime"] == "3600"
+
+
+def test_build_ftqc_resource_scenario_report_keeps_unresolved_symbols():
+    """Scenario reports expose remaining symbols for follow-up calibration."""
+    runtime = sp.Symbol("runtime", positive=True)
+    plan = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "runtime",
+                {
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: 100,
+                    FTQCResourceQuantity.RUNTIME_SECONDS: runtime,
+                },
+            ),
+        )
+    )
+    partial = FTQCResourceScenario("partial", {})
+
+    report = build_ftqc_resource_scenario_report(
+        plan,
+        (partial,),
+        quantities=(
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+        ),
+    )
+
+    assert report.rows[0].unresolved_symbols == ("runtime",)
+    assert not report.rows[0].is_fully_resolved
+    assert report.to_dict()["counts"] == {"resolved": 0, "unresolved": 1}
+    direct_report = FTQCResourceScenarioReport(
+        title="direct",
+        quantities=("runtime_seconds",),
+        scenarios=(partial,),
+        rows=(FTQCResourceScenarioRow("partial", {"runtime_seconds": runtime}),),
+    )
+    assert direct_report.quantities == (FTQCResourceQuantity.RUNTIME_SECONDS,)
+    with pytest.raises(ValueError, match="scenarios must not be empty"):
+        build_ftqc_resource_scenario_report(plan, ())
+    with pytest.raises(TypeError, match="FTQCResourceScenario"):
+        build_ftqc_resource_scenario_report(plan, (object(),))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="missing"):
+        build_ftqc_resource_scenario_report(
+            plan,
+            (partial,),
+            quantities=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+        )
+    with pytest.raises(ValueError, match="label"):
+        FTQCResourceScenario("", {})
+    with pytest.raises(TypeError, match="substitution keys"):
+        FTQCResourceScenario("bad", {object(): 1})  # type: ignore[dict-item]
+    with pytest.raises(ValueError, match="missing selected scenario quantities"):
+        FTQCResourceScenarioReport(
+            title="bad",
+            quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
+            scenarios=(partial,),
+            rows=(FTQCResourceScenarioRow("partial", {"physical_qubits": 100}),),
         )
 
 

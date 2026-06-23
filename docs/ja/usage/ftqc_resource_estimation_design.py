@@ -41,6 +41,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    FTQCResourceScenario,
     HamiltonianResourceReduction,
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
@@ -51,6 +52,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
     build_ftqc_resource_pareto_report,
+    build_ftqc_resource_scenario_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
@@ -624,6 +626,65 @@ assert sp.Abs(architecture_comparison[1].ratio - sp.Rational(10, 21)) < sp.Float
 )
 
 # %% [markdown]
+# ### Scenario感度
+#
+# concreteなarchitecture modelがすでにある場合、reliftは便利です。symbolic reviewでは、estimateをunboundのままにし、複数の名前付きscenarioで評価します。scenario行には残ったfree symbolも出るため、不足しているcalibration inputを見落としにくくなります。
+
+# %%
+symbolic_compressed = estimate_qubitized_chemistry_qpe_from_model(
+    compressed_model,
+    precision=accuracy_budget.qpe_precision,
+)
+scenario_report = build_ftqc_resource_scenario_report(
+    symbolic_compressed,
+    (
+        FTQCResourceScenario(
+            "baseline hardware",
+            {
+                "physical_qubits_per_logical": architecture.physical_qubits_per_logical,
+                "factory_qubits": architecture.factory_qubits,
+                "logical_cycle_time": architecture.logical_cycle_time_seconds,
+                "toffoli_throughput": architecture.toffoli_throughput_per_second,
+            },
+        ),
+        FTQCResourceScenario(
+            "faster factories",
+            {
+                "physical_qubits_per_logical": architecture.physical_qubits_per_logical,
+                "factory_qubits": 2 * architecture.factory_qubits,
+                "logical_cycle_time": architecture.logical_cycle_time_seconds / 2,
+                "toffoli_throughput": 4 * architecture.toffoli_throughput_per_second,
+            },
+        ),
+    ),
+    quantities=(
+        FTQCResourceQuantity.PHYSICAL_QUBITS,
+        FTQCResourceQuantity.RUNTIME_SECONDS,
+        FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ),
+    title="Compressed estimate architecture scenarios",
+)
+
+for row in scenario_report.to_row_table():
+    print(
+        row["label"],
+        "resolved=",
+        row["is_fully_resolved"],
+        "runtime=",
+        sp.N(sp.sympify(row["runtime_seconds"]), 4),
+    )
+
+assert all(row.is_fully_resolved for row in scenario_report.rows)
+assert scenario_report.rows[0].values[FTQCResourceQuantity.PHYSICAL_QUBITS] == (
+    compressed.physical_qubits
+)
+assert (
+    scenario_report.rows[1].values[FTQCResourceQuantity.RUNTIME_SECONDS]
+    < scenario_report.rows[0].values[FTQCResourceQuantity.RUNTIME_SECONDS]
+)
+assert scenario_report.to_dict()["counts"] == {"resolved": 2, "unresolved": 0}
+
+# %% [markdown]
 # ## Early-FTQCのパターン
 #
 # Early-FTQC推定はToffoli-nativeとは限りません。同じ比較APIを、主にT gatesとlogical depthを報告するTrotter型modelにも使えます。representation reviewで使うものと同じ`HamiltonianResourceReduction` objectを、Hamiltonianから作るTrotter estimatorへ渡せます。
@@ -871,6 +932,7 @@ assert budget_report.to_dict()["counts"] == {
 # - estimateに研究referenceを保持し、どの論文がsymbolic modelの根拠になったかをreportでauditできるようにします。
 # - reportでcircuit-level estimateと同じ形が必要な場合は、FTQC estimateを共通のlogical `ResourceEstimate` objectとして見られます。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
+# - `build_ftqc_resource_scenario_report`を使うと、1つのsymbolic estimateを複数の名前付きarchitecture scenarioで評価し、未解決のsymbolも確認できます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
 # - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、優先順位つきfinding、grouped countをreview artifactとしてまとめられます。

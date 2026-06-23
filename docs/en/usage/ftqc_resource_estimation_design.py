@@ -44,6 +44,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourcePlanStep,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    FTQCResourceScenario,
     HamiltonianResourceReduction,
     QPEStatePreparationBudget,
     SurfaceCodeCostModel,
@@ -54,6 +55,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
     build_ftqc_resource_pareto_report,
+    build_ftqc_resource_scenario_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
@@ -677,6 +679,68 @@ assert sp.Abs(architecture_comparison[1].ratio - sp.Rational(10, 21)) < sp.Float
 )
 
 # %% [markdown]
+# ### Scenario Sensitivity
+#
+# Relifting is convenient when you already have concrete architecture models.
+# For symbolic reviews, keep the estimate unbound and evaluate it under several
+# named scenarios. Scenario rows report any remaining free symbols so missing
+# calibration inputs stay visible.
+
+# %%
+symbolic_compressed = estimate_qubitized_chemistry_qpe_from_model(
+    compressed_model,
+    precision=accuracy_budget.qpe_precision,
+)
+scenario_report = build_ftqc_resource_scenario_report(
+    symbolic_compressed,
+    (
+        FTQCResourceScenario(
+            "baseline hardware",
+            {
+                "physical_qubits_per_logical": architecture.physical_qubits_per_logical,
+                "factory_qubits": architecture.factory_qubits,
+                "logical_cycle_time": architecture.logical_cycle_time_seconds,
+                "toffoli_throughput": architecture.toffoli_throughput_per_second,
+            },
+        ),
+        FTQCResourceScenario(
+            "faster factories",
+            {
+                "physical_qubits_per_logical": architecture.physical_qubits_per_logical,
+                "factory_qubits": 2 * architecture.factory_qubits,
+                "logical_cycle_time": architecture.logical_cycle_time_seconds / 2,
+                "toffoli_throughput": 4 * architecture.toffoli_throughput_per_second,
+            },
+        ),
+    ),
+    quantities=(
+        FTQCResourceQuantity.PHYSICAL_QUBITS,
+        FTQCResourceQuantity.RUNTIME_SECONDS,
+        FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ),
+    title="Compressed estimate architecture scenarios",
+)
+
+for row in scenario_report.to_row_table():
+    print(
+        row["label"],
+        "resolved=",
+        row["is_fully_resolved"],
+        "runtime=",
+        sp.N(sp.sympify(row["runtime_seconds"]), 4),
+    )
+
+assert all(row.is_fully_resolved for row in scenario_report.rows)
+assert scenario_report.rows[0].values[FTQCResourceQuantity.PHYSICAL_QUBITS] == (
+    compressed.physical_qubits
+)
+assert (
+    scenario_report.rows[1].values[FTQCResourceQuantity.RUNTIME_SECONDS]
+    < scenario_report.rows[0].values[FTQCResourceQuantity.RUNTIME_SECONDS]
+)
+assert scenario_report.to_dict()["counts"] == {"resolved": 2, "unresolved": 0}
+
+# %% [markdown]
 # ## Early-FTQC Pattern
 #
 # Early-FTQC estimates may not be Toffoli-native. The same comparison API works
@@ -967,6 +1031,8 @@ assert budget_report.to_dict()["counts"] == {
 #   when reports need the same shape as circuit-level estimates.
 # - Existing logical estimates can be relifted under new architecture
 #   assumptions without rebuilding the algorithm estimate.
+# - `build_ftqc_resource_scenario_report` evaluates one symbolic estimate under
+#   several named architecture scenarios and reports unresolved symbols.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable
 #   savings tables without hard-coding a particular chemistry factorization.
 # - `summarize_ftqc_resource_comparison` groups those rows into smaller,
