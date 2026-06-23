@@ -749,6 +749,28 @@ class TestHamiltonianWrapper:
         with pytest.raises(ValueError, match="non-negative int"):
             dict_to_hamiltonian(wrapper)
 
+    def test_numpy_int_declared_num_qubits_coerced_on_encode(self):
+        """A numpy integer declared width is coerced to a Python int on encode.
+
+        ``Hamiltonian(num_qubits=np.int64(...))`` stores a numpy scalar; without
+        coercion the wrapper would carry a non-JSON-serializable value and
+        ``dump_json`` would fail. The encoder ``.item()``-coerces it to a plain
+        int and the width round-trips.
+        """
+        h = qm_o.Hamiltonian(num_qubits=np.int64(3))
+        h.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)
+        wrapper = hamiltonian_to_dict(h)
+        assert type(wrapper["num_qubits"]) is int
+        assert wrapper["num_qubits"] == 3
+        restored = dict_to_hamiltonian(wrapper)
+        assert restored.num_qubits == h.num_qubits
+
+    def test_negative_declared_num_qubits_rejected_on_encode(self):
+        """A negative declared register width is rejected when encoding."""
+        h = qm_o.Hamiltonian(num_qubits=-1)
+        with pytest.raises(ValueError, match="non-negative"):
+            hamiltonian_to_dict(h)
+
     def test_empty_operator_list_rejected(self):
         """A term with an empty operator list is rejected on decode.
 

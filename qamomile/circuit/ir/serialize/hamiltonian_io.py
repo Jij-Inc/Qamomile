@@ -81,10 +81,11 @@ def hamiltonian_to_dict(h: Hamiltonian) -> dict[str, Any]:
             register width passed to the constructor, or ``None``).
 
     Raises:
-        TypeError: If ``h`` is not a ``Hamiltonian``, or if a
-            coefficient / the constant is not int, float, or complex
-            (after coercing any ``numpy`` scalar to its Python
-            equivalent).
+        TypeError: If ``h`` is not a ``Hamiltonian``, if a coefficient /
+            the constant is not int, float, or complex, or if the declared
+            ``num_qubits`` is not an int — all after coercing any ``numpy``
+            scalar to its Python equivalent.
+        ValueError: If the declared ``num_qubits`` is negative.
     """
     if not isinstance(h, Hamiltonian):
         raise TypeError(
@@ -102,7 +103,7 @@ def hamiltonian_to_dict(h: Hamiltonian) -> dict[str, Any]:
         # the property merges the declared width with the term-derived
         # width, so persisting it would freeze the derived part and
         # change ``remap_qubits`` / ``num_qubits`` behavior after decode.
-        "num_qubits": h._num_qubits,
+        "num_qubits": _num_qubits_to_wire(h._num_qubits),
     }
 
 
@@ -281,6 +282,40 @@ def _coeff_from_wire(value: Any) -> int | float | complex:
         f"Cannot decode Hamiltonian coefficient from {type(value).__name__!r}; "
         f"expected a number or a $complex wrapper dict."
     )
+
+
+def _num_qubits_to_wire(num_qubits: Any) -> int | None:
+    """Encode a Hamiltonian's declared register width for the wire.
+
+    Args:
+        num_qubits (Any): The declared width (``Hamiltonian._num_qubits``):
+            ``None``, a Python ``int``, or a ``numpy`` integer scalar. A
+            ``numpy`` scalar is coerced to its Python equivalent via
+            ``.item()`` so the wrapper stays JSON / msgpack-serializable.
+
+    Returns:
+        int | None: ``None`` unchanged, or a non-negative Python ``int``.
+
+    Raises:
+        TypeError: If ``num_qubits`` is neither ``None`` nor an ``int``
+            after coercing any ``numpy`` scalar (``bool`` is rejected even
+            though it subclasses int).
+        ValueError: If the coerced width is negative.
+    """
+    if num_qubits is None:
+        return None
+    if isinstance(num_qubits, np.generic):
+        num_qubits = num_qubits.item()
+    if not _is_plain_int(num_qubits):
+        raise TypeError(
+            f"Hamiltonian declared num_qubits must be an int or None, got "
+            f"{type(num_qubits).__name__}"
+        )
+    if num_qubits < 0:
+        raise ValueError(
+            f"Hamiltonian declared num_qubits must be non-negative, got {num_qubits!r}"
+        )
+    return num_qubits
 
 
 def _is_plain_int(value: Any) -> bool:
