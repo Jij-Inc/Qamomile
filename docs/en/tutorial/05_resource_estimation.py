@@ -27,6 +27,7 @@
 # - Symbolic resource estimation for parameterized qkernels
 # - The full `ResourceEstimate` field reference
 # - Scaling analysis with `.substitute()`
+# - FTQC-oriented comparison of logical and physical resource proxies
 
 # %%
 # Install the latest Qamomile through pip!
@@ -34,6 +35,9 @@
 
 # %%
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+import qamomile.resource_estimation as qre
+import sympy as sp
 
 # %% [markdown]
 # ## Estimating Resources of a Fixed QKernel
@@ -141,10 +145,101 @@ for n_val in [4, 8, 16, 32]:
     assert int(c.gates.two_qubit) == n_val - 1
 
 # %% [markdown]
+# ## Comparing FTQC Cost Drivers
+#
+# Fault-tolerant algorithms are usually compared before they are lowered to a backend circuit. Qamomile keeps that layer separate: use `qamomile.resource_estimation` to describe the Hamiltonian, estimate algorithm-level logical work, compare canonical quantities, and only then lift the result through an architecture model.
+#
+# In this toy example, the candidate workload has a smaller Hamiltonian normalization and a cheaper walk operator. The numbers are placeholders for an algorithm study, but the quantities are the same ones you would track when comparing block-encoding or Hamiltonian-representation choices.
+
+# %%
+hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)
+summary = qre.summarize_pauli_hamiltonian(hamiltonian)
+
+baseline_workload = qre.HamiltonianQPEWorkload(
+    hamiltonian=summary,
+    representation=qre.HamiltonianRepresentation.SPARSE_PAULI_LCU,
+    walk_cost_toffoli=120,
+    description="sparse Pauli LCU",
+)
+candidate_workload = qre.HamiltonianQPEWorkload(
+    hamiltonian=summary.with_lambda_scale(
+        sp.Rational(2, 5),
+        source="compressed representation",
+    ),
+    representation=qre.HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF,
+    second_factor_rank=4,
+    walk_cost_toffoli=80,
+    description="compressed factorization",
+)
+
+baseline_logical = qre.estimate_qubitized_qpe_resources_from_workload(
+    baseline_workload,
+    precision=1,
+)
+candidate_logical = qre.estimate_qubitized_qpe_resources_from_workload(
+    candidate_workload,
+    precision=1,
+)
+
+logical_rows = qre.compare_resource_values(
+    baseline_logical,
+    candidate_logical,
+    quantities=(
+        qre.ResourceQuantity.QPE_ITERATIONS,
+        qre.ResourceQuantity.NON_CLIFFORD_COUNT,
+        qre.ResourceQuantity.LOGICAL_QUBITS,
+    ),
+)
+for row in logical_rows:
+    print(row.to_dict())
+
+assert (
+    candidate_logical.gates.oracle_calls["qpe_iterations"]
+    < baseline_logical.gates.oracle_calls["qpe_iterations"]
+)
+assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
+
+# %% [markdown]
+# `compare_resource_values()` accepts logical `ResourceEstimate` objects directly. For a physical proxy, provide a compact architecture model. The estimate below is not a hardware design; it is a consistent way to compare candidates under the same surface-code-style assumptions.
+
+# %%
+surface_code = qre.SurfaceCodeCostModel(
+    code_distance=5,
+    physical_cycle_time_seconds=1e-6,
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=3,
+    factory_count=1,
+    physical_qubits_per_factory=1000,
+    factory_cycles_per_non_clifford=4,
+)
+
+baseline_physical = qre.estimate_physical_resources(baseline_logical, surface_code)
+candidate_physical = qre.estimate_physical_resources(candidate_logical, surface_code)
+
+physical_rows = qre.compare_resource_values(
+    baseline_physical,
+    candidate_physical,
+    quantities=(
+        qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.RUNTIME_SECONDS,
+        qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ),
+)
+for row in physical_rows:
+    print(row.to_dict())
+
+assert candidate_physical.runtime_seconds < baseline_physical.runtime_seconds
+assert (
+    candidate_physical.resource_values()["physical_qubit_seconds"]
+    < baseline_physical.resource_values()["physical_qubit_seconds"]
+)
+
+# %% [markdown]
 # ## Summary
 #
 # - `estimate_resources()` reports qubit and gate costs without executing.
 # - For parameterized qkernels, results are SymPy expressions showing exact scaling.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
+# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities.
 #
 # **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

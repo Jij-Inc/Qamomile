@@ -27,6 +27,7 @@
 # - パラメータ付き量子カーネルのシンボリックなリソース推定
 # - `ResourceEstimate`フィールドリファレンス
 # - `.substitute()`によるスケーリング分析
+# - FTQC向けの論理リソースと物理リソースproxyの比較
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -34,6 +35,9 @@
 
 # %%
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+import qamomile.resource_estimation as qre
+import sympy as sp
 
 # %% [markdown]
 # ## 固定量子カーネルのリソース推定
@@ -141,10 +145,101 @@ for n_val in [4, 8, 16, 32]:
     assert int(c.gates.two_qubit) == n_val - 1
 
 # %% [markdown]
+# ## FTQCのコスト要因を比較する
+#
+# Fault-tolerantアルゴリズムは、backend circuitへloweringする前に比較することがよくあります。Qamomileではこの層を分けて扱います。`qamomile.resource_estimation`を使うと、Hamiltonianの記述、アルゴリズムレベルの論理リソース推定、canonical quantityによる比較、architecture modelを通した物理リソースproxyへの変換を順に扱えます。
+#
+# この小さな例では、候補workloadのHamiltonian normalizationとwalk operatorのコストが小さいとします。数値はアルゴリズム検討用の仮の値ですが、比較するquantityはblock-encodingやHamiltonian表現の選択を比較するときにも使うものです。
+
+# %%
+hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)
+summary = qre.summarize_pauli_hamiltonian(hamiltonian)
+
+baseline_workload = qre.HamiltonianQPEWorkload(
+    hamiltonian=summary,
+    representation=qre.HamiltonianRepresentation.SPARSE_PAULI_LCU,
+    walk_cost_toffoli=120,
+    description="sparse Pauli LCU",
+)
+candidate_workload = qre.HamiltonianQPEWorkload(
+    hamiltonian=summary.with_lambda_scale(
+        sp.Rational(2, 5),
+        source="compressed representation",
+    ),
+    representation=qre.HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF,
+    second_factor_rank=4,
+    walk_cost_toffoli=80,
+    description="compressed factorization",
+)
+
+baseline_logical = qre.estimate_qubitized_qpe_resources_from_workload(
+    baseline_workload,
+    precision=1,
+)
+candidate_logical = qre.estimate_qubitized_qpe_resources_from_workload(
+    candidate_workload,
+    precision=1,
+)
+
+logical_rows = qre.compare_resource_values(
+    baseline_logical,
+    candidate_logical,
+    quantities=(
+        qre.ResourceQuantity.QPE_ITERATIONS,
+        qre.ResourceQuantity.NON_CLIFFORD_COUNT,
+        qre.ResourceQuantity.LOGICAL_QUBITS,
+    ),
+)
+for row in logical_rows:
+    print(row.to_dict())
+
+assert (
+    candidate_logical.gates.oracle_calls["qpe_iterations"]
+    < baseline_logical.gates.oracle_calls["qpe_iterations"]
+)
+assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
+
+# %% [markdown]
+# `compare_resource_values()`は論理`ResourceEstimate`オブジェクトを直接受け取れます。物理リソースproxyが必要な場合は、コンパクトなarchitecture modelを渡します。次の推定はhardware designではありません。同じsurface-code風の仮定のもとで候補を比較するための一貫した方法です。
+
+# %%
+surface_code = qre.SurfaceCodeCostModel(
+    code_distance=5,
+    physical_cycle_time_seconds=1e-6,
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=3,
+    factory_count=1,
+    physical_qubits_per_factory=1000,
+    factory_cycles_per_non_clifford=4,
+)
+
+baseline_physical = qre.estimate_physical_resources(baseline_logical, surface_code)
+candidate_physical = qre.estimate_physical_resources(candidate_logical, surface_code)
+
+physical_rows = qre.compare_resource_values(
+    baseline_physical,
+    candidate_physical,
+    quantities=(
+        qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.RUNTIME_SECONDS,
+        qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ),
+)
+for row in physical_rows:
+    print(row.to_dict())
+
+assert candidate_physical.runtime_seconds < baseline_physical.runtime_seconds
+assert (
+    candidate_physical.resource_values()["physical_qubit_seconds"]
+    < baseline_physical.resource_values()["physical_qubit_seconds"]
+)
+
+# %% [markdown]
 # ## まとめ
 #
 # - `estimate_resources()`は実行せずに量子ビット数とゲートコストを算出します。
 # - パラメータ付き量子カーネルでは、結果は厳密なスケーリングを示すSymPy式になります。
 # - `.substitute(n=...)`で特定のサイズに代入し、実行可能性を確認できます。
+# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較できます。
 #
 # **次へ**：[実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序について。

@@ -137,6 +137,13 @@ class SupportsResourceValues(Protocol):
         ...
 
 
+_ResourceValuesInput = (
+    SupportsResourceValues
+    | Mapping[str | ResourceQuantity, _SympyLike]
+    | ResourceEstimate
+)
+
+
 @dataclass(frozen=True)
 class ResourceQuantitySpec:
     """Describe one canonical resource quantity.
@@ -491,24 +498,18 @@ def describe_resource_quantity(
 
 
 def compare_resource_values(
-    baseline: SupportsResourceValues
-    | Mapping[str | ResourceQuantity, sp.Expr]
-    | ResourceEstimate,
-    candidate: SupportsResourceValues
-    | Mapping[str | ResourceQuantity, sp.Expr]
-    | ResourceEstimate,
+    baseline: _ResourceValuesInput,
+    candidate: _ResourceValuesInput,
     *,
     quantities: tuple[str | ResourceQuantity, ...] | None = None,
 ) -> tuple[ResourceComparisonRow, ...]:
     """Compare canonical quantities between two value providers.
 
     Args:
-        baseline (SupportsResourceValues | Mapping[str | ResourceQuantity,
-            sp.Expr] | ResourceEstimate): Reference resource values. Accepts
-            an object exposing ``resource_values()``, a mapping keyed by
-            canonical quantities, or a logical Qamomile ``ResourceEstimate``.
-        candidate (SupportsResourceValues | Mapping[str | ResourceQuantity,
-            sp.Expr] | ResourceEstimate): Candidate resource values. Accepts
+        baseline (_ResourceValuesInput): Reference resource values. Accepts an
+            object exposing ``resource_values()``, a mapping keyed by canonical
+            quantities, or a logical Qamomile ``ResourceEstimate``.
+        candidate (_ResourceValuesInput): Candidate resource values. Accepts
             the same shapes as ``baseline``.
         quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
             compare. Defaults to the intersection of quantities exposed by both
@@ -612,15 +613,12 @@ def resource_values_from_estimate(
 
 
 def _coerce_resource_values(
-    provider: SupportsResourceValues
-    | Mapping[str | ResourceQuantity, sp.Expr]
-    | ResourceEstimate,
+    provider: _ResourceValuesInput,
 ) -> dict[ResourceQuantity, sp.Expr]:
     """Return normalized resource values from any supported provider.
 
     Args:
-        provider (SupportsResourceValues | Mapping[str | ResourceQuantity,
-            sp.Expr] | ResourceEstimate): Provider to normalize.
+        provider (_ResourceValuesInput): Provider to normalize.
 
     Returns:
         dict[ResourceQuantity, sp.Expr]: Resource values keyed by enum.
@@ -643,13 +641,13 @@ def _coerce_resource_values(
 
 
 def _normalize_resource_values(
-    values: Mapping[str | ResourceQuantity, sp.Expr],
+    values: Mapping[str | ResourceQuantity, _SympyLike],
 ) -> dict[ResourceQuantity, sp.Expr]:
     """Normalize resource-value dictionary keys.
 
     Args:
-        values (Mapping[str | ResourceQuantity, sp.Expr]): Resource values keyed
-            by canonical strings or enum values.
+        values (Mapping[str | ResourceQuantity, _SympyLike]): Resource values
+            keyed by canonical strings or enum values.
 
     Returns:
         dict[ResourceQuantity, sp.Expr]: Resource values keyed by enum.
@@ -657,10 +655,11 @@ def _normalize_resource_values(
     Raises:
         ValueError: If any key is not a known resource quantity.
     """
-    return {
-        _normalize_resource_quantity(quantity): value
-        for quantity, value in values.items()
-    }
+    normalized: dict[ResourceQuantity, sp.Expr] = {}
+    for quantity, value in values.items():
+        normalized_quantity = _normalize_resource_quantity(quantity)
+        normalized[normalized_quantity] = _as_expr(value, normalized_quantity.value)
+    return normalized
 
 
 def _normalize_comparison_quantities(
