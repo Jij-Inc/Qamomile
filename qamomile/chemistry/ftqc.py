@@ -1,13 +1,14 @@
-"""Fault-tolerant resource estimates for quantum chemistry algorithms."""
+"""Estimate logical resources for quantum-chemistry FTQC workflows."""
 
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import sympy as sp
+
+from qamomile.resource_estimation import GateCount, ResourceEstimate
 
 _SympyLike = sp.Expr | int | float
 _CoefficientLike = _SympyLike | complex
@@ -38,212 +39,16 @@ class ChemistryQPEMethod(enum.StrEnum):
 
 
 @dataclass(frozen=True)
-class FTQCCostModel:
-    """Describe an architecture-level FTQC cost model.
-
-    Attributes:
-        physical_qubits_per_logical (sp.Expr | int | float): Physical qubit
-            overhead for one data or ancilla logical qubit.
-        logical_cycle_time_seconds (sp.Expr | int | float): Time for one
-            logical layer or logical cycle, in seconds.
-        factory_qubits (sp.Expr | int | float): Physical qubits reserved for
-            magic-state factories or equivalent non-Clifford support.
-        toffoli_throughput_per_second (sp.Expr | int | float): Sustainable
-            Toffoli or non-Clifford-equivalent throughput. Runtime uses the
-            larger of logical-depth time and factory-throughput time.
-
-    Raises:
-        ValueError: If any positive-valued field is non-positive or if
-            ``factory_qubits`` is negative.
-
-    Example:
-        >>> model = FTQCCostModel(
-        ...     physical_qubits_per_logical=1000,
-        ...     logical_cycle_time_seconds=1e-6,
-        ...     factory_qubits=20000,
-        ...     toffoli_throughput_per_second=1e5,
-        ... )
-        >>> model.physical_qubits_per_logical
-        1000
-    """
-
-    physical_qubits_per_logical: _SympyLike = field(
-        default_factory=lambda: sp.Symbol(
-            "physical_qubits_per_logical",
-            positive=True,
-        )
-    )
-    logical_cycle_time_seconds: _SympyLike = field(
-        default_factory=lambda: sp.Symbol("logical_cycle_time", positive=True)
-    )
-    factory_qubits: _SympyLike = field(
-        default_factory=lambda: sp.Symbol("factory_qubits", nonnegative=True)
-    )
-    toffoli_throughput_per_second: _SympyLike = field(
-        default_factory=lambda: sp.Symbol("toffoli_throughput", positive=True)
-    )
-
-    def __post_init__(self) -> None:
-        """Validate cost-model fields after dataclass construction.
-
-        Raises:
-            ValueError: If any positive-valued field is non-positive or if
-                ``factory_qubits`` is negative.
-        """
-        _validate_positive(
-            _as_expr(
-                self.physical_qubits_per_logical,
-                "physical_qubits_per_logical",
-            ),
-            "physical_qubits_per_logical",
-        )
-        _validate_positive(
-            _as_expr(
-                self.logical_cycle_time_seconds,
-                "logical_cycle_time_seconds",
-            ),
-            "logical_cycle_time_seconds",
-        )
-        _validate_nonnegative(
-            _as_expr(self.factory_qubits, "factory_qubits"),
-            "factory_qubits",
-        )
-        _validate_positive(
-            _as_expr(
-                self.toffoli_throughput_per_second,
-                "toffoli_throughput_per_second",
-            ),
-            "toffoli_throughput_per_second",
-        )
-
-
-@dataclass(frozen=True)
-class FTQCResourceEstimate:
-    """Represent algorithm-level FTQC resource estimates.
-
-    Attributes:
-        algorithm (str): Human-readable algorithm or representation name.
-        logical_qubits (sp.Expr): Logical qubits required by the algorithm.
-        physical_qubits (sp.Expr): Physical qubits under the selected
-            architecture model.
-        toffoli_gates (sp.Expr): Toffoli gate count or Toffoli-equivalent
-            non-Clifford count.
-        t_gates (sp.Expr): T gate count when it is distinct from Toffoli
-            count. Defaults to zero for Toffoli-native estimates.
-        clifford_gates (sp.Expr): Clifford gate estimate when available.
-        qpe_iterations (sp.Expr): Number of phase-estimation walk or
-            time-evolution calls.
-        logical_depth (sp.Expr): Logical circuit depth proxy.
-        runtime_seconds (sp.Expr): Runtime estimate in seconds.
-        parameters (dict[str, sp.Symbol]): Free symbols appearing in the
-            estimate, keyed by display name.
-        assumptions (dict[str, str]): Reader-facing notes about model choices.
-
-    Example:
-        >>> n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
-        >>> est = estimate_qubitized_chemistry_qpe(n, lam, eps, walk)
-        >>> est.qpe_iterations
-        lambda/eps
-    """
-
-    algorithm: str
-    logical_qubits: sp.Expr
-    physical_qubits: sp.Expr
-    toffoli_gates: sp.Expr
-    t_gates: sp.Expr
-    clifford_gates: sp.Expr
-    qpe_iterations: sp.Expr
-    logical_depth: sp.Expr
-    runtime_seconds: sp.Expr
-    parameters: dict[str, sp.Symbol] = field(default_factory=dict)
-    assumptions: dict[str, str] = field(default_factory=dict)
-
-    def substitute(self, **values: int | float) -> FTQCResourceEstimate:
-        """Substitute concrete values into all symbolic fields.
-
-        Args:
-            **values (int | float): Mapping from symbol name to concrete
-                value. Unknown names are accepted and converted into SymPy
-                symbols so callers can substitute ad hoc expressions.
-
-        Returns:
-            FTQCResourceEstimate: New estimate with substitutions applied.
-        """
-        substitutions: dict[Any, Any] = {}
-        for name, value in values.items():
-            substitutions[self.parameters.get(name, sp.Symbol(name))] = value
-
-        return self._map_exprs(lambda expr: expr.subs(substitutions).doit())
-
-    def simplify(self) -> FTQCResourceEstimate:
-        """Simplify every symbolic field.
-
-        Returns:
-            FTQCResourceEstimate: New estimate with simplified expressions.
-        """
-        return self._map_exprs(sp.simplify)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the estimate to string-valued dictionaries.
-
-        Returns:
-            dict[str, Any]: JSON-friendly dictionary containing all resource
-                fields, parameters, and assumptions.
-        """
-        return {
-            "algorithm": self.algorithm,
-            "logical_qubits": str(self.logical_qubits),
-            "physical_qubits": str(self.physical_qubits),
-            "toffoli_gates": str(self.toffoli_gates),
-            "t_gates": str(self.t_gates),
-            "clifford_gates": str(self.clifford_gates),
-            "qpe_iterations": str(self.qpe_iterations),
-            "logical_depth": str(self.logical_depth),
-            "runtime_seconds": str(self.runtime_seconds),
-            "parameters": {
-                name: str(symbol) for name, symbol in self.parameters.items()
-            },
-            "assumptions": dict(self.assumptions),
-        }
-
-    def _map_exprs(self, fn: Callable[[sp.Expr], sp.Expr]) -> FTQCResourceEstimate:
-        """Apply a function to each symbolic resource field.
-
-        Args:
-            fn (Callable[[sp.Expr], sp.Expr]): Callable accepting and
-                returning a SymPy expression.
-
-        Returns:
-            FTQCResourceEstimate: New estimate with mapped expressions.
-        """
-        return FTQCResourceEstimate(
-            algorithm=self.algorithm,
-            logical_qubits=fn(self.logical_qubits),
-            physical_qubits=fn(self.physical_qubits),
-            toffoli_gates=fn(self.toffoli_gates),
-            t_gates=fn(self.t_gates),
-            clifford_gates=fn(self.clifford_gates),
-            qpe_iterations=fn(self.qpe_iterations),
-            logical_depth=fn(self.logical_depth),
-            runtime_seconds=fn(self.runtime_seconds),
-            parameters=self.parameters,
-            assumptions=self.assumptions,
-        )
-
-
-@dataclass(frozen=True)
 class PauliHamiltonianResource:
-    """Summarize a Pauli-LCU Hamiltonian for FTQC resource estimates.
+    """Summarize a Pauli-LCU Hamiltonian for chemistry resource estimates.
 
     Attributes:
-        n_spin_orbitals (sp.Expr): Number of spin orbitals or qubits in the
-            encoded active-space Hamiltonian.
-        n_pauli_terms (sp.Expr): Number of non-identity Pauli terms in the
-            Hamiltonian representation.
+        n_spin_orbitals (sp.Expr): Number of spin orbitals or encoded qubits.
+        n_pauli_terms (sp.Expr): Number of non-identity Pauli terms.
         lambda_norm (sp.Expr): Sum of absolute non-identity Pauli
             coefficients used as the LCU normalization proxy.
         max_locality (sp.Expr): Maximum number of non-identity Pauli factors
-            in any term.
+            in any Hamiltonian term.
         constant (sp.Expr): Constant energy shift stored on the Hamiltonian.
         constant_included (bool): Whether ``constant`` was included in
             ``lambda_norm``.
@@ -335,19 +140,22 @@ class PauliHamiltonianResource:
 
 @dataclass(frozen=True)
 class ChemistryQPEModel:
-    """Describe a concrete chemistry representation for QPE estimates.
+    """Describe a chemistry representation used by QPE resource estimates.
 
     Attributes:
         hamiltonian (PauliHamiltonianResource): Pauli-LCU Hamiltonian summary.
-        method (ChemistryQPEMethod): QPE representation or optimization
+        walk_cost_toffoli (sp.Expr | int | float): Toffoli cost for one
+            qubitized walk operator call.
+        method (str | ChemistryQPEMethod): QPE representation or optimization
             strategy used to choose default logical-qubit scaling.
-        walk_cost_toffoli (sp.Expr): Toffoli cost for one qubitized walk.
-        sparsity (sp.Expr | None): Sparse-method nonzero term count. Defaults
-            to ``hamiltonian.n_pauli_terms`` when omitted.
-        second_factor_rank (sp.Expr | None): Average second factorization
-            rank for double-factorized methods.
-        logical_qubits (sp.Expr | None): Explicit logical-qubit count.
-        truncation_error (sp.Expr): Hamiltonian representation error budget.
+        sparsity (sp.Expr | int | float | None): Sparse-method nonzero term
+            count. Defaults to ``hamiltonian.n_pauli_terms`` for sparse QPE.
+        second_factor_rank (sp.Expr | int | float | None): Average second
+            factorization rank for double-factorized methods.
+        logical_qubits (sp.Expr | int | float | None): Explicit logical-qubit
+            count. Defaults to the method-specific scaling model.
+        truncation_error (sp.Expr | int | float): Hamiltonian representation
+            error budget.
         description (str): Reader-facing model label.
 
     Raises:
@@ -386,6 +194,8 @@ class ChemistryQPEModel:
             ValueError: If any positive-valued quantity is non-positive or if
                 ``truncation_error`` is negative.
         """
+        if not isinstance(self.hamiltonian, PauliHamiltonianResource):
+            raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
         _validate_positive(
             _as_expr(self.walk_cost_toffoli, "walk_cost_toffoli"),
             "walk_cost_toffoli",
@@ -472,7 +282,7 @@ def summarize_pauli_hamiltonian(
     include_constant: bool = False,
     source: str = "pauli_lcu",
 ) -> PauliHamiltonianResource:
-    """Summarize a Qamomile Pauli Hamiltonian for FTQC estimates.
+    """Summarize a Qamomile Pauli Hamiltonian for chemistry estimates.
 
     Args:
         hamiltonian (Any): ``qamomile.observable.Hamiltonian`` instance to
@@ -534,9 +344,8 @@ def estimate_qubitized_chemistry_qpe(
     sparsity: sp.Expr | int | None = None,
     second_factor_rank: sp.Expr | int | None = None,
     logical_qubits: sp.Expr | int | None = None,
-    cost_model: FTQCCostModel | None = None,
-) -> FTQCResourceEstimate:
-    """Estimate qubitized QPE resources for molecular Hamiltonians.
+) -> ResourceEstimate:
+    """Estimate logical qubitized QPE resources for molecular Hamiltonians.
 
     Args:
         n_spin_orbitals (sp.Expr | int): Number of spin orbitals in the
@@ -559,16 +368,14 @@ def estimate_qubitized_chemistry_qpe(
             symbolic ``Xi``.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
             When omitted, a representation-level scaling model is used.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime. Defaults to a
-            symbolic model.
 
     Returns:
-        FTQCResourceEstimate: Symbolic FTQC resource estimate.
+        ResourceEstimate: Architecture-independent logical resource estimate.
 
     Raises:
         ValueError: If a finite-set method is unknown, a required sparse
             parameter is missing, or a positive-valued input is non-positive.
+        TypeError: If a value cannot be converted into a SymPy expression.
     """
     method_enum = _normalize_method(method)
     n_expr = _as_expr(n_spin_orbitals, "n_spin_orbitals")
@@ -592,65 +399,41 @@ def estimate_qubitized_chemistry_qpe(
         logical_expr = _as_expr(logical_qubits, "logical_qubits")
         _validate_positive(logical_expr, "logical_qubits")
 
-    model = cost_model or FTQCCostModel()
     qpe_iterations = sp.simplify(lambda_expr / precision_expr)
     toffoli_gates = sp.simplify(qpe_iterations * walk_expr)
-    logical_depth = toffoli_gates
-    physical_qubits = sp.simplify(
-        logical_expr * model.physical_qubits_per_logical + model.factory_qubits
-    )
-    runtime_seconds = sp.simplify(
-        sp.Max(
-            logical_depth * model.logical_cycle_time_seconds,
-            toffoli_gates / model.toffoli_throughput_per_second,
-        )
-    )
-    assumptions = {
-        "qpe_iterations": "Uses lambda_norm / precision as the walk-call proxy.",
-        "method": method_enum.value,
-        "walk_cost_toffoli": (
-            "Caller supplies the per-walk Toffoli model so Qamomile does not "
-            "bake in one chemistry factorization implementation."
-        ),
-    }
-    return _build_estimate(
-        algorithm=f"qubitized_qpe:{method_enum.value}",
+    return _build_logical_estimate(
         logical_qubits=logical_expr,
-        physical_qubits=physical_qubits,
-        toffoli_gates=toffoli_gates,
+        total_gates=toffoli_gates,
+        multi_qubit_gates=toffoli_gates,
         t_gates=sp.Integer(0),
         clifford_gates=sp.Integer(0),
+        rotation_gates=sp.Integer(0),
         qpe_iterations=qpe_iterations,
-        logical_depth=logical_depth,
-        runtime_seconds=runtime_seconds,
-        assumptions=assumptions,
     )
 
 
 def estimate_qubitized_chemistry_qpe_from_model(
     model: ChemistryQPEModel,
     precision: _SympyLike,
-    *,
-    cost_model: FTQCCostModel | None = None,
-) -> FTQCResourceEstimate:
-    """Estimate qubitized QPE resources from a chemistry model object.
+) -> ResourceEstimate:
+    """Estimate logical qubitized QPE resources from a chemistry model.
 
     Args:
         model (ChemistryQPEModel): Hamiltonian representation model carrying
             lambda norm, sparsity/rank metadata, and walk cost.
         precision (sp.Expr | int | float): Target phase-estimation energy
             precision.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime. Defaults to a
-            symbolic model.
 
     Returns:
-        FTQCResourceEstimate: Symbolic FTQC resource estimate.
+        ResourceEstimate: Architecture-independent logical resource estimate.
 
     Raises:
-        ValueError: If the model or precision fields are invalid.
+        TypeError: If ``model`` is not a ``ChemistryQPEModel``.
+        ValueError: If ``precision`` is non-positive.
     """
-    estimate = estimate_qubitized_chemistry_qpe(
+    if not isinstance(model, ChemistryQPEModel):
+        raise TypeError("model must be a ChemistryQPEModel instance.")
+    return estimate_qubitized_chemistry_qpe(
         n_spin_orbitals=model.hamiltonian.n_spin_orbitals,
         lambda_norm=model.hamiltonian.lambda_norm,
         precision=precision,
@@ -667,30 +450,6 @@ def estimate_qubitized_chemistry_qpe_from_model(
             if model.logical_qubits is None
             else _as_expr(model.logical_qubits, "logical_qubits")
         ),
-        cost_model=cost_model,
-    )
-    assumptions = dict(estimate.assumptions)
-    assumptions.update(
-        {
-            "hamiltonian_source": model.hamiltonian.source,
-            "truncation_error": str(
-                _as_expr(model.truncation_error, "truncation_error")
-            ),
-        }
-    )
-    if model.description:
-        assumptions["description"] = model.description
-    return _build_estimate(
-        algorithm=estimate.algorithm,
-        logical_qubits=estimate.logical_qubits,
-        physical_qubits=estimate.physical_qubits,
-        toffoli_gates=estimate.toffoli_gates,
-        t_gates=estimate.t_gates,
-        clifford_gates=estimate.clifford_gates,
-        qpe_iterations=estimate.qpe_iterations,
-        logical_depth=estimate.logical_depth,
-        runtime_seconds=estimate.runtime_seconds,
-        assumptions=assumptions,
     )
 
 
@@ -706,9 +465,8 @@ def estimate_single_ancilla_trotter_qpe(
     randomized_compilation_factor: _SympyLike = 1,
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
-    cost_model: FTQCCostModel | None = None,
-) -> FTQCResourceEstimate:
-    """Estimate early-FTQC single-ancilla Trotter QPE resources.
+) -> ResourceEstimate:
+    """Estimate logical early-FTQC single-ancilla Trotter QPE resources.
 
     This estimator models the style of early-FTQC chemistry proposals that
     combine single-ancilla QPE, partially randomized product formulas, and
@@ -734,15 +492,14 @@ def estimate_single_ancilla_trotter_qpe(
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
             Defaults to ``n_spin_orbitals + 1`` for the data register plus
             the Hadamard-test ancilla.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime.
 
     Returns:
-        FTQCResourceEstimate: Symbolic FTQC resource estimate.
+        ResourceEstimate: Architecture-independent logical resource estimate.
 
     Raises:
         ValueError: If any positive-valued input is non-positive or either
             multiplicative reduction factor is negative.
+        TypeError: If a value cannot be converted into a SymPy expression.
     """
     n_expr = _as_expr(n_spin_orbitals, "n_spin_orbitals")
     terms_expr = _as_expr(n_pauli_terms, "n_pauli_terms")
@@ -784,33 +541,14 @@ def estimate_single_ancilla_trotter_qpe(
     )
     logical_depth = sp.simplify(qpe_iterations * pauli_rotations)
     t_gates = sp.simplify(logical_depth * rotation_t)
-    toffoli_gates = sp.Integer(0)
-    model = cost_model or FTQCCostModel()
-    physical_qubits = sp.simplify(
-        logical_expr * model.physical_qubits_per_logical + model.factory_qubits
-    )
-    runtime_seconds = sp.simplify(
-        sp.Max(
-            logical_depth * model.logical_cycle_time_seconds,
-            t_gates / model.toffoli_throughput_per_second,
-        )
-    )
-    assumptions = {
-        "effective_lambda": "lambda_norm * unitary_weight_factor.",
-        "qpe_style": "Single-ancilla Hadamard-test QPE with product-formula evolution.",
-        "randomization": "randomized_compilation_factor rescales Pauli-rotation work.",
-    }
-    return _build_estimate(
-        algorithm="single_ancilla_trotter_qpe:unitary_weight_concentration",
+    return _build_logical_estimate(
         logical_qubits=logical_expr,
-        physical_qubits=physical_qubits,
-        toffoli_gates=toffoli_gates,
+        total_gates=t_gates,
+        multi_qubit_gates=sp.Integer(0),
         t_gates=t_gates,
         clifford_gates=sp.Integer(0),
+        rotation_gates=pauli_rotations,
         qpe_iterations=qpe_iterations,
-        logical_depth=logical_depth,
-        runtime_seconds=runtime_seconds,
-        assumptions=assumptions,
     )
 
 
@@ -824,9 +562,8 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     randomized_compilation_factor: _SympyLike = 1,
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
-    cost_model: FTQCCostModel | None = None,
-) -> FTQCResourceEstimate:
-    """Estimate single-ancilla Trotter QPE from a Hamiltonian summary.
+) -> ResourceEstimate:
+    """Estimate logical Trotter QPE resources from a Hamiltonian summary.
 
     Args:
         hamiltonian (PauliHamiltonianResource): Pauli-LCU Hamiltonian summary.
@@ -842,12 +579,16 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
             rotation. Defaults to one.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
             Defaults to ``hamiltonian.n_spin_orbitals + 1``.
-        cost_model (FTQCCostModel | None): Architecture model used to lift
-            logical estimates to physical qubits and runtime.
 
     Returns:
-        FTQCResourceEstimate: Symbolic FTQC resource estimate.
+        ResourceEstimate: Architecture-independent logical resource estimate.
+
+    Raises:
+        TypeError: If ``hamiltonian`` is not a ``PauliHamiltonianResource``.
+        ValueError: If any resource quantity is invalid.
     """
+    if not isinstance(hamiltonian, PauliHamiltonianResource):
+        raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
     return estimate_single_ancilla_trotter_qpe(
         n_spin_orbitals=hamiltonian.n_spin_orbitals,
         n_pauli_terms=hamiltonian.n_pauli_terms,
@@ -859,7 +600,6 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
         randomized_compilation_factor=randomized_compilation_factor,
         rotation_synthesis_t_gates=rotation_synthesis_t_gates,
         logical_qubits=logical_qubits,
-        cost_model=cost_model,
     )
 
 
@@ -914,64 +654,45 @@ def _default_logical_qubits(
             raise ValueError(f"Unhandled chemistry QPE method: {method}")
 
 
-def _build_estimate(
+def _build_logical_estimate(
     *,
-    algorithm: str,
     logical_qubits: sp.Expr,
-    physical_qubits: sp.Expr,
-    toffoli_gates: sp.Expr,
+    total_gates: sp.Expr,
+    multi_qubit_gates: sp.Expr,
     t_gates: sp.Expr,
     clifford_gates: sp.Expr,
     qpe_iterations: sp.Expr,
-    logical_depth: sp.Expr,
-    runtime_seconds: sp.Expr,
-    assumptions: dict[str, str],
-) -> FTQCResourceEstimate:
-    """Create an estimate and collect its free symbolic parameters.
+    rotation_gates: sp.Expr,
+) -> ResourceEstimate:
+    """Create a logical estimate and collect free symbolic parameters.
 
     Args:
-        algorithm (str): Algorithm name.
         logical_qubits (sp.Expr): Logical qubit count.
-        physical_qubits (sp.Expr): Physical qubit count.
-        toffoli_gates (sp.Expr): Toffoli count.
+        total_gates (sp.Expr): Total logical gate-count proxy.
+        multi_qubit_gates (sp.Expr): Multi-qubit gate-count proxy.
         t_gates (sp.Expr): T count.
         clifford_gates (sp.Expr): Clifford count.
         qpe_iterations (sp.Expr): QPE iteration count.
-        logical_depth (sp.Expr): Logical depth proxy.
-        runtime_seconds (sp.Expr): Runtime estimate in seconds.
-        assumptions (dict[str, str]): Notes about model assumptions.
+        rotation_gates (sp.Expr): Rotation gate-count proxy.
 
     Returns:
-        FTQCResourceEstimate: Estimate with collected parameters.
+        ResourceEstimate: Logical estimate with collected parameters.
     """
-    expressions = [
-        logical_qubits,
-        physical_qubits,
-        toffoli_gates,
-        t_gates,
-        clifford_gates,
-        qpe_iterations,
-        logical_depth,
-        runtime_seconds,
-    ]
-    symbols: set[sp.Symbol] = set()
-    for expr in expressions:
-        for symbol in expr.free_symbols:
-            if isinstance(symbol, sp.Symbol):
-                symbols.add(symbol)
-    return FTQCResourceEstimate(
-        algorithm=algorithm,
-        logical_qubits=sp.simplify(logical_qubits),
-        physical_qubits=sp.simplify(physical_qubits),
-        toffoli_gates=sp.simplify(toffoli_gates),
-        t_gates=sp.simplify(t_gates),
-        clifford_gates=sp.simplify(clifford_gates),
-        qpe_iterations=sp.simplify(qpe_iterations),
-        logical_depth=sp.simplify(logical_depth),
-        runtime_seconds=sp.simplify(runtime_seconds),
-        parameters={str(symbol): symbol for symbol in sorted(symbols, key=str)},
-        assumptions=assumptions,
+    estimate = ResourceEstimate(
+        qubits=sp.simplify(logical_qubits),
+        gates=GateCount(
+            total=sp.simplify(total_gates),
+            single_qubit=sp.Integer(0),
+            two_qubit=sp.Integer(0),
+            multi_qubit=sp.simplify(multi_qubit_gates),
+            t_gates=sp.simplify(t_gates),
+            clifford_gates=sp.simplify(clifford_gates),
+            rotation_gates=sp.simplify(rotation_gates),
+            oracle_calls={"qpe_iterations": sp.simplify(qpe_iterations)},
+            oracle_queries={},
+        ),
     )
+    return estimate.simplify()
 
 
 def _normalize_method(method: str | ChemistryQPEMethod) -> ChemistryQPEMethod:
@@ -999,7 +720,7 @@ def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
     """Convert a numeric or symbolic value to a SymPy expression.
 
     Args:
-        value (sp.Expr | int | float): Value to convert.
+        value (sp.Expr | int | float | complex): Value to convert.
         name (str): Field name used in error messages.
 
     Returns:
@@ -1015,19 +736,21 @@ def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
 
 
 def _abs_as_expr(value: _CoefficientLike) -> sp.Expr:
-    """Return the symbolic absolute value of a numeric expression.
+    """Return the symbolic absolute value of a numeric coefficient.
 
     Args:
-        value (sp.Expr | int | float | complex): Coefficient or constant to
-            convert.
+        value (sp.Expr | int | float | complex): Coefficient to convert.
 
     Returns:
-        sp.Expr: Nonnegative SymPy absolute value.
+        sp.Expr: Absolute value represented as a SymPy expression.
 
     Raises:
-        TypeError: If ``value`` cannot be sympified.
+        TypeError: If ``value`` cannot be converted into a SymPy expression.
     """
-    return sp.Abs(_as_expr(value, "value"))
+    expr = _as_expr(value, "coefficient")
+    if expr.is_number:
+        return sp.Abs(expr)
+    return sp.Abs(expr)
 
 
 def _validate_positive(expr: sp.Expr, name: str) -> None:

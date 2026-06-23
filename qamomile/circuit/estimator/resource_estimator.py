@@ -89,8 +89,7 @@ class ResourceEstimate:
                     for name, val in self.gates.oracle_queries.items()
                 },
             ),
-            parameters=self.parameters,
-        )
+        ).with_collected_parameters()
 
     def simplify(self) -> ResourceEstimate:
         """Simplify all SymPy expressions.
@@ -101,7 +100,20 @@ class ResourceEstimate:
         return ResourceEstimate(
             qubits=sp.simplify(self.qubits),
             gates=self.gates.simplify(),
-            parameters=self.parameters,
+        ).with_collected_parameters()
+
+    def with_collected_parameters(self) -> ResourceEstimate:
+        """Return an estimate with parameters collected from expressions.
+
+        Returns:
+            ResourceEstimate: New estimate whose ``parameters`` contains all
+                free symbols from qubit, gate, oracle-call, and oracle-query
+                expressions.
+        """
+        return ResourceEstimate(
+            qubits=self.qubits,
+            gates=self.gates,
+            parameters=_collect_parameters(self.qubits, self.gates),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -254,28 +266,34 @@ def estimate_resources(
             )
             qubit_count = qubit_count.subs(all_subs)
 
-    # Collect all symbols (parameters)
-    all_symbols: set[sp.Symbol] = set()
-    for expr in [
-        qubit_count,
-        gate_count.total,
-        gate_count.single_qubit,
-        gate_count.two_qubit,
-        gate_count.multi_qubit,
-        gate_count.t_gates,
-        gate_count.clifford_gates,
-        gate_count.rotation_gates,
-    ]:
-        all_symbols.update(expr.free_symbols)  # type: ignore[arg-type]
-    for oracle_expr in gate_count.oracle_calls.values():
-        all_symbols.update(oracle_expr.free_symbols)  # type: ignore[arg-type]
-    for oracle_expr in gate_count.oracle_queries.values():
-        all_symbols.update(oracle_expr.free_symbols)  # type: ignore[arg-type]
-
-    parameters = {str(sym): sym for sym in sorted(all_symbols, key=str)}
-
     return ResourceEstimate(
         qubits=qubit_count,
         gates=gate_count,
-        parameters=parameters,
-    )
+    ).with_collected_parameters()
+
+
+def _collect_parameters(qubits: sp.Expr, gates: GateCount) -> dict[str, sp.Symbol]:
+    """Collect free symbols from logical resource expressions.
+
+    Args:
+        qubits (sp.Expr): Logical qubit-count expression.
+        gates (GateCount): Logical gate-count expressions.
+
+    Returns:
+        dict[str, sp.Symbol]: Free symbols keyed by their display names.
+    """
+    all_symbols: set[sp.Symbol] = set()
+    for expr in [
+        qubits,
+        gates.total,
+        gates.single_qubit,
+        gates.two_qubit,
+        gates.multi_qubit,
+        gates.t_gates,
+        gates.clifford_gates,
+        gates.rotation_gates,
+        *gates.oracle_calls.values(),
+        *gates.oracle_queries.values(),
+    ]:
+        all_symbols.update(expr.free_symbols)  # type: ignore[arg-type]
+    return {str(sym): sym for sym in sorted(all_symbols, key=str)}

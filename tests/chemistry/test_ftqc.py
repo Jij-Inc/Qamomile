@@ -6,15 +6,18 @@ import pytest
 import sympy as sp
 
 import qamomile.observable as qm_o
-from qamomile.circuit.estimator.algorithmic import (
+from qamomile.chemistry import (
     ChemistryQPEMethod,
     ChemistryQPEModel,
-    FTQCCostModel,
     estimate_qubitized_chemistry_qpe,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_single_ancilla_trotter_qpe,
     estimate_single_ancilla_trotter_qpe_from_hamiltonian,
     summarize_pauli_hamiltonian,
+)
+from qamomile.resource_estimation import (
+    FTQCCostModel,
+    estimate_physical_resources,
 )
 
 
@@ -30,9 +33,9 @@ def test_qubitized_qpe_tracks_lambda_precision_and_walk_cost():
         method=ChemistryQPEMethod.TENSOR_HYPERCONTRACTION,
     )
 
-    assert estimate.logical_qubits == n
-    assert estimate.qpe_iterations == lam / eps
-    assert estimate.toffoli_gates == lam * walk / eps
+    assert estimate.qubits == n
+    assert estimate.gates.oracle_calls["qpe_iterations"] == lam / eps
+    assert estimate.gates.multi_qubit == lam * walk / eps
     assert {"lambda", "eps", "C_W"}.issubset(estimate.parameters)
 
 
@@ -64,33 +67,34 @@ def test_qubitized_qpe_uses_representation_specific_logical_qubits():
         second_factor_rank=rank,
     )
 
-    assert sparse.logical_qubits == n + sp.sqrt(sparsity)
-    assert single.logical_qubits == n ** sp.Rational(3, 2)
-    assert double.logical_qubits == n * sp.sqrt(rank)
+    assert sparse.qubits == n + sp.sqrt(sparsity)
+    assert single.qubits == n ** sp.Rational(3, 2)
+    assert double.qubits == n * sp.sqrt(rank)
 
 
-def test_cost_model_lifts_logical_estimates_to_physical_runtime():
-    """Concrete architecture knobs produce concrete physical-qubit/runtime values."""
+def test_physical_estimation_lifts_logical_estimates_to_runtime():
+    """Physical estimation applies architecture knobs after logical estimation."""
     model = FTQCCostModel(
         physical_qubits_per_logical=100,
         logical_cycle_time_seconds=0.01,
         factory_qubits=20,
-        toffoli_throughput_per_second=50,
+        non_clifford_throughput_per_second=50,
     )
 
-    estimate = estimate_qubitized_chemistry_qpe(
+    logical = estimate_qubitized_chemistry_qpe(
         n_spin_orbitals=4,
         lambda_norm=8,
         precision=2,
         walk_cost_toffoli=10,
         logical_qubits=7,
-        cost_model=model,
     )
+    physical = estimate_physical_resources(logical, model)
 
-    assert estimate.logical_qubits == 7
-    assert estimate.physical_qubits == 720
-    assert estimate.toffoli_gates == 40
-    assert estimate.runtime_seconds == sp.Rational(4, 5)
+    assert logical.qubits == 7
+    assert logical.gates.total == 40
+    assert physical.physical_qubits == 720
+    assert physical.non_clifford_count == 40
+    assert physical.runtime_seconds == sp.Rational(4, 5)
 
 
 def test_single_ancilla_trotter_qpe_models_unitary_weight_reduction():
@@ -115,21 +119,21 @@ def test_single_ancilla_trotter_qpe_models_unitary_weight_reduction():
         rotation_synthesis_t_gates=3,
     )
 
-    assert baseline.qpe_iterations == 100
-    assert concentrated.qpe_iterations == 10
-    assert concentrated.t_gates == 15000
-    assert concentrated.logical_qubits == 21
-    assert concentrated.logical_depth < baseline.logical_depth
+    assert baseline.gates.oracle_calls["qpe_iterations"] == 100
+    assert concentrated.gates.oracle_calls["qpe_iterations"] == 10
+    assert concentrated.gates.t_gates == 15000
+    assert concentrated.qubits == 21
+    assert concentrated.gates.total < baseline.gates.total
 
 
 def test_cost_model_rejects_zero_non_clifford_throughput():
     """A zero non-Clifford throughput is invalid because runtime divides by it."""
-    with pytest.raises(ValueError, match="toffoli_throughput_per_second"):
+    with pytest.raises(ValueError, match="non_clifford_throughput_per_second"):
         FTQCCostModel(
             physical_qubits_per_logical=100,
             logical_cycle_time_seconds=1,
             factory_qubits=0,
-            toffoli_throughput_per_second=0,
+            non_clifford_throughput_per_second=0,
         )
 
 
@@ -232,11 +236,13 @@ def test_qubitized_qpe_from_model_uses_hamiltonian_metadata():
     estimate = estimate_qubitized_chemistry_qpe_from_model(model, precision=1)
 
     assert model.effective_sparsity == 2
-    assert estimate.logical_qubits == 2 + sp.sqrt(2)
-    assert sp.Abs(estimate.qpe_iterations - sp.Rational(5, 2)) < sp.Float("1e-12")
-    assert sp.Abs(estimate.toffoli_gates - sp.Rational(55, 2)) < sp.Float("1e-12")
-    assert estimate.assumptions["hamiltonian_source"] == "shifted"
-    assert sp.sympify(estimate.assumptions["truncation_error"]) == sp.Float("1e-5")
+    assert estimate.qubits == 2 + sp.sqrt(2)
+    assert sp.Abs(estimate.gates.oracle_calls["qpe_iterations"] - 2.5) < sp.Float(
+        "1e-12"
+    )
+    assert sp.Abs(estimate.gates.multi_qubit - 27.5) < sp.Float("1e-12")
+    assert model.to_dict()["hamiltonian"]["source"] == "shifted"
+    assert sp.sympify(model.to_dict()["truncation_error"]) == sp.Float("1e-5")
 
 
 def test_single_ancilla_trotter_qpe_from_hamiltonian_summary():
@@ -251,10 +257,10 @@ def test_single_ancilla_trotter_qpe_from_hamiltonian_summary():
         rotation_synthesis_t_gates=5,
     )
 
-    assert estimate.logical_qubits == 3
-    assert sp.simplify(estimate.qpe_iterations - 3) == 0
-    assert sp.simplify(estimate.logical_depth - 36) == 0
-    assert sp.simplify(estimate.t_gates - 180) == 0
+    assert estimate.qubits == 3
+    assert sp.simplify(estimate.gates.oracle_calls["qpe_iterations"] - 3) == 0
+    assert sp.simplify(estimate.gates.rotation_gates - 12) == 0
+    assert sp.simplify(estimate.gates.t_gates - 180) == 0
 
 
 def test_chemistry_qpe_model_rejects_negative_truncation_error():
@@ -267,3 +273,61 @@ def test_chemistry_qpe_model_rejects_negative_truncation_error():
             walk_cost_toffoli=1,
             truncation_error=-1,
         )
+
+
+def test_ftqc_substitute_recomputes_free_parameters():
+    """Substitution refreshes parameter metadata after symbols become concrete."""
+    n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
+
+    estimate = estimate_qubitized_chemistry_qpe(n, lam, eps, walk)
+    concrete = estimate.substitute(
+        **{
+            "n": 4,
+            "Xi": 9,
+            "lambda": 10,
+            "eps": 2,
+            "C_W": 3,
+        }
+    )
+
+    assert concrete.gates.multi_qubit == 15
+    assert concrete.parameters == {}
+
+
+def test_physical_substitute_recomputes_free_parameters():
+    """Physical estimates keep architecture symbols separate until substituted."""
+    n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
+    physical_overhead, cycle_time, factories, throughput = sp.symbols(
+        "physical_qubits_per_logical "
+        "logical_cycle_time_seconds "
+        "factory_qubits "
+        "non_clifford_throughput_per_second",
+        positive=True,
+    )
+
+    logical = estimate_qubitized_chemistry_qpe(n, lam, eps, walk)
+    model = FTQCCostModel(
+        physical_qubits_per_logical=physical_overhead,
+        logical_cycle_time_seconds=cycle_time,
+        factory_qubits=factories,
+        non_clifford_throughput_per_second=throughput,
+    )
+    physical = estimate_physical_resources(logical, model)
+    concrete = physical.substitute(
+        **{
+            "n": 4,
+            "Xi": 9,
+            "lambda": 10,
+            "eps": 2,
+            "C_W": 3,
+        }
+    )
+
+    assert concrete.logical.gates.multi_qubit == 15
+    assert concrete.non_clifford_count == 15
+    assert set(concrete.parameters) == {
+        "factory_qubits",
+        "logical_cycle_time_seconds",
+        "non_clifford_throughput_per_second",
+        "physical_qubits_per_logical",
+    }
