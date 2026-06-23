@@ -1445,7 +1445,12 @@ class InverseGate:
             BoundArguments: Bound and default-filled argument mapping.
 
         Raises:
-            TypeError: If any final argument is not a frontend `Handle`.
+            TypeError: If any final argument is not a frontend `Handle`, or
+                if a bound `Handle` does not match its declared parameter
+                type -- a quantum handle bound to a classical parameter, a
+                scalar `Qubit` bound to a `Vector[Qubit]` parameter (or the
+                reverse), or an array of the wrong rank. The latter checks
+                are delegated to `param_validation._validate_bound_handles`.
         """
         bound_args = self._qkernel.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
