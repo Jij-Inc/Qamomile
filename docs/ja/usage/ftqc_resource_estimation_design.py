@@ -614,9 +614,13 @@ assert sp.Abs(architecture_comparison[1].ratio - sp.Rational(10, 21)) < sp.Float
 # %% [markdown]
 # ## Early-FTQCのパターン
 #
-# Early-FTQC推定はToffoli-nativeとは限りません。同じ比較APIを、主にT gatesとlogical depthを報告するTrotter型modelにも使えます。
+# Early-FTQC推定はToffoli-nativeとは限りません。同じ比較APIを、主にT gatesとlogical depthを報告するTrotter型modelにも使えます。representation reviewで使うものと同じ`HamiltonianResourceReduction` objectを、Hamiltonianから作るTrotter estimatorへ渡せます。
 
 # %%
+early_ftqc_reduction = HamiltonianResourceReduction(
+    lambda_norm_factor=sp.Float("0.1"),
+    description="unitary weight concentration",
+)
 plain_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     scaled_summary,
     precision=sp.Float("0.0016"),
@@ -629,9 +633,9 @@ uwc_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     precision=sp.Float("0.0016"),
     trotter_steps_per_sample=8,
     samples=128,
-    unitary_weight_factor=sp.Float("0.1"),
     randomized_compilation_factor=sp.Float("0.5"),
     rotation_synthesis_t_gates=3,
+    resource_reduction=early_ftqc_reduction,
     cost_model=cost_model,
 )
 
@@ -646,6 +650,10 @@ for row in trotter_comparison:
 
 assert trotter_comparison[0].ratio == sp.Float("0.1")
 assert trotter_comparison[1].ratio == sp.Float("0.05")
+assert (
+    uwc_trotter.assumptions["resource_reduction_description"]
+    == "unitary weight concentration"
+)
 
 # %% [markdown]
 # ## Budget constraints

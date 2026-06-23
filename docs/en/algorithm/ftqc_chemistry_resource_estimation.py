@@ -41,6 +41,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCAccuracyBudget,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    HamiltonianResourceReduction,
     QPEStatePreparationBudget,
     SurfaceCodeDistanceBudget,
     block_encoding_from_chemistry_model,
@@ -458,11 +459,15 @@ assert scdf_block_estimate.logical_qubits == scdf_block.logical_qubits + 12
 #
 # Early-FTQC proposals may favor shallower single-ancilla QPE and Pauli
 # rotations over qubitized walks when qubits and depth are tightly constrained.
-# The unitary-weight concentration factor below represents a spectrally
-# invariant Hamiltonian transformation that reduces the cost-driving effective
-# weight.
+# The resource reduction below represents a spectrally invariant Hamiltonian
+# transformation, such as unitary weight concentration, that reduces the
+# cost-driving effective weight while staying separate from circuit lowering.
 
 # %%
+uwc_reduction = HamiltonianResourceReduction(
+    lambda_norm_factor=sp.Float("0.1"),
+    description="unitary weight concentration",
+)
 plain_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     scaled_summary,
     precision=qpe_precision,
@@ -476,9 +481,9 @@ uwc_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     precision=qpe_precision,
     trotter_steps_per_sample=8,
     samples=128,
-    unitary_weight_factor=sp.Float("0.1"),
     randomized_compilation_factor=sp.Float("0.5"),
     rotation_synthesis_t_gates=3,
+    resource_reduction=uwc_reduction,
     cost_model=cost_model,
 )
 
@@ -507,6 +512,9 @@ for row in trotter_savings:
 assert trotter_savings[0].ratio == sp.Float("0.1")
 assert trotter_savings[2].ratio == sp.Float("0.05")
 assert trotter_savings[3].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert "lambda_norm=0.100000000000000" in uwc_trotter.assumptions[
+    "resource_reduction_factors"
+]
 
 # %% [markdown]
 # ## Result

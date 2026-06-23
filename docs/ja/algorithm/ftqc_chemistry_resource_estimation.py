@@ -36,6 +36,7 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCAccuracyBudget,
     FTQCResourceProfile,
     FTQCResourceQuantity,
+    HamiltonianResourceReduction,
     QPEStatePreparationBudget,
     SurfaceCodeDistanceBudget,
     block_encoding_from_chemistry_model,
@@ -410,9 +411,13 @@ assert scdf_block_estimate.logical_qubits == scdf_block.logical_qubits + 12
 # %% [markdown]
 # ## Early-FTQC Trotter QPE
 #
-# Early-FTQCの提案では、量子ビット数とdepthが強く制限される場合、qubitized walksよりも浅いsingle-ancilla QPEとPauli rotationsが好まれることがあります。下のunitary-weight concentration factorは、コストを支配するeffective weightを下げるspectrally invariantなHamiltonian transformationを表します。
+# Early-FTQCの提案では、量子ビット数とdepthが強く制限される場合、qubitized walksよりも浅いsingle-ancilla QPEとPauli rotationsが好まれることがあります。下のresource reductionは、unitary weight concentrationのようなspectrally invariantなHamiltonian transformationを表します。コストを支配するeffective weightを下げつつ、circuit loweringとは分けて保持します。
 
 # %%
+uwc_reduction = HamiltonianResourceReduction(
+    lambda_norm_factor=sp.Float("0.1"),
+    description="unitary weight concentration",
+)
 plain_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     scaled_summary,
     precision=qpe_precision,
@@ -426,9 +431,9 @@ uwc_trotter = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     precision=qpe_precision,
     trotter_steps_per_sample=8,
     samples=128,
-    unitary_weight_factor=sp.Float("0.1"),
     randomized_compilation_factor=sp.Float("0.5"),
     rotation_synthesis_t_gates=3,
+    resource_reduction=uwc_reduction,
     cost_model=cost_model,
 )
 
@@ -457,6 +462,9 @@ for row in trotter_savings:
 assert trotter_savings[0].ratio == sp.Float("0.1")
 assert trotter_savings[2].ratio == sp.Float("0.05")
 assert trotter_savings[3].quantity == FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME
+assert "lambda_norm=0.100000000000000" in uwc_trotter.assumptions[
+    "resource_reduction_factors"
+]
 
 # %% [markdown]
 # ## Result

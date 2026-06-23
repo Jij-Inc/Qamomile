@@ -2766,6 +2766,7 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
     cost_model: _FTQCCostModelLike | None = None,
+    resource_reduction: HamiltonianResourceReduction | None = None,
     references: tuple[FTQCReference, ...] = (),
 ) -> FTQCResourceEstimate:
     """Estimate single-ancilla Trotter QPE from a Hamiltonian summary.
@@ -2787,16 +2788,41 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
         cost_model (FTQCCostModel | SurfaceCodeCostModel | None):
             Architecture model used to lift logical estimates to physical
             qubits and runtime.
+        resource_reduction (HamiltonianResourceReduction | None): Optional
+            representation-level reduction to apply to the Hamiltonian summary
+            before building the Trotter estimate. Defaults to None.
         references (tuple[FTQCReference, ...]): Additional research sources
             to attach to the estimate.
 
     Returns:
         FTQCResourceEstimate: Symbolic FTQC resource estimate.
+
+    Raises:
+        TypeError: If ``hamiltonian`` is not a ``PauliHamiltonianResource`` or
+            ``resource_reduction`` is not a ``HamiltonianResourceReduction``.
     """
-    return estimate_single_ancilla_trotter_qpe(
-        n_spin_orbitals=hamiltonian.n_spin_orbitals,
-        n_pauli_terms=hamiltonian.n_pauli_terms,
-        lambda_norm=hamiltonian.lambda_norm,
+    if not isinstance(hamiltonian, PauliHamiltonianResource):
+        raise TypeError("hamiltonian must be a PauliHamiltonianResource instance.")
+    if resource_reduction is not None and not isinstance(
+        resource_reduction,
+        HamiltonianResourceReduction,
+    ):
+        raise TypeError(
+            "resource_reduction must be a HamiltonianResourceReduction instance."
+        )
+
+    effective_hamiltonian = (
+        hamiltonian
+        if resource_reduction is None
+        else resource_reduction.apply_to_hamiltonian(hamiltonian)
+    )
+    reduction_references = (
+        () if resource_reduction is None else resource_reduction.references
+    )
+    estimate = estimate_single_ancilla_trotter_qpe(
+        n_spin_orbitals=effective_hamiltonian.n_spin_orbitals,
+        n_pauli_terms=effective_hamiltonian.n_pauli_terms,
+        lambda_norm=effective_hamiltonian.lambda_norm,
         precision=precision,
         trotter_steps_per_sample=trotter_steps_per_sample,
         samples=samples,
@@ -2805,7 +2831,34 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
         rotation_synthesis_t_gates=rotation_synthesis_t_gates,
         logical_qubits=logical_qubits,
         cost_model=cost_model,
-        references=references,
+        references=_combine_references(reduction_references, references),
+    )
+    assumptions = dict(estimate.assumptions)
+    assumptions["hamiltonian_source"] = effective_hamiltonian.source
+    if resource_reduction is not None:
+        if resource_reduction.description:
+            assumptions["resource_reduction_description"] = (
+                resource_reduction.description
+            )
+        assumptions["resource_reduction_factors"] = _format_resource_factors(
+            resource_reduction.resource_factors()
+        )
+    return _build_estimate(
+        algorithm=estimate.algorithm,
+        logical_qubits=estimate.logical_qubits,
+        physical_qubits=estimate.physical_qubits,
+        toffoli_gates=estimate.toffoli_gates,
+        t_gates=estimate.t_gates,
+        clifford_gates=estimate.clifford_gates,
+        qpe_iterations=estimate.qpe_iterations,
+        target_precision=estimate.target_precision,
+        logical_depth=estimate.logical_depth,
+        runtime_seconds=estimate.runtime_seconds,
+        assumptions=assumptions,
+        references=estimate.references,
+        formulas=estimate.formulas,
+        algorithm_values=estimate.algorithm_values,
+        architecture_values=estimate.architecture_values,
     )
 
 
@@ -3448,6 +3501,24 @@ def _combine_descriptions(base: str, extra: str) -> str:
     """
     parts = [part for part in (base, extra) if part]
     return "; ".join(parts)
+
+
+def _format_resource_factors(
+    factors: dict[FTQCResourceQuantity, sp.Expr],
+) -> str:
+    """Format resource-reduction factors for estimate assumptions.
+
+    Args:
+        factors (dict[FTQCResourceQuantity, sp.Expr]): Multiplicative factors
+            keyed by canonical FTQC resource quantity.
+
+    Returns:
+        str: Stable comma-separated ``quantity=factor`` string.
+    """
+    return ", ".join(
+        f"{quantity.value}={factors[quantity]}"
+        for quantity in sorted(factors, key=lambda item: item.value)
+    )
 
 
 def _normalize_method(method: str | ChemistryQPEMethod) -> ChemistryQPEMethod:

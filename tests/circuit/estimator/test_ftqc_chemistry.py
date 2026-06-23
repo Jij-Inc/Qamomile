@@ -441,6 +441,23 @@ def test_hamiltonian_resource_reduction_rejects_invalid_inputs():
     with pytest.raises(TypeError, match="ChemistryQPEModel"):
         reduction.apply_to_model(object())
 
+    with pytest.raises(TypeError, match="PauliHamiltonianResource"):
+        estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+            object(),
+            precision=1,
+            trotter_steps_per_sample=1,
+            samples=1,
+        )
+
+    with pytest.raises(TypeError, match="HamiltonianResourceReduction"):
+        estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+            summarize_pauli_hamiltonian(qm_o.Z(0)),
+            precision=1,
+            trotter_steps_per_sample=1,
+            samples=1,
+            resource_reduction=object(),
+        )
+
 
 def test_cost_model_lifts_logical_estimates_to_physical_runtime():
     """Concrete architecture knobs produce concrete physical-qubit/runtime values."""
@@ -864,6 +881,58 @@ def test_single_ancilla_trotter_qpe_from_hamiltonian_summary():
     assert estimate.target_precision == 1
     assert sp.simplify(estimate.logical_depth - 36) == 0
     assert sp.simplify(estimate.t_gates - 180) == 0
+
+
+def test_single_ancilla_trotter_qpe_accepts_hamiltonian_reduction():
+    """Hamiltonian reductions feed early-FTQC Trotter QPE estimates."""
+    summary = summarize_pauli_hamiltonian(
+        qm_o.Z(0) + 2 * qm_o.Z(1) + 3 * qm_o.Z(2) + 4 * qm_o.Z(3),
+        source="plain_trotter_lcu",
+    )
+    reference = FTQCReference(
+        key="arXiv:2603.22778",
+        title="Early FTQC chemistry resource model",
+        url="https://arxiv.org/abs/2603.22778",
+    )
+    reduction = HamiltonianResourceReduction(
+        lambda_norm_factor=sp.Rational(1, 10),
+        pauli_term_factor=sp.Rational(1, 2),
+        description="unitary weight concentration",
+        references=(reference,),
+    )
+
+    baseline = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        rotation_synthesis_t_gates=3,
+    )
+    reduced = estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+        summary,
+        precision=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        randomized_compilation_factor=sp.Rational(1, 2),
+        rotation_synthesis_t_gates=3,
+        resource_reduction=reduction,
+    )
+
+    assert sp.Abs(reduced.qpe_iterations - baseline.qpe_iterations / 10) < sp.Float(
+        "1e-12"
+    )
+    assert sp.Abs(reduced.logical_depth - baseline.logical_depth / 40) < sp.Float(
+        "1e-12"
+    )
+    assert sp.Abs(reduced.t_gates - baseline.t_gates / 40) < sp.Float("1e-12")
+    assert reduced.assumptions["hamiltonian_source"] == "plain_trotter_lcu:reduced"
+    assert (
+        reduced.assumptions["resource_reduction_description"]
+        == "unitary weight concentration"
+    )
+    assert "lambda_norm=1/10" in reduced.assumptions["resource_reduction_factors"]
+    assert "n_pauli_terms=1/2" in reduced.assumptions["resource_reduction_factors"]
+    assert [item.key for item in reduced.references].count("arXiv:2603.22778") == 1
 
 
 def test_chemistry_qpe_model_rejects_negative_truncation_error():
