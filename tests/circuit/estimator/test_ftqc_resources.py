@@ -1026,19 +1026,19 @@ def test_build_ftqc_research_signal_report_selects_available_quantities():
     )
     assert report.title == "arXiv:2603.22778 resource signal review"
     assert report.profile is None
-    assert row_quantities[0] == FTQCResourceQuantity.QPE_ITERATIONS
-    assert FTQCResourceQuantity.LAMBDA_NORM not in row_quantities
+    assert row_quantities[0] == FTQCResourceQuantity.LAMBDA_NORM
+    assert row_quantities[1] == FTQCResourceQuantity.QPE_ITERATIONS
     assert FTQCResourceQuantity.T_GATES in row_quantities
     assert row_table[0]["baseline_label"] == "Plain Trotter"
     assert row_table[0]["candidate_label"] == "UWC Trotter"
 
-    with pytest.raises(ValueError, match="lambda_norm"):
-        build_ftqc_research_signal_report(
-            "arXiv:2603.22778",
-            baseline,
-            candidate,
-            require_all_quantities=True,
-        )
+    strict_report = build_ftqc_research_signal_report(
+        "arXiv:2603.22778",
+        baseline,
+        candidate,
+        require_all_quantities=True,
+    )
+    assert strict_report.summary.rows[0].quantity == FTQCResourceQuantity.LAMBDA_NORM
 
     with pytest.raises(ValueError, match="Unknown FTQC research signal"):
         describe_ftqc_research_signal("arXiv:0000.00000")

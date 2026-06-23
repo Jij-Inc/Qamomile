@@ -664,7 +664,7 @@ assert (
 )
 
 # %% [markdown]
-# research-signal reportは、特定の論文が動機づけるquantityに比較対象を絞ります。具体的なestimateはsignal内のproblem-level driverをすべて公開するとは限らないため、defaultのreportは両方のestimateで利用できるsignal quantityを使います。
+# research-signal reportは、特定の論文が動機づけるquantityに比較対象を絞ります。Hamiltonianから作るTrotter estimatorはproblem-level driverも公開するため、ここではsignal contract全体を要求できます。
 
 # %%
 uwc_signal_report = build_ftqc_research_signal_report(
@@ -673,14 +673,15 @@ uwc_signal_report = build_ftqc_research_signal_report(
     uwc_trotter,
     baseline_label="Plain Trotter",
     candidate_label="UWC Trotter",
+    require_all_quantities=True,
 )
 print(uwc_signal_report.to_dict()["title"])
 print(uwc_signal_report.to_dict()["quantities"])
 
 assert uwc_signal_report.summary.rows[0].quantity == (
-    FTQCResourceQuantity.QPE_ITERATIONS
+    FTQCResourceQuantity.LAMBDA_NORM
 )
-assert "lambda_norm" not in uwc_signal_report.to_dict()["quantities"]
+assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]

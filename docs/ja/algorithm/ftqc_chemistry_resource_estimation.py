@@ -476,11 +476,13 @@ uwc_signal_report = build_ftqc_research_signal_report(
     uwc_trotter,
     baseline_label="Plain Trotter QPE",
     candidate_label="UWC-style Trotter QPE",
+    require_all_quantities=True,
 )
 print(uwc_signal_report.to_dict()["quantities"])
 
+assert uwc_signal_report.summary.rows[0].quantity == FTQCResourceQuantity.LAMBDA_NORM
 assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
-assert "lambda_norm" not in uwc_signal_report.to_dict()["quantities"]
+assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
 # ## Result

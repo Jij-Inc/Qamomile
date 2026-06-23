@@ -2541,6 +2541,15 @@ def estimate_qubitized_chemistry_qpe(
             "bake in one chemistry factorization implementation."
         ),
     }
+    algorithm_values = {
+        FTQCResourceQuantity.N_SPIN_ORBITALS: n_expr,
+        FTQCResourceQuantity.LAMBDA_NORM: lambda_expr,
+        FTQCResourceQuantity.WALK_COST_TOFFOLI: walk_expr,
+    }
+    if method_enum == ChemistryQPEMethod.SPARSE and sparsity is not None:
+        sparsity_expr = _as_expr(sparsity, "sparsity")
+        _validate_positive(sparsity_expr, "sparsity")
+        algorithm_values[FTQCResourceQuantity.N_PAULI_TERMS] = sparsity_expr
     return _build_estimate(
         algorithm=f"qubitized_qpe:{method_enum.value}",
         logical_qubits=logical_expr,
@@ -2558,6 +2567,7 @@ def estimate_qubitized_chemistry_qpe(
             references,
         ),
         formulas=_qubitized_qpe_formulas(),
+        algorithm_values=algorithm_values,
         architecture_values=architecture_values,
     )
 
@@ -2737,6 +2747,11 @@ def estimate_single_ancilla_trotter_qpe(
         "qpe_style": "Single-ancilla Hadamard-test QPE with product-formula evolution.",
         "randomization": "randomized_compilation_factor rescales Pauli-rotation work.",
     }
+    algorithm_values = {
+        FTQCResourceQuantity.N_SPIN_ORBITALS: n_expr,
+        FTQCResourceQuantity.N_PAULI_TERMS: terms_expr,
+        FTQCResourceQuantity.LAMBDA_NORM: lambda_expr,
+    }
     return _build_estimate(
         algorithm="single_ancilla_trotter_qpe:unitary_weight_concentration",
         logical_qubits=logical_expr,
@@ -2751,6 +2766,7 @@ def estimate_single_ancilla_trotter_qpe(
         assumptions=assumptions,
         references=_combine_references((_UWC_REFERENCE,), references),
         formulas=_single_ancilla_trotter_formulas(),
+        algorithm_values=algorithm_values,
         architecture_values=architecture_values,
     )
 

@@ -721,9 +721,8 @@ assert (
 
 # %% [markdown]
 # A research-signal report scopes the comparison to the quantities motivated by
-# a specific paper. Concrete estimates may not expose every problem-level
-# driver from the signal, so the default report uses the signal quantities
-# available on both estimates.
+# a specific paper. The Hamiltonian-driven Trotter estimator exposes its
+# problem-level drivers, so this report can require the full signal contract.
 
 # %%
 uwc_signal_report = build_ftqc_research_signal_report(
@@ -732,14 +731,15 @@ uwc_signal_report = build_ftqc_research_signal_report(
     uwc_trotter,
     baseline_label="Plain Trotter",
     candidate_label="UWC Trotter",
+    require_all_quantities=True,
 )
 print(uwc_signal_report.to_dict()["title"])
 print(uwc_signal_report.to_dict()["quantities"])
 
 assert uwc_signal_report.summary.rows[0].quantity == (
-    FTQCResourceQuantity.QPE_ITERATIONS
+    FTQCResourceQuantity.LAMBDA_NORM
 )
-assert "lambda_norm" not in uwc_signal_report.to_dict()["quantities"]
+assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
