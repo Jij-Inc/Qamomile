@@ -26,6 +26,8 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceConstraintStatus,
     FTQCResourceDriverReport,
     FTQCResourceFormula,
+    FTQCResourceParetoReport,
+    FTQCResourceParetoRow,
     FTQCResourcePlan,
     FTQCResourcePlanStep,
     FTQCResourceProfile,
@@ -40,6 +42,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
+    build_ftqc_resource_pareto_report,
     build_ftqc_resource_review_findings,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
@@ -1120,6 +1123,128 @@ def test_build_ftqc_resource_driver_report_traces_formula_dependencies():
 
     with pytest.raises(ValueError, match="targets must not be empty"):
         build_ftqc_resource_driver_report(baseline, candidate, targets=())
+
+
+def test_build_ftqc_resource_pareto_report_marks_frontier_candidates():
+    """Pareto reports keep resource tradeoffs and mark dominated candidates."""
+    baseline = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "baseline",
+                {
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: 1000,
+                    FTQCResourceQuantity.RUNTIME_SECONDS: 100,
+                    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS: 100_000,
+                },
+            ),
+        ),
+        title="Baseline",
+    )
+    compressed = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "compressed",
+                {
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: 700,
+                    FTQCResourceQuantity.RUNTIME_SECONDS: 80,
+                    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS: 56_000,
+                },
+            ),
+        ),
+        title="Compressed",
+    )
+    tiny_slow = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "tiny_slow",
+                {
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: 450,
+                    FTQCResourceQuantity.RUNTIME_SECONDS: 140,
+                    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS: 63_000,
+                },
+            ),
+        ),
+        title="Tiny slow",
+    )
+
+    report = build_ftqc_resource_pareto_report(
+        (
+            ("baseline", baseline),
+            ("compressed", compressed),
+            ("tiny slow", tiny_slow),
+        ),
+        quantities=(
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+        ),
+        title="Toy early-FTQC frontier",
+    )
+    report_dict = report.to_dict()
+    row_by_label = {row.label: row for row in report.rows}
+    table_by_label = {row["label"]: row for row in report.to_row_table()}
+
+    assert isinstance(report, FTQCResourceParetoReport)
+    assert all(isinstance(row, FTQCResourceParetoRow) for row in report.rows)
+    assert row_by_label["baseline"].dominated_by == ("compressed",)
+    assert row_by_label["compressed"].is_frontier
+    assert row_by_label["tiny slow"].is_frontier
+    assert [row.label for row in report.frontier] == ["compressed", "tiny slow"]
+    assert [row.label for row in report.dominated] == ["baseline"]
+    assert table_by_label["baseline"]["is_frontier"] is False
+    assert table_by_label["baseline"]["dominated_by"] == "compressed"
+    assert report_dict["title"] == "Toy early-FTQC frontier"
+    assert report_dict["quantities"] == ["physical_qubits", "runtime_seconds"]
+    assert report_dict["counts"] == {"frontier": 2, "dominated": 1}
+
+
+def test_build_ftqc_resource_pareto_report_keeps_symbolic_rows_on_frontier():
+    """Undecidable symbolic dominance keeps candidates reviewable."""
+    symbolic_runtime = sp.Symbol("runtime")
+    concrete = FTQCResourcePlanStep(
+        "concrete",
+        {
+            FTQCResourceQuantity.PHYSICAL_QUBITS: 100,
+            FTQCResourceQuantity.RUNTIME_SECONDS: 10,
+        },
+    )
+    symbolic = FTQCResourcePlanStep(
+        "symbolic",
+        {
+            FTQCResourceQuantity.PHYSICAL_QUBITS: 90,
+            FTQCResourceQuantity.RUNTIME_SECONDS: symbolic_runtime,
+        },
+    )
+
+    report = build_ftqc_resource_pareto_report(
+        (
+            ("concrete", FTQCResourcePlan((concrete,))),
+            ("symbolic", FTQCResourcePlan((symbolic,))),
+        ),
+        quantities=(
+            FTQCResourceQuantity.PHYSICAL_QUBITS,
+            FTQCResourceQuantity.RUNTIME_SECONDS,
+        ),
+    )
+
+    assert [row.label for row in report.frontier] == ["concrete", "symbolic"]
+    assert report.dominated == ()
+    with pytest.raises(ValueError, match="at least two"):
+        build_ftqc_resource_pareto_report((("only", FTQCResourcePlan((concrete,))),))
+    with pytest.raises(ValueError, match="unique"):
+        build_ftqc_resource_pareto_report(
+            (
+                ("duplicate", FTQCResourcePlan((concrete,))),
+                ("duplicate", FTQCResourcePlan((symbolic,))),
+            )
+        )
+    with pytest.raises(ValueError, match="missing"):
+        build_ftqc_resource_pareto_report(
+            (
+                ("concrete", FTQCResourcePlan((concrete,))),
+                ("symbolic", FTQCResourcePlan((symbolic,))),
+            ),
+            quantities=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+        )
 
 
 def test_audit_ftqc_research_signal_coverage_marks_missing_quantities():

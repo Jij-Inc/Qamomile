@@ -1747,6 +1747,196 @@ class FTQCResourceDriverReport:
         }
 
 
+@dataclass(frozen=True)
+class FTQCResourceParetoRow:
+    """Describe one candidate in an FTQC Pareto review.
+
+    Args:
+        label (str): Reader-facing candidate label.
+        values (dict[str | FTQCResourceQuantity, sp.Expr | int | float]):
+            Candidate resource values keyed by canonical quantities. Smaller
+            values are treated as better for Pareto dominance.
+        dominated_by (tuple[str, ...]): Labels of candidates that provably
+            dominate this row. Defaults to an empty tuple.
+
+    Raises:
+        TypeError: If any value cannot be converted to a SymPy expression.
+        ValueError: If ``label`` is empty or a resource key is unknown.
+
+    Example:
+        >>> row = FTQCResourceParetoRow(
+        ...     "compressed",
+        ...     {"physical_qubits": 100, "runtime_seconds": 2},
+        ... )
+        >>> row.is_frontier
+        True
+    """
+
+    label: str
+    values: dict[str | FTQCResourceQuantity, sp.Expr | int | float]
+    dominated_by: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize Pareto-row fields after dataclass construction.
+
+        Raises:
+            TypeError: If any value cannot be converted to a SymPy expression.
+            ValueError: If ``label`` is empty or a resource key is unknown.
+        """
+        if not self.label:
+            raise ValueError("label must not be empty.")
+        normalized_values = {
+            _normalize_resource_quantity(quantity): _sympify_resource_expr(
+                value,
+                str(quantity),
+            )
+            for quantity, value in self.values.items()
+        }
+        object.__setattr__(self, "values", normalized_values)
+        object.__setattr__(self, "dominated_by", tuple(self.dominated_by))
+
+    @property
+    def is_frontier(self) -> bool:
+        """Return whether no other candidate dominates this row.
+
+        Returns:
+            bool: True when ``dominated_by`` is empty.
+        """
+        return not self.dominated_by
+
+    def to_dict(self) -> dict[str, str | bool | list[str] | dict[str, str]]:
+        """Serialize the Pareto row.
+
+        Returns:
+            dict[str, str | bool | list[str] | dict[str, str]]: JSON-friendly
+                candidate label, values, frontier marker, and dominators.
+        """
+        values = cast(dict[FTQCResourceQuantity, sp.Expr], self.values)
+        return {
+            "label": self.label,
+            "values": {
+                quantity.value: str(value) for quantity, value in values.items()
+            },
+            "is_frontier": self.is_frontier,
+            "dominated_by": list(self.dominated_by),
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceParetoReport:
+    """Package a multi-candidate FTQC Pareto-frontier review.
+
+    Attributes:
+        title (str): Reader-facing report title.
+        quantities (tuple[FTQCResourceQuantity, ...]): Quantities used for
+            dominance checks. Smaller values are treated as better.
+        rows (tuple[FTQCResourceParetoRow, ...]): Candidate rows in input
+            order, annotated with dominance status.
+
+    Example:
+        >>> report = FTQCResourceParetoReport(
+        ...     title="Toy frontier",
+        ...     quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
+        ...     rows=(
+        ...         FTQCResourceParetoRow("fast", {"runtime_seconds": 1}),
+        ...         FTQCResourceParetoRow("slow", {"runtime_seconds": 2}, ("fast",)),
+        ...     ),
+        ... )
+        >>> report.frontier[0].label
+        'fast'
+    """
+
+    title: str
+    quantities: tuple[FTQCResourceQuantity, ...]
+    rows: tuple[FTQCResourceParetoRow, ...]
+
+    def __post_init__(self) -> None:
+        """Validate Pareto-report rows after dataclass construction.
+
+        Raises:
+            TypeError: If ``rows`` contains non-row items.
+            ValueError: If ``quantities`` or ``rows`` is empty.
+        """
+        if not self.quantities:
+            raise ValueError("quantities must not be empty.")
+        if not self.rows:
+            raise ValueError("rows must not be empty.")
+        if not all(isinstance(row, FTQCResourceParetoRow) for row in self.rows):
+            raise TypeError("rows must contain only FTQCResourceParetoRow instances.")
+        object.__setattr__(self, "quantities", tuple(self.quantities))
+        object.__setattr__(self, "rows", tuple(self.rows))
+
+    @property
+    def frontier(self) -> tuple[FTQCResourceParetoRow, ...]:
+        """Return non-dominated candidate rows.
+
+        Returns:
+            tuple[FTQCResourceParetoRow, ...]: Rows with no provable
+                dominators.
+        """
+        return tuple(row for row in self.rows if row.is_frontier)
+
+    @property
+    def dominated(self) -> tuple[FTQCResourceParetoRow, ...]:
+        """Return dominated candidate rows.
+
+        Returns:
+            tuple[FTQCResourceParetoRow, ...]: Rows with at least one
+                dominator.
+        """
+        return tuple(row for row in self.rows if not row.is_frontier)
+
+    def to_row_table(self) -> list[dict[str, str | bool]]:
+        """Return candidates as flat table rows.
+
+        Returns:
+            list[dict[str, str | bool]]: Rows with one column per selected
+                quantity plus frontier and dominator metadata.
+        """
+        rows = []
+        for row in self.rows:
+            values = cast(dict[FTQCResourceQuantity, sp.Expr], row.values)
+            serialized: dict[str, str | bool] = {
+                "label": row.label,
+                "is_frontier": row.is_frontier,
+                "dominated_by": ", ".join(row.dominated_by),
+            }
+            for quantity in self.quantities:
+                serialized[quantity.value] = str(values[quantity])
+            rows.append(serialized)
+        return rows
+
+    def to_dict(
+        self,
+    ) -> dict[
+        str,
+        str
+        | list[str]
+        | list[dict[str, str | bool]]
+        | list[dict[str, str | bool | list[str] | dict[str, str]]]
+        | dict[str, int],
+    ]:
+        """Serialize report metadata and candidate rows.
+
+        Returns:
+            dict[str, str | list[str] | list[dict[str, str | bool]] |
+                list[dict[str, str | bool | list[str] | dict[str, str]]] |
+                dict[str, int]]: JSON-friendly report metadata, selected
+                quantities, rows, frontier rows, dominated rows, and counts.
+        """
+        return {
+            "title": self.title,
+            "quantities": [quantity.value for quantity in self.quantities],
+            "rows": self.to_row_table(),
+            "frontier": [row.to_dict() for row in self.frontier],
+            "dominated": [row.to_dict() for row in self.dominated],
+            "counts": {
+                "frontier": len(self.frontier),
+                "dominated": len(self.dominated),
+            },
+        }
+
+
 FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.N_SPIN_ORBITALS,
@@ -2826,6 +3016,79 @@ def build_ftqc_resource_driver_report(
     )
 
 
+def build_ftqc_resource_pareto_report(
+    candidates: tuple[tuple[str, SupportsFTQCResourceValues], ...],
+    *,
+    title: str = "FTQC resource Pareto frontier",
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+    profile: str | FTQCResourceProfile | None = None,
+) -> FTQCResourceParetoReport:
+    """Build a Pareto-frontier report across FTQC candidate estimates.
+
+    Every selected quantity is treated as a resource cost where smaller is
+    better. A candidate dominates another candidate only when every selected
+    quantity is provably no larger and at least one quantity is provably
+    smaller. Symbolic comparisons that cannot be decided keep both candidates
+    on the frontier for later review.
+
+    Args:
+        candidates (tuple[tuple[str, SupportsFTQCResourceValues], ...]):
+            Candidate labels paired with estimates, models, or plans exposing
+            ``resource_values()``.
+        title (str): Reader-facing report title. Defaults to
+            ``"FTQC resource Pareto frontier"``.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
+            to inspect before optional profile quantities. Defaults to the
+            canonical intersection exposed by all candidates when ``profile``
+            is None.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile whose quantities are appended after ``quantities`` with
+            duplicates removed. Defaults to None.
+
+    Returns:
+        FTQCResourceParetoReport: Multi-candidate frontier report.
+
+    Raises:
+        ValueError: If fewer than two candidates are provided, labels repeat,
+            selected quantities are missing, or a profile key is unknown.
+    """
+    if len(candidates) < 2:
+        raise ValueError("candidates must contain at least two entries.")
+    labels = tuple(label for label, _ in candidates)
+    if len(set(labels)) != len(labels):
+        raise ValueError("candidate labels must be unique.")
+
+    value_maps = tuple(estimate.resource_values() for _, estimate in candidates)
+    selected = _select_pareto_quantities(value_maps, quantities, profile)
+    rows = []
+    for index, (label, _) in enumerate(candidates):
+        values: dict[str | FTQCResourceQuantity, sp.Expr | int | float] = {
+            quantity: _sympify_resource_expr(
+                value_maps[index][quantity], quantity.value
+            )
+            for quantity in selected
+        }
+        dominated_by = tuple(
+            other_label
+            for other_index, (other_label, _) in enumerate(candidates)
+            if other_index != index
+            and _pareto_dominates(value_maps[other_index], value_maps[index], selected)
+        )
+        rows.append(
+            FTQCResourceParetoRow(
+                label=label,
+                values=values,
+                dominated_by=dominated_by,
+            )
+        )
+
+    return FTQCResourceParetoReport(
+        title=title,
+        quantities=selected,
+        rows=tuple(rows),
+    )
+
+
 def build_ftqc_resource_review_findings(
     summary: FTQCResourceComparisonSummary,
     *,
@@ -3191,6 +3454,64 @@ def _normalize_comparison_quantities(
     return normalized
 
 
+def _select_pareto_quantities(
+    value_maps: tuple[dict[FTQCResourceQuantity, sp.Expr], ...],
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None,
+    profile: str | FTQCResourceProfile | None,
+) -> tuple[FTQCResourceQuantity, ...]:
+    """Select quantities shared by all Pareto candidates.
+
+    Args:
+        value_maps (tuple[dict[FTQCResourceQuantity, sp.Expr], ...]): Resource
+            values for each candidate.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Explicit
+            requested quantities.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile.
+
+    Returns:
+        tuple[FTQCResourceQuantity, ...]: Normalized selected quantities.
+
+    Raises:
+        ValueError: If a requested quantity is absent from any candidate or if
+            the selected common quantity set is empty.
+    """
+    if profile is None:
+        selected = quantities
+    elif quantities is None:
+        selected = ftqc_resource_profile_quantities(profile)
+    else:
+        selected = (*quantities, *ftqc_resource_profile_quantities(profile))
+
+    if selected is None:
+        common = set(value_maps[0])
+        for values in value_maps[1:]:
+            common &= set(values)
+        normalized = tuple(
+            spec.quantity
+            for spec in FTQC_RESOURCE_QUANTITY_SPECS
+            if spec.quantity in common
+        )
+    else:
+        normalized = _dedupe_resource_quantities(
+            tuple(_normalize_resource_quantity(quantity) for quantity in selected)
+        )
+    if not normalized:
+        raise ValueError("No common FTQC resource quantities are available.")
+
+    missing = [
+        quantity.value
+        for quantity in normalized
+        if any(quantity not in values for values in value_maps)
+    ]
+    if missing:
+        raise ValueError(
+            "Requested FTQC Pareto quantities are missing from at least one "
+            "candidate: " + ", ".join(missing) + "."
+        )
+    return normalized
+
+
 def _dedupe_resource_quantities(
     quantities: tuple[FTQCResourceQuantity, ...],
 ) -> tuple[FTQCResourceQuantity, ...]:
@@ -3434,6 +3755,45 @@ def _classify_change(reduction: sp.Expr) -> FTQCResourceChangeDirection:
     if simplified.is_negative:
         return FTQCResourceChangeDirection.LARGER
     return FTQCResourceChangeDirection.SYMBOLIC
+
+
+def _pareto_dominates(
+    challenger_values: dict[FTQCResourceQuantity, sp.Expr],
+    incumbent_values: dict[FTQCResourceQuantity, sp.Expr],
+    quantities: tuple[FTQCResourceQuantity, ...],
+) -> bool:
+    """Return whether one candidate provably dominates another.
+
+    Args:
+        challenger_values (dict[FTQCResourceQuantity, sp.Expr]): Candidate
+            values for the possible dominator.
+        incumbent_values (dict[FTQCResourceQuantity, sp.Expr]): Candidate
+            values for the possible dominated row.
+        quantities (tuple[FTQCResourceQuantity, ...]): Quantities used for
+            dominance checks, where smaller is better.
+
+    Returns:
+        bool: True only when the challenger is no larger for every quantity
+            and strictly smaller for at least one quantity.
+    """
+    strictly_better = False
+    for quantity in quantities:
+        challenger = _sympify_resource_expr(
+            challenger_values[quantity],
+            quantity.value,
+        )
+        incumbent = _sympify_resource_expr(
+            incumbent_values[quantity],
+            quantity.value,
+        )
+        difference = sp.simplify(incumbent - challenger)
+        if difference.equals(0):
+            continue
+        if difference.is_positive:
+            strictly_better = True
+            continue
+        return False
+    return strictly_better
 
 
 def _constraint_margin(

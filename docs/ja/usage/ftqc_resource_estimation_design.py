@@ -50,6 +50,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
+    build_ftqc_resource_pareto_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
@@ -747,6 +748,56 @@ assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in driver_quantities
 assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
 
 # %% [markdown]
+# ## Pareto Frontierレビュー
+#
+# ペアごとの比較は有用ですが、FTQC設計レビューでは複数の候補を競合する目的で比べることがよくあります。Pareto reportでは、別の候補が選択したすべてのresource quantityで同じか小さく、少なくとも1つで厳密に小さい場合にだけ、その候補をdominatedとして扱います。symbolicなtradeoffはfrontierに残るため、reviewerが確認できます。
+#
+# 下のfast architectureはsyntheticです。physical量子ビットとruntimeのtradeoffを分かりやすく作るためのもので、calibrated hardware designを主張するものではありません。
+
+# %%
+fast_architecture = SurfaceCodeCostModel(
+    code_distance=architecture.code_distance,
+    physical_cycle_time_seconds=sp.Float("1e-10"),
+    factory_count=20_000,
+    physical_qubits_per_factory=5000,
+    factory_cycles_per_toffoli=2,
+)
+fast_plain_trotter = plain_trotter.with_cost_model(fast_architecture)
+
+pareto_report = build_ftqc_resource_pareto_report(
+    (
+        ("Plain Trotter", plain_trotter),
+        ("UWC Trotter", uwc_trotter),
+        ("Fast plain Trotter", fast_plain_trotter),
+    ),
+    quantities=(
+        FTQCResourceQuantity.PHYSICAL_QUBITS,
+        FTQCResourceQuantity.RUNTIME_SECONDS,
+    ),
+    title="Early-FTQC architecture frontier",
+)
+
+for row in pareto_report.to_row_table():
+    print(
+        row["label"],
+        "frontier=",
+        row["is_frontier"],
+        "physical_qubits=",
+        sp.N(sp.sympify(row["physical_qubits"]), 4),
+        "runtime=",
+        sp.N(sp.sympify(row["runtime_seconds"]), 4),
+    )
+
+frontier_labels = {row.label for row in pareto_report.frontier}
+assert "Plain Trotter" not in frontier_labels
+assert "UWC Trotter" in frontier_labels
+assert "Fast plain Trotter" in frontier_labels
+assert pareto_report.to_dict()["counts"] == {
+    "frontier": 2,
+    "dominated": 1,
+}
+
+# %% [markdown]
 # ## Budget constraints
 #
 # early-FTQCの研究では、別のreview questionも重要です。estimateがphysical量子ビットやruntimeのbudgetに収まるか、という問いです。budget reportを使うと、同じcanonical resource valueを明示的なconstraintと照合できます。architecture仮定がまだsymbolicな場合、marginは未判断のまま残ります。
@@ -824,4 +875,5 @@ assert budget_report.to_dict()["counts"] == {
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
 # - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、優先順位つきfinding、grouped countをreview artifactとしてまとめられます。
 # - `build_ftqc_resource_driver_report`を使うと、target output quantityからformula dependencyをたどり、変化した上流のcost driverを確認できます。
+# - `build_ftqc_resource_pareto_report`を使うと、dominated estimateを示しつつ、physical量子ビットとruntimeのtradeoffを残して、複数候補をreviewしやすくできます。
 # - `evaluate_ftqc_resource_constraints`を使うと、estimateをphysical量子ビット、runtime、depthなどの明示的なresource budgetと照合できます。

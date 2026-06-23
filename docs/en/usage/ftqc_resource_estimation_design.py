@@ -53,6 +53,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_research_signal_report,
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
+    build_ftqc_resource_pareto_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
@@ -811,6 +812,61 @@ assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in driver_quantities
 assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
 
 # %% [markdown]
+# ## Pareto Frontier Review
+#
+# Pairwise comparisons are useful, but FTQC design reviews usually compare
+# several candidates under competing objectives. A Pareto report marks a
+# candidate as dominated only when another candidate is no larger for every
+# selected resource quantity and strictly smaller for at least one. Symbolic
+# tradeoffs stay on the frontier so they remain visible to reviewers.
+#
+# The fast architecture below is synthetic. It is only used to create a clear
+# physical-qubit/runtime tradeoff, not to claim a calibrated hardware design.
+
+# %%
+fast_architecture = SurfaceCodeCostModel(
+    code_distance=architecture.code_distance,
+    physical_cycle_time_seconds=sp.Float("1e-10"),
+    factory_count=20_000,
+    physical_qubits_per_factory=5000,
+    factory_cycles_per_toffoli=2,
+)
+fast_plain_trotter = plain_trotter.with_cost_model(fast_architecture)
+
+pareto_report = build_ftqc_resource_pareto_report(
+    (
+        ("Plain Trotter", plain_trotter),
+        ("UWC Trotter", uwc_trotter),
+        ("Fast plain Trotter", fast_plain_trotter),
+    ),
+    quantities=(
+        FTQCResourceQuantity.PHYSICAL_QUBITS,
+        FTQCResourceQuantity.RUNTIME_SECONDS,
+    ),
+    title="Early-FTQC architecture frontier",
+)
+
+for row in pareto_report.to_row_table():
+    print(
+        row["label"],
+        "frontier=",
+        row["is_frontier"],
+        "physical_qubits=",
+        sp.N(sp.sympify(row["physical_qubits"]), 4),
+        "runtime=",
+        sp.N(sp.sympify(row["runtime_seconds"]), 4),
+    )
+
+frontier_labels = {row.label for row in pareto_report.frontier}
+assert "Plain Trotter" not in frontier_labels
+assert "UWC Trotter" in frontier_labels
+assert "Fast plain Trotter" in frontier_labels
+assert pareto_report.to_dict()["counts"] == {
+    "frontier": 2,
+    "dominated": 1,
+}
+
+# %% [markdown]
 # ## Budget Constraints
 #
 # Early-FTQC studies often ask a different review question: does an estimate fit
@@ -919,5 +975,8 @@ assert budget_report.to_dict()["counts"] == {
 #   prioritized findings, and grouped counts for review artifacts.
 # - `build_ftqc_resource_driver_report` traces formula dependencies from a
 #   target output quantity to the upstream cost drivers that changed.
+# - `build_ftqc_resource_pareto_report` keeps several candidates reviewable by
+#   marking dominated estimates while preserving physical-qubit/runtime
+#   tradeoffs.
 # - `evaluate_ftqc_resource_constraints` checks estimates against explicit
 #   physical-qubit, runtime, depth, or other resource budgets.
