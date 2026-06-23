@@ -742,6 +742,33 @@ class TestHamiltonianWrapper:
         with pytest.raises(TypeError, match="must not be bool"):
             hamiltonian_to_dict(h)
 
+    def test_negative_num_qubits_rejected(self):
+        """A negative declared register width is rejected on decode."""
+        wrapper = hamiltonian_to_dict(qm_o.Hamiltonian.identity(1.0, num_qubits=2))
+        wrapper["num_qubits"] = -1
+        with pytest.raises(ValueError, match="non-negative int"):
+            dict_to_hamiltonian(wrapper)
+
+    def test_empty_operator_list_rejected(self):
+        """A term with an empty operator list is rejected on decode.
+
+        The encoder never emits an empty operator list — the constant lives in
+        the dedicated ``constant`` field — so an empty list is malformed wire
+        data that would otherwise fold into the constant via ``add_term`` and
+        double-encode it.
+        """
+        wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
+        wrapper["terms"].append([[], 3.0])
+        with pytest.raises(ValueError, match="non-empty list"):
+            dict_to_hamiltonian(wrapper)
+
+    def test_negative_qubit_index_rejected(self):
+        """A negative qubit index in a term operator is rejected on decode."""
+        wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
+        wrapper["terms"][0][0][0][1] = -1
+        with pytest.raises(ValueError, match="non-negative int"):
+            dict_to_hamiltonian(wrapper)
+
     def test_unknown_pauli_name_rejected(self):
         """A Pauli name outside the allow-map raises on decode."""
         wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))

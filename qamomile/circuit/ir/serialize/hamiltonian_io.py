@@ -126,17 +126,20 @@ def dict_to_hamiltonian(d: dict[str, Any]) -> Hamiltonian:
 
     Raises:
         ValueError: If ``d`` is not a valid wrapper dict — missing or
-            malformed ``terms``, a Pauli name outside the allow-map, a
-            non-int qubit index, a malformed coefficient, or a
-            ``num_qubits`` that is neither ``None`` nor an int.
+            malformed ``terms``, a term with an empty operator list (the
+            constant is carried by the dedicated ``constant`` field, so an
+            empty list would double-encode it), a Pauli name outside the
+            allow-map, a negative or non-int qubit index, a malformed
+            coefficient, or a ``num_qubits`` that is neither ``None`` nor a
+            non-negative int.
     """
     if not is_hamiltonian_wrapper(d):
         raise ValueError("dict_to_hamiltonian() called with a non-wrapper dict")
     num_qubits = d.get("num_qubits")
-    if num_qubits is not None and not _is_plain_int(num_qubits):
+    if num_qubits is not None and (not _is_plain_int(num_qubits) or num_qubits < 0):
         raise ValueError(
-            f"Hamiltonian wrapper 'num_qubits' must be an int or None, got "
-            f"{type(num_qubits).__name__}"
+            f"Hamiltonian wrapper 'num_qubits' must be a non-negative int or "
+            f"None, got {num_qubits!r}"
         )
     raw_terms = d.get("terms")
     if not isinstance(raw_terms, list):
@@ -151,8 +154,13 @@ def dict_to_hamiltonian(d: dict[str, Any]) -> Hamiltonian:
                 "[operators, coefficient] pairs"
             )
         raw_ops, raw_coeff = entry
-        if not isinstance(raw_ops, list):
-            raise ValueError("Hamiltonian wrapper term operators must be a list")
+        if not isinstance(raw_ops, list) or not raw_ops:
+            raise ValueError(
+                "Hamiltonian wrapper term operators must be a non-empty list; "
+                "the constant term is carried by the dedicated 'constant' "
+                "field, so an empty operator list would double-encode the "
+                "constant via add_term"
+            )
         operators = tuple(_operator_from_wire(raw_op) for raw_op in raw_ops)
         h.add_term(operators, _coeff_from_wire(raw_coeff))
     return h
@@ -164,14 +172,14 @@ def _operator_from_wire(raw_op: Any) -> PauliOperator:
     Args:
         raw_op (Any): The wire entry. Must be a two-element list whose
             first element is a Pauli name in the allow-map and whose
-            second element is an int qubit index.
+            second element is a non-negative int qubit index.
 
     Returns:
         PauliOperator: The reconstructed operator.
 
     Raises:
-        ValueError: If the entry shape, Pauli name, or index type is
-            invalid.
+        ValueError: If the entry shape or Pauli name is invalid, or the
+            qubit index is not a non-negative int.
     """
     if not isinstance(raw_op, list) or len(raw_op) != 2:
         raise ValueError(
@@ -184,9 +192,9 @@ def _operator_from_wire(raw_op: Any) -> PauliOperator:
             f"Pauli name {name!r} is not in the serialization allow-map "
             f"{sorted(_PAULI_BY_NAME)}"
         )
-    if not _is_plain_int(index):
+    if not _is_plain_int(index) or index < 0:
         raise ValueError(
-            f"Pauli operator qubit index must be an int, got {type(index).__name__}"
+            f"Pauli operator qubit index must be a non-negative int, got {index!r}"
         )
     return PauliOperator(pauli, index)
 
