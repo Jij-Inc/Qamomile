@@ -46,6 +46,7 @@ from qamomile.circuit.estimator.algorithmic import (
     SurfaceCodeDistanceBudget,
     block_encoding_from_chemistry_model,
     build_ftqc_research_signal_report,
+    build_ftqc_resource_driver_report,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_qubitized_qpe_from_block_encoding,
@@ -536,6 +537,37 @@ assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
+# A research-signal report says which quantities changed. A driver report adds
+# a second review lens: start from a target output quantity, then follow the
+# symbolic formulas backward to the upstream quantities that explain it. Here
+# we target physical qubit-seconds, because early-FTQC studies often care about
+# the space-time footprint more than a single gate count.
+
+# %%
+uwc_driver_report = build_ftqc_resource_driver_report(
+    plain_trotter,
+    uwc_trotter,
+    targets=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+    baseline_label="Plain Trotter QPE",
+    candidate_label="UWC-style Trotter QPE",
+)
+for row in uwc_driver_report.to_row_table():
+    print(
+        row["quantity"],
+        "target=",
+        row["is_target"],
+        "ratio=",
+        sp.N(sp.sympify(row["ratio"]), 4),
+    )
+
+uwc_driver_quantities = {row.quantity for row in uwc_driver_report.summary.rows}
+assert FTQCResourceQuantity.LAMBDA_NORM in uwc_driver_quantities
+assert FTQCResourceQuantity.QPE_ITERATIONS in uwc_driver_quantities
+assert FTQCResourceQuantity.T_GATES in uwc_driver_quantities
+assert FTQCResourceQuantity.RUNTIME_SECONDS in uwc_driver_quantities
+assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
+
+# %% [markdown]
 # ## Result
 #
 # We can put the estimates into a compact table. The important point is that
@@ -602,6 +634,8 @@ assert uwc_trotter.resource_values()[
 #   SELECT, reflection, and workspace costs can be reviewed separately.
 # - Demonstrated how a unitary-weight concentration factor can be modeled as a
 #   cost-driver reduction for early-FTQC single-ancilla Trotter QPE.
+# - Traced a physical qubit-seconds target back to the symbolic quantities
+#   that drive the early-FTQC estimate.
 # - Connected recent FTQC chemistry research signals to the canonical
 #   quantities that the tutorial compares.
 # - Used a standard `FTQCResourceProfile` so space-time comparisons have the

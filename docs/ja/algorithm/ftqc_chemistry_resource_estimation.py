@@ -41,6 +41,7 @@ from qamomile.circuit.estimator.algorithmic import (
     SurfaceCodeDistanceBudget,
     block_encoding_from_chemistry_model,
     build_ftqc_research_signal_report,
+    build_ftqc_resource_driver_report,
     compare_ftqc_resource_estimates,
     estimate_qubitized_chemistry_qpe_from_model,
     estimate_qubitized_qpe_from_block_encoding,
@@ -485,6 +486,33 @@ assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 
 # %% [markdown]
+# research-signal reportでは、どのquantityが変わったかを確認できます。driver reportを使うと、target output quantityから始めてsymbolic formulaを上流へたどり、そのquantityを説明するdriverを確認できます。ここではphysical qubit-secondsをtargetにします。early-FTQC研究では、単一のgate countよりspace-time footprintが重要になることが多いためです。
+
+# %%
+uwc_driver_report = build_ftqc_resource_driver_report(
+    plain_trotter,
+    uwc_trotter,
+    targets=(FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,),
+    baseline_label="Plain Trotter QPE",
+    candidate_label="UWC-style Trotter QPE",
+)
+for row in uwc_driver_report.to_row_table():
+    print(
+        row["quantity"],
+        "target=",
+        row["is_target"],
+        "ratio=",
+        sp.N(sp.sympify(row["ratio"]), 4),
+    )
+
+uwc_driver_quantities = {row.quantity for row in uwc_driver_report.summary.rows}
+assert FTQCResourceQuantity.LAMBDA_NORM in uwc_driver_quantities
+assert FTQCResourceQuantity.QPE_ITERATIONS in uwc_driver_quantities
+assert FTQCResourceQuantity.T_GATES in uwc_driver_quantities
+assert FTQCResourceQuantity.RUNTIME_SECONDS in uwc_driver_quantities
+assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
+
+# %% [markdown]
 # ## Result
 #
 # 推定結果を小さな表にまとめます。重要なのは、各列が別々の設計上の意味を持つことです。Hamiltonian representationの変更は`qpe_iterations`とper-step costに効くべきで、hardware modelの変更は`physical_qubits`、runtime、physical qubit-secondsに効くべきです。
@@ -537,5 +565,6 @@ assert uwc_trotter.resource_values()[
 # - code distanceなどのarchitecture quantityを各resource estimateに残し、後続のreportでauditできるようにしました。
 # - chemistry QPE modelをblock-encoding contractへ変換し、PREPARE、SELECT、reflection、workspace costを分けてreviewできる形にしました。
 # - unitary-weight concentration factorを、early-FTQC single-ancilla Trotter QPEのcost-driver reductionとしてモデル化する方法を示しました。
+# - physical qubit-secondsというtargetを、early-FTQC estimateを支配するsymbolic quantityへたどりました。
 # - 近年のFTQC化学計算のresearch signalを、このチュートリアルで比較するcanonical quantitiesへ結びつけました。
 # - 標準の`FTQCResourceProfile`を使い、space-time比較で同じquantity setを使うようにしました。
