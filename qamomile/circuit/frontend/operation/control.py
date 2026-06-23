@@ -28,8 +28,8 @@ from qamomile.circuit.frontend.param_validation import (
     _is_classical_param_decl,
     _is_quantum_handle,
     _is_uint_param_decl,
+    _validate_bound_handles,
     _validate_classical_param_handle,
-    _validate_param_handle,
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
@@ -593,43 +593,6 @@ class ControlledGate:
         """
         return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
 
-    def _validate_bound_handles(
-        self,
-        sub_args_resolved: dict[str, Any],
-    ) -> None:
-        """Validate bound sub-kernel handles before quantum filtering.
-
-        Checks every bound argument that is a ``Handle`` -- quantum *and*
-        classical -- against its declaration, so an arity mismatch fails
-        fast with a clear ``TypeError`` instead of leaking an
-        ``AttributeError`` from a deeper specialization step (``get_size``
-        on a scalar ``Qubit``). Raw Python literals (e.g. a ``theta=0.5``
-        default) are not ``Handle`` instances and are skipped here; their
-        type coercion is handled later in :meth:`_params_to_operands`.
-        Validation runs with ``allow_broadcast=True``: a quantum array
-        bound to a scalar ``Qubit`` target is a legitimate per-element
-        broadcast in the control path (the controlled gate is applied
-        once per target qubit), so it is accepted here even though the
-        same shape is rejected on a plain qkernel call.
-
-        Args:
-            sub_args_resolved (dict[str, Any]): Bound sub-kernel
-                arguments in wrapped-kernel signature order.
-
-        Raises:
-            TypeError: If a parameter is bound to a handle that does not
-                match its declared quantum / classical kind (a scalar
-                ``Qubit`` into a ``Vector[Qubit]`` target, a classical
-                handle into a quantum parameter, etc.).
-        """
-        kernel_input_types: dict[str, Any] = self._qkernel.input_types
-        for name, value in sub_args_resolved.items():
-            declared = kernel_input_types[name]
-            if isinstance(value, Handle):
-                _validate_param_handle(
-                    name, declared, value, context="control()", allow_broadcast=True
-                )
-
     # ``_validate_no_alias_or_overlap`` used to live here as an entry-
     # point alias / overlap check, mirroring the
     # ``_check_qubit_alias`` helper in ``qubit_gates.py``.  In practice
@@ -1164,7 +1127,12 @@ class ControlledGate:
 
         controls, sub_positional = self._split_controls_by_count(args, num_controls)
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
-        self._validate_bound_handles(sub_args_resolved)
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            sub_args_resolved,
+            context="control()",
+            allow_broadcast=True,
+        )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(
@@ -1468,7 +1436,12 @@ class ControlledGate:
         )
 
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
-        self._validate_bound_handles(sub_args_resolved)
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            sub_args_resolved,
+            context="control()",
+            allow_broadcast=True,
+        )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(

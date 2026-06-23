@@ -37,7 +37,7 @@ from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.handle.utils import get_size as _get_size
-from qamomile.circuit.frontend.param_validation import _validate_param_handle
+from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
@@ -598,12 +598,9 @@ class QKernel(Generic[P, R]):
         # during call-time specialization, and a quantum-into-classical
         # mismatch silently miscompiles (a ``Qubit`` bound to a ``Float``
         # parameter emits ``Rx(0.0)``).
-        for arg_name, arg_value in bound_args.arguments.items():
-            declared = self.input_types.get(arg_name)
-            if declared is not None and isinstance(arg_value, Handle):
-                _validate_param_handle(
-                    arg_name, declared, arg_value, context=f"{self.name}()"
-                )
+        _validate_bound_handles(
+            self.input_types, bound_args.arguments, context=f"{self.name}()"
+        )
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map: dict[str, Value] = {}

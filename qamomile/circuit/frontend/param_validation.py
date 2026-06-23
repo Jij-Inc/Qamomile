@@ -14,16 +14,13 @@ to reach these checks.
 from __future__ import annotations
 
 import types as _types
-from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 
 from qamomile.circuit.frontend.func_to_block import is_array_type
-from qamomile.circuit.frontend.handle import Observable
+from qamomile.circuit.frontend.handle import Handle, Observable
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Qubit, UInt
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
-
-if TYPE_CHECKING:
-    from qamomile.circuit.frontend.handle import Handle
 
 # Maps a classical scalar element annotation to the IR ``ValueType`` an
 # array of that element carries on its ``ArrayValue.type``. Used to check
@@ -400,3 +397,48 @@ def _validate_param_handle(
     # else: a structural container (``Tuple`` / ``Dict``) or an
     # unannotated parameter -- there is no scalar/array arity contract to
     # enforce here, so the handle passes through unchecked.
+
+
+def _validate_bound_handles(
+    input_types: dict[str, Any],
+    arguments: dict[str, Any],
+    *,
+    context: str = "control()",
+    allow_broadcast: bool = False,
+) -> None:
+    """Validate every bound argument handle against its declared parameter.
+
+    Iterates the bound-argument mapping and runs :func:`_validate_param_handle`
+    on each value that is a frontend ``Handle``. This is the single shared
+    entry point for every call site that binds caller handles to a kernel's
+    declared parameters -- the plain qkernel call (``QKernel.__call__``), the
+    controlled-gate call (``ControlledGate``), and the inverse-gate call
+    (``InverseGate``) -- so the same arity / quantum-vs-classical / rank checks
+    fire wherever arguments are bound, before any handle is consumed.
+
+    Non-``Handle`` values (raw Python literals such as a ``theta=0.5`` default)
+    and parameters absent from *input_types* are skipped: their promotion and
+    coercion are handled by each call site's own logic.
+
+    Args:
+        input_types (dict[str, Any]): Kernel parameter name to resolved
+            declared annotation (as recorded on ``QKernel.input_types``).
+        arguments (dict[str, Any]): Bound argument mapping (parameter name to
+            caller value), e.g. ``signature.bind(...).arguments``.
+        context (str): Call-site label used to prefix error messages, e.g.
+            ``"control()"`` or ``"my_kernel()"``. Defaults to ``"control()"``.
+        allow_broadcast (bool): Forwarded to :func:`_validate_param_handle`;
+            ``True`` lets a quantum 1-D ``Vector`` / ``VectorView`` bind to a
+            scalar ``Qubit`` parameter as a per-element broadcast (the control
+            path). Defaults to ``False``.
+
+    Raises:
+        TypeError: If any bound handle does not match its declared parameter
+            kind.
+    """
+    for name, value in arguments.items():
+        declared = input_types.get(name)
+        if declared is not None and isinstance(value, Handle):
+            _validate_param_handle(
+                name, declared, value, context, allow_broadcast=allow_broadcast
+            )

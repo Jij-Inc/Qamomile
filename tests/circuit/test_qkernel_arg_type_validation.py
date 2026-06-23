@@ -299,6 +299,38 @@ def _ok_normal_matrix() -> qmc.Bit:
     return qmc.measure(m[0, 0])
 
 
+# ``qmc.inverse`` binds caller handles to the wrapped kernel's declared
+# parameters through its own path, so it must run the same argument
+# validation as the plain and controlled calls.
+_inv_rx = qmc.inverse(_rx_target)
+_inv_vec = qmc.inverse(_vec_target)
+
+
+@qmc.qkernel
+def _err_inverse_qubit_into_float() -> qmc.Bit:
+    """P3 (inverse): a quantum ``Qubit`` passed as an inverse gate's ``theta``."""
+    qa = qmc.qubit("qa")
+    qb = qmc.qubit("qb")
+    qa = _inv_rx(qa, qb)
+    return qmc.measure(qa)
+
+
+@qmc.qkernel
+def _err_inverse_matrix_into_vec() -> qmc.Bit:
+    """Rank mismatch (inverse): a ``Matrix`` into a ``Vector[Qubit]`` inverse target."""
+    m = qmc.qubit_array((2, 2), "m")
+    out = _inv_vec(m)
+    return qmc.measure(out[0])
+
+
+@qmc.qkernel
+def _ok_inverse_vec() -> qmc.Bit:
+    """Inverse: a ``Vector[Qubit]`` into a matching ``Vector[Qubit]`` inverse target."""
+    qs = qmc.qubit_array(2, "qs")
+    qs = _inv_vec(qs)
+    return qmc.measure(qs[0])
+
+
 _ERROR_CASES = [
     ("normal_scalar_into_vec", _err_normal_scalar_into_vec),
     ("normal_vec_into_scalar", _err_normal_vec_into_scalar),
@@ -315,6 +347,8 @@ _ERROR_CASES = [
     ("normal_matrix_into_vec", _err_normal_matrix_into_vec),
     ("normal_vec_into_matrix", _err_normal_vec_into_matrix),
     ("control_matrix_broadcast", _err_control_matrix_broadcast),
+    ("inverse_qubit_into_float", _err_inverse_qubit_into_float),
+    ("inverse_matrix_into_vec", _err_inverse_matrix_into_vec),
 ]
 
 _OK_CASES = [
@@ -327,6 +361,7 @@ _OK_CASES = [
     ("control_broadcast_wholevec", _ok_control_broadcast_wholevec),
     ("control_broadcast_view", _ok_control_broadcast_view),
     ("normal_matrix", _ok_normal_matrix),
+    ("inverse_vec", _ok_inverse_vec),
 ]
 
 # Classical-only valid cases that have no quantum content (Bit pass-through)
