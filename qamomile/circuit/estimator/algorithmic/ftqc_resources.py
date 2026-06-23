@@ -266,6 +266,7 @@ class FTQCResourceReportKind(enum.StrEnum):
         DRIVER: Formula-driver resource-comparison report.
         PARETO: Multi-candidate Pareto-frontier report.
         SCENARIO: Symbolic scenario-sensitivity report.
+        SYMBOLIC_DEPENDENCIES: Free-symbol dependency report.
 
     Example:
         >>> FTQCResourceReportKind("scenario")
@@ -278,6 +279,7 @@ class FTQCResourceReportKind(enum.StrEnum):
     DRIVER = "driver"
     PARETO = "pareto"
     SCENARIO = "scenario"
+    SYMBOLIC_DEPENDENCIES = "symbolic_dependencies"
 
 
 class SupportsFTQCResourceValues(Protocol):
@@ -2236,6 +2238,225 @@ class FTQCResourceScenarioReport:
         }
 
 
+@dataclass(frozen=True)
+class FTQCResourceSymbolDependencyRow:
+    """Describe free-symbol dependencies for one FTQC resource quantity.
+
+    Args:
+        quantity (str | FTQCResourceQuantity): Canonical resource quantity.
+        expression (sp.Expr | int | float): Resource expression to inspect.
+        label (str): Reader-facing quantity label.
+        unit (str): Unit or dimension of the quantity.
+        category (FTQCResourceCategory): Modeling layer that owns the
+            quantity.
+        symbols (tuple[str, ...]): Free-symbol names discovered in the
+            expression. Defaults to an empty tuple.
+
+    Raises:
+        TypeError: If ``expression`` cannot be converted to a SymPy
+            expression.
+        ValueError: If ``quantity`` is not a known FTQC resource quantity.
+
+    Example:
+        >>> row = FTQCResourceSymbolDependencyRow(
+        ...     "runtime_seconds",
+        ...     sp.Symbol("logical_depth") * sp.Symbol("cycle_time"),
+        ...     "Runtime",
+        ...     "seconds",
+        ...     FTQCResourceCategory.PHYSICAL,
+        ... )
+        >>> row.symbols
+        ('cycle_time', 'logical_depth')
+    """
+
+    quantity: str | FTQCResourceQuantity
+    expression: sp.Expr | int | float
+    label: str
+    unit: str
+    category: FTQCResourceCategory
+    symbols: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize row fields after dataclass construction.
+
+        Raises:
+            TypeError: If ``expression`` cannot be sympified.
+            ValueError: If ``quantity`` is not a known FTQC resource quantity.
+        """
+        expression = _sympify_resource_expr(self.expression, "expression")
+        object.__setattr__(
+            self,
+            "quantity",
+            _normalize_resource_quantity(self.quantity),
+        )
+        object.__setattr__(self, "expression", expression)
+        if self.symbols:
+            object.__setattr__(self, "symbols", tuple(sorted(set(self.symbols))))
+        else:
+            object.__setattr__(
+                self,
+                "symbols",
+                _free_symbol_names((expression,)),
+            )
+
+    @property
+    def is_symbolic(self) -> bool:
+        """Return whether the expression still has free symbols.
+
+        Returns:
+            bool: True when at least one free symbol remains.
+        """
+        return bool(self.symbols)
+
+    def to_dict(self) -> dict[str, str | bool | list[str]]:
+        """Serialize the symbol-dependency row.
+
+        Returns:
+            dict[str, str | bool | list[str]]: JSON-friendly row containing
+                quantity metadata, expression text, symbol names, and symbolic
+                status.
+        """
+        quantity = cast(FTQCResourceQuantity, self.quantity)
+        return {
+            "quantity": quantity.value,
+            "label": self.label,
+            "unit": self.unit,
+            "category": self.category.value,
+            "expression": str(self.expression),
+            "symbols": list(self.symbols),
+            "is_symbolic": self.is_symbolic,
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceSymbolDependencyReport:
+    """Package free-symbol dependencies for an FTQC estimate.
+
+    Args:
+        title (str): Reader-facing report title.
+        rows (tuple[FTQCResourceSymbolDependencyRow, ...]): Dependency rows in
+            selected quantity order.
+
+    Raises:
+        TypeError: If ``rows`` contains non-row items.
+        ValueError: If ``title`` or ``rows`` is empty.
+
+    Example:
+        >>> row = FTQCResourceSymbolDependencyRow(
+        ...     "physical_qubits",
+        ...     sp.Symbol("logical_qubits") * 100,
+        ...     "Physical qubits",
+        ...     "physical qubits",
+        ...     FTQCResourceCategory.PHYSICAL,
+        ... )
+        >>> report = FTQCResourceSymbolDependencyReport("Symbols", (row,))
+        >>> report.symbol_names
+        ('logical_qubits',)
+    """
+
+    title: str
+    rows: tuple[FTQCResourceSymbolDependencyRow, ...]
+
+    def __post_init__(self) -> None:
+        """Validate report rows after dataclass construction.
+
+        Raises:
+            TypeError: If ``rows`` contains non-row items.
+            ValueError: If ``title`` or ``rows`` is empty.
+        """
+        if not self.title:
+            raise ValueError("title must not be empty.")
+        if not self.rows:
+            raise ValueError("rows must not be empty.")
+        if not all(
+            isinstance(row, FTQCResourceSymbolDependencyRow) for row in self.rows
+        ):
+            raise TypeError(
+                "rows must contain only FTQCResourceSymbolDependencyRow items."
+            )
+        object.__setattr__(self, "rows", tuple(self.rows))
+
+    @property
+    def symbolic(self) -> tuple[FTQCResourceSymbolDependencyRow, ...]:
+        """Return rows whose expressions still have free symbols.
+
+        Returns:
+            tuple[FTQCResourceSymbolDependencyRow, ...]: Symbolic rows.
+        """
+        return tuple(row for row in self.rows if row.is_symbolic)
+
+    @property
+    def resolved(self) -> tuple[FTQCResourceSymbolDependencyRow, ...]:
+        """Return rows whose expressions have no free symbols.
+
+        Returns:
+            tuple[FTQCResourceSymbolDependencyRow, ...]: Fully resolved rows.
+        """
+        return tuple(row for row in self.rows if not row.is_symbolic)
+
+    @property
+    def symbol_names(self) -> tuple[str, ...]:
+        """Return all free-symbol names used by report rows.
+
+        Returns:
+            tuple[str, ...]: Sorted unique symbol names.
+        """
+        return tuple(sorted({symbol for row in self.rows for symbol in row.symbols}))
+
+    def to_row_table(self) -> list[dict[str, str | bool]]:
+        """Return dependency rows as a flat table.
+
+        Returns:
+            list[dict[str, str | bool]]: Rows containing one resource
+                expression and comma-separated symbol names.
+        """
+        rows = []
+        for row in self.rows:
+            rows.append(
+                {
+                    "quantity": cast(FTQCResourceQuantity, row.quantity).value,
+                    "label": row.label,
+                    "unit": row.unit,
+                    "category": row.category.value,
+                    "expression": str(row.expression),
+                    "symbols": ", ".join(row.symbols),
+                    "is_symbolic": row.is_symbolic,
+                }
+            )
+        return rows
+
+    def to_dict(
+        self,
+    ) -> dict[
+        str,
+        str
+        | list[str]
+        | list[dict[str, str | bool]]
+        | list[dict[str, str | bool | list[str]]]
+        | dict[str, int],
+    ]:
+        """Serialize the symbol-dependency report.
+
+        Returns:
+            dict[str, str | list[str] | list[dict[str, str | bool]] |
+                list[dict[str, str | bool | list[str]]] | dict[str, int]]:
+                JSON-friendly report metadata, rows, symbolic rows, resolved
+                rows, and grouped counts.
+        """
+        return {
+            "title": self.title,
+            "symbols": list(self.symbol_names),
+            "rows": self.to_row_table(),
+            "symbolic": [row.to_dict() for row in self.symbolic],
+            "resolved": [row.to_dict() for row in self.resolved],
+            "counts": {
+                "symbolic": len(self.symbolic),
+                "resolved": len(self.resolved),
+                "symbols": len(self.symbol_names),
+            },
+        }
+
+
 FTQCResourceReportLike: TypeAlias = (
     FTQCResearchSignalCoverageReport
     | FTQCResourceBudgetReport
@@ -2243,6 +2464,7 @@ FTQCResourceReportLike: TypeAlias = (
     | FTQCResourceDriverReport
     | FTQCResourceParetoReport
     | FTQCResourceScenarioReport
+    | FTQCResourceSymbolDependencyReport
 )
 
 
@@ -3689,6 +3911,58 @@ def build_ftqc_resource_scenario_report(
     )
 
 
+def build_ftqc_resource_symbol_dependency_report(
+    estimate: SupportsFTQCResourceValues,
+    *,
+    title: str = "FTQC resource symbol dependencies",
+    quantities: tuple[str | FTQCResourceQuantity, ...] | None = None,
+    profile: str | FTQCResourceProfile | None = None,
+) -> FTQCResourceSymbolDependencyReport:
+    """Build a report of unresolved symbols in resource expressions.
+
+    The report is intentionally quantity-scoped rather than formula-scoped:
+    it answers which canonical resource values still depend on symbolic model
+    knobs before scenario substitutions or architecture calibration are
+    applied.
+
+    Args:
+        estimate (SupportsFTQCResourceValues): Estimate, model, or plan
+            exposing ``resource_values()``.
+        title (str): Reader-facing report title. Defaults to
+            ``"FTQC resource symbol dependencies"``.
+        quantities (tuple[str | FTQCResourceQuantity, ...] | None): Quantities
+            to inspect before optional profile quantities. Defaults to all
+            quantities exposed by ``estimate`` when ``profile`` is None.
+        profile (str | FTQCResourceProfile | None): Optional standard review
+            profile whose quantities are appended after ``quantities`` with
+            duplicates removed. Defaults to None.
+
+    Returns:
+        FTQCResourceSymbolDependencyReport: Report containing one row per
+            selected quantity and the free symbols found in each expression.
+
+    Raises:
+        ValueError: If a selected quantity is missing from ``estimate`` or if
+            ``profile`` is unknown.
+    """
+    values = estimate.resource_values()
+    selected = _select_scenario_quantities(values, quantities, profile)
+    rows = []
+    for quantity in selected:
+        expression = _sympify_resource_expr(values[quantity], quantity.value)
+        spec = describe_ftqc_resource_quantity(quantity)
+        rows.append(
+            FTQCResourceSymbolDependencyRow(
+                quantity=quantity,
+                expression=expression,
+                label=spec.label,
+                unit=spec.unit,
+                category=spec.category,
+            )
+        )
+    return FTQCResourceSymbolDependencyReport(title=title, rows=tuple(rows))
+
+
 def build_ftqc_resource_report_snapshot(
     report: FTQCResourceReportLike,
     *,
@@ -4257,6 +4531,8 @@ def _infer_resource_report_kind(
         return FTQCResourceReportKind.PARETO
     if isinstance(report, FTQCResourceScenarioReport):
         return FTQCResourceReportKind.SCENARIO
+    if isinstance(report, FTQCResourceSymbolDependencyReport):
+        return FTQCResourceReportKind.SYMBOLIC_DEPENDENCIES
     if isinstance(report, FTQCResourceComparisonReport):
         return FTQCResourceReportKind.COMPARISON
     raise TypeError("Unsupported FTQC resource report type.")

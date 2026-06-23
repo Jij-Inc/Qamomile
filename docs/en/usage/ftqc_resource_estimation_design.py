@@ -58,6 +58,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_report_bundle,
     build_ftqc_resource_report_snapshot,
     build_ftqc_resource_scenario_report,
+    build_ftqc_resource_symbol_dependency_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     evaluate_ftqc_resource_constraints,
@@ -123,9 +124,10 @@ for signal in research_signals:
 
 signal_by_key = {signal["reference_key"]: signal for signal in research_signals}
 assert "lambda_norm" in signal_by_key["arXiv:2403.03502"]["quantities"]
-assert "state_preparation_success_probability" in signal_by_key["arXiv:2601.08533"][
-    "quantities"
-]
+assert (
+    "state_preparation_success_probability"
+    in signal_by_key["arXiv:2601.08533"]["quantities"]
+)
 assert "t_gates" in signal_by_key["arXiv:2603.22778"]["quantities"]
 assert "spacetime" in signal_by_key["arXiv:2603.22778"]["profiles"]
 
@@ -180,9 +182,7 @@ assert FTQCResourceQuantity.CODE_DISTANCE.value in {row["quantity"] for row in c
 profile_catalog = {
     spec.profile: spec.to_dict() for spec in iter_ftqc_resource_profile_specs()
 }
-space_time_quantities = ftqc_resource_profile_quantities(
-    FTQCResourceProfile.SPACETIME
-)
+space_time_quantities = ftqc_resource_profile_quantities(FTQCResourceProfile.SPACETIME)
 
 print(profile_catalog[FTQCResourceProfile.SPACETIME]["description"])
 print(profile_catalog[FTQCResourceProfile.SPACETIME]["quantities"])
@@ -259,7 +259,9 @@ plan_budget = evaluate_ftqc_resource_constraints(
     title="Toy plan budget",
 )
 
-assert parallel_runtime_plan.resource_values()[FTQCResourceQuantity.RUNTIME_SECONDS] == 40
+assert (
+    parallel_runtime_plan.resource_values()[FTQCResourceQuantity.RUNTIME_SECONDS] == 40
+)
 assert plan_budget.satisfied[0].quantity == FTQCResourceQuantity.LOGICAL_QUBITS
 assert plan_budget.violated[0].quantity == FTQCResourceQuantity.TOFFOLI_GATES
 
@@ -395,9 +397,7 @@ assert uwc_model.hamiltonian.lambda_norm == reduction_summary.lambda_norm / 5
 assert uwc_model.walk_cost_toffoli == 3_000
 assert uwc_model.effective_sparsity == 4_000
 assert uwc_estimate.qpe_iterations == plain_estimate.qpe_iterations / 5
-assert uwc_estimate.toffoli_gates == plain_estimate.toffoli_gates * sp.Rational(
-    3, 20
-)
+assert uwc_estimate.toffoli_gates == plain_estimate.toffoli_gates * sp.Rational(3, 20)
 
 # %% [markdown]
 # ## Minimal Example
@@ -427,13 +427,10 @@ distance_budget = SurfaceCodeDistanceBudget(
 
 print(distance_budget.to_dict())
 assert distance_budget.code_distance == 21
-assert (
-    sp.Abs(
-        distance_budget.resource_values()[FTQCResourceQuantity.LOGICAL_ERROR_RATE]
-        - distance_budget.logical_failure_probability_per_operation
-    )
-    < sp.Float("1e-24")
-)
+assert sp.Abs(
+    distance_budget.resource_values()[FTQCResourceQuantity.LOGICAL_ERROR_RATE]
+    - distance_budget.logical_failure_probability_per_operation
+) < sp.Float("1e-24")
 
 architecture = distance_budget.to_surface_code_cost_model(
     physical_cycle_time_seconds=sp.Float("5e-8"),
@@ -743,6 +740,31 @@ assert (
 assert scenario_report.to_dict()["counts"] == {"resolved": 2, "unresolved": 0}
 
 # %% [markdown]
+# ### Symbol Dependency Audit
+#
+# Before choosing scenarios, a symbolic dependency report shows which free
+# symbols still control each selected resource quantity. This is the compact
+# checklist for architecture or algorithm knobs that must be calibrated before
+# turning a symbolic estimate into a concrete resource claim.
+
+# %%
+symbol_report = build_ftqc_resource_symbol_dependency_report(
+    symbolic_compressed,
+    profile=FTQCResourceProfile.SPACETIME,
+    title="Compressed estimate symbol dependencies",
+)
+for row in symbol_report.to_row_table():
+    print(row["quantity"], "symbols=", row["symbols"])
+
+assert "logical_cycle_time" in symbol_report.symbol_names
+assert "toffoli_throughput" in symbol_report.symbol_names
+assert any(
+    row.quantity == FTQCResourceQuantity.RUNTIME_SECONDS and row.is_symbolic
+    for row in symbol_report.rows
+)
+assert symbol_report.to_dict()["counts"]["symbols"] >= 2
+
+# %% [markdown]
 # ### Review Snapshots
 #
 # Reports keep their specialized tables, but review tooling often needs one
@@ -754,7 +776,7 @@ assert scenario_report.to_dict()["counts"] == {"resolved": 2, "unresolved": 0}
 scenario_snapshot = build_ftqc_resource_report_snapshot(scenario_report)
 review_bundle = build_ftqc_resource_report_bundle(
     "FTQC design review bundle",
-    (comparison_report, scenario_report),
+    (comparison_report, scenario_report, symbol_report),
 )
 
 print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
@@ -767,14 +789,22 @@ for row in review_bundle.to_row_table()[:2]:
 assert scenario_snapshot.to_dict()["kind"] == "scenario"
 assert scenario_snapshot.row_count == len(scenario_report.rows)
 assert review_bundle.to_dict()["counts"] == {
-    "snapshots": 2,
-    "rows": len(comparison_report.summary.rows) + len(scenario_report.rows),
+    "snapshots": 3,
+    "rows": (
+        len(comparison_report.summary.rows)
+        + len(scenario_report.rows)
+        + len(symbol_report.rows)
+    ),
 }
 assert review_bundle.to_manifest()["counts"] == review_bundle.to_dict()["counts"]
 assert review_bundle.to_manifest()["snapshots"][0]["kind"] == "comparison"
-assert review_bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
+assert review_bundle.counts_by_kind() == {
+    "comparison": 1,
+    "scenario": 1,
+    "symbolic_dependencies": 1,
+}
 assert review_bundle.to_row_table()[0]["report_kind"] == "comparison"
-assert review_bundle.to_row_table()[-1]["report_kind"] == "scenario"
+assert review_bundle.to_row_table()[-1]["report_kind"] == "symbolic_dependencies"
 
 # %% [markdown]
 # ## Early-FTQC Pattern
@@ -874,9 +904,7 @@ uwc_signal_report = build_ftqc_research_signal_report(
 print(uwc_signal_report.to_dict()["title"])
 print(uwc_signal_report.to_dict()["quantities"])
 
-assert uwc_signal_report.summary.rows[0].quantity == (
-    FTQCResourceQuantity.LAMBDA_NORM
-)
+assert uwc_signal_report.summary.rows[0].quantity == (FTQCResourceQuantity.LAMBDA_NORM)
 assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
 
@@ -1096,6 +1124,8 @@ assert budget_report.to_dict()["counts"] == {
 #   assumptions without rebuilding the algorithm estimate.
 # - `build_ftqc_resource_scenario_report` evaluates one symbolic estimate under
 #   several named architecture scenarios and reports unresolved symbols.
+# - `build_ftqc_resource_symbol_dependency_report` audits which free symbols
+#   still control each selected resource quantity before scenarios are chosen.
 # - `build_ftqc_resource_report_snapshot` and
 #   `build_ftqc_resource_report_bundle` wrap heterogeneous reports in a stable
 #   review manifest and flat row table without changing their specialized

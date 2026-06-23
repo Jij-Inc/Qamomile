@@ -40,6 +40,8 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceScenario,
     FTQCResourceScenarioReport,
     FTQCResourceScenarioRow,
+    FTQCResourceSymbolDependencyReport,
+    FTQCResourceSymbolDependencyRow,
     HamiltonianResourceReduction,
     SurfaceCodeCostModel,
     SurfaceCodeDistanceBudget,
@@ -53,6 +55,7 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_report_snapshot,
     build_ftqc_resource_review_findings,
     build_ftqc_resource_scenario_report,
+    build_ftqc_resource_symbol_dependency_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
     describe_ftqc_research_signal,
@@ -1368,6 +1371,86 @@ def test_build_ftqc_resource_scenario_report_keeps_unresolved_symbols():
             quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
             scenarios=(partial,),
             rows=(FTQCResourceScenarioRow("partial", {"physical_qubits": 100}),),
+        )
+
+
+def test_build_ftqc_resource_symbol_dependency_report_lists_free_symbols():
+    """Symbol dependency reports expose unresolved estimator knobs by quantity."""
+    logical_qubits = sp.Symbol("logical_qubits", positive=True)
+    logical_depth = sp.Symbol("logical_depth", positive=True)
+    cycle_time = sp.Symbol("logical_cycle_time", positive=True)
+    plan = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "symbolic_architecture",
+                {
+                    FTQCResourceQuantity.LOGICAL_QUBITS: logical_qubits,
+                    FTQCResourceQuantity.LOGICAL_DEPTH: logical_depth,
+                    FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME: (
+                        logical_qubits * logical_depth
+                    ),
+                    FTQCResourceQuantity.RUNTIME_SECONDS: logical_depth * cycle_time,
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: 1000,
+                    FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS: (
+                        1000 * logical_depth * cycle_time
+                    ),
+                },
+            ),
+        ),
+        title="Symbolic architecture plan",
+    )
+
+    report = build_ftqc_resource_symbol_dependency_report(
+        plan,
+        quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
+        profile=FTQCResourceProfile.SPACETIME,
+        title="Symbol audit",
+    )
+    report_dict = report.to_dict()
+    row_by_quantity = {row.quantity: row for row in report.rows}
+    table_by_quantity = {row["quantity"]: row for row in report.to_row_table()}
+    snapshot = build_ftqc_resource_report_snapshot(report)
+
+    assert isinstance(report, FTQCResourceSymbolDependencyReport)
+    assert all(isinstance(row, FTQCResourceSymbolDependencyRow) for row in report.rows)
+    assert [row.quantity for row in report.rows] == [
+        FTQCResourceQuantity.RUNTIME_SECONDS,
+        FTQCResourceQuantity.LOGICAL_QUBITS,
+        FTQCResourceQuantity.LOGICAL_DEPTH,
+        FTQCResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+        FTQCResourceQuantity.PHYSICAL_QUBITS,
+        FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ]
+    assert row_by_quantity[FTQCResourceQuantity.RUNTIME_SECONDS].symbols == (
+        "logical_cycle_time",
+        "logical_depth",
+    )
+    assert not row_by_quantity[FTQCResourceQuantity.PHYSICAL_QUBITS].is_symbolic
+    assert report.symbol_names == (
+        "logical_cycle_time",
+        "logical_depth",
+        "logical_qubits",
+    )
+    assert table_by_quantity["runtime_seconds"]["symbols"] == (
+        "logical_cycle_time, logical_depth"
+    )
+    assert report_dict["counts"] == {"symbolic": 5, "resolved": 1, "symbols": 3}
+    assert report_dict["symbolic"][0]["quantity"] == "runtime_seconds"
+    assert snapshot.kind is FTQCResourceReportKind.SYMBOLIC_DEPENDENCIES
+    assert snapshot.to_dict()["kind"] == "symbolic_dependencies"
+    assert snapshot.counts == {"symbolic": 5, "resolved": 1, "symbols": 3}
+
+    with pytest.raises(ValueError, match="missing"):
+        build_ftqc_resource_symbol_dependency_report(
+            plan,
+            quantities=(FTQCResourceQuantity.T_GATES,),
+        )
+    with pytest.raises(ValueError, match="rows must not be empty"):
+        FTQCResourceSymbolDependencyReport("empty", ())
+    with pytest.raises(TypeError, match="FTQCResourceSymbolDependencyRow"):
+        FTQCResourceSymbolDependencyReport(
+            "bad",
+            (object(),),  # type: ignore[arg-type]
         )
 
 
