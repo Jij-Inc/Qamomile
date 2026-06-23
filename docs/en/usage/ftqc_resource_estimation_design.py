@@ -747,8 +747,8 @@ assert scenario_report.to_dict()["counts"] == {"resolved": 2, "unresolved": 0}
 #
 # Reports keep their specialized tables, but review tooling often needs one
 # stable envelope with a report kind, row count, grouped counts, and payload.
-# Snapshot and bundle helpers provide that manifest without changing the
-# report-specific dictionaries.
+# Snapshot and bundle helpers provide that envelope and a compact manifest
+# without changing the report-specific dictionaries.
 
 # %%
 scenario_snapshot = build_ftqc_resource_report_snapshot(scenario_report)
@@ -759,6 +759,7 @@ review_bundle = build_ftqc_resource_report_bundle(
 
 print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
 print(review_bundle.to_dict()["counts"])
+print(review_bundle.to_manifest()["counts_by_kind"])
 print(review_bundle.counts_by_kind())
 for row in review_bundle.to_row_table()[:2]:
     print(row["report_kind"], row.get("label", row.get("quantity")))
@@ -769,6 +770,8 @@ assert review_bundle.to_dict()["counts"] == {
     "snapshots": 2,
     "rows": len(comparison_report.summary.rows) + len(scenario_report.rows),
 }
+assert review_bundle.to_manifest()["counts"] == review_bundle.to_dict()["counts"]
+assert review_bundle.to_manifest()["snapshots"][0]["kind"] == "comparison"
 assert review_bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
 assert review_bundle.to_row_table()[0]["report_kind"] == "comparison"
 assert review_bundle.to_row_table()[-1]["report_kind"] == "scenario"

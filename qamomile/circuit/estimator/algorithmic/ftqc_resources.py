@@ -2344,6 +2344,8 @@ class FTQCResourceReportBundle:
         1
         >>> bundle.to_row_table()[0]["report_kind"]
         'comparison'
+        >>> bundle.to_manifest()["counts_by_kind"]
+        {'comparison': 1}
     """
 
     title: str
@@ -2405,6 +2407,33 @@ class FTQCResourceReportBundle:
                 )
         return rows
 
+    def to_manifest(self) -> dict[str, Any]:
+        """Return stable bundle metadata for review tooling.
+
+        Returns:
+            dict[str, Any]: JSON-friendly bundle manifest containing title,
+                aggregate counts, counts grouped by report kind, and compact
+                snapshot metadata without the full report payloads.
+        """
+        return {
+            "title": self.title,
+            "counts": {
+                "snapshots": len(self.snapshots),
+                "rows": sum(snapshot.row_count for snapshot in self.snapshots),
+            },
+            "counts_by_kind": self.counts_by_kind(),
+            "snapshots": [
+                {
+                    "index": index,
+                    "kind": cast(FTQCResourceReportKind, snapshot.kind).value,
+                    "title": snapshot.title,
+                    "row_count": snapshot.row_count,
+                    "counts": dict(snapshot.counts or {}),
+                }
+                for index, snapshot in enumerate(self.snapshots)
+            ],
+        }
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the report bundle.
 
@@ -2413,15 +2442,14 @@ class FTQCResourceReportBundle:
                 flattened rows, total counts, and counts grouped by report
                 kind.
         """
+        manifest = self.to_manifest()
         return {
             "title": self.title,
             "snapshots": [snapshot.to_dict() for snapshot in self.snapshots],
             "rows": self.to_row_table(),
-            "counts": {
-                "snapshots": len(self.snapshots),
-                "rows": sum(snapshot.row_count for snapshot in self.snapshots),
-            },
-            "counts_by_kind": self.counts_by_kind(),
+            "manifest": manifest,
+            "counts": manifest["counts"],
+            "counts_by_kind": manifest["counts_by_kind"],
         }
 
 

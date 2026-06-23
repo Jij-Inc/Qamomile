@@ -1430,6 +1430,7 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
     )
     bundle_dict = bundle.to_dict()
     bundle_rows = bundle.to_row_table()
+    bundle_manifest = bundle.to_manifest()
 
     assert isinstance(snapshot, FTQCResourceReportSnapshot)
     assert snapshot.kind is FTQCResourceReportKind.COMPARISON
@@ -1438,6 +1439,31 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
     assert snapshot.to_dict()["payload"]["title"] == "Runtime comparison"
     assert isinstance(bundle, FTQCResourceReportBundle)
     assert bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
+    assert bundle_manifest == bundle_dict["manifest"]
+    assert bundle_manifest["counts"] == {"snapshots": 2, "rows": 3}
+    assert bundle_manifest["counts_by_kind"] == {"comparison": 1, "scenario": 1}
+    assert bundle_manifest["snapshots"] == [
+        {
+            "index": 0,
+            "kind": "comparison",
+            "title": "Runtime comparison",
+            "row_count": 1,
+            "counts": {
+                "smaller": 1,
+                "larger": 0,
+                "unchanged": 0,
+                "symbolic": 0,
+            },
+        },
+        {
+            "index": 1,
+            "kind": "scenario",
+            "title": "FTQC resource scenario report",
+            "row_count": 2,
+            "counts": {"resolved": 2, "unresolved": 0},
+        },
+    ]
+    assert "payload" not in bundle_manifest["snapshots"][0]
     assert bundle_dict["counts"] == {"snapshots": 2, "rows": 3}
     assert bundle_dict["rows"] == bundle_rows
     assert bundle_dict["snapshots"][1]["kind"] == "scenario"
