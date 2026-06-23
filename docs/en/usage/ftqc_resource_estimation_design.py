@@ -782,6 +782,7 @@ review_bundle = build_ftqc_resource_report_bundle(
 print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
 print(review_bundle.to_dict()["counts"])
 print(review_bundle.to_manifest()["counts_by_kind"])
+print(review_bundle.to_manifest()["symbol_names"])
 print(review_bundle.counts_by_kind())
 for row in review_bundle.to_row_table()[:2]:
     print(row["report_kind"], row.get("label", row.get("quantity")))
@@ -798,6 +799,8 @@ assert review_bundle.to_dict()["counts"] == {
 }
 assert review_bundle.to_manifest()["counts"] == review_bundle.to_dict()["counts"]
 assert review_bundle.to_manifest()["snapshots"][0]["kind"] == "comparison"
+assert "logical_cycle_time" in review_bundle.to_manifest()["symbol_names"]
+assert "toffoli_throughput" in review_bundle.to_manifest()["symbol_names"]
 assert review_bundle.counts_by_kind() == {
     "comparison": 1,
     "scenario": 1,

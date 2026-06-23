@@ -1538,6 +1538,7 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
                 "symbolic": 0,
             },
             "reference_keys": [],
+            "symbol_names": [],
         },
         {
             "index": 1,
@@ -1546,9 +1547,11 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
             "row_count": 2,
             "counts": {"resolved": 2, "unresolved": 0},
             "reference_keys": [],
+            "symbol_names": [],
         },
     ]
     assert bundle_manifest["reference_keys"] == []
+    assert bundle_manifest["symbol_names"] == []
     assert "payload" not in bundle_manifest["snapshots"][0]
     assert bundle_dict["counts"] == {"snapshots": 2, "rows": 3}
     assert bundle_dict["rows"] == bundle_rows
@@ -1671,6 +1674,75 @@ def test_ftqc_report_bundle_manifest_collects_reference_keys():
         0,
     )
     with pytest.raises(ValueError, match="reference_keys"):
+        malformed.to_dict()
+
+
+def test_ftqc_report_bundle_manifest_collects_symbol_names():
+    """Report bundle manifests expose unresolved symbolic dependency names."""
+    x = sp.Symbol("x")
+    y = sp.Symbol("y")
+    z = sp.Symbol("z")
+    symbol_report = FTQCResourceSymbolDependencyReport(
+        "Symbol dependencies",
+        (
+            FTQCResourceSymbolDependencyRow(
+                FTQCResourceQuantity.RUNTIME_SECONDS,
+                x + y,
+                "Runtime",
+                "seconds",
+                FTQCResourceCategory.PHYSICAL,
+            ),
+            FTQCResourceSymbolDependencyRow(
+                FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+                x * z,
+                "Physical qubit-seconds",
+                "physical qubit-seconds",
+                FTQCResourceCategory.PHYSICAL,
+            ),
+        ),
+    )
+    scenario_report = FTQCResourceScenarioReport(
+        title="Partial scenarios",
+        quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
+        scenarios=(FTQCResourceScenario("partial", {}),),
+        rows=(
+            FTQCResourceScenarioRow(
+                "partial",
+                {FTQCResourceQuantity.RUNTIME_SECONDS: y + z},
+                unresolved_symbols=("y", "z"),
+            ),
+        ),
+    )
+    bundle = build_ftqc_resource_report_bundle(
+        "Symbol review bundle",
+        (symbol_report, scenario_report),
+    )
+    symbol_snapshot = build_ftqc_resource_report_snapshot(symbol_report)
+    manifest = bundle.to_manifest()
+
+    assert symbol_snapshot.to_dict()["symbol_names"] == ["x", "y", "z"]
+    assert manifest["symbol_names"] == ["x", "y", "z"]
+    assert manifest["snapshots"][0]["symbol_names"] == ["x", "y", "z"]
+    assert manifest["snapshots"][1]["symbol_names"] == ["y", "z"]
+
+    display_string_payload = FTQCResourceReportSnapshot(
+        "symbolic_dependencies",
+        "Display symbols",
+        {
+            "title": "Display symbols",
+            "rows": [{"symbols": "x, y"}],
+        },
+        1,
+    )
+    assert display_string_payload.to_dict()["symbol_names"] == []
+
+    malformed = FTQCResourceReportSnapshot(
+        "symbolic_dependencies",
+        "Malformed symbols",
+        {"title": "Malformed symbols", "symbols": [object()]},
+        0,
+    )
+    with pytest.raises(ValueError, match="symbols"):
         malformed.to_dict()
 
 

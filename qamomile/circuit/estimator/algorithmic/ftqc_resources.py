@@ -2529,7 +2529,8 @@ class FTQCResourceReportSnapshot:
 
         Returns:
             dict[str, Any]: JSON-friendly snapshot envelope containing kind,
-                title, row count, grouped counts, reference keys, and payload.
+                title, row count, grouped counts, reference keys, symbol names,
+                and payload.
         """
         kind = cast(FTQCResourceReportKind, self.kind)
         return {
@@ -2538,6 +2539,7 @@ class FTQCResourceReportSnapshot:
             "row_count": self.row_count,
             "counts": dict(self.counts or {}),
             "reference_keys": list(_extract_report_reference_keys(self.payload)),
+            "symbol_names": list(_extract_report_symbol_names(self.payload)),
             "payload": dict(self.payload),
         }
 
@@ -2654,6 +2656,15 @@ class FTQCResourceReportBundle:
                     )
                 )
             ),
+            "symbol_names": list(
+                _dedupe_strings(
+                    tuple(
+                        symbol
+                        for snapshot in self.snapshots
+                        for symbol in _extract_report_symbol_names(snapshot.payload)
+                    )
+                )
+            ),
             "snapshots": [
                 {
                     "index": index,
@@ -2663,6 +2674,9 @@ class FTQCResourceReportBundle:
                     "counts": dict(snapshot.counts or {}),
                     "reference_keys": list(
                         _extract_report_reference_keys(snapshot.payload)
+                    ),
+                    "symbol_names": list(
+                        _extract_report_symbol_names(snapshot.payload)
                     ),
                 }
                 for index, snapshot in enumerate(self.snapshots)
@@ -4625,6 +4639,52 @@ def _extract_report_reference_keys(payload: dict[str, Any]) -> tuple[str, ...]:
     keys: list[str] = []
     _collect_report_reference_keys(payload, keys)
     return _dedupe_strings(tuple(keys))
+
+
+def _extract_report_symbol_names(payload: dict[str, Any]) -> tuple[str, ...]:
+    """Extract structured symbolic dependency names from a report payload.
+
+    Args:
+        payload (dict[str, Any]): Serialized report payload.
+
+    Returns:
+        tuple[str, ...]: Deduplicated symbol names discovered in structured
+            ``symbols``, ``symbol_names``, or ``unresolved_symbols`` fields.
+
+    Raises:
+        ValueError: If a structured symbol-name field is list-shaped but does
+            not contain only strings.
+    """
+    names: list[str] = []
+    _collect_report_symbol_names(payload, names)
+    return _dedupe_strings(tuple(names))
+
+
+def _collect_report_symbol_names(value: Any, names: list[str]) -> None:
+    """Collect structured symbol names recursively.
+
+    Args:
+        value (Any): JSON-like value to inspect.
+        names (list[str]): Mutable output list that receives symbol names.
+
+    Raises:
+        ValueError: If a structured symbol-name field is a malformed list.
+    """
+    if isinstance(value, dict):
+        for field, field_value in value.items():
+            if field in {"symbols", "symbol_names", "unresolved_symbols"}:
+                if isinstance(field_value, list):
+                    if not all(isinstance(name, str) for name in field_value):
+                        raise ValueError(
+                            f"report payload {field} must be a list of strings."
+                        )
+                    names.extend(field_value)
+                continue
+            _collect_report_symbol_names(field_value, names)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_report_symbol_names(item, names)
 
 
 def _collect_report_reference_keys(value: Any, keys: list[str]) -> None:
