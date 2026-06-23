@@ -40,16 +40,26 @@ class ResourceQuantity(enum.StrEnum):
         N_PAULI_TERMS: Number of non-identity Pauli terms.
         LAMBDA_NORM: Hamiltonian normalization driving QPE calls.
         MAX_LOCALITY: Maximum Pauli-string locality.
+        SYSTEM_QUBITS: Logical system-register qubits in a block encoding.
+        BLOCK_ENCODING_ANCILLA_QUBITS: Ancilla and workspace qubits used by a
+            block encoding before QPE readout qubits are added.
+        PREPARE_COST_TOFFOLI: Toffoli cost of one PREPARE call.
+        SELECT_COST_TOFFOLI: Toffoli cost of one SELECT or oracle call.
+        REFLECTION_COST_TOFFOLI: Toffoli cost of the reflection in one
+            qubitized walk.
+        QPE_REGISTER_QUBITS: Optional QPE readout-register qubits.
         WALK_COST_TOFFOLI: Toffoli cost of one qubitized walk.
         QPE_ITERATIONS: Number of phase-estimation walk or time-evolution
             calls.
         LOGICAL_QUBITS: Logical qubits required by an algorithm.
         LOGICAL_DEPTH: Logical-depth proxy.
+        LOGICAL_SPACETIME_VOLUME: Logical qubit-layer volume proxy.
         NON_CLIFFORD_COUNT: T, Toffoli, or equivalent non-Clifford count.
         T_GATES: T-gate or T-equivalent count.
         MULTI_QUBIT_GATES: Multi-qubit gate-count proxy.
         PHYSICAL_QUBITS: Physical qubits under an architecture model.
         RUNTIME_SECONDS: Runtime proxy in seconds.
+        PHYSICAL_QUBIT_SECONDS: Physical qubit-second space-time proxy.
         PHYSICAL_QUBITS_PER_LOGICAL: Physical overhead per logical qubit.
         LOGICAL_CYCLE_TIME_SECONDS: Logical layer or cycle time.
         FACTORY_QUBITS: Physical qubits reserved for factories.
@@ -75,15 +85,23 @@ class ResourceQuantity(enum.StrEnum):
     N_PAULI_TERMS = "n_pauli_terms"
     LAMBDA_NORM = "lambda_norm"
     MAX_LOCALITY = "max_locality"
+    SYSTEM_QUBITS = "system_qubits"
+    BLOCK_ENCODING_ANCILLA_QUBITS = "block_encoding_ancilla_qubits"
+    PREPARE_COST_TOFFOLI = "prepare_cost_toffoli"
+    SELECT_COST_TOFFOLI = "select_cost_toffoli"
+    REFLECTION_COST_TOFFOLI = "reflection_cost_toffoli"
+    QPE_REGISTER_QUBITS = "qpe_register_qubits"
     WALK_COST_TOFFOLI = "walk_cost_toffoli"
     QPE_ITERATIONS = "qpe_iterations"
     LOGICAL_QUBITS = "logical_qubits"
     LOGICAL_DEPTH = "logical_depth"
+    LOGICAL_SPACETIME_VOLUME = "logical_spacetime_volume"
     NON_CLIFFORD_COUNT = "non_clifford_count"
     T_GATES = "t_gates"
     MULTI_QUBIT_GATES = "multi_qubit_gates"
     PHYSICAL_QUBITS = "physical_qubits"
     RUNTIME_SECONDS = "runtime_seconds"
+    PHYSICAL_QUBIT_SECONDS = "physical_qubit_seconds"
     PHYSICAL_QUBITS_PER_LOGICAL = "physical_qubits_per_logical"
     LOGICAL_CYCLE_TIME_SECONDS = "logical_cycle_time_seconds"
     FACTORY_QUBITS = "factory_qubits"
@@ -239,6 +257,48 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "Maximum number of non-identity Pauli factors in one term.",
     ),
     ResourceQuantitySpec(
+        ResourceQuantity.SYSTEM_QUBITS,
+        "System qubits",
+        "logical qubits",
+        ResourceCategory.PROBLEM,
+        "Logical system-register qubits in a block-encoding model.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.BLOCK_ENCODING_ANCILLA_QUBITS,
+        "Block-encoding ancilla qubits",
+        "logical qubits",
+        ResourceCategory.ALGORITHM,
+        "Ancilla and workspace qubits used by a block encoding.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.PREPARE_COST_TOFFOLI,
+        "PREPARE cost",
+        "Toffoli gates per call",
+        ResourceCategory.ALGORITHM,
+        "Toffoli cost of one PREPARE or inverse-PREPARE call.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.SELECT_COST_TOFFOLI,
+        "SELECT cost",
+        "Toffoli gates per call",
+        ResourceCategory.ALGORITHM,
+        "Toffoli cost of one SELECT or oracle call.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.REFLECTION_COST_TOFFOLI,
+        "Reflection cost",
+        "Toffoli gates per walk",
+        ResourceCategory.ALGORITHM,
+        "Toffoli cost of the reflection used by one qubitized walk.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.QPE_REGISTER_QUBITS,
+        "QPE register qubits",
+        "logical qubits",
+        ResourceCategory.ALGORITHM,
+        "Optional phase-readout qubits used by an explicit QPE routine.",
+    ),
+    ResourceQuantitySpec(
         ResourceQuantity.WALK_COST_TOFFOLI,
         "Walk cost",
         "Toffoli gates per walk",
@@ -265,6 +325,13 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "logical layers",
         ResourceCategory.LOGICAL,
         "Logical circuit-depth proxy after algorithmic repetition factors.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+        "Logical space-time volume",
+        "logical qubit-layers",
+        ResourceCategory.LOGICAL,
+        "Logical qubits multiplied by logical-depth proxy.",
     ),
     ResourceQuantitySpec(
         ResourceQuantity.NON_CLIFFORD_COUNT,
@@ -300,6 +367,13 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "seconds",
         ResourceCategory.PHYSICAL,
         "Wall-clock runtime proxy under the selected architecture model.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        "Physical qubit-seconds",
+        "physical qubit-seconds",
+        ResourceCategory.PHYSICAL,
+        "Physical qubits multiplied by runtime proxy.",
     ),
     ResourceQuantitySpec(
         ResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL,

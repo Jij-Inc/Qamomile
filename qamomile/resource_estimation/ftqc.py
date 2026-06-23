@@ -521,11 +521,17 @@ class FTQCPhysicalResourceEstimate:
         values = {
             "logical_qubits": self.logical.qubits,
             "logical_depth": self.logical_depth,
+            "logical_spacetime_volume": sp.simplify(
+                self.logical.qubits * self.logical_depth
+            ),
             "non_clifford_count": self.non_clifford_count,
             "t_gates": self.logical.gates.t_gates,
             "multi_qubit_gates": self.logical.gates.multi_qubit,
             "physical_qubits": self.physical_qubits,
             "runtime_seconds": self.runtime_seconds,
+            "physical_qubit_seconds": sp.simplify(
+                self.physical_qubits * self.runtime_seconds
+            ),
             **self.architecture_values,
         }
         if "qpe_iterations" in self.logical.gates.oracle_calls:

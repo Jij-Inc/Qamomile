@@ -7,6 +7,10 @@ from qamomile.circuit.estimator import (
     estimate_resources,
     qubits_counter,
 )
+from qamomile.resource_estimation.block_encoding import (
+    BlockEncodingResource,
+    estimate_qubitized_qpe_resources_from_block_encoding,
+)
 from qamomile.resource_estimation.ftqc import (
     FTQCCostModel,
     FTQCPhysicalResourceEstimate,
@@ -41,6 +45,7 @@ __all__ = [
     "FTQCCostModel",
     "FTQCPhysicalResourceEstimate",
     "GateCount",
+    "BlockEncodingResource",
     "HamiltonianQPEWorkload",
     "HamiltonianRepresentation",
     "PauliHamiltonianResource",
@@ -55,6 +60,7 @@ __all__ = [
     "describe_resource_quantity",
     "estimate_physical_resources",
     "estimate_qubitized_qpe_resources",
+    "estimate_qubitized_qpe_resources_from_block_encoding",
     "estimate_qubitized_qpe_resources_from_workload",
     "estimate_resources",
     "estimate_trotter_qpe_resources",

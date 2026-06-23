@@ -30,7 +30,9 @@ def test_quantity_specs_cover_core_resource_layers():
 
     assert ResourceQuantity.LAMBDA_NORM in quantities
     assert ResourceQuantity.NON_CLIFFORD_COUNT in quantities
+    assert ResourceQuantity.LOGICAL_SPACETIME_VOLUME in quantities
     assert ResourceQuantity.PHYSICAL_QUBITS in quantities
+    assert ResourceQuantity.PHYSICAL_QUBIT_SECONDS in quantities
     assert ResourceQuantity.CODE_DISTANCE in quantities
     assert ResourceQuantity.FACTORY_COUNT in quantities
     assert {
@@ -150,6 +152,36 @@ def test_compare_physical_estimates_uses_canonical_values():
     assert sp.simplify(rows[0].ratio - sp.Rational(1, 2)) == 0
     assert rows[1].quantity == ResourceQuantity.NON_CLIFFORD_COUNT
     assert sp.simplify(rows[1].ratio - sp.Rational(1, 2)) == 0
+
+
+def test_physical_estimate_exposes_spacetime_values():
+    """Physical estimates expose logical and physical space-time proxies."""
+    summary = summarize_pauli_hamiltonian(2 * qm_o.Z(0) + 3 * qm_o.X(1))
+    logical = estimate_qubitized_qpe_resources_from_workload(
+        HamiltonianQPEWorkload(
+            hamiltonian=summary,
+            representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+            walk_cost_toffoli=10,
+        ),
+        precision=1,
+    )
+    physical = estimate_physical_resources(
+        logical,
+        FTQCCostModel(
+            physical_qubits_per_logical=100,
+            logical_cycle_time_seconds=sp.Float("1e-6"),
+            factory_qubits=10,
+            non_clifford_throughput_per_second=sp.Float("1e5"),
+        ),
+    )
+    values = physical.resource_values()
+
+    assert values["logical_spacetime_volume"] == (
+        physical.logical.qubits * physical.logical_depth
+    )
+    assert values["physical_qubit_seconds"] == (
+        physical.physical_qubits * physical.runtime_seconds
+    )
 
 
 def test_compare_resource_values_defaults_to_common_quantities():
