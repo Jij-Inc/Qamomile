@@ -1429,6 +1429,7 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
         (comparison, scenario),
     )
     bundle_dict = bundle.to_dict()
+    bundle_rows = bundle.to_row_table()
 
     assert isinstance(snapshot, FTQCResourceReportSnapshot)
     assert snapshot.kind is FTQCResourceReportKind.COMPARISON
@@ -1438,8 +1439,29 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
     assert isinstance(bundle, FTQCResourceReportBundle)
     assert bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
     assert bundle_dict["counts"] == {"snapshots": 2, "rows": 3}
+    assert bundle_dict["rows"] == bundle_rows
     assert bundle_dict["snapshots"][1]["kind"] == "scenario"
     assert bundle_dict["snapshots"][1]["counts"] == {"resolved": 2, "unresolved": 0}
+    assert bundle_rows[0]["snapshot_index"] == 0
+    assert bundle_rows[0]["report_kind"] == "comparison"
+    assert bundle_rows[0]["report_title"] == "Runtime comparison"
+    assert bundle_rows[0]["quantity"] == "runtime_seconds"
+    assert bundle_rows[1]["snapshot_index"] == 1
+    assert bundle_rows[1]["report_kind"] == "scenario"
+    assert bundle_rows[1]["label"] == "slow"
+    assert bundle_rows[2]["row_index"] == 1
+    colliding = FTQCResourceReportBundle(
+        "colliding",
+        (
+            FTQCResourceReportSnapshot(
+                "comparison",
+                "Colliding",
+                {"title": "Colliding", "rows": [{"report_kind": "payload"}]},
+                1,
+            ),
+        ),
+    )
+    assert colliding.to_row_table()[0]["report_kind"] == "comparison"
 
     overridden = build_ftqc_resource_report_snapshot(
         comparison,
@@ -1460,6 +1482,19 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
             0,
             {"resolved": -1},
         )
+    malformed = FTQCResourceReportBundle(
+        "malformed",
+        (
+            FTQCResourceReportSnapshot(
+                "comparison",
+                "Malformed",
+                {"title": "Malformed", "rows": ["bad"]},
+                1,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="rows must contain dictionaries"):
+        malformed.to_row_table()
 
 
 def test_audit_ftqc_research_signal_coverage_marks_missing_quantities():

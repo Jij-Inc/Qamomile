@@ -2342,6 +2342,8 @@ class FTQCResourceReportBundle:
         >>> bundle = FTQCResourceReportBundle("Review", (snapshot,))
         >>> bundle.to_dict()["counts"]["rows"]
         1
+        >>> bundle.to_row_table()[0]["report_kind"]
+        'comparison'
     """
 
     title: str
@@ -2379,16 +2381,42 @@ class FTQCResourceReportBundle:
             counts[kind.value] = counts.get(kind.value, 0) + 1
         return counts
 
+    def to_row_table(self) -> list[dict[str, Any]]:
+        """Return all snapshot rows as one review table.
+
+        Returns:
+            list[dict[str, Any]]: Flattened rows. Each row preserves the
+                original report row fields and adds ``snapshot_index``,
+                ``report_kind``, ``report_title``, and ``row_index`` columns.
+        """
+        rows: list[dict[str, Any]] = []
+        for snapshot_index, snapshot in enumerate(self.snapshots):
+            kind = cast(FTQCResourceReportKind, snapshot.kind)
+            payload_rows = _extract_report_rows(snapshot.payload)
+            for row_index, payload_row in enumerate(payload_rows):
+                rows.append(
+                    {
+                        **payload_row,
+                        "snapshot_index": snapshot_index,
+                        "report_kind": kind.value,
+                        "report_title": snapshot.title,
+                        "row_index": row_index,
+                    }
+                )
+        return rows
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the report bundle.
 
         Returns:
             dict[str, Any]: JSON-friendly bundle containing snapshot payloads,
-                total counts, and counts grouped by report kind.
+                flattened rows, total counts, and counts grouped by report
+                kind.
         """
         return {
             "title": self.title,
             "snapshots": [snapshot.to_dict() for snapshot in self.snapshots],
+            "rows": self.to_row_table(),
             "counts": {
                 "snapshots": len(self.snapshots),
                 "rows": sum(snapshot.row_count for snapshot in self.snapshots),
@@ -4210,6 +4238,33 @@ def _extract_report_row_count(payload: dict[str, Any]) -> int:
     if isinstance(results, list):
         return len(results)
     return 0
+
+
+def _extract_report_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract primary rows from a report payload.
+
+    Args:
+        payload (dict[str, Any]): Serialized report payload.
+
+    Returns:
+        list[dict[str, Any]]: Shallow copies of row dictionaries from
+            ``payload["rows"]`` or, for budget reports, ``payload["results"]``.
+
+    Raises:
+        ValueError: If a row-like payload field exists but does not contain
+            dictionaries.
+    """
+    raw_rows = payload.get("rows")
+    if raw_rows is None:
+        raw_rows = payload.get("results", [])
+    if not isinstance(raw_rows, list):
+        raise ValueError("report payload rows must be a list.")
+    rows = []
+    for row in raw_rows:
+        if not isinstance(row, dict):
+            raise ValueError("report payload rows must contain dictionaries.")
+        rows.append(dict(row))
+    return rows
 
 
 def _extract_report_counts(payload: dict[str, Any]) -> dict[str, int]:

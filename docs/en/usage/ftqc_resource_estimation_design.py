@@ -760,6 +760,8 @@ review_bundle = build_ftqc_resource_report_bundle(
 print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
 print(review_bundle.to_dict()["counts"])
 print(review_bundle.counts_by_kind())
+for row in review_bundle.to_row_table()[:2]:
+    print(row["report_kind"], row.get("label", row.get("quantity")))
 
 assert scenario_snapshot.to_dict()["kind"] == "scenario"
 assert scenario_snapshot.row_count == len(scenario_report.rows)
@@ -768,6 +770,8 @@ assert review_bundle.to_dict()["counts"] == {
     "rows": len(comparison_report.summary.rows) + len(scenario_report.rows),
 }
 assert review_bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
+assert review_bundle.to_row_table()[0]["report_kind"] == "comparison"
+assert review_bundle.to_row_table()[-1]["report_kind"] == "scenario"
 
 # %% [markdown]
 # ## Early-FTQC Pattern
@@ -1064,7 +1068,8 @@ assert budget_report.to_dict()["counts"] == {
 #   several named architecture scenarios and reports unresolved symbols.
 # - `build_ftqc_resource_report_snapshot` and
 #   `build_ftqc_resource_report_bundle` wrap heterogeneous reports in a stable
-#   review manifest without changing their specialized payloads.
+#   review manifest and flat row table without changing their specialized
+#   payloads.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable
 #   savings tables without hard-coding a particular chemistry factorization.
 # - `summarize_ftqc_resource_comparison` groups those rows into smaller,

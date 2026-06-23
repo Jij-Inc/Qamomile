@@ -701,6 +701,8 @@ review_bundle = build_ftqc_resource_report_bundle(
 print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
 print(review_bundle.to_dict()["counts"])
 print(review_bundle.counts_by_kind())
+for row in review_bundle.to_row_table()[:2]:
+    print(row["report_kind"], row.get("label", row.get("quantity")))
 
 assert scenario_snapshot.to_dict()["kind"] == "scenario"
 assert scenario_snapshot.row_count == len(scenario_report.rows)
@@ -709,6 +711,8 @@ assert review_bundle.to_dict()["counts"] == {
     "rows": len(comparison_report.summary.rows) + len(scenario_report.rows),
 }
 assert review_bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
+assert review_bundle.to_row_table()[0]["report_kind"] == "comparison"
+assert review_bundle.to_row_table()[-1]["report_kind"] == "scenario"
 
 # %% [markdown]
 # ## Early-FTQCのパターン
@@ -959,7 +963,7 @@ assert budget_report.to_dict()["counts"] == {
 # - reportでcircuit-level estimateと同じ形が必要な場合は、FTQC estimateを共通のlogical `ResourceEstimate` objectとして見られます。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `build_ftqc_resource_scenario_report`を使うと、1つのsymbolic estimateを複数の名前付きarchitecture scenarioで評価し、未解決のsymbolも確認できます。
-# - `build_ftqc_resource_report_snapshot`と`build_ftqc_resource_report_bundle`を使うと、reportごとの専用payloadを変えずに、異なるreportを安定したreview manifestへまとめられます。
+# - `build_ftqc_resource_report_snapshot`と`build_ftqc_resource_report_bundle`を使うと、reportごとの専用payloadを変えずに、異なるreportを安定したreview manifestとflat row tableへまとめられます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
 # - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、優先順位つきfinding、grouped countをreview artifactとしてまとめられます。
