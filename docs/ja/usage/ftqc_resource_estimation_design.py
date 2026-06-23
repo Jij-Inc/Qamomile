@@ -842,6 +842,31 @@ assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in driver_quantities
 assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
 
 # %% [markdown]
+# Report bundleは、軽量なmanifestの中に構造化されたresearch provenanceも残します。これにより、review toolingはすべてのnested payloadを読み込まなくても、そのartifactがどのpaper-level signalを確認するために作られたかを追跡できます。
+
+# %%
+research_review_bundle = build_ftqc_resource_report_bundle(
+    "UWC research review bundle",
+    (signal_catalog_report, uwc_signal_report, uwc_driver_report),
+)
+research_manifest = research_review_bundle.to_manifest()
+print(research_manifest["reference_keys"])
+
+assert research_manifest["reference_keys"] == [
+    "arXiv:2603.22778",
+    "arXiv:2601.08533",
+]
+assert research_manifest["counts_by_kind"] == {
+    "research_signal_coverage": 1,
+    "comparison": 1,
+    "driver": 1,
+}
+assert research_manifest["snapshots"][0]["reference_keys"] == [
+    "arXiv:2603.22778",
+    "arXiv:2601.08533",
+]
+
+# %% [markdown]
 # ## Pareto Frontierレビュー
 #
 # ペアごとの比較は有用ですが、FTQC設計レビューでは複数の候補を競合する目的で比べることがよくあります。Pareto reportでは、別の候補が選択したすべてのresource quantityで同じか小さく、少なくとも1つで厳密に小さい場合にだけ、その候補をdominatedとして扱います。symbolicなtradeoffはfrontierに残るため、reviewerが確認できます。

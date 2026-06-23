@@ -1454,6 +1454,7 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
                 "unchanged": 0,
                 "symbolic": 0,
             },
+            "reference_keys": [],
         },
         {
             "index": 1,
@@ -1461,8 +1462,10 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
             "title": "FTQC resource scenario report",
             "row_count": 2,
             "counts": {"resolved": 2, "unresolved": 0},
+            "reference_keys": [],
         },
     ]
+    assert bundle_manifest["reference_keys"] == []
     assert "payload" not in bundle_manifest["snapshots"][0]
     assert bundle_dict["counts"] == {"snapshots": 2, "rows": 3}
     assert bundle_dict["rows"] == bundle_rows
@@ -1521,6 +1524,71 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
     )
     with pytest.raises(ValueError, match="rows must contain dictionaries"):
         malformed.to_row_table()
+
+
+def test_ftqc_report_bundle_manifest_collects_reference_keys():
+    """Report bundle manifests expose structured research provenance."""
+    referenced = FTQCResourceReportSnapshot(
+        "comparison",
+        "Referenced comparison",
+        {
+            "title": "Referenced comparison",
+            "rows": [{"quantity": "runtime_seconds"}],
+            "reference_keys": ["arXiv:2403.03502"],
+            "formulas": [
+                {
+                    "quantity": "runtime_seconds",
+                    "reference_keys": [
+                        "arXiv:1610.06546",
+                        "arXiv:2403.03502",
+                    ],
+                }
+            ],
+            "references": [{"key": "internal:loader"}],
+        },
+        1,
+    )
+    coverage = FTQCResourceReportSnapshot(
+        "research_signal_coverage",
+        "Coverage",
+        {
+            "title": "Coverage",
+            "rows": [{"reference_key": "arXiv:2603.22778"}],
+        },
+        1,
+    )
+    bundle = FTQCResourceReportBundle(
+        "Referenced bundle",
+        (referenced, coverage),
+    )
+    manifest = bundle.to_manifest()
+
+    assert referenced.to_dict()["reference_keys"] == [
+        "arXiv:2403.03502",
+        "arXiv:1610.06546",
+        "internal:loader",
+    ]
+    assert manifest["reference_keys"] == [
+        "arXiv:2403.03502",
+        "arXiv:1610.06546",
+        "internal:loader",
+        "arXiv:2603.22778",
+    ]
+    assert manifest["snapshots"][0]["reference_keys"] == [
+        "arXiv:2403.03502",
+        "arXiv:1610.06546",
+        "internal:loader",
+    ]
+    assert manifest["snapshots"][1]["reference_keys"] == ["arXiv:2603.22778"]
+
+    malformed = FTQCResourceReportSnapshot(
+        "comparison",
+        "Malformed references",
+        {"title": "Malformed references", "rows": [], "reference_keys": [object()]},
+        0,
+    )
+    with pytest.raises(ValueError, match="reference_keys"):
+        malformed.to_dict()
 
 
 def test_audit_ftqc_research_signal_coverage_marks_missing_quantities():

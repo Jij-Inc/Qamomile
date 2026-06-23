@@ -2307,7 +2307,7 @@ class FTQCResourceReportSnapshot:
 
         Returns:
             dict[str, Any]: JSON-friendly snapshot envelope containing kind,
-                title, row count, grouped counts, and payload.
+                title, row count, grouped counts, reference keys, and payload.
         """
         kind = cast(FTQCResourceReportKind, self.kind)
         return {
@@ -2315,6 +2315,7 @@ class FTQCResourceReportSnapshot:
             "title": self.title,
             "row_count": self.row_count,
             "counts": dict(self.counts or {}),
+            "reference_keys": list(_extract_report_reference_keys(self.payload)),
             "payload": dict(self.payload),
         }
 
@@ -2422,6 +2423,15 @@ class FTQCResourceReportBundle:
                 "rows": sum(snapshot.row_count for snapshot in self.snapshots),
             },
             "counts_by_kind": self.counts_by_kind(),
+            "reference_keys": list(
+                _dedupe_strings(
+                    tuple(
+                        key
+                        for snapshot in self.snapshots
+                        for key in _extract_report_reference_keys(snapshot.payload)
+                    )
+                )
+            ),
             "snapshots": [
                 {
                     "index": index,
@@ -2429,6 +2439,9 @@ class FTQCResourceReportBundle:
                     "title": snapshot.title,
                     "row_count": snapshot.row_count,
                     "counts": dict(snapshot.counts or {}),
+                    "reference_keys": list(
+                        _extract_report_reference_keys(snapshot.payload)
+                    ),
                 }
                 for index, snapshot in enumerate(self.snapshots)
             ],
@@ -4318,6 +4331,101 @@ def _extract_report_counts(payload: dict[str, Any]) -> dict[str, int]:
             raise ValueError("report payload counts must map strings to integers.")
         counts[key] = value
     return counts
+
+
+def _extract_report_reference_keys(payload: dict[str, Any]) -> tuple[str, ...]:
+    """Extract structured reference keys from a report payload.
+
+    Args:
+        payload (dict[str, Any]): Serialized report payload.
+
+    Returns:
+        tuple[str, ...]: Deduplicated reference keys discovered in
+            ``reference_key``, ``reference_keys``, or ``references`` fields.
+
+    Raises:
+        ValueError: If a reference field exists but is not string-shaped.
+    """
+    keys: list[str] = []
+    _collect_report_reference_keys(payload, keys)
+    return _dedupe_strings(tuple(keys))
+
+
+def _collect_report_reference_keys(value: Any, keys: list[str]) -> None:
+    """Collect structured reference keys recursively.
+
+    Args:
+        value (Any): JSON-like value to inspect.
+        keys (list[str]): Mutable output list that receives discovered keys.
+
+    Raises:
+        ValueError: If a structured reference field has an unsupported shape.
+    """
+    if isinstance(value, dict):
+        for field, field_value in value.items():
+            if field == "reference_key":
+                if not isinstance(field_value, str):
+                    raise ValueError("report payload reference_key must be a string.")
+                keys.append(field_value)
+                continue
+            if field == "reference_keys":
+                if not isinstance(field_value, list) or not all(
+                    isinstance(key, str) for key in field_value
+                ):
+                    raise ValueError(
+                        "report payload reference_keys must be a list of strings."
+                    )
+                keys.extend(field_value)
+                continue
+            if field == "references":
+                _collect_reference_entries(field_value, keys)
+                continue
+            _collect_report_reference_keys(field_value, keys)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_report_reference_keys(item, keys)
+
+
+def _collect_reference_entries(value: Any, keys: list[str]) -> None:
+    """Collect keys from a serialized references field.
+
+    Args:
+        value (Any): Value from a ``references`` payload field.
+        keys (list[str]): Mutable output list that receives discovered keys.
+
+    Raises:
+        ValueError: If ``value`` is not a list of dictionaries with string
+            ``key`` fields.
+    """
+    if not isinstance(value, list):
+        raise ValueError("report payload references must be a list.")
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("report payload references must contain dictionaries.")
+        key = item.get("key")
+        if not isinstance(key, str):
+            raise ValueError("report payload reference entries must contain key.")
+        keys.append(key)
+
+
+def _dedupe_strings(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Deduplicate strings while preserving first occurrence order.
+
+    Args:
+        values (tuple[str, ...]): String values to deduplicate.
+
+    Returns:
+        tuple[str, ...]: Deduplicated values in first-seen order.
+    """
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        deduped.append(value)
+        seen.add(value)
+    return tuple(deduped)
 
 
 def _normalize_substitution_symbol(symbol: str | sp.Symbol) -> sp.Symbol:

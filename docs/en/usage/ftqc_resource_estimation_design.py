@@ -912,6 +912,33 @@ assert FTQCResourceQuantity.PHYSICAL_QUBIT_SECONDS in driver_quantities
 assert uwc_driver_report.to_row_table()[-1]["is_target"] is True
 
 # %% [markdown]
+# Report bundles also preserve structured research provenance in their compact
+# manifest. That lets review tooling trace an artifact back to the paper-level
+# signals it was built to check without loading every nested payload.
+
+# %%
+research_review_bundle = build_ftqc_resource_report_bundle(
+    "UWC research review bundle",
+    (signal_catalog_report, uwc_signal_report, uwc_driver_report),
+)
+research_manifest = research_review_bundle.to_manifest()
+print(research_manifest["reference_keys"])
+
+assert research_manifest["reference_keys"] == [
+    "arXiv:2603.22778",
+    "arXiv:2601.08533",
+]
+assert research_manifest["counts_by_kind"] == {
+    "research_signal_coverage": 1,
+    "comparison": 1,
+    "driver": 1,
+}
+assert research_manifest["snapshots"][0]["reference_keys"] == [
+    "arXiv:2603.22778",
+    "arXiv:2601.08533",
+]
+
+# %% [markdown]
 # ## Pareto Frontier Review
 #
 # Pairwise comparisons are useful, but FTQC design reviews usually compare
