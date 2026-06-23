@@ -1275,6 +1275,131 @@ class TestExpvalCudaqPipeline:
             transpiler.transpile(circuit, bindings={"n": 2})
 
 
+class TestExpvalStaticOnlyCudaq:
+    """Pin down CUDA-Q's static-only expectation-value contract.
+
+    Expectation values on CUDA-Q go through ``cudaq.observe`` and are only
+    available for STATIC artifacts.  RUNNABLE artifacts (mid-circuit
+    measurement / measurement-dependent control flow) must raise a clear
+    ``TypeError`` from ``estimate`` rather than silently mis-evaluating.
+    """
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 42])
+    @pytest.mark.parametrize("theta", [0.0, np.pi / 2, np.pi, 2 * np.pi, None])
+    def test_static_kernel_estimate_matches_analytic(self, seed, theta):
+        """Static-mode ``estimate`` returns ``<Z> = cos(theta)`` exactly.
+
+        ``None`` selects a random angle for the given seed; the listed
+        constants cover the 0/pi/2pi boundaries.
+        """
+        rng = np.random.default_rng(seed)
+        angle = float(rng.uniform(0.0, 2 * np.pi)) if theta is None else float(theta)
+
+        @qmc.qkernel
+        def rx_z(t: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit("q")
+            q = qmc.rx(q, t)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(rx_z, bindings={"H": H_label}, parameters=["t"])
+        artifact = exe.get_first_circuit()
+        assert artifact.execution_mode == ExecutionMode.STATIC
+
+        executor = transpiler.executor()
+        value = executor.estimate(artifact, H_label, params=[angle])
+        assert np.isclose(value, np.cos(angle), atol=1e-6)
+
+    @pytest.mark.parametrize("seed", [0, 1, 7])
+    def test_static_kernel_estimate_random_observable(self, seed):
+        """Static ``estimate`` on a Bell state matches the analytic value.
+
+        For the Bell state, ``<ZZ> = 1`` and ``<XX> = 1`` while ``<X0> = 0``;
+        a random combination ``a*ZZ + b*X0`` therefore has expectation ``a``.
+        """
+        rng = np.random.default_rng(seed)
+        a = float(rng.uniform(-2.0, 2.0))
+        b = float(rng.uniform(-2.0, 2.0))
+
+        @qmc.qkernel
+        def bell(n: qmc.UInt, H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(n, "q")
+            q[0] = qmc.h(q[0])
+            q[0], q[1] = qmc.cx(q[0], q[1])
+            return qmc.expval(q, H)
+
+        H_label = a * (qm_o.Z(0) * qm_o.Z(1)) + b * qm_o.X(0)
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(bell, bindings={"H": H_label, "n": 2})
+        artifact = exe.get_first_circuit()
+        assert artifact.execution_mode == ExecutionMode.STATIC
+
+        executor = transpiler.executor()
+        value = executor.estimate(artifact, H_label)
+        assert np.isclose(value, a, atol=1e-6)
+
+    def test_runnable_kernel_estimate_raises_clear_typeerror(self):
+        """``estimate`` on a RUNNABLE artifact raises an explanatory TypeError."""
+
+        @qmc.qkernel
+        def runnable() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            b = qmc.measure(q)
+            if b:
+                q2 = qmc.qubit("q2")
+                q2 = qmc.x(q2)
+            return b
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(runnable)
+        artifact = exe.get_first_circuit()
+        assert artifact.execution_mode == ExecutionMode.RUNNABLE
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        executor = transpiler.executor()
+        with pytest.raises(TypeError) as excinfo:
+            executor.estimate(artifact, H_label)
+
+        message = str(excinfo.value)
+        # The message must name the cause (RUNNABLE / cudaq.run vs observe) and
+        # the remedy (use a static kernel), not just say "not supported".
+        assert "cudaq.observe" in message
+        assert "cudaq.run" in message
+        assert "static" in message.lower()
+
+    def test_runnable_kernel_cannot_carry_terminal_expval(self):
+        """A RUNNABLE kernel with a terminal ``expval`` is structurally illegal.
+
+        Because the affine model rejects reusing a measured qubit, no single
+        kernel can be both RUNNABLE and produce a terminal expectation value,
+        so the ``ExecutableProgram.run`` expval path never feeds a RUNNABLE
+        artifact into ``estimate``.  The static-only ``TypeError`` guard is
+        reachable only by calling ``estimate`` directly on a RUNNABLE artifact.
+        The match keeps this test pinned to the consumed-qubit rejection rather
+        than any unrelated affine rule.
+        """
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def runnable_expval(H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            b = qmc.measure(q)
+            if b:
+                q = qmc.x(q)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = CudaqTranspiler()
+        with pytest.raises(AffineTypeError, match="already consumed"):
+            transpiler.transpile(runnable_expval, bindings={"H": H_label})
+
+
 # ============================================================================
 # 10. Sub-Kernel Inlining
 # ============================================================================
