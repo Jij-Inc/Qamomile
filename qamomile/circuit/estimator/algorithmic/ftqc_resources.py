@@ -496,6 +496,7 @@ class FTQCResearchSignalCoverage:
         """
         return {
             "reference_key": self.reference_key,
+            "research_signal_key": self.reference_key,
             "title": self.title,
             "available": [quantity.value for quantity in self.available],
             "missing": [quantity.value for quantity in self.missing],
@@ -586,6 +587,7 @@ class FTQCResearchSignalCoverageReport:
                 {
                     "estimate_label": self.estimate_label,
                     "reference_key": coverage.reference_key,
+                    "research_signal_key": coverage.reference_key,
                     "title": coverage.title,
                     "coverage_fraction": str(coverage.coverage_fraction),
                     "is_complete": coverage.is_complete,
@@ -1562,6 +1564,9 @@ class FTQCResourceComparisonReport:
         profile (FTQCResourceProfile | None): Standard review profile used to
             select comparison quantities, or None when no profile was used.
         summary (FTQCResourceComparisonSummary): Grouped comparison rows.
+        research_signal_keys (tuple[str, ...]): Optional research-signal keys
+            that this comparison was built to audit. Defaults to an empty
+            tuple for generic comparison reports.
 
     Example:
         >>> row = FTQCResourceComparisonRow(
@@ -1590,6 +1595,21 @@ class FTQCResourceComparisonReport:
     candidate_label: str
     profile: FTQCResourceProfile | None
     summary: FTQCResourceComparisonSummary
+    research_signal_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate comparison-report metadata after construction.
+
+        Raises:
+            TypeError: If ``research_signal_keys`` contains non-string items.
+        """
+        if not all(isinstance(key, str) for key in self.research_signal_keys):
+            raise TypeError("research_signal_keys must contain only strings.")
+        object.__setattr__(
+            self,
+            "research_signal_keys",
+            _dedupe_strings(tuple(self.research_signal_keys)),
+        )
 
     def to_dict(
         self,
@@ -1610,6 +1630,7 @@ class FTQCResourceComparisonReport:
             "baseline_label": self.baseline_label,
             "candidate_label": self.candidate_label,
             "profile": None if self.profile is None else self.profile.value,
+            "research_signal_keys": list(self.research_signal_keys),
             "quantities": [row.quantity.value for row in self.summary.rows],
             "rows": summary["rows"],
             "smaller": summary["smaller"],
@@ -1634,6 +1655,34 @@ class FTQCResourceComparisonReport:
             serialized["candidate_label"] = self.candidate_label
             rows.append(serialized)
         return rows
+
+    def with_research_signal(self, reference_key: str) -> FTQCResourceComparisonReport:
+        """Return a copy tagged with a research-signal key.
+
+        Args:
+            reference_key (str): Research-signal key to attach to the report.
+
+        Returns:
+            FTQCResourceComparisonReport: Copy preserving comparison rows and
+                labels while appending ``reference_key`` to
+                ``research_signal_keys``.
+
+        Raises:
+            TypeError: If ``reference_key`` is not a string.
+            ValueError: If ``reference_key`` is empty.
+        """
+        if not isinstance(reference_key, str):
+            raise TypeError("reference_key must be a string.")
+        if not reference_key:
+            raise ValueError("reference_key must not be empty.")
+        return FTQCResourceComparisonReport(
+            title=self.title,
+            baseline_label=self.baseline_label,
+            candidate_label=self.candidate_label,
+            profile=self.profile,
+            summary=self.summary,
+            research_signal_keys=(*self.research_signal_keys, reference_key),
+        )
 
     def to_review_findings(
         self,
@@ -2529,8 +2578,8 @@ class FTQCResourceReportSnapshot:
 
         Returns:
             dict[str, Any]: JSON-friendly snapshot envelope containing kind,
-                title, row count, grouped counts, reference keys, symbol names,
-                and payload.
+                title, row count, grouped counts, reference keys,
+                research-signal keys, symbol names, and payload.
         """
         kind = cast(FTQCResourceReportKind, self.kind)
         return {
@@ -2539,6 +2588,9 @@ class FTQCResourceReportSnapshot:
             "row_count": self.row_count,
             "counts": dict(self.counts or {}),
             "reference_keys": list(_extract_report_reference_keys(self.payload)),
+            "research_signal_keys": list(
+                _extract_report_research_signal_keys(self.payload)
+            ),
             "symbol_names": list(_extract_report_symbol_names(self.payload)),
             "payload": dict(self.payload),
         }
@@ -2656,6 +2708,17 @@ class FTQCResourceReportBundle:
                     )
                 )
             ),
+            "research_signal_keys": list(
+                _dedupe_strings(
+                    tuple(
+                        key
+                        for snapshot in self.snapshots
+                        for key in _extract_report_research_signal_keys(
+                            snapshot.payload
+                        )
+                    )
+                )
+            ),
             "symbol_names": list(
                 _dedupe_strings(
                     tuple(
@@ -2674,6 +2737,9 @@ class FTQCResourceReportBundle:
                     "counts": dict(snapshot.counts or {}),
                     "reference_keys": list(
                         _extract_report_reference_keys(snapshot.payload)
+                    ),
+                    "research_signal_keys": list(
+                        _extract_report_research_signal_keys(snapshot.payload)
                     ),
                     "symbol_names": list(
                         _extract_report_symbol_names(snapshot.payload)
@@ -3715,7 +3781,7 @@ def build_ftqc_research_signal_report(
         baseline_label=baseline_label,
         candidate_label=candidate_label,
         quantities=quantities,
-    )
+    ).with_research_signal(signal.reference_key)
 
 
 def build_ftqc_resource_driver_report(
@@ -4641,6 +4707,24 @@ def _extract_report_reference_keys(payload: dict[str, Any]) -> tuple[str, ...]:
     return _dedupe_strings(tuple(keys))
 
 
+def _extract_report_research_signal_keys(payload: dict[str, Any]) -> tuple[str, ...]:
+    """Extract structured research-signal keys from a report payload.
+
+    Args:
+        payload (dict[str, Any]): Serialized report payload.
+
+    Returns:
+        tuple[str, ...]: Deduplicated research-signal keys discovered in
+            ``research_signal_key`` or ``research_signal_keys`` fields.
+
+    Raises:
+        ValueError: If a research-signal field exists but is not string-shaped.
+    """
+    keys: list[str] = []
+    _collect_report_research_signal_keys(payload, keys)
+    return _dedupe_strings(tuple(keys))
+
+
 def _extract_report_symbol_names(payload: dict[str, Any]) -> tuple[str, ...]:
     """Extract structured symbolic dependency names from a report payload.
 
@@ -4685,6 +4769,42 @@ def _collect_report_symbol_names(value: Any, names: list[str]) -> None:
     if isinstance(value, list):
         for item in value:
             _collect_report_symbol_names(item, names)
+
+
+def _collect_report_research_signal_keys(value: Any, keys: list[str]) -> None:
+    """Collect structured research-signal keys recursively.
+
+    Args:
+        value (Any): JSON-like value to inspect.
+        keys (list[str]): Mutable output list that receives discovered keys.
+
+    Raises:
+        ValueError: If a structured research-signal field has an unsupported
+            shape.
+    """
+    if isinstance(value, dict):
+        for field, field_value in value.items():
+            if field == "research_signal_key":
+                if not isinstance(field_value, str):
+                    raise ValueError(
+                        "report payload research_signal_key must be a string."
+                    )
+                keys.append(field_value)
+                continue
+            if field == "research_signal_keys":
+                if not isinstance(field_value, list) or not all(
+                    isinstance(key, str) for key in field_value
+                ):
+                    raise ValueError(
+                        "report payload research_signal_keys must be a list of strings."
+                    )
+                keys.extend(field_value)
+                continue
+            _collect_report_research_signal_keys(field_value, keys)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_report_research_signal_keys(item, keys)
 
 
 def _collect_report_reference_keys(value: Any, keys: list[str]) -> None:

@@ -721,6 +721,7 @@ print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
 print(review_bundle.to_dict()["counts"])
 print(review_bundle.to_manifest()["counts_by_kind"])
 print(review_bundle.to_manifest()["symbol_names"])
+print(review_bundle.to_manifest()["research_signal_keys"])
 print(review_bundle.counts_by_kind())
 for row in review_bundle.to_row_table()[:2]:
     print(row["report_kind"], row.get("label", row.get("quantity")))
@@ -737,6 +738,7 @@ assert review_bundle.to_dict()["counts"] == {
 }
 assert review_bundle.to_manifest()["counts"] == review_bundle.to_dict()["counts"]
 assert review_bundle.to_manifest()["snapshots"][0]["kind"] == "comparison"
+assert review_bundle.to_manifest()["research_signal_keys"] == []
 assert "logical_cycle_time" in review_bundle.to_manifest()["symbol_names"]
 assert "toffoli_throughput" in review_bundle.to_manifest()["symbol_names"]
 assert review_bundle.counts_by_kind() == {
@@ -836,10 +838,33 @@ uwc_signal_report = build_ftqc_research_signal_report(
 )
 print(uwc_signal_report.to_dict()["title"])
 print(uwc_signal_report.to_dict()["quantities"])
+print(uwc_signal_report.to_dict()["research_signal_keys"])
 
 assert uwc_signal_report.summary.rows[0].quantity == (FTQCResourceQuantity.LAMBDA_NORM)
 assert "lambda_norm" in uwc_signal_report.to_dict()["quantities"]
 assert "t_gates" in uwc_signal_report.to_dict()["quantities"]
+assert uwc_signal_report.to_dict()["research_signal_keys"] == ["arXiv:2603.22778"]
+
+# %% [markdown]
+# signal reportとcoverage auditは、軽量なreview manifestとしてbundleにまとめることもできます。manifestではresearch-signal keyを一般的なreference provenanceとは分けて保持するため、review toolingはreport payload全体を読み込まなくても、このartifactがどの論文レベルのcontractをauditしているかを表示できます。
+
+# %%
+signal_review_bundle = build_ftqc_resource_report_bundle(
+    "UWC research signal bundle",
+    (signal_catalog_report, uwc_signal_report),
+)
+signal_manifest = signal_review_bundle.to_manifest()
+print(signal_manifest["research_signal_keys"])
+print(signal_manifest["snapshots"][0]["research_signal_keys"])
+print(signal_manifest["snapshots"][1]["research_signal_keys"])
+
+assert signal_manifest["research_signal_keys"] == [
+    "arXiv:2603.22778",
+    "arXiv:2601.08533",
+]
+assert signal_manifest["snapshots"][0]["kind"] == "research_signal_coverage"
+assert signal_manifest["snapshots"][1]["kind"] == "comparison"
+assert signal_manifest["snapshots"][1]["research_signal_keys"] == ["arXiv:2603.22778"]
 
 # %% [markdown]
 # driver reportは、target output quantityから始めて、estimateが公開しているformula metadataの依存関係をたどります。physical qubit-secondsのような最終metricが改善したとき、その上流にあるどのsymbolic driverが変わったのかをreviewしやすくなります。

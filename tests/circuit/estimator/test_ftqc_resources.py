@@ -1047,6 +1047,8 @@ def test_build_ftqc_research_signal_report_selects_available_quantities():
     )
     assert report.title == "arXiv:2603.22778 resource signal review"
     assert report.profile is None
+    assert report.research_signal_keys == ("arXiv:2603.22778",)
+    assert report.to_dict()["research_signal_keys"] == ["arXiv:2603.22778"]
     assert row_quantities[0] == FTQCResourceQuantity.LAMBDA_NORM
     assert row_quantities[1] == FTQCResourceQuantity.QPE_ITERATIONS
     assert FTQCResourceQuantity.T_GATES in row_quantities
@@ -1538,6 +1540,7 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
                 "symbolic": 0,
             },
             "reference_keys": [],
+            "research_signal_keys": [],
             "symbol_names": [],
         },
         {
@@ -1547,10 +1550,12 @@ def test_build_ftqc_resource_report_bundle_snapshots_reports():
             "row_count": 2,
             "counts": {"resolved": 2, "unresolved": 0},
             "reference_keys": [],
+            "research_signal_keys": [],
             "symbol_names": [],
         },
     ]
     assert bundle_manifest["reference_keys"] == []
+    assert bundle_manifest["research_signal_keys"] == []
     assert bundle_manifest["symbol_names"] == []
     assert "payload" not in bundle_manifest["snapshots"][0]
     assert bundle_dict["counts"] == {"snapshots": 2, "rows": 3}
@@ -1674,6 +1679,70 @@ def test_ftqc_report_bundle_manifest_collects_reference_keys():
         0,
     )
     with pytest.raises(ValueError, match="reference_keys"):
+        malformed.to_dict()
+
+
+def test_ftqc_report_bundle_manifest_collects_research_signal_keys():
+    """Report bundle manifests expose explicit research-signal coverage."""
+    row = FTQCResourceComparisonRow(
+        quantity=FTQCResourceQuantity.RUNTIME_SECONDS,
+        baseline=10,
+        candidate=4,
+        ratio=sp.Rational(2, 5),
+        reduction=sp.Rational(3, 5),
+        label="Runtime",
+        unit="seconds",
+        category=FTQCResourceCategory.PHYSICAL,
+    )
+    signal_report = FTQCResourceComparisonReport(
+        title="UWC signal review",
+        baseline_label="plain",
+        candidate_label="uwc",
+        profile=None,
+        summary=FTQCResourceComparisonSummary.from_rows((row,)),
+        research_signal_keys=("arXiv:2603.22778",),
+    )
+    coverage = FTQCResearchSignalCoverage(
+        reference_key="arXiv:2601.08533",
+        title="State-preparation filtering",
+        available=(FTQCResourceQuantity.QPE_REPETITIONS,),
+        missing=(),
+        total=1,
+    )
+    coverage_report = FTQCResearchSignalCoverageReport(
+        title="Coverage",
+        estimate_label="filtered",
+        coverages=(coverage,),
+    )
+    bundle = build_ftqc_resource_report_bundle(
+        "Research signal bundle",
+        (signal_report, coverage_report),
+    )
+    signal_snapshot = build_ftqc_resource_report_snapshot(signal_report)
+    manifest = bundle.to_manifest()
+
+    assert signal_snapshot.to_dict()["research_signal_keys"] == ["arXiv:2603.22778"]
+    assert coverage_report.to_dict()["rows"][0]["research_signal_key"] == (
+        "arXiv:2601.08533"
+    )
+    assert manifest["research_signal_keys"] == [
+        "arXiv:2603.22778",
+        "arXiv:2601.08533",
+    ]
+    assert manifest["snapshots"][0]["research_signal_keys"] == ["arXiv:2603.22778"]
+    assert manifest["snapshots"][1]["research_signal_keys"] == ["arXiv:2601.08533"]
+
+    malformed = FTQCResourceReportSnapshot(
+        "comparison",
+        "Malformed signal keys",
+        {
+            "title": "Malformed signal keys",
+            "rows": [],
+            "research_signal_keys": [object()],
+        },
+        0,
+    )
+    with pytest.raises(ValueError, match="research_signal_keys"):
         malformed.to_dict()
 
 
