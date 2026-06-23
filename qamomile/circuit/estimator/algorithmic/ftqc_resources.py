@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeAlias, cast
 
 import sympy as sp
 
@@ -254,6 +254,30 @@ class FTQCResourceProfile(enum.StrEnum):
     SPACETIME = "spacetime"
     ERROR_BUDGET = "error_budget"
     ARCHITECTURE = "architecture"
+
+
+class FTQCResourceReportKind(enum.StrEnum):
+    """Name standardized FTQC resource report snapshot kinds.
+
+    Attributes:
+        RESEARCH_SIGNAL_COVERAGE: Research-signal quantity coverage report.
+        BUDGET: Resource-budget constraint report.
+        COMPARISON: Pairwise resource-comparison report.
+        DRIVER: Formula-driver resource-comparison report.
+        PARETO: Multi-candidate Pareto-frontier report.
+        SCENARIO: Symbolic scenario-sensitivity report.
+
+    Example:
+        >>> FTQCResourceReportKind("scenario")
+        <FTQCResourceReportKind.SCENARIO: 'scenario'>
+    """
+
+    RESEARCH_SIGNAL_COVERAGE = "research_signal_coverage"
+    BUDGET = "budget"
+    COMPARISON = "comparison"
+    DRIVER = "driver"
+    PARETO = "pareto"
+    SCENARIO = "scenario"
 
 
 class SupportsFTQCResourceValues(Protocol):
@@ -2212,6 +2236,167 @@ class FTQCResourceScenarioReport:
         }
 
 
+FTQCResourceReportLike: TypeAlias = (
+    FTQCResearchSignalCoverageReport
+    | FTQCResourceBudgetReport
+    | FTQCResourceComparisonReport
+    | FTQCResourceDriverReport
+    | FTQCResourceParetoReport
+    | FTQCResourceScenarioReport
+)
+
+
+@dataclass(frozen=True)
+class FTQCResourceReportSnapshot:
+    """Package one FTQC report in a stable machine-readable envelope.
+
+    Args:
+        kind (str | FTQCResourceReportKind): Standard report kind.
+        title (str): Reader-facing report title.
+        payload (dict[str, Any]): JSON-friendly report payload, usually from
+            the report's ``to_dict()`` method.
+        row_count (int): Number of primary rows represented by the report.
+        counts (dict[str, int]): Grouped count metadata extracted from the
+            payload. Defaults to an empty mapping.
+
+    Raises:
+        ValueError: If ``kind`` is unknown, ``title`` is empty, ``row_count``
+            is negative, or any count value is negative.
+
+    Example:
+        >>> snapshot = FTQCResourceReportSnapshot(
+        ...     kind="scenario",
+        ...     title="Toy",
+        ...     payload={"title": "Toy", "rows": []},
+        ...     row_count=0,
+        ... )
+        >>> snapshot.to_dict()["kind"]
+        'scenario'
+    """
+
+    kind: str | FTQCResourceReportKind
+    title: str
+    payload: dict[str, Any]
+    row_count: int
+    counts: dict[str, int] | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize and validate snapshot fields after construction.
+
+        Raises:
+            ValueError: If ``kind`` is unknown, ``title`` is empty,
+                ``row_count`` is negative, or any count value is negative.
+        """
+        normalized_kind = FTQCResourceReportKind(self.kind)
+        if not self.title:
+            raise ValueError("title must not be empty.")
+        if self.row_count < 0:
+            raise ValueError("row_count must be non-negative.")
+        counts = {} if self.counts is None else dict(self.counts)
+        negative_counts = [name for name, count in counts.items() if count < 0]
+        if negative_counts:
+            raise ValueError(
+                "counts must be non-negative: " + ", ".join(negative_counts) + "."
+            )
+        object.__setattr__(self, "kind", normalized_kind)
+        object.__setattr__(self, "payload", dict(self.payload))
+        object.__setattr__(self, "counts", counts)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the report snapshot.
+
+        Returns:
+            dict[str, Any]: JSON-friendly snapshot envelope containing kind,
+                title, row count, grouped counts, and payload.
+        """
+        kind = cast(FTQCResourceReportKind, self.kind)
+        return {
+            "kind": kind.value,
+            "title": self.title,
+            "row_count": self.row_count,
+            "counts": dict(self.counts or {}),
+            "payload": dict(self.payload),
+        }
+
+
+@dataclass(frozen=True)
+class FTQCResourceReportBundle:
+    """Group FTQC report snapshots for one review artifact.
+
+    Args:
+        title (str): Reader-facing bundle title.
+        snapshots (tuple[FTQCResourceReportSnapshot, ...]): Snapshots in the
+            order they should be reviewed.
+
+    Raises:
+        TypeError: If ``snapshots`` contains non-snapshot items.
+        ValueError: If ``title`` or ``snapshots`` is empty.
+
+    Example:
+        >>> snapshot = FTQCResourceReportSnapshot(
+        ...     "comparison",
+        ...     "Toy",
+        ...     {"title": "Toy", "rows": [{"quantity": "runtime_seconds"}]},
+        ...     1,
+        ... )
+        >>> bundle = FTQCResourceReportBundle("Review", (snapshot,))
+        >>> bundle.to_dict()["counts"]["rows"]
+        1
+    """
+
+    title: str
+    snapshots: tuple[FTQCResourceReportSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        """Validate bundle fields after dataclass construction.
+
+        Raises:
+            TypeError: If ``snapshots`` contains non-snapshot items.
+            ValueError: If ``title`` or ``snapshots`` is empty.
+        """
+        if not self.title:
+            raise ValueError("title must not be empty.")
+        if not self.snapshots:
+            raise ValueError("snapshots must not be empty.")
+        if not all(
+            isinstance(snapshot, FTQCResourceReportSnapshot)
+            for snapshot in self.snapshots
+        ):
+            raise TypeError(
+                "snapshots must contain only FTQCResourceReportSnapshot items."
+            )
+        object.__setattr__(self, "snapshots", tuple(self.snapshots))
+
+    def counts_by_kind(self) -> dict[str, int]:
+        """Return snapshot counts grouped by report kind.
+
+        Returns:
+            dict[str, int]: Number of snapshots per report kind.
+        """
+        counts: dict[str, int] = {}
+        for snapshot in self.snapshots:
+            kind = cast(FTQCResourceReportKind, snapshot.kind)
+            counts[kind.value] = counts.get(kind.value, 0) + 1
+        return counts
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the report bundle.
+
+        Returns:
+            dict[str, Any]: JSON-friendly bundle containing snapshot payloads,
+                total counts, and counts grouped by report kind.
+        """
+        return {
+            "title": self.title,
+            "snapshots": [snapshot.to_dict() for snapshot in self.snapshots],
+            "counts": {
+                "snapshots": len(self.snapshots),
+                "rows": sum(snapshot.row_count for snapshot in self.snapshots),
+            },
+            "counts_by_kind": self.counts_by_kind(),
+        }
+
+
 FTQC_RESOURCE_QUANTITY_SPECS: tuple[FTQCResourceQuantitySpec, ...] = (
     FTQCResourceQuantitySpec(
         FTQCResourceQuantity.N_SPIN_ORBITALS,
@@ -3435,6 +3620,75 @@ def build_ftqc_resource_scenario_report(
     )
 
 
+def build_ftqc_resource_report_snapshot(
+    report: FTQCResourceReportLike,
+    *,
+    kind: str | FTQCResourceReportKind | None = None,
+    title: str | None = None,
+) -> FTQCResourceReportSnapshot:
+    """Build a stable snapshot envelope for one FTQC report.
+
+    Args:
+        report (FTQCResourceReportLike): Report object exposing ``title`` and
+            ``to_dict()``.
+        kind (str | FTQCResourceReportKind | None): Optional explicit report
+            kind. Defaults to inferring the kind from the report class.
+        title (str | None): Optional title override. Defaults to
+            ``report.title``.
+
+    Returns:
+        FTQCResourceReportSnapshot: Snapshot envelope containing the report
+            kind, title, row count, grouped counts, and payload.
+
+    Raises:
+        TypeError: If ``report`` is not a supported FTQC report type.
+        ValueError: If ``kind`` is unknown, the resolved title is empty, or
+            extracted count metadata is malformed.
+    """
+    normalized_kind = (
+        _infer_resource_report_kind(report)
+        if kind is None
+        else FTQCResourceReportKind(kind)
+    )
+    payload = cast(dict[str, Any], report.to_dict())
+    return FTQCResourceReportSnapshot(
+        kind=normalized_kind,
+        title=report.title if title is None else title,
+        payload=payload,
+        row_count=_extract_report_row_count(payload),
+        counts=_extract_report_counts(payload),
+    )
+
+
+def build_ftqc_resource_report_bundle(
+    title: str,
+    reports: tuple[FTQCResourceReportLike, ...],
+) -> FTQCResourceReportBundle:
+    """Build a review bundle from several FTQC reports.
+
+    Args:
+        title (str): Reader-facing bundle title.
+        reports (tuple[FTQCResourceReportLike, ...]): Reports to snapshot in
+            review order.
+
+    Returns:
+        FTQCResourceReportBundle: Bundle containing one snapshot per report.
+
+    Raises:
+        TypeError: If any report is not a supported FTQC report type.
+        ValueError: If ``title`` or ``reports`` is empty, or if any snapshot
+            cannot be built.
+    """
+    if not reports:
+        raise ValueError("reports must not be empty.")
+    return FTQCResourceReportBundle(
+        title=title,
+        snapshots=tuple(
+            build_ftqc_resource_report_snapshot(report) for report in reports
+        ),
+    )
+
+
 def build_ftqc_resource_review_findings(
     summary: FTQCResourceComparisonSummary,
     *,
@@ -3908,6 +4162,79 @@ def _select_scenario_quantities(
             + "."
         )
     return normalized
+
+
+def _infer_resource_report_kind(
+    report: FTQCResourceReportLike,
+) -> FTQCResourceReportKind:
+    """Infer the standard snapshot kind for one report object.
+
+    Args:
+        report (FTQCResourceReportLike): FTQC report object.
+
+    Returns:
+        FTQCResourceReportKind: Inferred report kind.
+
+    Raises:
+        TypeError: If ``report`` is not a supported FTQC report type.
+    """
+    if isinstance(report, FTQCResearchSignalCoverageReport):
+        return FTQCResourceReportKind.RESEARCH_SIGNAL_COVERAGE
+    if isinstance(report, FTQCResourceBudgetReport):
+        return FTQCResourceReportKind.BUDGET
+    if isinstance(report, FTQCResourceDriverReport):
+        return FTQCResourceReportKind.DRIVER
+    if isinstance(report, FTQCResourceParetoReport):
+        return FTQCResourceReportKind.PARETO
+    if isinstance(report, FTQCResourceScenarioReport):
+        return FTQCResourceReportKind.SCENARIO
+    if isinstance(report, FTQCResourceComparisonReport):
+        return FTQCResourceReportKind.COMPARISON
+    raise TypeError("Unsupported FTQC resource report type.")
+
+
+def _extract_report_row_count(payload: dict[str, Any]) -> int:
+    """Extract the primary row count from a report payload.
+
+    Args:
+        payload (dict[str, Any]): Serialized report payload.
+
+    Returns:
+        int: Number of primary report rows, or zero when no row-like field is
+            present.
+    """
+    rows = payload.get("rows")
+    if isinstance(rows, list):
+        return len(rows)
+    results = payload.get("results")
+    if isinstance(results, list):
+        return len(results)
+    return 0
+
+
+def _extract_report_counts(payload: dict[str, Any]) -> dict[str, int]:
+    """Extract grouped integer counts from a report payload.
+
+    Args:
+        payload (dict[str, Any]): Serialized report payload.
+
+    Returns:
+        dict[str, int]: Count metadata copied from ``payload["counts"]`` when
+            present, otherwise an empty mapping.
+
+    Raises:
+        ValueError: If ``payload["counts"]`` is present but is not a mapping
+            from strings to integers.
+    """
+    raw_counts = payload.get("counts", {})
+    if not isinstance(raw_counts, dict):
+        raise ValueError("report payload counts must be a dictionary.")
+    counts: dict[str, int] = {}
+    for key, value in raw_counts.items():
+        if not isinstance(key, str) or not isinstance(value, int):
+            raise ValueError("report payload counts must map strings to integers.")
+        counts[key] = value
+    return counts
 
 
 def _normalize_substitution_symbol(symbol: str | sp.Symbol) -> sp.Symbol:

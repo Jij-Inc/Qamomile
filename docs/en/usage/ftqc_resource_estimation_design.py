@@ -55,6 +55,8 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
     build_ftqc_resource_pareto_report,
+    build_ftqc_resource_report_bundle,
+    build_ftqc_resource_report_snapshot,
     build_ftqc_resource_scenario_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
@@ -741,6 +743,33 @@ assert (
 assert scenario_report.to_dict()["counts"] == {"resolved": 2, "unresolved": 0}
 
 # %% [markdown]
+# ### Review Snapshots
+#
+# Reports keep their specialized tables, but review tooling often needs one
+# stable envelope with a report kind, row count, grouped counts, and payload.
+# Snapshot and bundle helpers provide that manifest without changing the
+# report-specific dictionaries.
+
+# %%
+scenario_snapshot = build_ftqc_resource_report_snapshot(scenario_report)
+review_bundle = build_ftqc_resource_report_bundle(
+    "FTQC design review bundle",
+    (comparison_report, scenario_report),
+)
+
+print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
+print(review_bundle.to_dict()["counts"])
+print(review_bundle.counts_by_kind())
+
+assert scenario_snapshot.to_dict()["kind"] == "scenario"
+assert scenario_snapshot.row_count == len(scenario_report.rows)
+assert review_bundle.to_dict()["counts"] == {
+    "snapshots": 2,
+    "rows": len(comparison_report.summary.rows) + len(scenario_report.rows),
+}
+assert review_bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
+
+# %% [markdown]
 # ## Early-FTQC Pattern
 #
 # Early-FTQC estimates may not be Toffoli-native. The same comparison API works
@@ -1033,6 +1062,9 @@ assert budget_report.to_dict()["counts"] == {
 #   assumptions without rebuilding the algorithm estimate.
 # - `build_ftqc_resource_scenario_report` evaluates one symbolic estimate under
 #   several named architecture scenarios and reports unresolved symbols.
+# - `build_ftqc_resource_report_snapshot` and
+#   `build_ftqc_resource_report_bundle` wrap heterogeneous reports in a stable
+#   review manifest without changing their specialized payloads.
 # - `compare_ftqc_resource_estimates` turns symbolic estimates into reviewable
 #   savings tables without hard-coding a particular chemistry factorization.
 # - `summarize_ftqc_resource_comparison` groups those rows into smaller,

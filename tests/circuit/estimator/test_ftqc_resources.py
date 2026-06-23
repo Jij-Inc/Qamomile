@@ -33,6 +33,9 @@ from qamomile.circuit.estimator.algorithmic import (
     FTQCResourceProfile,
     FTQCResourceProfileSpec,
     FTQCResourceQuantity,
+    FTQCResourceReportBundle,
+    FTQCResourceReportKind,
+    FTQCResourceReportSnapshot,
     FTQCResourceReviewFinding,
     FTQCResourceScenario,
     FTQCResourceScenarioReport,
@@ -46,6 +49,8 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
     build_ftqc_resource_pareto_report,
+    build_ftqc_resource_report_bundle,
+    build_ftqc_resource_report_snapshot,
     build_ftqc_resource_review_findings,
     build_ftqc_resource_scenario_report,
     compare_ftqc_resource_estimates,
@@ -1363,6 +1368,97 @@ def test_build_ftqc_resource_scenario_report_keeps_unresolved_symbols():
             quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
             scenarios=(partial,),
             rows=(FTQCResourceScenarioRow("partial", {"physical_qubits": 100}),),
+        )
+
+
+def test_build_ftqc_resource_report_bundle_snapshots_reports():
+    """Report bundles wrap heterogeneous FTQC reports for review artifacts."""
+    runtime = sp.Symbol("runtime", positive=True)
+    baseline = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "baseline",
+                {
+                    FTQCResourceQuantity.RUNTIME_SECONDS: 100,
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: 1_000,
+                },
+            ),
+        ),
+        title="Baseline",
+    )
+    candidate = FTQCResourcePlan(
+        (
+            FTQCResourcePlanStep(
+                "candidate",
+                {
+                    FTQCResourceQuantity.RUNTIME_SECONDS: 25,
+                    FTQCResourceQuantity.PHYSICAL_QUBITS: 2_000,
+                },
+            ),
+        ),
+        title="Candidate",
+    )
+    comparison = build_ftqc_resource_comparison_report(
+        baseline,
+        candidate,
+        title="Runtime comparison",
+        quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
+    )
+    scenario = build_ftqc_resource_scenario_report(
+        FTQCResourcePlan(
+            (
+                FTQCResourcePlanStep(
+                    "symbolic",
+                    {
+                        FTQCResourceQuantity.RUNTIME_SECONDS: runtime,
+                    },
+                ),
+            ),
+            title="Symbolic runtime",
+        ),
+        (
+            FTQCResourceScenario("slow", {"runtime": 10}),
+            FTQCResourceScenario("fast", {"runtime": 2}),
+        ),
+        quantities=(FTQCResourceQuantity.RUNTIME_SECONDS,),
+    )
+
+    snapshot = build_ftqc_resource_report_snapshot(comparison)
+    bundle = build_ftqc_resource_report_bundle(
+        "FTQC review bundle",
+        (comparison, scenario),
+    )
+    bundle_dict = bundle.to_dict()
+
+    assert isinstance(snapshot, FTQCResourceReportSnapshot)
+    assert snapshot.kind is FTQCResourceReportKind.COMPARISON
+    assert snapshot.row_count == 1
+    assert snapshot.counts == {"smaller": 1, "larger": 0, "unchanged": 0, "symbolic": 0}
+    assert snapshot.to_dict()["payload"]["title"] == "Runtime comparison"
+    assert isinstance(bundle, FTQCResourceReportBundle)
+    assert bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
+    assert bundle_dict["counts"] == {"snapshots": 2, "rows": 3}
+    assert bundle_dict["snapshots"][1]["kind"] == "scenario"
+    assert bundle_dict["snapshots"][1]["counts"] == {"resolved": 2, "unresolved": 0}
+
+    overridden = build_ftqc_resource_report_snapshot(
+        comparison,
+        kind="driver",
+        title="Override title",
+    )
+    assert overridden.kind is FTQCResourceReportKind.DRIVER
+    assert overridden.title == "Override title"
+    with pytest.raises(TypeError, match="Unsupported FTQC resource report type"):
+        build_ftqc_resource_report_snapshot(object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="reports must not be empty"):
+        build_ftqc_resource_report_bundle("empty", ())
+    with pytest.raises(ValueError, match="counts must be non-negative"):
+        FTQCResourceReportSnapshot(
+            "scenario",
+            "bad",
+            {},
+            0,
+            {"resolved": -1},
         )
 
 

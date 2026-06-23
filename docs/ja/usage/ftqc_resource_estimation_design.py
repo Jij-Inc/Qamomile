@@ -52,6 +52,8 @@ from qamomile.circuit.estimator.algorithmic import (
     build_ftqc_resource_comparison_report,
     build_ftqc_resource_driver_report,
     build_ftqc_resource_pareto_report,
+    build_ftqc_resource_report_bundle,
+    build_ftqc_resource_report_snapshot,
     build_ftqc_resource_scenario_report,
     compare_ftqc_resource_estimates,
     default_ftqc_resource_aggregation_rule,
@@ -685,6 +687,30 @@ assert (
 assert scenario_report.to_dict()["counts"] == {"resolved": 2, "unresolved": 0}
 
 # %% [markdown]
+# ### Review snapshot
+#
+# reportは専用のtableを保ちますが、review toolingではreport kind、row count、grouped count、payloadを持つ安定したenvelopeが必要になることがあります。snapshot helperとbundle helperを使うと、reportごとの辞書を変えずに、そのmanifestを作れます。
+
+# %%
+scenario_snapshot = build_ftqc_resource_report_snapshot(scenario_report)
+review_bundle = build_ftqc_resource_report_bundle(
+    "FTQC design review bundle",
+    (comparison_report, scenario_report),
+)
+
+print(scenario_snapshot.to_dict()["kind"], scenario_snapshot.row_count)
+print(review_bundle.to_dict()["counts"])
+print(review_bundle.counts_by_kind())
+
+assert scenario_snapshot.to_dict()["kind"] == "scenario"
+assert scenario_snapshot.row_count == len(scenario_report.rows)
+assert review_bundle.to_dict()["counts"] == {
+    "snapshots": 2,
+    "rows": len(comparison_report.summary.rows) + len(scenario_report.rows),
+}
+assert review_bundle.counts_by_kind() == {"comparison": 1, "scenario": 1}
+
+# %% [markdown]
 # ## Early-FTQCのパターン
 #
 # Early-FTQC推定はToffoli-nativeとは限りません。同じ比較APIを、主にT gatesとlogical depthを報告するTrotter型modelにも使えます。representation reviewで使うものと同じ`HamiltonianResourceReduction` objectを、Hamiltonianから作るTrotter estimatorへ渡せます。
@@ -933,6 +959,7 @@ assert budget_report.to_dict()["counts"] == {
 # - reportでcircuit-level estimateと同じ形が必要な場合は、FTQC estimateを共通のlogical `ResourceEstimate` objectとして見られます。
 # - 既存のlogical estimateは、algorithm estimateを作り直さずに新しいarchitecture仮定でreliftできます。
 # - `build_ftqc_resource_scenario_report`を使うと、1つのsymbolic estimateを複数の名前付きarchitecture scenarioで評価し、未解決のsymbolも確認できます。
+# - `build_ftqc_resource_report_snapshot`と`build_ftqc_resource_report_bundle`を使うと、reportごとの専用payloadを変えずに、異なるreportを安定したreview manifestへまとめられます。
 # - `compare_ftqc_resource_estimates`を使うと、特定のchemistry factorizationをhard-codeせず、symbolicな推定をreviewしやすいsavings tableへ変換できます。
 # - `summarize_ftqc_resource_comparison`を使うと、その行を小さい、大きい、変わらない、symbolicな変化へ分けて設計レビューできます。
 # - `build_ftqc_resource_comparison_report`を使うと、label、profile、行、優先順位つきfinding、grouped countをreview artifactとしてまとめられます。
