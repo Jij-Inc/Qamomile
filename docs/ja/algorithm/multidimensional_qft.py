@@ -244,13 +244,8 @@ def compute_prob(result: SampleResult) -> np.ndarray:
     prob = np.zeros(f_padding.shape)
     total = sum(c for _, c in result.results)
     for bits, count in result.results:
-<<<<<<< HEAD
-        kx = sum([2**i*bits[i] for i in range(Nqx)])
-        ky = sum([2**(i-Nqx)*bits[i] for i in range(Nqx, Nqx+Nqy)])
-=======
         kx = sum(bits[i] << i for i in range(Nqx))
         ky = sum(bits[Nqx + i] << i for i in range(Nqy))
->>>>>>> 42431bd7adc10b613f654e99c4ddcdf33989e186
         prob[kx, ky] += count / total
     return prob
 
