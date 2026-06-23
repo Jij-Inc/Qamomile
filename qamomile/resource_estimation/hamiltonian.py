@@ -9,6 +9,7 @@ import sympy as sp
 
 _SympyLike = sp.Expr | int | float
 _CoefficientLike = _SympyLike | complex
+_OPENFERMION_PAULI_LABELS = frozenset({"X", "Y", "Z"})
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,20 @@ class PauliHamiltonianResource:
             "source": self.source,
         }
 
+    def resource_values(self) -> dict[str, sp.Expr]:
+        """Return canonical resource values exposed by the summary.
+
+        Returns:
+            dict[str, sp.Expr]: Problem-level Hamiltonian values keyed by
+            canonical resource quantity names.
+        """
+        return {
+            "n_qubits": self.n_qubits,
+            "n_pauli_terms": self.n_pauli_terms,
+            "lambda_norm": self.lambda_norm,
+            "max_locality": self.max_locality,
+        }
+
 
 def summarize_pauli_hamiltonian(
     hamiltonian: Any,
@@ -176,6 +191,109 @@ def summarize_pauli_hamiltonian(
         max_locality=sp.Integer(max_locality),
         constant=constant,
         constant_included=include_constant,
+        source=source,
+    )
+
+
+def hamiltonian_from_openfermion_qubit_operator(
+    openfermion_operator: Any,
+    *,
+    num_qubits: int | None = None,
+) -> Any:
+    """Convert an OpenFermion qubit operator into a Qamomile Hamiltonian.
+
+    Args:
+        openfermion_operator (Any): OpenFermion ``QubitOperator``-like object
+            exposing a ``terms`` mapping from Pauli-string tuples to numeric
+            coefficients.
+        num_qubits (int | None): Optional encoded register size to store on
+            the returned Hamiltonian. Defaults to inferring the size from the
+            largest Pauli index.
+
+    Returns:
+        qamomile.observable.Hamiltonian: Equivalent Qamomile Hamiltonian with
+            identity terms stored as ``constant``.
+
+    Raises:
+        TypeError: If ``openfermion_operator`` does not expose a terms mapping
+            or a term is malformed.
+        ValueError: If a Pauli label is not one of ``X``, ``Y``, or ``Z``.
+    """
+    import qamomile.observable as qm_o
+
+    terms = getattr(openfermion_operator, "terms", None)
+    if not isinstance(terms, dict):
+        raise TypeError(
+            "openfermion_operator must expose an OpenFermion-style terms mapping."
+        )
+
+    paulis = {
+        "X": qm_o.Pauli.X,
+        "Y": qm_o.Pauli.Y,
+        "Z": qm_o.Pauli.Z,
+    }
+    hamiltonian = qm_o.Hamiltonian(num_qubits=num_qubits)
+    for term, coefficient in terms.items():
+        if term == ():
+            hamiltonian.constant += coefficient
+            continue
+        if not isinstance(term, tuple):
+            raise TypeError("OpenFermion Pauli terms must be tuples.")
+
+        operators = []
+        for factor in term:
+            if (
+                not isinstance(factor, tuple)
+                or len(factor) != 2
+                or not isinstance(factor[0], int)
+                or not isinstance(factor[1], str)
+            ):
+                raise TypeError("OpenFermion Pauli factors must be (int, str) tuples.")
+            qubit, label = factor
+            if label not in _OPENFERMION_PAULI_LABELS:
+                valid = ", ".join(sorted(_OPENFERMION_PAULI_LABELS))
+                raise ValueError(
+                    f"Unsupported OpenFermion Pauli label {label!r}; "
+                    f"valid labels: {valid}."
+                )
+            operators.append(qm_o.PauliOperator(paulis[label], qubit))
+        hamiltonian.add_term(tuple(operators), coefficient)
+    return hamiltonian
+
+
+def summarize_openfermion_qubit_operator(
+    openfermion_operator: Any,
+    *,
+    n_qubits: _SympyLike | None = None,
+    include_constant: bool = False,
+    source: str = "openfermion_qubit_operator",
+) -> PauliHamiltonianResource:
+    """Summarize an OpenFermion qubit operator for resource estimates.
+
+    Args:
+        openfermion_operator (Any): OpenFermion ``QubitOperator``-like object
+            exposing a ``terms`` mapping.
+        n_qubits (sp.Expr | int | float | None): Override for the encoded
+            qubit count. Defaults to the inferred Qamomile Hamiltonian width.
+        include_constant (bool): Whether to include the constant term in
+            ``lambda_norm``. Defaults to False.
+        source (str): Human-readable source label for the summary.
+
+    Returns:
+        PauliHamiltonianResource: Hamiltonian summary containing term count,
+            lambda norm, constant, and max locality.
+
+    Raises:
+        TypeError: If the OpenFermion object is malformed.
+        ValueError: If a Pauli label or derived resource quantity is invalid.
+    """
+    hamiltonian = hamiltonian_from_openfermion_qubit_operator(
+        openfermion_operator,
+    )
+    return summarize_pauli_hamiltonian(
+        hamiltonian,
+        n_qubits=n_qubits,
+        include_constant=include_constant,
         source=source,
     )
 

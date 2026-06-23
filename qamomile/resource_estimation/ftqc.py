@@ -181,6 +181,241 @@ class FTQCCostModel:
 
 
 @dataclass(frozen=True)
+class SurfaceCodeCostModel:
+    """Derive rough FTQC proxy knobs from surface-code assumptions.
+
+    This model is still intentionally compact. It does not estimate logical
+    error rates, choose a distance from a target failure probability, or model
+    detailed factory layouts. It turns explicit surface-code and factory
+    assumptions into the generic ``FTQCCostModel`` consumed by
+    ``estimate_physical_resources``.
+
+    Attributes:
+        code_distance (sp.Expr | int | float): Surface-code distance.
+        physical_cycle_time_seconds (sp.Expr | int | float): Duration of one
+            physical error-correction cycle, in seconds.
+        physical_qubits_per_logical_factor (sp.Expr | int | float): Constant
+            factor multiplying ``code_distance ** 2`` for one logical patch.
+        logical_cycle_factor (sp.Expr | int | float): Constant factor
+            multiplying ``code_distance`` to form one logical cycle.
+        factory_count (sp.Expr | int | float): Number of parallel factories.
+        physical_qubits_per_factory (sp.Expr | int | float): Physical qubits
+            reserved for one factory.
+        factory_cycles_per_non_clifford (sp.Expr | int | float): Logical cycles
+            required by one factory output.
+
+    Raises:
+        ValueError: If a positive-valued quantity is non-positive or if
+            ``physical_qubits_per_factory`` is negative.
+
+    Example:
+        >>> model = SurfaceCodeCostModel(
+        ...     code_distance=7,
+        ...     physical_cycle_time_seconds=1e-6,
+        ...     physical_qubits_per_logical_factor=2,
+        ...     logical_cycle_factor=3,
+        ...     factory_count=4,
+        ...     physical_qubits_per_factory=1000,
+        ...     factory_cycles_per_non_clifford=2,
+        ... )
+        >>> model.physical_qubits_per_logical
+        98
+    """
+
+    code_distance: _SympyLike
+    physical_cycle_time_seconds: _SympyLike
+    physical_qubits_per_logical_factor: _SympyLike = 2
+    logical_cycle_factor: _SympyLike = 1
+    factory_count: _SympyLike = 1
+    physical_qubits_per_factory: _SympyLike = 0
+    factory_cycles_per_non_clifford: _SympyLike = 1
+
+    def __post_init__(self) -> None:
+        """Validate surface-code fields after dataclass construction.
+
+        Raises:
+            ValueError: If a positive-valued quantity is non-positive or if
+                ``physical_qubits_per_factory`` is negative.
+        """
+        for name, value in {
+            key: value
+            for key, value in self.resource_inputs().items()
+            if key != "physical_qubits_per_factory"
+        }.items():
+            _validate_positive(value, name)
+        _validate_nonnegative(
+            self._physical_qubits_per_factory,
+            "physical_qubits_per_factory",
+        )
+
+    @property
+    def physical_qubits_per_logical(self) -> sp.Expr:
+        """Return physical qubits used by one logical patch.
+
+        Returns:
+            sp.Expr: ``physical_qubits_per_logical_factor * code_distance**2``.
+        """
+        return sp.simplify(
+            self._physical_qubits_per_logical_factor * self._code_distance**2
+        )
+
+    @property
+    def logical_cycle_time_seconds(self) -> sp.Expr:
+        """Return logical cycle time in seconds.
+
+        Returns:
+            sp.Expr: Logical cycle time derived from physical cycles.
+        """
+        return sp.simplify(
+            self._logical_cycle_factor
+            * self._code_distance
+            * self._physical_cycle_time_seconds
+        )
+
+    @property
+    def factory_qubits(self) -> sp.Expr:
+        """Return physical qubits reserved for factories.
+
+        Returns:
+            sp.Expr: Total factory qubit count.
+        """
+        return sp.simplify(self._factory_count * self._physical_qubits_per_factory)
+
+    @property
+    def non_clifford_throughput_per_second(self) -> sp.Expr:
+        """Return sustainable non-Clifford throughput.
+
+        Returns:
+            sp.Expr: Factory outputs per second under the compact factory
+            model.
+        """
+        return sp.simplify(
+            self._factory_count
+            / (self._factory_cycles_per_non_clifford * self.logical_cycle_time_seconds)
+        )
+
+    def to_cost_model(self) -> FTQCCostModel:
+        """Return the generic FTQC cost model represented by this architecture.
+
+        Returns:
+            FTQCCostModel: Generic physical-lift model derived from
+            surface-code assumptions.
+        """
+        return FTQCCostModel(
+            physical_qubits_per_logical=self.physical_qubits_per_logical,
+            logical_cycle_time_seconds=self.logical_cycle_time_seconds,
+            factory_qubits=self.factory_qubits,
+            non_clifford_throughput_per_second=(
+                self.non_clifford_throughput_per_second
+            ),
+        )
+
+    def resource_inputs(self) -> dict[str, sp.Expr]:
+        """Return raw surface-code inputs as named symbolic values.
+
+        Returns:
+            dict[str, sp.Expr]: Surface-code inputs keyed by stable names.
+        """
+        return {
+            "code_distance": self._code_distance,
+            "physical_cycle_time_seconds": self._physical_cycle_time_seconds,
+            "physical_qubits_per_logical_factor": (
+                self._physical_qubits_per_logical_factor
+            ),
+            "logical_cycle_factor": self._logical_cycle_factor,
+            "factory_count": self._factory_count,
+            "physical_qubits_per_factory": self._physical_qubits_per_factory,
+            "factory_cycles_per_non_clifford": (self._factory_cycles_per_non_clifford),
+        }
+
+    def resource_values(self) -> dict[str, sp.Expr]:
+        """Return raw and derived architecture values.
+
+        Returns:
+            dict[str, sp.Expr]: Surface-code inputs plus generic FTQC cost
+            values.
+        """
+        values = self.resource_inputs()
+        values.update(self.to_cost_model().resource_values())
+        return values
+
+    @property
+    def _code_distance(self) -> sp.Expr:
+        """Return code distance as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted code distance.
+        """
+        return _as_expr(self.code_distance, "code_distance")
+
+    @property
+    def _physical_cycle_time_seconds(self) -> sp.Expr:
+        """Return physical cycle time as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted physical cycle time.
+        """
+        return _as_expr(
+            self.physical_cycle_time_seconds,
+            "physical_cycle_time_seconds",
+        )
+
+    @property
+    def _physical_qubits_per_logical_factor(self) -> sp.Expr:
+        """Return logical patch qubit factor as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted patch qubit factor.
+        """
+        return _as_expr(
+            self.physical_qubits_per_logical_factor,
+            "physical_qubits_per_logical_factor",
+        )
+
+    @property
+    def _logical_cycle_factor(self) -> sp.Expr:
+        """Return logical cycle factor as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted logical cycle factor.
+        """
+        return _as_expr(self.logical_cycle_factor, "logical_cycle_factor")
+
+    @property
+    def _factory_count(self) -> sp.Expr:
+        """Return factory count as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted factory count.
+        """
+        return _as_expr(self.factory_count, "factory_count")
+
+    @property
+    def _physical_qubits_per_factory(self) -> sp.Expr:
+        """Return factory size as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted factory size.
+        """
+        return _as_expr(
+            self.physical_qubits_per_factory,
+            "physical_qubits_per_factory",
+        )
+
+    @property
+    def _factory_cycles_per_non_clifford(self) -> sp.Expr:
+        """Return factory cycles per non-Clifford output.
+
+        Returns:
+            sp.Expr: Converted factory latency.
+        """
+        return _as_expr(
+            self.factory_cycles_per_non_clifford,
+            "factory_cycles_per_non_clifford",
+        )
+
+
+@dataclass(frozen=True)
 class FTQCPhysicalResourceEstimate:
     """Represent architecture-lifted FTQC resource proxies.
 
@@ -276,10 +511,31 @@ class FTQCPhysicalResourceEstimate:
             },
         }
 
+    def resource_values(self) -> dict[str, sp.Expr]:
+        """Return canonical resource values exposed by the physical estimate.
+
+        Returns:
+            dict[str, sp.Expr]: Logical and physical values keyed by canonical
+            resource quantity names.
+        """
+        values = {
+            "logical_qubits": self.logical.qubits,
+            "logical_depth": self.logical_depth,
+            "non_clifford_count": self.non_clifford_count,
+            "t_gates": self.logical.gates.t_gates,
+            "multi_qubit_gates": self.logical.gates.multi_qubit,
+            "physical_qubits": self.physical_qubits,
+            "runtime_seconds": self.runtime_seconds,
+            **self.architecture_values,
+        }
+        if "qpe_iterations" in self.logical.gates.oracle_calls:
+            values["qpe_iterations"] = self.logical.gates.oracle_calls["qpe_iterations"]
+        return values
+
 
 def estimate_physical_resources(
     logical: ResourceEstimate,
-    cost_model: FTQCCostModel,
+    cost_model: FTQCCostModel | SurfaceCodeCostModel,
     *,
     logical_depth: _SympyLike | None = None,
     non_clifford_count: _SympyLike | None = None,
@@ -289,9 +545,10 @@ def estimate_physical_resources(
     Args:
         logical (ResourceEstimate): Existing logical circuit or algorithmic
             resource estimate.
-        cost_model (FTQCCostModel): Coarse architecture proxy used to compute
-            physical qubits and runtime. It does not encode a concrete QEC
-            architecture.
+        cost_model (FTQCCostModel | SurfaceCodeCostModel): Architecture model
+            used to compute physical qubits and runtime. ``FTQCCostModel`` is
+            a compact direct proxy; ``SurfaceCodeCostModel`` derives that proxy
+            from explicit surface-code knobs.
         logical_depth (sp.Expr | int | float | None): Optional logical-depth
             proxy. Defaults to ``logical.gates.total`` because the current
             generic ``ResourceEstimate`` does not track depth separately.
@@ -305,12 +562,16 @@ def estimate_physical_resources(
 
     Raises:
         TypeError: If ``logical`` is not a ``ResourceEstimate`` or if
-            ``cost_model`` is not an ``FTQCCostModel``.
+            ``cost_model`` is not a supported architecture model.
     """
     if not isinstance(logical, ResourceEstimate):
         raise TypeError("logical must be a ResourceEstimate instance.")
+    if isinstance(cost_model, SurfaceCodeCostModel):
+        cost_model = cost_model.to_cost_model()
     if not isinstance(cost_model, FTQCCostModel):
-        raise TypeError("cost_model must be an FTQCCostModel instance.")
+        raise TypeError(
+            "cost_model must be an FTQCCostModel or SurfaceCodeCostModel instance."
+        )
 
     depth_expr = (
         logical.gates.total

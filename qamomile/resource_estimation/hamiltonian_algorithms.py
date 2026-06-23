@@ -1,4 +1,4 @@
-"""Estimate logical resources for quantum-chemistry FTQC workflows."""
+"""Estimate logical resources for Hamiltonian phase-estimation workloads."""
 
 from __future__ import annotations
 
@@ -8,32 +8,29 @@ from typing import Any
 
 import sympy as sp
 
-from qamomile.resource_estimation import (
-    GateCount,
-    PauliHamiltonianResource,
-    ResourceEstimate,
-)
+from qamomile.circuit.estimator import GateCount, ResourceEstimate
+from qamomile.resource_estimation.hamiltonian import PauliHamiltonianResource
 
 _SympyLike = sp.Expr | int | float
 
 
-class ChemistryQPEMethod(enum.StrEnum):
-    """Select a chemistry Hamiltonian representation for QPE estimates.
+class HamiltonianRepresentation(enum.StrEnum):
+    """Select a Hamiltonian representation for logical QPE estimates.
 
     Attributes:
-        SPARSE: Sparse Pauli-LCU representation.
-        SINGLE_FACTORIZATION: Single-factorized two-electron tensor.
-        DOUBLE_FACTORIZATION: Double-factorized two-electron tensor.
+        SPARSE_PAULI_LCU: Sparse Pauli-LCU representation.
+        SINGLE_FACTORIZATION: Single-factorized tensor representation.
+        DOUBLE_FACTORIZATION: Double-factorized tensor representation.
         TENSOR_HYPERCONTRACTION: Tensor-hypercontracted representation.
         SYMMETRY_COMPRESSED_DF: Symmetry-compressed double factorization.
         UNITARY_WEIGHT_CONCENTRATION: Early-FTQC unitary-weight concentration.
 
     Example:
-        >>> ChemistryQPEMethod("tensor_hypercontraction")
-        <ChemistryQPEMethod.TENSOR_HYPERCONTRACTION: 'tensor_hypercontraction'>
+        >>> HamiltonianRepresentation("sparse_pauli_lcu")
+        <HamiltonianRepresentation.SPARSE_PAULI_LCU: 'sparse_pauli_lcu'>
     """
 
-    SPARSE = "sparse"
+    SPARSE_PAULI_LCU = "sparse_pauli_lcu"
     SINGLE_FACTORIZATION = "single_factorization"
     DOUBLE_FACTORIZATION = "double_factorization"
     TENSOR_HYPERCONTRACTION = "tensor_hypercontraction"
@@ -42,29 +39,30 @@ class ChemistryQPEMethod(enum.StrEnum):
 
 
 @dataclass(frozen=True)
-class ChemistryQPEModel:
-    """Describe a chemistry representation used by QPE resource estimates.
+class HamiltonianQPEWorkload:
+    """Describe a Hamiltonian workload for phase-estimation resource estimates.
 
     Attributes:
         hamiltonian (PauliHamiltonianResource): Generic Pauli Hamiltonian
             resource summary.
         walk_cost_toffoli (sp.Expr | int | float): Toffoli cost for one
             qubitized walk operator call.
-        method (str | ChemistryQPEMethod): QPE representation or optimization
-            strategy used to choose default logical-qubit scaling.
+        representation (str | HamiltonianRepresentation): Hamiltonian
+            representation used to choose default logical-qubit scaling.
         sparsity (sp.Expr | int | float | None): Sparse-method nonzero term
-            count. Defaults to ``hamiltonian.n_pauli_terms`` for sparse QPE.
+            count. Defaults to ``hamiltonian.n_pauli_terms`` for sparse LCU.
         second_factor_rank (sp.Expr | int | float | None): Average second
             factorization rank for double-factorized methods.
         logical_qubits (sp.Expr | int | float | None): Explicit logical-qubit
-            count. Defaults to the method-specific scaling model.
-        truncation_error (sp.Expr | int | float): Hamiltonian representation
-            error budget.
+            count. Defaults to the representation-specific scaling model.
+        representation_error (sp.Expr | int | float): Hamiltonian
+            representation error budget.
         description (str): Reader-facing model label.
 
     Raises:
+        TypeError: If ``hamiltonian`` is not a ``PauliHamiltonianResource``.
         ValueError: If any positive-valued quantity is non-positive or if
-            ``truncation_error`` is negative.
+            ``representation_error`` is negative.
 
     Example:
         >>> summary = PauliHamiltonianResource(
@@ -73,30 +71,34 @@ class ChemistryQPEModel:
         ...     lambda_norm=20,
         ...     max_locality=2,
         ... )
-        >>> model = ChemistryQPEModel(
+        >>> workload = HamiltonianQPEWorkload(
         ...     summary,
         ...     walk_cost_toffoli=100,
-        ...     method=ChemistryQPEMethod.SPARSE,
+        ...     representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
         ... )
-        >>> model.effective_sparsity
+        >>> workload.effective_sparsity
         10
     """
 
     hamiltonian: PauliHamiltonianResource
     walk_cost_toffoli: _SympyLike
-    method: str | ChemistryQPEMethod = ChemistryQPEMethod.DOUBLE_FACTORIZATION
+    representation: str | HamiltonianRepresentation = (
+        HamiltonianRepresentation.DOUBLE_FACTORIZATION
+    )
     sparsity: _SympyLike | None = None
     second_factor_rank: _SympyLike | None = None
     logical_qubits: _SympyLike | None = None
-    truncation_error: _SympyLike = 0
+    representation_error: _SympyLike = 0
     description: str = ""
 
     def __post_init__(self) -> None:
-        """Validate model fields after dataclass construction.
+        """Validate workload fields after dataclass construction.
 
         Raises:
+            TypeError: If ``hamiltonian`` is not a
+                ``PauliHamiltonianResource``.
             ValueError: If any positive-valued quantity is non-positive or if
-                ``truncation_error`` is negative.
+                ``representation_error`` is negative.
         """
         if not isinstance(self.hamiltonian, PauliHamiltonianResource):
             raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
@@ -117,19 +119,19 @@ class ChemistryQPEModel:
                 "logical_qubits",
             )
         _validate_nonnegative(
-            _as_expr(self.truncation_error, "truncation_error"),
-            "truncation_error",
+            _as_expr(self.representation_error, "representation_error"),
+            "representation_error",
         )
-        _normalize_method(self.method)
+        _normalize_representation(self.representation)
 
     @property
-    def normalized_method(self) -> ChemistryQPEMethod:
-        """Return the normalized QPE method.
+    def normalized_representation(self) -> HamiltonianRepresentation:
+        """Return the normalized Hamiltonian representation.
 
         Returns:
-            ChemistryQPEMethod: Normalized finite-set method.
+            HamiltonianRepresentation: Normalized finite-set representation.
         """
-        return _normalize_method(self.method)
+        return _normalize_representation(self.representation)
 
     @property
     def effective_sparsity(self) -> sp.Expr | None:
@@ -137,23 +139,23 @@ class ChemistryQPEModel:
 
         Returns:
             sp.Expr | None: Explicit sparsity, Hamiltonian term count for the
-                sparse method, or None for non-sparse methods.
+                sparse representation, or None for non-sparse representations.
         """
         if self.sparsity is not None:
             return _as_expr(self.sparsity, "sparsity")
-        if self.normalized_method == ChemistryQPEMethod.SPARSE:
+        if self.normalized_representation == HamiltonianRepresentation.SPARSE_PAULI_LCU:
             return self.hamiltonian.n_pauli_terms
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the model to a JSON-friendly dictionary.
+        """Serialize the workload to a JSON-friendly dictionary.
 
         Returns:
-            dict[str, Any]: String-valued model metadata.
+            dict[str, Any]: String-valued workload metadata.
         """
         return {
             "hamiltonian": self.hamiltonian.to_dict(),
-            "method": self.normalized_method.value,
+            "representation": self.normalized_representation.value,
             "walk_cost_toffoli": str(
                 _as_expr(self.walk_cost_toffoli, "walk_cost_toffoli")
             ),
@@ -172,45 +174,59 @@ class ChemistryQPEModel:
                 if self.logical_qubits is None
                 else str(_as_expr(self.logical_qubits, "logical_qubits"))
             ),
-            "truncation_error": str(
-                _as_expr(self.truncation_error, "truncation_error")
+            "representation_error": str(
+                _as_expr(self.representation_error, "representation_error")
             ),
             "description": self.description,
         }
 
+    def resource_values(self) -> dict[str, sp.Expr]:
+        """Return canonical resource values exposed by the workload.
 
-def estimate_qubitized_chemistry_qpe(
-    n_spin_orbitals: sp.Expr | int,
+        Returns:
+            dict[str, sp.Expr]: Hamiltonian summary values plus algorithm
+            workload parameters.
+        """
+        values = self.hamiltonian.resource_values()
+        values["walk_cost_toffoli"] = _as_expr(
+            self.walk_cost_toffoli,
+            "walk_cost_toffoli",
+        )
+        if self.effective_sparsity is not None:
+            values["n_pauli_terms"] = self.effective_sparsity
+        return values
+
+
+def estimate_qubitized_qpe_resources(
+    n_qubits: sp.Expr | int,
     lambda_norm: _SympyLike,
     precision: _SympyLike,
     walk_cost_toffoli: sp.Expr | int,
     *,
-    method: str | ChemistryQPEMethod = ChemistryQPEMethod.DOUBLE_FACTORIZATION,
+    representation: str | HamiltonianRepresentation = (
+        HamiltonianRepresentation.DOUBLE_FACTORIZATION
+    ),
     sparsity: sp.Expr | int | None = None,
     second_factor_rank: sp.Expr | int | None = None,
     logical_qubits: sp.Expr | int | None = None,
 ) -> ResourceEstimate:
-    """Estimate logical qubitized QPE resources for molecular Hamiltonians.
+    """Estimate logical qubitized-QPE resources for a Hamiltonian.
 
     Args:
-        n_spin_orbitals (sp.Expr | int): Number of spin orbitals in the
-            active-space Hamiltonian.
+        n_qubits (sp.Expr | int): Number of encoded Hamiltonian qubits.
         lambda_norm (sp.Expr | int | float): LCU block-encoding
-            normalization, often the representation-dependent Hamiltonian
-            1-norm.
+            normalization, often the Hamiltonian 1-norm.
         precision (sp.Expr | int | float): Target phase-estimation energy
-            precision in Hartree or another consistent energy unit.
+            precision in a consistent energy unit.
         walk_cost_toffoli (sp.Expr | int): Toffoli cost for one qubitized
             walk operator call.
-        method (str | ChemistryQPEMethod): Hamiltonian representation used
-            to choose a default logical-qubit model. Defaults to double
-            factorization.
+        representation (str | HamiltonianRepresentation): Hamiltonian
+            representation used to choose a default logical-qubit model.
         sparsity (sp.Expr | int | None): Number of nonzero Pauli or LCU
-            terms for the sparse method. Required only when using the sparse
-            default logical-qubit model.
-        second_factor_rank (sp.Expr | int | None): Average second
-            factorization rank for double-factorized methods. Defaults to a
-            symbolic ``Xi``.
+            terms for sparse Pauli-LCU estimates. Defaults to None.
+        second_factor_rank (sp.Expr | int | None): Average rank for
+            double-factorized methods. Defaults to symbolic ``Xi`` when
+            needed.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
             When omitted, a representation-level scaling model is used.
 
@@ -218,24 +234,25 @@ def estimate_qubitized_chemistry_qpe(
         ResourceEstimate: Architecture-independent logical resource estimate.
 
     Raises:
-        ValueError: If a finite-set method is unknown, a required sparse
-            parameter is missing, or a positive-valued input is non-positive.
+        ValueError: If a finite-set representation is unknown, a required
+            sparse parameter is missing, or a positive-valued input is
+            non-positive.
         TypeError: If a value cannot be converted into a SymPy expression.
     """
-    method_enum = _normalize_method(method)
-    n_expr = _as_expr(n_spin_orbitals, "n_spin_orbitals")
+    representation_enum = _normalize_representation(representation)
+    n_expr = _as_expr(n_qubits, "n_qubits")
     lambda_expr = _as_expr(lambda_norm, "lambda_norm")
     precision_expr = _as_expr(precision, "precision")
     walk_expr = _as_expr(walk_cost_toffoli, "walk_cost_toffoli")
 
-    _validate_positive(n_expr, "n_spin_orbitals")
+    _validate_positive(n_expr, "n_qubits")
     _validate_positive(lambda_expr, "lambda_norm")
     _validate_positive(precision_expr, "precision")
     _validate_positive(walk_expr, "walk_cost_toffoli")
 
     if logical_qubits is None:
         logical_expr = _default_logical_qubits(
-            method_enum,
+            representation_enum,
             n_expr,
             sparsity=sparsity,
             second_factor_rank=second_factor_rank,
@@ -257,14 +274,14 @@ def estimate_qubitized_chemistry_qpe(
     )
 
 
-def estimate_qubitized_chemistry_qpe_from_model(
-    model: ChemistryQPEModel,
+def estimate_qubitized_qpe_resources_from_workload(
+    workload: HamiltonianQPEWorkload,
     precision: _SympyLike,
 ) -> ResourceEstimate:
-    """Estimate logical qubitized QPE resources from a chemistry model.
+    """Estimate logical qubitized-QPE resources from a workload object.
 
     Args:
-        model (ChemistryQPEModel): Hamiltonian representation model carrying
+        workload (HamiltonianQPEWorkload): Hamiltonian workload carrying
             lambda norm, sparsity/rank metadata, and walk cost.
         precision (sp.Expr | int | float): Target phase-estimation energy
             precision.
@@ -273,33 +290,33 @@ def estimate_qubitized_chemistry_qpe_from_model(
         ResourceEstimate: Architecture-independent logical resource estimate.
 
     Raises:
-        TypeError: If ``model`` is not a ``ChemistryQPEModel``.
+        TypeError: If ``workload`` is not a ``HamiltonianQPEWorkload``.
         ValueError: If ``precision`` is non-positive.
     """
-    if not isinstance(model, ChemistryQPEModel):
-        raise TypeError("model must be a ChemistryQPEModel instance.")
-    return estimate_qubitized_chemistry_qpe(
-        n_spin_orbitals=model.hamiltonian.n_qubits,
-        lambda_norm=model.hamiltonian.lambda_norm,
+    if not isinstance(workload, HamiltonianQPEWorkload):
+        raise TypeError("workload must be a HamiltonianQPEWorkload instance.")
+    return estimate_qubitized_qpe_resources(
+        n_qubits=workload.hamiltonian.n_qubits,
+        lambda_norm=workload.hamiltonian.lambda_norm,
         precision=precision,
-        walk_cost_toffoli=_as_expr(model.walk_cost_toffoli, "walk_cost_toffoli"),
-        method=model.normalized_method,
-        sparsity=model.effective_sparsity,
+        walk_cost_toffoli=_as_expr(workload.walk_cost_toffoli, "walk_cost_toffoli"),
+        representation=workload.normalized_representation,
+        sparsity=workload.effective_sparsity,
         second_factor_rank=(
             None
-            if model.second_factor_rank is None
-            else _as_expr(model.second_factor_rank, "second_factor_rank")
+            if workload.second_factor_rank is None
+            else _as_expr(workload.second_factor_rank, "second_factor_rank")
         ),
         logical_qubits=(
             None
-            if model.logical_qubits is None
-            else _as_expr(model.logical_qubits, "logical_qubits")
+            if workload.logical_qubits is None
+            else _as_expr(workload.logical_qubits, "logical_qubits")
         ),
     )
 
 
-def estimate_single_ancilla_trotter_qpe(
-    n_spin_orbitals: sp.Expr | int,
+def estimate_trotter_qpe_resources(
+    n_qubits: sp.Expr | int,
     n_pauli_terms: sp.Expr | int,
     lambda_norm: _SympyLike,
     precision: _SympyLike,
@@ -311,15 +328,11 @@ def estimate_single_ancilla_trotter_qpe(
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
 ) -> ResourceEstimate:
-    """Estimate logical early-FTQC single-ancilla Trotter QPE resources.
-
-    This estimator models the style of early-FTQC chemistry proposals that
-    combine single-ancilla QPE, partially randomized product formulas, and
-    Hamiltonian-weight reduction such as unitary weight concentration.
+    """Estimate logical single-ancilla Trotter-QPE resources.
 
     Args:
-        n_spin_orbitals (sp.Expr | int): Number of spin orbitals.
-        n_pauli_terms (sp.Expr | int): Number of Pauli LCU terms.
+        n_qubits (sp.Expr | int): Number of encoded Hamiltonian qubits.
+        n_pauli_terms (sp.Expr | int): Number of Pauli terms.
         lambda_norm (sp.Expr | int | float): Original Hamiltonian 1-norm.
         precision (sp.Expr | int | float): Target energy precision.
         trotter_steps_per_sample (sp.Expr | int): Product-formula steps per
@@ -327,16 +340,14 @@ def estimate_single_ancilla_trotter_qpe(
         samples (sp.Expr | int): Number of sampled time points or shots in
             the signal-processing routine.
         unitary_weight_factor (sp.Expr | int | float): Multiplicative
-            reduction in Hamiltonian weight after spectrally invariant
-            transformations. Values below one model cost reduction. Defaults
-            to one.
+            reduction in Hamiltonian weight. Values below one model cost
+            reduction. Defaults to one.
         randomized_compilation_factor (sp.Expr | int | float): Multiplicative
             cost factor for partially randomized compilation. Defaults to one.
         rotation_synthesis_t_gates (sp.Expr | int): T-gate cost per small
             Pauli rotation. Defaults to one symbolic T-equivalent unit.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
-            Defaults to ``n_spin_orbitals + 1`` for the data register plus
-            the Hadamard-test ancilla.
+            Defaults to ``n_qubits + 1`` for data plus Hadamard-test ancilla.
 
     Returns:
         ResourceEstimate: Architecture-independent logical resource estimate.
@@ -346,7 +357,7 @@ def estimate_single_ancilla_trotter_qpe(
             multiplicative reduction factor is negative.
         TypeError: If a value cannot be converted into a SymPy expression.
     """
-    n_expr = _as_expr(n_spin_orbitals, "n_spin_orbitals")
+    n_expr = _as_expr(n_qubits, "n_qubits")
     terms_expr = _as_expr(n_pauli_terms, "n_pauli_terms")
     lambda_expr = _as_expr(lambda_norm, "lambda_norm")
     precision_expr = _as_expr(precision, "precision")
@@ -360,7 +371,7 @@ def estimate_single_ancilla_trotter_qpe(
     rotation_t = _as_expr(rotation_synthesis_t_gates, "rotation_synthesis_t_gates")
 
     for name, expr in [
-        ("n_spin_orbitals", n_expr),
+        ("n_qubits", n_expr),
         ("n_pauli_terms", terms_expr),
         ("lambda_norm", lambda_expr),
         ("precision", precision_expr),
@@ -397,7 +408,7 @@ def estimate_single_ancilla_trotter_qpe(
     )
 
 
-def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
+def estimate_trotter_qpe_resources_from_hamiltonian(
     hamiltonian: PauliHamiltonianResource,
     precision: _SympyLike,
     *,
@@ -408,7 +419,7 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     rotation_synthesis_t_gates: sp.Expr | int = 1,
     logical_qubits: sp.Expr | int | None = None,
 ) -> ResourceEstimate:
-    """Estimate logical Trotter QPE resources from a Hamiltonian summary.
+    """Estimate logical Trotter-QPE resources from a Hamiltonian summary.
 
     Args:
         hamiltonian (PauliHamiltonianResource): Pauli-LCU Hamiltonian summary.
@@ -434,8 +445,8 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
     """
     if not isinstance(hamiltonian, PauliHamiltonianResource):
         raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
-    return estimate_single_ancilla_trotter_qpe(
-        n_spin_orbitals=hamiltonian.n_qubits,
+    return estimate_trotter_qpe_resources(
+        n_qubits=hamiltonian.n_qubits,
         n_pauli_terms=hamiltonian.n_pauli_terms,
         lambda_norm=hamiltonian.lambda_norm,
         precision=precision,
@@ -449,8 +460,8 @@ def estimate_single_ancilla_trotter_qpe_from_hamiltonian(
 
 
 def _default_logical_qubits(
-    method: ChemistryQPEMethod,
-    n_spin_orbitals: sp.Expr,
+    representation: HamiltonianRepresentation,
+    n_qubits: sp.Expr,
     *,
     sparsity: sp.Expr | int | None,
     second_factor_rank: sp.Expr | int | None,
@@ -458,8 +469,8 @@ def _default_logical_qubits(
     """Return representation-level logical-qubit scaling.
 
     Args:
-        method (ChemistryQPEMethod): Hamiltonian representation.
-        n_spin_orbitals (sp.Expr): Number of spin orbitals.
+        representation (HamiltonianRepresentation): Hamiltonian representation.
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
         sparsity (sp.Expr | int | None): Sparse-method nonzero term count.
         second_factor_rank (sp.Expr | int | None): Average rank for
             double-factorized methods.
@@ -468,21 +479,23 @@ def _default_logical_qubits(
         sp.Expr: Symbolic logical-qubit estimate.
 
     Raises:
-        ValueError: If the sparse method lacks ``sparsity``.
+        ValueError: If the sparse representation lacks ``sparsity``.
     """
-    n = n_spin_orbitals
-    match method:
-        case ChemistryQPEMethod.SPARSE:
+    n = n_qubits
+    match representation:
+        case HamiltonianRepresentation.SPARSE_PAULI_LCU:
             if sparsity is None:
-                raise ValueError("sparsity is required for sparse QPE estimates.")
+                raise ValueError(
+                    "sparsity is required for sparse Pauli-LCU QPE estimates."
+                )
             sparsity_expr = _as_expr(sparsity, "sparsity")
             _validate_positive(sparsity_expr, "sparsity")
             return sp.simplify(n + sp.sqrt(sparsity_expr))
-        case ChemistryQPEMethod.SINGLE_FACTORIZATION:
+        case HamiltonianRepresentation.SINGLE_FACTORIZATION:
             return sp.simplify(n ** sp.Rational(3, 2))
         case (
-            ChemistryQPEMethod.DOUBLE_FACTORIZATION
-            | ChemistryQPEMethod.SYMMETRY_COMPRESSED_DF
+            HamiltonianRepresentation.DOUBLE_FACTORIZATION
+            | HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF
         ):
             rank_expr = (
                 sp.Symbol("Xi", positive=True)
@@ -491,12 +504,12 @@ def _default_logical_qubits(
             )
             _validate_positive(rank_expr, "second_factor_rank")
             return sp.simplify(n * sp.sqrt(rank_expr))
-        case ChemistryQPEMethod.TENSOR_HYPERCONTRACTION:
+        case HamiltonianRepresentation.TENSOR_HYPERCONTRACTION:
             return n
-        case ChemistryQPEMethod.UNITARY_WEIGHT_CONCENTRATION:
+        case HamiltonianRepresentation.UNITARY_WEIGHT_CONCENTRATION:
             return n + 1
         case _:
-            raise ValueError(f"Unhandled chemistry QPE method: {method}")
+            raise ValueError(f"Unhandled Hamiltonian representation: {representation}")
 
 
 def _build_logical_estimate(
@@ -540,24 +553,27 @@ def _build_logical_estimate(
     return estimate.simplify()
 
 
-def _normalize_method(method: str | ChemistryQPEMethod) -> ChemistryQPEMethod:
-    """Normalize a public method value to ``ChemistryQPEMethod``.
+def _normalize_representation(
+    representation: str | HamiltonianRepresentation,
+) -> HamiltonianRepresentation:
+    """Normalize a public representation value.
 
     Args:
-        method (str | ChemistryQPEMethod): User-provided method.
+        representation (str | HamiltonianRepresentation): User-provided
+            representation.
 
     Returns:
-        ChemistryQPEMethod: Normalized enum value.
+        HamiltonianRepresentation: Normalized enum value.
 
     Raises:
-        ValueError: If ``method`` is not a known chemistry QPE method.
+        ValueError: If ``representation`` is not known.
     """
     try:
-        return ChemistryQPEMethod(method)
+        return HamiltonianRepresentation(representation)
     except ValueError as exc:
-        valid = ", ".join(item.value for item in ChemistryQPEMethod)
+        valid = ", ".join(item.value for item in HamiltonianRepresentation)
         raise ValueError(
-            f"Unknown chemistry QPE method {method!r}; valid: {valid}."
+            f"Unknown Hamiltonian representation {representation!r}; valid: {valid}."
         ) from exc
 
 

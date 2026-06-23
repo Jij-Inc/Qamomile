@@ -8,6 +8,8 @@ import sympy as sp
 import qamomile.observable as qm_o
 from qamomile.resource_estimation import (
     PauliHamiltonianResource,
+    hamiltonian_from_openfermion_qubit_operator,
+    summarize_openfermion_qubit_operator,
     summarize_pauli_hamiltonian,
 )
 
@@ -63,3 +65,37 @@ def test_summarize_pauli_hamiltonian_rejects_non_hamiltonian_input():
     """The summary helper fails early on non-Qamomile Hamiltonian objects."""
     with pytest.raises(TypeError, match="qamomile.observable.Hamiltonian"):
         summarize_pauli_hamiltonian(object())
+
+
+def test_openfermion_style_qubit_operator_converts_to_hamiltonian_summary():
+    """OpenFermion-style term mappings feed the same Hamiltonian summary path."""
+
+    class QubitOperatorStub:
+        """Expose a minimal OpenFermion-style ``terms`` mapping."""
+
+        terms = {
+            ((0, "Z"),): 2,
+            ((1, "X"), (2, "Y")): 3,
+            (): 4,
+        }
+
+    hamiltonian = hamiltonian_from_openfermion_qubit_operator(QubitOperatorStub())
+    summary = summarize_openfermion_qubit_operator(QubitOperatorStub())
+
+    assert hamiltonian.num_qubits == 3
+    assert hamiltonian.constant == 4
+    assert summary.n_qubits == 3
+    assert summary.n_pauli_terms == 2
+    assert sp.Abs(summary.lambda_norm - 5) < sp.Float("1e-12")
+
+
+def test_openfermion_style_qubit_operator_rejects_invalid_pauli_label():
+    """OpenFermion conversion rejects unsupported Pauli labels early."""
+
+    class QubitOperatorStub:
+        """Expose an invalid OpenFermion-style ``terms`` mapping."""
+
+        terms = {((0, "A"),): 1}
+
+    with pytest.raises(ValueError, match="Unsupported OpenFermion Pauli label"):
+        hamiltonian_from_openfermion_qubit_operator(QubitOperatorStub())
