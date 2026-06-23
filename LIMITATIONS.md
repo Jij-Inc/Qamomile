@@ -115,6 +115,14 @@ Rather than spin the unroll loop to `MAX_UNROLL_DEPTH` and emit the generic "did
 
 **Future fix**: add an ancilla-based or recursive gate-synthesis decomposition for multi-controlled single-qubit gates in `qamomile/quri_parts/transpiler.py::QuriPartsEmitPass._emit_irreducible_multi_controlled_gate`, which would lift both the qubit-count cap and the compile-time-angle restriction.
 
+## Controlled Pauli evolution requires a compile-time-numeric gamma on QURI Parts
+
+**When it bites**: wrapping a `qmc.pauli_evolve` sub-kernel in `qmc.control` and transpiling for QURI Parts with `gamma` left as a runtime parameter (`parameters=["gamma"]`). The controlled lowering raises `EmitError` at transpile time; only a concrete `gamma` binding compiles. A concrete `gamma` works for any number of controls (one control via `CRZ`, two or more via the dense `UnitaryMatrix` path).
+
+**Why this trade-off was chosen**: the controlled fallback (`qamomile/circuit/transpiler/passes/emit_support/controlled_emission.py::emit_controlled_pauli_evolve`) emits each Pauli term's basis change and CX ladder uncontrolled and controls only the central `RZ(2 * coeff * gamma)`. Forming that angle scales the resolved `gamma` by `2 * coeff`, but QURI Parts' Rust-backed runtime `Parameter` exposes no Python arithmetic, so the scaling cannot be expressed — the same pre-existing limitation that already prevents uncontrolled `pauli_evolve` from accepting a parametric `gamma` on QURI Parts. Independently, for two or more controls the central `RZ` lowers to a dense `UnitaryMatrix` (see "QURI Parts multi-controlled gates use a bounded dense unitary"), which bakes the angle into a matrix and therefore needs a compile-time-numeric value regardless. The controlled lowering converts the raw `TypeError` from the unsupported scaling into a clear `EmitError` that names the cause and points at binding `gamma`.
+
+**Future fix**: thread the per-term angle through QURI Parts' linear-combination angle form (`LinearMappedUnboundParametricQuantumCircuit` plus the emitter's `combine_symbolic`) instead of scaling the `Parameter` in Python, which would let single-control controlled (and uncontrolled) `pauli_evolve` accept a parametric `gamma` via `CRZ`; the two-or-more-control dense path keeps the concrete-angle requirement until the multi-controlled gate gains a gate-synthesis decomposition.
+
 ## CUDA-Q observe cannot estimate controlled modular arithmetic yet
 
 **When it bites**: running the controlled modular arithmetic expectation-value path on the CUDA-Q backend. Sampling uses a separate execution path, but `cudaq.observe()` does not yet support the runtime control flow used by these controlled modular arithmetic kernels.

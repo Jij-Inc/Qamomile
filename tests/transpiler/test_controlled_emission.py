@@ -12,7 +12,9 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.types.primitives import QubitType
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes.emit_support import (
     controlled_emission,
@@ -144,6 +146,40 @@ def test_controlled_dispatch_accepts_composite_gate(monkeypatch) -> None:
 
     assert calls == [([7], [3])]
     assert qubit_map[QubitAddress(q_out.uuid)] == 3
+
+
+def test_controlled_dispatch_accepts_pauli_evolve(monkeypatch) -> None:
+    """Controlled dispatch routes a PauliEvolveOp to the shared lowering."""
+    q = Value(type=QubitType(), name="q")
+    q_out = q.next_version()
+    observable = Value(type=ObservableType(), name="ham")
+    gamma = Value(type=FloatType(), name="gamma")
+    op = PauliEvolveOp(operands=[q, observable, gamma], results=[q_out])
+    calls: list[list[int]] = []
+
+    def fake_emit_pauli_evolve(
+        emit_pass: Any,
+        circuit: Any,
+        op: PauliEvolveOp,
+        control_indices: list[int],
+        qubit_map: dict[Any, int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Record the controls threaded into the controlled Pauli evolution."""
+        del emit_pass, circuit, op, qubit_map, bindings
+        calls.append(control_indices)
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "emit_controlled_pauli_evolve",
+        fake_emit_pauli_evolve,
+    )
+
+    emit_controlled_operations(
+        _ResolverOnlyEmitPass(), object(), [op], [7], {QubitAddress(q.uuid): 3}, {}
+    )
+
+    assert calls == [[7]]
 
 
 class _RecordingEmitter:
