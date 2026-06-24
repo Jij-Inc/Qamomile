@@ -37,6 +37,7 @@ from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.handle.utils import get_size as _get_size
+from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
@@ -587,6 +588,19 @@ class QKernel(Generic[P, R]):
                 bound_args.arguments[arg_name] = _promote_literal_to_handle(
                     arg_value, expected_type
                 )
+
+        # Fail fast on argument type mismatches before any handle is
+        # consumed: a scalar ``Qubit`` bound to a ``Vector[Qubit]``
+        # parameter (or the reverse), or a quantum handle bound to a
+        # classical parameter. Without this guard a scalar-into-array
+        # mismatch surfaces much later as an opaque ``AttributeError``
+        # (``'Qubit' object has no attribute 'shape'``) from ``get_size``
+        # during call-time specialization, and a quantum-into-classical
+        # mismatch silently miscompiles (a ``Qubit`` bound to a ``Float``
+        # parameter emits ``Rx(0.0)``).
+        _validate_bound_handles(
+            self.input_types, bound_args.arguments, context=f"{self.name}()"
+        )
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map: dict[str, Value] = {}
