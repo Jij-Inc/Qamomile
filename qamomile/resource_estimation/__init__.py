@@ -12,9 +12,12 @@ from qamomile.resource_estimation.block_encoding import (
     estimate_qubitized_qpe_resources_from_block_encoding,
 )
 from qamomile.resource_estimation.ftqc import (
+    ActiveVolumeCostModel,
+    FTQCActiveVolumeResourceEstimate,
     FTQCCostModel,
     FTQCPhysicalResourceEstimate,
     SurfaceCodeCostModel,
+    estimate_active_volume_resources,
     estimate_physical_resources,
     resource_estimate_expressions,
 )
@@ -63,6 +66,8 @@ from qamomile.resource_estimation.quantities import (
 
 __all__ = [
     "FTQCCostModel",
+    "ActiveVolumeCostModel",
+    "FTQCActiveVolumeResourceEstimate",
     "FTQCPhysicalResourceEstimate",
     "GateCount",
     "BlockEncodingResource",
@@ -91,6 +96,7 @@ __all__ = [
     "describe_resource_review_profile",
     "evaluate_resource_value_scenarios",
     "evaluate_resource_values",
+    "estimate_active_volume_resources",
     "estimate_physical_resources",
     "estimate_qubitized_qpe_resources",
     "estimate_qubitized_qpe_resources_from_block_encoding",

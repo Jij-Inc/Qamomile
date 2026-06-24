@@ -43,6 +43,7 @@ import qamomile.resource_estimation as qre
 # | Reduce Hamiltonian normalization before qubitized QPE. | [Symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502) reduces the 1-norm that drives QPE iterations and Toffoli cost. | `lambda_norm`, `representation_error`, `walk_cost_toffoli`, `qpe_iterations`, `t_gates` |
 # | Replace the block-encoding workload with an early-FTQC Trotter workload. | [Unitary weight concentration](https://arxiv.org/abs/2603.22778) reports reduced effective Hamiltonian weight for a single-ancilla, Trotter-based QPE setting. | `effective_lambda_norm`, `unitary_weight_factor`, `trotter_steps_per_sample`, `pauli_rotations`, `rotation_synthesis_t_gates` |
 # | Move from logical resources to architecture bottlenecks. | Surface-code and magic-state-factory estimates, such as [Gidney and Ekerå's factoring estimate](https://arxiv.org/abs/1905.09749), make runtime depend on both logical depth and non-Clifford throughput. | `physical_qubits`, `depth_limited_runtime_seconds`, `non_clifford_limited_runtime_seconds`, `physical_qubit_seconds` |
+# | Price only resources that are active during operations. | [BLISS-THC with active-volume compilation](https://arxiv.org/abs/2501.06165) separates operation volume from idle footprint in a recent chemistry-resource estimate. | `logical_operations`, `active_volume`, `active_volume_runtime_seconds`, `active_volume_throughput_per_second` |
 #
 # This split keeps three contracts explicit:
 #
@@ -70,6 +71,9 @@ profiles = {
     "physical outcomes": qre.describe_resource_review_profile(
         qre.ResourceReviewProfile.FTQC_PHYSICAL_OUTCOMES
     ),
+    "active-volume outcomes": qre.describe_resource_review_profile(
+        qre.ResourceReviewProfile.FTQC_ACTIVE_VOLUME_OUTCOMES
+    ),
 }
 
 for name, profile in profiles.items():
@@ -86,6 +90,9 @@ assert (
 assert (
     qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS
     in profiles["physical outcomes"].quantities
+)
+assert (
+    qre.ResourceQuantity.ACTIVE_VOLUME in profiles["active-volume outcomes"].quantities
 )
 
 # %% [markdown]
@@ -188,6 +195,46 @@ assert (
 )
 
 # %% [markdown]
+# ## Active-Volume Models
+#
+# Some recent FTQC analyses model an operation-volume bottleneck instead of a full footprint-times-depth bottleneck.
+# Qamomile keeps that contract separate through `ActiveVolumeCostModel`.
+# The model is still symbolic and assumption-driven: it records active-volume units per logical gate, an optional surcharge for non-Clifford operations, and an active-volume throughput.
+
+# %%
+active_volume_model = qre.ActiveVolumeCostModel(
+    active_volume_per_logical_gate=3,
+    active_volume_per_non_clifford=2,
+    active_volume_throughput_per_second=10,
+)
+
+qubitized_active_volume = qre.estimate_active_volume_resources(
+    qubitized_logical,
+    active_volume_model,
+)
+uwc_active_volume = qre.estimate_active_volume_resources(
+    uwc_logical,
+    active_volume_model,
+)
+
+active_volume_rows = qre.compare_resource_values(
+    qubitized_active_volume,
+    uwc_active_volume,
+    quantities=profiles["active-volume outcomes"].quantities,
+)
+for row in active_volume_rows:
+    print(row.to_dict())
+
+assert (
+    uwc_active_volume.resource_values()["active_volume"]
+    < qubitized_active_volume.resource_values()["active_volume"]
+)
+assert (
+    uwc_active_volume.resource_values()["active_volume_runtime_seconds"]
+    == uwc_active_volume.resource_values()["runtime_seconds"]
+)
+
+# %% [markdown]
 # ## Symbolic Scenarios
 #
 # Early FTQC reviews often leave architecture knobs symbolic until a hardware assumption is chosen.
@@ -240,11 +287,46 @@ assert {row.symbol for row in driver_rows} == {"cycle_time", "distance"}
 assert len(scenario_rows) == 6
 assert all(row.is_resolved for row in scenario_rows)
 
+# %%
+gate_volume = sp.symbols("gate_volume", positive=True)
+active_volume_throughput = sp.symbols("active_volume_throughput", positive=True)
+symbolic_active_volume = qre.estimate_active_volume_resources(
+    uwc_logical,
+    qre.ActiveVolumeCostModel(
+        active_volume_per_logical_gate=gate_volume,
+        active_volume_per_non_clifford=2,
+        active_volume_throughput_per_second=active_volume_throughput,
+    ),
+)
+
+active_volume_scenarios = qre.evaluate_resource_value_scenarios(
+    symbolic_active_volume,
+    {
+        "compact operation volume": {
+            "gate_volume": 2,
+            "active_volume_throughput": 20,
+        },
+        "larger operation volume": {
+            "gate_volume": 5,
+            "active_volume_throughput": 20,
+        },
+    },
+    quantities=(
+        qre.ResourceQuantity.ACTIVE_VOLUME,
+        qre.ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS,
+    ),
+)
+for row in active_volume_scenarios:
+    print(row.to_dict())
+
+assert len(active_volume_scenarios) == 4
+assert all(row.is_resolved for row in active_volume_scenarios)
+
 # %% [markdown]
 # ## Summary
 #
 # In this notebook, we learned:
 #
 # - FTQC resource reviews should keep problem, algorithm, and architecture contracts separate.
-# - Recent chemistry-resource papers can be audited through canonical quantities such as Hamiltonian normalization, effective lambda, non-Clifford work, logical qubits, runtime bottlenecks, and physical qubit-seconds.
+# - Recent chemistry-resource papers can be audited through canonical quantities such as Hamiltonian normalization, effective lambda, non-Clifford work, logical qubits, runtime bottlenecks, physical qubit-seconds, and active volume.
 # - Qamomile's resource-estimation API is designed to compare those quantities before adding any report, snapshot, or manifest layer.

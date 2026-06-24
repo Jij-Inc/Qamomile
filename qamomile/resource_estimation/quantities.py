@@ -75,10 +75,14 @@ class ResourceQuantity(enum.StrEnum):
         PAULI_ROTATIONS: Pauli rotations used by product-formula evolution.
         LOGICAL_QUBITS: Logical qubits required by an algorithm.
         LOGICAL_DEPTH: Logical-depth proxy.
+        LOGICAL_OPERATIONS: Logical operation or gate-count proxy.
         LOGICAL_SPACETIME_VOLUME: Logical qubit-layer volume proxy.
         NON_CLIFFORD_COUNT: T, Toffoli, or equivalent non-Clifford count.
         T_GATES: T-gate or T-equivalent count.
         MULTI_QUBIT_GATES: Multi-qubit gate-count proxy.
+        ACTIVE_VOLUME: Active-volume operation cost proxy.
+        ACTIVE_VOLUME_RUNTIME_SECONDS: Runtime implied by active-volume
+            throughput.
         PHYSICAL_QUBITS: Physical qubits under an architecture model.
         DEPTH_LIMITED_RUNTIME_SECONDS: Runtime implied by logical depth and
             logical cycle time.
@@ -101,6 +105,11 @@ class ResourceQuantity(enum.StrEnum):
         PHYSICAL_QUBITS_PER_FACTORY: Physical qubits used by one factory.
         FACTORY_CYCLES_PER_NON_CLIFFORD: Logical cycles needed per factory
             output.
+        ACTIVE_VOLUME_PER_LOGICAL_GATE: Active-volume units per logical gate.
+        ACTIVE_VOLUME_PER_NON_CLIFFORD: Additional active-volume units per
+            non-Clifford gate.
+        ACTIVE_VOLUME_THROUGHPUT_PER_SECOND: Sustainable active-volume
+            throughput.
 
     Example:
         >>> ResourceQuantity("lambda_norm")
@@ -131,10 +140,13 @@ class ResourceQuantity(enum.StrEnum):
     PAULI_ROTATIONS = "pauli_rotations"
     LOGICAL_QUBITS = "logical_qubits"
     LOGICAL_DEPTH = "logical_depth"
+    LOGICAL_OPERATIONS = "logical_operations"
     LOGICAL_SPACETIME_VOLUME = "logical_spacetime_volume"
     NON_CLIFFORD_COUNT = "non_clifford_count"
     T_GATES = "t_gates"
     MULTI_QUBIT_GATES = "multi_qubit_gates"
+    ACTIVE_VOLUME = "active_volume"
+    ACTIVE_VOLUME_RUNTIME_SECONDS = "active_volume_runtime_seconds"
     PHYSICAL_QUBITS = "physical_qubits"
     DEPTH_LIMITED_RUNTIME_SECONDS = "depth_limited_runtime_seconds"
     NON_CLIFFORD_LIMITED_RUNTIME_SECONDS = "non_clifford_limited_runtime_seconds"
@@ -151,6 +163,9 @@ class ResourceQuantity(enum.StrEnum):
     FACTORY_COUNT = "factory_count"
     PHYSICAL_QUBITS_PER_FACTORY = "physical_qubits_per_factory"
     FACTORY_CYCLES_PER_NON_CLIFFORD = "factory_cycles_per_non_clifford"
+    ACTIVE_VOLUME_PER_LOGICAL_GATE = "active_volume_per_logical_gate"
+    ACTIVE_VOLUME_PER_NON_CLIFFORD = "active_volume_per_non_clifford"
+    ACTIVE_VOLUME_THROUGHPUT_PER_SECOND = "active_volume_throughput_per_second"
 
 
 class ResourceReviewProfile(enum.StrEnum):
@@ -165,6 +180,8 @@ class ResourceReviewProfile(enum.StrEnum):
             lifting.
         FTQC_PHYSICAL_OUTCOMES: Physical proxy outcomes after architecture
             lifting.
+        FTQC_ACTIVE_VOLUME_OUTCOMES: Active-volume outcomes after
+            architecture lifting.
         SURFACE_CODE_ARCHITECTURE: Surface-code knobs that should be recorded
             beside a physical proxy estimate.
 
@@ -177,6 +194,7 @@ class ResourceReviewProfile(enum.StrEnum):
     TROTTER_QPE_WORKLOAD = "trotter_qpe_workload"
     FTQC_LOGICAL_OUTCOMES = "ftqc_logical_outcomes"
     FTQC_PHYSICAL_OUTCOMES = "ftqc_physical_outcomes"
+    FTQC_ACTIVE_VOLUME_OUTCOMES = "ftqc_active_volume_outcomes"
     SURFACE_CODE_ARCHITECTURE = "surface_code_architecture"
 
 
@@ -775,6 +793,13 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "Logical circuit-depth proxy after algorithmic repetition factors.",
     ),
     ResourceQuantitySpec(
+        ResourceQuantity.LOGICAL_OPERATIONS,
+        "Logical operations",
+        "logical operations",
+        ResourceCategory.LOGICAL,
+        "Logical operation count used by active-volume-style resource models.",
+    ),
+    ResourceQuantitySpec(
         ResourceQuantity.LOGICAL_SPACETIME_VOLUME,
         "Logical space-time volume",
         "logical qubit-layers",
@@ -801,6 +826,20 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "gates",
         ResourceCategory.LOGICAL,
         "Multi-qubit gate-count proxy.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.ACTIVE_VOLUME,
+        "Active volume",
+        "active-volume units",
+        ResourceCategory.PHYSICAL,
+        "Operation-volume proxy for architectures priced by active resources.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS,
+        "Active-volume runtime",
+        "seconds",
+        ResourceCategory.PHYSICAL,
+        "Runtime implied by active volume and architecture throughput.",
     ),
     ResourceQuantitySpec(
         ResourceQuantity.PHYSICAL_QUBITS,
@@ -914,6 +953,27 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         ResourceCategory.ARCHITECTURE,
         "Logical cycles required by one factory to produce a non-Clifford resource.",
     ),
+    ResourceQuantitySpec(
+        ResourceQuantity.ACTIVE_VOLUME_PER_LOGICAL_GATE,
+        "Active volume per logical gate",
+        "active-volume units / logical gate",
+        ResourceCategory.ARCHITECTURE,
+        "Active-volume units assigned to one logical gate or operation.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.ACTIVE_VOLUME_PER_NON_CLIFFORD,
+        "Active volume per non-Clifford",
+        "active-volume units / gate",
+        ResourceCategory.ARCHITECTURE,
+        "Additional active-volume units assigned to one non-Clifford operation.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.ACTIVE_VOLUME_THROUGHPUT_PER_SECOND,
+        "Active-volume throughput",
+        "active-volume units / second",
+        ResourceCategory.ARCHITECTURE,
+        "Sustainable architecture throughput for active-volume units.",
+    ),
 )
 
 _SPECS_BY_QUANTITY = {spec.quantity: spec for spec in RESOURCE_QUANTITY_SPECS}
@@ -975,6 +1035,19 @@ RESOURCE_REVIEW_PROFILES: tuple[ResourceQuantityProfile, ...] = (
             ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS,
             ResourceQuantity.RUNTIME_SECONDS,
             ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        ),
+    ),
+    ResourceQuantityProfile(
+        ResourceReviewProfile.FTQC_ACTIVE_VOLUME_OUTCOMES,
+        "FTQC active-volume outcomes",
+        "Active-volume quantities used to compare candidates under an operation-volume model.",
+        (
+            ResourceQuantity.LOGICAL_QUBITS,
+            ResourceQuantity.LOGICAL_OPERATIONS,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+            ResourceQuantity.ACTIVE_VOLUME,
+            ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS,
+            ResourceQuantity.RUNTIME_SECONDS,
         ),
     ),
     ResourceQuantityProfile(

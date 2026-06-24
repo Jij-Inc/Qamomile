@@ -7,6 +7,7 @@ import sympy as sp
 
 import qamomile.observable as qm_o
 from qamomile.resource_estimation import (
+    ActiveVolumeCostModel,
     FTQCCostModel,
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
@@ -25,9 +26,11 @@ from qamomile.resource_estimation import (
     compare_resource_values,
     describe_resource_quantity,
     describe_resource_review_profile,
+    estimate_active_volume_resources,
     estimate_physical_resources,
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
+    estimate_trotter_qpe_resources,
     evaluate_resource_value_scenarios,
     evaluate_resource_values,
     iter_resource_quantity_specs,
@@ -50,12 +53,16 @@ def test_quantity_specs_cover_core_resource_layers():
     assert ResourceQuantity.ALGORITHMIC_PRECISION in quantities
     assert ResourceQuantity.NON_CLIFFORD_COUNT in quantities
     assert ResourceQuantity.LOGICAL_SPACETIME_VOLUME in quantities
+    assert ResourceQuantity.LOGICAL_OPERATIONS in quantities
     assert ResourceQuantity.PHYSICAL_QUBITS in quantities
+    assert ResourceQuantity.ACTIVE_VOLUME in quantities
+    assert ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS in quantities
     assert ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS in quantities
     assert ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS in quantities
     assert ResourceQuantity.PHYSICAL_QUBIT_SECONDS in quantities
     assert ResourceQuantity.CODE_DISTANCE in quantities
     assert ResourceQuantity.FACTORY_COUNT in quantities
+    assert ResourceQuantity.ACTIVE_VOLUME_THROUGHPUT_PER_SECOND in quantities
     assert {
         ResourceCategory.PROBLEM,
         ResourceCategory.ALGORITHM,
@@ -84,10 +91,19 @@ def test_resource_estimation_facade_exports_symbolic_value_helpers():
             non_clifford_throughput_per_second=100,
         ),
     )
+    active_volume: SupportsResourceValues = estimate_active_volume_resources(
+        logical,
+        ActiveVolumeCostModel(
+            active_volume_per_logical_gate=1,
+            active_volume_per_non_clifford=0,
+            active_volume_throughput_per_second=10,
+        ),
+    )
 
     assert logical.qubits in expressions
     assert logical.gates.total in expressions
     assert ResourceQuantity.LOGICAL_QUBITS.value in physical.resource_values()
+    assert ResourceQuantity.ACTIVE_VOLUME.value in active_volume.resource_values()
 
 
 def test_describe_resource_quantity_normalizes_strings():
@@ -117,6 +133,9 @@ def test_resource_review_profiles_group_recommended_quantity_sets():
         ResourceReviewProfile.TROTTER_QPE_WORKLOAD
     )
     physical_profile = describe_resource_review_profile("ftqc_physical_outcomes")
+    active_volume_profile = describe_resource_review_profile(
+        ResourceReviewProfile.FTQC_ACTIVE_VOLUME_OUTCOMES
+    )
 
     assert all(isinstance(profile, ResourceQuantityProfile) for profile in profiles)
     assert logical_profile is by_key[ResourceReviewProfile.FTQC_LOGICAL_OUTCOMES]
@@ -128,6 +147,11 @@ def test_resource_review_profiles_group_recommended_quantity_sets():
         ResourceQuantity.NON_CLIFFORD_COUNT,
     )
     assert ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
+    assert ResourceQuantity.ACTIVE_VOLUME in active_volume_profile.quantities
+    assert (
+        ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS
+        in active_volume_profile.quantities
+    )
     assert (
         ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS
         in physical_profile.quantities
@@ -139,6 +163,7 @@ def test_resource_review_profiles_group_recommended_quantity_sets():
         physical_profile.quantities
     )
     assert physical_profile.to_dict()["profile"] == "ftqc_physical_outcomes"
+    assert active_volume_profile.to_dict()["profile"] == "ftqc_active_volume_outcomes"
     with pytest.raises(ValueError, match="Unknown resource review profile"):
         describe_resource_review_profile("not-a-profile")
 
@@ -164,6 +189,82 @@ def test_surface_code_model_exposes_raw_and_derived_resource_values():
     assert sp.Abs(
         values["non_clifford_throughput_per_second"] - expected_throughput
     ) < sp.Float("1e-12")
+
+
+def test_active_volume_model_exposes_operation_volume_resources():
+    """Active-volume models expose operation-volume runtime proxies."""
+    logical = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=10,
+        precision=2,
+        walk_cost_toffoli=5,
+        representation=HamiltonianRepresentation.TENSOR_HYPERCONTRACTION,
+    )
+    cost_model = ActiveVolumeCostModel(
+        active_volume_per_logical_gate=3,
+        active_volume_per_non_clifford=2,
+        active_volume_throughput_per_second=10,
+    )
+
+    active_volume = estimate_active_volume_resources(logical, cost_model)
+    values = active_volume.resource_values()
+
+    assert active_volume.logical_gate_count == 25
+    assert active_volume.non_clifford_count == 25
+    assert active_volume.active_volume == 125
+    assert active_volume.runtime_seconds == sp.Rational(25, 2)
+    assert values["logical_operations"] == 25
+    assert values["active_volume"] == 125
+    assert values["active_volume_runtime_seconds"] == sp.Rational(25, 2)
+    assert values["runtime_seconds"] == sp.Rational(25, 2)
+    assert values["active_volume_per_logical_gate"] == 3
+
+
+def test_active_volume_scenarios_track_symbolic_architecture_knobs():
+    """Active-volume estimates keep symbolic architecture drivers auditable."""
+    gate_volume = sp.Symbol("gate_volume", positive=True)
+    throughput = sp.Symbol("throughput", positive=True)
+    logical = estimate_trotter_qpe_resources(
+        n_qubits=2,
+        n_pauli_terms=3,
+        lambda_norm=6,
+        precision=2,
+        trotter_steps_per_sample=2,
+        samples=5,
+        rotation_synthesis_t_gates=2,
+    )
+    estimate = estimate_active_volume_resources(
+        logical,
+        ActiveVolumeCostModel(
+            active_volume_per_logical_gate=gate_volume,
+            active_volume_per_non_clifford=1,
+            active_volume_throughput_per_second=throughput,
+        ),
+    )
+
+    driver_rows = audit_resource_value_drivers(
+        estimate,
+        quantities=(
+            ResourceQuantity.ACTIVE_VOLUME,
+            ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS,
+        ),
+    )
+    scenario_rows = evaluate_resource_value_scenarios(
+        estimate,
+        {
+            "fast": {"gate_volume": 2, "throughput": 30},
+            "slow": {"gate_volume": 4, "throughput": 10},
+        },
+        quantities=(
+            ResourceQuantity.ACTIVE_VOLUME,
+            ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS,
+        ),
+    )
+
+    assert {row.symbol for row in driver_rows} == {"gate_volume", "throughput"}
+    assert len(scenario_rows) == 4
+    assert all(row.is_resolved for row in scenario_rows)
+    assert scenario_rows[0].value < scenario_rows[2].value
 
 
 def test_compare_resource_values_reports_ratios_and_reductions():

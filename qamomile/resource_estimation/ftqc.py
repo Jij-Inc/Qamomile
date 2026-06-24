@@ -452,6 +452,161 @@ class SurfaceCodeCostModel:
 
 
 @dataclass(frozen=True)
+class ActiveVolumeCostModel:
+    """Map logical estimates to active-volume resource proxies.
+
+    Active-volume models price only the resources that are active during an
+    operation, rather than multiplying the full physical footprint by the
+    logical depth. The model is intentionally compact: it records explicit
+    per-operation assumptions and derives a runtime from an active-volume
+    throughput.
+
+    Attributes:
+        active_volume_per_logical_gate (sp.Expr | int | float): Active-volume
+            units assigned to one logical gate or operation.
+        active_volume_per_non_clifford (sp.Expr | int | float): Additional
+            active-volume units assigned to one non-Clifford operation.
+        active_volume_throughput_per_second (sp.Expr | int | float):
+            Sustainable active-volume throughput.
+
+    Raises:
+        ValueError: If a positive-valued quantity is non-positive or if
+            ``active_volume_per_non_clifford`` is negative.
+
+    Example:
+        >>> model = ActiveVolumeCostModel(
+        ...     active_volume_per_logical_gate=3,
+        ...     active_volume_per_non_clifford=2,
+        ...     active_volume_throughput_per_second=10,
+        ... )
+        >>> model.active_volume_for(5, 2)
+        19
+    """
+
+    active_volume_per_logical_gate: _SympyLike
+    active_volume_per_non_clifford: _SympyLike = 0
+    active_volume_throughput_per_second: _SympyLike = 1
+
+    def __post_init__(self) -> None:
+        """Validate active-volume fields after dataclass construction.
+
+        Raises:
+            ValueError: If a positive-valued quantity is non-positive or if
+                ``active_volume_per_non_clifford`` is negative.
+        """
+        _validate_positive(
+            self._active_volume_per_logical_gate,
+            "active_volume_per_logical_gate",
+        )
+        _validate_nonnegative(
+            self._active_volume_per_non_clifford,
+            "active_volume_per_non_clifford",
+        )
+        _validate_positive(
+            self._active_volume_throughput_per_second,
+            "active_volume_throughput_per_second",
+        )
+
+    def active_volume_for(
+        self,
+        logical_gate_count: _SympyLike,
+        non_clifford_count: _SympyLike,
+    ) -> sp.Expr:
+        """Compute active-volume units for logical work.
+
+        Args:
+            logical_gate_count (sp.Expr | int | float): Logical operation or
+                gate count to price.
+            non_clifford_count (sp.Expr | int | float): Non-Clifford
+                operation count that receives the additional cost.
+
+        Returns:
+            sp.Expr: Active-volume units under this model.
+
+        Raises:
+            ValueError: If either input is provably negative.
+        """
+        logical_expr = _as_expr(logical_gate_count, "logical_gate_count")
+        non_clifford_expr = _as_expr(non_clifford_count, "non_clifford_count")
+        _validate_nonnegative(logical_expr, "logical_gate_count")
+        _validate_nonnegative(non_clifford_expr, "non_clifford_count")
+        return sp.simplify(
+            logical_expr * self._active_volume_per_logical_gate
+            + non_clifford_expr * self._active_volume_per_non_clifford
+        )
+
+    def runtime_seconds_for(self, active_volume: _SympyLike) -> sp.Expr:
+        """Compute runtime from active volume and throughput.
+
+        Args:
+            active_volume (sp.Expr | int | float): Active-volume units to
+                execute.
+
+        Returns:
+            sp.Expr: Runtime in seconds.
+
+        Raises:
+            ValueError: If ``active_volume`` is provably negative.
+        """
+        active_volume_expr = _as_expr(active_volume, "active_volume")
+        _validate_nonnegative(active_volume_expr, "active_volume")
+        return sp.simplify(
+            active_volume_expr / self._active_volume_throughput_per_second
+        )
+
+    def resource_values(self) -> dict[str, sp.Expr]:
+        """Return architecture inputs as named symbolic values.
+
+        Returns:
+            dict[str, sp.Expr]: Active-volume model values keyed by stable
+            names.
+        """
+        return {
+            "active_volume_per_logical_gate": self._active_volume_per_logical_gate,
+            "active_volume_per_non_clifford": self._active_volume_per_non_clifford,
+            "active_volume_throughput_per_second": (
+                self._active_volume_throughput_per_second
+            ),
+        }
+
+    @property
+    def _active_volume_per_logical_gate(self) -> sp.Expr:
+        """Return per-logical-gate active volume as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted active-volume cost.
+        """
+        return _as_expr(
+            self.active_volume_per_logical_gate,
+            "active_volume_per_logical_gate",
+        )
+
+    @property
+    def _active_volume_per_non_clifford(self) -> sp.Expr:
+        """Return per-non-Clifford active volume as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted active-volume cost.
+        """
+        return _as_expr(
+            self.active_volume_per_non_clifford,
+            "active_volume_per_non_clifford",
+        )
+
+    @property
+    def _active_volume_throughput_per_second(self) -> sp.Expr:
+        """Return active-volume throughput as a SymPy expression.
+
+        Returns:
+            sp.Expr: Converted active-volume throughput.
+        """
+        return _as_expr(
+            self.active_volume_throughput_per_second,
+            "active_volume_throughput_per_second",
+        )
+
+
+@dataclass(frozen=True)
 class FTQCPhysicalResourceEstimate:
     """Represent architecture-lifted FTQC resource proxies.
 
@@ -607,6 +762,142 @@ class FTQCPhysicalResourceEstimate:
         )
 
 
+@dataclass(frozen=True)
+class FTQCActiveVolumeResourceEstimate:
+    """Represent active-volume-lifted FTQC resource proxies.
+
+    Attributes:
+        logical (ResourceEstimate): Existing Qamomile logical resource
+            estimate used as the proxy-estimation input.
+        logical_gate_count (sp.Expr): Logical operation or gate-count proxy
+            used to compute active volume.
+        non_clifford_count (sp.Expr): Toffoli/T-equivalent count receiving
+            additional active-volume cost.
+        active_volume (sp.Expr): Active-volume operation cost proxy.
+        runtime_seconds (sp.Expr): Runtime proxy in seconds.
+        architecture_values (dict[str, sp.Expr]): Architecture parameters
+            used for the active-volume lift.
+        parameters (dict[str, sp.Symbol]): Free symbols appearing in logical
+            and active-volume quantities.
+
+    Example:
+        >>> from qamomile.resource_estimation import GateCount, ResourceEstimate
+        >>> logical = ResourceEstimate(
+        ...     qubits=5,
+        ...     gates=GateCount.zero().with_total(10),
+        ... )
+        >>> estimate = estimate_active_volume_resources(
+        ...     logical,
+        ...     ActiveVolumeCostModel(2, 1, 5),
+        ... )
+        >>> estimate.active_volume
+        20
+    """
+
+    logical: ResourceEstimate
+    logical_gate_count: sp.Expr
+    non_clifford_count: sp.Expr
+    active_volume: sp.Expr
+    runtime_seconds: sp.Expr
+    architecture_values: dict[str, sp.Expr] = field(default_factory=dict)
+    parameters: dict[str, sp.Symbol] = field(default_factory=dict)
+
+    def substitute(self, **values: int | float) -> FTQCActiveVolumeResourceEstimate:
+        """Substitute concrete values into active-volume quantities.
+
+        Args:
+            **values (int | float): Mapping from symbol name to concrete value.
+
+        Returns:
+            FTQCActiveVolumeResourceEstimate: Estimate with substituted fields
+            and refreshed free-symbol metadata.
+        """
+        substitutions: dict[Any, Any] = {}
+        for name, value in values.items():
+            substitutions[self.parameters.get(name, sp.Symbol(name))] = value
+
+        logical = self.logical.substitute(**values)
+        logical_gate_count = self.logical_gate_count.subs(substitutions).doit()
+        non_clifford_count = self.non_clifford_count.subs(substitutions).doit()
+        active_volume = self.active_volume.subs(substitutions).doit()
+        runtime_seconds = self.runtime_seconds.subs(substitutions).doit()
+        architecture_values = {
+            name: expr.subs(substitutions).doit()
+            for name, expr in self.architecture_values.items()
+        }
+        return FTQCActiveVolumeResourceEstimate(
+            logical=logical,
+            logical_gate_count=logical_gate_count,
+            non_clifford_count=non_clifford_count,
+            active_volume=active_volume,
+            runtime_seconds=runtime_seconds,
+            architecture_values=architecture_values,
+            parameters=_collect_parameters(
+                *resource_estimate_expressions(logical),
+                logical_gate_count,
+                non_clifford_count,
+                active_volume,
+                runtime_seconds,
+                *architecture_values.values(),
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the active-volume estimate to string-valued dictionaries.
+
+        Returns:
+            dict[str, Any]: JSON-friendly active-volume estimate.
+        """
+        return {
+            "logical": self.logical.to_dict(),
+            "logical_gate_count": str(self.logical_gate_count),
+            "non_clifford_count": str(self.non_clifford_count),
+            "active_volume": str(self.active_volume),
+            "active_volume_runtime_seconds": str(self.active_volume_runtime_seconds),
+            "runtime_seconds": str(self.runtime_seconds),
+            "architecture_values": {
+                name: str(value) for name, value in self.architecture_values.items()
+            },
+            "parameters": {
+                name: str(symbol) for name, symbol in self.parameters.items()
+            },
+        }
+
+    def resource_values(self) -> dict[str, sp.Expr]:
+        """Return canonical resource values exposed by the estimate.
+
+        Returns:
+            dict[str, sp.Expr]: Logical and active-volume values keyed by
+            canonical resource quantity names.
+        """
+        values = {
+            "logical_qubits": self.logical.qubits,
+            "logical_operations": self.logical_gate_count,
+            "non_clifford_count": self.non_clifford_count,
+            "t_gates": self.logical.gates.t_gates,
+            "multi_qubit_gates": self.logical.gates.multi_qubit,
+            "active_volume": self.active_volume,
+            "active_volume_runtime_seconds": self.active_volume_runtime_seconds,
+            "runtime_seconds": self.runtime_seconds,
+            **self.architecture_values,
+        }
+        if "qpe_iterations" in self.logical.gates.oracle_calls:
+            values["qpe_iterations"] = self.logical.gates.oracle_calls["qpe_iterations"]
+        return values
+
+    @property
+    def active_volume_runtime_seconds(self) -> sp.Expr:
+        """Return the active-volume-throughput-limited runtime component.
+
+        Returns:
+            sp.Expr: ``active_volume / active_volume_throughput_per_second``.
+        """
+        return sp.simplify(
+            self.active_volume
+            / self.architecture_values["active_volume_throughput_per_second"]
+        )
+
+
 def estimate_physical_resources(
     logical: ResourceEstimate,
     cost_model: FTQCCostModel | SurfaceCodeCostModel,
@@ -674,6 +965,73 @@ def estimate_physical_resources(
             depth_expr,
             non_clifford_expr,
             physical_qubits,
+            runtime_seconds,
+            *architecture_values.values(),
+        ),
+    )
+
+
+def estimate_active_volume_resources(
+    logical: ResourceEstimate,
+    cost_model: ActiveVolumeCostModel,
+    *,
+    logical_gate_count: _SympyLike | None = None,
+    non_clifford_count: _SympyLike | None = None,
+) -> FTQCActiveVolumeResourceEstimate:
+    """Lift a logical estimate to active-volume resource proxies.
+
+    Args:
+        logical (ResourceEstimate): Existing logical circuit or algorithmic
+            resource estimate.
+        cost_model (ActiveVolumeCostModel): Architecture model used to compute
+            active volume and throughput-limited runtime.
+        logical_gate_count (sp.Expr | int | float | None): Optional logical
+            operation-count proxy. Defaults to ``logical.gates.total``.
+        non_clifford_count (sp.Expr | int | float | None): Optional
+            non-Clifford workload. Defaults to ``logical.gates.t_gates +
+            logical.gates.multi_qubit``.
+
+    Returns:
+        FTQCActiveVolumeResourceEstimate: Active-volume resource proxy linked
+        to ``logical``.
+
+    Raises:
+        TypeError: If ``logical`` is not a ``ResourceEstimate`` or
+            ``cost_model`` is not an ``ActiveVolumeCostModel``.
+    """
+    if not isinstance(logical, ResourceEstimate):
+        raise TypeError("logical must be a ResourceEstimate instance.")
+    if not isinstance(cost_model, ActiveVolumeCostModel):
+        raise TypeError("cost_model must be an ActiveVolumeCostModel instance.")
+
+    logical_gate_expr = (
+        logical.gates.total
+        if logical_gate_count is None
+        else _as_expr(logical_gate_count, "logical_gate_count")
+    )
+    non_clifford_expr = (
+        sp.simplify(logical.gates.t_gates + logical.gates.multi_qubit)
+        if non_clifford_count is None
+        else _as_expr(non_clifford_count, "non_clifford_count")
+    )
+    active_volume = cost_model.active_volume_for(
+        logical_gate_expr,
+        non_clifford_expr,
+    )
+    runtime_seconds = cost_model.runtime_seconds_for(active_volume)
+    architecture_values = cost_model.resource_values()
+    return FTQCActiveVolumeResourceEstimate(
+        logical=logical,
+        logical_gate_count=sp.simplify(logical_gate_expr),
+        non_clifford_count=sp.simplify(non_clifford_expr),
+        active_volume=sp.simplify(active_volume),
+        runtime_seconds=sp.simplify(runtime_seconds),
+        architecture_values=architecture_values,
+        parameters=_collect_parameters(
+            *resource_estimate_expressions(logical),
+            logical_gate_expr,
+            non_clifford_expr,
+            active_volume,
             runtime_seconds,
             *architecture_values.values(),
         ),

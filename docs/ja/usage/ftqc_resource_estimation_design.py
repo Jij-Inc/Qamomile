@@ -43,6 +43,7 @@ import qamomile.resource_estimation as qre
 # | qubitized QPEの前にHamiltonian normalizationを下げる。 | [Symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502)は、QPE iterationとToffoli costを動かす1-normを減らします。 | `lambda_norm`, `representation_error`, `walk_cost_toffoli`, `qpe_iterations`, `t_gates` |
 # | block-encoding workloadをearly-FTQC向けのTrotter workloadへ置き換える。 | [Unitary weight concentration](https://arxiv.org/abs/2603.22778)は、single-ancillaでTrotter-basedなQPE設定におけるeffective Hamiltonian weightの削減を報告しています。 | `effective_lambda_norm`, `unitary_weight_factor`, `trotter_steps_per_sample`, `pauli_rotations`, `rotation_synthesis_t_gates` |
 # | 論理resourceをarchitecture bottleneckへ変換する。 | [Gidney and Ekeråの素因数分解推定](https://arxiv.org/abs/1905.09749)のようなsurface-codeとmagic-state-factoryの推定では、runtimeがlogical depthとnon-Clifford throughputの両方に依存します。 | `physical_qubits`, `depth_limited_runtime_seconds`, `non_clifford_limited_runtime_seconds`, `physical_qubit_seconds` |
+# | operation中にactiveなresourceだけを価格づける。 | [BLISS-THCとactive-volume compilation](https://arxiv.org/abs/2501.06165)は、近年の量子化学resource estimateでoperation volumeとidle footprintを分けています。 | `logical_operations`, `active_volume`, `active_volume_runtime_seconds`, `active_volume_throughput_per_second` |
 #
 # この分離により、三つのcontractを明示できます。
 #
@@ -71,6 +72,9 @@ profiles = {
     "physical outcomes": qre.describe_resource_review_profile(
         qre.ResourceReviewProfile.FTQC_PHYSICAL_OUTCOMES
     ),
+    "active-volume outcomes": qre.describe_resource_review_profile(
+        qre.ResourceReviewProfile.FTQC_ACTIVE_VOLUME_OUTCOMES
+    ),
 }
 
 for name, profile in profiles.items():
@@ -87,6 +91,9 @@ assert (
 assert (
     qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS
     in profiles["physical outcomes"].quantities
+)
+assert (
+    qre.ResourceQuantity.ACTIVE_VOLUME in profiles["active-volume outcomes"].quantities
 )
 
 # %% [markdown]
@@ -190,6 +197,47 @@ assert (
 )
 
 # %% [markdown]
+# ## Active-volume model
+#
+# 近年のFTQC解析には、full footprint-times-depth bottleneckではなくoperation-volume bottleneckをmodel化するものがあります。
+# Qamomileでは、そのcontractを`ActiveVolumeCostModel`として分けます。
+# このmodelもsymbolicでassumption-drivenです。
+# logical gateあたりのactive-volume unit、non-Clifford operationへの追加cost、active-volume throughputを記録します。
+
+# %%
+active_volume_model = qre.ActiveVolumeCostModel(
+    active_volume_per_logical_gate=3,
+    active_volume_per_non_clifford=2,
+    active_volume_throughput_per_second=10,
+)
+
+qubitized_active_volume = qre.estimate_active_volume_resources(
+    qubitized_logical,
+    active_volume_model,
+)
+uwc_active_volume = qre.estimate_active_volume_resources(
+    uwc_logical,
+    active_volume_model,
+)
+
+active_volume_rows = qre.compare_resource_values(
+    qubitized_active_volume,
+    uwc_active_volume,
+    quantities=profiles["active-volume outcomes"].quantities,
+)
+for row in active_volume_rows:
+    print(row.to_dict())
+
+assert (
+    uwc_active_volume.resource_values()["active_volume"]
+    < qubitized_active_volume.resource_values()["active_volume"]
+)
+assert (
+    uwc_active_volume.resource_values()["active_volume_runtime_seconds"]
+    == uwc_active_volume.resource_values()["runtime_seconds"]
+)
+
+# %% [markdown]
 # ## Symbolic scenario
 #
 # early FTQCのレビューでは、hardware assumptionを選ぶまでarchitecture knobをsymbolicなまま残すことがあります。
@@ -242,11 +290,46 @@ assert {row.symbol for row in driver_rows} == {"cycle_time", "distance"}
 assert len(scenario_rows) == 6
 assert all(row.is_resolved for row in scenario_rows)
 
+# %%
+gate_volume = sp.symbols("gate_volume", positive=True)
+active_volume_throughput = sp.symbols("active_volume_throughput", positive=True)
+symbolic_active_volume = qre.estimate_active_volume_resources(
+    uwc_logical,
+    qre.ActiveVolumeCostModel(
+        active_volume_per_logical_gate=gate_volume,
+        active_volume_per_non_clifford=2,
+        active_volume_throughput_per_second=active_volume_throughput,
+    ),
+)
+
+active_volume_scenarios = qre.evaluate_resource_value_scenarios(
+    symbolic_active_volume,
+    {
+        "compact operation volume": {
+            "gate_volume": 2,
+            "active_volume_throughput": 20,
+        },
+        "larger operation volume": {
+            "gate_volume": 5,
+            "active_volume_throughput": 20,
+        },
+    },
+    quantities=(
+        qre.ResourceQuantity.ACTIVE_VOLUME,
+        qre.ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS,
+    ),
+)
+for row in active_volume_scenarios:
+    print(row.to_dict())
+
+assert len(active_volume_scenarios) == 4
+assert all(row.is_resolved for row in active_volume_scenarios)
+
 # %% [markdown]
 # ## Summary
 #
 # このnotebookでは、次のことを確認しました。
 #
 # - FTQC resource reviewでは、problem、algorithm、architectureのcontractを分けます。
-# - 近年の量子化学resource paperは、Hamiltonian normalization、effective lambda、non-Clifford work、logical qubits、runtime bottleneck、physical qubit-secondsのようなcanonical quantityで監査できます。
+# - 近年の量子化学resource paperは、Hamiltonian normalization、effective lambda、non-Clifford work、logical qubits、runtime bottleneck、physical qubit-seconds、active volumeのようなcanonical quantityで監査できます。
 # - Qamomileのresource-estimation APIは、report、snapshot、manifestの層を追加する前に、それらのquantityを比較できるように設計されています。
