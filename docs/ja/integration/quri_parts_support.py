@@ -92,8 +92,9 @@ plt.show()
 # %% [markdown]
 # ## `@qkernel`によるQAOAアンザッツの構築
 #
-# QAOAアンザッツを小さな`@qkernel`として直接書きます。
-# レシピは[MaxCutに対するQAOAチュートリアル](../algorithm/qaoa_maxcut.ipynb)と同じです。計算基底の一様な重ね合わせ状態を準備した後、コスト層とミキサー層を$p$回交互に適用し、最後に計算基底で測定します。
+# QAOAの状態、サンプリング用アンザッツ、期待値計算を、再利用可能な量子カーネルとして書きます。
+# レシピは[MaxCutに対するQAOAチュートリアル](../algorithm/qaoa_maxcut.ipynb)と同じです。計算基底の一様な重ね合わせ状態を準備した後、コスト層とミキサー層を$p$回交互に適用します。
+# サンプリング用の量子カーネルでは最後の状態を計算基底で測定し、期待値計算用の量子カーネルでは同じ状態をHamiltonianに対して評価します。
 #
 # :::{tip}
 # Qamomileの回転ゲートは$e^{-i\theta/2}$という規約に従います。
@@ -139,6 +140,22 @@ def mixer_layer(
 
 
 @qmc.qkernel
+def qaoa_state(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return q
+
+
+@qmc.qkernel
 def qaoa_ansatz(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -147,11 +164,22 @@ def qaoa_ansatz(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
+    q = qaoa_state(p, quad, linear, n, gammas, betas)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def qaoa_energy(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    H: qmc.Observable,
+) -> qmc.Float:
+    q = qaoa_state(p, quad, linear, n, gammas, betas)
+    return qmc.expval(q, H)
 
 
 # %% [markdown]
@@ -296,7 +324,62 @@ plt.show()
 # ここで得た最適パラメータ(`opt_gammas`、`opt_betas`)を、以降の例でも使います。
 
 # %% [markdown]
-# ## 期待値計算: 未バインド回路とバインド済み回路の違い
+# ## `run()`による期待値計算
+#
+# Qamomileでは、量子回路の出力に対する期待値を量子カーネル内の`qmc.expval(...)`で記述します。
+# これをQURI Partsへトランスパイルすると、`ExecutableProgram.run(executor, bindings=...)`で呼び出せる実行可能オブジェクトになります。
+# `run()`はQamomileのパラメータ情報を使ってランタイムパラメータをバインドし、そのうえでQURI Partsのestimatorを呼び出します。
+#
+# まず$H_C = \sum_{(i,j) \in E} Z_i Z_j$をQamomileの`Hamiltonian`として組み立てます。
+# その後、期待値計算用の量子カーネルをトランスパイルし、最適化済みQAOAパラメータで評価します。
+
+# %%
+# MaxCutのIsingコストに対応するQamomileのHamiltonianを組み立てます。
+cost_hamiltonian = qm_o.Hamiltonian()
+for (i, j), Jij in spin_model.quad.items():
+    cost_hamiltonian.add_term(
+        (qm_o.PauliOperator(qm_o.Pauli.Z, i), qm_o.PauliOperator(qm_o.Pauli.Z, j)),
+        Jij,
+    )
+for i, hi in spin_model.linear.items():
+    cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
+
+# 期待値計算用の量子カーネルをトランスパイルし、`run()`で評価します。
+expval_executable = transpiler.transpile(
+    qaoa_energy,
+    bindings={
+        "p": p,
+        "quad": spin_model.quad,
+        "linear": spin_model.linear,
+        "n": num_nodes,
+        "H": cost_hamiltonian,
+    },
+    parameters=["gammas", "betas"],
+)
+energy_via_run = expval_executable.run(
+    executor,
+    bindings={"gammas": opt_gammas, "betas": opt_betas},
+).result()
+
+print(f"Executable.run() expectation: {energy_via_run:+.10f}")
+print(f"sample mean energy          : {res.fun:+.4f}")
+assert np.isfinite(energy_via_run)
+
+# %% [markdown]
+# QamomileのAPIだけで扱う場合は、`ExecutableProgram.run(...)`を使うのがおすすめです。
+# QURI Parts回路を自分で扱いたい場合には`executor.estimate(...)`や`executor.estimate_expectation(...)`も使えます。
+# `run()`の経路では、Qamomileが名前付きランタイムパラメータをestimator呼び出しの前にバインドするため、QURI Parts側のフラットなパラメータ順をユーザーが管理する必要はありません。
+#
+# 次のセクションでは、より低レベルの経路を開き、QURI Partsが未バインド回路とバインド済み回路をどう扱い分けるかを見ます。
+
+# %% [markdown]
+# ## QURI Partsの高度な機能
+#
+# QURI Partsには、パラメトリックestimatorと非パラメトリックestimatorの両方があります。
+# Qamomileは通常、この違いを`ExecutableProgram.run(...)`や`executor.estimate(...)`の内側に隠しますが、QURI Parts回路を細かく制御したい場合は`estimate_expectation(...)`を直接呼び出す方法も便利です。
+
+# %% [markdown]
+# ### 期待値計算: 未バインド回路とバインド済み回路の違い
 #
 # `QuriPartsExecutor.estimate_expectation(circuit, hamiltonian, param_values)`は、QURI Partsで期待値を計算するためのメソッドです。
 # 渡された**回路の状態**に応じて、QURI Partsの2種類のestimatorを使い分けます。
@@ -316,20 +399,9 @@ plt.show()
 # これをコストハミルトニアンと一緒に`estimate_expectation`に渡せば、サンプリングノイズを含まない$\langle H_C \rangle$を計算できます。
 # QAOAの最適化でも、同じ回路を保ったまま`executable.sample()`とデコードの組み合わせを`executor.estimate(circuit, hamiltonian, params=...)`に置き換えられます。
 #
-# 2つの経路を直接試すため、まずQamomileの`Hamiltonian`として$H_C = \sum_{(i,j) \in E} Z_i Z_j$を組み立てます。
-# それをQURI Partsの演算子に変換し、各回路に対して`estimate_expectation`を呼び出します。
+# 2つの経路を直接試すため、前のセクションで作ったHamiltonianをQURI Partsの演算子に変換し、各回路に対して`estimate_expectation`を呼び出します。
 
 # %%
-# MaxCutのIsingコストに対応するQamomileのHamiltonianを組み立てます。
-cost_hamiltonian = qm_o.Hamiltonian()
-for (i, j), Jij in spin_model.quad.items():
-    cost_hamiltonian.add_term(
-        (qm_o.PauliOperator(qm_o.Pauli.Z, i), qm_o.PauliOperator(qm_o.Pauli.Z, j)),
-        Jij,
-    )
-for i, hi in spin_model.linear.items():
-    cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
 # 直接期待値計算できるよう、observableをQURI Parts演算子へ変換します。
 quri_H = hamiltonian_to_quri_operator(cost_hamiltonian)
 
@@ -368,6 +440,7 @@ energy_bound = executor.estimate_expectation(bound_circuit, quri_H, [])
 print(f"parametric  estimator: {energy_unbound:+.10f}")
 print(f"non-param.  estimator: {energy_bound:+.10f}")
 assert np.isclose(energy_unbound, energy_bound, atol=1e-10)
+assert np.isclose(energy_via_run, energy_unbound, atol=1e-10)
 
 # %% [markdown]
 # 両方の経路は数値精度の範囲で一致します。
@@ -376,7 +449,7 @@ assert np.isclose(energy_unbound, energy_bound, atol=1e-10)
 # この経路の切り替えはQamomileの`executor.estimate()`インターフェース内部に隠れているので、通常は意識する必要はありません。
 # `estimate_expectation`を直接呼び出すのは、QURI Partsの回路を自分で扱う場合に限られます。
 #
-# `executor.estimate(circuit, hamiltonian, params=...)`は、Qamomileのオブジェクトをそのまま扱える、より使いやすいメソッドです。
+# `executor.estimate(circuit, hamiltonian, params=...)`は、既存のQURI Parts回路を渡しつつ、QamomileのHamiltonianオブジェクトをそのまま扱えるメソッドです。
 # `qamomile.observable.Hamiltonian`を直接受け取り、内部で自動変換してから`estimate_expectation`を呼び出します。
 
 # %%
@@ -438,6 +511,6 @@ print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 # ## まとめ
 #
 # - `QuriPartsTranspiler().transpile(kernel, bindings=..., parameters=[...])`は量子カーネルをQURI Partsの`LinearMappedParametricQuantumCircuit`に変換し、QURI Partsの`draw_circuit`でそのまま確認できます。
-# - `QuriPartsExecutor`は、デフォルトのQulacs状態ベクトルシミュレータ上で、QAOA形式のサンプリングを行う`executable.sample()`と、ノイズなしの期待値計算を行う`executor.estimate(...)`の両方をサポートします。
+# - `QuriPartsExecutor`は、デフォルトのQulacs状態ベクトルシミュレータ上で、QAOA形式のサンプリングを行う`executable.sample()`、`qmc.expval(...)`を返す量子カーネル向けの`executable.run()`、回路を直接扱う期待値計算の`executor.estimate(...)`をサポートします。
 # - `estimate_expectation`は、渡された回路にフリーパラメータが残っているかどうかに応じて、QURI Partsのパラメトリックestimatorと非パラメトリックestimatorを切り替えます。通常は`executor.estimate()`を使えば、この切り替えを意識せずに済みます。
 # - QURI Partsの`NoiseSimulator`ベースのsamplerなど、独自のsamplerやestimatorは`transpiler.executor(...)`経由で差し替えられます。量子カーネルをトランスパイルし直す必要はありません。

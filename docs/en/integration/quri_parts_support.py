@@ -93,8 +93,9 @@ plt.show()
 # %% [markdown]
 # ## Building the QAOA ansatz with `@qkernel`
 #
-# We write the QAOA ansatz directly as a small `@qkernel`.
-# The recipe is the same as in the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). After preparing a uniform superposition in the computational basis, we alternately apply cost and mixer layers $p$ times, then measure in the computational basis.
+# We write reusable qkernels for the QAOA state, sampling ansatz, and expectation-value evaluation.
+# The recipe is the same as in the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). After preparing a uniform superposition in the computational basis, we alternately apply cost and mixer layers $p$ times.
+# The sampling qkernel measures the final state in the computational basis, while the expectation-value qkernel evaluates the same state against a Hamiltonian.
 #
 # :::{tip}
 # Qamomile's rotation gates follow the $e^{-i\theta/2}$ convention.
@@ -143,6 +144,23 @@ def mixer_layer(
 
 
 @qmc.qkernel
+def qaoa_state(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    # Prepare the final QAOA state without measuring it.
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return q
+
+
+@qmc.qkernel
 def qaoa_ansatz(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -151,12 +169,24 @@ def qaoa_ansatz(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    # Alternate cost and mixer layers, then measure the final QAOA state.
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
+    # Measure the final QAOA state for sampling.
+    q = qaoa_state(p, quad, linear, n, gammas, betas)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def qaoa_energy(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    H: qmc.Observable,
+) -> qmc.Float:
+    # Evaluate the same QAOA state against a Hamiltonian observable.
+    q = qaoa_state(p, quad, linear, n, gammas, betas)
+    return qmc.expval(q, H)
 
 
 # %% [markdown]
@@ -302,7 +332,62 @@ plt.show()
 # The optimized parameters from this run (`opt_gammas`, `opt_betas`) are reused throughout the rest of this page.
 
 # %% [markdown]
-# ## Expectation values: unbound circuits and bound circuits
+# ## Expectation values with `run()`
+#
+# In Qamomile, you write expectation values in a qkernel with `qmc.expval(...)`.
+# When this is transpiled to QURI Parts, it becomes an executable object that can be called with `ExecutableProgram.run(executor, bindings=...)`.
+# `run()` uses Qamomile's recorded parameter information to bind runtime parameters before calling the QURI Parts estimator.
+#
+# First build a Qamomile `Hamiltonian` for $H_C = \sum_{(i,j) \in E} Z_i Z_j$.
+# Then transpile the expectation-value qkernel and evaluate it at the optimized QAOA parameters.
+
+# %%
+# Build the Qamomile Hamiltonian that matches the MaxCut Ising cost.
+cost_hamiltonian = qm_o.Hamiltonian()
+for (i, j), Jij in spin_model.quad.items():
+    cost_hamiltonian.add_term(
+        (qm_o.PauliOperator(qm_o.Pauli.Z, i), qm_o.PauliOperator(qm_o.Pauli.Z, j)),
+        Jij,
+    )
+for i, hi in spin_model.linear.items():
+    cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
+
+# Transpile the expectation-value qkernel and evaluate it with `run()`.
+expval_executable = transpiler.transpile(
+    qaoa_energy,
+    bindings={
+        "p": p,
+        "quad": spin_model.quad,
+        "linear": spin_model.linear,
+        "n": num_nodes,
+        "H": cost_hamiltonian,
+    },
+    parameters=["gammas", "betas"],
+)
+energy_via_run = expval_executable.run(
+    executor,
+    bindings={"gammas": opt_gammas, "betas": opt_betas},
+).result()
+
+print(f"Executable.run() expectation: {energy_via_run:+.10f}")
+print(f"sample mean energy          : {res.fun:+.4f}")
+assert np.isfinite(energy_via_run)
+
+# %% [markdown]
+# `ExecutableProgram.run(...)` is the recommended route when you work through the Qamomile API.
+# Direct `executor.estimate(...)` and `executor.estimate_expectation(...)` calls are still available when you intentionally manage QURI Parts circuits yourself.
+# On the `run()` path, Qamomile binds the named runtime parameters before the estimator call, so you do not need to manage QURI Parts' flat parameter order yourself.
+#
+# The next section opens that lower-level path and shows how QURI Parts handles unbound and already-bound circuits differently.
+
+# %% [markdown]
+# ## Advanced QURI Parts features
+#
+# QURI Parts exposes both parametric and non-parametric estimator paths.
+# Qamomile normally hides that distinction behind `ExecutableProgram.run(...)` or `executor.estimate(...)`, but direct `estimate_expectation(...)` calls are useful when you need full control over the QURI Parts circuit.
+
+# %% [markdown]
+# ### Expectation values: unbound circuits and bound circuits
 #
 # `QuriPartsExecutor.estimate_expectation(circuit, hamiltonian, param_values)` computes expectation values with QURI Parts.
 # It chooses between two QURI Parts estimators depending on the **state of the circuit it receives**:
@@ -322,20 +407,9 @@ plt.show()
 # We can pass it to `estimate_expectation` together with the cost Hamiltonian to compute $\langle H_C \rangle$ without sampling noise.
 # In a QAOA optimizer, you can keep the same circuit and replace `executable.sample()` plus decoding with `executor.estimate(circuit, hamiltonian, params=...)`.
 #
-# To try both paths directly, first build a Qamomile `Hamiltonian` for $H_C = \sum_{(i,j) \in E} Z_i Z_j$.
-# Then convert it to a QURI Parts operator and call `estimate_expectation` for each circuit variant.
+# To try both paths directly, convert the Hamiltonian from the previous section to a QURI Parts operator and call `estimate_expectation` for each circuit variant.
 
 # %%
-# Build the Qamomile Hamiltonian that matches the MaxCut Ising cost.
-cost_hamiltonian = qm_o.Hamiltonian()
-for (i, j), Jij in spin_model.quad.items():
-    cost_hamiltonian.add_term(
-        (qm_o.PauliOperator(qm_o.Pauli.Z, i), qm_o.PauliOperator(qm_o.Pauli.Z, j)),
-        Jij,
-    )
-for i, hi in spin_model.linear.items():
-    cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
 # Convert the observable to a QURI Parts operator for direct estimation.
 quri_H = hamiltonian_to_quri_operator(cost_hamiltonian)
 
@@ -374,6 +448,7 @@ energy_bound = executor.estimate_expectation(bound_circuit, quri_H, [])
 print(f"parametric  estimator: {energy_unbound:+.10f}")
 print(f"non-param.  estimator: {energy_bound:+.10f}")
 assert np.isclose(energy_unbound, energy_bound, atol=1e-10)
+assert np.isclose(energy_via_run, energy_unbound, atol=1e-10)
 
 # %% [markdown]
 # Both paths agree to numerical precision.
@@ -382,7 +457,7 @@ assert np.isclose(energy_unbound, energy_bound, atol=1e-10)
 # This path selection is hidden inside Qamomile's `executor.estimate()` interface, so you normally do not need to think about it.
 # Call `estimate_expectation` directly only when you need to manage the QURI Parts circuit yourself.
 #
-# `executor.estimate(circuit, hamiltonian, params=...)` is the easier method when you want to stay at the Qamomile API level.
+# `executor.estimate(circuit, hamiltonian, params=...)` is the easier method when you want to pass an existing QURI Parts circuit but keep Qamomile's Hamiltonian object.
 # It accepts a `qamomile.observable.Hamiltonian` directly, converts it automatically, and then calls `estimate_expectation`.
 
 # %%
@@ -444,6 +519,6 @@ print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 # ## Summary
 #
 # - `QuriPartsTranspiler().transpile(kernel, bindings=..., parameters=[...])` converts the qkernel to a QURI Parts `LinearMappedParametricQuantumCircuit`, which can be inspected with QURI Parts' `draw_circuit`.
-# - `QuriPartsExecutor` supports both `executable.sample()` for QAOA-style sampling and `executor.estimate(...)` for noise-free expectation values, against the Qulacs state-vector simulator by default.
+# - `QuriPartsExecutor` supports `executable.sample()` for QAOA-style sampling, `executable.run()` for qkernels that return `qmc.expval(...)`, and direct `executor.estimate(...)` calls for circuit-level expectation values against the Qulacs state-vector simulator by default.
 # - `estimate_expectation` switches between QURI Parts' parametric and non-parametric estimators depending on whether the input circuit still has free parameters. Usually, `executor.estimate()` lets you use this behavior without thinking about the switch.
 # - Custom samplers and estimators, including QURI Parts' `NoiseSimulator`-backed sampler, can be passed through `transpiler.executor(...)` without re-transpiling the kernel.
