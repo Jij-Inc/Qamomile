@@ -927,7 +927,12 @@ def estimate_physical_resources(
 
     Raises:
         TypeError: If ``logical`` is not a ``ResourceEstimate`` or if
-            ``cost_model`` is not a supported architecture model.
+            ``cost_model`` is not a supported architecture model. Also raised
+            if ``logical_depth`` or ``non_clifford_count`` cannot be converted
+            to a SymPy expression.
+        ValueError: If the cost model rejects the derived or overridden
+            quantities, such as non-positive logical qubits or negative
+            logical-depth or non-Clifford counts.
     """
     if not isinstance(logical, ResourceEstimate):
         raise TypeError("logical must be a ResourceEstimate instance.")
@@ -997,7 +1002,12 @@ def estimate_active_volume_resources(
 
     Raises:
         TypeError: If ``logical`` is not a ``ResourceEstimate`` or
-            ``cost_model`` is not an ``ActiveVolumeCostModel``.
+            ``cost_model`` is not an ``ActiveVolumeCostModel``. Also raised if
+            ``logical_gate_count`` or ``non_clifford_count`` cannot be
+            converted to a SymPy expression.
+        ValueError: If the active-volume model rejects the derived or
+            overridden quantities, such as negative logical-gate or
+            non-Clifford counts.
     """
     if not isinstance(logical, ResourceEstimate):
         raise TypeError("logical must be a ResourceEstimate instance.")
