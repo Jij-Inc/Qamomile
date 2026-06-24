@@ -19,27 +19,29 @@
 #
 # # Introduction to Quantum Fourier transform (QFT)
 #
-# The Quantum Fourier Transform (QFT) is the quantum analogue of the discrete Fourier transform. It appears as a core subroutine in quantum phase estimation, order finding, and many algorithms that need to move information between a computational-basis description and a phase description.
+# The Quantum Fourier Transform (QFT) is the quantum analogue of the discrete Fourier transform. It appears as a core subroutine in quantum phase estimation, order finding, and many algorithms that need to move information between a computational-basis description and a phase description {cite:p}`10.48550/arXiv.quant-ph/0201067`.
 #
-# This page introduces the classical Fourier transform viewpoint, explains the QFT circuit at a high level, and then implements the three-qubit $F_8$ example from the [Wikipedia QFT example](https://en.wikipedia.org/wiki/Quantum_Fourier_transform#Example), which follows the standard presentation in Nielsen and Chuang's *Quantum Computation and Quantum Information* {cite:p}`10.1017/CBO9780511976667`. By the end, you will have a Qamomile qkernel that draws the QFT circuit, executes it on a local Qiskit simulator, and reports the resource estimate for the standard decomposition.
+# This page introduces the classical Fourier transform viewpoint, explains the QFT circuit at a high level, and then implements a four-qubit frequency-estimation example. By the end, you will have a Qamomile qkernel that draws the QFT circuit, executes it on a local Qiskit simulator, estimates the dominant frequency from a histogram, and uses resource estimation to inspect the symbolic scaling of the standard decomposition.
 
 # %%
 # Install the latest Qamomile through pip!
 # # !pip install qamomile
 
 # %%
-from itertools import product
+import math
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 import qamomile.circuit as qmc
 from qamomile.circuit.stdlib.qft import qft
 from qamomile.qiskit import QiskitTranspiler
+from qiskit_aer import AerSimulator
 
 transpiler = QiskitTranspiler()
 
 # %% [markdown]
-# ## Fourier Transform
+# ## Background: Fourier Transform
 #
 # A Fourier transform rewrites data in terms of frequencies. In continuous settings, the input is a function over time or space and the output tells us how much of each frequency is present. In finite computation, the version we usually meet is the **Discrete Fourier Transform** (DFT).
 #
@@ -52,26 +54,6 @@ transpiler = QiskitTranspiler()
 #
 # The output index $k$ labels a frequency component. The complex phase factor $e^{2\pi i jk / N}$ is what makes each input position contribute with a different phase to each output frequency.
 
-# %%
-num_qubits = 3
-dimension = 2**num_qubits
-basis_index = 5
-omega = np.exp(2j * np.pi / dimension)
-
-signal = np.zeros(dimension, dtype=complex)
-signal[basis_index] = 1.0
-dft = np.fft.ifft(signal, norm="ortho")
-expected_dft = np.array(
-    [omega ** (basis_index * k) / np.sqrt(dimension) for k in range(dimension)]
-)
-
-print(np.round(dft, 3))
-assert np.allclose(dft, expected_dft)
-assert np.allclose(np.abs(dft), 1 / np.sqrt(dimension))
-
-# %% [markdown]
-# This is the classical Fourier transform of the basis vector whose only nonzero entry is at index $5$. Its output has equal magnitude in all eight components, with phases set by powers of the eighth root of unity $\omega = e^{2\pi i/8}$.
-
 # %% [markdown]
 # ## Algorithm
 #
@@ -80,13 +62,6 @@ assert np.allclose(np.abs(dft), 1 / np.sqrt(dimension))
 # $$
 # \mathrm{QFT}_N \lvert x \rangle =
 # \frac{1}{\sqrt{N}}\sum_{k=0}^{N-1} e^{2\pi i xk/N}\lvert k \rangle.
-# $$
-#
-# For the three-qubit example used here, $n=3$, $N=8$, $\omega = e^{2\pi i/8}$, and
-#
-# $$
-# F_8\lvert x \rangle =
-# \frac{1}{\sqrt{8}}\sum_{k=0}^{7}\omega^{xk}\lvert k\rangle.
 # $$
 #
 # The important difference from a classical DFT is that the vector being transformed is the quantum state vector. Measuring immediately after QFT only reveals samples from the output probabilities; the phase information is still there, but it is accessed through later interference, as in phase estimation.
@@ -139,104 +114,204 @@ assert np.allclose(np.abs(dft), 1 / np.sqrt(dimension))
 # \left(\lvert 0\rangle + e^{2\pi i[0.x_jx_{j+1}\ldots x_n]}\lvert 1\rangle\right).
 # $$
 #
-# For the three-qubit case, this is
+# For the four-qubit case, this is
 #
 # $$
-# \mathrm{QFT}\lvert x_1x_2x_3\rangle =
-# \frac{1}{\sqrt{8}}
-# \left(\lvert 0\rangle + e^{2\pi i[0.x_3]}\lvert 1\rangle\right)
+# \mathrm{QFT}\lvert x_1x_2x_3x_4\rangle =
+# \frac{1}{\sqrt{16}}
+# \left(\lvert 0\rangle + e^{2\pi i[0.x_4]}\lvert 1\rangle\right)
 # \otimes
-# \left(\lvert 0\rangle + e^{2\pi i[0.x_2x_3]}\lvert 1\rangle\right)
+# \left(\lvert 0\rangle + e^{2\pi i[0.x_3x_4]}\lvert 1\rangle\right)
 # \otimes
-# \left(\lvert 0\rangle + e^{2\pi i[0.x_1x_2x_3]}\lvert 1\rangle\right).
+# \left(\lvert 0\rangle + e^{2\pi i[0.x_2x_3x_4]}\lvert 1\rangle\right)
+# \otimes
+# \left(\lvert 0\rangle + e^{2\pi i[0.x_1x_2x_3x_4]}\lvert 1\rangle\right).
 # $$
 #
 # ### Step 4: Reverse the output order
 #
-# The textbook QFT decomposition naturally produces the qubits in reversed order. A final layer of swaps restores the register order. Some algorithms omit these swaps and track the reversed order classically, but Qamomile's standard `qft` function includes them.
+# The textbook QFT decomposition naturally produces the qubits in reversed order. A final layer of swaps restores the register order. Some algorithms omit these swaps and track the reversed order classically.
+#
+# ```{figure} assets/qft_circuit.png
+# :alt: Standard QFT circuit
+# :width: 720px
+#
+# QFT quantum circuit for $n=4$.
+# ```
 
 # %% [markdown]
 # ## Implementation: `qft` function
 #
+# The `qamomile.circuit.stdlib.qft.qft` function contains the full process described above: Hadamard gates, controlled phase rotations, and final swaps.
+#
+# ### Problem Example
+#
+# We use $N=16$ samples, so the quantum register has four qubits. For this example, $n=4$, $N=16$, $\omega = e^{2\pi i/16}$, and
+#
+# $$
+# F_{16}\lvert x \rangle =
+# \frac{1}{\sqrt{16}}\sum_{k=0}^{15}\omega^{xk}\lvert k\rangle.
+# $$
+#
+# We prepare a quantum state whose amplitude at basis index $j$ is $s_j$:
+#
+# $$
+# \lvert \psi_f\rangle =
+# \sum_{j=0}^{N-1} s_j \lvert j\rangle,
+# \qquad
+# s_j = \frac{1}{\sqrt{N}} e^{-2\pi i f j/N},
+# \qquad f=5,\quad j=0,1,\ldots,N-1.
+# $$
+#
+# In other words, the function values $f(j)=e^{-2\pi i f j/N}$ are embedded into the amplitudes of $\lvert \psi_f\rangle$ with the normalization factor $1/\sqrt{N}$. Applying QFT to this state moves the frequency component of $f(j)$ into the output amplitudes. With the DFT convention from the background section, all spectral weight should appear at frequency index $k=5$.
+
+# %%
+num_qubits = 4
+dimension = 2**num_qubits
+frequency = 5
+positions = np.arange(dimension)
+
+signal = np.exp(-2j * np.pi * frequency * positions / dimension) / np.sqrt(dimension)
+spectrum = np.fft.ifft(signal, norm="ortho")
+expected_spectrum = np.zeros(dimension, dtype=complex)
+expected_spectrum[frequency] = 1.0
+
+print(np.round(np.abs(spectrum), 3))
+assert np.allclose(spectrum, expected_spectrum)
+
+# %% [markdown]
+# ### Quantum Kernel with `qft`
+#
 # Qamomile provides QFT as a standard-library composite gate. The convenience function `qamomile.circuit.stdlib.qft.qft` accepts a `Vector[Qubit]`, applies the QFT to the whole register, and returns the transformed vector.
 #
-# We prepare the three-qubit basis state $\lvert 101\rangle$, which is index $5$, and apply QFT. This is the $F_8\lvert 5\rangle$ instance of the example above. Direct measurement samples uniformly over the 8 basis states because each output amplitude has magnitude $1/\sqrt{8}$.
+# The state preparation below creates the phase ramp directly on the amplitudes. We treat `q[0]` as the least significant bit of the sample index $j$, so the phase added to each qubit doubles from left to right.
 
 # %%
 @qmc.qkernel
-def qft_on_five() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(3, name="q")
-    q[0] = qmc.x(q[0])
-    q[2] = qmc.x(q[2])
+def qft_frequency_estimator() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(num_qubits, name="q")
+
+    # Start from a uniform superposition over all sample indices.
+    q = qmc.h(q)
+
+    # Encode the phase ramp exp(-2 pi i f j / N) into the amplitudes.
+    q[0] = qmc.p(q[0], -2 * math.pi * frequency / dimension)
+    q[1] = qmc.p(q[1], -2 * math.pi * frequency * 2 / dimension)
+    q[2] = qmc.p(q[2], -2 * math.pi * frequency * 4 / dimension)
+    q[3] = qmc.p(q[3], -2 * math.pi * frequency * 8 / dimension)
+
+    # Apply QFT and measure the frequency index.
     q = qft(q)
     return qmc.measure(q)
 
 
 # %%
-qft_on_five.draw()
+qft_frequency_estimator.draw()
 
 # %% [markdown]
 # The compact diagram keeps QFT as one composite operation. If you want to see how a backend receives the circuit, transpile it. Qiskit can emit a native `QFTGate`, followed by measurements here.
 
 # %%
-qiskit_circuit = transpiler.to_circuit(qft_on_five)
+qiskit_circuit = transpiler.to_circuit(qft_frequency_estimator)
 print(qiskit_circuit.draw())
 
 # %% [markdown]
-# Now execute the qkernel locally. The result is stochastic because we sample a quantum state, but the expected probability is $1/8$ for each 3-bit outcome.
+# ### Execution Result
+#
+# Now execute the qkernel locally and plot a histogram of the measured frequency indices. The helper converts a measured bit tuple to an integer with `q[0]` as the least significant bit, matching the state preparation above.
 
 # %%
-try:
-    from qiskit_aer import AerSimulator
-
-    backend = AerSimulator(seed_simulator=1234, max_parallel_threads=1)
-except ImportError:
-    from qiskit.providers.basic_provider import BasicSimulator
-
-    backend = BasicSimulator()
-    backend.set_options(seed_simulator=1234)
-
+backend = AerSimulator(seed_simulator=1234, max_parallel_threads=1)
 shots = 512
-result = (
-    transpiler.transpile(qft_on_five)
-    .sample(transpiler.executor(backend), shots=shots)
-    .result()
-)
-counts = dict(result.results)
-expected_outcomes = set(product([0, 1], repeat=3))
+executable = transpiler.transpile(qft_frequency_estimator)
+result = executable.sample(transpiler.executor(backend), shots=shots).result()
 
-for outcome in sorted(expected_outcomes):
-    probability = counts.get(outcome, 0) / shots
-    print(f"{outcome}: {probability:.3f}")
+probabilities = np.zeros(dimension)
+for outcome, count in result.results:
+    frequency_index = sum(bit << idx for idx, bit in enumerate(outcome))
+    probabilities[frequency_index] = count / shots
+
+fig, ax = plt.subplots(figsize=(7, 3))
+ax.bar(range(dimension), probabilities)
+ax.set_xlabel("frequency index")
+ax.set_ylabel("probability")
+ax.set_xticks(range(dimension))
+ax.set_ylim(0, 1.05)
+plt.show()
+
+estimated_frequency = int(np.argmax(probabilities))
+print(f"estimated frequency: {estimated_frequency}")
 
 assert result.shots == shots
-assert sum(counts.values()) == shots
-assert set(counts).issubset(expected_outcomes)
-assert all(isinstance(outcome, tuple) and len(outcome) == 3 for outcome in counts)
+assert sum(count for _, count in result.results) == shots
+assert estimated_frequency == frequency
+assert probabilities[frequency] > 0.95
+assert all(
+    isinstance(outcome, tuple) and len(outcome) == num_qubits
+    for outcome, _ in result.results
+)
 
 # %% [markdown]
-# Finally, ask Qamomile for a resource estimate. For this kernel, the standard 3-qubit QFT contributes 3 Hadamard gates, 3 controlled phase rotations, and 1 swap. The two extra X gates prepare $\lvert 101\rangle$.
+# ## Resource Estimation
+#
+# The standard exact QFT decomposition uses:
+#
+# - $n$ Hadamard gates
+# - $\frac{n(n - 1)}{2}$ controlled phase rotations
+# - $\left\lfloor n / 2 \right\rfloor$ swaps
+#
+# Therefore the total gate count is $n + \frac{n(n - 1)}{2} + \left\lfloor n / 2 \right\rfloor$, which scales as $O(n^2)$.
+#
+# Now let's check this with Qamomile's resource estimation feature.
 
 # %%
-estimate = qft_on_five.estimate_resources().simplify()
-print("qubits:", estimate.qubits)
-print("total gates:", estimate.gates.total)
-print("single-qubit gates:", estimate.gates.single_qubit)
-print("two-qubit gates:", estimate.gates.two_qubit)
-print("rotation gates:", estimate.gates.rotation_gates)
-print("Clifford gates:", estimate.gates.clifford_gates)
+@qmc.qkernel
+def qft_scaling(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(n, name="q")
 
-assert estimate.qubits == 3
-assert estimate.gates.total == 9
-assert estimate.gates.single_qubit == 5
-assert estimate.gates.two_qubit == 4
-assert estimate.gates.rotation_gates == 3
-assert estimate.gates.clifford_gates == 6
+    for j in qmc.range(n - 1, -1, -1):
+        q[j] = qmc.h(q[j])
+
+        for k in qmc.range(j - 1, -1, -1):
+            angle = math.pi / (2 ** (j - k))
+            q[j], q[k] = qmc.cp(q[j], q[k], angle)
+
+    for j in qmc.range(n // 2):
+        q[j], q[n - j - 1] = qmc.swap(q[j], q[n - j - 1])
+
+    return q
+
+
+# %%
+symbolic_estimate = qft_scaling.estimate_resources().simplify()
+print("qubits:", symbolic_estimate.qubits)
+print("total gates:", symbolic_estimate.gates.total)
+print("single-qubit gates:", symbolic_estimate.gates.single_qubit)
+print("two-qubit gates:", symbolic_estimate.gates.two_qubit)
+print("rotation gates:", symbolic_estimate.gates.rotation_gates)
+print("Clifford gates:", symbolic_estimate.gates.clifford_gates)
+
+assert "n" in str(symbolic_estimate.gates.total)
+assert "j" not in str(symbolic_estimate.gates.total)
+assert "k" not in str(symbolic_estimate.gates.total)
+
+estimate_8 = symbolic_estimate.substitute(n=8)
+assert estimate_8.qubits == 8
+assert estimate_8.gates.total == 40
+assert estimate_8.gates.single_qubit == 8
+assert estimate_8.gates.two_qubit == 32
+assert estimate_8.gates.rotation_gates == 28
+assert estimate_8.gates.clifford_gates == 12
+
+# %% [markdown]
+# A dense classical DFT on a length-$N$ vector uses $O(N^2)$ arithmetic operations, and the fast Fourier transform reduces this to $O(N\log N)$. If the Fourier transform dimension is $N = 2^n$, the exact QFT uses $O(n^2)=O((\log N)^2)$ gates. As a unitary transformation, QFT is therefore exponentially smaller in $N$ than the dense classical DFT, and still polylogarithmic compared with the FFT. This does not mean that QFT reads out all $N$ Fourier coefficients efficiently: the transform happens coherently in the quantum state, and a measurement still returns only samples. The scaling benefit matters when later quantum operations use the phase information without materializing the full vector classically.
 
 # %% [markdown]
 # ## Summary
 #
+# In this notebook, we connected the classical DFT viewpoint to QFT, implemented a four-qubit frequency-estimation example, sampled the output, and checked the symbolic resource scaling.
+#
 # - The DFT rewrites a finite vector into frequency components; QFT applies the same transform to quantum amplitudes.
-# - The three-qubit $F_8$ example maps $\lvert 5\rangle = \lvert 101\rangle$ to an equal-magnitude phase pattern over all 8 computational-basis states.
+# - The four-qubit example prepares a single-frequency phase ramp, applies QFT, and estimates the dominant frequency from the sampled histogram.
 # - In Qamomile, `qamomile.circuit.stdlib.qft.qft` applies QFT directly to a `Vector[Qubit]`.
-# - `draw()`, backend execution, and `estimate_resources()` give you the circuit view, sampled behavior, and gate-cost view of the same qkernel.
+# - `draw()`, backend execution, and `estimate_resources()` give you the circuit view, sampled behavior, and symbolic scaling of the same QFT structure.
