@@ -234,6 +234,7 @@ def test_physical_estimates_expose_runtime_bottleneck_components():
         non_clifford_count=200,
     )
     values = physical.resource_values()
+    serialized = physical.to_dict()
 
     assert physical.depth_limited_runtime_seconds == sp.Rational(1, 20)
     assert physical.non_clifford_limited_runtime_seconds == 20
@@ -242,6 +243,8 @@ def test_physical_estimates_expose_runtime_bottleneck_components():
         1, 20
     )
     assert values[ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS.value] == 20
+    assert serialized["depth_limited_runtime_seconds"] == "1/20"
+    assert serialized["non_clifford_limited_runtime_seconds"] == "20"
 
 
 def test_pareto_resource_values_marks_frontier_candidates():
