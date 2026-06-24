@@ -19,7 +19,7 @@
 #
 # # QURI Partsサポート
 #
-# このページでは、具体的な最適化問題を通して、Qamomileの[QURI Parts](https://quri-parts.qunasys.com/)バックエンドを紹介します。
+# このページでは、具体的な最適化問題を通して、Qamomileの[QURI Parts](https://quri-parts.qunasys.com/)量子SDK連携を紹介します。
 # このチュートリアルでは、小さなMaxCutインスタンスに対するQAOA最適化を例に、Qamomileの量子カーネルをQURI Parts回路へトランスパイルし、サンプリングと期待値評価を行います。
 # `QuriPartsExecutor`は、デフォルトで高速なC++製状態ベクトルシミュレータ[Qulacs](https://docs.qulacs.org/)を使うため、以下の例は追加設定なしでローカルCPU上で実行できます。
 
@@ -171,7 +171,7 @@ qaoa_ansatz.draw(
 # %% [markdown]
 # ## QURI Partsへのトランスパイル
 #
-# `QuriPartsTranspiler`は、他のバックエンドと同じように`transpile()`で使えます。
+# `QuriPartsTranspiler`は、他の量子SDKと同じように`transpile()`で使えます。
 # 問題の構造を決める引数は`bindings`で固定し、`gammas` / `betas`はランタイムパラメータとして残します。
 
 # %%
@@ -388,10 +388,10 @@ print(f"executor.estimate     : {energy_via_estimate:+.10f}")
 assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 
 # %% [markdown]
-# ## 他のQURI Partsバックエンドの利用
+# ## 他のQURI Parts sampler / estimatorの利用
 #
 # `QuriPartsExecutor()`は、初回利用時にデフォルトのQulacs状態ベクトルsamplerとパラメトリックestimatorを遅延生成します。
-# 別のQURI Partsバックエンドに差し替えたい場合は、`QuriPartsTranspiler.executor(sampler=..., estimator=...)`経由でsamplerやestimatorを渡すか、`QuriPartsExecutor(sampler=..., estimator=...)`を直接インスタンス化します。
+# QURI Partsのsamplerやestimatorを差し替えたい場合は、`QuriPartsTranspiler.executor(sampler=..., estimator=...)`経由でsamplerやestimatorを渡すか、`QuriPartsExecutor(sampler=..., estimator=...)`を直接インスタンス化します。
 # 差し替えたexecutorは、上で使った`executor`の位置にそのまま当てはめられます。
 # samplerを変えても、量子カーネルをトランスパイルし直す必要はありません。
 # `executable`が回路を持ち、`executor`が実行に使うsamplerやestimatorを持つ、という役割分担になっているためです。

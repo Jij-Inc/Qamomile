@@ -19,10 +19,10 @@
 #
 # # Qiskitサポート
 #
-# このページでは、具体的な最適化問題を通して、Qamomileの[Qiskit](https://quantum-computing.ibm.com/docs/)バックエンドを紹介します。
-# QiskitはQamomileの標準バックエンドです。`qamomile`をインストールすれば、`QiskitTranspiler`と`QiskitExecutor`をすぐに使えます。
+# このページでは、具体的な最適化問題を通して、Qamomileの[Qiskit](https://quantum-computing.ibm.com/docs/)量子SDK連携を紹介します。
+# QiskitはQamomileの標準の量子SDK連携です。`qamomile`をインストールすれば、`QiskitTranspiler`と`QiskitExecutor`をすぐに使えます。
 # このチュートリアルでは、小さなMaxCutインスタンスに対するQAOA最適化を例に、Qamomileの量子カーネルをQiskit回路へトランスパイルし、Qiskitシミュレータ上でサンプリングと期待値評価を行います。
-# さらに、Qiskitならではの高度な回路機能も紹介します。
+# さらに、Qiskitの高度な回路機能も紹介します。
 
 # %%
 # 最新のQamomileをpipからインストールします。
@@ -188,7 +188,7 @@ qaoa_ansatz.draw(
 # ## Qiskitへのトランスパイル
 #
 # Qamomileの量子カーネルで定義した回路は、`QiskitTranspiler`でQiskitの`QuantumCircuit`へトランスパイルできます。
-# `QiskitTranspiler`は、他のバックエンドと同じように`transpile()`で使えます。
+# `QiskitTranspiler`は、他の量子SDKと同じように`transpile()`で使えます。
 # 問題の構造を決める引数は`bindings`で固定し、`gammas` / `betas`はランタイムパラメータとして残します。
 # チュートリアルの出力を再現できるように、固定シードと`max_parallel_threads=1`を設定した`AerSimulator`を使います。
 
@@ -365,15 +365,16 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # QamomileのAPIだけで扱う場合は、`ExecutableProgram.run(...)`を使うのがおすすめです。
 # Qiskit回路を自分で扱いたい場合には`executor.estimate(...)`も使えますが、その場合はQiskitのパラメータ順や回路のバインド状態をユーザー側で管理する必要があります。
-# `QiskitExecutor`はデフォルトで`StatevectorEstimator`を生成し、現在のV2 estimatorインターフェースと古いV1インターフェースの両方を自動的に扱います。
+# `QiskitExecutor`は、利用可能な場合にはデフォルトでQiskitの`StatevectorEstimator`を生成するため、現在のQiskit環境ではV2 primitiveインターフェースを使います。
+# カスタムestimatorや古いQiskit / AerのestimatorがV2形式の`run([(circuit, observable, params)])`呼び出しを受け付けない場合、QamomileはV1形式の`run(circuits, observables, parameter_values)`へフォールバックします。
 
 # %% [markdown]
-# ## Qiskit固有の高度な機能
+# ## Qiskitの高度な機能
 #
-# Qamomileでは、Qiskitを標準の回路実行バックエンドとして使えます。
+# Qamomileでは、Qiskitを標準の量子SDK連携として使えます。
 # そのため、Qiskitが持つ高度な回路機能を活用するための入口も用意しています。
 #
-# このセクションでは、生成した回路をQiskitバックエンドへ渡すときに便利なQiskit固有の機能を3つ示します。
+# このセクションでは、生成した回路をQiskitの実行対象へ渡すときに便利な機能を3つ示します。
 #
 # - 動的回路のためのネイティブ古典制御フロー(`for_loop`、`if_else`、`while_loop`)
 # - パラメトリックな時間発展`qmc.pauli_evolve(...)`をQiskitネイティブな`PauliEvolutionGate`として直接出力
@@ -382,7 +383,7 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # ### 古典制御フローとランタイム古典式
 #
-# Qiskitバックエンドは、Qamomileの古典制御フローやランタイム古典式を、Qiskitの動的回路命令や古典式に直接変換できます。
+# Qiskit連携は、Qamomileの古典制御フローやランタイム古典式を、Qiskitの動的回路命令や古典式に直接変換できます。
 # `qmc.range(...)`ループは、Qiskitの`for_loop`になります。
 # 測定結果に基づく`if` / `else`と`while`は、Qiskitの動的回路命令になります。
 # `a & b`のような条件式は、`qiskit.circuit.classical.expr`を通してQiskitの古典式に直接変換できます。
@@ -456,7 +457,7 @@ print("if_else condition:", if_op.condition)
 # ### ネイティブ`PauliEvolutionGate`
 #
 # `qmc.pauli_evolve(q, H, gamma)`は、Qamomileの中間表現では$e^{-i\gamma H}$を表します。
-# Qiskitバックエンドは、`use_native_composite=True`(デフォルト)の場合、この操作を`PauliEvolutionGate`として出力します。
+# Qiskit連携は、`use_native_composite=True`(デフォルト)の場合、この操作を`PauliEvolutionGate`として出力します。
 # 未バインドの`gamma`はQiskitの`Parameter`になるため、同じ回路を変分パラメータを変えながら評価する用途に再利用できます。
 
 # %%
@@ -489,14 +490,14 @@ assert "PauliEvolution" in evolution_ops
 assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
-# バックエンドに依存しないゲート分解を確認したい場合は、`QiskitTranspiler(use_native_composite=False)`を渡します。
-# 同じフラグでネイティブQFT/IQFT出力も無効化できるため、デバッグやバックエンド非依存のゲート数比較に便利です。
+# 量子SDKに依存しないゲート分解を確認したい場合は、`QiskitTranspiler(use_native_composite=False)`を渡します。
+# 同じフラグでネイティブQFT/IQFT出力も無効化できるため、デバッグや量子SDK非依存のゲート数比較に便利です。
 
 # %% [markdown]
 # ### ネイティブ`QFTGate`
 #
 # Qamomileには、QFTや逆QFTを`qmc.qft(...)` / `qmc.iqft(...)`で表す高水準の操作があります。
-# Qiskitバックエンドでは、これらの量子カーネルを量子ゲートへ分解せず、Qiskitネイティブな`QFTGate`として直接出力できます。
+# Qiskit連携では、これらの量子カーネルを量子ゲートへ分解せず、Qiskitネイティブな`QFTGate`として直接出力できます。
 # 量子ゲートに分解された回路が必要な場合は、`use_native_composite=False`を指定すると、H/controlled-phase/SWAPに展開されます。
 # %%
 # QiskitのネイティブQFTゲートと、ゲート分解された回路を比較します。
@@ -524,11 +525,11 @@ assert "cp" in decomposed_ops
 assert len(qft_native.data) < len(qft_decomposed.data)
 
 # %% [markdown]
-# ## 他のQiskitバックエンドの利用
+# ## 他のQiskit実行対象の利用
 #
-# `QiskitExecutor`では、トランスパイル済み回路と、それを実行するバックエンドを分けて扱います。
-# そのため、`transpiler.executor(backend=...)`でバックエンドを差し替えるだけで、同じ回路をさまざまなQiskitバックエンドで実行できます。
-# 例えば、ノイズなしのローカルシミュレータやAerノイズモデルに加えて、IBM Quantumが提供する実機バックエンドも利用できます。
+# `QiskitExecutor`では、トランスパイル済み回路と、それを実行するQiskitの実行対象を分けて扱います。
+# そのため、`transpiler.executor(backend=...)`でQiskitの実行対象を差し替えるだけで、同じ回路をさまざまなQiskit実行対象で実行できます。
+# 例えば、ノイズなしのローカルシミュレータやAerノイズモデルに加えて、IBM Quantumが提供する実機も利用できます。
 #
 # ここでは、脱分極ノイズを持つAerノイズモデルを作り、`AerSimulator`へ渡す例を示します。
 # 同じ最適化済みパラメータで、ノイズなしとノイズありのサンプル平均エネルギーを比較します。
@@ -548,7 +549,7 @@ noisy_backend = AerSimulator(
 )
 noisy_executor = transpiler.executor(backend=noisy_backend)
 
-# 同じexecutableを、ノイズなしとノイズありのバックエンドで実行します。
+# 同じexecutableを、ノイズなしとノイズありの実行対象で実行します。
 clean_result = executable.sample(
     executor,
     bindings={"gammas": opt_gammas, "betas": opt_betas},
@@ -574,6 +575,6 @@ assert np.isfinite(noisy_energy)
 # ## まとめ
 #
 # - `QiskitTranspiler().transpile(kernel, bindings=..., parameters=[...])`は量子カーネルを`ExecutableProgram[QuantumCircuit]`に変換します。Qiskitエコシステム内で扱いたい場合は、`to_circuit(...)`で生のQiskit`QuantumCircuit`を取得できます。
-# - `QiskitExecutor`は、測定を返す量子カーネル向けの`executable.sample()`と、期待値向けの`executable.run()` / `executor.estimate(...)`の両方をサポートします。デフォルトでは`AerSimulator`を使い、`transpiler.executor(backend=...)`から任意のQiskitバックエンドオブジェクトを受け取れます。
-# - Qiskitバックエンドは、Qiskitが高い抽象度の回路命令を持つ箇所では、回路途中の測定、動的`for_loop` / `if_else` / `while_loop`、ランタイム古典式、`PauliEvolutionGate`、`QFTGate`をネイティブに出力します。
-# - Aerノイズモデル、providerが提供するバックエンド、qBraidでラップしたQiskitデバイスを、qkernelを再トランスパイルせずに使えます。`qamomile.optimization`のヘルパーも、同じQiskit回路を受け渡す仕組みを使っています。
+# - `QiskitExecutor`は、測定を返す量子カーネル向けの`executable.sample()`と、期待値向けの`executable.run()` / `executor.estimate(...)`の両方をサポートします。デフォルトでは`AerSimulator`を使い、`transpiler.executor(backend=...)`から任意のQiskit実行対象オブジェクトを受け取れます。
+# - Qiskit連携は、Qiskitが高い抽象度の回路命令を持つ箇所では、回路途中の測定、動的`for_loop` / `if_else` / `while_loop`、ランタイム古典式、`PauliEvolutionGate`、`QFTGate`をネイティブに出力します。
+# - Aerノイズモデル、providerが提供する実行対象、qBraidでラップしたQiskitデバイスを、qkernelを再トランスパイルせずに使えます。`qamomile.optimization`のヘルパーも、同じQiskit回路を受け渡す仕組みを使っています。

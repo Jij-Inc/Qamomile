@@ -19,10 +19,10 @@
 #
 # # Qiskit Support
 #
-# This page shows how to use Qamomile's [Qiskit](https://quantum-computing.ibm.com/docs/) backend through a concrete optimization problem.
-# Qiskit is Qamomile's default backend. Installing `qamomile` gives you access to `QiskitTranspiler` and `QiskitExecutor`.
+# This page shows how to use Qamomile's [Qiskit](https://quantum-computing.ibm.com/docs/) quantum SDK integration through a concrete optimization problem.
+# Qiskit is Qamomile's default quantum SDK integration. Installing `qamomile` gives you access to `QiskitTranspiler` and `QiskitExecutor`.
 # In this tutorial, we use QAOA optimization for a small MaxCut instance as an example. We transpile a Qamomile qkernel to a Qiskit circuit, then run sampling and expectation-value evaluation on a Qiskit simulator.
-# Along the way, we also look at several Qiskit-specific features.
+# Along the way, we also look at several advanced Qiskit features.
 
 # %%
 # Install the latest Qamomile through pip.
@@ -193,9 +193,9 @@ qaoa_ansatz.draw(
 # ## Transpile to Qiskit
 #
 # A quantum circuit defined as a Qamomile qkernel can be converted to a Qiskit `QuantumCircuit` with `QiskitTranspiler`.
-# You call `QiskitTranspiler.transpile()` the same way as with any other backend.
+# You call `QiskitTranspiler.transpile()` the same way as with any other quantum SDK.
 # We bind the arguments that determine the problem structure and keep `gammas` / `betas` as runtime parameters.
-# For reproducible tutorial output, we specify an `AerSimulator` backend with a fixed seed and `max_parallel_threads=1`.
+# For reproducible tutorial output, we specify an `AerSimulator` execution target with a fixed seed and `max_parallel_threads=1`.
 
 # %%
 SEED = 42
@@ -373,15 +373,16 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # `ExecutableProgram.run(...)` is the recommended route when you work through the Qamomile API.
 # Direct `executor.estimate(...)` calls are still available when you intentionally manage Qiskit circuits yourself, but then you are responsible for Qiskit's parameter ordering and whether the circuit has already been bound.
-# `QiskitExecutor` creates `StatevectorEstimator` by default and automatically handles both the modern V2 estimator interface and the older V1 interface.
+# `QiskitExecutor` creates Qiskit's `StatevectorEstimator` by default when it is available, so current Qiskit installs use the V2 primitive interface.
+# If a custom estimator, or an older Qiskit / Aer estimator, does not accept the V2 `run([(circuit, observable, params)])` call, Qamomile falls back to the V1 `run(circuits, observables, parameter_values)` form.
 
 # %% [markdown]
-# ## Advanced Qiskit-specific features
+# ## Advanced Qiskit features
 #
-# Qiskit is Qamomile's default circuit-execution backend.
+# Qiskit is Qamomile's default quantum SDK integration.
 # For that reason, Qamomile provides several ways to use advanced Qiskit features.
 #
-# This section shows three Qiskit-specific features that are useful when running generated circuits on Qiskit backends:
+# This section shows three features exposed by the Qiskit integration that are useful when running generated circuits on Qiskit execution targets:
 #
 # - native classical control flow (`for_loop`, `if_else`, `while_loop`) for dynamic circuits,
 # - direct translation of parametric time evolution `qmc.pauli_evolve(...)` as a native `PauliEvolutionGate`,
@@ -390,7 +391,7 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # ### Classical control flow and runtime classical expressions
 #
-# For Qamomile programs that use classical control flow and runtime classical expressions, the Qiskit backend can translate them directly into Qiskit's dynamic-circuit instructions and classical expressions.
+# For Qamomile programs that use classical control flow and runtime classical expressions, the Qiskit integration can translate them directly into Qiskit's dynamic-circuit instructions and classical expressions.
 # `qmc.range(...)` loops become Qiskit `for_loop`.
 # Measurement-backed `if` / `else` and `while` become Qiskit dynamic-circuit instructions.
 # Compound predicates such as `a & b` can be converted directly into Qiskit classical expressions through `qiskit.circuit.classical.expr`.
@@ -467,7 +468,7 @@ print("if_else condition:", if_op.condition)
 # ### Native `PauliEvolutionGate`
 #
 # `qmc.pauli_evolve(q, H, gamma)` represents the time evolution $e^{-i\gamma H}$.
-# The Qiskit backend writes that operation as a `PauliEvolutionGate` when `use_native_composite=True` (the default).
+# The Qiskit integration writes that operation as a `PauliEvolutionGate` when `use_native_composite=True` (the default).
 # An unbound `gamma` becomes a Qiskit `Parameter`, so the same circuit can be reused while trying different variational parameters.
 
 # %%
@@ -502,13 +503,13 @@ assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
 # Pass `QiskitTranspiler(use_native_composite=False)` when you want a gate-by-gate decomposition instead.
-# The same flag also disables native QFT/IQFT output, which is useful for debugging or for comparing gate counts across backends.
+# The same flag also disables native QFT/IQFT output, which is useful for debugging or for comparing gate counts across quantum SDKs.
 
 # %% [markdown]
 # ### Native `QFTGate`
 #
 # Qamomile provides high-level operations for QFT and inverse QFT through `qmc.qft(...)` / `qmc.iqft(...)`.
-# The Qiskit backend can translate these qkernels directly to Qiskit's native `QFTGate`, without decomposing them into elementary quantum gates.
+# The Qiskit integration can translate these qkernels directly to Qiskit's native `QFTGate`, without decomposing them into elementary quantum gates.
 # If you need a decomposed circuit, pass `use_native_composite=False` to expand the operation into H/controlled-phase/SWAP gates.
 
 # %%
@@ -537,10 +538,10 @@ assert "cp" in decomposed_ops
 assert len(qft_native.data) < len(qft_decomposed.data)
 
 # %% [markdown]
-# ## Using other Qiskit backends
+# ## Using other Qiskit execution targets
 #
-# `QiskitExecutor` keeps the generated circuit separate from the backend that executes it.
-# By passing a backend with `transpiler.executor(backend=...)`, you can run the same circuit on various backends.
+# `QiskitExecutor` keeps the generated circuit separate from the Qiskit execution target that runs it.
+# By passing an execution target with `transpiler.executor(backend=...)`, you can run the same circuit on various Qiskit execution targets.
 # For example, you can use a noiseless local simulator, an Aer noise model, or a real quantum computer provided by IBM Quantum.
 #
 # Here, we build an Aer noise model with depolarizing noise and pass it to `AerSimulator`.
@@ -561,7 +562,7 @@ noisy_backend = AerSimulator(
 )
 noisy_executor = transpiler.executor(backend=noisy_backend)
 
-# Run the same executable on clean and noisy backends.
+# Run the same executable on clean and noisy execution targets.
 clean_result = executable.sample(
     executor,
     bindings={"gammas": opt_gammas, "betas": opt_betas},
@@ -587,6 +588,6 @@ assert np.isfinite(noisy_energy)
 # ## Summary
 #
 # - `QiskitTranspiler().transpile(kernel, bindings=..., parameters=[...])` converts the qkernel to an `ExecutableProgram[QuantumCircuit]`; `to_circuit(...)` returns the Qiskit `QuantumCircuit` directly when you want to stay inside the Qiskit ecosystem.
-# - `QiskitExecutor` supports both `executable.sample()` for measured qkernels and `executable.run()` / `executor.estimate(...)` for expectation values, using `AerSimulator` by default and accepting any Qiskit backend object through `transpiler.executor(backend=...)`.
-# - The Qiskit backend uses native mid-circuit measurement, dynamic `for_loop` / `if_else` / `while_loop`, runtime classical expressions, `PauliEvolutionGate`, and `QFTGate` where Qiskit provides a high-level representation.
-# - Aer noise models, provider backends, and qBraid-wrapped Qiskit devices can be used without re-transpiling the qkernel; Qamomile's optimization helpers use the same Qiskit circuit interface.
+# - `QiskitExecutor` supports both `executable.sample()` for measured qkernels and `executable.run()` / `executor.estimate(...)` for expectation values, using `AerSimulator` by default and accepting any Qiskit execution target object through `transpiler.executor(backend=...)`.
+# - The Qiskit integration uses native mid-circuit measurement, dynamic `for_loop` / `if_else` / `while_loop`, runtime classical expressions, `PauliEvolutionGate`, and `QFTGate` where Qiskit provides a high-level representation.
+# - Aer noise models, provider execution targets, and qBraid-wrapped Qiskit devices can be used without re-transpiling the qkernel; Qamomile's optimization helpers use the same Qiskit circuit interface.

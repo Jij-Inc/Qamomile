@@ -19,7 +19,7 @@
 #
 # # QURI Parts Support
 #
-# This page shows how to use Qamomile's [QURI Parts](https://quri-parts.qunasys.com/) backend through a concrete optimization problem.
+# This page shows how to use Qamomile's [QURI Parts](https://quri-parts.qunasys.com/) quantum SDK integration through a concrete optimization problem.
 # In this tutorial, we use QAOA optimization for a small MaxCut instance as an example. We transpile a Qamomile qkernel to a QURI Parts circuit, then run sampling and expectation-value evaluation.
 # `QuriPartsExecutor` uses [Qulacs](https://docs.qulacs.org/), a fast C++ state-vector simulator, by default, so the examples below run on a local CPU without any extra configuration.
 
@@ -177,7 +177,7 @@ qaoa_ansatz.draw(
 # %% [markdown]
 # ## Transpile to QURI Parts
 #
-# `QuriPartsTranspiler` is used with `transpile()` the same way as any other backend.
+# `QuriPartsTranspiler` is used with `transpile()` the same way as any other quantum SDK.
 # We bind the arguments that determine the problem structure and keep `gammas` / `betas` as runtime parameters.
 
 # %%
@@ -394,10 +394,10 @@ print(f"executor.estimate     : {energy_via_estimate:+.10f}")
 assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 
 # %% [markdown]
-# ## Using other QURI Parts backends
+# ## Using other QURI Parts samplers and estimators
 #
 # `QuriPartsExecutor()` lazily creates the default Qulacs state-vector sampler and parametric estimator on first use.
-# To swap in a different QURI Parts backend, pass a sampler or estimator through `QuriPartsTranspiler.executor(sampler=..., estimator=...)`, or instantiate `QuriPartsExecutor(sampler=..., estimator=...)` directly.
+# To swap QURI Parts' sampler or estimator, pass it through `QuriPartsTranspiler.executor(sampler=..., estimator=...)`, or instantiate `QuriPartsExecutor(sampler=..., estimator=...)` directly.
 # The custom executor can be used anywhere `executor` appeared above.
 # Swapping the sampler does not require re-transpiling the kernel.
 # The executable carries the circuit, while the executor carries the sampler or estimator used for execution.
