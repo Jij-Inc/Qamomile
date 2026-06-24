@@ -303,6 +303,44 @@ assert (
 )
 
 # %% [markdown]
+# When more than two candidates are involved, `pareto_resource_values()` keeps the non-dominated tradeoffs visible. The slower candidate below uses the same logical algorithm and qubit overhead as the candidate above, but assumes a slower cycle time. It is dominated because it uses the same physical qubits and takes longer.
+
+# %%
+slow_surface_code = qre.SurfaceCodeCostModel(
+    code_distance=5,
+    physical_cycle_time_seconds=2e-6,
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=3,
+    factory_count=1,
+    physical_qubits_per_factory=1000,
+    factory_cycles_per_non_clifford=4,
+)
+slow_candidate_physical = qre.estimate_physical_resources(
+    candidate_logical,
+    slow_surface_code,
+)
+pareto_rows = qre.pareto_resource_values(
+    {
+        "baseline": baseline_physical,
+        "candidate": candidate_physical,
+        "slow candidate": slow_candidate_physical,
+    },
+    quantities=(
+        qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.RUNTIME_SECONDS,
+    ),
+)
+for row in pareto_rows:
+    print(row.to_dict())
+
+frontier_labels = {row.label for row in pareto_rows if row.is_frontier}
+assert frontier_labels == {"baseline", "candidate"}
+assert any(
+    row.label == "slow candidate" and row.dominated_by == ("candidate",)
+    for row in pareto_rows
+)
+
+# %% [markdown]
 # If some architecture assumptions are still symbolic, `evaluate_resource_value_scenarios()` turns them into a compact scenario table. This is useful when the algorithm estimate is fixed, but code distance, cycle time, or factory assumptions are still design variables.
 
 # %%
@@ -344,6 +382,6 @@ assert all(row.is_resolved for row in scenario_rows)
 # - `estimate_resources()` reports qubit and gate costs without executing.
 # - For parameterized qkernels, results are SymPy expressions showing exact scaling.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
-# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities, audit which symbols drive those quantities, then evaluate remaining architecture symbols across scenarios.
+# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities, keep Pareto tradeoffs visible, audit which symbols drive those quantities, then evaluate remaining architecture symbols across scenarios.
 #
 # **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

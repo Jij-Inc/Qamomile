@@ -34,6 +34,7 @@ from qamomile.resource_estimation.hamiltonian_algorithms import (
 from qamomile.resource_estimation.quantities import (
     ResourceCategory,
     ResourceComparisonRow,
+    ResourceParetoRow,
     ResourceQuantity,
     ResourceQuantitySpec,
     ResourceScenarioValueRow,
@@ -46,6 +47,7 @@ from qamomile.resource_estimation.quantities import (
     evaluate_resource_value_scenarios,
     evaluate_resource_values,
     iter_resource_quantity_specs,
+    pareto_resource_values,
     resource_values_from_estimate,
 )
 
@@ -59,6 +61,7 @@ __all__ = [
     "PauliHamiltonianResource",
     "ResourceCategory",
     "ResourceComparisonRow",
+    "ResourceParetoRow",
     "ResourceQuantity",
     "ResourceQuantitySpec",
     "ResourceEstimate",
@@ -82,6 +85,7 @@ __all__ = [
     "estimate_trotter_qpe_resources_from_hamiltonian",
     "hamiltonian_from_openfermion_qubit_operator",
     "iter_resource_quantity_specs",
+    "pareto_resource_values",
     "qubits_counter",
     "resource_values_from_estimate",
     "summarize_openfermion_qubit_operator",

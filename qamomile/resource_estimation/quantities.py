@@ -151,6 +151,9 @@ _ResourceValuesInput = (
     | Mapping[str | ResourceQuantity, _SympyLike]
     | ResourceEstimate
 )
+_ResourceCandidatesInput = (
+    Mapping[str, _ResourceValuesInput] | tuple[tuple[str, _ResourceValuesInput], ...]
+)
 _ScenarioSubstitutions = Mapping[str | sp.Symbol, _SympyLike]
 
 
@@ -246,6 +249,77 @@ class ResourceComparisonRow:
             "candidate": str(self.candidate),
             "ratio": str(self.ratio),
             "reduction": str(self.reduction),
+        }
+
+
+@dataclass(frozen=True)
+class ResourceParetoRow:
+    """Describe one candidate in a Pareto-frontier resource review.
+
+    Attributes:
+        label (str): Reader-facing candidate label.
+        values (dict[ResourceQuantity, sp.Expr]): Selected resource values for
+            the candidate. Smaller values are treated as better.
+        dominated_by (tuple[str, ...]): Labels of candidates that provably
+            dominate this row.
+
+    Raises:
+        TypeError: If any value cannot be converted to a SymPy expression.
+        ValueError: If ``label`` is empty or a resource key is unknown.
+
+    Example:
+        >>> row = ResourceParetoRow(
+        ...     label="compressed",
+        ...     values={ResourceQuantity.RUNTIME_SECONDS: 2},
+        ... )
+        >>> row.is_frontier
+        True
+    """
+
+    label: str
+    values: dict[ResourceQuantity, sp.Expr]
+    dominated_by: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize Pareto-row fields after dataclass construction.
+
+        Raises:
+            TypeError: If any value cannot be converted to a SymPy expression.
+            ValueError: If ``label`` is empty or a resource key is unknown.
+        """
+        if not self.label:
+            raise ValueError("label must not be empty.")
+        normalized_values = {
+            _normalize_resource_quantity(quantity): _as_expr(value, str(quantity))
+            for quantity, value in self.values.items()
+        }
+        object.__setattr__(self, "values", normalized_values)
+        object.__setattr__(self, "dominated_by", tuple(self.dominated_by))
+
+    @property
+    def is_frontier(self) -> bool:
+        """Return whether no other candidate dominates this row.
+
+        Returns:
+            bool: True when ``dominated_by`` is empty.
+        """
+        return not self.dominated_by
+
+    def to_dict(self) -> dict[str, str | bool | list[str] | dict[str, str]]:
+        """Serialize the Pareto row.
+
+        Returns:
+            dict[str, str | bool | list[str] | dict[str, str]]: JSON-friendly
+                candidate label, selected values, frontier marker, and
+                dominator labels.
+        """
+        return {
+            "label": self.label,
+            "values": {
+                quantity.value: str(value) for quantity, value in self.values.items()
+            },
+            "is_frontier": self.is_frontier,
+            "dominated_by": list(self.dominated_by),
         }
 
 
@@ -770,6 +844,62 @@ def compare_resource_values(
     return tuple(rows)
 
 
+def pareto_resource_values(
+    candidates: _ResourceCandidatesInput,
+    *,
+    quantities: tuple[str | ResourceQuantity, ...] | None = None,
+) -> tuple[ResourceParetoRow, ...]:
+    """Mark Pareto-frontier candidates across resource values.
+
+    Every selected quantity is treated as a resource cost where smaller is
+    better. A candidate dominates another candidate only when every selected
+    quantity is provably no larger and at least one quantity is provably
+    smaller. Symbolic comparisons that cannot be decided keep both candidates
+    on the frontier for later review.
+
+    Args:
+        candidates (_ResourceCandidatesInput): Candidate labels paired with
+            resource values. Accepts an ordered mapping or a tuple of
+            ``(label, provider)`` pairs. Providers follow the same contract as
+            ``compare_resource_values``.
+        quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
+            use for dominance checks. Defaults to the canonical intersection
+            exposed by all candidates.
+
+    Returns:
+        tuple[ResourceParetoRow, ...]: Candidate rows in input order, annotated
+            with frontier and dominator metadata.
+
+    Raises:
+        ValueError: If fewer than two candidates are supplied, labels repeat,
+            selected quantities are missing, or no common quantity exists.
+        TypeError: If a candidate provider cannot be interpreted as resource
+            values.
+    """
+    normalized_candidates = _normalize_pareto_candidates(candidates)
+    value_maps = tuple(
+        _coerce_resource_values(provider) for _, provider in normalized_candidates
+    )
+    selected = _normalize_pareto_quantities(value_maps, quantities)
+    rows: list[ResourceParetoRow] = []
+    for index, (label, _) in enumerate(normalized_candidates):
+        values = {quantity: value_maps[index][quantity] for quantity in selected}
+        dominated_by = tuple(
+            other_label
+            for other_index, (other_label, _) in enumerate(normalized_candidates)
+            if other_index != index
+            and _pareto_dominates(value_maps[other_index], value_maps[index], selected)
+        )
+        rows.append(
+            ResourceParetoRow(
+                label=label,
+                values=values,
+                dominated_by=dominated_by,
+            )
+        )
+    return tuple(rows)
+
+
 def audit_resource_value_symbols(
     provider: _ResourceValuesInput,
     *,
@@ -1158,6 +1288,84 @@ def _normalize_audit_quantities(
     return normalized
 
 
+def _normalize_pareto_candidates(
+    candidates: _ResourceCandidatesInput,
+) -> tuple[tuple[str, _ResourceValuesInput], ...]:
+    """Normalize Pareto candidate input to ordered label/provider pairs.
+
+    Args:
+        candidates (_ResourceCandidatesInput): Ordered mapping or tuple of
+            ``(label, provider)`` pairs.
+
+    Returns:
+        tuple[tuple[str, _ResourceValuesInput], ...]: Normalized candidates.
+
+    Raises:
+        ValueError: If fewer than two candidates are supplied, labels repeat,
+            or a label is empty.
+    """
+    if isinstance(candidates, Mapping):
+        items = tuple(candidates.items())
+    else:
+        items = tuple(candidates)
+    if len(items) < 2:
+        raise ValueError("candidates must contain at least two entries.")
+
+    normalized = tuple((str(label), provider) for label, provider in items)
+    labels = tuple(label for label, _ in normalized)
+    if any(not label for label in labels):
+        raise ValueError("candidate labels must not be empty.")
+    if len(set(labels)) != len(labels):
+        raise ValueError("candidate labels must be unique.")
+    return normalized
+
+
+def _normalize_pareto_quantities(
+    value_maps: tuple[dict[ResourceQuantity, sp.Expr], ...],
+    quantities: tuple[str | ResourceQuantity, ...] | None,
+) -> tuple[ResourceQuantity, ...]:
+    """Normalize Pareto quantity selection.
+
+    Args:
+        value_maps (tuple[dict[ResourceQuantity, sp.Expr], ...]): Resource
+            values for each candidate.
+        quantities (tuple[str | ResourceQuantity, ...] | None): Requested
+            quantities, or None for the canonical intersection.
+
+    Returns:
+        tuple[ResourceQuantity, ...]: Normalized quantities.
+
+    Raises:
+        ValueError: If no common quantity exists or a requested quantity is
+            missing from any candidate.
+    """
+    if quantities is None:
+        common = set(value_maps[0])
+        for values in value_maps[1:]:
+            common &= set(values)
+        normalized = tuple(
+            spec.quantity for spec in RESOURCE_QUANTITY_SPECS if spec.quantity in common
+        )
+        if not normalized:
+            raise ValueError("No common resource quantities are available.")
+        return normalized
+
+    normalized = tuple(
+        _normalize_resource_quantity(quantity) for quantity in quantities
+    )
+    missing = [
+        quantity.value
+        for quantity in normalized
+        if any(quantity not in values for values in value_maps)
+    ]
+    if missing:
+        raise ValueError(
+            "Requested Pareto quantities are missing from at least one "
+            "candidate: " + ", ".join(missing) + "."
+        )
+    return normalized
+
+
 def _evaluate_resource_values_for_scenario(
     values: dict[ResourceQuantity, sp.Expr],
     quantities: tuple[ResourceQuantity, ...],
@@ -1214,6 +1422,39 @@ def _evaluate_resource_values_for_scenario(
     if require_resolved and unresolved:
         raise ValueError(_format_unresolved_scenario_values(unresolved))
     return tuple(rows)
+
+
+def _pareto_dominates(
+    challenger_values: dict[ResourceQuantity, sp.Expr],
+    incumbent_values: dict[ResourceQuantity, sp.Expr],
+    quantities: tuple[ResourceQuantity, ...],
+) -> bool:
+    """Return whether one candidate provably dominates another.
+
+    Args:
+        challenger_values (dict[ResourceQuantity, sp.Expr]): Candidate values
+            for the possible dominator.
+        incumbent_values (dict[ResourceQuantity, sp.Expr]): Candidate values
+            for the possible dominated row.
+        quantities (tuple[ResourceQuantity, ...]): Quantities used for
+            dominance checks, where smaller is better.
+
+    Returns:
+        bool: True only when the challenger is no larger for every quantity
+            and strictly smaller for at least one quantity.
+    """
+    strictly_better = False
+    for quantity in quantities:
+        difference = sp.simplify(
+            incumbent_values[quantity] - challenger_values[quantity]
+        )
+        if difference.equals(0):
+            continue
+        if difference.is_positive is True:
+            strictly_better = True
+            continue
+        return False
+    return strictly_better
 
 
 def _normalize_substitutions(

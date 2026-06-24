@@ -11,6 +11,7 @@ from qamomile.resource_estimation import (
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
     ResourceCategory,
+    ResourceParetoRow,
     ResourceQuantity,
     ResourceScenarioValueRow,
     ResourceSymbolDependencyRow,
@@ -26,6 +27,7 @@ from qamomile.resource_estimation import (
     evaluate_resource_value_scenarios,
     evaluate_resource_values,
     iter_resource_quantity_specs,
+    pareto_resource_values,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
 )
@@ -163,6 +165,107 @@ def test_compare_physical_estimates_uses_canonical_values():
     assert sp.simplify(rows[0].ratio - sp.Rational(1, 2)) == 0
     assert rows[1].quantity == ResourceQuantity.NON_CLIFFORD_COUNT
     assert sp.simplify(rows[1].ratio - sp.Rational(1, 2)) == 0
+
+
+def test_pareto_resource_values_marks_frontier_candidates():
+    """Pareto rows mark dominated candidates while preserving tradeoffs."""
+    baseline = {
+        ResourceQuantity.PHYSICAL_QUBITS: 1000,
+        ResourceQuantity.RUNTIME_SECONDS: 100,
+        ResourceQuantity.PHYSICAL_QUBIT_SECONDS: 100_000,
+    }
+    compressed = {
+        ResourceQuantity.PHYSICAL_QUBITS: 700,
+        ResourceQuantity.RUNTIME_SECONDS: 80,
+        ResourceQuantity.PHYSICAL_QUBIT_SECONDS: 56_000,
+    }
+    tiny_slow = {
+        ResourceQuantity.PHYSICAL_QUBITS: 450,
+        ResourceQuantity.RUNTIME_SECONDS: 140,
+        ResourceQuantity.PHYSICAL_QUBIT_SECONDS: 63_000,
+    }
+
+    rows = pareto_resource_values(
+        (
+            ("baseline", baseline),
+            ("compressed", compressed),
+            ("tiny slow", tiny_slow),
+        ),
+        quantities=(
+            ResourceQuantity.PHYSICAL_QUBITS,
+            ResourceQuantity.RUNTIME_SECONDS,
+        ),
+    )
+    by_label = {row.label: row for row in rows}
+
+    assert all(isinstance(row, ResourceParetoRow) for row in rows)
+    assert by_label["baseline"].dominated_by == ("compressed",)
+    assert by_label["baseline"].is_frontier is False
+    assert by_label["compressed"].is_frontier is True
+    assert by_label["tiny slow"].is_frontier is True
+    assert [row.label for row in rows if row.is_frontier] == [
+        "compressed",
+        "tiny slow",
+    ]
+    assert by_label["baseline"].to_dict()["values"] == {
+        "physical_qubits": "1000",
+        "runtime_seconds": "100",
+    }
+
+
+def test_pareto_resource_values_keeps_symbolic_rows_on_frontier():
+    """Undecidable symbolic dominance keeps candidates reviewable."""
+    symbolic_runtime = sp.Symbol("runtime")
+
+    rows = pareto_resource_values(
+        {
+            "concrete": {
+                ResourceQuantity.PHYSICAL_QUBITS: 100,
+                ResourceQuantity.RUNTIME_SECONDS: 10,
+            },
+            "symbolic": {
+                ResourceQuantity.PHYSICAL_QUBITS: 90,
+                ResourceQuantity.RUNTIME_SECONDS: symbolic_runtime,
+            },
+        },
+        quantities=(
+            ResourceQuantity.PHYSICAL_QUBITS,
+            ResourceQuantity.RUNTIME_SECONDS,
+        ),
+    )
+
+    assert [row.label for row in rows if row.is_frontier] == [
+        "concrete",
+        "symbolic",
+    ]
+    assert all(not row.dominated_by for row in rows)
+    with pytest.raises(ValueError, match="at least two"):
+        pareto_resource_values({"only": {ResourceQuantity.RUNTIME_SECONDS: 1}})
+    with pytest.raises(ValueError, match="unique"):
+        pareto_resource_values(
+            (
+                ("duplicate", {ResourceQuantity.RUNTIME_SECONDS: 1}),
+                ("duplicate", {ResourceQuantity.RUNTIME_SECONDS: 2}),
+            )
+        )
+    with pytest.raises(ValueError, match="missing"):
+        pareto_resource_values(
+            {
+                "concrete": {
+                    ResourceQuantity.PHYSICAL_QUBITS: 100,
+                    ResourceQuantity.RUNTIME_SECONDS: 10,
+                },
+                "symbolic": {ResourceQuantity.PHYSICAL_QUBITS: 90},
+            },
+            quantities=(ResourceQuantity.RUNTIME_SECONDS,),
+        )
+    with pytest.raises(ValueError, match="No common"):
+        pareto_resource_values(
+            {
+                "qubits": {ResourceQuantity.PHYSICAL_QUBITS: 100},
+                "runtime": {ResourceQuantity.RUNTIME_SECONDS: 10},
+            }
+        )
 
 
 def test_logical_estimates_expose_canonical_values_for_comparison():

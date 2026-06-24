@@ -303,6 +303,44 @@ assert (
 )
 
 # %% [markdown]
+# 3つ以上の候補がある場合、`pareto_resource_values()`を使うと、支配されていないtradeoffを残して確認できます。次の遅い候補は、上のcandidateと同じ論理アルゴリズムと量子ビットoverheadを使いますが、cycle timeを遅く仮定します。同じ物理量子ビット数でより長い時間がかかるため、candidateに支配されます。
+
+# %%
+slow_surface_code = qre.SurfaceCodeCostModel(
+    code_distance=5,
+    physical_cycle_time_seconds=2e-6,
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=3,
+    factory_count=1,
+    physical_qubits_per_factory=1000,
+    factory_cycles_per_non_clifford=4,
+)
+slow_candidate_physical = qre.estimate_physical_resources(
+    candidate_logical,
+    slow_surface_code,
+)
+pareto_rows = qre.pareto_resource_values(
+    {
+        "baseline": baseline_physical,
+        "candidate": candidate_physical,
+        "slow candidate": slow_candidate_physical,
+    },
+    quantities=(
+        qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.RUNTIME_SECONDS,
+    ),
+)
+for row in pareto_rows:
+    print(row.to_dict())
+
+frontier_labels = {row.label for row in pareto_rows if row.is_frontier}
+assert frontier_labels == {"baseline", "candidate"}
+assert any(
+    row.label == "slow candidate" and row.dominated_by == ("candidate",)
+    for row in pareto_rows
+)
+
+# %% [markdown]
 # architecture仮定の一部がまだsymbolicな場合、`evaluate_resource_value_scenarios()`を使うと、それらをcompactなscenario tableに変換できます。algorithm estimateは固定されているものの、code distance、cycle time、factory仮定がまだ設計変数として残っている場合に便利です。
 
 # %%
@@ -344,6 +382,6 @@ assert all(row.is_resolved for row in scenario_rows)
 # - `estimate_resources()`は実行せずに量子ビット数とゲートコストを算出します。
 # - パラメータ付き量子カーネルでは、結果は厳密なスケーリングを示すSymPy式になります。
 # - `.substitute(n=...)`で特定のサイズに代入し、実行可能性を確認できます。
-# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較し、それらのquantityを動かすsymbolを監査して、残ったarchitecture symbolをscenarioごとに評価できます。
+# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較し、Pareto tradeoffを見える形で残し、それらのquantityを動かすsymbolを監査して、残ったarchitecture symbolをscenarioごとに評価できます。
 #
 # **次へ**：[実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序について。
