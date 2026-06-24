@@ -107,7 +107,11 @@ def emit_pauli_evolve(
             operation="PauliEvolveOp",
         )
 
-    # Validate qubit count: logical array size vs Hamiltonian
+    # Validate qubit count: logical array size vs Hamiltonian. A
+    # Hamiltonian smaller than the register is embedded into the
+    # register's qubit space (identity on the untouched qubits) by
+    # acting only on its declared qubits below; only a Hamiltonian
+    # *larger* than the register is a genuine error.
     input_array = op.qubits
     assert isinstance(input_array, ArrayValue)
     num_h_qubits = hamiltonian.num_qubits
@@ -115,11 +119,12 @@ def emit_pauli_evolve(
         n_resolved = emit_pass._resolver.resolve_int_value(
             input_array.shape[0], bindings
         )
-        if n_resolved is not None and n_resolved != num_h_qubits:
+        if n_resolved is not None and num_h_qubits > n_resolved:
             raise EmitError(
                 f"PauliEvolveOp qubit count mismatch: "
                 f"qubit register has {n_resolved} qubits but "
-                f"Hamiltonian acts on {num_h_qubits} qubits.",
+                f"Hamiltonian acts on {num_h_qubits} qubits. "
+                f"The Hamiltonian must not be larger than the register.",
                 operation="PauliEvolveOp",
             )
 

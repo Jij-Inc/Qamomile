@@ -754,6 +754,33 @@ def pauli_evolve_run(
 
 
 @qmc.qkernel
+def padded_pauli_evolve_sample(
+    ham: qmc.Observable, gamma: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Sample evolution under a Hamiltonian narrower than the register.
+
+    The register has 2 qubits but ``ham`` (e.g. ``Z(0)``) acts on only
+    1 qubit, so it must be identity-padded onto the untouched qubit
+    rather than rejected.
+    """
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q = qmc.pauli_evolve(q, ham, gamma)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def padded_pauli_evolve_run(
+    ham: qmc.Observable, gamma: qmc.Float, obs: qmc.Observable
+) -> qmc.Float:
+    """Run expval after evolution under a register-narrower Hamiltonian."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q = qmc.pauli_evolve(q, ham, gamma)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
 def sliced_pauli_evolve_sample(
     ham: qmc.Observable,
     gamma: qmc.Float,
@@ -1294,6 +1321,25 @@ FRONTEND_EXECUTION_CASES = [
             "ham": qm_o.Z(0) * qm_o.Z(1),
             "gamma": 0.0,
             "obs": qm_o.Z(0) + qm_o.Z(1),
+        },
+    ),
+    # Regression for #467: a Hamiltonian (Z(0), 1 qubit) narrower than the
+    # 2-qubit register must be identity-padded onto the untouched qubit
+    # rather than rejected. The non-zero gamma only adds a phase on q[0],
+    # so the Z-basis sample and ⟨Z(0)⟩ stay deterministic.
+    FrontendExecutionCase(
+        name="padded-pauli-evolve",
+        sample_kernel=padded_pauli_evolve_sample,
+        run_kernel=padded_pauli_evolve_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=-1.0,
+        sample_bindings={"ham": qm_o.Z(0), "gamma": 0.5},
+        run_bindings={
+            "ham": qm_o.Z(0),
+            "gamma": 0.5,
+            "obs": qm_o.Z(0),
         },
     ),
 ]
