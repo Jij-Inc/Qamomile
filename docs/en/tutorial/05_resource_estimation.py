@@ -124,6 +124,25 @@ assert qre.ResourceQuantity.LOGICAL_SPACETIME_VOLUME in symbolic_quantities
 assert all(row.is_symbolic for row in symbol_rows)
 
 # %% [markdown]
+# The inverse view is often more useful when reviewing an FTQC estimate: `audit_resource_value_drivers()` groups affected quantities by symbol. In the example below, the single size symbol `n` drives all three selected logical quantities.
+
+# %%
+driver_rows = qre.audit_resource_value_drivers(
+    est,
+    quantities=(
+        qre.ResourceQuantity.LOGICAL_QUBITS,
+        qre.ResourceQuantity.LOGICAL_DEPTH,
+        qre.ResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+    ),
+)
+for row in driver_rows:
+    print(row.to_dict())
+
+assert len(driver_rows) == 1
+assert driver_rows[0].symbol == "n"
+assert driver_rows[0].quantity_count == 3
+
+# %% [markdown]
 # ## `ResourceEstimate` Fields Reference
 #
 # | Field | Description |
@@ -325,6 +344,6 @@ assert all(row.is_resolved for row in scenario_rows)
 # - `estimate_resources()` reports qubit and gate costs without executing.
 # - For parameterized qkernels, results are SymPy expressions showing exact scaling.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
-# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities, then evaluate remaining architecture symbols across scenarios.
+# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities, audit which symbols drive those quantities, then evaluate remaining architecture symbols across scenarios.
 #
 # **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

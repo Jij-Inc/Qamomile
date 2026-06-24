@@ -573,8 +573,11 @@ def estimate_physical_resources(
     if not isinstance(logical, ResourceEstimate):
         raise TypeError("logical must be a ResourceEstimate instance.")
     if isinstance(cost_model, SurfaceCodeCostModel):
+        architecture_values = cost_model.resource_values()
         cost_model = cost_model.to_cost_model()
-    if not isinstance(cost_model, FTQCCostModel):
+    elif isinstance(cost_model, FTQCCostModel):
+        architecture_values = cost_model.resource_values()
+    else:
         raise TypeError(
             "cost_model must be an FTQCCostModel or SurfaceCodeCostModel instance."
         )
@@ -591,7 +594,6 @@ def estimate_physical_resources(
     )
     physical_qubits = cost_model.physical_qubits_for(logical.qubits)
     runtime_seconds = cost_model.runtime_seconds_for(depth_expr, non_clifford_expr)
-    architecture_values = cost_model.resource_values()
     return FTQCPhysicalResourceEstimate(
         logical=logical,
         logical_depth=sp.simplify(depth_expr),

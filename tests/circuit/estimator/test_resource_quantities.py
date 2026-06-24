@@ -14,7 +14,9 @@ from qamomile.resource_estimation import (
     ResourceQuantity,
     ResourceScenarioValueRow,
     ResourceSymbolDependencyRow,
+    ResourceSymbolDriverRow,
     SurfaceCodeCostModel,
+    audit_resource_value_drivers,
     audit_resource_value_symbols,
     compare_resource_values,
     describe_resource_quantity,
@@ -393,6 +395,101 @@ def test_audit_resource_value_symbols_filters_resolved_values():
         audit_resource_value_symbols(
             values,
             quantities=(ResourceQuantity.NON_CLIFFORD_COUNT,),
+        )
+
+
+def test_audit_resource_value_drivers_groups_impacted_quantities():
+    """Driver audits invert symbol dependencies into symbol-centered rows."""
+    n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
+    estimate = estimate_qubitized_qpe_resources(
+        n_qubits=n,
+        lambda_norm=lam,
+        precision=eps,
+        walk_cost_toffoli=walk,
+        logical_qubits=n + 2,
+    )
+
+    rows = audit_resource_value_drivers(
+        estimate,
+        quantities=(
+            ResourceQuantity.LOGICAL_QUBITS,
+            ResourceQuantity.QPE_ITERATIONS,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+        ),
+    )
+    by_symbol = {row.symbol: row for row in rows}
+
+    assert all(isinstance(row, ResourceSymbolDriverRow) for row in rows)
+    assert tuple(by_symbol) == ("C_W", "eps", "lambda", "n")
+    assert by_symbol["lambda"].quantities == (
+        ResourceQuantity.QPE_ITERATIONS,
+        ResourceQuantity.NON_CLIFFORD_COUNT,
+    )
+    assert by_symbol["lambda"].categories == (
+        ResourceCategory.ALGORITHM,
+        ResourceCategory.LOGICAL,
+    )
+    assert by_symbol["lambda"].quantity_count == 2
+    assert by_symbol["lambda"].to_dict()["quantities"] == [
+        "qpe_iterations",
+        "non_clifford_count",
+    ]
+    assert by_symbol["n"].quantities == (ResourceQuantity.LOGICAL_QUBITS,)
+
+
+def test_audit_resource_value_drivers_crosses_architecture_and_physical_layers():
+    """Driver audits expose architecture symbols that influence physical outputs."""
+    d, cycle_time = sp.symbols("d cycle_time", positive=True)
+    logical = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=1,
+        walk_cost_toffoli=10,
+        logical_qubits=12,
+    )
+    model = SurfaceCodeCostModel(
+        code_distance=d,
+        physical_cycle_time_seconds=cycle_time,
+        physical_qubits_per_logical_factor=2,
+        logical_cycle_factor=3,
+        factory_count=4,
+        physical_qubits_per_factory=1000,
+        factory_cycles_per_non_clifford=2,
+    )
+    physical = estimate_physical_resources(logical, model)
+
+    rows = audit_resource_value_drivers(
+        physical,
+        quantities=(
+            ResourceQuantity.CODE_DISTANCE,
+            ResourceQuantity.PHYSICAL_CYCLE_TIME_SECONDS,
+            ResourceQuantity.PHYSICAL_QUBITS,
+            ResourceQuantity.RUNTIME_SECONDS,
+        ),
+    )
+    by_symbol = {row.symbol: row for row in rows}
+
+    assert by_symbol["d"].quantities == (
+        ResourceQuantity.CODE_DISTANCE,
+        ResourceQuantity.PHYSICAL_QUBITS,
+        ResourceQuantity.RUNTIME_SECONDS,
+    )
+    assert by_symbol["d"].categories == (
+        ResourceCategory.ARCHITECTURE,
+        ResourceCategory.PHYSICAL,
+    )
+    assert by_symbol["cycle_time"].quantities == (
+        ResourceQuantity.PHYSICAL_CYCLE_TIME_SECONDS,
+        ResourceQuantity.RUNTIME_SECONDS,
+    )
+    assert by_symbol["cycle_time"].categories == (
+        ResourceCategory.ARCHITECTURE,
+        ResourceCategory.PHYSICAL,
+    )
+    with pytest.raises(ValueError, match="missing"):
+        audit_resource_value_drivers(
+            physical,
+            quantities=(ResourceQuantity.LAMBDA_NORM,),
         )
 
 

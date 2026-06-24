@@ -309,6 +309,59 @@ class ResourceSymbolDependencyRow:
 
 
 @dataclass(frozen=True)
+class ResourceSymbolDriverRow:
+    """Describe which resource quantities one free symbol drives.
+
+    Attributes:
+        symbol (str): Free-symbol name.
+        quantities (tuple[ResourceQuantity, ...]): Canonical quantities whose
+            expressions contain ``symbol``.
+        labels (tuple[str, ...]): Reader-facing labels for ``quantities``.
+        categories (tuple[ResourceCategory, ...]): Distinct modeling layers
+            touched by ``symbol`` in first-seen order.
+
+    Example:
+        >>> row = ResourceSymbolDriverRow(
+        ...     symbol="lambda",
+        ...     quantities=(ResourceQuantity.QPE_ITERATIONS,),
+        ...     labels=("QPE iterations",),
+        ...     categories=(ResourceCategory.ALGORITHM,),
+        ... )
+        >>> row.quantity_count
+        1
+    """
+
+    symbol: str
+    quantities: tuple[ResourceQuantity, ...]
+    labels: tuple[str, ...]
+    categories: tuple[ResourceCategory, ...]
+
+    @property
+    def quantity_count(self) -> int:
+        """Return the number of quantities driven by the symbol.
+
+        Returns:
+            int: Count of impacted canonical quantities.
+        """
+        return len(self.quantities)
+
+    def to_dict(self) -> dict[str, str | int | list[str]]:
+        """Serialize the symbol-driver row.
+
+        Returns:
+            dict[str, str | int | list[str]]: JSON-friendly symbol name,
+                impacted quantities, labels, categories, and count.
+        """
+        return {
+            "symbol": self.symbol,
+            "quantity_count": self.quantity_count,
+            "quantities": [quantity.value for quantity in self.quantities],
+            "labels": list(self.labels),
+            "categories": [category.value for category in self.categories],
+        }
+
+
+@dataclass(frozen=True)
 class ResourceScenarioValueRow:
     """Describe one resource quantity evaluated under a scenario.
 
@@ -767,6 +820,60 @@ def audit_resource_value_symbols(
     return tuple(rows)
 
 
+def audit_resource_value_drivers(
+    provider: _ResourceValuesInput,
+    *,
+    quantities: tuple[str | ResourceQuantity, ...] | None = None,
+) -> tuple[ResourceSymbolDriverRow, ...]:
+    """Audit which canonical resource quantities each symbol drives.
+
+    This is the inverse view of ``audit_resource_value_symbols``. It is useful
+    when a resource estimate remains symbolic and the caller wants to explain
+    which problem, algorithm, or architecture assumptions affect each reported
+    quantity.
+
+    Args:
+        provider (_ResourceValuesInput): Resource values to inspect. Accepts
+            an object exposing ``resource_values()``, a mapping keyed by
+            canonical quantities, or a logical Qamomile ``ResourceEstimate``.
+        quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
+            audit. Defaults to all canonical quantities exposed by
+            ``provider`` in catalog order.
+
+    Returns:
+        tuple[ResourceSymbolDriverRow, ...]: Symbol-driver rows sorted by
+            symbol name. Each row lists impacted quantities in canonical
+            catalog order.
+
+    Raises:
+        ValueError: If a requested quantity is missing from ``provider``.
+        TypeError: If ``provider`` cannot be interpreted as resource values.
+    """
+    values = _coerce_resource_values(provider)
+    selected = _normalize_audit_quantities(values, quantities)
+    impacted_by_symbol: dict[str, list[ResourceQuantity]] = {}
+    for quantity in selected:
+        for symbol in values[quantity].free_symbols:
+            impacted_by_symbol.setdefault(str(symbol), []).append(quantity)
+
+    rows = []
+    for symbol in sorted(impacted_by_symbol):
+        impacted = tuple(impacted_by_symbol[symbol])
+        labels = tuple(
+            describe_resource_quantity(quantity).label for quantity in impacted
+        )
+        categories = _distinct_categories(impacted)
+        rows.append(
+            ResourceSymbolDriverRow(
+                symbol=symbol,
+                quantities=impacted,
+                labels=labels,
+                categories=categories,
+            )
+        )
+    return tuple(rows)
+
+
 def evaluate_resource_values(
     provider: _ResourceValuesInput,
     substitutions: _ScenarioSubstitutions | None = None,
@@ -1157,6 +1264,25 @@ def _sorted_free_symbol_names(value: sp.Expr) -> tuple[str, ...]:
         tuple[str, ...]: Free-symbol names sorted lexicographically.
     """
     return tuple(sorted(str(symbol) for symbol in value.free_symbols))
+
+
+def _distinct_categories(
+    quantities: tuple[ResourceQuantity, ...],
+) -> tuple[ResourceCategory, ...]:
+    """Return distinct categories for quantities in first-seen order.
+
+    Args:
+        quantities (tuple[ResourceQuantity, ...]): Quantities to inspect.
+
+    Returns:
+        tuple[ResourceCategory, ...]: Distinct categories in first-seen order.
+    """
+    categories: list[ResourceCategory] = []
+    for quantity in quantities:
+        category = describe_resource_quantity(quantity).category
+        if category not in categories:
+            categories.append(category)
+    return tuple(categories)
 
 
 def _format_unresolved_scenario_values(

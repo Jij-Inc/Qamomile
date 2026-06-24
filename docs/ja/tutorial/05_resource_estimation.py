@@ -124,6 +124,25 @@ assert qre.ResourceQuantity.LOGICAL_SPACETIME_VOLUME in symbolic_quantities
 assert all(row.is_symbolic for row in symbol_rows)
 
 # %% [markdown]
+# FTQC推定をレビューする場合は、逆向きの見方が役立つことがあります。`audit_resource_value_drivers()`は影響を受けるquantityをsymbolごとにまとめます。次の例では、サイズを表すsymbolである`n`が、選択した3つの論理quantityすべてを動かしています。
+
+# %%
+driver_rows = qre.audit_resource_value_drivers(
+    est,
+    quantities=(
+        qre.ResourceQuantity.LOGICAL_QUBITS,
+        qre.ResourceQuantity.LOGICAL_DEPTH,
+        qre.ResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+    ),
+)
+for row in driver_rows:
+    print(row.to_dict())
+
+assert len(driver_rows) == 1
+assert driver_rows[0].symbol == "n"
+assert driver_rows[0].quantity_count == 3
+
+# %% [markdown]
 # ## `ResourceEstimate`フィールドリファレンス
 #
 # | フィールド | 説明 |
@@ -325,6 +344,6 @@ assert all(row.is_resolved for row in scenario_rows)
 # - `estimate_resources()`は実行せずに量子ビット数とゲートコストを算出します。
 # - パラメータ付き量子カーネルでは、結果は厳密なスケーリングを示すSymPy式になります。
 # - `.substitute(n=...)`で特定のサイズに代入し、実行可能性を確認できます。
-# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較し、残ったarchitecture symbolをscenarioごとに評価できます。
+# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較し、それらのquantityを動かすsymbolを監査して、残ったarchitecture symbolをscenarioごとに評価できます。
 #
 # **次へ**：[実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序について。
