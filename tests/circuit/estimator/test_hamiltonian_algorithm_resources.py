@@ -7,6 +7,7 @@ import sympy as sp
 
 import qamomile.observable as qm_o
 from qamomile.resource_estimation import (
+    BlockEncodingResource,
     FTQCCostModel,
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
@@ -103,6 +104,41 @@ def test_hamiltonian_workload_composes_with_surface_code_model():
     assert sp.Abs(logical.gates.multi_qubit - 50) < sp.Float("1e-12")
     assert physical.physical_qubits == 50 * (2 + sp.sqrt(2)) + 2000
     assert physical.non_clifford_count == logical.gates.multi_qubit
+
+
+def test_hamiltonian_workload_builds_from_block_encoding_contract():
+    """Block-encoding contracts become comparable Hamiltonian QPE workloads."""
+    summary = summarize_pauli_hamiltonian(
+        4 * qm_o.Z(0) + 3 * qm_o.X(1) + qm_o.Z(0) * qm_o.Z(1)
+    )
+    block = BlockEncodingResource(
+        system_qubits=2,
+        normalization=5,
+        prepare_cost_toffoli=7,
+        select_cost_toffoli=11,
+        reflection_cost_toffoli=3,
+        ancilla_qubits=4,
+        name="compressed_df",
+    )
+
+    workload = HamiltonianQPEWorkload.from_block_encoding(
+        summary,
+        block,
+        representation=HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF,
+        second_factor_rank=2,
+        qpe_register_qubits=3,
+        representation_error=sp.Rational(1, 4),
+    )
+    logical = estimate_qubitized_qpe_resources_from_workload(workload, precision=1)
+
+    assert workload.hamiltonian.lambda_norm == 5
+    assert workload.hamiltonian.n_pauli_terms == summary.n_pauli_terms
+    assert workload.hamiltonian.source == "compressed_df"
+    assert workload.walk_cost_toffoli == 28
+    assert workload.logical_qubits == 9
+    assert logical.qubits == 9
+    assert logical.gates.oracle_calls["qpe_iterations"] == sp.Rational(20, 3)
+    assert logical.gates.multi_qubit == sp.Rational(560, 3)
 
 
 def test_trotter_qpe_models_unitary_weight_reduction():

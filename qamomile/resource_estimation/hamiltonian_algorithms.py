@@ -225,6 +225,87 @@ class HamiltonianQPEWorkload:
         _validate_positive(remaining, "algorithmic_precision")
         return remaining
 
+    @classmethod
+    def from_block_encoding(
+        cls,
+        hamiltonian: PauliHamiltonianResource,
+        block_encoding: Any,
+        *,
+        representation: str | HamiltonianRepresentation = (
+            HamiltonianRepresentation.DOUBLE_FACTORIZATION
+        ),
+        second_factor_rank: _SympyLike | None = None,
+        qpe_register_qubits: _SympyLike = 0,
+        representation_error: _SympyLike = 0,
+        description: str | None = None,
+    ) -> HamiltonianQPEWorkload:
+        """Build a QPE workload from a block-encoding contract.
+
+        The returned workload uses the block-encoding normalization as the
+        Hamiltonian normalization, the walk cost from the PREPARE/SELECT
+        contract, and the block-encoding footprint plus optional QPE readout
+        qubits as the explicit logical-qubit count.
+
+        Args:
+            hamiltonian (PauliHamiltonianResource): Problem-level Hamiltonian
+                summary whose term and locality metadata should be preserved.
+            block_encoding (Any): ``BlockEncodingResource`` describing the
+                algorithm-specific block encoding.
+            representation (str | HamiltonianRepresentation): Hamiltonian
+                representation label for the resulting workload. Defaults to
+                ``HamiltonianRepresentation.DOUBLE_FACTORIZATION``.
+            second_factor_rank (sp.Expr | int | float | None): Optional
+                second-factor rank metadata for factorized representations.
+                Defaults to None.
+            qpe_register_qubits (sp.Expr | int | float): Optional QPE readout
+                register qubits added to the block-encoding footprint.
+                Defaults to 0.
+            representation_error (sp.Expr | int | float): Hamiltonian
+                representation error consumed before phase estimation.
+                Defaults to 0.
+            description (str | None): Optional reader-facing label. Defaults
+                to the block-encoding name.
+
+        Returns:
+            HamiltonianQPEWorkload: Workload backed by the block-encoding
+            resource contract.
+
+        Raises:
+            TypeError: If ``hamiltonian`` is not a
+                ``PauliHamiltonianResource`` or ``block_encoding`` is not a
+                ``BlockEncodingResource``.
+            ValueError: If ``qpe_register_qubits`` is negative or any
+                workload quantity is invalid.
+        """
+        from qamomile.resource_estimation.block_encoding import BlockEncodingResource
+
+        if not isinstance(hamiltonian, PauliHamiltonianResource):
+            raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
+        if not isinstance(block_encoding, BlockEncodingResource):
+            raise TypeError("block_encoding must be a BlockEncodingResource.")
+
+        qpe_qubits = _as_expr(qpe_register_qubits, "qpe_register_qubits")
+        _validate_nonnegative(qpe_qubits, "qpe_register_qubits")
+        block_values = block_encoding.resource_values()
+        encoded_hamiltonian = PauliHamiltonianResource(
+            n_qubits=block_values["system_qubits"],
+            n_pauli_terms=hamiltonian.n_pauli_terms,
+            lambda_norm=block_values["lambda_norm"],
+            max_locality=hamiltonian.max_locality,
+            constant=hamiltonian.constant,
+            constant_included=hamiltonian.constant_included,
+            source=block_encoding.name,
+        )
+        return cls(
+            hamiltonian=encoded_hamiltonian,
+            walk_cost_toffoli=block_encoding.walk_cost_toffoli,
+            representation=representation,
+            second_factor_rank=second_factor_rank,
+            logical_qubits=sp.simplify(block_values["logical_qubits"] + qpe_qubits),
+            representation_error=representation_error,
+            description=block_encoding.name if description is None else description,
+        )
+
 
 def estimate_qubitized_qpe_resources(
     n_qubits: sp.Expr | int,

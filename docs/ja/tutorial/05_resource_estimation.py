@@ -149,30 +149,47 @@ for n_val in [4, 8, 16, 32]:
 #
 # Fault-tolerantアルゴリズムは、backend circuitへloweringする前に比較することがよくあります。Qamomileではこの層を分けて扱います。`qamomile.resource_estimation`を使うと、Hamiltonianの記述、アルゴリズムレベルの論理リソース推定、canonical quantityによる比較、architecture modelを通した物理リソースproxyへの変換を順に扱えます。
 #
-# この小さな例では、候補workloadのHamiltonian normalizationとwalk operatorのコストが小さいとします。数値はアルゴリズム検討用の仮の値ですが、比較するquantityはblock-encodingやHamiltonian表現の選択を比較するときにも使うものです。
+# この小さな例では、各候補をblock-encoding contractとして表します。このcontractには、Hamiltonian normalization、PREPARE/SELECT/reflectionのコスト、ancilla footprint、任意のrepresentation errorを記録します。これらのquantityがあれば、backend circuitに固定せずにHamiltonian QPE workloadを作れます。
 #
 # :::{note}
-# [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502)のような近年の量子化学リソース推定では、Hamiltonian normalization、walk operatorのコスト、Toffoli数、論理量子ビット数、runtime、space-time volumeなどを通してアルゴリズムを比較します。このチュートリアルはその論文の再現ではありません。そのような比較を組み立てるために必要なQamomileのresource quantityを示します。
+# [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502)や[unitary weight concentration](https://arxiv.org/abs/2603.22778)のような近年の量子化学リソース推定では、Hamiltonian normalization、representation error、walk operatorのコスト、Toffoli数、論理量子ビット数、runtime、space-time volumeなどを通してアルゴリズムを比較します。このチュートリアルはこれらの論文の再現ではありません。そのような比較を組み立てるために必要なQamomileのresource quantityを示します。
 # :::
 
 # %%
 hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)
 summary = qre.summarize_pauli_hamiltonian(hamiltonian)
 
-baseline_workload = qre.HamiltonianQPEWorkload(
-    hamiltonian=summary,
+baseline_block = qre.BlockEncodingResource(
+    system_qubits=summary.n_qubits,
+    normalization=summary.lambda_norm,
+    prepare_cost_toffoli=20,
+    select_cost_toffoli=70,
+    reflection_cost_toffoli=10,
+    ancilla_qubits=1,
+    name="sparse Pauli LCU",
+)
+candidate_block = qre.BlockEncodingResource(
+    system_qubits=summary.n_qubits,
+    normalization=sp.Rational(2, 5) * summary.lambda_norm,
+    prepare_cost_toffoli=15,
+    select_cost_toffoli=45,
+    reflection_cost_toffoli=5,
+    ancilla_qubits=2,
+    name="compressed factorization",
+)
+
+baseline_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
+    summary,
+    baseline_block,
     representation=qre.HamiltonianRepresentation.SPARSE_PAULI_LCU,
-    walk_cost_toffoli=120,
     description="sparse Pauli LCU",
 )
-candidate_workload = qre.HamiltonianQPEWorkload(
-    hamiltonian=summary.with_lambda_scale(
-        sp.Rational(2, 5),
-        source="compressed representation",
-    ),
+candidate_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
+    summary,
+    candidate_block,
     representation=qre.HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF,
     second_factor_rank=4,
-    walk_cost_toffoli=80,
+    representation_error=sp.Rational(1, 10),
     description="compressed factorization",
 )
 
@@ -202,6 +219,7 @@ assert (
     < baseline_logical.gates.oracle_calls["qpe_iterations"]
 )
 assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
+assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
 
 # %% [markdown]
 # `compare_resource_values()`は論理`ResourceEstimate`オブジェクトを直接受け取れます。物理リソースproxyが必要な場合は、コンパクトなarchitecture modelを渡します。次の推定はhardware designではありません。同じsurface-code風の仮定のもとで候補を比較するための一貫した方法です。

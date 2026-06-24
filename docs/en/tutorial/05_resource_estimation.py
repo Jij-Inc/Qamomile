@@ -149,30 +149,47 @@ for n_val in [4, 8, 16, 32]:
 #
 # Fault-tolerant algorithms are usually compared before they are lowered to a backend circuit. Qamomile keeps that layer separate: use `qamomile.resource_estimation` to describe the Hamiltonian, estimate algorithm-level logical work, compare canonical quantities, and only then lift the result through an architecture model.
 #
-# In this toy example, the candidate workload has a smaller Hamiltonian normalization and a cheaper walk operator. The numbers are placeholders for an algorithm study, but the quantities are the same ones you would track when comparing block-encoding or Hamiltonian-representation choices.
+# In this toy example, each candidate starts as a block-encoding contract. The contract records the Hamiltonian normalization, PREPARE/SELECT/reflection costs, ancilla footprint, and optional representation error. Those quantities are enough to build a Hamiltonian QPE workload without committing to a backend circuit.
 #
 # :::{note}
-# Recent chemistry resource-estimation work, such as [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502), often compares algorithms through the Hamiltonian normalization, walk-operator cost, Toffoli count, logical qubits, runtime, and space-time volume. This tutorial does not reproduce that paper; it shows the Qamomile resource quantities needed to build that kind of comparison.
+# Recent chemistry resource-estimation work, such as [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502) and [unitary weight concentration](https://arxiv.org/abs/2603.22778), often compares algorithms through the Hamiltonian normalization, representation error, walk-operator cost, Toffoli count, logical qubits, runtime, and space-time volume. This tutorial does not reproduce those papers; it shows the Qamomile resource quantities needed to build that kind of comparison.
 # :::
 
 # %%
 hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)
 summary = qre.summarize_pauli_hamiltonian(hamiltonian)
 
-baseline_workload = qre.HamiltonianQPEWorkload(
-    hamiltonian=summary,
+baseline_block = qre.BlockEncodingResource(
+    system_qubits=summary.n_qubits,
+    normalization=summary.lambda_norm,
+    prepare_cost_toffoli=20,
+    select_cost_toffoli=70,
+    reflection_cost_toffoli=10,
+    ancilla_qubits=1,
+    name="sparse Pauli LCU",
+)
+candidate_block = qre.BlockEncodingResource(
+    system_qubits=summary.n_qubits,
+    normalization=sp.Rational(2, 5) * summary.lambda_norm,
+    prepare_cost_toffoli=15,
+    select_cost_toffoli=45,
+    reflection_cost_toffoli=5,
+    ancilla_qubits=2,
+    name="compressed factorization",
+)
+
+baseline_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
+    summary,
+    baseline_block,
     representation=qre.HamiltonianRepresentation.SPARSE_PAULI_LCU,
-    walk_cost_toffoli=120,
     description="sparse Pauli LCU",
 )
-candidate_workload = qre.HamiltonianQPEWorkload(
-    hamiltonian=summary.with_lambda_scale(
-        sp.Rational(2, 5),
-        source="compressed representation",
-    ),
+candidate_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
+    summary,
+    candidate_block,
     representation=qre.HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF,
     second_factor_rank=4,
-    walk_cost_toffoli=80,
+    representation_error=sp.Rational(1, 10),
     description="compressed factorization",
 )
 
@@ -202,6 +219,7 @@ assert (
     < baseline_logical.gates.oracle_calls["qpe_iterations"]
 )
 assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
+assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
 
 # %% [markdown]
 # `compare_resource_values()` accepts logical `ResourceEstimate` objects directly. For a physical proxy, provide a compact architecture model. The estimate below is not a hardware design; it is a consistent way to compare candidates under the same surface-code-style assumptions.
