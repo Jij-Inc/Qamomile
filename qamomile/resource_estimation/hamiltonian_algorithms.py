@@ -453,6 +453,93 @@ class TrotterQPEWorkload:
             * _as_expr(self.unitary_weight_factor, "unitary_weight_factor")
         )
 
+    @classmethod
+    def from_effective_lambda_norm(
+        cls,
+        hamiltonian: PauliHamiltonianResource,
+        effective_lambda_norm: _SympyLike,
+        *,
+        trotter_steps_per_sample: _SympyLike,
+        samples: _SympyLike,
+        randomized_compilation_factor: _SympyLike = 1,
+        rotation_synthesis_t_gates: _SympyLike = 1,
+        logical_qubits: _SympyLike | None = None,
+        representation_error: _SympyLike = 0,
+        description: str = "",
+    ) -> TrotterQPEWorkload:
+        """Build a Trotter workload from a reported effective lambda norm.
+
+        Recent chemistry resource estimates often report the Hamiltonian
+        weight after concentration or randomized time-evolution analysis,
+        rather than the multiplicative factor that produced it. This
+        constructor preserves the original Hamiltonian summary and derives the
+        unitary-weight factor from the requested effective lambda norm.
+
+        Args:
+            hamiltonian (PauliHamiltonianResource): Original Pauli
+                Hamiltonian summary before weight concentration.
+            effective_lambda_norm (sp.Expr | int | float): Hamiltonian
+                normalization after weight concentration. Must be positive.
+            trotter_steps_per_sample (sp.Expr | int | float): Product-formula
+                steps per sampled time-evolution segment.
+            samples (sp.Expr | int | float): Number of sampled time points or
+                signal-processing shots.
+            randomized_compilation_factor (sp.Expr | int | float):
+                Multiplicative product-formula cost factor from randomized
+                evolution. Defaults to 1.
+            rotation_synthesis_t_gates (sp.Expr | int | float): T-gate cost
+                for one Pauli rotation. Defaults to 1.
+            logical_qubits (sp.Expr | int | float | None): Explicit logical
+                qubit count. Defaults to data qubits plus one Hadamard-test
+                ancilla.
+            representation_error (sp.Expr | int | float): Energy error
+                consumed before phase estimation. Defaults to 0.
+            description (str): Reader-facing workload label.
+
+        Returns:
+            TrotterQPEWorkload: Workload whose ``unitary_weight_factor`` is
+            ``effective_lambda_norm / hamiltonian.lambda_norm``.
+
+        Raises:
+            TypeError: If ``hamiltonian`` is not a
+                ``PauliHamiltonianResource``.
+            ValueError: If either lambda norm is non-positive or any workload
+                quantity is invalid.
+
+        Example:
+            >>> summary = PauliHamiltonianResource(
+            ...     n_qubits=4,
+            ...     n_pauli_terms=10,
+            ...     lambda_norm=20,
+            ...     max_locality=2,
+            ... )
+            >>> workload = TrotterQPEWorkload.from_effective_lambda_norm(
+            ...     summary,
+            ...     effective_lambda_norm=5,
+            ...     trotter_steps_per_sample=2,
+            ...     samples=5,
+            ... )
+            >>> workload.unitary_weight_factor
+            1/4
+        """
+        if not isinstance(hamiltonian, PauliHamiltonianResource):
+            raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
+        original_lambda = _as_expr(hamiltonian.lambda_norm, "lambda_norm")
+        effective_lambda = _as_expr(effective_lambda_norm, "effective_lambda_norm")
+        _validate_positive(original_lambda, "lambda_norm")
+        _validate_positive(effective_lambda, "effective_lambda_norm")
+        return cls(
+            hamiltonian=hamiltonian,
+            trotter_steps_per_sample=trotter_steps_per_sample,
+            samples=samples,
+            unitary_weight_factor=sp.simplify(effective_lambda / original_lambda),
+            randomized_compilation_factor=randomized_compilation_factor,
+            rotation_synthesis_t_gates=rotation_synthesis_t_gates,
+            logical_qubits=logical_qubits,
+            representation_error=representation_error,
+            description=description,
+        )
+
     def algorithmic_precision(self, precision: _SympyLike) -> sp.Expr:
         """Return precision remaining after representation error.
 

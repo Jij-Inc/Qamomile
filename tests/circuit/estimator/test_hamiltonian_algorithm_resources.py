@@ -208,6 +208,46 @@ def test_trotter_workload_exposes_weight_concentration_drivers():
     assert logical.qubits == 3
 
 
+def test_trotter_workload_builds_from_reported_effective_lambda():
+    """Reported effective lambda norms derive the unitary-weight factor."""
+    summary = summarize_pauli_hamiltonian(
+        3 * qm_o.Z(0) + 5 * qm_o.X(1) + 2 * qm_o.Z(0) * qm_o.Z(1)
+    )
+
+    workload = TrotterQPEWorkload.from_effective_lambda_norm(
+        summary,
+        effective_lambda_norm=2,
+        trotter_steps_per_sample=3,
+        samples=7,
+        randomized_compilation_factor=sp.Rational(1, 3),
+        rotation_synthesis_t_gates=11,
+        description="reported chemistry estimate",
+    )
+    logical = estimate_trotter_qpe_resources_from_workload(workload, precision=1)
+
+    assert sp.Abs(summary.lambda_norm - 10) < sp.Float("1e-12")
+    assert sp.Abs(workload.unitary_weight_factor - sp.Rational(1, 5)) < sp.Float(
+        "1e-12"
+    )
+    assert sp.Abs(workload.effective_lambda_norm - 2) < sp.Float("1e-12")
+    assert sp.Abs(logical.gates.oracle_calls["qpe_iterations"] - 2) < sp.Float("1e-12")
+    assert sp.Abs(logical.gates.rotation_gates - 21) < sp.Float("1e-12")
+    assert sp.Abs(logical.gates.t_gates - 462) < sp.Float("1e-12")
+
+
+def test_trotter_effective_lambda_constructor_rejects_zero_original_lambda():
+    """Effective-lambda workloads need a positive original Hamiltonian norm."""
+    summary = summarize_pauli_hamiltonian(qm_o.Hamiltonian(num_qubits=1))
+
+    with pytest.raises(ValueError, match="lambda_norm"):
+        TrotterQPEWorkload.from_effective_lambda_norm(
+            summary,
+            effective_lambda_norm=1,
+            trotter_steps_per_sample=1,
+            samples=1,
+        )
+
+
 def test_trotter_qpe_from_hamiltonian_summary():
     """Trotter QPE estimates can be driven directly by a Hamiltonian summary."""
     summary = summarize_pauli_hamiltonian(qm_o.Z(0) + 2 * qm_o.X(1))

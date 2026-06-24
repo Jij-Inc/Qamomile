@@ -287,14 +287,14 @@ assert precision_rows[0].ratio == 1
 assert precision_rows[1].candidate == sp.Rational(9, 10)
 
 # %% [markdown]
-# 別のアルゴリズムファミリーでは、block-encoding oracleの代わりにproduct-formula time evolutionと少ない論理量子ビット数を使うことがあります。`TrotterQPEWorkload`は、このような仮定を明示的に記録します。これはunitary weight concentrationやpartially randomized time evolutionに着想を得たデモに適した形です。このチュートリアルの数値は小さなtoy exampleですが、表示しているquantityはpaper-scale modelをauditするときと同じです。
+# 別のアルゴリズムファミリーでは、block-encoding oracleの代わりにproduct-formula time evolutionと少ない論理量子ビット数を使うことがあります。`TrotterQPEWorkload`は、このような仮定を明示的に記録します。論文の表ではconcentration後のeffective Hamiltonian weightが報告されることが多いため、`from_effective_lambda_norm()`は元のHamiltonian summaryを残したまま、その値からmultiplicative factorを導きます。このチュートリアルの数値は小さなtoy exampleですが、表示しているquantityはpaper-scale modelをauditするときと同じです。
 
 # %%
-uwc_workload = qre.TrotterQPEWorkload(
+uwc_workload = qre.TrotterQPEWorkload.from_effective_lambda_norm(
     summary,
+    effective_lambda_norm=1,
     trotter_steps_per_sample=2,
     samples=10,
-    unitary_weight_factor=sp.Rational(1, 9),
     randomized_compilation_factor=sp.Rational(1, 2),
     rotation_synthesis_t_gates=2,
     description="unitary weight concentration toy model",

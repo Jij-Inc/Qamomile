@@ -287,14 +287,14 @@ assert precision_rows[0].ratio == 1
 assert precision_rows[1].candidate == sp.Rational(9, 10)
 
 # %% [markdown]
-# A different algorithm family may trade block-encoding oracles for product-formula time evolution and fewer logical qubits. `TrotterQPEWorkload` records those assumptions explicitly. This is the right shape for demonstrations inspired by unitary weight concentration or partially randomized time evolution: the tutorial numbers are intentionally tiny, but the visible quantities are the same ones you would audit in a paper-scale model.
+# A different algorithm family may trade block-encoding oracles for product-formula time evolution and fewer logical qubits. `TrotterQPEWorkload` records those assumptions explicitly. Paper tables often report the effective Hamiltonian weight after concentration, so `from_effective_lambda_norm()` derives the multiplicative factor while keeping the original Hamiltonian summary visible. The tutorial numbers are intentionally tiny, but the visible quantities are the same ones you would audit in a paper-scale model.
 
 # %%
-uwc_workload = qre.TrotterQPEWorkload(
+uwc_workload = qre.TrotterQPEWorkload.from_effective_lambda_norm(
     summary,
+    effective_lambda_norm=1,
     trotter_steps_per_sample=2,
     samples=10,
-    unitary_weight_factor=sp.Rational(1, 9),
     randomized_compilation_factor=sp.Rational(1, 2),
     rotation_synthesis_t_gates=2,
     description="unitary weight concentration toy model",
