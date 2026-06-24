@@ -11,29 +11,38 @@ from qamomile.resource_estimation import (
     FTQCCostModel,
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
+    PauliHamiltonianResource,
     ResourceCategory,
     ResourceParetoRow,
     ResourceQuantity,
     ResourceQuantityProfile,
+    ResourceResearchSignal,
+    ResourceResearchSignalCoverageRow,
+    ResourceResearchSignalSpec,
     ResourceReviewProfile,
     ResourceScenarioValueRow,
     ResourceSymbolDependencyRow,
     ResourceSymbolDriverRow,
     SupportsResourceValues,
     SurfaceCodeCostModel,
+    TrotterQPEWorkload,
+    audit_resource_research_signal_coverage,
     audit_resource_value_drivers,
     audit_resource_value_symbols,
     compare_resource_values,
     describe_resource_quantity,
+    describe_resource_research_signal,
     describe_resource_review_profile,
     estimate_active_volume_resources,
     estimate_physical_resources,
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
     estimate_trotter_qpe_resources,
+    estimate_trotter_qpe_resources_from_workload,
     evaluate_resource_value_scenarios,
     evaluate_resource_values,
     iter_resource_quantity_specs,
+    iter_resource_research_signals,
     iter_resource_review_profiles,
     pareto_resource_values,
     resource_estimate_expressions,
@@ -166,6 +175,97 @@ def test_resource_review_profiles_group_recommended_quantity_sets():
     assert active_volume_profile.to_dict()["profile"] == "ftqc_active_volume_outcomes"
     with pytest.raises(ValueError, match="Unknown resource review profile"):
         describe_resource_review_profile("not-a-profile")
+
+
+def test_resource_research_signal_catalog_tracks_paper_motivated_quantities():
+    """Research-signal specs map paper claims to canonical quantities."""
+    signals = iter_resource_research_signals()
+    by_key = {signal.signal: signal for signal in signals}
+
+    uwc_signal = describe_resource_research_signal(
+        ResourceResearchSignal.TROTTER_WEIGHT_REDUCTION
+    )
+    active_volume_signal = describe_resource_research_signal(
+        "active_volume_compilation"
+    )
+
+    assert all(isinstance(signal, ResourceResearchSignalSpec) for signal in signals)
+    assert uwc_signal is by_key[ResourceResearchSignal.TROTTER_WEIGHT_REDUCTION]
+    assert ResourceQuantity.EFFECTIVE_LAMBDA_NORM in uwc_signal.quantities
+    assert ResourceQuantity.PAULI_ROTATIONS in uwc_signal.quantities
+    assert ResourceQuantity.ACTIVE_VOLUME in active_volume_signal.quantities
+    assert (
+        ResourceQuantity.ACTIVE_VOLUME_THROUGHPUT_PER_SECOND
+        in active_volume_signal.quantities
+    )
+    assert active_volume_signal.to_dict()["reference_url"] == (
+        "https://arxiv.org/abs/2501.06165"
+    )
+    assert [spec.quantity for spec in active_volume_signal.specs()] == list(
+        active_volume_signal.quantities
+    )
+    with pytest.raises(ValueError, match="Unknown resource research signal"):
+        describe_resource_research_signal("not-a-signal")
+
+
+def test_research_signal_coverage_audits_available_resource_values():
+    """Coverage rows identify which paper-motivated quantities are present."""
+    summary = PauliHamiltonianResource(
+        n_qubits=4,
+        n_pauli_terms=12,
+        lambda_norm=12,
+        max_locality=2,
+    )
+    workload = TrotterQPEWorkload.from_effective_lambda_norm(
+        summary,
+        effective_lambda_norm=3,
+        trotter_steps_per_sample=2,
+        samples=4,
+        rotation_synthesis_t_gates=3,
+    )
+    logical = estimate_trotter_qpe_resources_from_workload(workload, precision=1)
+    active_volume = estimate_active_volume_resources(
+        logical,
+        ActiveVolumeCostModel(
+            active_volume_per_logical_gate=2,
+            active_volume_per_non_clifford=1,
+            active_volume_throughput_per_second=10,
+        ),
+    )
+    values = workload.resource_values_for_precision(1)
+    values.update(resource_values_from_estimate(logical))
+    values.update(active_volume.resource_values())
+
+    rows = audit_resource_research_signal_coverage(
+        values,
+        signals=(
+            ResourceResearchSignal.TROTTER_WEIGHT_REDUCTION,
+            ResourceResearchSignal.ACTIVE_VOLUME_COMPILATION,
+            ResourceResearchSignal.ARCHITECTURE_BOTTLENECK_LIFT,
+        ),
+    )
+    by_signal = {row.signal: row for row in rows}
+
+    assert all(isinstance(row, ResourceResearchSignalCoverageRow) for row in rows)
+    assert by_signal[ResourceResearchSignal.TROTTER_WEIGHT_REDUCTION].is_supported
+    assert by_signal[ResourceResearchSignal.ACTIVE_VOLUME_COMPILATION].is_supported
+    assert not by_signal[
+        ResourceResearchSignal.ARCHITECTURE_BOTTLENECK_LIFT
+    ].is_supported
+    assert (
+        ResourceQuantity.PHYSICAL_QUBIT_SECONDS
+        in by_signal[
+            ResourceResearchSignal.ARCHITECTURE_BOTTLENECK_LIFT
+        ].missing_quantities
+    )
+    assert (
+        by_signal[ResourceResearchSignal.ACTIVE_VOLUME_COMPILATION].to_dict()[
+            "is_supported"
+        ]
+        is True
+    )
+    with pytest.raises(ValueError, match="Unknown resource research signal"):
+        audit_resource_research_signal_coverage(values, signals=("not-a-signal",))
 
 
 def test_surface_code_model_exposes_raw_and_derived_resource_values():

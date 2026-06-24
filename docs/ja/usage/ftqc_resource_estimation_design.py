@@ -238,6 +238,33 @@ assert (
 )
 
 # %% [markdown]
+# ## Research-signal coverage
+#
+# research signalをreviewできるのは、そのsignalが必要とするquantityをestimateが公開している場合です。
+# 次のcatalogは、このページ冒頭の表を実行可能なcoverage checkにします。
+
+# %%
+for signal in qre.iter_resource_research_signals():
+    print(signal.to_dict())
+
+coverage_values = qubitized_workload.resource_values_for_precision(1)
+coverage_values.update(qre.resource_values_from_estimate(qubitized_logical))
+coverage_values.update(uwc_workload.resource_values_for_precision(1))
+coverage_values.update(qre.resource_values_from_estimate(uwc_logical))
+coverage_values.update(uwc_physical.resource_values())
+coverage_values.update(uwc_active_volume.resource_values())
+
+coverage_rows = qre.audit_resource_research_signal_coverage(coverage_values)
+for row in coverage_rows:
+    print(row.to_dict())
+
+assert all(row.is_supported for row in coverage_rows)
+assert any(
+    row.signal == qre.ResourceResearchSignal.ACTIVE_VOLUME_COMPILATION
+    for row in coverage_rows
+)
+
+# %% [markdown]
 # ## Symbolic scenario
 #
 # early FTQCのレビューでは、hardware assumptionを選ぶまでarchitecture knobをsymbolicなまま残すことがあります。

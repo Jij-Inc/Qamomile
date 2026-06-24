@@ -198,6 +198,30 @@ class ResourceReviewProfile(enum.StrEnum):
     SURFACE_CODE_ARCHITECTURE = "surface_code_architecture"
 
 
+class ResourceResearchSignal(enum.StrEnum):
+    """Name paper-motivated FTQC resource-review signals.
+
+    Attributes:
+        HAMILTONIAN_NORMALIZATION_REDUCTION: Signal for methods that reduce
+            Hamiltonian normalization before qubitized QPE.
+        TROTTER_WEIGHT_REDUCTION: Signal for early-FTQC Trotter workflows that
+            reduce effective Hamiltonian weight.
+        ARCHITECTURE_BOTTLENECK_LIFT: Signal for lifting logical work to
+            physical footprint and runtime bottlenecks.
+        ACTIVE_VOLUME_COMPILATION: Signal for operation-volume cost models
+            that price active resources rather than idle footprint.
+
+    Example:
+        >>> ResourceResearchSignal("active_volume_compilation")
+        <ResourceResearchSignal.ACTIVE_VOLUME_COMPILATION: 'active_volume_compilation'>
+    """
+
+    HAMILTONIAN_NORMALIZATION_REDUCTION = "hamiltonian_normalization_reduction"
+    TROTTER_WEIGHT_REDUCTION = "trotter_weight_reduction"
+    ARCHITECTURE_BOTTLENECK_LIFT = "architecture_bottleneck_lift"
+    ACTIVE_VOLUME_COMPILATION = "active_volume_compilation"
+
+
 class SupportsResourceValues(Protocol):
     """Represent objects that expose canonical resource values.
 
@@ -311,6 +335,119 @@ class ResourceQuantityProfile:
             "label": self.label,
             "description": self.description,
             "quantities": [quantity.value for quantity in self.quantities],
+        }
+
+
+@dataclass(frozen=True)
+class ResourceResearchSignalSpec:
+    """Describe one paper-motivated FTQC review signal.
+
+    Attributes:
+        signal (ResourceResearchSignal): Machine-readable signal key.
+        label (str): Reader-facing signal label.
+        example_reference (str): Short citation or paper label that motivates
+            the review surface.
+        reference_url (str): Stable URL for the motivating reference.
+        description (str): Short explanation of the resource-estimation
+            improvement being audited.
+        quantities (tuple[ResourceQuantity, ...]): Canonical quantities that
+            should be present to review this signal.
+
+    Example:
+        >>> spec = describe_resource_research_signal("active_volume_compilation")
+        >>> ResourceQuantity.ACTIVE_VOLUME in spec.quantities
+        True
+    """
+
+    signal: ResourceResearchSignal
+    label: str
+    example_reference: str
+    reference_url: str
+    description: str
+    quantities: tuple[ResourceQuantity, ...]
+
+    def specs(self) -> tuple[ResourceQuantitySpec, ...]:
+        """Return quantity specifications required by this signal.
+
+        Returns:
+            tuple[ResourceQuantitySpec, ...]: Quantity metadata in signal
+                order.
+        """
+        return tuple(
+            describe_resource_quantity(quantity) for quantity in self.quantities
+        )
+
+    def to_dict(self) -> dict[str, str | list[str]]:
+        """Serialize the research signal specification.
+
+        Returns:
+            dict[str, str | list[str]]: JSON-friendly signal metadata and
+                required quantity keys.
+        """
+        return {
+            "signal": self.signal.value,
+            "label": self.label,
+            "example_reference": self.example_reference,
+            "reference_url": self.reference_url,
+            "description": self.description,
+            "quantities": [quantity.value for quantity in self.quantities],
+        }
+
+
+@dataclass(frozen=True)
+class ResourceResearchSignalCoverageRow:
+    """Describe whether resource values cover one research signal.
+
+    Attributes:
+        signal (ResourceResearchSignal): Audited research-signal key.
+        label (str): Reader-facing signal label.
+        present_quantities (tuple[ResourceQuantity, ...]): Required
+            quantities found in the provider.
+        missing_quantities (tuple[ResourceQuantity, ...]): Required
+            quantities absent from the provider.
+
+    Example:
+        >>> row = ResourceResearchSignalCoverageRow(
+        ...     signal=ResourceResearchSignal.ACTIVE_VOLUME_COMPILATION,
+        ...     label="Active-volume compilation",
+        ...     present_quantities=(ResourceQuantity.ACTIVE_VOLUME,),
+        ...     missing_quantities=(),
+        ... )
+        >>> row.is_supported
+        True
+    """
+
+    signal: ResourceResearchSignal
+    label: str
+    present_quantities: tuple[ResourceQuantity, ...]
+    missing_quantities: tuple[ResourceQuantity, ...]
+
+    @property
+    def is_supported(self) -> bool:
+        """Return whether every required quantity is present.
+
+        Returns:
+            bool: True when ``missing_quantities`` is empty.
+        """
+        return not self.missing_quantities
+
+    def to_dict(self) -> dict[str, str | bool | list[str]]:
+        """Serialize the coverage row.
+
+        Returns:
+            dict[str, str | bool | list[str]]: JSON-friendly signal metadata,
+                support flag, and present or missing quantity keys.
+        """
+        return {
+            "signal": self.signal.value,
+            "label": self.label,
+            "is_supported": self.is_supported,
+            "present_quantities": [
+                quantity.value for quantity in self.present_quantities
+            ],
+            "missing_quantities": [
+                quantity.value for quantity in self.missing_quantities
+            ],
         }
 
 
@@ -1068,6 +1205,74 @@ RESOURCE_REVIEW_PROFILES: tuple[ResourceQuantityProfile, ...] = (
 
 _PROFILES_BY_KEY = {profile.profile: profile for profile in RESOURCE_REVIEW_PROFILES}
 
+RESOURCE_RESEARCH_SIGNALS: tuple[ResourceResearchSignalSpec, ...] = (
+    ResourceResearchSignalSpec(
+        ResourceResearchSignal.HAMILTONIAN_NORMALIZATION_REDUCTION,
+        "Hamiltonian normalization reduction",
+        "Symmetry-compressed double factorization",
+        "https://arxiv.org/abs/2403.03502",
+        "Methods that reduce Hamiltonian normalization or block-encoding cost "
+        "before qubitized QPE.",
+        (
+            ResourceQuantity.LAMBDA_NORM,
+            ResourceQuantity.REPRESENTATION_ERROR,
+            ResourceQuantity.WALK_COST_TOFFOLI,
+            ResourceQuantity.QPE_ITERATIONS,
+            ResourceQuantity.T_GATES,
+        ),
+    ),
+    ResourceResearchSignalSpec(
+        ResourceResearchSignal.TROTTER_WEIGHT_REDUCTION,
+        "Trotter weight reduction",
+        "Unitary weight concentration",
+        "https://arxiv.org/abs/2603.22778",
+        "Early-FTQC product-formula workflows that reduce effective "
+        "Hamiltonian weight and Pauli-rotation work.",
+        (
+            ResourceQuantity.EFFECTIVE_LAMBDA_NORM,
+            ResourceQuantity.UNITARY_WEIGHT_FACTOR,
+            ResourceQuantity.TROTTER_STEPS_PER_SAMPLE,
+            ResourceQuantity.TROTTER_SAMPLES,
+            ResourceQuantity.PAULI_ROTATIONS,
+            ResourceQuantity.ROTATION_SYNTHESIS_T_GATES,
+        ),
+    ),
+    ResourceResearchSignalSpec(
+        ResourceResearchSignal.ARCHITECTURE_BOTTLENECK_LIFT,
+        "Architecture bottleneck lift",
+        "Surface-code factory estimates",
+        "https://arxiv.org/abs/1905.09749",
+        "Lifts logical resources to architecture-level footprint, runtime "
+        "bottlenecks, and space-time proxies.",
+        (
+            ResourceQuantity.PHYSICAL_QUBITS,
+            ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS,
+            ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS,
+            ResourceQuantity.RUNTIME_SECONDS,
+            ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        ),
+    ),
+    ResourceResearchSignalSpec(
+        ResourceResearchSignal.ACTIVE_VOLUME_COMPILATION,
+        "Active-volume compilation",
+        "BLISS-THC with active-volume compilation",
+        "https://arxiv.org/abs/2501.06165",
+        "Operation-volume estimates that price active resources separately "
+        "from idle physical footprint.",
+        (
+            ResourceQuantity.LOGICAL_OPERATIONS,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+            ResourceQuantity.ACTIVE_VOLUME,
+            ResourceQuantity.ACTIVE_VOLUME_RUNTIME_SECONDS,
+            ResourceQuantity.ACTIVE_VOLUME_THROUGHPUT_PER_SECOND,
+        ),
+    ),
+)
+
+_RESEARCH_SIGNALS_BY_KEY = {
+    signal.signal: signal for signal in RESOURCE_RESEARCH_SIGNALS
+}
+
 
 def iter_resource_quantity_specs() -> tuple[ResourceQuantitySpec, ...]:
     """Return the canonical resource quantity specifications.
@@ -1087,6 +1292,17 @@ def iter_resource_review_profiles() -> tuple[ResourceQuantityProfile, ...]:
             algorithm inputs to physical and architecture review surfaces.
     """
     return RESOURCE_REVIEW_PROFILES
+
+
+def iter_resource_research_signals() -> tuple[ResourceResearchSignalSpec, ...]:
+    """Return the paper-motivated FTQC research signals.
+
+    Returns:
+        tuple[ResourceResearchSignalSpec, ...]: Research-signal specifications
+            ordered from problem-level reductions to architecture-level
+            outcomes.
+    """
+    return RESOURCE_RESEARCH_SIGNALS
 
 
 def describe_resource_quantity(
@@ -1123,6 +1339,69 @@ def describe_resource_review_profile(
     """
     normalized = _normalize_resource_review_profile(profile)
     return _PROFILES_BY_KEY[normalized]
+
+
+def describe_resource_research_signal(
+    signal: str | ResourceResearchSignal,
+) -> ResourceResearchSignalSpec:
+    """Return metadata for one paper-motivated research signal.
+
+    Args:
+        signal (str | ResourceResearchSignal): Research-signal key or enum
+            value.
+
+    Returns:
+        ResourceResearchSignalSpec: Metadata describing the signal and the
+            canonical quantities needed to review it.
+
+    Raises:
+        ValueError: If ``signal`` is not a known resource research signal.
+    """
+    normalized = _normalize_resource_research_signal(signal)
+    return _RESEARCH_SIGNALS_BY_KEY[normalized]
+
+
+def audit_resource_research_signal_coverage(
+    provider: _ResourceValuesInput,
+    *,
+    signals: tuple[str | ResourceResearchSignal, ...] | None = None,
+) -> tuple[ResourceResearchSignalCoverageRow, ...]:
+    """Audit which research signals are covered by resource values.
+
+    Args:
+        provider (_ResourceValuesInput): Resource values to inspect. Accepts
+            an object exposing ``resource_values()``, a mapping keyed by
+            canonical quantities, or a logical Qamomile ``ResourceEstimate``.
+        signals (tuple[str | ResourceResearchSignal, ...] | None): Research
+            signals to audit. Defaults to every cataloged signal.
+
+    Returns:
+        tuple[ResourceResearchSignalCoverageRow, ...]: Coverage rows in
+            catalog order for the default selection, or request order for an
+            explicit selection.
+
+    Raises:
+        TypeError: If ``provider`` cannot be interpreted as resource values.
+        ValueError: If any requested signal is unknown.
+    """
+    values = _coerce_resource_values(provider)
+    selected = _normalize_research_signals(signals)
+    rows = []
+    for signal in selected:
+        spec = describe_resource_research_signal(signal)
+        present = tuple(quantity for quantity in spec.quantities if quantity in values)
+        missing = tuple(
+            quantity for quantity in spec.quantities if quantity not in values
+        )
+        rows.append(
+            ResourceResearchSignalCoverageRow(
+                signal=spec.signal,
+                label=spec.label,
+                present_quantities=present,
+                missing_quantities=missing,
+            )
+        )
+    return tuple(rows)
 
 
 def compare_resource_values(
@@ -1938,6 +2217,49 @@ def _normalize_resource_review_profile(
         raise ValueError(
             f"Unknown resource review profile {profile!r}; valid: {valid}."
         ) from exc
+
+
+def _normalize_resource_research_signal(
+    signal: str | ResourceResearchSignal,
+) -> ResourceResearchSignal:
+    """Normalize one resource research-signal key.
+
+    Args:
+        signal (str | ResourceResearchSignal): Resource research-signal key.
+
+    Returns:
+        ResourceResearchSignal: Normalized signal enum.
+
+    Raises:
+        ValueError: If ``signal`` is not a known resource research signal.
+    """
+    try:
+        return ResourceResearchSignal(signal)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in ResourceResearchSignal)
+        raise ValueError(
+            f"Unknown resource research signal {signal!r}; valid: {valid}."
+        ) from exc
+
+
+def _normalize_research_signals(
+    signals: tuple[str | ResourceResearchSignal, ...] | None,
+) -> tuple[ResourceResearchSignal, ...]:
+    """Normalize research-signal selection.
+
+    Args:
+        signals (tuple[str | ResourceResearchSignal, ...] | None): Requested
+            signals, or None for every cataloged signal.
+
+    Returns:
+        tuple[ResourceResearchSignal, ...]: Normalized signal keys.
+
+    Raises:
+        ValueError: If any requested signal is unknown.
+    """
+    if signals is None:
+        return tuple(spec.signal for spec in RESOURCE_RESEARCH_SIGNALS)
+    return tuple(_normalize_resource_research_signal(signal) for signal in signals)
 
 
 def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
