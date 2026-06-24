@@ -9,3 +9,4 @@ Qamomileの個別モジュールを使うためのHow-toガイドです。
 ## すべての記事
 
 - [`BinaryModel`の使い方](binary_model) — 制約なしのバイナリ/スピン変数モデルをQUBO/HUBO/IsingあるいはOMMXから構築する
+- [FTQCリソースレビューの設計](ftqc_resource_estimation_design) — FTQC algorithmの主張をcanonicalなresource-estimation quantityへ写す
