@@ -378,6 +378,21 @@ def _two_heisenberg_plus_const(rng: np.random.Generator) -> qm_o.Hamiltonian:
     return _two_heisenberg(rng) + rng.uniform(0.3, 1.5)
 
 
+def _pure_const(rng: np.random.Generator) -> qm_o.Hamiltonian:
+    """Build a single-qubit Hamiltonian whose only nonzero part is a constant.
+
+    The ``X(0) * 0.0`` keeps the register width at one qubit while leaving no
+    Pauli term, so the controlled evolution emits only the relative phase.
+
+    Args:
+        rng (np.random.Generator): Seeded RNG for the constant offset.
+
+    Returns:
+        qm_o.Hamiltonian: A one-qubit Hamiltonian with only a constant term.
+    """
+    return qm_o.X(0) * 0.0 + rng.uniform(0.3, 1.5)
+
+
 # (id, run_kernel | None, sample_kernel, n_controls, n_target, ham_builder)
 _CASES: list[tuple[str, Any, Any, int, int, Callable[[np.random.Generator], Any]]] = [
     ("c1t1_X", _cpe_run_c1t1, _cpe_sample_c1t1, 1, 1, _single_x),
@@ -412,6 +427,10 @@ _CASES: list[tuple[str, Any, Any, int, int, Callable[[np.random.Generator], Any]
         2,
         _two_heisenberg_plus_const,
     ),
+    # Pure constant (no Pauli term): the controlled evolution is purely the
+    # relative phase on the control(s).
+    ("c1t1_pure_const", _cpe_run_c1t1, _cpe_sample_c1t1, 1, 1, _pure_const),
+    ("c2t1_pure_const", None, _cpe_sample_c2t1, 2, 1, _pure_const),
 ]
 
 _RUN_CASES = [c for c in _CASES if c[1] is not None]
@@ -575,21 +594,24 @@ def test_controlled_pauli_evolve_sample_matches_qiskit(
     [
         (_cpe_sample_c1t1, qm_o.X(0)),
         (_cpe_sample_c2t2, qm_o.X(0) * qm_o.X(1)),
+        # Pure constant: the constant-term phase scaling (gamma * constant),
+        # not the per-term RZ, is what cannot be expressed parametrically.
+        (_cpe_sample_c1t1, qm_o.X(0) * 0.0 + 0.8),
     ],
-    ids=["one-control", "two-controls"],
+    ids=["one-control", "two-controls", "constant-term"],
 )
 def test_controlled_pauli_evolve_parametric_gamma_raises_on_quri_parts(
     kernel: Any, ham: qm_o.Hamiltonian
 ) -> None:
     """Runtime-parametric gamma raises a clean ``EmitError`` on QURI Parts.
 
-    The central RZ angle is ``2 * coeff * gamma``; QURI Parts' Rust-backed
-    runtime ``Parameter`` exposes no Python arithmetic, so this scaling
-    cannot be expressed (the same pre-existing limitation as uncontrolled
-    ``pauli_evolve``). For two or more controls the dense ``UnitaryMatrix``
-    path independently requires a compile-time-numeric angle. Either way the
-    controlled lowering surfaces a clear ``EmitError`` at transpile time
-    rather than a raw ``TypeError``.
+    The central RZ angle is ``2 * coeff * gamma`` and the constant-term phase
+    is ``-gamma * constant``; QURI Parts' Rust-backed runtime ``Parameter``
+    exposes no Python arithmetic, so neither scaling can be expressed (the
+    same pre-existing limitation as uncontrolled ``pauli_evolve``). For two or
+    more controls the dense ``UnitaryMatrix`` path independently requires a
+    compile-time-numeric angle. Either way the controlled lowering surfaces a
+    clear ``EmitError`` at transpile time rather than a raw ``TypeError``.
     """
     qp_tr = _quri_parts_transpiler()
     with pytest.raises(EmitError):
