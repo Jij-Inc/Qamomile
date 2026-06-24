@@ -150,6 +150,10 @@ for n_val in [4, 8, 16, 32]:
 # Fault-tolerantアルゴリズムは、backend circuitへloweringする前に比較することがよくあります。Qamomileではこの層を分けて扱います。`qamomile.resource_estimation`を使うと、Hamiltonianの記述、アルゴリズムレベルの論理リソース推定、canonical quantityによる比較、architecture modelを通した物理リソースproxyへの変換を順に扱えます。
 #
 # この小さな例では、候補workloadのHamiltonian normalizationとwalk operatorのコストが小さいとします。数値はアルゴリズム検討用の仮の値ですが、比較するquantityはblock-encodingやHamiltonian表現の選択を比較するときにも使うものです。
+#
+# :::{note}
+# [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502)のような近年の量子化学リソース推定では、Hamiltonian normalization、walk operatorのコスト、Toffoli数、論理量子ビット数、runtime、space-time volumeなどを通してアルゴリズムを比較します。このチュートリアルはその論文の再現ではありません。そのような比較を組み立てるために必要なQamomileのresource quantityを示します。
+# :::
 
 # %%
 hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)

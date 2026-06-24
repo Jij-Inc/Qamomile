@@ -150,6 +150,10 @@ for n_val in [4, 8, 16, 32]:
 # Fault-tolerant algorithms are usually compared before they are lowered to a backend circuit. Qamomile keeps that layer separate: use `qamomile.resource_estimation` to describe the Hamiltonian, estimate algorithm-level logical work, compare canonical quantities, and only then lift the result through an architecture model.
 #
 # In this toy example, the candidate workload has a smaller Hamiltonian normalization and a cheaper walk operator. The numbers are placeholders for an algorithm study, but the quantities are the same ones you would track when comparing block-encoding or Hamiltonian-representation choices.
+#
+# :::{note}
+# Recent chemistry resource-estimation work, such as [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502), often compares algorithms through the Hamiltonian normalization, walk-operator cost, Toffoli count, logical qubits, runtime, and space-time volume. This tutorial does not reproduce that paper; it shows the Qamomile resource quantities needed to build that kind of comparison.
+# :::
 
 # %%
 hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)
