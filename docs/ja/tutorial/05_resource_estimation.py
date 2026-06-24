@@ -110,7 +110,18 @@ print("parameters:", est.parameters)
 assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
-# 出力には、量子ビット数を表す`n`や総ゲート数を表す`3*n - 1`のようなSymPy式が含まれます。これらは近似ではなく厳密な値です。
+# 出力には、量子ビット数を表す`n`や総ゲート数を表す`3*n - 1`のようなSymPy式が含まれます。これらは近似ではなく厳密な値です。推定がまだsymbolicな場合、`audit_resource_value_symbols()`を使うと、どのcanonical resource quantityが未解決のsymbolに依存しているかを確認できます。
+
+# %%
+symbol_rows = qre.audit_resource_value_symbols(est, include_resolved=False)
+for row in symbol_rows:
+    print(row.to_dict())
+
+symbolic_quantities = {row.quantity for row in symbol_rows}
+assert qre.ResourceQuantity.LOGICAL_QUBITS in symbolic_quantities
+assert qre.ResourceQuantity.LOGICAL_DEPTH in symbolic_quantities
+assert qre.ResourceQuantity.LOGICAL_SPACETIME_VOLUME in symbolic_quantities
+assert all(row.is_symbolic for row in symbol_rows)
 
 # %% [markdown]
 # ## `ResourceEstimate`フィールドリファレンス

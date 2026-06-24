@@ -248,6 +248,65 @@ class ResourceComparisonRow:
         }
 
 
+@dataclass(frozen=True)
+class ResourceSymbolDependencyRow:
+    """Describe unresolved symbolic dependencies for one resource quantity.
+
+    Attributes:
+        quantity (ResourceQuantity): Audited resource quantity.
+        value (sp.Expr): Resource value expression.
+        symbols (tuple[str, ...]): Sorted free-symbol names in ``value``.
+        label (str): Reader-facing quantity label.
+        unit (str): Resource unit.
+        category (ResourceCategory): Modeling layer for the quantity.
+
+    Example:
+        >>> row = ResourceSymbolDependencyRow(
+        ...     quantity=ResourceQuantity.RUNTIME_SECONDS,
+        ...     value=sp.Symbol("runtime"),
+        ...     symbols=("runtime",),
+        ...     label="Runtime",
+        ...     unit="seconds",
+        ...     category=ResourceCategory.PHYSICAL,
+        ... )
+        >>> row.is_symbolic
+        True
+    """
+
+    quantity: ResourceQuantity
+    value: sp.Expr
+    symbols: tuple[str, ...]
+    label: str
+    unit: str
+    category: ResourceCategory
+
+    @property
+    def is_symbolic(self) -> bool:
+        """Return whether the resource value still has free symbols.
+
+        Returns:
+            bool: True when ``value`` has unresolved SymPy symbols.
+        """
+        return bool(self.symbols)
+
+    def to_dict(self) -> dict[str, str | bool | list[str]]:
+        """Serialize the symbol-dependency row.
+
+        Returns:
+            dict[str, str | bool | list[str]]: JSON-friendly row metadata,
+                value expression, symbolic-state flag, and symbol names.
+        """
+        return {
+            "quantity": self.quantity.value,
+            "label": self.label,
+            "unit": self.unit,
+            "category": self.category.value,
+            "value": str(self.value),
+            "is_symbolic": self.is_symbolic,
+            "symbols": list(self.symbols),
+        }
+
+
 RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
     ResourceQuantitySpec(
         ResourceQuantity.N_QUBITS,
@@ -588,6 +647,56 @@ def compare_resource_values(
     return tuple(rows)
 
 
+def audit_resource_value_symbols(
+    provider: _ResourceValuesInput,
+    *,
+    quantities: tuple[str | ResourceQuantity, ...] | None = None,
+    include_resolved: bool = True,
+) -> tuple[ResourceSymbolDependencyRow, ...]:
+    """Audit free symbols in canonical resource values.
+
+    Args:
+        provider (_ResourceValuesInput): Resource values to inspect. Accepts
+            an object exposing ``resource_values()``, a mapping keyed by
+            canonical quantities, or a logical Qamomile ``ResourceEstimate``.
+        quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
+            audit. Defaults to all canonical quantities exposed by
+            ``provider`` in catalog order.
+        include_resolved (bool): Whether rows with no free symbols should be
+            returned. Defaults to True. Set to False to return only unresolved
+            quantities.
+
+    Returns:
+        tuple[ResourceSymbolDependencyRow, ...]: Symbol-dependency rows with
+            value expressions and sorted free-symbol names.
+
+    Raises:
+        ValueError: If a requested quantity is missing from ``provider``.
+        TypeError: If ``provider`` cannot be interpreted as resource values.
+    """
+    values = _coerce_resource_values(provider)
+    selected = _normalize_audit_quantities(values, quantities)
+
+    rows = []
+    for quantity in selected:
+        value = sp.sympify(values[quantity])
+        symbols = tuple(sorted(str(symbol) for symbol in value.free_symbols))
+        if not include_resolved and not symbols:
+            continue
+        spec = describe_resource_quantity(quantity)
+        rows.append(
+            ResourceSymbolDependencyRow(
+                quantity=quantity,
+                value=value,
+                symbols=symbols,
+                label=spec.label,
+                unit=spec.unit,
+                category=spec.category,
+            )
+        )
+    return tuple(rows)
+
+
 def resource_values_from_estimate(
     estimate: ResourceEstimate,
     *,
@@ -729,6 +838,43 @@ def _normalize_comparison_quantities(
         for quantity in normalized
         if quantity not in baseline_values or quantity not in candidate_values
     ]
+    if missing:
+        raise ValueError(
+            "Requested resource quantities are missing from the inputs: "
+            + ", ".join(missing)
+            + "."
+        )
+    return normalized
+
+
+def _normalize_audit_quantities(
+    values: dict[ResourceQuantity, sp.Expr],
+    quantities: tuple[str | ResourceQuantity, ...] | None,
+) -> tuple[ResourceQuantity, ...]:
+    """Normalize symbol-audit quantity selection.
+
+    Args:
+        values (dict[ResourceQuantity, sp.Expr]): Resource values keyed by
+            normalized quantity.
+        quantities (tuple[str | ResourceQuantity, ...] | None): Requested
+            quantities, or None for every exposed canonical quantity.
+
+    Returns:
+        tuple[ResourceQuantity, ...]: Normalized quantities in catalog order
+            for default selection, or request order for explicit selection.
+
+    Raises:
+        ValueError: If a requested quantity is absent from ``values``.
+    """
+    if quantities is None:
+        return tuple(
+            spec.quantity for spec in RESOURCE_QUANTITY_SPECS if spec.quantity in values
+        )
+
+    normalized = tuple(
+        _normalize_resource_quantity(quantity) for quantity in quantities
+    )
+    missing = [quantity.value for quantity in normalized if quantity not in values]
     if missing:
         raise ValueError(
             "Requested resource quantities are missing from the inputs: "

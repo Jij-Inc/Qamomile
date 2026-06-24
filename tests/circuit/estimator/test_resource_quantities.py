@@ -12,7 +12,9 @@ from qamomile.resource_estimation import (
     HamiltonianRepresentation,
     ResourceCategory,
     ResourceQuantity,
+    ResourceSymbolDependencyRow,
     SurfaceCodeCostModel,
+    audit_resource_value_symbols,
     compare_resource_values,
     describe_resource_quantity,
     estimate_physical_resources,
@@ -337,6 +339,58 @@ def test_compare_resource_values_accepts_precision_aware_workload_values():
     assert rows[1].baseline == 1
     assert rows[1].candidate == sp.Rational(9, 10)
     assert rows[1].ratio == sp.Rational(9, 10)
+
+
+def test_audit_resource_value_symbols_reports_unresolved_quantities():
+    """Symbol audits expose which canonical quantities still depend on parameters."""
+    n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
+    estimate = estimate_qubitized_qpe_resources(
+        n_qubits=n,
+        lambda_norm=lam,
+        precision=eps,
+        walk_cost_toffoli=walk,
+        logical_qubits=n + 2,
+    )
+
+    rows = audit_resource_value_symbols(
+        estimate,
+        quantities=(
+            ResourceQuantity.LOGICAL_QUBITS,
+            ResourceQuantity.QPE_ITERATIONS,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+        ),
+    )
+
+    assert all(isinstance(row, ResourceSymbolDependencyRow) for row in rows)
+    assert rows[0].quantity == ResourceQuantity.LOGICAL_QUBITS
+    assert rows[0].symbols == ("n",)
+    assert rows[0].is_symbolic is True
+    assert rows[1].quantity == ResourceQuantity.QPE_ITERATIONS
+    assert rows[1].symbols == ("eps", "lambda")
+    assert rows[2].quantity == ResourceQuantity.NON_CLIFFORD_COUNT
+    assert rows[2].symbols == ("C_W", "eps", "lambda")
+    assert rows[2].to_dict()["symbols"] == ["C_W", "eps", "lambda"]
+
+
+def test_audit_resource_value_symbols_filters_resolved_values():
+    """Symbol audits can focus on unresolved quantities only."""
+    values = {
+        ResourceQuantity.LOGICAL_QUBITS: 5,
+        ResourceQuantity.RUNTIME_SECONDS: sp.Symbol("runtime_seconds"),
+        ResourceQuantity.PHYSICAL_QUBITS: sp.Integer(1000),
+    }
+
+    rows = audit_resource_value_symbols(values, include_resolved=False)
+
+    assert len(rows) == 1
+    assert rows[0].quantity == ResourceQuantity.RUNTIME_SECONDS
+    assert rows[0].symbols == ("runtime_seconds",)
+    assert rows[0].to_dict()["is_symbolic"] is True
+    with pytest.raises(ValueError, match="missing"):
+        audit_resource_value_symbols(
+            values,
+            quantities=(ResourceQuantity.NON_CLIFFORD_COUNT,),
+        )
 
 
 def test_compare_resource_values_rejects_missing_or_zero_baseline():

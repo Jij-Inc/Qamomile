@@ -110,7 +110,18 @@ print("parameters:", est.parameters)
 assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
-# The output contains SymPy expressions like `n` for qubits and `3*n - 1` for total gates. These are exact — not approximations.
+# The output contains SymPy expressions like `n` for qubits and `3*n - 1` for total gates. These are exact — not approximations. When an estimate is still symbolic, `audit_resource_value_symbols()` shows which canonical resource quantities still depend on unresolved symbols.
+
+# %%
+symbol_rows = qre.audit_resource_value_symbols(est, include_resolved=False)
+for row in symbol_rows:
+    print(row.to_dict())
+
+symbolic_quantities = {row.quantity for row in symbol_rows}
+assert qre.ResourceQuantity.LOGICAL_QUBITS in symbolic_quantities
+assert qre.ResourceQuantity.LOGICAL_DEPTH in symbolic_quantities
+assert qre.ResourceQuantity.LOGICAL_SPACETIME_VOLUME in symbolic_quantities
+assert all(row.is_symbolic for row in symbol_rows)
 
 # %% [markdown]
 # ## `ResourceEstimate` Fields Reference
