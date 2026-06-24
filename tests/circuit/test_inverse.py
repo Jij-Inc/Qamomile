@@ -89,8 +89,9 @@ except ImportError:  # pragma: no cover - covered when quri_parts is absent.
 
 _HAS_CUDAQ = True
 try:  # pragma: no cover - dependency-presence guard.
-    import cudaq  # noqa: F401
-
+    # The lazy accessor raises ImportError when cudaq is missing, without
+    # loading the cudaq runtime at collection time when it is installed
+    # (see tests/_cudaq_isolation.py).
     from qamomile.cudaq import CudaqTranspiler
 except ImportError:  # pragma: no cover - covered when cudaq is absent.
     _HAS_CUDAQ = False
@@ -114,7 +115,12 @@ BACKENDS = [
     pytest.param(
         CudaqTranspiler,
         id="cudaq",
-        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
     ),
 ]
 
@@ -885,7 +891,7 @@ def test_inverse_qkernel_rejects_vector_for_scalar_input() -> None:
         qs = qmc.inverse(_inverse_layer)(qs, 0.25)
         return qs
 
-    with pytest.raises(TypeError, match="expected scalar, got Vector"):
+    with pytest.raises(TypeError, match="scalar Qubit but received"):
         circuit.build()
 
 
@@ -2072,8 +2078,13 @@ def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) 
     ]
 
 
+@pytest.mark.cudaq
 def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
-    """inverse(qkernel) uses CUDA-Q cudaq.adjoint when available."""
+    """inverse(qkernel) uses CUDA-Q cudaq.adjoint when available.
+
+    Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+    session is unsafe — see tests/_cudaq_isolation.py.
+    """
     cudaq = pytest.importorskip("cudaq")
 
     from qamomile.cudaq import CudaqTranspiler
@@ -2107,8 +2118,13 @@ def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
     assert np.allclose(statevector, expected, atol=1e-8)
 
 
+@pytest.mark.cudaq
 def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
-    """inverse(qkernel) keeps Vector inputs atomic for CUDA-Q adjoint."""
+    """inverse(qkernel) keeps Vector inputs atomic for CUDA-Q adjoint.
+
+    Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+    session is unsafe — see tests/_cudaq_isolation.py.
+    """
     cudaq = pytest.importorskip("cudaq")
 
     from qamomile.cudaq import CudaqTranspiler
@@ -2145,8 +2161,13 @@ def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
     assert np.allclose(statevector, expected, atol=1e-8)
 
 
+@pytest.mark.cudaq
 def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
-    """CUDA-Q inverse-of-inverse falls back before nested adjoint emission."""
+    """CUDA-Q inverse-of-inverse falls back before nested adjoint emission.
+
+    Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+    session is unsafe — see tests/_cudaq_isolation.py.
+    """
     cudaq = pytest.importorskip("cudaq")
 
     from qamomile.cudaq import CudaqTranspiler
@@ -2210,8 +2231,13 @@ def _inverse_runtime_call_then_gate_layer(
     return q
 
 
+@pytest.mark.cudaq
 def test_inverse_cudaq_adjoint_inlines_nested_source_block() -> None:
-    """CUDA-Q adjoint helpers include nested qkernel call bodies."""
+    """CUDA-Q adjoint helpers include nested qkernel call bodies.
+
+    Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+    session is unsafe — see tests/_cudaq_isolation.py.
+    """
     pytest.importorskip("cudaq")
 
     from qamomile.cudaq import CudaqTranspiler
@@ -3131,12 +3157,8 @@ def _computational_basis_state_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKe
 def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     """Build state-preparation amplitude_encoding inverse roundtrip kernels.
 
-    The inverse leg goes through a register-parameterized qkernel wrapper,
-    exercising Mottonen composite-gate inversion. The forward leg applies
-    `amplitude_encoding` directly inside the entry kernel: routing the
-    forward call through the same wrapper currently trips a pre-existing
-    transpiler qubit-map assertion (QInit ordering for nested composite
-    emission, unrelated to inverse), so only the inverse leg is wrapped.
+    Both legs go through a register-parameterized qkernel wrapper,
+    exercising Möttönen custom-composite inlining and inversion.
 
     Returns:
         tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
@@ -3154,14 +3176,14 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     @qmc.qkernel
     def sample_circuit() -> qmc.Vector[qmc.Bit]:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding(qs, amplitudes)
+        qs = amplitude_layer(qs)
         qs = qmc.inverse(amplitude_layer)(qs)
         return qmc.measure(qs)
 
     @qmc.qkernel
     def expval_circuit(observable: qmc.Observable) -> qmc.Float:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding(qs, amplitudes)
+        qs = amplitude_layer(qs)
         qs = qmc.inverse(amplitude_layer)(qs)
         return qmc.expval(qs, observable)
 
@@ -3174,10 +3196,9 @@ def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     """Build state-preparation amplitude_encoding_from_angles roundtrip kernels.
 
     The parametric companion to `amplitude_encoding`: pre-computed Mottonen
-    Ry angles flow through the same composite gate, so the case mirrors the
-    amplitude_encoding one, including the direct forward leg (the nested
-    forward call trips the same pre-existing transpiler qubit-map
-    assertion, unrelated to inverse).
+    Ry angles are emitted as elementary gates rather than through a custom
+    composite operation. The wrapper path is included for symmetry with
+    `amplitude_encoding`, but it does not exercise `_inline_composite`.
 
     Returns:
         tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
@@ -3198,14 +3219,14 @@ def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     @qmc.qkernel
     def sample_circuit() -> qmc.Vector[qmc.Bit]:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding_from_angles(qs, ry_angles)
+        qs = amplitude_angles_layer(qs)
         qs = qmc.inverse(amplitude_angles_layer)(qs)
         return qmc.measure(qs)
 
     @qmc.qkernel
     def expval_circuit(observable: qmc.Observable) -> qmc.Float:
         qs = qmc.qubit_array(2, "qs")
-        qs = amplitude_encoding_from_angles(qs, ry_angles)
+        qs = amplitude_angles_layer(qs)
         qs = qmc.inverse(amplitude_angles_layer)(qs)
         return qmc.expval(qs, observable)
 

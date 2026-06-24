@@ -188,6 +188,8 @@ def evaluate_binop_values(
                 return left / right if right != 0 else None
             case BinOpKind.FLOORDIV:
                 return left // right if right != 0 else None
+            case BinOpKind.MOD:
+                return left % right if right != 0 else None
             case BinOpKind.POW:
                 return left**right
             case BinOpKind.MIN:

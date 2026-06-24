@@ -74,6 +74,7 @@ class ResolutionFailureReason(Enum):
     SYMBOLIC_INDEX_NOT_BOUND = "symbolic_index_not_bound"
     ARRAY_ELEMENT_NOT_IN_QUBIT_MAP = "array_element_not_in_qubit_map"
     INDEX_NOT_NUMERIC = "index_not_numeric"
+    NEGATIVE_INDEX = "negative_index"
     NESTED_ARRAY_RESOLUTION_FAILED = "nested_array_resolution_failed"
     DIRECT_UUID_NOT_FOUND = "direct_uuid_not_found"
     UNKNOWN = "unknown"
@@ -184,6 +185,12 @@ class QubitIndexResolutionError(EmitError):
                 suggestions.append(
                     f"The resolved index for '{info.operand_name}' is not a number. "
                     f"Ensure your bindings contain numeric values for array indices."
+                )
+            elif info.failure_reason == ResolutionFailureReason.NEGATIVE_INDEX:
+                suggestions.append(
+                    f"The resolved index for '{info.operand_name}' is negative. "
+                    f"Python-style negative indexing is not supported; compute "
+                    f"the index explicitly (e.g. 'n - 1' with a bound 'n')."
                 )
 
         if not suggestions:

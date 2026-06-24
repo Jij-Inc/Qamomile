@@ -8244,6 +8244,126 @@ class TestDirectCastMeasure:
             f"Expected 2 measurement ops, got {len(measure_ops)}"
         )
 
+    def test_inlined_cast_measure_remaps_carriers(self):
+        """Inline pass must remap cast carriers from callee to caller arrays."""
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            anc = qmc.qubit("anc")
+            q = qmc.qubit_array(2, "q")
+            anc = qmc.x(anc)
+            return sub(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measured_qubits = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_qubits == [1, 2]
+
+    def test_inlined_cast_measure_with_slice_view_argument(self):
+        """Inlined cast over a strided-view argument measures root qubits.
+
+        The inline pass maps the callee formal to the caller's ``q[1::2]``
+        view; carrier keys must be folded into the root array's index space
+        (physical qubits 1 and 3), not kept as view-local indices.
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            return sub(q[1::2])
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measured_qubits = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_qubits == [1, 3]
+
+    @pytest.mark.parametrize(
+        ("flag", "expected_qubits"),
+        [(1, [1, 3]), (0, [0, 2])],
+    )
+    def test_cast_measure_compile_time_if_selects_branch_qubits(
+        self, flag, expected_qubits
+    ):
+        """Compile-time if over slice views measures the selected qubits.
+
+        Trace time bakes the TRUE branch's carrier keys into the cast
+        metadata; lowering must rebuild them for the actually-selected
+        branch and propagate the rebuilt result to the measurement.
+        """
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            if flag == 1:
+                v = q[1::2]
+            else:
+                v = q[0::2]
+            qf = qmc.cast(v, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"flag": flag})
+        qc = exe.compiled_quantum[0].circuit
+        measured_qubits = sorted(
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_qubits == expected_qubits
+
+    def test_inlined_runtime_if_phi_cast_measures_all_qubits(self):
+        """Phi-merged QFixed carriers survive inlining of runtime-if bodies.
+
+        The phi output of a measurement-backed ``if`` carries QFixed carrier
+        metadata referencing the array cast inside the branches; cloning
+        during inline must remap those references so the final measurement
+        is not silently dropped (1 ancilla measure + 2 carrier measures).
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit], anc: qmc.Qubit, t: qmc.Qubit) -> qmc.Float:
+            b = qmc.measure(anc)
+            if b:
+                t = qmc.x(t)
+                qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            else:
+                t = qmc.z(t)
+                qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            anc = qmc.qubit("anc")
+            t = qmc.qubit("t")
+            return sub(q, anc, t)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measure_count = sum(1 for inst in qc.data if inst.operation.name == "measure")
+        assert measure_count == 3
+
 
 # ============================================================================
 # Unresolved non-measurement if-condition rejection
@@ -8403,3 +8523,92 @@ class TestWhileIfSharedLocalPhi:
 
         with pytest.raises((DependencyError, EmitError)):
             _transpile_and_get_circuit(circuit)
+
+
+class TestCommonFallbackMappedWalker:
+    """Exercise the shared controlled fallback via a gateless Qiskit pass.
+
+    Monkeypatching ``QiskitEmitPass._blockvalue_to_gate`` to return None
+    forces the shared mapped walker (the path QURI Parts-like backends
+    take), so its output can be statevector-compared against Qiskit's
+    native custom-controlled-gate emission of the same kernel.
+    """
+
+    @staticmethod
+    def _force_fallback(monkeypatch) -> None:
+        """Disable block-to-gate conversion on the Qiskit emit pass."""
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        monkeypatch.setattr(
+            QiskitEmitPass,
+            "_blockvalue_to_gate",
+            lambda self, *args, **kwargs: None,
+        )
+
+    def test_multi_target_inner_block_matches_native_gate_path(
+        self, monkeypatch
+    ) -> None:
+        """Multi-target controlled sub-kernel: fallback equals native path."""
+
+        @qmc.qkernel
+        def multi_target(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[0], qs[2] = qmc.cx(qs[0], qs[2])
+            qs[1] = qmc.rz(qs[1], 0.375)
+            return qs
+
+        controlled = qmc.control(multi_target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            c = qmc.qubit("c")
+            qs = qmc.qubit_array(3, "qs")
+            c = qmc.h(c)
+            qs[1] = qmc.x(qs[1])
+            c, qs = controlled(c, qs)
+            bits = qmc.measure(qs)
+            return bits
+
+        _, native_circuit = _transpile_and_get_circuit(circuit)
+        native_sv = _run_statevector(native_circuit, decompose=True)
+
+        self._force_fallback(monkeypatch)
+        _, fallback_circuit = _transpile_and_get_circuit(circuit)
+        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
+
+        assert statevectors_equal(fallback_sv, native_sv)
+
+    def test_controlled_modular_increment_matches_native_gate_path(
+        self, monkeypatch
+    ) -> None:
+        """Nested symbolic MCX composition: fallback equals native path.
+
+        ``modular_increment`` wraps ``qmc.control(qmc.x,
+        num_controls=k)`` inside a ``qmc.range`` loop, so the shared
+        walker must unroll the loop, resolve the loop-dependent nested
+        ``SymbolicControlledU``, and compose its controls with the
+        outer one (the 1D periodic Poisson shift shape).
+        """
+        from qamomile.circuit import modular_increment
+
+        controlled_shift = qmc.control(modular_increment)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            c = qmc.qubit("c")
+            qs = qmc.qubit_array(2, "qs")
+            c = qmc.h(c)
+            qs[0] = qmc.x(qs[0])
+            c, qs = controlled_shift(c, qs)
+            bits = qmc.measure(qs)
+            return bits
+
+        _, native_circuit = _transpile_and_get_circuit(circuit)
+        native_sv = _run_statevector(native_circuit, decompose=True)
+
+        self._force_fallback(monkeypatch)
+        _, fallback_circuit = _transpile_and_get_circuit(circuit)
+        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
+
+        assert statevectors_equal(fallback_sv, native_sv)
