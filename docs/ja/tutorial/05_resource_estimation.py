@@ -149,7 +149,7 @@ for n_val in [4, 8, 16, 32]:
 #
 # Fault-tolerantアルゴリズムは、backend circuitへloweringする前に比較することがよくあります。Qamomileではこの層を分けて扱います。`qamomile.resource_estimation`を使うと、Hamiltonianの記述、アルゴリズムレベルの論理リソース推定、canonical quantityによる比較、architecture modelを通した物理リソースproxyへの変換を順に扱えます。
 #
-# この小さな例では、各候補をblock-encoding contractとして表します。このcontractには、Hamiltonian normalization、PREPARE/SELECT/reflectionのコスト、ancilla footprint、任意のrepresentation errorを記録します。これらのquantityがあれば、backend circuitに固定せずにHamiltonian QPE workloadを作れます。
+# この小さな例では、各候補をblock-encoding contractとして表します。このcontractには、Hamiltonian normalization、PREPARE/SELECT/reflectionのコスト、ancilla footprint、QPE readout registerのサイズ、任意のrepresentation errorを記録します。これらのquantityがあれば、backend circuitに固定せずにHamiltonian QPE workloadを作れます。
 #
 # :::{note}
 # [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502)や[unitary weight concentration](https://arxiv.org/abs/2603.22778)のような近年の量子化学リソース推定では、Hamiltonian normalization、representation error、walk operatorのコスト、Toffoli数、論理量子ビット数、runtime、space-time volumeなどを通してアルゴリズムを比較します。このチュートリアルはこれらの論文の再現ではありません。そのような比較を組み立てるために必要なQamomileのresource quantityを示します。
@@ -182,6 +182,7 @@ baseline_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
     summary,
     baseline_block,
     representation=qre.HamiltonianRepresentation.SPARSE_PAULI_LCU,
+    qpe_register_qubits=2,
     description="sparse Pauli LCU",
 )
 candidate_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
@@ -189,6 +190,7 @@ candidate_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
     candidate_block,
     representation=qre.HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF,
     second_factor_rank=4,
+    qpe_register_qubits=2,
     representation_error=sp.Rational(1, 10),
     description="compressed factorization",
 )
@@ -219,6 +221,7 @@ assert (
     < baseline_logical.gates.oracle_calls["qpe_iterations"]
 )
 assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
+assert candidate_workload.qpe_register_qubits == 2
 assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
 
 # %% [markdown]

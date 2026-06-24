@@ -261,7 +261,7 @@ def test_physical_estimate_exposes_spacetime_values():
 
 
 def test_compare_resource_values_defaults_to_common_quantities():
-    """Default comparison uses the canonical intersection of exposed values."""
+    """Default comparison uses comparable nonzero-baseline common values."""
     summary = summarize_pauli_hamiltonian(qm_o.Z(0) + qm_o.X(1))
     rows = compare_resource_values(
         summary,
@@ -276,6 +276,30 @@ def test_compare_resource_values_defaults_to_common_quantities():
     ]
     lambda_row = rows[2]
     assert sp.simplify(lambda_row.ratio - sp.Rational(1, 2)) == 0
+
+
+def test_compare_resource_values_default_skips_zero_baseline_quantities():
+    """Optional zero-baseline quantities do not break default comparisons."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0) + qm_o.X(1))
+    baseline = HamiltonianQPEWorkload(
+        hamiltonian=summary,
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        walk_cost_toffoli=10,
+    )
+    candidate = HamiltonianQPEWorkload(
+        hamiltonian=summary.with_lambda_scale(sp.Rational(1, 2)),
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        walk_cost_toffoli=5,
+        representation_error=sp.Rational(1, 10),
+        qpe_register_qubits=2,
+    )
+    rows = compare_resource_values(baseline, candidate)
+
+    quantities = [row.quantity for row in rows]
+    assert ResourceQuantity.REPRESENTATION_ERROR not in quantities
+    assert ResourceQuantity.QPE_REGISTER_QUBITS not in quantities
+    assert ResourceQuantity.LAMBDA_NORM in quantities
+    assert ResourceQuantity.WALK_COST_TOFFOLI in quantities
 
 
 def test_compare_resource_values_rejects_missing_or_zero_baseline():

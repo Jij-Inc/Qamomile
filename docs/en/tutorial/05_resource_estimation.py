@@ -149,7 +149,7 @@ for n_val in [4, 8, 16, 32]:
 #
 # Fault-tolerant algorithms are usually compared before they are lowered to a backend circuit. Qamomile keeps that layer separate: use `qamomile.resource_estimation` to describe the Hamiltonian, estimate algorithm-level logical work, compare canonical quantities, and only then lift the result through an architecture model.
 #
-# In this toy example, each candidate starts as a block-encoding contract. The contract records the Hamiltonian normalization, PREPARE/SELECT/reflection costs, ancilla footprint, and optional representation error. Those quantities are enough to build a Hamiltonian QPE workload without committing to a backend circuit.
+# In this toy example, each candidate starts as a block-encoding contract. The contract records the Hamiltonian normalization, PREPARE/SELECT/reflection costs, ancilla footprint, QPE readout register size, and optional representation error. Those quantities are enough to build a Hamiltonian QPE workload without committing to a backend circuit.
 #
 # :::{note}
 # Recent chemistry resource-estimation work, such as [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502) and [unitary weight concentration](https://arxiv.org/abs/2603.22778), often compares algorithms through the Hamiltonian normalization, representation error, walk-operator cost, Toffoli count, logical qubits, runtime, and space-time volume. This tutorial does not reproduce those papers; it shows the Qamomile resource quantities needed to build that kind of comparison.
@@ -182,6 +182,7 @@ baseline_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
     summary,
     baseline_block,
     representation=qre.HamiltonianRepresentation.SPARSE_PAULI_LCU,
+    qpe_register_qubits=2,
     description="sparse Pauli LCU",
 )
 candidate_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
@@ -189,6 +190,7 @@ candidate_workload = qre.HamiltonianQPEWorkload.from_block_encoding(
     candidate_block,
     representation=qre.HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF,
     second_factor_rank=4,
+    qpe_register_qubits=2,
     representation_error=sp.Rational(1, 10),
     description="compressed factorization",
 )
@@ -219,6 +221,7 @@ assert (
     < baseline_logical.gates.oracle_calls["qpe_iterations"]
 )
 assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
+assert candidate_workload.qpe_register_qubits == 2
 assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
 
 # %% [markdown]

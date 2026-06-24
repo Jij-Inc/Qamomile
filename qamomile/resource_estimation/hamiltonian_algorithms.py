@@ -54,10 +54,13 @@ class HamiltonianQPEWorkload:
         second_factor_rank (sp.Expr | int | float | None): Average second
             factorization rank for double-factorized methods.
         logical_qubits (sp.Expr | int | float | None): Explicit logical-qubit
-            count. Defaults to the representation-specific scaling model.
+            count before ``qpe_register_qubits`` are added. Defaults to the
+            representation-specific scaling model.
         representation_error (sp.Expr | int | float): Hamiltonian
             representation error budget.
         description (str): Reader-facing model label.
+        qpe_register_qubits (sp.Expr | int | float): Optional QPE readout
+            register qubits.
 
     Raises:
         TypeError: If ``hamiltonian`` is not a ``PauliHamiltonianResource``.
@@ -90,6 +93,7 @@ class HamiltonianQPEWorkload:
     logical_qubits: _SympyLike | None = None
     representation_error: _SympyLike = 0
     description: str = ""
+    qpe_register_qubits: _SympyLike = 0
 
     def __post_init__(self) -> None:
         """Validate workload fields after dataclass construction.
@@ -121,6 +125,10 @@ class HamiltonianQPEWorkload:
         _validate_nonnegative(
             _as_expr(self.representation_error, "representation_error"),
             "representation_error",
+        )
+        _validate_nonnegative(
+            _as_expr(self.qpe_register_qubits, "qpe_register_qubits"),
+            "qpe_register_qubits",
         )
         _normalize_representation(self.representation)
 
@@ -177,6 +185,9 @@ class HamiltonianQPEWorkload:
             "representation_error": str(
                 _as_expr(self.representation_error, "representation_error")
             ),
+            "qpe_register_qubits": str(
+                _as_expr(self.qpe_register_qubits, "qpe_register_qubits")
+            ),
             "description": self.description,
         }
 
@@ -195,6 +206,10 @@ class HamiltonianQPEWorkload:
         values["representation_error"] = _as_expr(
             self.representation_error,
             "representation_error",
+        )
+        values["qpe_register_qubits"] = _as_expr(
+            self.qpe_register_qubits,
+            "qpe_register_qubits",
         )
         if self.effective_sparsity is not None:
             values["n_pauli_terms"] = self.effective_sparsity
@@ -243,8 +258,8 @@ class HamiltonianQPEWorkload:
 
         The returned workload uses the block-encoding normalization as the
         Hamiltonian normalization, the walk cost from the PREPARE/SELECT
-        contract, and the block-encoding footprint plus optional QPE readout
-        qubits as the explicit logical-qubit count.
+        contract, the block-encoding footprint as the base logical-qubit
+        count, and optional QPE readout qubits as separate algorithm metadata.
 
         Args:
             hamiltonian (PauliHamiltonianResource): Problem-level Hamiltonian
@@ -301,8 +316,9 @@ class HamiltonianQPEWorkload:
             walk_cost_toffoli=block_encoding.walk_cost_toffoli,
             representation=representation,
             second_factor_rank=second_factor_rank,
-            logical_qubits=sp.simplify(block_values["logical_qubits"] + qpe_qubits),
+            logical_qubits=block_values["logical_qubits"],
             representation_error=representation_error,
+            qpe_register_qubits=qpe_qubits,
             description=block_encoding.name if description is None else description,
         )
 
@@ -319,6 +335,7 @@ def estimate_qubitized_qpe_resources(
     sparsity: sp.Expr | int | None = None,
     second_factor_rank: sp.Expr | int | None = None,
     logical_qubits: sp.Expr | int | None = None,
+    qpe_register_qubits: _SympyLike = 0,
 ) -> ResourceEstimate:
     """Estimate logical qubitized-QPE resources for a Hamiltonian.
 
@@ -338,7 +355,10 @@ def estimate_qubitized_qpe_resources(
             double-factorized methods. Defaults to symbolic ``Xi`` when
             needed.
         logical_qubits (sp.Expr | int | None): Explicit logical-qubit count.
-            When omitted, a representation-level scaling model is used.
+            When omitted, a representation-level scaling model is used. This
+            footprint excludes ``qpe_register_qubits``.
+        qpe_register_qubits (sp.Expr | int | float): Optional QPE readout
+            register qubits added to the logical footprint. Defaults to 0.
 
     Returns:
         ResourceEstimate: Architecture-independent logical resource estimate.
@@ -354,11 +374,13 @@ def estimate_qubitized_qpe_resources(
     lambda_expr = _as_expr(lambda_norm, "lambda_norm")
     precision_expr = _as_expr(precision, "precision")
     walk_expr = _as_expr(walk_cost_toffoli, "walk_cost_toffoli")
+    qpe_qubits = _as_expr(qpe_register_qubits, "qpe_register_qubits")
 
     _validate_positive(n_expr, "n_qubits")
     _validate_positive(lambda_expr, "lambda_norm")
     _validate_positive(precision_expr, "precision")
     _validate_positive(walk_expr, "walk_cost_toffoli")
+    _validate_nonnegative(qpe_qubits, "qpe_register_qubits")
 
     if logical_qubits is None:
         logical_expr = _default_logical_qubits(
@@ -370,6 +392,7 @@ def estimate_qubitized_qpe_resources(
     else:
         logical_expr = _as_expr(logical_qubits, "logical_qubits")
         _validate_positive(logical_expr, "logical_qubits")
+    logical_expr = sp.simplify(logical_expr + qpe_qubits)
 
     qpe_iterations = sp.simplify(lambda_expr / precision_expr)
     toffoli_gates = sp.simplify(qpe_iterations * walk_expr)
@@ -392,7 +415,8 @@ def estimate_qubitized_qpe_resources_from_workload(
 
     Args:
         workload (HamiltonianQPEWorkload): Hamiltonian workload carrying
-            lambda norm, sparsity/rank metadata, and walk cost.
+            lambda norm, sparsity/rank metadata, walk cost, QPE readout
+            registers, and representation error.
         precision (sp.Expr | int | float): Total target energy precision
             budget. ``workload.representation_error`` is subtracted before
             estimating QPE iterations.
@@ -423,6 +447,10 @@ def estimate_qubitized_qpe_resources_from_workload(
             None
             if workload.logical_qubits is None
             else _as_expr(workload.logical_qubits, "logical_qubits")
+        ),
+        qpe_register_qubits=_as_expr(
+            workload.qpe_register_qubits,
+            "qpe_register_qubits",
         ),
     )
 

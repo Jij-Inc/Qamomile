@@ -135,7 +135,9 @@ def test_hamiltonian_workload_builds_from_block_encoding_contract():
     assert workload.hamiltonian.n_pauli_terms == summary.n_pauli_terms
     assert workload.hamiltonian.source == "compressed_df"
     assert workload.walk_cost_toffoli == 28
-    assert workload.logical_qubits == 9
+    assert workload.logical_qubits == 6
+    assert workload.qpe_register_qubits == 3
+    assert workload.resource_values()["qpe_register_qubits"] == 3
     assert logical.qubits == 9
     assert logical.gates.oracle_calls["qpe_iterations"] == sp.Rational(20, 3)
     assert logical.gates.multi_qubit == sp.Rational(560, 3)
@@ -245,6 +247,16 @@ def test_physical_estimation_lifts_logical_estimates_to_runtime():
             },
             "sparsity is required",
         ),
+        (
+            {
+                "n_qubits": 1,
+                "lambda_norm": 1,
+                "precision": 1,
+                "walk_cost_toffoli": 1,
+                "qpe_register_qubits": -1,
+            },
+            "qpe_register_qubits",
+        ),
     ],
 )
 def test_qubitized_qpe_rejects_invalid_inputs(
@@ -256,6 +268,22 @@ def test_qubitized_qpe_rejects_invalid_inputs(
         estimate_qubitized_qpe_resources(**kwargs)
 
 
+def test_qubitized_qpe_adds_qpe_register_qubits_to_logical_footprint():
+    """Explicit QPE readout registers are counted in logical qubits."""
+    estimate = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        logical_qubits=7,
+        qpe_register_qubits=3,
+    )
+
+    assert estimate.qubits == 10
+    assert estimate.gates.oracle_calls["qpe_iterations"] == 4
+    assert estimate.gates.multi_qubit == 40
+
+
 def test_workload_rejects_negative_representation_error():
     """Representation error budgets cannot be negative."""
     summary = summarize_pauli_hamiltonian(qm_o.Z(0))
@@ -265,6 +293,18 @@ def test_workload_rejects_negative_representation_error():
             hamiltonian=summary,
             walk_cost_toffoli=1,
             representation_error=-1,
+        )
+
+
+def test_workload_rejects_negative_qpe_register_qubits():
+    """QPE register qubit metadata cannot be negative."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0))
+
+    with pytest.raises(ValueError, match="qpe_register_qubits"):
+        HamiltonianQPEWorkload(
+            hamiltonian=summary,
+            walk_cost_toffoli=1,
+            qpe_register_qubits=-1,
         )
 
 

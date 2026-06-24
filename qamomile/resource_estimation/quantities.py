@@ -522,7 +522,7 @@ def compare_resource_values(
         candidate (_ResourceValuesInput): Candidate resource values. Accepts
             the same shapes as ``baseline``.
         quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
-            compare. Defaults to the intersection of quantities exposed by both
+            compare. Defaults to nonzero-baseline quantities exposed by both
             inputs, ordered by the canonical quantity catalog.
 
     Returns:
@@ -683,7 +683,8 @@ def _normalize_comparison_quantities(
         baseline_values (dict[ResourceQuantity, sp.Expr]): Baseline values.
         candidate_values (dict[ResourceQuantity, sp.Expr]): Candidate values.
         quantities (tuple[str | ResourceQuantity, ...] | None): Requested
-            quantities or None for the canonical intersection.
+            quantities or None for the nonzero-baseline canonical
+            intersection.
 
     Returns:
         tuple[ResourceQuantity, ...]: Normalized quantities.
@@ -694,7 +695,10 @@ def _normalize_comparison_quantities(
     if quantities is None:
         common = set(baseline_values) & set(candidate_values)
         return tuple(
-            spec.quantity for spec in RESOURCE_QUANTITY_SPECS if spec.quantity in common
+            spec.quantity
+            for spec in RESOURCE_QUANTITY_SPECS
+            if spec.quantity in common
+            and not baseline_values[spec.quantity].equals(sp.Integer(0))
         )
 
     normalized = tuple(
