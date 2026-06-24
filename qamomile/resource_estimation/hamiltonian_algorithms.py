@@ -192,9 +192,38 @@ class HamiltonianQPEWorkload:
             self.walk_cost_toffoli,
             "walk_cost_toffoli",
         )
+        values["representation_error"] = _as_expr(
+            self.representation_error,
+            "representation_error",
+        )
         if self.effective_sparsity is not None:
             values["n_pauli_terms"] = self.effective_sparsity
         return values
+
+    def algorithmic_precision(self, precision: _SympyLike) -> sp.Expr:
+        """Return precision remaining after representation error.
+
+        Args:
+            precision (sp.Expr | int | float): Total target energy precision
+                budget.
+
+        Returns:
+            sp.Expr: Precision budget available to phase estimation after
+                subtracting ``representation_error``.
+
+        Raises:
+            ValueError: If ``precision`` is non-positive or if the remaining
+                algorithmic precision is provably non-positive.
+            TypeError: If ``precision`` cannot be converted into a SymPy
+                expression.
+        """
+        precision_expr = _as_expr(precision, "precision")
+        _validate_positive(precision_expr, "precision")
+        remaining = sp.simplify(
+            precision_expr - _as_expr(self.representation_error, "representation_error")
+        )
+        _validate_positive(remaining, "algorithmic_precision")
+        return remaining
 
 
 def estimate_qubitized_qpe_resources(
@@ -283,22 +312,24 @@ def estimate_qubitized_qpe_resources_from_workload(
     Args:
         workload (HamiltonianQPEWorkload): Hamiltonian workload carrying
             lambda norm, sparsity/rank metadata, and walk cost.
-        precision (sp.Expr | int | float): Target phase-estimation energy
-            precision.
+        precision (sp.Expr | int | float): Total target energy precision
+            budget. ``workload.representation_error`` is subtracted before
+            estimating QPE iterations.
 
     Returns:
         ResourceEstimate: Architecture-independent logical resource estimate.
 
     Raises:
         TypeError: If ``workload`` is not a ``HamiltonianQPEWorkload``.
-        ValueError: If ``precision`` is non-positive.
+        ValueError: If ``precision`` is non-positive or if the representation
+            error consumes the full precision budget.
     """
     if not isinstance(workload, HamiltonianQPEWorkload):
         raise TypeError("workload must be a HamiltonianQPEWorkload instance.")
     return estimate_qubitized_qpe_resources(
         n_qubits=workload.hamiltonian.n_qubits,
         lambda_norm=workload.hamiltonian.lambda_norm,
-        precision=precision,
+        precision=workload.algorithmic_precision(precision),
         walk_cost_toffoli=_as_expr(workload.walk_cost_toffoli, "walk_cost_toffoli"),
         representation=workload.normalized_representation,
         sparsity=workload.effective_sparsity,

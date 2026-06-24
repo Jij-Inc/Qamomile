@@ -10,7 +10,9 @@ from qamomile.resource_estimation import (
     FTQCCostModel,
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
+    ResourceQuantity,
     SurfaceCodeCostModel,
+    compare_resource_values,
     estimate_physical_resources,
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
@@ -228,6 +230,63 @@ def test_workload_rejects_negative_representation_error():
             walk_cost_toffoli=1,
             representation_error=-1,
         )
+
+
+def test_workload_representation_error_consumes_precision_budget():
+    """Representation error increases QPE iterations by reducing precision."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0) + 2 * qm_o.X(1))
+    exact = HamiltonianQPEWorkload(
+        hamiltonian=summary,
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        walk_cost_toffoli=10,
+    )
+    approximate = HamiltonianQPEWorkload(
+        hamiltonian=summary,
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        walk_cost_toffoli=10,
+        representation_error=sp.Rational(1, 4),
+    )
+
+    exact_logical = estimate_qubitized_qpe_resources_from_workload(
+        exact,
+        precision=1,
+    )
+    approximate_logical = estimate_qubitized_qpe_resources_from_workload(
+        approximate,
+        precision=1,
+    )
+    rows = compare_resource_values(
+        approximate,
+        exact,
+        quantities=(ResourceQuantity.REPRESENTATION_ERROR,),
+    )
+
+    # The toy Hamiltonian has lambda_norm = |1| + |2| = 3. With no
+    # representation error, qpe_iterations = 3 / 1. With error 1/4,
+    # the remaining algorithmic precision is 3/4, so iterations = 3 / (3/4).
+    assert sp.Abs(exact_logical.gates.oracle_calls["qpe_iterations"] - 3) < sp.Float(
+        "1e-12"
+    )
+    assert approximate.algorithmic_precision(1) == sp.Rational(3, 4)
+    assert sp.Abs(
+        approximate_logical.gates.oracle_calls["qpe_iterations"] - 4
+    ) < sp.Float("1e-12")
+    assert rows[0].baseline == sp.Rational(1, 4)
+    assert rows[0].candidate == 0
+
+
+def test_workload_rejects_exhausted_precision_budget():
+    """Representation error must leave positive precision for QPE."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0))
+    workload = HamiltonianQPEWorkload(
+        hamiltonian=summary,
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        walk_cost_toffoli=10,
+        representation_error=1,
+    )
+
+    with pytest.raises(ValueError, match="algorithmic_precision"):
+        estimate_qubitized_qpe_resources_from_workload(workload, precision=1)
 
 
 def test_logical_and_physical_substitute_recompute_free_parameters():
