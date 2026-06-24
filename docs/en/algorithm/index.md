@@ -8,6 +8,7 @@ Concrete quantum algorithm examples built with Qamomile.
 
 ## All articles
 
+- [Introduction to Quantum Fourier transform (QFT)](qft) — DFT background, QFT circuit steps, stdlib implementation, execution, and resource estimation
 - [QAOA for MaxCut](qaoa_maxcut) — Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`
 - [QAOA for Graph Partitioning](qaoa_graph_partition) — End-to-end optimization example using OMMX, JijModeling, and `QAOAConverter`
 - [VQE for the Hydrogen Molecule](vqe_for_hydrogen) — Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE

@@ -8,6 +8,7 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 
 ## すべての記事
 
+- [量子フーリエ変換（QFT）入門](qft) — DFTの背景、QFT回路の手順、標準ライブラリによる実装、実行、リソース推定
 - [QAOAでMaxCutを解く](qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
 - [QAOAによるグラフ分割](qaoa_graph_partition) — OMMX・JijModeling・`QAOAConverter`を使ったend-to-endの最適化例
 - [水素分子のためのVQE](vqe_for_hydrogen) — OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求める
