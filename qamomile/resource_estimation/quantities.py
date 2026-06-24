@@ -54,8 +54,12 @@ class ResourceQuantity(enum.StrEnum):
             qubitized walk.
         QPE_REGISTER_QUBITS: Optional QPE readout-register qubits.
         WALK_COST_TOFFOLI: Toffoli cost of one qubitized walk.
+        TARGET_PRECISION: Total target energy precision budget for an
+            algorithm estimate.
         REPRESENTATION_ERROR: Error budget consumed by Hamiltonian
             representation or compression before phase estimation.
+        ALGORITHMIC_PRECISION: Precision budget left for QPE after
+            representation error is removed.
         QPE_ITERATIONS: Number of phase-estimation walk or time-evolution
             calls.
         LOGICAL_QUBITS: Logical qubits required by an algorithm.
@@ -99,7 +103,9 @@ class ResourceQuantity(enum.StrEnum):
     REFLECTION_COST_TOFFOLI = "reflection_cost_toffoli"
     QPE_REGISTER_QUBITS = "qpe_register_qubits"
     WALK_COST_TOFFOLI = "walk_cost_toffoli"
+    TARGET_PRECISION = "target_precision"
     REPRESENTATION_ERROR = "representation_error"
+    ALGORITHMIC_PRECISION = "algorithmic_precision"
     QPE_ITERATIONS = "qpe_iterations"
     LOGICAL_QUBITS = "logical_qubits"
     LOGICAL_DEPTH = "logical_depth"
@@ -321,11 +327,25 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "Toffoli cost of one qubitized walk operator call.",
     ),
     ResourceQuantitySpec(
+        ResourceQuantity.TARGET_PRECISION,
+        "Target precision",
+        "energy",
+        ResourceCategory.ALGORITHM,
+        "Total energy precision budget requested for an algorithm estimate.",
+    ),
+    ResourceQuantitySpec(
         ResourceQuantity.REPRESENTATION_ERROR,
         "Representation error",
         "energy",
         ResourceCategory.ALGORITHM,
         "Energy error budget consumed before phase-estimation sampling.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.ALGORITHMIC_PRECISION,
+        "Algorithmic precision",
+        "energy",
+        ResourceCategory.ALGORITHM,
+        "Energy precision budget left for QPE after representation error.",
     ),
     ResourceQuantitySpec(
         ResourceQuantity.QPE_ITERATIONS,

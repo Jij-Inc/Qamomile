@@ -149,7 +149,7 @@ for n_val in [4, 8, 16, 32]:
 #
 # Fault-tolerant algorithms are usually compared before they are lowered to a backend circuit. Qamomile keeps that layer separate: use `qamomile.resource_estimation` to describe the Hamiltonian, estimate algorithm-level logical work, compare canonical quantities, and only then lift the result through an architecture model.
 #
-# In this toy example, each candidate starts as a block-encoding contract. The contract records the Hamiltonian normalization, PREPARE/SELECT/reflection costs, ancilla footprint, QPE readout register size, and optional representation error. Those quantities are enough to build a Hamiltonian QPE workload without committing to a backend circuit.
+# In this toy example, each candidate starts as a block-encoding contract. The contract records the Hamiltonian normalization, PREPARE/SELECT/reflection costs, ancilla footprint, QPE readout register size, and optional representation error. Those quantities are enough to build a Hamiltonian QPE workload without committing to a backend circuit. When a target precision is supplied, the workload can also expose the remaining QPE precision budget as a canonical quantity.
 #
 # :::{note}
 # Recent chemistry resource-estimation work, such as [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502) and [unitary weight concentration](https://arxiv.org/abs/2603.22778), often compares algorithms through the Hamiltonian normalization, representation error, walk-operator cost, Toffoli count, logical qubits, runtime, and space-time volume. This tutorial does not reproduce those papers; it shows the Qamomile resource quantities needed to build that kind of comparison.
@@ -216,6 +216,17 @@ logical_rows = qre.compare_resource_values(
 for row in logical_rows:
     print(row.to_dict())
 
+precision_rows = qre.compare_resource_values(
+    baseline_workload.resource_values_for_precision(1),
+    candidate_workload.resource_values_for_precision(1),
+    quantities=(
+        qre.ResourceQuantity.TARGET_PRECISION,
+        qre.ResourceQuantity.ALGORITHMIC_PRECISION,
+    ),
+)
+for row in precision_rows:
+    print(row.to_dict())
+
 assert (
     candidate_logical.gates.oracle_calls["qpe_iterations"]
     < baseline_logical.gates.oracle_calls["qpe_iterations"]
@@ -223,6 +234,8 @@ assert (
 assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
 assert candidate_workload.qpe_register_qubits == 2
 assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
+assert precision_rows[0].ratio == 1
+assert precision_rows[1].candidate == sp.Rational(9, 10)
 
 # %% [markdown]
 # `compare_resource_values()` accepts logical `ResourceEstimate` objects directly. For a physical proxy, provide a compact architecture model. The estimate below is not a hardware design; it is a consistent way to compare candidates under the same surface-code-style assumptions.

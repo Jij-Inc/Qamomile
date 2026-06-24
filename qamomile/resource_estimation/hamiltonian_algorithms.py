@@ -215,6 +215,34 @@ class HamiltonianQPEWorkload:
             values["n_pauli_terms"] = self.effective_sparsity
         return values
 
+    def resource_values_for_precision(
+        self, precision: _SympyLike
+    ) -> dict[str, sp.Expr]:
+        """Return canonical resource values for one target precision.
+
+        Args:
+            precision (sp.Expr | int | float): Total target energy precision
+                budget used to derive the algorithmic precision available to
+                phase estimation.
+
+        Returns:
+            dict[str, sp.Expr]: Workload resource values plus
+                ``target_precision`` and ``algorithmic_precision``.
+
+        Raises:
+            ValueError: If ``precision`` is non-positive or if
+                ``representation_error`` leaves no positive precision for QPE.
+            TypeError: If ``precision`` cannot be converted into a SymPy
+                expression.
+        """
+        precision_expr = _as_expr(precision, "precision")
+        _validate_positive(precision_expr, "precision")
+
+        values = self.resource_values()
+        values["target_precision"] = precision_expr
+        values["algorithmic_precision"] = self.algorithmic_precision(precision_expr)
+        return values
+
     def algorithmic_precision(self, precision: _SympyLike) -> sp.Expr:
         """Return precision remaining after representation error.
 

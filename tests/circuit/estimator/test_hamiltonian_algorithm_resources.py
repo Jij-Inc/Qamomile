@@ -332,9 +332,17 @@ def test_workload_representation_error_consumes_precision_budget():
         precision=1,
     )
     rows = compare_resource_values(
-        approximate,
-        exact,
+        approximate.resource_values_for_precision(1),
+        exact.resource_values_for_precision(1),
         quantities=(ResourceQuantity.REPRESENTATION_ERROR,),
+    )
+    precision_rows = compare_resource_values(
+        exact.resource_values_for_precision(1),
+        approximate.resource_values_for_precision(1),
+        quantities=(
+            ResourceQuantity.TARGET_PRECISION,
+            ResourceQuantity.ALGORITHMIC_PRECISION,
+        ),
     )
 
     # The toy Hamiltonian has lambda_norm = |1| + |2| = 3. With no
@@ -349,6 +357,12 @@ def test_workload_representation_error_consumes_precision_budget():
     ) < sp.Float("1e-12")
     assert rows[0].baseline == sp.Rational(1, 4)
     assert rows[0].candidate == 0
+    assert precision_rows[0].quantity == ResourceQuantity.TARGET_PRECISION
+    assert precision_rows[0].ratio == 1
+    assert precision_rows[1].quantity == ResourceQuantity.ALGORITHMIC_PRECISION
+    assert precision_rows[1].baseline == 1
+    assert precision_rows[1].candidate == sp.Rational(3, 4)
+    assert precision_rows[1].ratio == sp.Rational(3, 4)
 
 
 def test_workload_rejects_exhausted_precision_budget():
@@ -363,6 +377,9 @@ def test_workload_rejects_exhausted_precision_budget():
 
     with pytest.raises(ValueError, match="algorithmic_precision"):
         estimate_qubitized_qpe_resources_from_workload(workload, precision=1)
+
+    with pytest.raises(ValueError, match="algorithmic_precision"):
+        workload.resource_values_for_precision(1)
 
 
 def test_logical_and_physical_substitute_recompute_free_parameters():

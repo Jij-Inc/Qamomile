@@ -149,7 +149,7 @@ for n_val in [4, 8, 16, 32]:
 #
 # Fault-tolerantアルゴリズムは、backend circuitへloweringする前に比較することがよくあります。Qamomileではこの層を分けて扱います。`qamomile.resource_estimation`を使うと、Hamiltonianの記述、アルゴリズムレベルの論理リソース推定、canonical quantityによる比較、architecture modelを通した物理リソースproxyへの変換を順に扱えます。
 #
-# この小さな例では、各候補をblock-encoding contractとして表します。このcontractには、Hamiltonian normalization、PREPARE/SELECT/reflectionのコスト、ancilla footprint、QPE readout registerのサイズ、任意のrepresentation errorを記録します。これらのquantityがあれば、backend circuitに固定せずにHamiltonian QPE workloadを作れます。
+# この小さな例では、各候補をblock-encoding contractとして表します。このcontractには、Hamiltonian normalization、PREPARE/SELECT/reflectionのコスト、ancilla footprint、QPE readout registerのサイズ、任意のrepresentation errorを記録します。これらのquantityがあれば、backend circuitに固定せずにHamiltonian QPE workloadを作れます。target precisionを与えると、workloadはQPEに残るprecision budgetもcanonical quantityとして公開できます。
 #
 # :::{note}
 # [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502)や[unitary weight concentration](https://arxiv.org/abs/2603.22778)のような近年の量子化学リソース推定では、Hamiltonian normalization、representation error、walk operatorのコスト、Toffoli数、論理量子ビット数、runtime、space-time volumeなどを通してアルゴリズムを比較します。このチュートリアルはこれらの論文の再現ではありません。そのような比較を組み立てるために必要なQamomileのresource quantityを示します。
@@ -216,6 +216,17 @@ logical_rows = qre.compare_resource_values(
 for row in logical_rows:
     print(row.to_dict())
 
+precision_rows = qre.compare_resource_values(
+    baseline_workload.resource_values_for_precision(1),
+    candidate_workload.resource_values_for_precision(1),
+    quantities=(
+        qre.ResourceQuantity.TARGET_PRECISION,
+        qre.ResourceQuantity.ALGORITHMIC_PRECISION,
+    ),
+)
+for row in precision_rows:
+    print(row.to_dict())
+
 assert (
     candidate_logical.gates.oracle_calls["qpe_iterations"]
     < baseline_logical.gates.oracle_calls["qpe_iterations"]
@@ -223,6 +234,8 @@ assert (
 assert candidate_logical.gates.multi_qubit < baseline_logical.gates.multi_qubit
 assert candidate_workload.qpe_register_qubits == 2
 assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
+assert precision_rows[0].ratio == 1
+assert precision_rows[1].candidate == sp.Rational(9, 10)
 
 # %% [markdown]
 # `compare_resource_values()`は論理`ResourceEstimate`オブジェクトを直接受け取れます。物理リソースproxyが必要な場合は、コンパクトなarchitecture modelを渡します。次の推定はhardware designではありません。同じsurface-code風の仮定のもとで候補を比較するための一貫した方法です。

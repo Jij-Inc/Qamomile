@@ -31,6 +31,8 @@ def test_quantity_specs_cover_core_resource_layers():
     categories = {spec.category for spec in specs}
 
     assert ResourceQuantity.LAMBDA_NORM in quantities
+    assert ResourceQuantity.TARGET_PRECISION in quantities
+    assert ResourceQuantity.ALGORITHMIC_PRECISION in quantities
     assert ResourceQuantity.NON_CLIFFORD_COUNT in quantities
     assert ResourceQuantity.LOGICAL_SPACETIME_VOLUME in quantities
     assert ResourceQuantity.PHYSICAL_QUBITS in quantities
@@ -298,8 +300,43 @@ def test_compare_resource_values_default_skips_zero_baseline_quantities():
     quantities = [row.quantity for row in rows]
     assert ResourceQuantity.REPRESENTATION_ERROR not in quantities
     assert ResourceQuantity.QPE_REGISTER_QUBITS not in quantities
+    assert ResourceQuantity.TARGET_PRECISION not in quantities
+    assert ResourceQuantity.ALGORITHMIC_PRECISION not in quantities
     assert ResourceQuantity.LAMBDA_NORM in quantities
     assert ResourceQuantity.WALK_COST_TOFFOLI in quantities
+
+
+def test_compare_resource_values_accepts_precision_aware_workload_values():
+    """Precision-aware workload values expose target and QPE error budgets."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0) + qm_o.X(1))
+    baseline = HamiltonianQPEWorkload(
+        hamiltonian=summary,
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        walk_cost_toffoli=10,
+    )
+    candidate = HamiltonianQPEWorkload(
+        hamiltonian=summary.with_lambda_scale(sp.Rational(1, 2)),
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        walk_cost_toffoli=5,
+        representation_error=sp.Rational(1, 10),
+    )
+    rows = compare_resource_values(
+        baseline.resource_values_for_precision(1),
+        candidate.resource_values_for_precision(1),
+        quantities=(
+            ResourceQuantity.TARGET_PRECISION,
+            ResourceQuantity.ALGORITHMIC_PRECISION,
+        ),
+    )
+
+    assert rows[0].quantity == ResourceQuantity.TARGET_PRECISION
+    assert rows[0].baseline == 1
+    assert rows[0].candidate == 1
+    assert rows[0].ratio == 1
+    assert rows[1].quantity == ResourceQuantity.ALGORITHMIC_PRECISION
+    assert rows[1].baseline == 1
+    assert rows[1].candidate == sp.Rational(9, 10)
+    assert rows[1].ratio == sp.Rational(9, 10)
 
 
 def test_compare_resource_values_rejects_missing_or_zero_baseline():
