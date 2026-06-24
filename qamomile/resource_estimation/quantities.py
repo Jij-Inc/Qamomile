@@ -60,8 +60,19 @@ class ResourceQuantity(enum.StrEnum):
             representation or compression before phase estimation.
         ALGORITHMIC_PRECISION: Precision budget left for QPE after
             representation error is removed.
+        EFFECTIVE_LAMBDA_NORM: Hamiltonian normalization after algorithmic
+            weight reduction.
+        TROTTER_STEPS_PER_SAMPLE: Product-formula steps per sampled time.
+        TROTTER_SAMPLES: Number of sampled times or signal-processing shots.
+        UNITARY_WEIGHT_FACTOR: Multiplicative reduction applied to Hamiltonian
+            weight.
+        RANDOMIZED_COMPILATION_FACTOR: Multiplicative cost factor from
+            randomized time evolution or compilation.
+        ROTATION_SYNTHESIS_T_GATES: T gates used to synthesize one Pauli
+            rotation.
         QPE_ITERATIONS: Number of phase-estimation walk or time-evolution
             calls.
+        PAULI_ROTATIONS: Pauli rotations used by product-formula evolution.
         LOGICAL_QUBITS: Logical qubits required by an algorithm.
         LOGICAL_DEPTH: Logical-depth proxy.
         LOGICAL_SPACETIME_VOLUME: Logical qubit-layer volume proxy.
@@ -106,7 +117,14 @@ class ResourceQuantity(enum.StrEnum):
     TARGET_PRECISION = "target_precision"
     REPRESENTATION_ERROR = "representation_error"
     ALGORITHMIC_PRECISION = "algorithmic_precision"
+    EFFECTIVE_LAMBDA_NORM = "effective_lambda_norm"
+    TROTTER_STEPS_PER_SAMPLE = "trotter_steps_per_sample"
+    TROTTER_SAMPLES = "trotter_samples"
+    UNITARY_WEIGHT_FACTOR = "unitary_weight_factor"
+    RANDOMIZED_COMPILATION_FACTOR = "randomized_compilation_factor"
+    ROTATION_SYNTHESIS_T_GATES = "rotation_synthesis_t_gates"
     QPE_ITERATIONS = "qpe_iterations"
+    PAULI_ROTATIONS = "pauli_rotations"
     LOGICAL_QUBITS = "logical_qubits"
     LOGICAL_DEPTH = "logical_depth"
     LOGICAL_SPACETIME_VOLUME = "logical_spacetime_volume"
@@ -135,6 +153,8 @@ class ResourceReviewProfile(enum.StrEnum):
     Attributes:
         HAMILTONIAN_QPE_WORKLOAD: Problem and algorithm inputs that drive a
             Hamiltonian QPE workload.
+        TROTTER_QPE_WORKLOAD: Product-formula and weight-reduction inputs
+            that drive a Trotter QPE workload.
         FTQC_LOGICAL_OUTCOMES: Logical algorithm outcomes before architecture
             lifting.
         FTQC_PHYSICAL_OUTCOMES: Physical proxy outcomes after architecture
@@ -148,6 +168,7 @@ class ResourceReviewProfile(enum.StrEnum):
     """
 
     HAMILTONIAN_QPE_WORKLOAD = "hamiltonian_qpe_workload"
+    TROTTER_QPE_WORKLOAD = "trotter_qpe_workload"
     FTQC_LOGICAL_OUTCOMES = "ftqc_logical_outcomes"
     FTQC_PHYSICAL_OUTCOMES = "ftqc_physical_outcomes"
     SURFACE_CODE_ARCHITECTURE = "surface_code_architecture"
@@ -678,11 +699,60 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "Energy precision budget left for QPE after representation error.",
     ),
     ResourceQuantitySpec(
+        ResourceQuantity.EFFECTIVE_LAMBDA_NORM,
+        "Effective Hamiltonian normalization",
+        "energy",
+        ResourceCategory.ALGORITHM,
+        "Hamiltonian normalization after algorithmic weight reduction.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.TROTTER_STEPS_PER_SAMPLE,
+        "Trotter steps per sample",
+        "steps / sample",
+        ResourceCategory.ALGORITHM,
+        "Product-formula steps used for one sampled time-evolution segment.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.TROTTER_SAMPLES,
+        "Trotter samples",
+        "samples",
+        ResourceCategory.ALGORITHM,
+        "Number of sampled time points or signal-processing shots.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.UNITARY_WEIGHT_FACTOR,
+        "Unitary weight factor",
+        "multiplier",
+        ResourceCategory.ALGORITHM,
+        "Multiplicative Hamiltonian-weight reduction applied before QPE.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.RANDOMIZED_COMPILATION_FACTOR,
+        "Randomized compilation factor",
+        "multiplier",
+        ResourceCategory.ALGORITHM,
+        "Multiplicative product-formula cost factor from randomized evolution.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.ROTATION_SYNTHESIS_T_GATES,
+        "Rotation synthesis cost",
+        "T gates / rotation",
+        ResourceCategory.ALGORITHM,
+        "T gates used to synthesize one Pauli rotation.",
+    ),
+    ResourceQuantitySpec(
         ResourceQuantity.QPE_ITERATIONS,
         "QPE iterations",
         "iterations",
         ResourceCategory.ALGORITHM,
         "Number of QPE walk or time-evolution calls.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.PAULI_ROTATIONS,
+        "Pauli rotations",
+        "rotations",
+        ResourceCategory.LOGICAL,
+        "Pauli rotations used by product-formula time evolution.",
     ),
     ResourceQuantitySpec(
         ResourceQuantity.LOGICAL_QUBITS,
@@ -840,6 +910,24 @@ RESOURCE_REVIEW_PROFILES: tuple[ResourceQuantityProfile, ...] = (
             ResourceQuantity.WALK_COST_TOFFOLI,
             ResourceQuantity.QPE_REGISTER_QUBITS,
             ResourceQuantity.REPRESENTATION_ERROR,
+            ResourceQuantity.ALGORITHMIC_PRECISION,
+        ),
+    ),
+    ResourceQuantityProfile(
+        ResourceReviewProfile.TROTTER_QPE_WORKLOAD,
+        "Trotter QPE workload",
+        "Product-formula and weight-reduction quantities that drive Trotter QPE.",
+        (
+            ResourceQuantity.N_QUBITS,
+            ResourceQuantity.N_PAULI_TERMS,
+            ResourceQuantity.LAMBDA_NORM,
+            ResourceQuantity.EFFECTIVE_LAMBDA_NORM,
+            ResourceQuantity.TROTTER_STEPS_PER_SAMPLE,
+            ResourceQuantity.TROTTER_SAMPLES,
+            ResourceQuantity.UNITARY_WEIGHT_FACTOR,
+            ResourceQuantity.RANDOMIZED_COMPILATION_FACTOR,
+            ResourceQuantity.ROTATION_SYNTHESIS_T_GATES,
+            ResourceQuantity.TARGET_PRECISION,
             ResourceQuantity.ALGORITHMIC_PRECISION,
         ),
     ),
@@ -1308,6 +1396,7 @@ def resource_values_from_estimate(
         "non_clifford_count": sp.simplify(non_clifford_expr),
         "t_gates": estimate.gates.t_gates,
         "multi_qubit_gates": estimate.gates.multi_qubit,
+        "pauli_rotations": estimate.gates.rotation_gates,
     }
     if "qpe_iterations" in estimate.gates.oracle_calls:
         values["qpe_iterations"] = estimate.gates.oracle_calls["qpe_iterations"]

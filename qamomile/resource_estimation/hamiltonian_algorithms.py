@@ -351,6 +351,232 @@ class HamiltonianQPEWorkload:
         )
 
 
+@dataclass(frozen=True)
+class TrotterQPEWorkload:
+    """Describe a product-formula QPE workload for resource reviews.
+
+    The workload keeps product-formula and unitary-weight assumptions symbolic
+    so recent low-qubit chemistry proposals can be compared against
+    qubitized-QPE candidates without prematurely lowering either method to a
+    backend circuit.
+
+    Attributes:
+        hamiltonian (PauliHamiltonianResource): Generic Pauli Hamiltonian
+            resource summary.
+        trotter_steps_per_sample (sp.Expr | int | float): Product-formula
+            steps per sampled time-evolution segment.
+        samples (sp.Expr | int | float): Number of sampled time points or
+            signal-processing shots.
+        unitary_weight_factor (sp.Expr | int | float): Multiplicative
+            Hamiltonian-weight reduction. Values below one model unitary
+            weight concentration.
+        randomized_compilation_factor (sp.Expr | int | float): Multiplicative
+            product-formula cost factor from randomized evolution.
+        rotation_synthesis_t_gates (sp.Expr | int | float): T-gate cost for
+            one Pauli rotation.
+        logical_qubits (sp.Expr | int | float | None): Explicit logical-qubit
+            count. Defaults to data qubits plus one Hadamard-test ancilla.
+        representation_error (sp.Expr | int | float): Energy error consumed
+            before phase estimation.
+        description (str): Reader-facing workload label.
+
+    Raises:
+        TypeError: If ``hamiltonian`` is not a ``PauliHamiltonianResource``.
+        ValueError: If a positive-valued quantity is non-positive or if a
+            reduction/error quantity is negative.
+
+    Example:
+        >>> summary = PauliHamiltonianResource(
+        ...     n_qubits=4,
+        ...     n_pauli_terms=10,
+        ...     lambda_norm=20,
+        ...     max_locality=2,
+        ... )
+        >>> workload = TrotterQPEWorkload(
+        ...     summary,
+        ...     trotter_steps_per_sample=2,
+        ...     samples=5,
+        ...     unitary_weight_factor=sp.Rational(1, 4),
+        ... )
+        >>> workload.effective_lambda_norm
+        5
+    """
+
+    hamiltonian: PauliHamiltonianResource
+    trotter_steps_per_sample: _SympyLike
+    samples: _SympyLike
+    unitary_weight_factor: _SympyLike = 1
+    randomized_compilation_factor: _SympyLike = 1
+    rotation_synthesis_t_gates: _SympyLike = 1
+    logical_qubits: _SympyLike | None = None
+    representation_error: _SympyLike = 0
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate workload fields after dataclass construction.
+
+        Raises:
+            TypeError: If ``hamiltonian`` is not a
+                ``PauliHamiltonianResource``.
+            ValueError: If a positive-valued quantity is non-positive or if a
+                reduction/error quantity is negative.
+        """
+        if not isinstance(self.hamiltonian, PauliHamiltonianResource):
+            raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
+        for name, value in {
+            "trotter_steps_per_sample": self.trotter_steps_per_sample,
+            "samples": self.samples,
+            "rotation_synthesis_t_gates": self.rotation_synthesis_t_gates,
+        }.items():
+            _validate_positive(_as_expr(value, name), name)
+        if self.logical_qubits is not None:
+            _validate_positive(
+                _as_expr(self.logical_qubits, "logical_qubits"),
+                "logical_qubits",
+            )
+        for name, value in {
+            "unitary_weight_factor": self.unitary_weight_factor,
+            "randomized_compilation_factor": self.randomized_compilation_factor,
+            "representation_error": self.representation_error,
+        }.items():
+            _validate_nonnegative(_as_expr(value, name), name)
+
+    @property
+    def effective_lambda_norm(self) -> sp.Expr:
+        """Return Hamiltonian normalization after weight concentration.
+
+        Returns:
+            sp.Expr: ``lambda_norm * unitary_weight_factor``.
+        """
+        return sp.simplify(
+            self.hamiltonian.lambda_norm
+            * _as_expr(self.unitary_weight_factor, "unitary_weight_factor")
+        )
+
+    def algorithmic_precision(self, precision: _SympyLike) -> sp.Expr:
+        """Return precision remaining after representation error.
+
+        Args:
+            precision (sp.Expr | int | float): Total target energy precision
+                budget.
+
+        Returns:
+            sp.Expr: Precision budget available to phase estimation.
+
+        Raises:
+            ValueError: If ``precision`` is non-positive or if the remaining
+                precision is provably non-positive.
+            TypeError: If ``precision`` cannot be converted to a SymPy
+                expression.
+        """
+        precision_expr = _as_expr(precision, "precision")
+        _validate_positive(precision_expr, "precision")
+        remaining = sp.simplify(
+            precision_expr - _as_expr(self.representation_error, "representation_error")
+        )
+        _validate_positive(remaining, "algorithmic_precision")
+        return remaining
+
+    def resource_values(self) -> dict[str, sp.Expr]:
+        """Return canonical resource values exposed by the workload.
+
+        Returns:
+            dict[str, sp.Expr]: Hamiltonian and product-formula workload
+                quantities.
+        """
+        values = self.hamiltonian.resource_values()
+        values["effective_lambda_norm"] = self.effective_lambda_norm
+        values["trotter_steps_per_sample"] = _as_expr(
+            self.trotter_steps_per_sample,
+            "trotter_steps_per_sample",
+        )
+        values["trotter_samples"] = _as_expr(self.samples, "samples")
+        values["unitary_weight_factor"] = _as_expr(
+            self.unitary_weight_factor,
+            "unitary_weight_factor",
+        )
+        values["randomized_compilation_factor"] = _as_expr(
+            self.randomized_compilation_factor,
+            "randomized_compilation_factor",
+        )
+        values["rotation_synthesis_t_gates"] = _as_expr(
+            self.rotation_synthesis_t_gates,
+            "rotation_synthesis_t_gates",
+        )
+        values["representation_error"] = _as_expr(
+            self.representation_error,
+            "representation_error",
+        )
+        return values
+
+    def resource_values_for_precision(
+        self,
+        precision: _SympyLike,
+    ) -> dict[str, sp.Expr]:
+        """Return canonical resource values for one target precision.
+
+        Args:
+            precision (sp.Expr | int | float): Total target precision budget.
+
+        Returns:
+            dict[str, sp.Expr]: Workload values plus target and algorithmic
+                precision.
+
+        Raises:
+            ValueError: If ``precision`` is non-positive or exhausted by
+                ``representation_error``.
+            TypeError: If ``precision`` cannot be converted to a SymPy
+                expression.
+        """
+        precision_expr = _as_expr(precision, "precision")
+        _validate_positive(precision_expr, "precision")
+        values = self.resource_values()
+        values["target_precision"] = precision_expr
+        values["algorithmic_precision"] = self.algorithmic_precision(precision_expr)
+        return values
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the workload to a JSON-friendly dictionary.
+
+        Returns:
+            dict[str, Any]: String-valued workload metadata.
+        """
+        return {
+            "hamiltonian": self.hamiltonian.to_dict(),
+            "trotter_steps_per_sample": str(
+                _as_expr(
+                    self.trotter_steps_per_sample,
+                    "trotter_steps_per_sample",
+                )
+            ),
+            "samples": str(_as_expr(self.samples, "samples")),
+            "unitary_weight_factor": str(
+                _as_expr(self.unitary_weight_factor, "unitary_weight_factor")
+            ),
+            "randomized_compilation_factor": str(
+                _as_expr(
+                    self.randomized_compilation_factor,
+                    "randomized_compilation_factor",
+                )
+            ),
+            "rotation_synthesis_t_gates": str(
+                _as_expr(
+                    self.rotation_synthesis_t_gates,
+                    "rotation_synthesis_t_gates",
+                )
+            ),
+            "logical_qubits": (
+                None
+                if self.logical_qubits is None
+                else str(_as_expr(self.logical_qubits, "logical_qubits"))
+            ),
+            "representation_error": str(
+                _as_expr(self.representation_error, "representation_error")
+            ),
+            "description": self.description,
+        }
+
+
 def estimate_qubitized_qpe_resources(
     n_qubits: sp.Expr | int,
     lambda_norm: _SympyLike,
@@ -573,6 +799,59 @@ def estimate_trotter_qpe_resources(
         clifford_gates=sp.Integer(0),
         rotation_gates=pauli_rotations,
         qpe_iterations=qpe_iterations,
+    )
+
+
+def estimate_trotter_qpe_resources_from_workload(
+    workload: TrotterQPEWorkload,
+    precision: _SympyLike,
+) -> ResourceEstimate:
+    """Estimate logical Trotter-QPE resources from a workload object.
+
+    Args:
+        workload (TrotterQPEWorkload): Product-formula workload carrying
+            Hamiltonian, sampling, unitary-weight, and synthesis assumptions.
+        precision (sp.Expr | int | float): Total target energy precision
+            budget. ``workload.representation_error`` is subtracted before
+            estimating QPE iterations.
+
+    Returns:
+        ResourceEstimate: Architecture-independent logical resource estimate.
+
+    Raises:
+        TypeError: If ``workload`` is not a ``TrotterQPEWorkload``.
+        ValueError: If ``precision`` is non-positive or exhausted by the
+            workload representation error.
+    """
+    if not isinstance(workload, TrotterQPEWorkload):
+        raise TypeError("workload must be a TrotterQPEWorkload instance.")
+    return estimate_trotter_qpe_resources(
+        n_qubits=workload.hamiltonian.n_qubits,
+        n_pauli_terms=workload.hamiltonian.n_pauli_terms,
+        lambda_norm=workload.hamiltonian.lambda_norm,
+        precision=workload.algorithmic_precision(precision),
+        trotter_steps_per_sample=_as_expr(
+            workload.trotter_steps_per_sample,
+            "trotter_steps_per_sample",
+        ),
+        samples=_as_expr(workload.samples, "samples"),
+        unitary_weight_factor=_as_expr(
+            workload.unitary_weight_factor,
+            "unitary_weight_factor",
+        ),
+        randomized_compilation_factor=_as_expr(
+            workload.randomized_compilation_factor,
+            "randomized_compilation_factor",
+        ),
+        rotation_synthesis_t_gates=_as_expr(
+            workload.rotation_synthesis_t_gates,
+            "rotation_synthesis_t_gates",
+        ),
+        logical_qubits=(
+            None
+            if workload.logical_qubits is None
+            else _as_expr(workload.logical_qubits, "logical_qubits")
+        ),
     )
 
 

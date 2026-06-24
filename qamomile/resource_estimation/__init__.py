@@ -26,10 +26,12 @@ from qamomile.resource_estimation.hamiltonian import (
 from qamomile.resource_estimation.hamiltonian_algorithms import (
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
+    TrotterQPEWorkload,
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
     estimate_trotter_qpe_resources,
     estimate_trotter_qpe_resources_from_hamiltonian,
+    estimate_trotter_qpe_resources_from_workload,
 )
 from qamomile.resource_estimation.quantities import (
     ResourceCategory,
@@ -75,6 +77,7 @@ __all__ = [
     "ResourceSymbolDriverRow",
     "ResourceSymbolDependencyRow",
     "SurfaceCodeCostModel",
+    "TrotterQPEWorkload",
     "audit_resource_value_drivers",
     "audit_resource_value_symbols",
     "compare_resource_values",
@@ -90,6 +93,7 @@ __all__ = [
     "estimate_resources",
     "estimate_trotter_qpe_resources",
     "estimate_trotter_qpe_resources_from_hamiltonian",
+    "estimate_trotter_qpe_resources_from_workload",
     "hamiltonian_from_openfermion_qubit_operator",
     "iter_resource_review_profiles",
     "iter_resource_quantity_specs",

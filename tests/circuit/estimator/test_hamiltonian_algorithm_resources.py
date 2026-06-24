@@ -13,12 +13,15 @@ from qamomile.resource_estimation import (
     HamiltonianRepresentation,
     ResourceQuantity,
     SurfaceCodeCostModel,
+    TrotterQPEWorkload,
     compare_resource_values,
     estimate_physical_resources,
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
     estimate_trotter_qpe_resources,
     estimate_trotter_qpe_resources_from_hamiltonian,
+    estimate_trotter_qpe_resources_from_workload,
+    resource_values_from_estimate,
     summarize_pauli_hamiltonian,
 )
 
@@ -170,6 +173,39 @@ def test_trotter_qpe_models_unitary_weight_reduction():
     assert concentrated.gates.t_gates == 15000
     assert concentrated.qubits == 21
     assert concentrated.gates.total < baseline.gates.total
+
+
+def test_trotter_workload_exposes_weight_concentration_drivers():
+    """Trotter workloads expose algorithm assumptions before logical lifting."""
+    summary = summarize_pauli_hamiltonian(qm_o.Z(0) + 2 * qm_o.X(1))
+    workload = TrotterQPEWorkload(
+        summary,
+        trotter_steps_per_sample=2,
+        samples=5,
+        unitary_weight_factor=sp.Rational(1, 3),
+        randomized_compilation_factor=sp.Rational(1, 2),
+        rotation_synthesis_t_gates=7,
+        representation_error=sp.Rational(1, 5),
+        description="unitary weight concentration",
+    )
+
+    logical = estimate_trotter_qpe_resources_from_workload(workload, precision=1)
+    workload_values = workload.resource_values_for_precision(1)
+    logical_values = resource_values_from_estimate(logical)
+
+    # The toy Hamiltonian has lambda_norm = |1| + |2| = 3. The
+    # unitary-weight factor reduces this to 1, and representation error 1/5
+    # leaves algorithmic precision 4/5, so QPE iterations are 1 / (4/5).
+    assert sp.Abs(workload.effective_lambda_norm - 1) < sp.Float("1e-12")
+    assert sp.Abs(workload_values["effective_lambda_norm"] - 1) < sp.Float("1e-12")
+    assert workload_values["algorithmic_precision"] == sp.Rational(4, 5)
+    assert sp.Abs(
+        logical.gates.oracle_calls["qpe_iterations"] - sp.Rational(5, 4)
+    ) < sp.Float("1e-12")
+    assert logical.gates.rotation_gates == 10
+    assert sp.Abs(logical.gates.t_gates - sp.Rational(175, 2)) < sp.Float("1e-12")
+    assert logical_values["pauli_rotations"] == 10
+    assert logical.qubits == 3
 
 
 def test_trotter_qpe_from_hamiltonian_summary():

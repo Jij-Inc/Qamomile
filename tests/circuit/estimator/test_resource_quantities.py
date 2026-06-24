@@ -85,6 +85,9 @@ def test_resource_review_profiles_group_recommended_quantity_sets():
     logical_profile = describe_resource_review_profile(
         ResourceReviewProfile.FTQC_LOGICAL_OUTCOMES
     )
+    trotter_profile = describe_resource_review_profile(
+        ResourceReviewProfile.TROTTER_QPE_WORKLOAD
+    )
     physical_profile = describe_resource_review_profile("ftqc_physical_outcomes")
 
     assert all(isinstance(profile, ResourceQuantityProfile) for profile in profiles)
@@ -97,6 +100,9 @@ def test_resource_review_profiles_group_recommended_quantity_sets():
         ResourceQuantity.NON_CLIFFORD_COUNT,
     )
     assert ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
+    assert ResourceQuantity.EFFECTIVE_LAMBDA_NORM in trotter_profile.quantities
+    assert ResourceQuantity.UNITARY_WEIGHT_FACTOR in trotter_profile.quantities
+    assert ResourceQuantity.ROTATION_SYNTHESIS_T_GATES in trotter_profile.quantities
     assert [spec.quantity for spec in physical_profile.specs()] == list(
         physical_profile.quantities
     )

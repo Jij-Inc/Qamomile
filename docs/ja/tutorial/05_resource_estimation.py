@@ -198,10 +198,14 @@ logical_profile = qre.describe_resource_review_profile(
 physical_profile = qre.describe_resource_review_profile(
     qre.ResourceReviewProfile.FTQC_PHYSICAL_OUTCOMES
 )
-for profile in (workload_profile, logical_profile, physical_profile):
+trotter_profile = qre.describe_resource_review_profile(
+    qre.ResourceReviewProfile.TROTTER_QPE_WORKLOAD
+)
+for profile in (workload_profile, trotter_profile, logical_profile, physical_profile):
     print(profile.to_dict())
 
 assert qre.ResourceQuantity.LAMBDA_NORM in workload_profile.quantities
+assert qre.ResourceQuantity.EFFECTIVE_LAMBDA_NORM in trotter_profile.quantities
 assert qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
 
 # %%
@@ -281,6 +285,46 @@ assert candidate_workload.qpe_register_qubits == 2
 assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
 assert precision_rows[0].ratio == 1
 assert precision_rows[1].candidate == sp.Rational(9, 10)
+
+# %% [markdown]
+# 別のアルゴリズムファミリーでは、block-encoding oracleの代わりにproduct-formula time evolutionと少ない論理量子ビット数を使うことがあります。`TrotterQPEWorkload`は、このような仮定を明示的に記録します。これはunitary weight concentrationやpartially randomized time evolutionに着想を得たデモに適した形です。このチュートリアルの数値は小さなtoy exampleですが、表示しているquantityはpaper-scale modelをauditするときと同じです。
+
+# %%
+uwc_workload = qre.TrotterQPEWorkload(
+    summary,
+    trotter_steps_per_sample=2,
+    samples=10,
+    unitary_weight_factor=sp.Rational(1, 9),
+    randomized_compilation_factor=sp.Rational(1, 2),
+    rotation_synthesis_t_gates=2,
+    description="unitary weight concentration toy model",
+)
+uwc_rows = qre.evaluate_resource_values(
+    uwc_workload.resource_values_for_precision(1),
+    quantities=trotter_profile.quantities,
+)
+for row in uwc_rows:
+    print(row.to_dict())
+
+uwc_logical = qre.estimate_trotter_qpe_resources_from_workload(
+    uwc_workload,
+    precision=1,
+)
+uwc_vs_baseline_rows = qre.compare_resource_values(
+    baseline_logical,
+    uwc_logical,
+    quantities=logical_profile.quantities,
+)
+for row in uwc_vs_baseline_rows:
+    print(row.to_dict())
+
+assert sp.Abs(uwc_workload.effective_lambda_norm - 1) < sp.Float("1e-12")
+assert uwc_logical.qubits == summary.n_qubits + 1
+assert (
+    sp.Abs(uwc_logical.gates.oracle_calls["qpe_iterations"] - 1)
+    < sp.Float("1e-12")
+)
+assert uwc_logical.gates.t_gates < baseline_logical.gates.multi_qubit
 
 # %% [markdown]
 # `compare_resource_values()`は論理`ResourceEstimate`オブジェクトを直接受け取れます。物理リソースproxyが必要な場合は、コンパクトなarchitecture modelを渡します。次の推定はhardware designではありません。同じsurface-code風の仮定のもとで候補を比較するための一貫した方法です。

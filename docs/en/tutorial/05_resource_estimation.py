@@ -198,10 +198,14 @@ logical_profile = qre.describe_resource_review_profile(
 physical_profile = qre.describe_resource_review_profile(
     qre.ResourceReviewProfile.FTQC_PHYSICAL_OUTCOMES
 )
-for profile in (workload_profile, logical_profile, physical_profile):
+trotter_profile = qre.describe_resource_review_profile(
+    qre.ResourceReviewProfile.TROTTER_QPE_WORKLOAD
+)
+for profile in (workload_profile, trotter_profile, logical_profile, physical_profile):
     print(profile.to_dict())
 
 assert qre.ResourceQuantity.LAMBDA_NORM in workload_profile.quantities
+assert qre.ResourceQuantity.EFFECTIVE_LAMBDA_NORM in trotter_profile.quantities
 assert qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
 
 # %%
@@ -281,6 +285,46 @@ assert candidate_workload.qpe_register_qubits == 2
 assert candidate_workload.algorithmic_precision(1) == sp.Rational(9, 10)
 assert precision_rows[0].ratio == 1
 assert precision_rows[1].candidate == sp.Rational(9, 10)
+
+# %% [markdown]
+# A different algorithm family may trade block-encoding oracles for product-formula time evolution and fewer logical qubits. `TrotterQPEWorkload` records those assumptions explicitly. This is the right shape for demonstrations inspired by unitary weight concentration or partially randomized time evolution: the tutorial numbers are intentionally tiny, but the visible quantities are the same ones you would audit in a paper-scale model.
+
+# %%
+uwc_workload = qre.TrotterQPEWorkload(
+    summary,
+    trotter_steps_per_sample=2,
+    samples=10,
+    unitary_weight_factor=sp.Rational(1, 9),
+    randomized_compilation_factor=sp.Rational(1, 2),
+    rotation_synthesis_t_gates=2,
+    description="unitary weight concentration toy model",
+)
+uwc_rows = qre.evaluate_resource_values(
+    uwc_workload.resource_values_for_precision(1),
+    quantities=trotter_profile.quantities,
+)
+for row in uwc_rows:
+    print(row.to_dict())
+
+uwc_logical = qre.estimate_trotter_qpe_resources_from_workload(
+    uwc_workload,
+    precision=1,
+)
+uwc_vs_baseline_rows = qre.compare_resource_values(
+    baseline_logical,
+    uwc_logical,
+    quantities=logical_profile.quantities,
+)
+for row in uwc_vs_baseline_rows:
+    print(row.to_dict())
+
+assert sp.Abs(uwc_workload.effective_lambda_norm - 1) < sp.Float("1e-12")
+assert uwc_logical.qubits == summary.n_qubits + 1
+assert (
+    sp.Abs(uwc_logical.gates.oracle_calls["qpe_iterations"] - 1)
+    < sp.Float("1e-12")
+)
+assert uwc_logical.gates.t_gates < baseline_logical.gates.multi_qubit
 
 # %% [markdown]
 # `compare_resource_values()` accepts logical `ResourceEstimate` objects directly. For a physical proxy, provide a compact architecture model. The estimate below is not a hardware design; it is a consistent way to compare candidates under the same surface-code-style assumptions.
