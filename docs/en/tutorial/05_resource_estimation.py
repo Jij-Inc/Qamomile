@@ -34,10 +34,11 @@
 # # !pip install qamomile
 
 # %%
+import sympy as sp
+
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 import qamomile.resource_estimation as qre
-import sympy as sp
 
 # %% [markdown]
 # ## Estimating Resources of a Fixed QKernel
@@ -211,6 +212,7 @@ assert qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantitie
 # %% [markdown]
 # Chemistry estimates often start from an OpenFermion `QubitOperator`. Qamomile does not need to own that object: it only needs the OpenFermion-style `terms` mapping so the Hamiltonian can be summarized into resource quantities.
 
+
 # %%
 class OpenFermionQubitOperatorStub:
     terms = {
@@ -350,11 +352,60 @@ for row in uwc_vs_baseline_rows:
 
 assert sp.Abs(uwc_workload.effective_lambda_norm - 1) < sp.Float("1e-12")
 assert uwc_logical.qubits == summary.n_qubits + 1
-assert (
-    sp.Abs(uwc_logical.gates.oracle_calls["qpe_iterations"] - 1)
-    < sp.Float("1e-12")
-)
+assert sp.Abs(uwc_logical.gates.oracle_calls["qpe_iterations"] - 1) < sp.Float("1e-12")
 assert uwc_logical.gates.t_gates < baseline_logical.gates.multi_qubit
+
+# %% [markdown]
+# You can also keep the reported effective lambda symbolic until review time. This makes the break between "no concentration" and a reported concentration table explicit without changing the workload structure.
+
+# %%
+lambda_eff = sp.symbols("lambda_eff", positive=True)
+symbolic_uwc_workload = qre.TrotterQPEWorkload.from_effective_lambda_norm(
+    summary,
+    effective_lambda_norm=lambda_eff,
+    trotter_steps_per_sample=2,
+    samples=10,
+    randomized_compilation_factor=sp.Rational(1, 2),
+    rotation_synthesis_t_gates=2,
+    description="symbolic unitary weight concentration",
+)
+symbolic_uwc_logical = qre.estimate_trotter_qpe_resources_from_workload(
+    symbolic_uwc_workload,
+    precision=1,
+)
+lambda_scenario_rows = qre.evaluate_resource_value_scenarios(
+    symbolic_uwc_logical,
+    {
+        "no concentration": {"lambda_eff": summary.lambda_norm},
+        "reported concentration": {"lambda_eff": 1},
+    },
+    quantities=(
+        qre.ResourceQuantity.QPE_ITERATIONS,
+        qre.ResourceQuantity.T_GATES,
+        qre.ResourceQuantity.LOGICAL_QUBITS,
+    ),
+)
+for row in lambda_scenario_rows:
+    print(row.to_dict())
+
+lambda_scenario_values = {
+    (row.scenario, row.quantity): row.value for row in lambda_scenario_rows
+}
+assert len(lambda_scenario_rows) == 6
+assert all(row.is_resolved for row in lambda_scenario_rows)
+assert (
+    sp.simplify(
+        lambda_scenario_values[
+            ("reported concentration", qre.ResourceQuantity.QPE_ITERATIONS)
+        ]
+        - 1
+    )
+    == 0
+)
+assert (
+    lambda_scenario_values[("reported concentration", qre.ResourceQuantity.T_GATES)]
+    < lambda_scenario_values[("no concentration", qre.ResourceQuantity.T_GATES)]
+)
 
 # %% [markdown]
 # `compare_resource_values()` accepts logical `ResourceEstimate` objects directly. For a physical proxy, provide a compact architecture model. The estimate below is not a hardware design; it is a consistent way to compare candidates under the same surface-code-style assumptions.
