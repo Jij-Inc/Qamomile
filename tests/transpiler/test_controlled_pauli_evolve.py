@@ -350,6 +350,34 @@ def _three_xyz(rng: np.random.Generator) -> qm_o.Hamiltonian:
     return rng.uniform(0.3, 1.5) * qm_o.X(0) * qm_o.Y(1) * qm_o.Z(2)
 
 
+def _single_x_plus_const(rng: np.random.Generator) -> qm_o.Hamiltonian:
+    """Build ``a * X(0) + d`` with a nonzero identity (constant) offset.
+
+    The constant ``d`` is a global phase for uncontrolled evolution but an
+    observable relative phase once controlled, so it exercises the
+    controlled constant-term path.
+
+    Args:
+        rng (np.random.Generator): Seeded RNG for the coefficient and offset.
+
+    Returns:
+        qm_o.Hamiltonian: A single-Pauli Hamiltonian with a constant offset.
+    """
+    return rng.uniform(0.3, 1.5) * qm_o.X(0) + rng.uniform(0.3, 1.5)
+
+
+def _two_heisenberg_plus_const(rng: np.random.Generator) -> qm_o.Hamiltonian:
+    """Build the Heisenberg Hamiltonian plus a nonzero constant offset.
+
+    Args:
+        rng (np.random.Generator): Seeded RNG for the coefficients and offset.
+
+    Returns:
+        qm_o.Hamiltonian: A commuting multi-term Hamiltonian with a constant.
+    """
+    return _two_heisenberg(rng) + rng.uniform(0.3, 1.5)
+
+
 # (id, run_kernel | None, sample_kernel, n_controls, n_target, ham_builder)
 _CASES: list[tuple[str, Any, Any, int, int, Callable[[np.random.Generator], Any]]] = [
     ("c1t1_X", _cpe_run_c1t1, _cpe_sample_c1t1, 1, 1, _single_x),
@@ -364,6 +392,26 @@ _CASES: list[tuple[str, Any, Any, int, int, Callable[[np.random.Generator], Any]
     ("c2t1_Z", None, _cpe_sample_c2t1, 2, 1, _single_z),
     ("c2t2_XX", _cpe_run_c2t2, _cpe_sample_c2t2, 2, 2, _two_xx),
     ("c2t2_heisenberg", _cpe_run_c2t2, _cpe_sample_c2t2, 2, 2, _two_heisenberg),
+    # Constant (identity) Hamiltonian terms: dropped uncontrolled (global
+    # phase) but an observable relative phase once controlled.
+    ("c1t1_X_const", _cpe_run_c1t1, _cpe_sample_c1t1, 1, 1, _single_x_plus_const),
+    ("c2t1_X_const", None, _cpe_sample_c2t1, 2, 1, _single_x_plus_const),
+    (
+        "c1t2_heisenberg_const",
+        _cpe_run_c1t2,
+        _cpe_sample_c1t2,
+        1,
+        2,
+        _two_heisenberg_plus_const,
+    ),
+    (
+        "c2t2_heisenberg_const",
+        _cpe_run_c2t2,
+        _cpe_sample_c2t2,
+        2,
+        2,
+        _two_heisenberg_plus_const,
+    ),
 ]
 
 _RUN_CASES = [c for c in _CASES if c[1] is not None]

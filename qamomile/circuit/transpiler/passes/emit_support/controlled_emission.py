@@ -1192,8 +1192,16 @@ def emit_controlled_pauli_evolve(
     ``RZ`` is routed through :func:`_emit_mc_rotation`, which dispatches
     to ``emit_crz`` for a single control and to the backend's
     ``_emit_irreducible_multi_controlled_gate`` hook for two or more.
-    Constant (identity) Hamiltonian terms are skipped, matching the
-    uncontrolled :func:`emit_pauli_evolve` and the CUDA-Q reference path.
+
+    A constant (identity) Hamiltonian term ``c * I`` is a global phase
+    ``exp(-i * gamma * c)`` for the uncontrolled evolution (correctly
+    dropped by :func:`emit_pauli_evolve`), but under controls it becomes
+    an *observable* relative phase on the all-controls-on subspace, so it
+    MUST be emitted here. It is realized as a ``P(-gamma * c)`` on one
+    control conditioned on the remaining controls (``emit_p`` for a single
+    control, a controlled / dense ``P`` for more), matching Qiskit's
+    native ``PauliEvolutionGate`` whose ``SparsePauliOp`` carries the
+    constant.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass; provides the
@@ -1213,9 +1221,10 @@ def emit_controlled_pauli_evolve(
     Raises:
         EmitError: If ``control_indices`` is empty, the observable does
             not resolve to a Hamiltonian, gamma cannot be resolved, the
-            Hamiltonian is non-Hermitian, the register size does not
-            match the Hamiltonian, a term qubit cannot be resolved, or
-            (for two or more controls) the central ``RZ`` angle is
+            Hamiltonian is non-Hermitian (a term or the constant has a
+            non-real coefficient), the register size does not match the
+            Hamiltonian, a term qubit cannot be resolved, or (for two or
+            more controls, or a nonzero constant term) the angle is
             runtime-parametric and the backend's dense multi-controlled
             path requires a compile-time-numeric angle.
     """
@@ -1352,6 +1361,46 @@ def emit_controlled_pauli_evolve(
                 emit_pass._emitter.emit_h(circuit, qi)
                 emit_pass._emitter.emit_s(circuit, qi)
             # Z and I had no basis change to undo.
+
+    # Controlled constant (identity) term. ``exp(-i*gamma*c*I)`` is a global
+    # phase for the uncontrolled evolution, but under controls it is an
+    # observable relative phase on the all-controls-on subspace, so it must
+    # be emitted. ``P(lambda) = diag(1, e^{i*lambda})`` with lambda = -gamma*c
+    # puts e^{-i*gamma*c} on the all-ones control subspace (no factor of two:
+    # this is a direct phase, not an RZ). It is applied to one control,
+    # conditioned on the rest.
+    constant = hamiltonian.constant
+    if abs(constant) > 1e-15:
+        if abs(constant.imag) > 1e-10:
+            raise EmitError(
+                f"PauliEvolveOp requires a Hermitian Hamiltonian (real "
+                f"coefficients), but found a complex constant {constant}.",
+                operation="PauliEvolveOp",
+            )
+        try:
+            if isinstance(gamma, (int, float)):
+                phase = -float(constant.real * gamma)
+            else:
+                phase = (-float(constant.real)) * gamma
+        except TypeError as exc:
+            raise EmitError(
+                "Controlled Pauli evolution requires a compile-time-numeric "
+                "gamma on this backend: its runtime parameter type does not "
+                "support the constant-term phase scaling (gamma * constant). "
+                "Bind gamma to a concrete value before transpilation.",
+                operation="PauliEvolveOp",
+            ) from exc
+        if len(control_indices) == 1:
+            emit_pass._emitter.emit_p(circuit, control_indices[0], phase)
+        else:
+            _emit_mc_rotation(
+                emit_pass,
+                circuit,
+                GateOperationType.P,
+                control_indices[:-1],
+                control_indices[-1],
+                phase,
+            )
 
     # PauliEvolve never moves qubits: the evolved register occupies the
     # same physical slots as the input register.
