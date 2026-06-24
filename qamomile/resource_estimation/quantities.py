@@ -129,6 +129,30 @@ class ResourceQuantity(enum.StrEnum):
     FACTORY_CYCLES_PER_NON_CLIFFORD = "factory_cycles_per_non_clifford"
 
 
+class ResourceReviewProfile(enum.StrEnum):
+    """Select a recommended quantity set for resource reviews.
+
+    Attributes:
+        HAMILTONIAN_QPE_WORKLOAD: Problem and algorithm inputs that drive a
+            Hamiltonian QPE workload.
+        FTQC_LOGICAL_OUTCOMES: Logical algorithm outcomes before architecture
+            lifting.
+        FTQC_PHYSICAL_OUTCOMES: Physical proxy outcomes after architecture
+            lifting.
+        SURFACE_CODE_ARCHITECTURE: Surface-code knobs that should be recorded
+            beside a physical proxy estimate.
+
+    Example:
+        >>> ResourceReviewProfile("ftqc_logical_outcomes")
+        <ResourceReviewProfile.FTQC_LOGICAL_OUTCOMES: 'ftqc_logical_outcomes'>
+    """
+
+    HAMILTONIAN_QPE_WORKLOAD = "hamiltonian_qpe_workload"
+    FTQC_LOGICAL_OUTCOMES = "ftqc_logical_outcomes"
+    FTQC_PHYSICAL_OUTCOMES = "ftqc_physical_outcomes"
+    SURFACE_CODE_ARCHITECTURE = "surface_code_architecture"
+
+
 class SupportsResourceValues(Protocol):
     """Represent objects that expose canonical resource values.
 
@@ -192,6 +216,56 @@ class ResourceQuantitySpec:
             "unit": self.unit,
             "category": self.category.value,
             "description": self.description,
+        }
+
+
+@dataclass(frozen=True)
+class ResourceQuantityProfile:
+    """Describe a recommended set of resource quantities.
+
+    Attributes:
+        profile (ResourceReviewProfile): Machine-readable profile key.
+        label (str): Reader-facing profile label.
+        description (str): Short description of the review purpose.
+        quantities (tuple[ResourceQuantity, ...]): Canonical quantities to
+            inspect for this profile.
+
+    Example:
+        >>> profile = describe_resource_review_profile(
+        ...     ResourceReviewProfile.FTQC_PHYSICAL_OUTCOMES
+        ... )
+        >>> ResourceQuantity.RUNTIME_SECONDS in profile.quantities
+        True
+    """
+
+    profile: ResourceReviewProfile
+    label: str
+    description: str
+    quantities: tuple[ResourceQuantity, ...]
+
+    def specs(self) -> tuple[ResourceQuantitySpec, ...]:
+        """Return quantity specifications for this profile.
+
+        Returns:
+            tuple[ResourceQuantitySpec, ...]: Quantity metadata in profile
+                order.
+        """
+        return tuple(
+            describe_resource_quantity(quantity) for quantity in self.quantities
+        )
+
+    def to_dict(self) -> dict[str, str | list[str]]:
+        """Serialize the resource quantity profile.
+
+        Returns:
+            dict[str, str | list[str]]: JSON-friendly profile metadata and
+                quantity keys.
+        """
+        return {
+            "profile": self.profile.value,
+            "label": self.label,
+            "description": self.description,
+            "quantities": [quantity.value for quantity in self.quantities],
         }
 
 
@@ -754,6 +828,63 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
 
 _SPECS_BY_QUANTITY = {spec.quantity: spec for spec in RESOURCE_QUANTITY_SPECS}
 
+RESOURCE_REVIEW_PROFILES: tuple[ResourceQuantityProfile, ...] = (
+    ResourceQuantityProfile(
+        ResourceReviewProfile.HAMILTONIAN_QPE_WORKLOAD,
+        "Hamiltonian QPE workload",
+        "Problem and algorithm quantities that drive Hamiltonian phase estimation.",
+        (
+            ResourceQuantity.N_QUBITS,
+            ResourceQuantity.N_PAULI_TERMS,
+            ResourceQuantity.LAMBDA_NORM,
+            ResourceQuantity.WALK_COST_TOFFOLI,
+            ResourceQuantity.QPE_REGISTER_QUBITS,
+            ResourceQuantity.REPRESENTATION_ERROR,
+            ResourceQuantity.ALGORITHMIC_PRECISION,
+        ),
+    ),
+    ResourceQuantityProfile(
+        ResourceReviewProfile.FTQC_LOGICAL_OUTCOMES,
+        "FTQC logical outcomes",
+        "Architecture-independent logical quantities used to compare FTQC algorithms.",
+        (
+            ResourceQuantity.QPE_ITERATIONS,
+            ResourceQuantity.LOGICAL_QUBITS,
+            ResourceQuantity.LOGICAL_DEPTH,
+            ResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+        ),
+    ),
+    ResourceQuantityProfile(
+        ResourceReviewProfile.FTQC_PHYSICAL_OUTCOMES,
+        "FTQC physical outcomes",
+        "Physical proxy quantities used to compare candidates under one architecture model.",
+        (
+            ResourceQuantity.LOGICAL_QUBITS,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+            ResourceQuantity.PHYSICAL_QUBITS,
+            ResourceQuantity.RUNTIME_SECONDS,
+            ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+        ),
+    ),
+    ResourceQuantityProfile(
+        ResourceReviewProfile.SURFACE_CODE_ARCHITECTURE,
+        "Surface-code architecture",
+        "Surface-code assumptions that should accompany a physical resource proxy.",
+        (
+            ResourceQuantity.CODE_DISTANCE,
+            ResourceQuantity.PHYSICAL_CYCLE_TIME_SECONDS,
+            ResourceQuantity.PHYSICAL_QUBITS_PER_LOGICAL_FACTOR,
+            ResourceQuantity.LOGICAL_CYCLE_FACTOR,
+            ResourceQuantity.FACTORY_COUNT,
+            ResourceQuantity.PHYSICAL_QUBITS_PER_FACTORY,
+            ResourceQuantity.FACTORY_CYCLES_PER_NON_CLIFFORD,
+        ),
+    ),
+)
+
+_PROFILES_BY_KEY = {profile.profile: profile for profile in RESOURCE_REVIEW_PROFILES}
+
 
 def iter_resource_quantity_specs() -> tuple[ResourceQuantitySpec, ...]:
     """Return the canonical resource quantity specifications.
@@ -763,6 +894,16 @@ def iter_resource_quantity_specs() -> tuple[ResourceQuantitySpec, ...]:
             reader-friendly order from problem inputs to physical outputs.
     """
     return RESOURCE_QUANTITY_SPECS
+
+
+def iter_resource_review_profiles() -> tuple[ResourceQuantityProfile, ...]:
+    """Return the recommended resource review profiles.
+
+    Returns:
+        tuple[ResourceQuantityProfile, ...]: Quantity profiles ordered from
+            algorithm inputs to physical and architecture review surfaces.
+    """
+    return RESOURCE_REVIEW_PROFILES
 
 
 def describe_resource_quantity(
@@ -781,6 +922,24 @@ def describe_resource_quantity(
     """
     normalized = _normalize_resource_quantity(quantity)
     return _SPECS_BY_QUANTITY[normalized]
+
+
+def describe_resource_review_profile(
+    profile: str | ResourceReviewProfile,
+) -> ResourceQuantityProfile:
+    """Return a recommended resource review profile.
+
+    Args:
+        profile (str | ResourceReviewProfile): Profile key or enum value.
+
+    Returns:
+        ResourceQuantityProfile: Recommended profile metadata and quantity set.
+
+    Raises:
+        ValueError: If ``profile`` is not a known resource review profile.
+    """
+    normalized = _normalize_resource_review_profile(profile)
+    return _PROFILES_BY_KEY[normalized]
 
 
 def compare_resource_values(
@@ -1567,6 +1726,29 @@ def _normalize_resource_quantity(
         valid = ", ".join(item.value for item in ResourceQuantity)
         raise ValueError(
             f"Unknown resource quantity {quantity!r}; valid: {valid}."
+        ) from exc
+
+
+def _normalize_resource_review_profile(
+    profile: str | ResourceReviewProfile,
+) -> ResourceReviewProfile:
+    """Normalize one resource review profile key.
+
+    Args:
+        profile (str | ResourceReviewProfile): Resource review profile key.
+
+    Returns:
+        ResourceReviewProfile: Normalized profile enum.
+
+    Raises:
+        ValueError: If ``profile`` is not a known resource review profile.
+    """
+    try:
+        return ResourceReviewProfile(profile)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in ResourceReviewProfile)
+        raise ValueError(
+            f"Unknown resource review profile {profile!r}; valid: {valid}."
         ) from exc
 
 

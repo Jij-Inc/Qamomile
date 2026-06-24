@@ -13,6 +13,8 @@ from qamomile.resource_estimation import (
     ResourceCategory,
     ResourceParetoRow,
     ResourceQuantity,
+    ResourceQuantityProfile,
+    ResourceReviewProfile,
     ResourceScenarioValueRow,
     ResourceSymbolDependencyRow,
     ResourceSymbolDriverRow,
@@ -21,12 +23,14 @@ from qamomile.resource_estimation import (
     audit_resource_value_symbols,
     compare_resource_values,
     describe_resource_quantity,
+    describe_resource_review_profile,
     estimate_physical_resources,
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
     evaluate_resource_value_scenarios,
     evaluate_resource_values,
     iter_resource_quantity_specs,
+    iter_resource_review_profiles,
     pareto_resource_values,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
@@ -71,6 +75,34 @@ def test_describe_resource_quantity_rejects_unknown_key():
     """Unknown quantity keys fail with a finite-set validation error."""
     with pytest.raises(ValueError, match="Unknown resource quantity"):
         describe_resource_quantity("not-a-resource")
+
+
+def test_resource_review_profiles_group_recommended_quantity_sets():
+    """Review profiles expose stable quantity sets for common FTQC decisions."""
+    profiles = iter_resource_review_profiles()
+    by_key = {profile.profile: profile for profile in profiles}
+
+    logical_profile = describe_resource_review_profile(
+        ResourceReviewProfile.FTQC_LOGICAL_OUTCOMES
+    )
+    physical_profile = describe_resource_review_profile("ftqc_physical_outcomes")
+
+    assert all(isinstance(profile, ResourceQuantityProfile) for profile in profiles)
+    assert logical_profile is by_key[ResourceReviewProfile.FTQC_LOGICAL_OUTCOMES]
+    assert logical_profile.quantities == (
+        ResourceQuantity.QPE_ITERATIONS,
+        ResourceQuantity.LOGICAL_QUBITS,
+        ResourceQuantity.LOGICAL_DEPTH,
+        ResourceQuantity.LOGICAL_SPACETIME_VOLUME,
+        ResourceQuantity.NON_CLIFFORD_COUNT,
+    )
+    assert ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
+    assert [spec.quantity for spec in physical_profile.specs()] == list(
+        physical_profile.quantities
+    )
+    assert physical_profile.to_dict()["profile"] == "ftqc_physical_outcomes"
+    with pytest.raises(ValueError, match="Unknown resource review profile"):
+        describe_resource_review_profile("not-a-profile")
 
 
 def test_surface_code_model_exposes_raw_and_derived_resource_values():

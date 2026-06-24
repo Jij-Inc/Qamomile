@@ -185,6 +185,25 @@ for n_val in [4, 8, 16, 32]:
 # Recent chemistry resource-estimation work, such as [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502) and [unitary weight concentration](https://arxiv.org/abs/2603.22778), often compares algorithms through the Hamiltonian normalization, representation error, walk-operator cost, Toffoli count, logical qubits, runtime, and space-time volume. This tutorial does not reproduce those papers; it shows the Qamomile resource quantities needed to build that kind of comparison.
 # :::
 
+# %% [markdown]
+# `ResourceReviewProfile` groups canonical quantities by review task. A workload profile records the symbols that drive Hamiltonian QPE, while logical and physical outcome profiles are suitable for `compare_resource_values()` and `pareto_resource_values()`.
+
+# %%
+workload_profile = qre.describe_resource_review_profile(
+    qre.ResourceReviewProfile.HAMILTONIAN_QPE_WORKLOAD
+)
+logical_profile = qre.describe_resource_review_profile(
+    qre.ResourceReviewProfile.FTQC_LOGICAL_OUTCOMES
+)
+physical_profile = qre.describe_resource_review_profile(
+    qre.ResourceReviewProfile.FTQC_PHYSICAL_OUTCOMES
+)
+for profile in (workload_profile, logical_profile, physical_profile):
+    print(profile.to_dict())
+
+assert qre.ResourceQuantity.LAMBDA_NORM in workload_profile.quantities
+assert qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
+
 # %%
 hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)
 summary = qre.summarize_pauli_hamiltonian(hamiltonian)
@@ -237,11 +256,7 @@ candidate_logical = qre.estimate_qubitized_qpe_resources_from_workload(
 logical_rows = qre.compare_resource_values(
     baseline_logical,
     candidate_logical,
-    quantities=(
-        qre.ResourceQuantity.QPE_ITERATIONS,
-        qre.ResourceQuantity.NON_CLIFFORD_COUNT,
-        qre.ResourceQuantity.LOGICAL_QUBITS,
-    ),
+    quantities=logical_profile.quantities,
 )
 for row in logical_rows:
     print(row.to_dict())
@@ -287,11 +302,7 @@ candidate_physical = qre.estimate_physical_resources(candidate_logical, surface_
 physical_rows = qre.compare_resource_values(
     baseline_physical,
     candidate_physical,
-    quantities=(
-        qre.ResourceQuantity.PHYSICAL_QUBITS,
-        qre.ResourceQuantity.RUNTIME_SECONDS,
-        qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
-    ),
+    quantities=physical_profile.quantities,
 )
 for row in physical_rows:
     print(row.to_dict())
@@ -325,10 +336,7 @@ pareto_rows = qre.pareto_resource_values(
         "candidate": candidate_physical,
         "slow candidate": slow_candidate_physical,
     },
-    quantities=(
-        qre.ResourceQuantity.PHYSICAL_QUBITS,
-        qre.ResourceQuantity.RUNTIME_SECONDS,
-    ),
+    quantities=physical_profile.quantities,
 )
 for row in pareto_rows:
     print(row.to_dict())
