@@ -96,8 +96,6 @@ plt.show()
 # :::
 
 # %%
-# Define the QAOA quantum circuit as qkernels.
-
 # Prepare a uniform superposition over all graph nodes.
 @qmc.qkernel
 def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:

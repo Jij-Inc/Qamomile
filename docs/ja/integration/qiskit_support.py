@@ -96,8 +96,6 @@ plt.show()
 # :::
 
 # %%
-# QAOA回路を量子カーネルとして定義します。
-
 # グラフの全ノードに対応する一様重ね合わせを準備します。
 @qmc.qkernel
 def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
