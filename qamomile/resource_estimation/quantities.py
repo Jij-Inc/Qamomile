@@ -151,6 +151,7 @@ _ResourceValuesInput = (
     | Mapping[str | ResourceQuantity, _SympyLike]
     | ResourceEstimate
 )
+_ScenarioSubstitutions = Mapping[str | sp.Symbol, _SympyLike]
 
 
 @dataclass(frozen=True)
@@ -303,6 +304,75 @@ class ResourceSymbolDependencyRow:
             "category": self.category.value,
             "value": str(self.value),
             "is_symbolic": self.is_symbolic,
+            "symbols": list(self.symbols),
+        }
+
+
+@dataclass(frozen=True)
+class ResourceScenarioValueRow:
+    """Describe one resource quantity evaluated under a scenario.
+
+    Attributes:
+        scenario (str): Scenario label.
+        quantity (ResourceQuantity): Evaluated resource quantity.
+        expression (sp.Expr): Original symbolic expression before applying
+            scenario substitutions.
+        value (sp.Expr): Expression after scenario substitutions.
+        symbols (tuple[str, ...]): Remaining free-symbol names in ``value``.
+        label (str): Reader-facing quantity label.
+        unit (str): Resource unit.
+        category (ResourceCategory): Modeling layer for the quantity.
+
+    Example:
+        >>> row = ResourceScenarioValueRow(
+        ...     scenario="baseline",
+        ...     quantity=ResourceQuantity.LOGICAL_QUBITS,
+        ...     expression=sp.Symbol("n") + 2,
+        ...     value=10,
+        ...     symbols=(),
+        ...     label="Logical qubits",
+        ...     unit="logical qubits",
+        ...     category=ResourceCategory.LOGICAL,
+        ... )
+        >>> row.is_resolved
+        True
+    """
+
+    scenario: str
+    quantity: ResourceQuantity
+    expression: sp.Expr
+    value: sp.Expr
+    symbols: tuple[str, ...]
+    label: str
+    unit: str
+    category: ResourceCategory
+
+    @property
+    def is_resolved(self) -> bool:
+        """Return whether the scenario resolved every free symbol.
+
+        Returns:
+            bool: True when ``value`` has no remaining SymPy symbols.
+        """
+        return not self.symbols
+
+    def to_dict(self) -> dict[str, str | bool | list[str]]:
+        """Serialize the scenario value row.
+
+        Returns:
+            dict[str, str | bool | list[str]]: JSON-friendly scenario label,
+                quantity metadata, evaluated value, original expression, and
+                remaining symbols.
+        """
+        return {
+            "scenario": self.scenario,
+            "quantity": self.quantity.value,
+            "label": self.label,
+            "unit": self.unit,
+            "category": self.category.value,
+            "expression": str(self.expression),
+            "value": str(self.value),
+            "is_resolved": self.is_resolved,
             "symbols": list(self.symbols),
         }
 
@@ -680,7 +750,7 @@ def audit_resource_value_symbols(
     rows = []
     for quantity in selected:
         value = sp.sympify(values[quantity])
-        symbols = tuple(sorted(str(symbol) for symbol in value.free_symbols))
+        symbols = _sorted_free_symbol_names(value)
         if not include_resolved and not symbols:
             continue
         spec = describe_resource_quantity(quantity)
@@ -692,6 +762,103 @@ def audit_resource_value_symbols(
                 label=spec.label,
                 unit=spec.unit,
                 category=spec.category,
+            )
+        )
+    return tuple(rows)
+
+
+def evaluate_resource_values(
+    provider: _ResourceValuesInput,
+    substitutions: _ScenarioSubstitutions | None = None,
+    *,
+    quantities: tuple[str | ResourceQuantity, ...] | None = None,
+    scenario: str = "scenario",
+    require_resolved: bool = True,
+) -> tuple[ResourceScenarioValueRow, ...]:
+    """Evaluate canonical resource values under one scenario.
+
+    Args:
+        provider (_ResourceValuesInput): Resource values to evaluate. Accepts
+            an object exposing ``resource_values()``, a mapping keyed by
+            canonical quantities, or a logical Qamomile ``ResourceEstimate``.
+        substitutions (_ScenarioSubstitutions | None): Scenario substitutions
+            keyed by symbol name or ``sp.Symbol``. Defaults to None, meaning
+            no substitutions are applied.
+        quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
+            evaluate. Defaults to all canonical quantities exposed by
+            ``provider`` in catalog order.
+        scenario (str): Scenario label included in every returned row.
+            Defaults to ``"scenario"``.
+        require_resolved (bool): Whether unresolved symbols after
+            substitution should raise an error. Defaults to True.
+
+    Returns:
+        tuple[ResourceScenarioValueRow, ...]: Evaluated resource rows.
+
+    Raises:
+        ValueError: If a requested quantity is missing from ``provider`` or if
+            ``require_resolved`` is True and a row remains symbolic.
+        TypeError: If ``provider`` or a substitution value cannot be
+            interpreted as a SymPy expression.
+    """
+    values = _coerce_resource_values(provider)
+    selected = _normalize_audit_quantities(values, quantities)
+    return _evaluate_resource_values_for_scenario(
+        values,
+        selected,
+        scenario,
+        substitutions or {},
+        require_resolved=require_resolved,
+    )
+
+
+def evaluate_resource_value_scenarios(
+    provider: _ResourceValuesInput,
+    scenarios: Mapping[str, _ScenarioSubstitutions],
+    *,
+    quantities: tuple[str | ResourceQuantity, ...] | None = None,
+    require_resolved: bool = True,
+) -> tuple[ResourceScenarioValueRow, ...]:
+    """Evaluate canonical resource values under multiple scenarios.
+
+    Args:
+        provider (_ResourceValuesInput): Resource values to evaluate. Accepts
+            an object exposing ``resource_values()``, a mapping keyed by
+            canonical quantities, or a logical Qamomile ``ResourceEstimate``.
+        scenarios (Mapping[str, _ScenarioSubstitutions]): Ordered mapping
+            from scenario label to substitutions keyed by symbol name or
+            ``sp.Symbol``.
+        quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
+            evaluate. Defaults to all canonical quantities exposed by
+            ``provider`` in catalog order.
+        require_resolved (bool): Whether unresolved symbols after
+            substitution should raise an error. Defaults to True.
+
+    Returns:
+        tuple[ResourceScenarioValueRow, ...]: Scenario rows in input scenario
+            order and canonical quantity order.
+
+    Raises:
+        ValueError: If no scenarios are supplied, a requested quantity is
+            missing from ``provider``, or ``require_resolved`` is True and a
+            row remains symbolic.
+        TypeError: If ``provider`` or a substitution value cannot be
+            interpreted as a SymPy expression.
+    """
+    if not scenarios:
+        raise ValueError("scenarios must contain at least one scenario.")
+
+    values = _coerce_resource_values(provider)
+    selected = _normalize_audit_quantities(values, quantities)
+    rows: list[ResourceScenarioValueRow] = []
+    for scenario, substitutions in scenarios.items():
+        rows.extend(
+            _evaluate_resource_values_for_scenario(
+                values,
+                selected,
+                scenario,
+                substitutions,
+                require_resolved=require_resolved,
             )
         )
     return tuple(rows)
@@ -882,6 +1049,135 @@ def _normalize_audit_quantities(
             + "."
         )
     return normalized
+
+
+def _evaluate_resource_values_for_scenario(
+    values: dict[ResourceQuantity, sp.Expr],
+    quantities: tuple[ResourceQuantity, ...],
+    scenario: str,
+    substitutions: _ScenarioSubstitutions,
+    *,
+    require_resolved: bool,
+) -> tuple[ResourceScenarioValueRow, ...]:
+    """Evaluate normalized resource values for one scenario.
+
+    Args:
+        values (dict[ResourceQuantity, sp.Expr]): Resource values keyed by
+            normalized quantity.
+        quantities (tuple[ResourceQuantity, ...]): Quantities to evaluate.
+        scenario (str): Scenario label.
+        substitutions (_ScenarioSubstitutions): Scenario substitutions keyed
+            by symbol name or ``sp.Symbol``.
+        require_resolved (bool): Whether remaining free symbols should raise.
+
+    Returns:
+        tuple[ResourceScenarioValueRow, ...]: Evaluated rows.
+
+    Raises:
+        ValueError: If ``require_resolved`` is True and any row remains
+            symbolic.
+        TypeError: If any substitution value cannot be converted to a SymPy
+            expression.
+    """
+    normalized_substitutions = _normalize_substitutions(
+        substitutions,
+        tuple(values[quantity] for quantity in quantities),
+    )
+    rows = []
+    unresolved = []
+    for quantity in quantities:
+        expression = values[quantity]
+        value = sp.simplify(expression.subs(normalized_substitutions).doit())
+        symbols = _sorted_free_symbol_names(value)
+        spec = describe_resource_quantity(quantity)
+        row = ResourceScenarioValueRow(
+            scenario=str(scenario),
+            quantity=quantity,
+            expression=expression,
+            value=value,
+            symbols=symbols,
+            label=spec.label,
+            unit=spec.unit,
+            category=spec.category,
+        )
+        rows.append(row)
+        if symbols:
+            unresolved.append(row)
+
+    if require_resolved and unresolved:
+        raise ValueError(_format_unresolved_scenario_values(unresolved))
+    return tuple(rows)
+
+
+def _normalize_substitutions(
+    substitutions: _ScenarioSubstitutions,
+    expressions: tuple[sp.Expr, ...],
+) -> dict[sp.Symbol, sp.Expr]:
+    """Normalize scenario substitutions to SymPy keys and values.
+
+    Args:
+        substitutions (_ScenarioSubstitutions): Substitutions keyed by symbol
+            name or ``sp.Symbol``.
+        expressions (tuple[sp.Expr, ...]): Expressions whose free symbols
+            should be matched when substitutions are keyed by string name.
+
+    Returns:
+        dict[sp.Symbol, sp.Expr]: Normalized SymPy substitutions.
+
+    Raises:
+        TypeError: If any substitution value cannot be converted to a SymPy
+            expression.
+    """
+    symbols_by_name: dict[str, list[sp.Symbol]] = {}
+    for expression in expressions:
+        for symbol in expression.free_symbols:
+            if not isinstance(symbol, sp.Symbol):
+                continue
+            symbols_by_name.setdefault(str(symbol), []).append(symbol)
+
+    normalized: dict[sp.Symbol, sp.Expr] = {}
+    for key, value in substitutions.items():
+        value_expr = _as_expr(value, str(key))
+        if isinstance(key, sp.Symbol):
+            normalized[key] = value_expr
+            continue
+        matched_symbols = symbols_by_name.get(str(key), [sp.Symbol(str(key))])
+        for symbol in matched_symbols:
+            normalized[symbol] = value_expr
+    return normalized
+
+
+def _sorted_free_symbol_names(value: sp.Expr) -> tuple[str, ...]:
+    """Return sorted free-symbol names for an expression.
+
+    Args:
+        value (sp.Expr): Expression to inspect.
+
+    Returns:
+        tuple[str, ...]: Free-symbol names sorted lexicographically.
+    """
+    return tuple(sorted(str(symbol) for symbol in value.free_symbols))
+
+
+def _format_unresolved_scenario_values(
+    rows: list[ResourceScenarioValueRow],
+) -> str:
+    """Format unresolved scenario rows for an exception message.
+
+    Args:
+        rows (list[ResourceScenarioValueRow]): Rows that still have free
+            symbols.
+
+    Returns:
+        str: Human-readable error message.
+    """
+    details = "; ".join(
+        f"{row.scenario}:{row.quantity.value}({', '.join(row.symbols)})" for row in rows
+    )
+    return (
+        "Scenario substitutions did not resolve every requested resource "
+        f"quantity: {details}."
+    )
 
 
 def _normalize_resource_quantity(

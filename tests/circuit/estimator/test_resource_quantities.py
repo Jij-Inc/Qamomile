@@ -12,6 +12,7 @@ from qamomile.resource_estimation import (
     HamiltonianRepresentation,
     ResourceCategory,
     ResourceQuantity,
+    ResourceScenarioValueRow,
     ResourceSymbolDependencyRow,
     SurfaceCodeCostModel,
     audit_resource_value_symbols,
@@ -20,6 +21,8 @@ from qamomile.resource_estimation import (
     estimate_physical_resources,
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
+    evaluate_resource_value_scenarios,
+    evaluate_resource_values,
     iter_resource_quantity_specs,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
@@ -391,6 +394,83 @@ def test_audit_resource_value_symbols_filters_resolved_values():
             values,
             quantities=(ResourceQuantity.NON_CLIFFORD_COUNT,),
         )
+
+
+def test_evaluate_resource_values_resolves_one_scenario():
+    """Scenario evaluation substitutes symbolic resource quantities."""
+    n, lam, eps, walk = sp.symbols("n lambda eps C_W", positive=True)
+    estimate = estimate_qubitized_qpe_resources(
+        n_qubits=n,
+        lambda_norm=lam,
+        precision=eps,
+        walk_cost_toffoli=walk,
+        logical_qubits=n + 2,
+    )
+
+    rows = evaluate_resource_values(
+        estimate,
+        {"n": 10, lam: 5, "eps": sp.Rational(1, 10), "C_W": 7},
+        scenario="small",
+        quantities=(
+            ResourceQuantity.LOGICAL_QUBITS,
+            ResourceQuantity.QPE_ITERATIONS,
+            ResourceQuantity.NON_CLIFFORD_COUNT,
+        ),
+    )
+
+    assert all(isinstance(row, ResourceScenarioValueRow) for row in rows)
+    assert [row.scenario for row in rows] == ["small", "small", "small"]
+    assert [row.quantity for row in rows] == [
+        ResourceQuantity.LOGICAL_QUBITS,
+        ResourceQuantity.QPE_ITERATIONS,
+        ResourceQuantity.NON_CLIFFORD_COUNT,
+    ]
+    assert [row.value for row in rows] == [12, 50, 350]
+    assert all(row.is_resolved for row in rows)
+    assert rows[2].to_dict()["expression"] == "C_W*lambda/eps"
+    assert rows[2].to_dict()["value"] == "350"
+
+
+def test_evaluate_resource_value_scenarios_reports_remaining_symbols():
+    """Scenario tables can either keep or reject unresolved symbols."""
+    d, n, runtime = sp.symbols("d n runtime", positive=True)
+    values = {
+        ResourceQuantity.PHYSICAL_QUBITS: 2 * d**2 * n,
+        ResourceQuantity.RUNTIME_SECONDS: runtime / d,
+    }
+
+    rows = evaluate_resource_value_scenarios(
+        values,
+        {
+            "distance-7": {"d": 7},
+            "distance-9": {"d": 9, runtime: 18},
+        },
+        quantities=(
+            ResourceQuantity.PHYSICAL_QUBITS,
+            ResourceQuantity.RUNTIME_SECONDS,
+        ),
+        require_resolved=False,
+    )
+
+    assert [row.scenario for row in rows] == [
+        "distance-7",
+        "distance-7",
+        "distance-9",
+        "distance-9",
+    ]
+    assert rows[0].value == 98 * n
+    assert rows[0].symbols == ("n",)
+    assert rows[1].symbols == ("runtime",)
+    assert rows[3].value == 2
+    assert rows[3].is_resolved is True
+    with pytest.raises(ValueError, match="distance-7:physical_qubits"):
+        evaluate_resource_value_scenarios(
+            values,
+            {"distance-7": {"d": 7}},
+            quantities=(ResourceQuantity.PHYSICAL_QUBITS,),
+        )
+    with pytest.raises(ValueError, match="at least one"):
+        evaluate_resource_value_scenarios(values, {})
 
 
 def test_compare_resource_values_rejects_missing_or_zero_baseline():

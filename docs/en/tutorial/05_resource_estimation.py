@@ -284,11 +284,47 @@ assert (
 )
 
 # %% [markdown]
+# If some architecture assumptions are still symbolic, `evaluate_resource_value_scenarios()` turns them into a compact scenario table. This is useful when the algorithm estimate is fixed, but code distance, cycle time, or factory assumptions are still design variables.
+
+# %%
+d, cycle_time = sp.symbols("d cycle_time", positive=True)
+symbolic_surface_code = qre.SurfaceCodeCostModel(
+    code_distance=d,
+    physical_cycle_time_seconds=cycle_time,
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=3,
+    factory_count=1,
+    physical_qubits_per_factory=1000,
+    factory_cycles_per_non_clifford=4,
+)
+symbolic_physical = qre.estimate_physical_resources(
+    candidate_logical,
+    symbolic_surface_code,
+)
+scenario_rows = qre.evaluate_resource_value_scenarios(
+    symbolic_physical,
+    {
+        "distance-5 fast cycle": {"d": 5, "cycle_time": sp.Float("5e-7")},
+        "distance-7 nominal": {"d": 7, "cycle_time": sp.Float("1e-6")},
+    },
+    quantities=(
+        qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.RUNTIME_SECONDS,
+        qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ),
+)
+for row in scenario_rows:
+    print(row.to_dict())
+
+assert len(scenario_rows) == 6
+assert all(row.is_resolved for row in scenario_rows)
+
+# %% [markdown]
 # ## Summary
 #
 # - `estimate_resources()` reports qubit and gate costs without executing.
 # - For parameterized qkernels, results are SymPy expressions showing exact scaling.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
-# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities.
+# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities, then evaluate remaining architecture symbols across scenarios.
 #
 # **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

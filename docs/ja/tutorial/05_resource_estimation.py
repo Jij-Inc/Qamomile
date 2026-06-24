@@ -284,11 +284,47 @@ assert (
 )
 
 # %% [markdown]
+# architecture仮定の一部がまだsymbolicな場合、`evaluate_resource_value_scenarios()`を使うと、それらをcompactなscenario tableに変換できます。algorithm estimateは固定されているものの、code distance、cycle time、factory仮定がまだ設計変数として残っている場合に便利です。
+
+# %%
+d, cycle_time = sp.symbols("d cycle_time", positive=True)
+symbolic_surface_code = qre.SurfaceCodeCostModel(
+    code_distance=d,
+    physical_cycle_time_seconds=cycle_time,
+    physical_qubits_per_logical_factor=2,
+    logical_cycle_factor=3,
+    factory_count=1,
+    physical_qubits_per_factory=1000,
+    factory_cycles_per_non_clifford=4,
+)
+symbolic_physical = qre.estimate_physical_resources(
+    candidate_logical,
+    symbolic_surface_code,
+)
+scenario_rows = qre.evaluate_resource_value_scenarios(
+    symbolic_physical,
+    {
+        "distance-5 fast cycle": {"d": 5, "cycle_time": sp.Float("5e-7")},
+        "distance-7 nominal": {"d": 7, "cycle_time": sp.Float("1e-6")},
+    },
+    quantities=(
+        qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.RUNTIME_SECONDS,
+        qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
+    ),
+)
+for row in scenario_rows:
+    print(row.to_dict())
+
+assert len(scenario_rows) == 6
+assert all(row.is_resolved for row in scenario_rows)
+
+# %% [markdown]
 # ## まとめ
 #
 # - `estimate_resources()`は実行せずに量子ビット数とゲートコストを算出します。
 # - パラメータ付き量子カーネルでは、結果は厳密なスケーリングを示すSymPy式になります。
 # - `.substitute(n=...)`で特定のサイズに代入し、実行可能性を確認できます。
-# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較できます。
+# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較し、残ったarchitecture symbolをscenarioごとに評価できます。
 #
 # **次へ**：[実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序について。
