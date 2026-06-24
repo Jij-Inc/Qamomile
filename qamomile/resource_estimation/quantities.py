@@ -80,6 +80,10 @@ class ResourceQuantity(enum.StrEnum):
         T_GATES: T-gate or T-equivalent count.
         MULTI_QUBIT_GATES: Multi-qubit gate-count proxy.
         PHYSICAL_QUBITS: Physical qubits under an architecture model.
+        DEPTH_LIMITED_RUNTIME_SECONDS: Runtime implied by logical depth and
+            logical cycle time.
+        NON_CLIFFORD_LIMITED_RUNTIME_SECONDS: Runtime implied by non-Clifford
+            throughput.
         RUNTIME_SECONDS: Runtime proxy in seconds.
         PHYSICAL_QUBIT_SECONDS: Physical qubit-second space-time proxy.
         PHYSICAL_QUBITS_PER_LOGICAL: Physical overhead per logical qubit.
@@ -132,6 +136,8 @@ class ResourceQuantity(enum.StrEnum):
     T_GATES = "t_gates"
     MULTI_QUBIT_GATES = "multi_qubit_gates"
     PHYSICAL_QUBITS = "physical_qubits"
+    DEPTH_LIMITED_RUNTIME_SECONDS = "depth_limited_runtime_seconds"
+    NON_CLIFFORD_LIMITED_RUNTIME_SECONDS = "non_clifford_limited_runtime_seconds"
     RUNTIME_SECONDS = "runtime_seconds"
     PHYSICAL_QUBIT_SECONDS = "physical_qubit_seconds"
     PHYSICAL_QUBITS_PER_LOGICAL = "physical_qubits_per_logical"
@@ -804,6 +810,20 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "Physical qubits after logical-qubit overhead and factory allocation.",
     ),
     ResourceQuantitySpec(
+        ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS,
+        "Depth-limited runtime",
+        "seconds",
+        ResourceCategory.PHYSICAL,
+        "Runtime implied by logical depth and logical cycle time.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS,
+        "Non-Clifford-limited runtime",
+        "seconds",
+        ResourceCategory.PHYSICAL,
+        "Runtime implied by non-Clifford throughput.",
+    ),
+    ResourceQuantitySpec(
         ResourceQuantity.RUNTIME_SECONDS,
         "Runtime",
         "seconds",
@@ -951,6 +971,8 @@ RESOURCE_REVIEW_PROFILES: tuple[ResourceQuantityProfile, ...] = (
             ResourceQuantity.LOGICAL_QUBITS,
             ResourceQuantity.NON_CLIFFORD_COUNT,
             ResourceQuantity.PHYSICAL_QUBITS,
+            ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS,
+            ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS,
             ResourceQuantity.RUNTIME_SECONDS,
             ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
         ),

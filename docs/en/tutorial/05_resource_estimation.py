@@ -432,11 +432,31 @@ physical_rows = qre.compare_resource_values(
 for row in physical_rows:
     print(row.to_dict())
 
+candidate_runtime_values = candidate_physical.resource_values()
+print(
+    {
+        "depth_limited_runtime_seconds": candidate_runtime_values[
+            "depth_limited_runtime_seconds"
+        ],
+        "non_clifford_limited_runtime_seconds": candidate_runtime_values[
+            "non_clifford_limited_runtime_seconds"
+        ],
+        "runtime_seconds": candidate_runtime_values["runtime_seconds"],
+    }
+)
+
 assert candidate_physical.runtime_seconds < baseline_physical.runtime_seconds
 assert (
     candidate_physical.resource_values()["physical_qubit_seconds"]
     < baseline_physical.resource_values()["physical_qubit_seconds"]
 )
+assert candidate_runtime_values["runtime_seconds"] == sp.Max(
+    candidate_runtime_values["depth_limited_runtime_seconds"],
+    candidate_runtime_values["non_clifford_limited_runtime_seconds"],
+)
+
+# %% [markdown]
+# The runtime components are useful when reading FTQC chemistry estimates: a smaller logical algorithm may stop being factory-throughput limited and become depth-limited, or vice versa. Keeping both quantities visible avoids hiding that bottleneck inside a single wall-clock number.
 
 # %% [markdown]
 # When more than two candidates are involved, `pareto_resource_values()` keeps the non-dominated tradeoffs visible. The slower candidate below uses the same logical algorithm and qubit overhead as the candidate above, but assumes a slower cycle time. It is dominated because it uses the same physical qubits and takes longer.
@@ -499,6 +519,8 @@ scenario_rows = qre.evaluate_resource_value_scenarios(
     },
     quantities=(
         qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS,
+        qre.ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS,
         qre.ResourceQuantity.RUNTIME_SECONDS,
         qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
     ),
@@ -506,7 +528,7 @@ scenario_rows = qre.evaluate_resource_value_scenarios(
 for row in scenario_rows:
     print(row.to_dict())
 
-assert len(scenario_rows) == 6
+assert len(scenario_rows) == 10
 assert all(row.is_resolved for row in scenario_rows)
 
 # %% [markdown]
@@ -515,6 +537,6 @@ assert all(row.is_resolved for row in scenario_rows)
 # - `estimate_resources()` reports qubit and gate costs without executing.
 # - For parameterized qkernels, results are SymPy expressions showing exact scaling.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
-# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities, keep Pareto tradeoffs visible, audit which symbols drive those quantities, then evaluate remaining architecture symbols across scenarios.
+# - Use `qamomile.resource_estimation` to compare FTQC algorithm candidates by canonical logical and physical quantities, inspect runtime bottlenecks, keep Pareto tradeoffs visible, audit which symbols drive those quantities, then evaluate remaining architecture symbols across scenarios.
 #
 # **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

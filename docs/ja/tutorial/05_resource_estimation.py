@@ -432,11 +432,31 @@ physical_rows = qre.compare_resource_values(
 for row in physical_rows:
     print(row.to_dict())
 
+candidate_runtime_values = candidate_physical.resource_values()
+print(
+    {
+        "depth_limited_runtime_seconds": candidate_runtime_values[
+            "depth_limited_runtime_seconds"
+        ],
+        "non_clifford_limited_runtime_seconds": candidate_runtime_values[
+            "non_clifford_limited_runtime_seconds"
+        ],
+        "runtime_seconds": candidate_runtime_values["runtime_seconds"],
+    }
+)
+
 assert candidate_physical.runtime_seconds < baseline_physical.runtime_seconds
 assert (
     candidate_physical.resource_values()["physical_qubit_seconds"]
     < baseline_physical.resource_values()["physical_qubit_seconds"]
 )
+assert candidate_runtime_values["runtime_seconds"] == sp.Max(
+    candidate_runtime_values["depth_limited_runtime_seconds"],
+    candidate_runtime_values["non_clifford_limited_runtime_seconds"],
+)
+
+# %% [markdown]
+# runtimeの内訳は、FTQCの量子化学推定を読むときに役立ちます。小さな論理アルゴリズムがfactory throughput律速からdepth律速へ移る場合も、その逆もあります。両方のquantityを見える形で残すことで、単一のwall-clock値の中にbottleneckを隠さずに済みます。
 
 # %% [markdown]
 # 3つ以上の候補がある場合、`pareto_resource_values()`を使うと、支配されていないtradeoffを残して確認できます。次の遅い候補は、上のcandidateと同じ論理アルゴリズムと量子ビットoverheadを使いますが、cycle timeを遅く仮定します。同じ物理量子ビット数でより長い時間がかかるため、candidateに支配されます。
@@ -499,6 +519,8 @@ scenario_rows = qre.evaluate_resource_value_scenarios(
     },
     quantities=(
         qre.ResourceQuantity.PHYSICAL_QUBITS,
+        qre.ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS,
+        qre.ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS,
         qre.ResourceQuantity.RUNTIME_SECONDS,
         qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS,
     ),
@@ -506,7 +528,7 @@ scenario_rows = qre.evaluate_resource_value_scenarios(
 for row in scenario_rows:
     print(row.to_dict())
 
-assert len(scenario_rows) == 6
+assert len(scenario_rows) == 10
 assert all(row.is_resolved for row in scenario_rows)
 
 # %% [markdown]
@@ -515,6 +537,6 @@ assert all(row.is_resolved for row in scenario_rows)
 # - `estimate_resources()`は実行せずに量子ビット数とゲートコストを算出します。
 # - パラメータ付き量子カーネルでは、結果は厳密なスケーリングを示すSymPy式になります。
 # - `.substitute(n=...)`で特定のサイズに代入し、実行可能性を確認できます。
-# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較し、Pareto tradeoffを見える形で残し、それらのquantityを動かすsymbolを監査して、残ったarchitecture symbolをscenarioごとに評価できます。
+# - `qamomile.resource_estimation`を使うと、FTQCアルゴリズム候補をcanonicalな論理リソースと物理リソースquantityで比較し、runtime bottleneckを確認し、Pareto tradeoffを見える形で残し、それらのquantityを動かすsymbolを監査して、残ったarchitecture symbolをscenarioごとに評価できます。
 #
 # **次へ**：[実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序について。

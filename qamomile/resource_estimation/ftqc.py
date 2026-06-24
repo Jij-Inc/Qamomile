@@ -111,16 +111,52 @@ class FTQCCostModel:
         Raises:
             ValueError: If either quantity is negative.
         """
-        depth_expr = _as_expr(logical_depth, "logical_depth")
-        non_clifford_expr = _as_expr(non_clifford_count, "non_clifford_count")
-        _validate_nonnegative(depth_expr, "logical_depth")
-        _validate_nonnegative(non_clifford_expr, "non_clifford_count")
         return sp.simplify(
             sp.Max(
-                depth_expr * self._logical_cycle_time_seconds,
-                non_clifford_expr / self._non_clifford_throughput_per_second,
+                self.depth_limited_runtime_seconds_for(logical_depth),
+                self.non_clifford_limited_runtime_seconds_for(non_clifford_count),
             )
         )
+
+    def depth_limited_runtime_seconds_for(
+        self,
+        logical_depth: _SympyLike,
+    ) -> sp.Expr:
+        """Compute the depth-limited runtime component.
+
+        Args:
+            logical_depth (sp.Expr | int | float): Logical depth proxy.
+
+        Returns:
+            sp.Expr: Runtime in seconds implied by executing logical layers
+            at the architecture's logical cycle time.
+
+        Raises:
+            ValueError: If ``logical_depth`` is negative.
+        """
+        depth_expr = _as_expr(logical_depth, "logical_depth")
+        _validate_nonnegative(depth_expr, "logical_depth")
+        return sp.simplify(depth_expr * self._logical_cycle_time_seconds)
+
+    def non_clifford_limited_runtime_seconds_for(
+        self,
+        non_clifford_count: _SympyLike,
+    ) -> sp.Expr:
+        """Compute the non-Clifford-throughput runtime component.
+
+        Args:
+            non_clifford_count (sp.Expr | int | float): Toffoli/T-equivalent
+                count that consumes factory or hardware throughput.
+
+        Returns:
+            sp.Expr: Runtime in seconds implied by non-Clifford throughput.
+
+        Raises:
+            ValueError: If ``non_clifford_count`` is negative.
+        """
+        non_clifford_expr = _as_expr(non_clifford_count, "non_clifford_count")
+        _validate_nonnegative(non_clifford_expr, "non_clifford_count")
+        return sp.simplify(non_clifford_expr / self._non_clifford_throughput_per_second)
 
     def resource_values(self) -> dict[str, sp.Expr]:
         """Return architecture inputs as named symbolic values.
@@ -501,6 +537,10 @@ class FTQCPhysicalResourceEstimate:
             "logical": self.logical.to_dict(),
             "logical_depth": str(self.logical_depth),
             "non_clifford_count": str(self.non_clifford_count),
+            "depth_limited_runtime_seconds": str(self.depth_limited_runtime_seconds),
+            "non_clifford_limited_runtime_seconds": str(
+                self.non_clifford_limited_runtime_seconds
+            ),
             "physical_qubits": str(self.physical_qubits),
             "runtime_seconds": str(self.runtime_seconds),
             "architecture_values": {
@@ -527,6 +567,10 @@ class FTQCPhysicalResourceEstimate:
             "non_clifford_count": self.non_clifford_count,
             "t_gates": self.logical.gates.t_gates,
             "multi_qubit_gates": self.logical.gates.multi_qubit,
+            "depth_limited_runtime_seconds": self.depth_limited_runtime_seconds,
+            "non_clifford_limited_runtime_seconds": (
+                self.non_clifford_limited_runtime_seconds
+            ),
             "physical_qubits": self.physical_qubits,
             "runtime_seconds": self.runtime_seconds,
             "physical_qubit_seconds": sp.simplify(
@@ -537,6 +581,30 @@ class FTQCPhysicalResourceEstimate:
         if "qpe_iterations" in self.logical.gates.oracle_calls:
             values["qpe_iterations"] = self.logical.gates.oracle_calls["qpe_iterations"]
         return values
+
+    @property
+    def depth_limited_runtime_seconds(self) -> sp.Expr:
+        """Return the logical-depth-limited runtime component.
+
+        Returns:
+            sp.Expr: ``logical_depth * logical_cycle_time_seconds``.
+        """
+        return sp.simplify(
+            self.logical_depth * self.architecture_values["logical_cycle_time_seconds"]
+        )
+
+    @property
+    def non_clifford_limited_runtime_seconds(self) -> sp.Expr:
+        """Return the non-Clifford-throughput-limited runtime component.
+
+        Returns:
+            sp.Expr: ``non_clifford_count /
+            non_clifford_throughput_per_second``.
+        """
+        return sp.simplify(
+            self.non_clifford_count
+            / self.architecture_values["non_clifford_throughput_per_second"]
+        )
 
 
 def estimate_physical_resources(

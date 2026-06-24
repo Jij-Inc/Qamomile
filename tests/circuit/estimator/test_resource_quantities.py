@@ -49,6 +49,8 @@ def test_quantity_specs_cover_core_resource_layers():
     assert ResourceQuantity.NON_CLIFFORD_COUNT in quantities
     assert ResourceQuantity.LOGICAL_SPACETIME_VOLUME in quantities
     assert ResourceQuantity.PHYSICAL_QUBITS in quantities
+    assert ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS in quantities
+    assert ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS in quantities
     assert ResourceQuantity.PHYSICAL_QUBIT_SECONDS in quantities
     assert ResourceQuantity.CODE_DISTANCE in quantities
     assert ResourceQuantity.FACTORY_COUNT in quantities
@@ -100,6 +102,10 @@ def test_resource_review_profiles_group_recommended_quantity_sets():
         ResourceQuantity.NON_CLIFFORD_COUNT,
     )
     assert ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
+    assert (
+        ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS
+        in physical_profile.quantities
+    )
     assert ResourceQuantity.EFFECTIVE_LAMBDA_NORM in trotter_profile.quantities
     assert ResourceQuantity.UNITARY_WEIGHT_FACTOR in trotter_profile.quantities
     assert ResourceQuantity.ROTATION_SYNTHESIS_T_GATES in trotter_profile.quantities
@@ -203,6 +209,39 @@ def test_compare_physical_estimates_uses_canonical_values():
     assert sp.simplify(rows[0].ratio - sp.Rational(1, 2)) == 0
     assert rows[1].quantity == ResourceQuantity.NON_CLIFFORD_COUNT
     assert sp.simplify(rows[1].ratio - sp.Rational(1, 2)) == 0
+
+
+def test_physical_estimates_expose_runtime_bottleneck_components():
+    """Physical estimates expose depth and non-Clifford runtime components."""
+    logical = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=20,
+        precision=1,
+        walk_cost_toffoli=5,
+        representation=HamiltonianRepresentation.TENSOR_HYPERCONTRACTION,
+    )
+    cost_model = FTQCCostModel(
+        physical_qubits_per_logical=100,
+        logical_cycle_time_seconds=sp.Rational(1, 1000),
+        factory_qubits=0,
+        non_clifford_throughput_per_second=10,
+    )
+
+    physical = estimate_physical_resources(
+        logical,
+        cost_model,
+        logical_depth=50,
+        non_clifford_count=200,
+    )
+    values = physical.resource_values()
+
+    assert physical.depth_limited_runtime_seconds == sp.Rational(1, 20)
+    assert physical.non_clifford_limited_runtime_seconds == 20
+    assert physical.runtime_seconds == 20
+    assert values[ResourceQuantity.DEPTH_LIMITED_RUNTIME_SECONDS.value] == sp.Rational(
+        1, 20
+    )
+    assert values[ResourceQuantity.NON_CLIFFORD_LIMITED_RUNTIME_SECONDS.value] == 20
 
 
 def test_pareto_resource_values_marks_frontier_candidates():
