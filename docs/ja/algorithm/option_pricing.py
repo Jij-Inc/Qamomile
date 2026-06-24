@@ -18,13 +18,30 @@
 # tags: [algorithm, finance, simulation]
 # ---
 #
-# # Option Pricing using Quantum Computers
+# # 量子コンピュータを用いたオプションプライシング
 #
-# ここでは[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)の内容を理解し、その実装を通してQamomileの使い方を学ぶことにしましょう。
+# ゲート型量子コンピュータ上で実行する量子振幅推定は、様々な応用が提案されています。
+# その中でも、金融工学のオプションプライシングは、その最たる例です。
+# これまで、オプションプライシングには古典モンテカルロ法が用いられてきましたが、量子振幅推定はそれと比較して2次高速化をもたらすことが知られています。
+# そこで本記事では、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)で提案された、量子振幅推定によるオプションおよびオプションポートフォリオプライシング手法の理解と実装についてまとめました。オプションプライシングの例を通して、Qamomileの使い方を学びましょう。
+
+# %%
+# Install the latest Qamomile through pip! 
+# # !pip install qamomile
+
+# %%
+import numpy as np
+from scipy.optimize import minimize_scalar
+import matplotlib.pyplot as plt
+
+import qamomile.circuit as qmc
+from qamomile.circuit.algorithm.state_preparation import amplitude_encoding
+from qamomile.qiskit import QiskitTranspiler
+
+# %% [markdown]
+# ## 背景
 #
-# ## 量子コンピュータを用いたオプションプライシング
-#
-# ### 問題背景
+# ### 問題: オプションプライシング
 #
 # 金融リスクの計算は、大きな需要があります。
 # モンテカルロ (MC) 計算はその中心的な計算手法ですあり、Value at Risk (VaR) の推定や店頭デリバティブのプライシング決定など、幅広く用いられています。
@@ -45,8 +62,13 @@
 # 先ほどの[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算を改良し、必要量子ビット数・ゲート数の大幅な削減に成功しました。  
 # そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算手法をオプションプラインシングに拡張し、NISQフレンドリーな実装を示しました。
 #
+# ## アルゴリズム: NISQでのオプションプライシング計算
+#
 # ### ペイオフの計算
 #
+# QAE ではグローバー演算子 $\mathcal{Q}$ を $k$ 回繰り返すことで、測定確率が $\sin^2 ((2k+1) \theta_\alpha)$ という既知の関数形で変化します。
+# これにより、少ない測定回数でも $\theta_\alpha$ を高精度に推定することが可能になります。
+# ここでは QAE を用い、どのようにペイオフの計算を行うかを実際に見ていきましょう。
 # 求めたい $n$ 量子ビット状態を $\vert \psi_1 \rangle_n$、それ以外の必要でない量子状態を $\vert \psi_0 \rangle_n$ とに分けるユニタリ演算子を $\mathcal{A}$ とします。
 # 状態を分けるためにアンシラ量子ビットを1つ用いることにすると、演算子 $\mathcal{A}$ は $n+1$ 量子ビットに作用し
 #
@@ -76,30 +98,12 @@
 #
 # となることがわかります。
 # ここで $\mathbb{E}[f(S)]$ は、オプション $S$ のペイオフ $f$ の平均値です。
-# すなわち、式(2)のような状態を作る演算子 $\mathcal{A}$ さえ構築できれば、QAEによりペイオフの平均値を計算できることがわかります。
-# 量子状態の振幅に $\sqrt{f(S_i)}$ を実装する素直な方法として、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)は次のような考え方をしました。
-# まずは
-#
-# $$
-# \vert i \rangle \vert 0 \rangle \ \longrightarrow \ 
-# \vert i \rangle \vert \tilde{v} (i) \rangle \tag{4}
-# $$
-#
-# のようなバイナリ演算子を実装します。
-# ここで $\tilde{v} (i)$ はオプションペイオフに関連するブラウン運動の関数 $v(x)$ を、バイナリ近似化したものです。
-# ここに制御回転 $R_y$ を加えることで、式(1)の形の状態を作ります。
-# これは
-#
-# $$
-# R_y (2\theta) \vert 0 \rangle 
-# = \cos \theta \vert 0 \rangle + \sin \theta \vert 1 \rangle \tag{5}
-# $$
-#
-# のような、$R_y$の性質によるものです。
-# しかしこの方法では、量子ビット数と回路depthが大きくなる問題がありました。
+# すなわち、式(2)のような状態を作る演算子 $\mathcal{A}$ さえ構築できれば、QAEによりペイオフの平均値を計算できることがわかります。  
+# [Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)は、ペイオフを補助レジスタにバイナリ表現で格納し、制御回転をかける手法を提案しました。
+# しかし、量子ビット数と回路depthが増大する問題を抱えていました。
 # そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6)の線形 $R_y$ 手法による軽量な実装を提案しました。
 #
-# #### 簡単な場合: $f(i) = f_1 i + f_0$
+# ### 簡単な場合: $f(i) = f_1 i + f_0$
 #
 # まずは一番簡単なケースについて議論していきましょう。
 # 関数 $f$ が線形、すなわち $f(i) = f_1 i + f_0 $ ($f_0, f_1$ は定数) のように書けるとします。
@@ -107,43 +111,22 @@
 #
 # $$
 # \vert i \rangle_n \vert 0 \rangle \ \longrightarrow \ 
-# \vert i \rangle_n (\cos [f(i)] \vert 0 \rangle  + \sin [f(i)] \vert 1 \rangle ) \tag{6}
+# \vert i \rangle_n (\cos [f(i)] \vert 0 \rangle  + \sin [f(i)] \vert 1 \rangle ) \tag{4}
 # $$
 #
 # は、制御 $R_y$ ゲートのみで効率的に実装することができます。
-# $i$ を量子ビット $j$ ($j \in \{0, 1, \dots, n-1\}$) を用いて $i=\sum_{j=0}^{n-1} 2^j j$ のようにすると
-#
-# $$
-# f(i) 
-# = f_0 + f_1 \sum_j 2^j j 
-# = f_0 + \sum_j 2^j f_1 j \tag{7}
-# $$
-#
-# このように書くと、これは各量子ビット $\vert j \rangle$ をコントロールとして、ペイオフ量子ビットに $R_y (2 \cdot 2^j f_1)$ をかけることで、$\sin [f(i)]$ を実現することができます。
-# 実際、$\vert j \rangle$ をコントロール、ペイオフ量子ビットをターゲットとして制御 $R_y$ ゲート $\mathrm{CR}_y (\theta)$ を作用させると
-#
-# $$
-# \mathrm{CR}_y \vert j \rangle \vert \psi \rangle 
-# = \left\{ \begin{array}{ll}
-# \vert 0 \rangle \vert \psi \rangle & \mathrm{if} \ j = 0 \\
-# \vert 1 \rangle R_y (\theta) \vert \psi \rangle & \mathrm{if} \ j = 1 
-# \end{array} \right. \ \Longrightarrow \ 
-# \mathrm{CR}_y (\theta) \vert j \rangle \vert \psi \rangle 
-# = \vert j \rangle R_y (j \theta) \vert \psi \rangle \tag{8}
-# $$
-#
-# のようになることからわかります。
+# $i$ を量子ビット $j$ ($j \in \{0, 1, \dots, n-1\}$) を用いて $i=\sum_{j=0}^{n-1} 2^j j$ のようにバイナリ表現したものと $R_y$ の加法性を組合せることで、各量子ビット $\vert j \rangle$ をコントロールとしてペイオフ量子ビットに $R_y (2 \cdot 2^j f_1)$ をかけるだけで、$\sin [f(i)]$ を実現することができます。
 # $f_0$ は定数であることから、単純な $R_y$ で実装することができます。
 # $R_y (\alpha) R_y (\beta) = R_y (\alpha + \beta)$ のような加法性から、これらを組合せることで $\vert i \rangle_n [\cos (f_0 + f_1 i ) \vert 0 \rangle + \sin (f_0 + f_1 i ) \vert 1 \rangle]$ を実装することができることがわかります。
 #
-# #### 平均値への適用
+# ### 平均値への適用
 #
 # 振幅推定では、入力は重ね合わせ $\sum_i \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle$ で与えられます。
 # ここに先ほどの制御回転を施すことで
 #
 # $$
 # \sum_i \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle \ \longrightarrow \ 
-# \sum_i \sqrt{p_i} \vert i \rangle_n \{ \cos [f(i)] \vert 0 \rangle + \sin [f(i)] \vert 1 \rangle \} \tag{9}
+# \sum_i \sqrt{p_i} \vert i \rangle_n \{ \cos [f(i)] \vert 0 \rangle + \sin [f(i)] \vert 1 \rangle \} \tag{5}
 # $$
 #
 # を得ます。
@@ -152,16 +135,16 @@
 # $$
 # P_1 
 # = \sum_i p_i \sin^2 [f(i)] 
-# \neq \mathbb{E} [f(S)] \tag{10}
+# \neq \mathbb{E} [f(S)] \tag{6}
 # $$
 #
 # のようになり、振幅推定で取り出した値がそのまま平均値になりません。
-# そこで角度 $f(i)$ を $\pi / 4$ の周りで展開するような形にします。
+# そこで $\sin^2$ を線形近似した時に最も精度が良くなるように、$\sin^2$ の導関数の値が最大となる $\pi/4$ の周りで展開するような形にしましょう。
 # すなわち
 #
 # $$
 # \sum_i \sqrt{p_i} \vert i \rangle_n \{ \cos [f(i)] \vert 0 \rangle + \sin [f(i)] \vert 1 \rangle \} \approx
-# \sum_i \sqrt{p_i} \vert i \rangle_n \left\{ \cos \left( c \tilde{f}(i) + \frac{\pi}{4} \right) \vert 0 \rangle + \sin \left( c \tilde{f}(i) + \frac{\pi}{4} \right) \vert 1 \rangle \right\} \tag{11}
+# \sum_i \sqrt{p_i} \vert i \rangle_n \left\{ \cos \left( c \tilde{f}(i) + \frac{\pi}{4} \right) \vert 0 \rangle + \sin \left( c \tilde{f}(i) + \frac{\pi}{4} \right) \vert 1 \rangle \right\} \tag{7}
 # $$
 #
 # のような状態を実現する演算子を構築することにしましょう。
@@ -170,7 +153,7 @@
 #
 # $$
 # \tilde{f} (i) 
-# = 2 \frac{f(i) - f_\mathrm{min}}{f_\mathrm{max} - f_\mathrm{min}} - 1 \tag{12}
+# = 2 \frac{f(i) - f_\mathrm{min}}{f_\mathrm{max} - f_\mathrm{min}} - 1 \tag{8}
 # $$
 #
 # のように $f(i)$ を規格化したもので、その値の範囲は $\tilde{f}(i) \in [-1, 1]$ となります。
@@ -182,25 +165,27 @@
 # = \sum_i p_i \sin^2 \left\{ c \tilde{f}(i) + \frac{\pi}{4} \right\} 
 # = \sum_i p_i \frac{1}{2} \left[ 1 + \sin \left\{ 2 c \tilde{f}(i) + \frac{\pi}{2} \right\} \right] 
 # \underbrace{\approx}_{cf \ll 1} \sum_i p_i \left( \frac{1}{2} + c\tilde{f} (i) + \mathcal{O}(c^3 \tilde{f}^3)\right) 
-# = \frac{1}{2} + c \mathbb{E} [\tilde{f}(i)] + \mathcal{O} (c^3 \tilde{f}^3) \tag{13}
+# = \frac{1}{2} + c \mathbb{E} [\tilde{f}(i)] + \mathcal{O} (c^3 \tilde{f}^3) \tag{9}
 # $$
 #
 # のようになります。
 # $P_1$ を振幅推定で推定すれば、既知の $c, f_\mathrm{min}, f_\mathrm{max}$ により $\mathbb{E}[f(S)]$ を算出することが可能になります。
 # しかし、ここでは $c$ の選び方が重要になります。
-# $c$ を小さくすると、(13)式の精度は良くなりますが、$P_1 \sim \frac{1}{2}$ に値が集中し、振幅推定精度が落ちることになります。
-# 逆に大きな $c$ に対しては $P_1$ の範囲が大きくなりますが、(13)式の $\mathcal{O}(c^3 \tilde{f}^3)$ の誤差が増えることになります。
-# このトレードオフから、収束率はサンプル数に対して $\mathcal{O}(M^{-2/3})$ となること判明しています。
-# 完全な2次高速化を達成することはできませんが、依然として古典MCの $\mathcal{O}(M^{-1/2})$ を凌駕することがわかります。
+# $c$ を小さくすると、(9)式の精度は良くなりますが、$P_1 \sim \frac{1}{2}$ に値が集中し、振幅推定精度が落ちることになります。
+# 逆に大きな $c$ に対しては $P_1$ の範囲が大きくなりますが、(9)式の $\mathcal{O}(c^3 \tilde{f}^3)$ の誤差が増えることになります。
+# このトレードオフから、収束率はサンプル数に対して $\mathcal{O}(M^{-2/3})$ のような中間的な収束率となります。
+# 完全な2次高速化を達成することはできませんが、依然として古典MCの $\mathcal{O}(M^{-1/2})$ を凌駕することがわかります。  
+# 以下に示す実装では、QAE の中でも最尤振幅推定 (Maximum Likelihood Amplitude Estimation: MLAE) と呼ばれる手法を用いています。
+# この手法は、QAE の中でも位相推定を用いない軽量な手法であることから、実用に適しています。
 #
-# #### コールオプションへの応用
+# ### コールオプションへの応用
 #
 # 例えばバニラコールオプションでは、アセット価格がある値 $K$ を上回っている場合、その実際の価格と権利行使価格 $K$ の差額が支払われます。
 # すなわち、コールオプションペイオフ $f_C (S_T)$ は、次のように書くことができます。
 #
 # $$
 # f_C (S_T) 
-# = \max (0, S_T - K) \tag{14}
+# = \max (0, S_T - K) \tag{10}
 # $$
 #
 # それに対し、プットオプションペイオフ $f_P (S_T)$ は、権利行使価格より小さな場合に支払われるものです。
@@ -208,7 +193,7 @@
 #
 # $$
 # f_P (S_T) 
-# = \max (0, K - S_T) \tag{15}
+# = \max (0, K - S_T) \tag{11}
 # $$
 #
 # のように書かれます。
@@ -220,7 +205,7 @@
 # $$
 # \vert \psi \rangle_n \vert 0 \rangle \ \longrightarrow \ 
 # \vert \phi_1 \rangle 
-# = \sum_{i<K} \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle + \sum_{i \geq K} \sqrt{p_i} \vert i \rangle_n \vert 1 \rangle \tag{16}
+# = \sum_{i<K} \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle + \sum_{i \geq K} \sqrt{p_i} \vert i \rangle_n \vert 1 \rangle \tag{12}
 # $$
 #
 # のようになります。
@@ -231,37 +216,28 @@
 # $$
 # c\tilde{f}(i) + \frac{\pi}{4}
 # = g_0 + g(i) 
-# = \frac{\pi}{4} - c + \frac{2c(i - K)}{i_\mathrm{max} - K} \tag{17}
+# = \frac{\pi}{4} - c + \frac{2c(i - K)}{i_\mathrm{max} - K} \tag{13}
 # $$
 #
 # のようにします。
-# このようにして回転を式(16)に適用すれば
+# このようにして回転を式(12)に適用すれば
 #
 # $$
-# \sum_{i<K} \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle \{\cos(g_0) \vert 0 \rangle + \sin(g_0) \vert 1 \rangle\} + \sum_{i \geq K} \sqrt{p_i} \vert i \rangle_n \vert 1 \rangle [\cos\{g_0 + g(i)\} \vert 0 \rangle + \sin\{g_0 + g(i)\} \vert 1 \rangle ] \tag{18}
+# \sum_{i<K} \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle \{\cos(g_0) \vert 0 \rangle + \sin(g_0) \vert 1 \rangle\} + \sum_{i \geq K} \sqrt{p_i} \vert i \rangle_n \vert 1 \rangle [\cos\{g_0 + g(i)\} \vert 0 \rangle + \sin\{g_0 + g(i)\} \vert 1 \rangle ] \tag{14}
 # $$
 #
 # のようになり、2つ目のアンシラ量子ビットが $\vert 1 \rangle$ となる確率は
 #
 # $$
 # P_1 
-# = \sum_{i<K} p_i \sin^2 (g_0) + \sum_{i\geq K} p_i \sin^2 \{g_0 + g(i)\} \tag{19}
+# = \sum_{i<K} p_i \sin^2 (g_0) + \sum_{i\geq K} p_i \sin^2 \{g_0 + g(i)\} \tag{15}
 # $$
 #
 # と求まります。
 # これは振幅推定を用いて効率的に求めることができます。
 
 # %% [markdown]
-# ## 実装
-
-# %%
-import numpy as np
-from scipy.optimize import minimize_scalar
-import matplotlib.pyplot as plt
-
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.state_preparation import amplitude_encoding
-from qamomile.qiskit import QiskitTranspiler
+# ## Qamomileによる実装
 
 # %% [markdown]
 # ### 分布の読み込み
@@ -270,11 +246,7 @@ from qamomile.qiskit import QiskitTranspiler
 # ここではまず、幾何ブラウン運動下にある満期 $S_T$ の対数正規分布を離散化したものを準備し、これを株価のデータとします。
 
 # %%
-# ============================================================
-# 1. 問題データと角度の事前計算
-# ============================================================
-n_qubits = 4   # ← ここを変えるだけで任意の数に対応
-
+n_qubits = 4 
 S0, K, r, sigma, T = 2.0, 1.9, 0.05, 0.4, 40 / 365
 mu  = (r - 0.5 * sigma**2) * T
 std = sigma * np.sqrt(T)
@@ -298,7 +270,6 @@ slopes     = [(2**j) * theta_S for j in range(n_qubits)]
 neg_slopes = [-s for s in slopes]
 offset     = 4 * c * (S_min - K) / F_max - 2 * c + np.pi / 2
 
-# 整合性チェック
 alpha_min = offset / 2
 alpha_max = (offset + (2**n_qubits - 1) * theta_S) / 2
 print(f"S_min での振幅角: {alpha_min:.4f}  "
@@ -342,7 +313,7 @@ print(f"理論 P1 (k=0):       {P1_theory:.4f}")
 
 # %%
 # ============================================================
-# P_X と P_X†(qmc.inverse で随伴を自動生成)
+# P_X と P_X†(qmc.inverse でエルミート演算を生成)
 # ============================================================
 @qmc.qkernel
 def load_distribution(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -404,7 +375,7 @@ print("→ 両者が近ければペイオフ回路は正しく動いています
 
 # %%
 # ============================================================
-# 3. Qamomile による MLAE (varying k)
+# 3. Qamomile による MLAE (可変 k)
 # ============================================================
 def build_Ak_kernel(k: int):
     n_anc = max(0, n_qubits - 2)
