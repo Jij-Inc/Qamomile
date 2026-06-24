@@ -1,4 +1,4 @@
-"""Define canonical resource quantities for reports and comparisons."""
+"""Define canonical resource quantities for symbolic comparisons."""
 
 from __future__ import annotations
 
