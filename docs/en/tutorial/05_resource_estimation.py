@@ -185,6 +185,15 @@ for n_val in [4, 8, 16, 32]:
 # :::{note}
 # Recent chemistry resource-estimation work, such as [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502) and [unitary weight concentration](https://arxiv.org/abs/2603.22778), often compares algorithms through the Hamiltonian normalization, representation error, walk-operator cost, Toffoli count, logical qubits, runtime, and space-time volume. This tutorial does not reproduce those papers; it shows the Qamomile resource quantities needed to build that kind of comparison.
 # :::
+#
+# A useful FTQC review separates the paper-level claim from the architecture lift:
+#
+# | Paper-level question | Qamomile quantities to inspect |
+# | --- | --- |
+# | Did the Hamiltonian representation reduce the work signal? | `lambda_norm`, `effective_lambda_norm`, `unitary_weight_factor`, `representation_error` |
+# | Did the algorithm reduce logical non-Clifford work? | `qpe_iterations`, `walk_cost_toffoli`, `pauli_rotations`, `t_gates`, `non_clifford_count` |
+# | Did it spend extra memory to get that reduction? | `logical_qubits`, `qpe_register_qubits`, `block_encoding_ancilla_qubits` |
+# | Does the architecture model turn that into a real bottleneck shift? | `physical_qubits`, `depth_limited_runtime_seconds`, `non_clifford_limited_runtime_seconds`, `physical_qubit_seconds` |
 
 # %% [markdown]
 # `ResourceReviewProfile` groups canonical quantities by review task. A workload profile records the symbols that drive Hamiltonian QPE, while logical and physical outcome profiles are suitable for `compare_resource_values()` and `pareto_resource_values()`.

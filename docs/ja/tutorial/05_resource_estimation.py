@@ -185,6 +185,15 @@ for n_val in [4, 8, 16, 32]:
 # :::{note}
 # [symmetry-compressed double factorization](https://arxiv.org/abs/2403.03502)や[unitary weight concentration](https://arxiv.org/abs/2603.22778)のような近年の量子化学リソース推定では、Hamiltonian normalization、representation error、walk operatorのコスト、Toffoli数、論理量子ビット数、runtime、space-time volumeなどを通してアルゴリズムを比較します。このチュートリアルはこれらの論文の再現ではありません。そのような比較を組み立てるために必要なQamomileのresource quantityを示します。
 # :::
+#
+# FTQCレビューでは、論文レベルの主張とarchitecture modelによる変換を分けて確認します。
+#
+# | 論文レベルの問い | 確認するQamomile quantity |
+# | --- | --- |
+# | Hamiltonian representationはwork signalを減らしたか | `lambda_norm`, `effective_lambda_norm`, `unitary_weight_factor`, `representation_error` |
+# | アルゴリズムは論理non-Clifford workを減らしたか | `qpe_iterations`, `walk_cost_toffoli`, `pauli_rotations`, `t_gates`, `non_clifford_count` |
+# | その削減のために追加のmemoryを使っているか | `logical_qubits`, `qpe_register_qubits`, `block_encoding_ancilla_qubits` |
+# | architecture modelを通すとbottleneckが移るか | `physical_qubits`, `depth_limited_runtime_seconds`, `non_clifford_limited_runtime_seconds`, `physical_qubit_seconds` |
 
 # %% [markdown]
 # `ResourceReviewProfile`は、review taskごとにcanonical quantityをまとめたものです。workload profileにはHamiltonian QPEを動かすsymbolが含まれ、logical outcome profileとphysical outcome profileは`compare_resource_values()`や`pareto_resource_values()`にそのまま渡せます。
