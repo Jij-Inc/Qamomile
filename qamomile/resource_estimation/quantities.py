@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 import sympy as sp
 
@@ -1650,7 +1650,11 @@ def _evaluate_resource_values_for_scenario(
     unresolved = []
     for quantity in quantities:
         expression = values[quantity]
-        value = sp.simplify(expression.subs(normalized_substitutions).doit())
+        substitutions_for_sympy = cast(
+            Mapping[sp.Basic | complex, sp.Expr | complex],
+            normalized_substitutions,
+        )
+        value = sp.simplify(expression.subs(substitutions_for_sympy).doit())
         symbols = _sorted_free_symbol_names(value)
         spec = describe_resource_quantity(quantity)
         row = ResourceScenarioValueRow(
