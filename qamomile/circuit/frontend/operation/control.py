@@ -21,9 +21,16 @@ from typing import (
     get_type_hints,
 )
 
-from qamomile.circuit.frontend.func_to_block import is_array_type
 from qamomile.circuit.frontend.handle import Handle, Observable
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
+from qamomile.circuit.frontend.param_validation import (
+    _array_element_type,
+    _is_classical_param_decl,
+    _is_quantum_handle,
+    _is_uint_param_decl,
+    _validate_bound_handles,
+    _validate_classical_param_handle,
+)
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -71,196 +78,6 @@ _synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" 
 # the only case that lands here; non-hashable callables fall through to
 # no caching at all.
 _synthesized_kernel_cache_strong: dict[Callable[..., Any], Any] = {}
-
-
-def _union_members(param_type: Any) -> tuple[Any, ...]:
-    """Return members when a parameter annotation is a union.
-
-    Args:
-        param_type (Any): A resolved qkernel input annotation.
-
-    Returns:
-        tuple[Any, ...]: Union member annotations, or an empty tuple
-            when *param_type* is not a union annotation.
-    """
-    origin = get_origin(param_type)
-    if origin in (Union, _types.UnionType):
-        return get_args(param_type)
-    return ()
-
-
-def _array_element_type(param_type: Any) -> Any | None:
-    """Return the element handle type for an array annotation.
-
-    Args:
-        param_type (Any): A frontend annotation such as
-            ``Vector[Float]`` or ``Vector[Qubit]``.
-
-    Returns:
-        Any | None: The element handle type when *param_type* is an
-            array annotation, or ``None`` for scalar annotations.
-    """
-    if not is_array_type(param_type):
-        return None
-    args = get_args(param_type)
-    if args:
-        return args[0]
-    return getattr(param_type, "element_type", None)
-
-
-def _is_scalar_classical_param_decl(param_type: Any) -> bool:
-    """Return whether a parameter declaration is scalar classical.
-
-    Args:
-        param_type (Any): A resolved qkernel input annotation.
-
-    Returns:
-        bool: ``True`` for scalar ``Float`` / ``UInt`` declarations,
-            including scalar union forms such as ``float | Float``.
-    """
-    scalar_types = (Float, float, UInt, int)
-    if param_type in scalar_types:
-        return True
-    members = _union_members(param_type)
-    return bool(members) and all(member in scalar_types for member in members)
-
-
-def _is_uint_param_decl(param_type: Any) -> bool:
-    """Return whether a parameter declaration is integer-like.
-
-    Args:
-        param_type (Any): A resolved qkernel input annotation.
-
-    Returns:
-        bool: ``True`` for scalar ``UInt`` / ``int`` declarations,
-            including union forms whose members are all integer-like.
-    """
-    if param_type in (UInt, int):
-        return True
-    members = _union_members(param_type)
-    return bool(members) and all(member in (UInt, int) for member in members)
-
-
-def _is_quantum_param_decl(param_type: Any) -> bool:
-    """Return whether a qkernel parameter declaration is quantum.
-
-    Args:
-        param_type (Any): A resolved qkernel input annotation.
-
-    Returns:
-        bool: ``True`` for ``Qubit`` and ``Vector[Qubit]``-like
-            declarations, otherwise ``False``.
-    """
-    if param_type is Qubit:
-        return True
-    return _array_element_type(param_type) is Qubit
-
-
-def _is_classical_param_decl(param_type: Any) -> bool:
-    """Return whether a qkernel parameter declaration is classical.
-
-    Args:
-        param_type (Any): A resolved qkernel input annotation.
-
-    Returns:
-        bool: ``True`` for scalar ``Float`` / ``UInt`` declarations and
-            their array forms such as ``Vector[Float]``. Also returns
-            ``True`` for ``Observable`` handles.
-    """
-    if param_type is Observable:
-        return True
-    if _is_scalar_classical_param_decl(param_type):
-        return True
-    return _array_element_type(param_type) in (Float, float, UInt, int)
-
-
-def _is_quantum_handle(value: Any) -> bool:
-    """Return whether a runtime handle carries quantum data.
-
-    Args:
-        value (Any): A caller argument or bound qkernel argument.
-
-    Returns:
-        bool: ``True`` for scalar ``Qubit`` handles and arrays whose
-            element IR type is quantum.
-    """
-    from qamomile.circuit.frontend.handle.array import ArrayBase
-
-    if isinstance(value, Qubit):
-        return True
-    if isinstance(value, ArrayBase):
-        return value.value.type.is_quantum()
-    return False
-
-
-def _validate_classical_param_handle(
-    param_name: str,
-    declared: Any,
-    param_value: Handle,
-) -> None:
-    """Validate that a handle matches a classical parameter declaration.
-
-    Args:
-        param_name (str): Wrapped-kernel parameter name, used in error
-            messages.
-        declared (Any): Resolved wrapped-kernel input annotation.
-        param_value (Handle): Caller-supplied handle value.
-
-    Raises:
-        TypeError: If the supplied handle is quantum or does not match the
-            declared scalar, array, or observable parameter kind.
-    """
-    from qamomile.circuit.frontend.handle.array import ArrayBase
-
-    if _is_quantum_handle(param_value):
-        raise TypeError(
-            f"control(): parameter {param_name!r} is declared as a "
-            f"classical parameter but received quantum handle "
-            f"{type(param_value).__name__}. Pass a classical handle instead."
-        )
-
-    if declared is Observable:
-        if not isinstance(param_value, Observable):
-            raise TypeError(
-                f"control(): parameter {param_name!r} is declared as "
-                f"Observable but received {type(param_value).__name__}. "
-                f"Pass an Observable handle from the enclosing qkernel."
-            )
-        return
-
-    element_type = _array_element_type(declared)
-    if element_type is not None:
-        if not isinstance(param_value, ArrayBase):
-            raise TypeError(
-                f"control(): parameter {param_name!r} is declared as "
-                f"an array parameter but received "
-                f"{type(param_value).__name__}. Pass the corresponding "
-                f"Vector handle from the caller kernel instead."
-            )
-        expected_type = UIntType() if element_type in (UInt, int) else FloatType()
-        if param_value.value.type != expected_type:
-            raise TypeError(
-                f"control(): parameter {param_name!r} expects "
-                f"{expected_type.label()} elements but received "
-                f"{param_value.value.type.label()} elements."
-            )
-        return
-
-    if _is_uint_param_decl(declared):
-        if not isinstance(param_value, UInt):
-            raise TypeError(
-                f"control(): parameter {param_name!r} is declared as "
-                f"UInt/int but received {type(param_value).__name__}. "
-                f"Pass a UInt handle instead."
-            )
-        return
-
-    if not isinstance(param_value, Float):
-        raise TypeError(
-            f"control(): parameter {param_name!r} is declared as "
-            f"Float/float but received {type(param_value).__name__}. "
-            f"Pass a Float handle instead."
-        )
 
 
 def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
@@ -787,27 +604,6 @@ class ControlledGate:
                 the same iteration order.
         """
         return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
-
-    def _validate_bound_classical_handles(
-        self,
-        sub_args_resolved: dict[str, Any],
-    ) -> None:
-        """Validate bound classical parameters before quantum filtering.
-
-        Args:
-            sub_args_resolved (dict[str, Any]): Bound sub-kernel
-                arguments in wrapped-kernel signature order.
-
-        Raises:
-            TypeError: If a classical parameter is bound to an
-                incompatible handle, including quantum handles that would
-                otherwise be collected as target operands.
-        """
-        kernel_input_types: dict[str, Any] = self._qkernel.input_types
-        for name, value in sub_args_resolved.items():
-            declared = kernel_input_types[name]
-            if _is_classical_param_decl(declared) and isinstance(value, Handle):
-                _validate_classical_param_handle(name, declared, value)
 
     # ``_validate_no_alias_or_overlap`` used to live here as an entry-
     # point alias / overlap check, mirroring the
@@ -1397,7 +1193,12 @@ class ControlledGate:
 
         controls, sub_positional = self._split_controls_by_count(args, num_controls)
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
-        self._validate_bound_classical_handles(sub_args_resolved)
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            sub_args_resolved,
+            context="control()",
+            allow_broadcast=True,
+        )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(
@@ -1701,7 +1502,12 @@ class ControlledGate:
         )
 
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
-        self._validate_bound_classical_handles(sub_args_resolved)
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            sub_args_resolved,
+            context="control()",
+            allow_broadcast=True,
+        )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(

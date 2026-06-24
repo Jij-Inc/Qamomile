@@ -891,7 +891,7 @@ def test_inverse_qkernel_rejects_vector_for_scalar_input() -> None:
         qs = qmc.inverse(_inverse_layer)(qs, 0.25)
         return qs
 
-    with pytest.raises(TypeError, match="expected scalar, got Vector"):
+    with pytest.raises(TypeError, match="scalar Qubit but received"):
         circuit.build()
 
 

@@ -2252,13 +2252,25 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
     """CUDA-Q quantum executor.
 
-    Supports sampling via ``cudaq.sample`` and expectation value estimation
-    via ``cudaq.observe``.  Dispatches to the appropriate CUDA-Q runtime
-    API based on the artifact's ``execution_mode``.
+    Supports sampling via ``cudaq.sample`` / ``cudaq.run`` and expectation
+    value estimation via ``cudaq.observe``.  Dispatches to the appropriate
+    CUDA-Q runtime API based on the artifact's ``execution_mode``:
+
+    - ``STATIC`` artifacts (no mid-circuit measurement or runtime control
+      flow) support both sampling (``cudaq.sample``) and expectation-value
+      estimation (``cudaq.observe``).
+    - ``RUNNABLE`` artifacts (mid-circuit measurement or measurement-dependent
+      control flow such as ``if bit:`` / ``while bit:``) support sampling only,
+      via ``cudaq.run``.
+
+    Expectation-value estimation is therefore **static-only**: calling
+    :meth:`estimate` on a ``RUNNABLE`` artifact raises ``TypeError`` because
+    ``cudaq.observe`` cannot consume a kernel that requires ``cudaq.run``.
+    See :meth:`estimate` for the full rationale.
 
     Args:
-        target: CUDA-Q target name (e.g., ``"qpp-cpu"``). If None, uses
-            the default CUDA-Q target.
+        target (str | None): CUDA-Q target name (e.g., ``"qpp-cpu"``). If
+            None, uses the default CUDA-Q target.
     """
 
     def __init__(self, target: str | None = None):
@@ -2402,10 +2414,55 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         hamiltonian: "qm_o.Hamiltonian",
         params: Sequence[float] | None = None,
     ) -> float:
-        """Estimate expectation value using ``cudaq.observe``.
+        """Estimate an expectation value using ``cudaq.observe``.
 
-        Only supported for STATIC-mode artifacts.  RUNNABLE-mode artifacts
-        are not compatible with ``cudaq.observe()`` and raise ``TypeError``.
+        Expectation-value estimation on the CUDA-Q backend is **static-only**.
+        It is supported exclusively for ``STATIC``-mode artifacts, which are
+        evaluated with ``cudaq.observe()``.  ``RUNNABLE``-mode artifacts (a
+        kernel containing mid-circuit measurement or measurement-dependent
+        control flow such as ``if bit:`` / ``while bit:``) are emitted for
+        ``cudaq.run()``, and ``cudaq.observe()`` cannot consume them.  Such
+        artifacts therefore raise ``TypeError`` rather than silently returning
+        a meaningless value.
+
+        This is a CUDA-Q API limitation, not merely a Qamomile gap:
+        ``cudaq.observe()`` evaluates the analytic expectation value of a
+        deterministic state-preparation kernel and has no execution path for a
+        kernel that requires the per-shot ``cudaq.run()`` runtime.  There is no
+        safe alternative that preserves the exact-expectation contract of this
+        method, so the ``TypeError`` path is intentional.  Under the current
+        affine model a single Qamomile kernel also cannot be both ``RUNNABLE``
+        and carry a terminal ``qmc.expval`` (reusing a measured qubit is
+        rejected), so the ``ExecutableProgram.run`` expval path does not reach
+        this guard; it is reached only when ``estimate`` is called directly on
+        a ``RUNNABLE`` artifact.
+
+        Args:
+            circuit (Any): A CUDA-Q artifact (``CudaqKernelArtifact`` or
+                ``BoundCudaqKernelArtifact``).  Must be ``STATIC``-mode;
+                ``RUNNABLE``-mode artifacts are rejected.
+            hamiltonian (qm_o.Hamiltonian): The observable to measure.  A
+                ``qamomile.observable.Hamiltonian`` is converted to a CUDA-Q
+                ``SpinOperator``; an already-converted operator is used as-is.
+            params (Sequence[float] | None): Values for the kernel's runtime
+                ``parameters`` slots, in declared parameter order.  Compile-
+                time-bound parameters are already baked into the artifact and
+                are not included here.  Defaults to None for a non-parametric
+                or already-bound (``BoundCudaqKernelArtifact``) kernel.
+
+        Returns:
+            float: The estimated expectation value ``<psi|H|psi>``.
+
+        Raises:
+            TypeError: If ``circuit`` is a ``RUNNABLE``-mode artifact, since
+                ``cudaq.observe()`` only accepts static state-preparation
+                kernels (see the static-only note above).
+
+        Example:
+            >>> transpiler = CudaqTranspiler()
+            >>> exe = transpiler.transpile(static_ansatz, bindings={"H": H})
+            >>> executor = transpiler.executor()
+            >>> value = executor.estimate(exe.get_first_circuit(), H)
         """
         import cudaq
         import qamomile.observable as qm_o
@@ -2414,8 +2471,17 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         mode = getattr(circuit, "execution_mode", ExecutionMode.STATIC)
         if mode == ExecutionMode.RUNNABLE:
             raise TypeError(
-                "cudaq.observe() is not supported for runtime control flow "
-                "circuits. Use sample() or run() instead."
+                "Expectation-value estimation is not available for this CUDA-Q "
+                "circuit. The kernel uses mid-circuit measurement or "
+                "measurement-dependent control flow (e.g. `if bit:` / "
+                "`while bit:`), so it is emitted in RUNNABLE mode and executed "
+                "with `cudaq.run()`. CUDA-Q's expectation-value primitive "
+                "`cudaq.observe()` only accepts static state-preparation "
+                "kernels and cannot consume a RUNNABLE kernel. To estimate an "
+                "expectation value, express the state preparation as a static "
+                "kernel without measurement-dependent control flow; "
+                "expectation values cannot be computed for measurement-"
+                "conditioned circuits on the CUDA-Q backend."
             )
 
         self._ensure_target()  # type: ignore[unreachable]
