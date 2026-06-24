@@ -9,7 +9,10 @@ from typing import Any
 import sympy as sp
 
 from qamomile.circuit.estimator import GateCount, ResourceEstimate
-from qamomile.resource_estimation.hamiltonian import PauliHamiltonianResource
+from qamomile.resource_estimation.hamiltonian import (
+    PauliHamiltonianResource,
+    summarize_openfermion_qubit_operator,
+)
 
 _SympyLike = sp.Expr | int | float
 
@@ -796,6 +799,86 @@ def estimate_qubitized_qpe_resources_from_workload(
     )
 
 
+def qubitized_qpe_workload_from_openfermion(
+    openfermion_operator: Any,
+    *,
+    walk_cost_toffoli: _SympyLike,
+    representation: str | HamiltonianRepresentation = (
+        HamiltonianRepresentation.SPARSE_PAULI_LCU
+    ),
+    n_qubits: _SympyLike | None = None,
+    include_constant: bool = False,
+    source: str = "openfermion_qubit_operator",
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+    logical_qubits: _SympyLike | None = None,
+    representation_error: _SympyLike = 0,
+    description: str = "",
+    qpe_register_qubits: _SympyLike = 0,
+) -> HamiltonianQPEWorkload:
+    """Build a qubitized-QPE workload from an OpenFermion operator.
+
+    This helper preserves Qamomile's resource-estimation layer boundary:
+    OpenFermion-like data is summarized as a Pauli Hamiltonian, then packaged
+    as an algorithm workload without constructing a backend circuit.
+
+    Args:
+        openfermion_operator (Any): OpenFermion ``QubitOperator``-like object
+            exposing a ``terms`` mapping.
+        walk_cost_toffoli (sp.Expr | int | float): Toffoli cost for one
+            qubitized walk-operator call.
+        representation (str | HamiltonianRepresentation): Hamiltonian
+            representation used for logical-qubit scaling. Defaults to sparse
+            Pauli LCU.
+        n_qubits (sp.Expr | int | float | None): Optional encoded qubit-count
+            override. Defaults to the operator-inferred width.
+        include_constant (bool): Whether to include the identity coefficient
+            in the Hamiltonian normalization. Defaults to False.
+        source (str): Human-readable Hamiltonian source label.
+        sparsity (sp.Expr | int | float | None): Optional sparse-method
+            nonzero term count. Defaults to the Hamiltonian term count for
+            sparse Pauli LCU.
+        second_factor_rank (sp.Expr | int | float | None): Optional
+            second-factor rank metadata for factorized representations.
+        logical_qubits (sp.Expr | int | float | None): Explicit base logical
+            qubit count before QPE readout registers are added.
+        representation_error (sp.Expr | int | float): Hamiltonian
+            representation error consumed before phase estimation. Defaults
+            to 0.
+        description (str): Reader-facing workload label. Defaults to an empty
+            string.
+        qpe_register_qubits (sp.Expr | int | float): Optional QPE readout
+            register qubits. Defaults to 0.
+
+    Returns:
+        HamiltonianQPEWorkload: Workload backed by the OpenFermion-style
+        Hamiltonian summary.
+
+    Raises:
+        TypeError: If the OpenFermion object is malformed or any symbolic
+            input cannot be converted to SymPy.
+        ValueError: If a Pauli label, representation, or resource quantity is
+            invalid.
+    """
+    summary = summarize_openfermion_qubit_operator(
+        openfermion_operator,
+        n_qubits=n_qubits,
+        include_constant=include_constant,
+        source=source,
+    )
+    return HamiltonianQPEWorkload(
+        hamiltonian=summary,
+        walk_cost_toffoli=walk_cost_toffoli,
+        representation=representation,
+        sparsity=sparsity,
+        second_factor_rank=second_factor_rank,
+        logical_qubits=logical_qubits,
+        representation_error=representation_error,
+        description=description,
+        qpe_register_qubits=qpe_register_qubits,
+    )
+
+
 def estimate_trotter_qpe_resources(
     n_qubits: sp.Expr | int,
     n_pauli_terms: sp.Expr | int,
@@ -990,6 +1073,107 @@ def estimate_trotter_qpe_resources_from_hamiltonian(
         randomized_compilation_factor=randomized_compilation_factor,
         rotation_synthesis_t_gates=rotation_synthesis_t_gates,
         logical_qubits=logical_qubits,
+    )
+
+
+def trotter_qpe_workload_from_openfermion(
+    openfermion_operator: Any,
+    *,
+    trotter_steps_per_sample: _SympyLike,
+    samples: _SympyLike,
+    effective_lambda_norm: _SympyLike | None = None,
+    unitary_weight_factor: _SympyLike = 1,
+    randomized_compilation_factor: _SympyLike = 1,
+    rotation_synthesis_t_gates: _SympyLike = 1,
+    logical_qubits: _SympyLike | None = None,
+    representation_error: _SympyLike = 0,
+    n_qubits: _SympyLike | None = None,
+    include_constant: bool = False,
+    source: str = "openfermion_qubit_operator",
+    description: str = "",
+) -> TrotterQPEWorkload:
+    """Build a Trotter-QPE workload from an OpenFermion operator.
+
+    Use ``effective_lambda_norm`` when a chemistry resource-estimation table
+    reports the Hamiltonian weight after concentration. Otherwise provide a
+    multiplicative ``unitary_weight_factor`` directly.
+
+    Args:
+        openfermion_operator (Any): OpenFermion ``QubitOperator``-like object
+            exposing a ``terms`` mapping.
+        trotter_steps_per_sample (sp.Expr | int | float): Product-formula
+            steps per sampled time-evolution segment.
+        samples (sp.Expr | int | float): Number of sampled time points or
+            signal-processing shots.
+        effective_lambda_norm (sp.Expr | int | float | None): Optional
+            Hamiltonian normalization after concentration. When provided, the
+            workload derives ``unitary_weight_factor`` from it. Defaults to
+            None.
+        unitary_weight_factor (sp.Expr | int | float): Multiplicative
+            Hamiltonian-weight reduction used when ``effective_lambda_norm``
+            is not provided. Defaults to 1.
+        randomized_compilation_factor (sp.Expr | int | float): Multiplicative
+            product-formula cost factor from randomized evolution. Defaults
+            to 1.
+        rotation_synthesis_t_gates (sp.Expr | int | float): T-gate cost for
+            one Pauli rotation. Defaults to 1.
+        logical_qubits (sp.Expr | int | float | None): Explicit logical qubit
+            count. Defaults to data qubits plus one Hadamard-test ancilla.
+        representation_error (sp.Expr | int | float): Energy error consumed
+            before phase estimation. Defaults to 0.
+        n_qubits (sp.Expr | int | float | None): Optional encoded qubit-count
+            override. Defaults to the operator-inferred width.
+        include_constant (bool): Whether to include the identity coefficient
+            in the Hamiltonian normalization. Defaults to False.
+        source (str): Human-readable Hamiltonian source label.
+        description (str): Reader-facing workload label.
+
+    Returns:
+        TrotterQPEWorkload: Workload backed by the OpenFermion-style
+        Hamiltonian summary.
+
+    Raises:
+        TypeError: If the OpenFermion object is malformed or any symbolic
+            input cannot be converted to SymPy.
+        ValueError: If a Pauli label or resource quantity is invalid, or if
+            ``effective_lambda_norm`` is provided together with a non-unit
+            ``unitary_weight_factor``.
+    """
+    summary = summarize_openfermion_qubit_operator(
+        openfermion_operator,
+        n_qubits=n_qubits,
+        include_constant=include_constant,
+        source=source,
+    )
+    weight_factor = _as_expr(unitary_weight_factor, "unitary_weight_factor")
+    if effective_lambda_norm is not None:
+        if sp.simplify(weight_factor - 1) != 0:
+            raise ValueError(
+                "effective_lambda_norm and a non-unit unitary_weight_factor "
+                "cannot both be provided."
+            )
+        return TrotterQPEWorkload.from_effective_lambda_norm(
+            summary,
+            effective_lambda_norm,
+            trotter_steps_per_sample=trotter_steps_per_sample,
+            samples=samples,
+            randomized_compilation_factor=randomized_compilation_factor,
+            rotation_synthesis_t_gates=rotation_synthesis_t_gates,
+            logical_qubits=logical_qubits,
+            representation_error=representation_error,
+            description=description,
+        )
+
+    return TrotterQPEWorkload(
+        hamiltonian=summary,
+        trotter_steps_per_sample=trotter_steps_per_sample,
+        samples=samples,
+        unitary_weight_factor=weight_factor,
+        randomized_compilation_factor=randomized_compilation_factor,
+        rotation_synthesis_t_gates=rotation_synthesis_t_gates,
+        logical_qubits=logical_qubits,
+        representation_error=representation_error,
+        description=description,
     )
 
 

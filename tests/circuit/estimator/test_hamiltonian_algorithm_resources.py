@@ -21,9 +21,26 @@ from qamomile.resource_estimation import (
     estimate_trotter_qpe_resources,
     estimate_trotter_qpe_resources_from_hamiltonian,
     estimate_trotter_qpe_resources_from_workload,
+    qubitized_qpe_workload_from_openfermion,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
+    trotter_qpe_workload_from_openfermion,
 )
+
+
+class QubitOperatorStub:
+    """Expose a minimal OpenFermion-style terms mapping for workload tests.
+
+    Attributes:
+        terms (dict[tuple[tuple[int, str], ...], int]): Pauli-string terms in
+            the same shape as OpenFermion ``QubitOperator.terms``.
+    """
+
+    terms = {
+        ((0, "Z"),): 2,
+        ((1, "X"), (2, "Y")): 3,
+        (): 4,
+    }
 
 
 def test_qubitized_qpe_tracks_lambda_precision_and_walk_cost():
@@ -146,6 +163,36 @@ def test_hamiltonian_workload_builds_from_block_encoding_contract():
     assert logical.gates.multi_qubit == sp.Rational(560, 3)
 
 
+def test_qubitized_workload_builds_from_openfermion_operator():
+    """OpenFermion-style operators become auditable QPE workloads."""
+    workload = qubitized_qpe_workload_from_openfermion(
+        QubitOperatorStub(),
+        walk_cost_toffoli=11,
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        qpe_register_qubits=2,
+        representation_error=sp.Rational(1, 5),
+        description="openfermion sparse Pauli LCU",
+    )
+    logical = estimate_qubitized_qpe_resources_from_workload(workload, precision=1)
+
+    assert workload.hamiltonian.n_qubits == 3
+    assert workload.hamiltonian.n_pauli_terms == 2
+    assert sp.simplify(workload.hamiltonian.lambda_norm - 5) == 0
+    assert sp.simplify(workload.hamiltonian.constant - 4) == 0
+    assert workload.hamiltonian.constant_included is False
+    assert workload.effective_sparsity == 2
+    assert workload.qpe_register_qubits == 2
+    assert workload.resource_values_for_precision(1)["algorithmic_precision"] == (
+        sp.Rational(4, 5)
+    )
+    assert logical.qubits == 5 + sp.sqrt(2)
+    assert (
+        sp.simplify(logical.gates.oracle_calls["qpe_iterations"] - sp.Rational(25, 4))
+        == 0
+    )
+    assert sp.simplify(logical.gates.multi_qubit - sp.Rational(275, 4)) == 0
+
+
 def test_trotter_qpe_models_unitary_weight_reduction():
     """Unitary-weight concentration reduces the lambda-driven QPE iterations."""
     baseline = estimate_trotter_qpe_resources(
@@ -233,6 +280,42 @@ def test_trotter_workload_builds_from_reported_effective_lambda():
     assert sp.Abs(logical.gates.oracle_calls["qpe_iterations"] - 2) < sp.Float("1e-12")
     assert sp.Abs(logical.gates.rotation_gates - 21) < sp.Float("1e-12")
     assert sp.Abs(logical.gates.t_gates - 462) < sp.Float("1e-12")
+
+
+def test_trotter_workload_builds_from_openfermion_effective_lambda():
+    """OpenFermion Trotter workloads can use reported effective lambda."""
+    workload = trotter_qpe_workload_from_openfermion(
+        QubitOperatorStub(),
+        effective_lambda_norm=1,
+        trotter_steps_per_sample=2,
+        samples=5,
+        randomized_compilation_factor=sp.Rational(1, 2),
+        rotation_synthesis_t_gates=7,
+        description="openfermion unitary weight concentration",
+    )
+    logical = estimate_trotter_qpe_resources_from_workload(workload, precision=1)
+
+    assert workload.hamiltonian.n_qubits == 3
+    assert workload.hamiltonian.n_pauli_terms == 2
+    assert sp.simplify(workload.hamiltonian.lambda_norm - 5) == 0
+    assert sp.simplify(workload.unitary_weight_factor - sp.Rational(1, 5)) == 0
+    assert sp.simplify(workload.effective_lambda_norm - 1) == 0
+    assert logical.qubits == 4
+    assert sp.simplify(logical.gates.oracle_calls["qpe_iterations"] - 1) == 0
+    assert logical.gates.rotation_gates == 10
+    assert sp.simplify(logical.gates.t_gates - 70) == 0
+
+
+def test_trotter_openfermion_workload_rejects_conflicting_weight_inputs():
+    """Effective lambda and direct unitary-weight factors are exclusive."""
+    with pytest.raises(ValueError, match="effective_lambda_norm"):
+        trotter_qpe_workload_from_openfermion(
+            QubitOperatorStub(),
+            effective_lambda_norm=1,
+            unitary_weight_factor=sp.Rational(1, 2),
+            trotter_steps_per_sample=1,
+            samples=1,
+        )
 
 
 def test_trotter_effective_lambda_constructor_rejects_zero_original_lambda():

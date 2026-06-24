@@ -32,6 +32,8 @@ from qamomile.resource_estimation.hamiltonian_algorithms import (
     estimate_trotter_qpe_resources,
     estimate_trotter_qpe_resources_from_hamiltonian,
     estimate_trotter_qpe_resources_from_workload,
+    qubitized_qpe_workload_from_openfermion,
+    trotter_qpe_workload_from_openfermion,
 )
 from qamomile.resource_estimation.quantities import (
     ResourceCategory,
@@ -98,8 +100,10 @@ __all__ = [
     "iter_resource_review_profiles",
     "iter_resource_quantity_specs",
     "pareto_resource_values",
+    "qubitized_qpe_workload_from_openfermion",
     "qubits_counter",
     "resource_values_from_estimate",
     "summarize_openfermion_qubit_operator",
     "summarize_pauli_hamiltonian",
+    "trotter_qpe_workload_from_openfermion",
 ]

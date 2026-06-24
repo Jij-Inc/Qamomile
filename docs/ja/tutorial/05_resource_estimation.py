@@ -208,6 +208,36 @@ assert qre.ResourceQuantity.LAMBDA_NORM in workload_profile.quantities
 assert qre.ResourceQuantity.EFFECTIVE_LAMBDA_NORM in trotter_profile.quantities
 assert qre.ResourceQuantity.PHYSICAL_QUBIT_SECONDS in physical_profile.quantities
 
+# %% [markdown]
+# 量子化学の推定はOpenFermionの`QubitOperator`から始まることがよくあります。Qamomileがそのオブジェクト自体を所有する必要はありません。OpenFermion形式の`terms` mappingがあれば、Hamiltonianをresource quantityへ要約できます。
+
+# %%
+class OpenFermionQubitOperatorStub:
+    terms = {
+        ((0, "Z"),): 4,
+        ((1, "Z"),): 3,
+        ((0, "X"), (1, "X")): 2,
+    }
+
+
+openfermion_workload = qre.qubitized_qpe_workload_from_openfermion(
+    OpenFermionQubitOperatorStub(),
+    walk_cost_toffoli=100,
+    representation=qre.HamiltonianRepresentation.SPARSE_PAULI_LCU,
+    qpe_register_qubits=2,
+    description="OpenFermion sparse Pauli LCU",
+)
+openfermion_logical = qre.estimate_qubitized_qpe_resources_from_workload(
+    openfermion_workload,
+    precision=1,
+)
+
+print(openfermion_workload.hamiltonian.to_dict())
+print(openfermion_logical)
+assert openfermion_workload.hamiltonian.n_pauli_terms == 3
+assert sp.simplify(openfermion_workload.hamiltonian.lambda_norm - 9) == 0
+assert sp.simplify(openfermion_logical.gates.oracle_calls["qpe_iterations"] - 9) == 0
+
 # %%
 hamiltonian = 4 * qm_o.Z(0) + 3 * qm_o.Z(1) + 2 * qm_o.X(0) * qm_o.X(1)
 summary = qre.summarize_pauli_hamiltonian(hamiltonian)
