@@ -18,6 +18,7 @@ from qamomile.resource_estimation import (
     ResourceScenarioValueRow,
     ResourceSymbolDependencyRow,
     ResourceSymbolDriverRow,
+    SupportsResourceValues,
     SurfaceCodeCostModel,
     audit_resource_value_drivers,
     audit_resource_value_symbols,
@@ -32,6 +33,7 @@ from qamomile.resource_estimation import (
     iter_resource_quantity_specs,
     iter_resource_review_profiles,
     pareto_resource_values,
+    resource_estimate_expressions,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
 )
@@ -62,6 +64,30 @@ def test_quantity_specs_cover_core_resource_layers():
         ResourceCategory.ARCHITECTURE,
     }.issubset(categories)
     assert len(quantities) == len(specs)
+
+
+def test_resource_estimation_facade_exports_symbolic_value_helpers():
+    """The public facade exposes value protocols and expression collectors."""
+    logical = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=1,
+        walk_cost_toffoli=3,
+    )
+    expressions = resource_estimate_expressions(logical)
+    physical: SupportsResourceValues = estimate_physical_resources(
+        logical,
+        FTQCCostModel(
+            physical_qubits_per_logical=100,
+            logical_cycle_time_seconds=sp.Rational(1, 1_000_000),
+            factory_qubits=1000,
+            non_clifford_throughput_per_second=100,
+        ),
+    )
+
+    assert logical.qubits in expressions
+    assert logical.gates.total in expressions
+    assert ResourceQuantity.LOGICAL_QUBITS.value in physical.resource_values()
 
 
 def test_describe_resource_quantity_normalizes_strings():

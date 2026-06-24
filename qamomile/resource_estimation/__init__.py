@@ -16,6 +16,7 @@ from qamomile.resource_estimation.ftqc import (
     FTQCPhysicalResourceEstimate,
     SurfaceCodeCostModel,
     estimate_physical_resources,
+    resource_estimate_expressions,
 )
 from qamomile.resource_estimation.hamiltonian import (
     PauliHamiltonianResource,
@@ -46,6 +47,7 @@ from qamomile.resource_estimation.quantities import (
     ResourceScenarioValueRow,
     ResourceSymbolDependencyRow,
     ResourceSymbolDriverRow,
+    SupportsResourceValues,
     audit_resource_value_drivers,
     audit_resource_value_symbols,
     compare_resource_values,
@@ -79,6 +81,7 @@ __all__ = [
     "ResourceSymbolDriverRow",
     "ResourceSymbolDependencyRow",
     "SurfaceCodeCostModel",
+    "SupportsResourceValues",
     "TrotterQPEWorkload",
     "audit_resource_value_drivers",
     "audit_resource_value_symbols",
@@ -103,6 +106,7 @@ __all__ = [
     "qubitized_qpe_workload_from_openfermion",
     "qubits_counter",
     "resource_values_from_estimate",
+    "resource_estimate_expressions",
     "summarize_openfermion_qubit_operator",
     "summarize_pauli_hamiltonian",
     "trotter_qpe_workload_from_openfermion",
