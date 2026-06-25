@@ -350,6 +350,27 @@ class GateEmitter(Protocol[T]):
         """
         ...
 
+    def supports_reusable_gates(self) -> bool:
+        """Return whether ``circuit_to_gate`` can produce reusable gates.
+
+        Returns:
+            bool: True when the backend can convert emitted sub-circuits to
+                reusable gate objects. Defaults to False so emit paths can
+                avoid building throwaway sub-circuits for backends that only
+                support inline fallback emission.
+        """
+        return False
+
+    def supports_gate_inverse(self) -> bool:
+        """Return whether reusable gates can be inverted natively.
+
+        Returns:
+            bool: True when ``gate_inverse`` can return a backend-native
+                inverse for gates produced by ``circuit_to_gate``. Defaults
+                to False.
+        """
+        return False
+
     @abstractmethod
     def append_gate(
         self,
@@ -391,6 +412,19 @@ class GateEmitter(Protocol[T]):
             New controlled gate
         """
         ...
+
+    def gate_inverse(self, gate: Any) -> Any:
+        """Create a backend-native inverse gate when supported.
+
+        Args:
+            gate (Any): Backend-specific gate object returned by
+                `circuit_to_gate`.
+
+        Returns:
+            Any: Backend-specific inverse gate object, or None when the
+            backend cannot invert reusable gates natively.
+        """
+        return None
 
     # Control flow support (optional - backends can return False to fall back)
     def supports_for_loop(self) -> bool:
@@ -495,6 +529,14 @@ def default_combine_symbolic(
             return lhs / rhs if rhs != 0 else 0.0
         case BinOpKind.FLOORDIV:
             return lhs // rhs if rhs != 0 else 0
+        case BinOpKind.MOD:
+            # Unlike the div-by-zero degenerate convention above (return 0 to
+            # let emission continue), modulo by zero is undefined, and the
+            # compile-time fold path (evaluate_binop_values) treats it as
+            # non-foldable. Do not special-case rhs == 0 here: a concrete zero
+            # divisor raises loudly rather than silently producing a wrong
+            # value, keeping the symbolic path consistent with folding.
+            return lhs % rhs
         case BinOpKind.POW:
             return lhs**rhs
         case _:

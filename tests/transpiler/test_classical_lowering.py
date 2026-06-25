@@ -537,6 +537,7 @@ class TestVectorBitElementProvenance:
             "RuntimeClassicalExpr(AND)."
         )
 
+    @pytest.mark.cudaq
     def test_flat_if_on_measured_vector_element_cudaq(self):
         """The same ``if s[i]:`` pattern compiles on the CUDA-Q backend.
 
@@ -545,7 +546,10 @@ class TestVectorBitElementProvenance:
         lookup) and the CUDA-Q-specific ``_collect_loop_carried_clbits``
         pre-scan (which also walks ``parent_array``). Exercising this
         end-to-end on CUDA-Q ensures both call sites stay consistent with
-        the Qiskit-side coverage. Skipped when CUDA-Q is not installed.
+        the Qiskit-side coverage. Runs in ``-m cudaq`` sessions only:
+        loading cudaq (and the torch/OpenMP runtimes it brings) into a
+        default session that also executes qiskit-aer can segfault — see
+        tests/_cudaq_isolation.py.
         """
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler

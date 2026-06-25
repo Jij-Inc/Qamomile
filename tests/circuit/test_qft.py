@@ -773,11 +773,14 @@ class TestNestedShapeDependentStdlib:
 
     @pytest.mark.parametrize("seed", [0, 1, 7])
     @pytest.mark.parametrize("n", [1, 2, 3])
-    def test_392_cross_backend_sampling(self, n, seed):
+    def test_392_cross_backend_sampling(self, sdk_transpiler, n, seed):
         """Cross-backend sampling: ``IQFT|+...+>`` collapses to ``|0...0>``.
 
         Verifies that the nested-call IQFT fix produces identical
-        behavior on every quantum SDK backend Qamomile ships with.
+        behavior on every quantum SDK backend Qamomile ships with,
+        parametrized via ``sdk_transpiler`` so each backend leg runs in
+        the matching ``-m`` session (the cudaq leg must never load
+        cudaq into a default session — see tests/_cudaq_isolation.py).
 
         The kernel prepares ``H^{⊗n}|0...0> = |+...+>`` inside an inner
         ``prepare`` kernel that *also* applies IQFT, then measures
@@ -788,14 +791,13 @@ class TestNestedShapeDependentStdlib:
         protects both the IR-level fix and each backend's emit pass.
 
         Args:
+            sdk_transpiler (SdkTranspilerCase): Backend label plus
+                transpiler instance from the shared fixture.
             n (int): Register size, parametrized with both 1 and small
                 multi-qubit cases.
-            seed (int): RNG seed for sampler reproducibility.
+            seed (int): RNG seed for sampler reproducibility (used by
+                the seedable Qiskit simulator leg).
         """
-        pytest.importorskip("qiskit")
-        from qiskit.providers.basic_provider import BasicSimulator
-
-        from qamomile.qiskit import QiskitTranspiler
 
         @qkernel
         def prepare(m: qmc.UInt) -> Vector[Qubit]:
@@ -810,64 +812,49 @@ class TestNestedShapeDependentStdlib:
             qs = prepare(m)
             return qmc.measure(qs)
 
-        results: dict[str, dict[tuple, int]] = {}
+        transpiler = sdk_transpiler.transpiler
+        if sdk_transpiler.backend_name == "qiskit":
+            from qiskit.providers.basic_provider import BasicSimulator
 
-        # Qiskit
-        qiskit_tr = QiskitTranspiler()
-        backend = BasicSimulator()
-        backend.set_options(seed_simulator=seed)
-        exe = qiskit_tr.transpile(measure_top, bindings={"m": n})
-        job = exe.sample(qiskit_tr.executor(backend=backend), shots=512)
-        results["qiskit"] = {bits: cnt for bits, cnt in job.result().results}
+            backend = BasicSimulator()
+            backend.set_options(seed_simulator=seed)
+            executor = transpiler.executor(backend=backend)
+        else:
+            executor = transpiler.executor()
 
-        # QuriParts (state-vector sampler)
-        quri_parts = pytest.importorskip("quri_parts")  # noqa: F841
-        from qamomile.quri_parts import QuriPartsTranspiler
-
-        qp_tr = QuriPartsTranspiler()
-        exe = qp_tr.transpile(measure_top, bindings={"m": n})
-        job = exe.sample(qp_tr.executor(), shots=512)
-        results["quri_parts"] = {bits: cnt for bits, cnt in job.result().results}
-
-        # CUDA-Q (optional — many CI envs lack the simulator).
-        try:
-            cudaq = pytest.importorskip("cudaq")  # noqa: F841
-            from qamomile.cudaq import CudaqTranspiler
-
-            cudaq_tr = CudaqTranspiler()
-            exe = cudaq_tr.transpile(measure_top, bindings={"m": n})
-            job = exe.sample(cudaq_tr.executor(), shots=512)
-            results["cudaq"] = {bits: cnt for bits, cnt in job.result().results}
-        except (pytest.skip.Exception, ImportError, RuntimeError):
-            pass
+        exe = transpiler.transpile(measure_top, bindings={"m": n})
+        job = exe.sample(executor, shots=512)
+        counts = {bits: cnt for bits, cnt in job.result().results}
 
         # IQFT followed by sampling a uniform superposition must yield
         # only the all-zero bitstring on every backend.
         expected_bits = tuple(0 for _ in range(n))
-        for backend_name, counts in results.items():
-            assert set(counts) == {expected_bits}, (
-                f"{backend_name}: expected {{({expected_bits})}}, got {set(counts)}"
-            )
+        assert set(counts) == {expected_bits}, (
+            f"{sdk_transpiler.backend_name}: "
+            f"expected {{({expected_bits})}}, got {set(counts)}"
+        )
 
     @pytest.mark.parametrize("seed", [0, 5])
     @pytest.mark.parametrize("n", [1, 2, 3])
-    def test_392_cross_backend_expval(self, n, seed):
+    def test_392_cross_backend_expval(self, sdk_transpiler, n, seed):
         """Cross-backend expval: ``<+...+|IQFT^† Z_0 IQFT|+...+> = 1``.
 
         Pairs with :meth:`test_392_cross_backend_sampling` to exercise
         the estimator pipeline of every backend (sampler and estimator
-        regress independently). ``IQFT|+...+> = |0...0>`` so
-        ``<Z_0> = 1`` exactly under noiseless simulation.
+        regress independently), parametrized via ``sdk_transpiler`` so
+        each backend leg runs in the matching ``-m`` session (see
+        tests/_cudaq_isolation.py for the cudaq constraint).
+        ``IQFT|+...+> = |0...0>`` so ``<Z_0> = 1`` exactly under
+        noiseless simulation.
 
         Args:
+            sdk_transpiler (SdkTranspilerCase): Backend label plus
+                transpiler instance from the shared fixture.
             n (int): Register size.
             seed (int): RNG seed; included so an accidental dependence
                 on a fixed initial state would be caught.
         """
         import qamomile.observable as qm_o
-
-        pytest.importorskip("qiskit")
-        from qamomile.qiskit import QiskitTranspiler
 
         @qkernel
         def prepare(m: qmc.UInt) -> Vector[Qubit]:
@@ -886,41 +873,14 @@ class TestNestedShapeDependentStdlib:
         rng = np.random.default_rng(seed)
         _ = rng.random()  # mix the seed into the RNG state for symmetry with sampling
 
-        # Qiskit
-        qiskit_tr = QiskitTranspiler()
-        exe = qiskit_tr.transpile(expval_top, bindings={"m": n, "obs": H})
-        val_q = exe.run(qiskit_tr.executor()).result()
-        assert np.isclose(val_q, 1.0, atol=1e-8), (
-            f"qiskit n={n} seed={seed}: expected <Z_0>=1, got {val_q}"
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(expval_top, bindings={"m": n, "obs": H})
+        val = exe.run(transpiler.executor()).result()
+        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        assert np.isclose(val, 1.0, atol=atol), (
+            f"{sdk_transpiler.backend_name} n={n} seed={seed}: "
+            f"expected <Z_0>=1, got {val}"
         )
-
-        # QuriParts
-        try:
-            pytest.importorskip("quri_parts")
-            from qamomile.quri_parts import QuriPartsTranspiler
-
-            qp_tr = QuriPartsTranspiler()
-            exe = qp_tr.transpile(expval_top, bindings={"m": n, "obs": H})
-            val_qp = exe.run(qp_tr.executor()).result()
-            assert np.isclose(val_qp, 1.0, atol=1e-8), (
-                f"quri_parts n={n} seed={seed}: expected <Z_0>=1, got {val_qp}"
-            )
-        except pytest.skip.Exception:
-            pass
-
-        # CUDA-Q (optional)
-        try:
-            pytest.importorskip("cudaq")
-            from qamomile.cudaq import CudaqTranspiler
-
-            cudaq_tr = CudaqTranspiler()
-            exe = cudaq_tr.transpile(expval_top, bindings={"m": n, "obs": H})
-            val_c = exe.run(cudaq_tr.executor()).result()
-            assert np.isclose(val_c, 1.0, atol=1e-6), (
-                f"cudaq n={n} seed={seed}: expected <Z_0>=1, got {val_c}"
-            )
-        except (pytest.skip.Exception, ImportError, RuntimeError):
-            pass
 
     @pytest.mark.parametrize("n", [1, 2, 3])
     def test_392_reproducer_iqft_visible_after_inline(self, qiskit_transpiler, n):

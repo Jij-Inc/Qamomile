@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import abc
 
 import ommx.v1
@@ -18,25 +20,30 @@ def normalize_problem_input(
     :class:`MathematicalProblemConverter` base class and
     :class:`~qamomile.optimization.pce.PCEConverter` (which deliberately
     does not inherit from that base) both delegate to this helper so the
-    OMMX deep-copy / ``to_qubo`` semantics live in exactly one place.
+    OMMX deep-copy / ``to_hubo`` semantics live in exactly one place.
 
     For OMMX inputs, the instance is deep-copied via a bytes round-trip
-    before ``to_qubo`` is called: ``to_qubo`` mutates the instance it is
+    before ``to_hubo`` is called: ``to_hubo`` mutates the instance it is
     called on (it appends slack decision variables for non-binary vars
     and absorbs constraints into the objective via the penalty method).
     Mutating the caller's instance silently is surprising; copying first
     leaves the caller's view untouched. The deep copy retains
     original-constraint metadata internally, so downstream
     ``evaluate_samples`` reports feasibility against the user's
-    *original* constraints, and slack bits added by ``to_qubo`` are
+    *original* constraints, and slack bits added by ``to_hubo`` are
     reconstructed back into the original decision variables (e.g.,
     integers rebuilt from log-encoded slack bits) by ``evaluate_samples``
     automatically.
 
+    ``to_hubo`` is used instead of ``to_qubo`` so that both purely
+    quadratic (QUBO) and higher-order (HUBO) instances are handled
+    uniformly. For quadratic-only instances the two paths produce
+    equivalent optimization problems (same coefficients and vartype).
+
     Args:
         instance (ommx.v1.Instance | BinaryModel): The combinatorial
             optimization problem. ``ommx.v1.Instance`` inputs are
-            deep-copied and converted via ``to_qubo()``; ``BinaryModel``
+            deep-copied and converted via ``to_hubo()``; ``BinaryModel``
             inputs retain their declared vartype as the target output
             vartype.
 
@@ -45,7 +52,7 @@ def normalize_problem_input(
         ``(stored_instance, original_vartype, spin_model)``.
 
         * ``stored_instance``: the deep-copied ``Instance`` for OMMX
-          inputs (post ``to_qubo``), or ``None`` for ``BinaryModel``
+          inputs (post ``to_hubo``), or ``None`` for ``BinaryModel``
           inputs.
         * ``original_vartype``: the declared vartype of the input — used
           by converters' ``decode`` paths to return results in the
@@ -61,8 +68,8 @@ def normalize_problem_input(
         return None, instance.vartype, instance.change_vartype(VarType.SPIN)
     if isinstance(instance, ommx.v1.Instance):
         stored = ommx.v1.Instance.from_bytes(instance.to_bytes())
-        qubo, constant = stored.to_qubo()
-        spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(VarType.SPIN)
+        hubo, constant = stored.to_hubo()
+        spin_model = BinaryModel.from_hubo(hubo, constant).change_vartype(VarType.SPIN)
         return stored, VarType.BINARY, spin_model
     raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
 
@@ -161,10 +168,15 @@ class MathematicalProblemConverter(abc.ABC):
 
         Subclasses must implement this method to build the appropriate
         Hamiltonian for their specific algorithm (e.g., Pauli-Z for QAOA,
-        QRAC-encoded for QRAO).
+        QRAC-encoded for QRAO). Oracle-based converters that do not use a cost
+        Hamiltonian (e.g., ``GASConverter``) should raise ``NotImplementedError``.
 
         Returns:
             qm_o.Hamiltonian: The cost Hamiltonian.
+
+        Raises:
+            NotImplementedError: If the converter does not expose a cost
+                Hamiltonian.
         """
         ...
 

@@ -28,16 +28,31 @@ Output guarantees:
     3. ``canonicalize`` is idempotent: running it twice on the same
        Block yields the same canonical bytes as running it once.
 
+Canonical-bytes scope:
+    Display-only fields (``Block.name``, ``Block.output_names``,
+    ``Value.name``) are excluded from ``to_canonical_bytes``;
+    functional fields are included. ``Block.label_args`` (input port
+    names by position) and ``Block.param_slots`` (the kernel's
+    classical parameter contract) are both functional: two Blocks
+    whose operations match but whose parameter manifests differ (e.g.,
+    a slot rebound from ``RUNTIME_PARAMETER`` to
+    ``COMPILE_TIME_BOUND``) hash differently. ``param_slots`` holds no
+    Value/UUID references, so ``canonicalize`` carries the tuple over
+    verbatim with nothing to remap.
+
 Limitations:
     - ``Value.parent_array`` cycles (a Value whose ``parent_array`` is
       itself reachable from the Value's siblings) are not constructed
       by the frontend today; the canonicalizer assumes the
       Value-reference graph through ``parent_array`` and
       ``element_indices`` is acyclic.
-    - ``ValueMetadata.dict_runtime.bound_data`` and
-      ``ArrayRuntimeMetadata.const_array`` may carry arbitrary frozen
-      Python data; hash stability for these requires that contained
-      objects have a stable ``repr``.
+    - ``ValueMetadata.dict_runtime.bound_data``,
+      ``ArrayRuntimeMetadata.const_array``, and
+      ``ParamSlot.default`` / ``ParamSlot.bound_value`` may carry
+      arbitrary frozen Python data. ``numpy.ndarray`` payloads (except
+      object-dtype arrays) are hashed from their raw buffer
+      (dtype + shape + bytes) and are therefore exempt; hash stability
+      for any other object type requires a stable ``repr``.
 """
 
 from __future__ import annotations
@@ -48,24 +63,28 @@ import hashlib
 import uuid as _uuid
 from typing import Any, cast
 
+import numpy as np
+
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
-    ArrayRuntimeMetadata,
     ArrayValue,
-    CastMetadata,
     DictValue,
-    QFixedMetadata,
     TupleValue,
     Value,
     ValueBase,
     ValueMetadata,
+    remap_indexed_identifier,
+    remap_value_metadata_references,
 )
 
 _SUPPORTED_KINDS = frozenset({BlockKind.AFFINE, BlockKind.ANALYZED})
@@ -86,7 +105,8 @@ def canonicalize(block: Block) -> Block:
     Returns:
         Block: A new Block with canonical UUIDs. ``Block.kind`` matches
             the input. Existing input/output ordering, operation
-            ordering, and metadata structure are preserved.
+            ordering, metadata structure, and the ``param_slots``
+            manifest (carried over verbatim) are preserved.
 
     Raises:
         ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
@@ -209,8 +229,9 @@ class _Canonicalizer:
     """Walker that assigns deterministic UUIDs by traversal order.
 
     A single ``_Canonicalizer`` covers one ``canonicalize`` invocation
-    and may recurse into nested Blocks (currently only via
-    ``CompositeGateOperation.implementation_block``). A shared counter
+    and may recurse into nested Blocks (for example via
+    ``CompositeGateOperation.implementation_block`` and
+    ``InverseBlockOperation`` source/fallback blocks). A shared counter
     across nested Blocks guarantees no UUID string collisions within
     the returned canonical tree.
     """
@@ -301,16 +322,14 @@ class _Canonicalizer:
     def canonical_block(self, block: Block) -> Block:
         """Return a canonical clone of ``block``.
 
-        Sub-Blocks reached via ``CompositeGateOperation`` are
+        Sub-Blocks reached via nested operation fields are
         canonicalized through the same Canonicalizer instance and are
         cached by Python ``id`` so repeated references share a single
         canonical Block.
 
         Args:
             block (Block): The IR Block to canonicalize. Sub-Blocks
-                reachable from this Block (via
-                ``CompositeGateOperation.implementation_block``) are
-                canonicalized recursively.
+                reachable from this Block are canonicalized recursively.
 
         Returns:
             Block: A new Block with canonical UUIDs and rewritten
@@ -343,6 +362,9 @@ class _Canonicalizer:
             operations=new_operations,
             kind=block.kind,
             parameters=new_parameters,
+            # ParamSlot is frozen and holds no Value/UUID references, so
+            # the manifest is shared verbatim — there is nothing to remap.
+            param_slots=block.param_slots,
         )
         self._block_cache[id(block)] = new_block
         return new_block
@@ -354,7 +376,7 @@ class _Canonicalizer:
         so subclass-extra Value fields (e.g., ``ControlledU.power``,
         ``ForOperation.loop_var_value``) are rewritten consistently.
         Recurses into nested control-flow ops via ``HasNestedOps`` and
-        into ``CompositeGateOperation.implementation_block``.
+        into nested operation Blocks.
 
         Args:
             op (Operation): The Operation to canonicalize.
@@ -393,7 +415,10 @@ class _Canonicalizer:
         if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
             new_op = dataclasses.replace(
                 new_op,
-                qubit_mapping=[self._remap_uuid(u) for u in new_op.qubit_mapping],
+                qubit_mapping=[
+                    remap_indexed_identifier(u, self._remap_uuid)
+                    for u in new_op.qubit_mapping
+                ],
             )
 
         if (
@@ -402,6 +427,13 @@ class _Canonicalizer:
         ):
             sub = self.canonical_block(new_op.implementation_block)
             new_op = dataclasses.replace(new_op, implementation_block=sub)
+        if isinstance(new_op, InverseBlockOperation):
+            if new_op.source_block is not None:
+                sub = self.canonical_block(new_op.source_block)
+                new_op = dataclasses.replace(new_op, source_block=sub)
+            if new_op.implementation_block is not None:
+                sub = self.canonical_block(new_op.implementation_block)
+                new_op = dataclasses.replace(new_op, implementation_block=sub)
 
         # ControlledUOperation carries the unitary as a nested ``block``
         # field. Canonicalize it through the same canonicalizer so UUIDs
@@ -475,6 +507,9 @@ class _Canonicalizer:
                 entries=tuple(new_entries),
             )
         elif isinstance(value, ArrayValue):
+            new_slice_of: ArrayValue | None = None
+            if value.slice_of is not None:
+                new_slice_of = cast(ArrayValue, self.canonical_value(value.slice_of))
             cloned = dataclasses.replace(
                 value,
                 uuid=new_uuid,
@@ -482,6 +517,17 @@ class _Canonicalizer:
                 metadata=new_metadata,
                 shape=tuple(
                     cast(Value, self.canonical_value(dim)) for dim in value.shape
+                ),
+                slice_of=new_slice_of,
+                slice_start=(
+                    cast(Value, self.canonical_value(value.slice_start))
+                    if value.slice_start is not None
+                    else None
+                ),
+                slice_step=(
+                    cast(Value, self.canonical_value(value.slice_step))
+                    if value.slice_step is not None
+                    else None
                 ),
             )
         elif isinstance(value, Value):
@@ -538,48 +584,10 @@ class _Canonicalizer:
             ValueMetadata: A new bundle with rewritten UUID / logical_id
                 references and untouched scalar / dict-runtime sections.
         """
-        new_cast = metadata.cast
-        if new_cast is not None:
-            new_cast = CastMetadata(
-                source_uuid=self._remap_uuid(new_cast.source_uuid),
-                qubit_uuids=tuple(self._remap_uuid(u) for u in new_cast.qubit_uuids),
-                source_logical_id=(
-                    self._remap_logical_id(new_cast.source_logical_id)
-                    if new_cast.source_logical_id is not None
-                    else None
-                ),
-                qubit_logical_ids=tuple(
-                    self._remap_logical_id(lid) for lid in new_cast.qubit_logical_ids
-                ),
-            )
-
-        new_qfixed = metadata.qfixed
-        if new_qfixed is not None:
-            new_qfixed = QFixedMetadata(
-                qubit_uuids=tuple(self._remap_uuid(u) for u in new_qfixed.qubit_uuids),
-                num_bits=new_qfixed.num_bits,
-                int_bits=new_qfixed.int_bits,
-            )
-
-        new_array_rt = metadata.array_runtime
-        if new_array_rt is not None:
-            new_array_rt = ArrayRuntimeMetadata(
-                const_array=new_array_rt.const_array,
-                element_uuids=tuple(
-                    self._remap_uuid(u) for u in new_array_rt.element_uuids
-                ),
-                element_logical_ids=tuple(
-                    self._remap_logical_id(lid)
-                    for lid in new_array_rt.element_logical_ids
-                ),
-            )
-
-        return ValueMetadata(
-            scalar=metadata.scalar,
-            cast=new_cast,
-            qfixed=new_qfixed,
-            array_runtime=new_array_rt,
-            dict_runtime=metadata.dict_runtime,
+        return remap_value_metadata_references(
+            metadata,
+            self._remap_uuid,
+            self._remap_logical_id,
         )
 
 
@@ -592,10 +600,11 @@ def _token(obj: Any) -> str:
     """Render an arbitrary Python value into a stable string token.
 
     Handles the small set of types appearing in IR metadata: scalars,
-    enums, tuples/lists, dicts (sorted by key), ``ValueBase`` instances
-    (rendered as a compact ``<ClassName:UUID>`` reference since the
-    full state is emitted in the value-declaration section), and
-    ``ValueType`` instances (rendered via ``.label()`` to avoid
+    enums, ``numpy.ndarray`` (rendered as dtype + shape + a digest of
+    the raw buffer), tuples/lists, dicts (sorted by key), ``ValueBase``
+    instances (rendered as a compact ``<ClassName:UUID>`` reference
+    since the full state is emitted in the value-declaration section),
+    and ``ValueType`` instances (rendered via ``.label()`` to avoid
     embedding memory addresses from the default ``object.__repr__``).
     Falls back to ``repr`` for anything else; callers that store
     opaque Python objects in metadata must ensure those objects have a
@@ -603,7 +612,8 @@ def _token(obj: Any) -> str:
 
     Args:
         obj (Any): A Python value reachable from canonical IR data
-            (Value metadata field, operation dataclass field, etc.).
+            (Value metadata field, operation dataclass field,
+            ``ParamSlot`` payload, etc.).
 
     Returns:
         str: A deterministic string token suitable for inclusion in
@@ -617,6 +627,19 @@ def _token(obj: Any) -> str:
         return repr(obj)
     if isinstance(obj, enum.Enum):
         return f"{type(obj).__name__}.{obj.name}"
+    if isinstance(obj, np.ndarray) and not obj.dtype.hasobject:
+        # ``repr`` is unusable as array identity: it truncates large
+        # arrays (different arrays collide) and obeys process-global
+        # ``np.printoptions`` (equal arrays diverge). Hash the raw
+        # buffer instead. Object-dtype arrays have no content-defined
+        # buffer and fall through to the ``repr`` fallback below.
+        data = np.ascontiguousarray(obj)
+        # Feed the contiguous buffer to the hasher as a flat ``uint8``
+        # memoryview (buffer protocol) so no extra ``bytes`` copy of a
+        # potentially large array is allocated; ``ascontiguousarray``
+        # already guarantees a C-contiguous buffer.
+        digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
+        return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
     if isinstance(obj, ValueBase):
         return _value_token(obj)
     if isinstance(obj, ValueType):
@@ -697,7 +720,9 @@ def _metadata_token(metadata: ValueMetadata) -> str:
         parts.append(
             f"array_runtime(const={_token(metadata.array_runtime.const_array)},"
             f"elem_uuids={_token(list(metadata.array_runtime.element_uuids))},"
-            f"elem_lids={_token(list(metadata.array_runtime.element_logical_ids))})"
+            f"elem_lids={_token(list(metadata.array_runtime.element_logical_ids))},"
+            f"elem_par_uuids={_token(list(metadata.array_runtime.element_parent_uuids))},"
+            f"elem_par_idxs={_token(list(metadata.array_runtime.element_parent_indices))})"
         )
     if metadata.dict_runtime is not None:
         # ``bound_data`` is stored as tuple-of-pairs in the Mapping's
@@ -742,6 +767,12 @@ def _collect_values(block: Block, out: list[ValueBase], seen: set[str]) -> None:
         elif isinstance(v, ArrayValue):
             for dim in v.shape:
                 visit(dim)
+            if v.slice_of is not None:
+                visit(v.slice_of)
+            if v.slice_start is not None:
+                visit(v.slice_start)
+            if v.slice_step is not None:
+                visit(v.slice_step)
         elif isinstance(v, Value):
             if v.parent_array is not None:
                 visit(v.parent_array)
@@ -778,10 +809,16 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _collect_from_operation(child, visit)
-    if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
-        # Nested block's values participate in the same canonical
-        # universe; recurse to ensure they are declared too.
-        _collect_from_subblock(op.implementation_block, visit)
+    if isinstance(op, CompositeGateOperation):
+        if op.implementation_block is not None:
+            # Nested block's values participate in the same canonical
+            # universe; recurse to ensure they are declared too.
+            _collect_from_subblock(op.implementation_block, visit)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            _collect_from_subblock(op.source_block, visit)
+        if op.implementation_block is not None:
+            _collect_from_subblock(op.implementation_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
 
@@ -789,7 +826,9 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
 def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """Walk the Values declared inside a nested Block.
 
-    Used for ``CompositeGateOperation.implementation_block`` and
+    Used for nested operation Blocks such as
+    ``CompositeGateOperation.implementation_block``,
+    ``InverseBlockOperation.source_block``, and
     ``ControlledUOperation.block``. Mirrors the top-level
     ``_collect_values`` walk order so declarations remain
     deterministic.
@@ -821,11 +860,11 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         # CompositeGateOperation extras: opaque Python references that
         # do not reflect IR-level structure.
         "composite_gate_instance",
-        # Nested-Block fields. Both ``implementation_block``
-        # (CompositeGateOperation) and ``block`` (ControlledUOperation)
-        # are emitted separately by ``_emit_operation`` so they are not
-        # rendered through ``repr`` here.
+        # Nested-Block fields. These are emitted separately by
+        # ``_emit_operation`` so they are not rendered through ``repr``
+        # here.
         "implementation_block",
+        "source_block",
         "block",
     }
 )
@@ -837,8 +876,9 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     ``Block.name`` and ``Block.output_names`` are display-only labels
     and are intentionally omitted from canonical bytes; two
     structurally-identical kernels with different function names hash
-    equally. ``Block.label_args`` is functional (it names input
-    parameters by position) and is included.
+    equally. ``Block.label_args`` (input parameter names by position)
+    and ``Block.param_slots`` (the kernel's classical parameter
+    contract) are functional and are included.
 
     Args:
         block (Block): The canonical Block to render.
@@ -849,6 +889,7 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     pad = _INLINE_INDENT * indent
     out.append(f"{pad}BLOCK kind={block.kind.name}")
     out.append(f"{pad}{_INLINE_INDENT}label_args={_token(block.label_args)}")
+    out.append(f"{pad}{_INLINE_INDENT}param_slots={_token(block.param_slots)}")
 
     declared: list[ValueBase] = []
     seen: set[str] = set()
@@ -910,6 +951,12 @@ def _value_declaration(v: ValueBase) -> str:
             parts.append("indices=" + _token([idx.uuid for idx in v.element_indices]))
     if isinstance(v, ArrayValue):
         parts.append("shape=" + _token([dim.uuid for dim in v.shape]))
+        if v.slice_of is not None:
+            parts.append(f"slice_of={v.slice_of.uuid}")
+        if v.slice_start is not None:
+            parts.append(f"slice_start={v.slice_start.uuid}")
+        if v.slice_step is not None:
+            parts.append(f"slice_step={v.slice_step.uuid}")
     if isinstance(v, TupleValue):
         parts.append("elements=" + _token([e.uuid for e in v.elements]))
     if isinstance(v, DictValue):
@@ -947,6 +994,13 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
         out.append(f"{pad}{_INLINE_INDENT}implementation:")
         _emit_block(op.implementation_block, out, indent + 2)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            out.append(f"{pad}{_INLINE_INDENT}source:")
+            _emit_block(op.source_block, out, indent + 2)
+        if op.implementation_block is not None:
+            out.append(f"{pad}{_INLINE_INDENT}implementation:")
+            _emit_block(op.implementation_block, out, indent + 2)
 
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")

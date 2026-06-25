@@ -4,7 +4,6 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import phase_gadget
-from qamomile.circuit.transpiler.errors import QubitIndexResolutionError
 from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, binary
 from qamomile.optimization.qaoa import QAOAConverter
 from qamomile.qiskit.transpiler import QiskitTranspiler
@@ -218,9 +217,15 @@ def test_phase_gadget_branches(indices, n_qubits):
 
 
 def test_phase_gadget_empty_indices_raises():
-    """Verify phase_gadget rejects empty index vectors (k=0)."""
+    """Verify phase_gadget rejects empty index vectors (k=0).
+
+    With ``indices=[]`` the gadget's ``last = k - 1`` folds to the constant
+    ``-1`` during call-time specialization, so the frontend's negative-index
+    rejection fires at trace time. Previously the bad index survived to emit
+    and only failed there as ``QubitIndexResolutionError``.
+    """
     transpiler = QiskitTranspiler()
-    with pytest.raises(QubitIndexResolutionError):
+    with pytest.raises(NotImplementedError, match="Negative index"):
         transpiler.transpile(
             _gadget_with_indices,
             bindings={"n": 1, "indices": []},

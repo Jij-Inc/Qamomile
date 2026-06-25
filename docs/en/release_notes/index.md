@@ -4,6 +4,8 @@ slug: release-notes
 
 # Release Notes
 
+- [v0.12.6](v0_12_6) — circuit inversion with `qmc.inverse` (built-in gates, `@qkernel`s, QFT/IQFT), `qmc.modular_increment` / `qmc.modular_decrement` basis-state arithmetic, job/result types importable from `qamomile.circuit`
+- [v0.12.5](v0_12_5) — `PCEConverter` / `PCEEncoder` for Pauli Correlation Encoding, seeded QURI Parts sampling, measured `Vector[Bit]` condition fixes, and `qmc.expval` fixes for `Vector` elements
 - [v0.12.4](v0_12_4) — `qmc.controlled` renamed to `qmc.control` with a more expressive symbolic mode, higher-order Ising model construction via `BinaryModel.from_higher_ising`, unary `-` on `Float` handles
 - [v0.12.3](v0_12_3) — Python-style `Vector` slicing, `commutator(a, b)` for Pauli-Hamiltonians, `computational_basis_state` algorithm helper
 - [v0.12.2](v0_12_2) — Möttönen amplitude encoding, sample-based subspace diagonalization (QSCI), `qmc.controlled` accepts built-in gates, `LocalSearch` on `BinaryModel`, docs restructured into `tutorial/` / `algorithm/` / `usage/` / `integration/`

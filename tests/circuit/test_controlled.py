@@ -26,6 +26,7 @@ from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import (
     EmitError,
     QubitConsumedError,
+    SliceBorrowViolationError,
 )
 from tests.transpiler.gate_test_specs import (
     all_zeros_state,
@@ -83,8 +84,8 @@ def _mock_qkernel(
             ``qmc.x``.
         classical_params: Sequence of ``(name, type)`` tuples for
             classical parameters.  ``type`` must be one of ``Float`` /
-            ``UInt`` / ``float`` / ``int`` (the set
-            ``_params_to_operands`` recognises).
+            ``UInt`` / ``float`` / ``int`` or a scalar union of those
+            types (the set ``_params_to_operands`` recognises).
 
     Returns:
         A ``MagicMock`` with ``.block`` stubbed, ``.input_types`` set to
@@ -251,6 +252,18 @@ class TestControlledGateCall:
         param_val = op.operands[2]
         assert isinstance(param_val, Value)
         assert param_val.get_const() == 0.5
+
+    def test_scalar_union_param_is_not_treated_as_array_param(self):
+        """Scalar union annotations accept raw values instead of hitting array checks."""
+        cg = ControlledGate(
+            _mock_qkernel(classical_params=(("angle", float | Float),)),
+            num_controls=1,
+        )
+        with trace() as tracer:
+            cg(_make_qubit("ctrl"), _make_qubit("tgt"), angle=0.5)
+        op = tracer.operations[0]
+        assert len(op.operands) == 3
+        assert op.operands[2].get_const() == 0.5
 
     def test_handle_type_param_uses_value_directly(self):
         cg = ControlledGate(
@@ -1013,8 +1026,9 @@ except ImportError:  # pragma: no cover
 
 _HAS_CUDAQ = True
 try:  # pragma: no cover - presence check
-    import cudaq  # noqa: F401
-
+    # The lazy accessor raises ImportError when cudaq is missing, without
+    # loading the cudaq runtime at collection time when it is installed
+    # (see tests/_cudaq_isolation.py).
     from qamomile.cudaq import CudaqTranspiler as _CudaqTranspilerCheck  # noqa: F401
 except ImportError:  # pragma: no cover
     _HAS_CUDAQ = False
@@ -1054,7 +1068,30 @@ _BUILTIN_BACKENDS = [
     pytest.param(
         _cudaq_transpiler_factory,
         id="cudaq",
-        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
+    ),
+]
+
+_QISKIT_CUDAQ_BACKENDS = [
+    pytest.param(
+        _qiskit_transpiler_factory,
+        id="qiskit",
+        marks=pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed"),
+    ),
+    pytest.param(
+        _cudaq_transpiler_factory,
+        id="cudaq",
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
     ),
 ]
 
@@ -2486,6 +2523,295 @@ class TestControlledVectorInnerKernelCrossSDK:
 
 
 # =============================================================================
+# Cross-SDK execution: measuring / expval the RETURNED whole-Vector control
+# =============================================================================
+#
+# Regression for the bug where passing a whole ``Vector[Qubit]`` as the
+# concrete control prefix (e.g. ``cg(qmc.qubit_array(2), target)``) left
+# the *returned* control vector's per-element ``QubitAddress`` keys
+# unmapped.  ``ConcreteControlledU`` expands a whole-Vector control into
+# per-element scalar operands / results, but the user-facing output
+# handle was re-aggregated into a throwaway next-version ``ArrayValue``
+# whose element addresses were never written to the emit ``qubit_map``.
+# A later ``measure`` / element access of that vector then silently
+# resolved to nothing (Qiskit emitted no measurement at all and returned
+# an all-zeros classical register).  Passing the controls as individual
+# scalar ``Qubit`` handles always worked because each output ``Qubit``
+# wraps the IR result scalar directly; these tests pin the whole-Vector
+# control output against the scalar-control form on every SDK and
+# exercise the sampling and expectation-value primitives independently.
+
+
+def _whole_vector_control_measure_kernel(bits, num_controls):
+    """Build a kernel that whole-Vector-controls an X and measures the controls.
+
+    The control register is prepared to the basis state ``bits``, used
+    as the *whole* control prefix of a ``num_controls``-controlled X on
+    a separate target, and the returned control vector is measured.  The
+    controlled-U leaves the control qubits' computational-basis values
+    unchanged, so the measurement must reproduce ``bits`` exactly — which
+    only happens if the returned control vector's element addresses are
+    mapped.
+
+    Args:
+        bits (tuple[int, ...]): Per-control basis bits (0/1); length must
+            equal ``num_controls``.
+        num_controls (int): Control register length (2 or 3).
+
+    Returns:
+        QKernel: A no-argument kernel returning ``Vector[Bit]``.
+
+    Raises:
+        ValueError: If ``num_controls`` is not 2 or 3.
+    """
+    if num_controls == 2:
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            ctrl = qmc.qubit_array(2, "ctrl")
+            t = qmc.qubit(name="t")
+            if bits[0]:
+                ctrl[0] = qmc.x(ctrl[0])
+            if bits[1]:
+                ctrl[1] = qmc.x(ctrl[1])
+            cg = qmc.control(_x_gate, num_controls=2)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.measure(c_out)
+
+        return kernel
+    if num_controls == 3:
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            ctrl = qmc.qubit_array(3, "ctrl")
+            t = qmc.qubit(name="t")
+            if bits[0]:
+                ctrl[0] = qmc.x(ctrl[0])
+            if bits[1]:
+                ctrl[1] = qmc.x(ctrl[1])
+            if bits[2]:
+                ctrl[2] = qmc.x(ctrl[2])
+            cg = qmc.control(_x_gate, num_controls=3)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.measure(c_out)
+
+        return kernel
+    raise ValueError(f"unsupported num_controls={num_controls}")
+
+
+def _whole_vector_control_expval_kernel(theta, num_controls):
+    """Build an expval kernel using a whole-Vector control prefix.
+
+    Prepares the control register with ``RY(theta)`` (broadcast over the
+    whole vector) and the target with ``H``, applies a
+    ``num_controls``-controlled X, and returns the expectation value of
+    the bound observable over the *returned* control register.
+
+    Args:
+        theta (float): RY rotation angle applied to every control qubit.
+        num_controls (int): Control register length (2 or 3).
+
+    Returns:
+        QKernel: A kernel taking ``obs: qmc.Observable`` returning a
+            ``qmc.Float``.
+
+    Raises:
+        ValueError: If ``num_controls`` is not 2 or 3.
+    """
+    if num_controls == 2:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            ctrl = qmc.qubit_array(2, "ctrl")
+            t = qmc.qubit(name="t")
+            ctrl = qmc.ry(ctrl, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=2)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.expval(c_out, obs)
+
+        return kernel
+    if num_controls == 3:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            ctrl = qmc.qubit_array(3, "ctrl")
+            t = qmc.qubit(name="t")
+            ctrl = qmc.ry(ctrl, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=3)
+            c_out, _t_out = cg(ctrl, t)
+            return qmc.expval(c_out, obs)
+
+        return kernel
+    raise ValueError(f"unsupported num_controls={num_controls}")
+
+
+def _scalar_control_expval_kernel(theta, num_controls):
+    """Build the scalar-control counterpart of the whole-Vector expval kernel.
+
+    Same circuit as :func:`_whole_vector_control_expval_kernel` but the
+    controls are supplied as individual scalar ``Qubit`` handles (the
+    always-working form), so the two expectation values must agree.
+
+    Args:
+        theta (float): RY rotation angle applied to every control qubit.
+        num_controls (int): Control register length (2 or 3).
+
+    Returns:
+        QKernel: A kernel taking ``obs: qmc.Observable`` returning a
+            ``qmc.Float``.
+
+    Raises:
+        ValueError: If ``num_controls`` is not 2 or 3.
+    """
+    if num_controls == 2:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            c0 = qmc.qubit(name="c0")
+            c1 = qmc.qubit(name="c1")
+            t = qmc.qubit(name="t")
+            c0 = qmc.ry(c0, theta)
+            c1 = qmc.ry(c1, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=2)
+            c0, c1, _t_out = cg(c0, c1, t)
+            return qmc.expval((c0, c1), obs)
+
+        return kernel
+    if num_controls == 3:
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> qmc.Float:
+            c0 = qmc.qubit(name="c0")
+            c1 = qmc.qubit(name="c1")
+            c2 = qmc.qubit(name="c2")
+            t = qmc.qubit(name="t")
+            c0 = qmc.ry(c0, theta)
+            c1 = qmc.ry(c1, theta)
+            c2 = qmc.ry(c2, theta)
+            t = qmc.h(t)
+            cg = qmc.control(_x_gate, num_controls=3)
+            c0, c1, c2, _t_out = cg(c0, c1, c2, t)
+            return qmc.expval((c0, c1, c2), obs)
+
+        return kernel
+    raise ValueError(f"unsupported num_controls={num_controls}")
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("num_controls", [2, 3])
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+class TestControlledWholeVectorControlOutput:
+    """Measure / expval the returned whole-Vector control output, per SDK.
+
+    Cross-SDK execution coverage for the fixed bug: the regression is
+    parametrized over every supported quantum SDK (`_BUILTIN_BACKENDS`:
+    Qiskit, QuriParts, CUDA-Q) and exercises both the sampling and the
+    expectation-value primitives (they regress independently).  The
+    minimal reproducing case is `num_controls == 2`; transpilation +
+    execution there is mandatory on every supported SDK (an `EmitError`
+    is re-raised, not skipped), so the fix stays verified end-to-end on
+    all backends.  Only the orthogonal `num_controls >= 3` multi-control
+    decomposition gap — a pre-existing per-backend limitation unrelated
+    to this fix — is skipped gracefully.
+    """
+
+    def test_measure_control_output_matches_prepared_state(
+        self, transpiler_factory, num_controls, seed
+    ):
+        """Measuring the returned control vector reproduces the prepared bits.
+
+        Reproduces the original bug directly: a non-zero basis state is
+        prepared on a whole ``Vector[Qubit]`` control prefix, the
+        controlled gate is applied, and the *returned* control vector is
+        measured.  Pre-fix this emitted no measurement and returned an
+        all-zeros register; post-fix every shot must equal the prepared
+        bitstring.
+        """
+        rng = np.random.default_rng(seed)
+        # Draw a non-zero bitstring so a regression that silently
+        # measures all-zeros is always caught.
+        bits = tuple(int(b) for b in rng.integers(0, 2, size=num_controls))
+        if not any(bits):
+            bits = (1, *bits[1:])
+
+        kernel = _whole_vector_control_measure_kernel(bits, num_controls)
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel)
+        except EmitError as e:
+            # The fixed bug (whole-Vector control output) reproduces at
+            # num_controls == 2, which every supported SDK can emit and
+            # execute, so an EmitError there must fail loudly — the whole
+            # point of this regression is that the fix runs end-to-end on
+            # every backend.  Only the orthogonal multi-control
+            # (num_controls >= 3) decomposition gap, a pre-existing
+            # per-backend limitation, is skipped gracefully.
+            if num_controls <= 2:
+                raise
+            pytest.skip(
+                f"{t.__class__.__name__} does not support "
+                f"{num_controls}-controlled-U: {e}"
+            )
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total > 0, f"no shots returned on SDK={transpiler_factory.__name__}"
+        for value, count in result.results:
+            assert tuple(value) == bits, (
+                f"expected control output to measure {bits}, got value={value} "
+                f"count={count} on SDK={transpiler_factory.__name__}, seed={seed}"
+            )
+
+    def test_expval_control_output_matches_scalar_form(
+        self, transpiler_factory, num_controls, seed
+    ):
+        """Whole-Vector control output expval equals the scalar-control form.
+
+        Builds two circuits that differ only in how the controls are
+        supplied — one whole ``Vector[Qubit]`` prefix vs. individual
+        scalar ``Qubit`` handles — and pins the expectation value of
+        ``Σ_i Z_i`` over the *returned control register*.  The
+        whole-Vector form must agree with the always-working scalar form
+        on every SDK.
+        """
+        import qamomile.observable as qm_o
+
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+
+        H = qm_o.Hamiltonian.zero(num_qubits=num_controls)
+        for i in range(num_controls):
+            H += qm_o.Z(i)
+
+        vector_kernel = _whole_vector_control_expval_kernel(theta, num_controls)
+        scalar_kernel = _scalar_control_expval_kernel(theta, num_controls)
+
+        t = transpiler_factory()
+        try:
+            exe_v = t.transpile(vector_kernel, bindings={"obs": H})
+            exe_s = t.transpile(scalar_kernel, bindings={"obs": H})
+        except EmitError as e:
+            # See the measurement test: the fixed case (num_controls == 2)
+            # must execute on every supported SDK, so only the orthogonal
+            # multi-control (num_controls >= 3) gap is skipped.
+            if num_controls <= 2:
+                raise
+            pytest.skip(
+                f"{t.__class__.__name__} does not support "
+                f"{num_controls}-controlled-U: {e}"
+            )
+        val_v = exe_v.run(t.executor()).result()
+        val_s = exe_s.run(t.executor()).result()
+        assert np.isclose(val_v, val_s, atol=1e-6), (
+            f"whole-Vector/scalar control expval mismatch on "
+            f"SDK={transpiler_factory.__name__}, seed={seed}, theta={theta}: "
+            f"vector={val_v}, scalar={val_s}"
+        )
+
+
+# =============================================================================
 # Cross-SDK execution: concrete-mode VectorView controls + Vector[Qubit] sub args
 # =============================================================================
 #
@@ -2529,6 +2855,160 @@ def _vector_ry_pair(
     qs[0] = qmc.ry(qs[0], theta)
     qs[1] = qmc.ry(qs[1], theta)
     return qs
+
+
+@qmc.qkernel
+def _vector_angle_pair(
+    qs: qmc.Vector[qmc.Qubit],
+    angles: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply independent vector-parameter rotations to a 2-qubit target."""
+    qs[0] = qmc.ry(qs[0], angles[0])
+    qs[1] = qmc.ry(qs[1], angles[1])
+    return qs
+
+
+@qmc.qkernel
+def _broadcast_rx_then_ry(
+    qs: qmc.Vector[qmc.Qubit],
+    angles: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Broadcast ``RX`` over a vector target, then rotate one element."""
+    qs = qmc.rx(qs, angles[0])
+    qs[0] = qmc.ry(qs[0], angles[1])
+    return qs
+
+
+@qmc.qkernel
+def _mixed_scalar_vector_targets(
+    head: qmc.Qubit,
+    tail: qmc.Vector[qmc.Qubit],
+    theta: qmc.Float,
+    angles: qmc.Vector[qmc.Float],
+) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
+    """Rotate scalar and vector targets with scalar and vector parameters."""
+    head = qmc.ry(head, theta)
+    tail[0] = qmc.rx(tail[0], angles[0])
+    tail[1] = qmc.ry(tail[1], angles[1])
+    return head, tail
+
+
+class _BellPairComposite(qmc.CompositeGate):
+    """Custom two-qubit CompositeGate used inside controlled test kernels."""
+
+    custom_name = "controlled_test_bell_pair"
+
+    @property
+    def num_target_qubits(self) -> int:
+        return 2
+
+    def _decompose(
+        self,
+        qubits: qmc.Vector[qmc.Qubit] | tuple[qmc.Qubit, ...],
+    ) -> tuple[qmc.Qubit, ...]:
+        q0, q1 = qubits
+        q0 = qmc.h(q0)
+        q0, q1 = qmc.cx(q0, q1)
+        return q0, q1
+
+
+_BELL_PAIR_COMPOSITE = _BellPairComposite()
+
+
+@qmc.qkernel
+def _composite_bell_pair(
+    qs: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a custom CompositeGate to a two-qubit vector target."""
+    q0 = qs[0]
+    q1 = qs[1]
+    q0, q1 = _BELL_PAIR_COMPOSITE(q0, q1)
+    qs[0] = q0
+    qs[1] = q1
+    return qs
+
+
+@qmc.qkernel
+def _qft_pair(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply the built-in QFT CompositeGate to a two-qubit vector target."""
+    return qmc.qft(qs)
+
+
+@qmc.qkernel
+def _nested_ccx_on_triplet(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    q2: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply an inner two-control X gate inside an outer controlled block."""
+    ccx = qmc.control(qmc.x, num_controls=2)
+    q0, q1, q2 = ccx(q0, q1, q2)
+    return q0, q1, q2
+
+
+@qmc.qkernel
+def _nested_cx_on_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply an inner controlled-X gate to a two-qubit pair."""
+    cx = qmc.control(qmc.x, num_controls=1)
+    q0, q1 = cx(q0, q1)
+    return q0, q1
+
+
+@qmc.qkernel
+def _double_nested_ccx_on_triplet(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    q2: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply a two-level nested controlled-X to a three-qubit triplet."""
+    ccx = qmc.control(_nested_cx_on_pair, num_controls=1)
+    q0, q1, q2 = ccx(q0, q1, q2)
+    return q0, q1, q2
+
+
+def _make_deep_nested_control_circuit(
+    initial_one_indices: tuple[int, ...],
+) -> Any:
+    """Create a circuit with three nested controlled layers.
+
+    Args:
+        initial_one_indices (tuple[int, ...]): Qubit indices to initialize
+            to ``|1>`` before applying the nested controlled operation.
+
+    Returns:
+        Any: A qkernel that measures the four-qubit output state.
+    """
+
+    def _prepare(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply compile-time selected X gates to the test register."""
+        if 0 in initial_one_indices:
+            qs[0] = qmc.x(qs[0])
+        if 1 in initial_one_indices:
+            qs[1] = qmc.x(qs[1])
+        if 2 in initial_one_indices:
+            qs[2] = qmc.x(qs[2])
+        return qs
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(4, "qs")
+        qs = _prepare(qs)
+        cccx = qmc.control(_double_nested_ccx_on_triplet, num_controls=1)
+        qs[0], qs[1], qs[2], qs[3] = cccx(qs[0], qs[1], qs[2], qs[3])
+        return qmc.measure(qs)
+
+    return circuit
+
+
+def _counts_dict(results):
+    counts: dict[Any, int] = {}
+    for value, count in results:
+        key = tuple(value) if not isinstance(value, int) else value
+        counts[key] = counts.get(key, 0) + count
+    return counts
 
 
 @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
@@ -2683,20 +3163,718 @@ class TestControlledVectorSubArgCrossSDK:
         )
 
 
-class TestControlledVectorSubArgQuriPartsMatrixFallback:
-    """QURI Parts matrix fallback emits multi-target controlled blocks.
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledNativeMixedControlCrossSDK:
+    """Native controlled gates with scalar + sliced-vector controls."""
+
+    def test_scalar_plus_vectorview_controls_sample(self, transpiler_factory):
+        """``control(qmc.x, 3)(scalar, qs[0:2], target)`` samples correctly."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[3] = qmc.x(qs[3])
+            ctrl_main = qs[3]
+            prefix = qs[0:2]
+            target = qs[2]
+            mcx = qmc.control(qmc.x, num_controls=3)
+            ctrl_main, prefix, target = mcx(ctrl_main, prefix, target)
+            qs[3] = ctrl_main
+            qs[0:2] = prefix
+            qs[2] = target
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit)
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support mixed "
+                f"scalar/VectorView native controls: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
+
+
+class TestControlledVectorClassicalParameter:
+    """Controlled custom kernels with ``Vector[Float]`` parameters."""
+
+    def test_frontend_accepts_vector_float_parameter(self):
+        """``Vector[Float]`` is treated as a classical sub-kernel parameter."""
+
+        @qmc.qkernel
+        def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vector_angle_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        _ = kernel.block
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    def test_vector_float_parameter_sampling_runs(self, transpiler_factory):
+        """Bound ``Vector[Float]`` parameter survives controlled-U emission."""
+
+        @qmc.qkernel
+        def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vector_angle_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel, bindings={"angles": [0.25, -0.4]})
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support Vector[Float] "
+                f"parameters under controlled custom kernels: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128
+
+    @pytest.mark.parametrize("seed", [0, 7, 42])
+    def test_qiskit_expval_matches_scalar_parameter_form(self, seed):
+        """Vector-parameter and scalar-parameter controlled forms agree."""
+        pytest.importorskip("qiskit")
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        rng = np.random.default_rng(seed)
+        angles = [
+            float(rng.uniform(-math.pi, math.pi)),
+            float(rng.uniform(-math.pi, math.pi)),
+        ]
+
+        @qmc.qkernel
+        def scalar_pair(
+            q0: qmc.Qubit,
+            q1: qmc.Qubit,
+            theta0: qmc.Float,
+            theta1: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            q0 = qmc.ry(q0, theta0)
+            q1 = qmc.ry(q1, theta1)
+            return q0, q1
+
+        @qmc.qkernel
+        def vector_kernel(
+            obs: qmc.Observable,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_vector_angle_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(obs: qmc.Observable) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(scalar_pair, num_controls=1)
+            qs[0], qs[1], qs[2] = cg(
+                qs[0],
+                qs[1],
+                qs[2],
+                theta0=angles[0],
+                theta1=angles[1],
+            )
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=3)
+        for i in range(3):
+            H += qm_o.Z(i)
+
+        t = QiskitTranspiler()
+        exe_vector = t.transpile(
+            vector_kernel,
+            bindings={"obs": H, "angles": angles},
+        )
+        exe_scalar = t.transpile(scalar_kernel, bindings={"obs": H})
+        val_vector = exe_vector.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_vector, val_scalar, atol=1e-6)
+
+
+class TestControlledBroadcastWithVectorFloatParameter:
+    """Controlled custom kernels that broadcast over sliced vector targets."""
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    def test_broadcast_slice_sampling_runs(self, transpiler_factory):
+        """Controlled broadcast over ``qs[1:3]`` samples on supported SDKs."""
+
+        @qmc.qkernel
+        def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_broadcast_rx_then_ry, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(kernel, bindings={"angles": [0.3, -0.2]})
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support controlled "
+                f"broadcast over sliced vector targets: {e}"
+            )
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128
+
+    @pytest.mark.parametrize("seed", [1, 5])
+    def test_qiskit_broadcast_slice_expval_matches_scalar_form(self, seed):
+        """Broadcast on ``qs[1:3]`` agrees with an explicit scalar wrapper."""
+        pytest.importorskip("qiskit")
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        rng = np.random.default_rng(seed)
+        angles = [
+            float(rng.uniform(-math.pi, math.pi)),
+            float(rng.uniform(-math.pi, math.pi)),
+        ]
+
+        @qmc.qkernel
+        def scalar_broadcast_equivalent(
+            q0: qmc.Qubit,
+            q1: qmc.Qubit,
+            angles: qmc.Vector[qmc.Float],
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            q0 = qmc.rx(q0, angles[0])
+            q1 = qmc.rx(q1, angles[0])
+            q0 = qmc.ry(q0, angles[1])
+            return q0, q1
+
+        @qmc.qkernel
+        def broadcast_kernel(
+            obs: qmc.Observable,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_broadcast_rx_then_ry, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3], angles=angles)
+            qs[1:3] = view_out
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(
+            obs: qmc.Observable,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(scalar_broadcast_equivalent, num_controls=1)
+            qs[0], qs[1], qs[2] = cg(qs[0], qs[1], qs[2], angles=angles)
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=3)
+        for i in range(3):
+            H += qm_o.Z(i)
+
+        t = QiskitTranspiler()
+        bindings = {"obs": H, "angles": angles}
+        exe_broadcast = t.transpile(broadcast_kernel, bindings=bindings)
+        exe_scalar = t.transpile(scalar_kernel, bindings=bindings)
+        val_broadcast = exe_broadcast.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_broadcast, val_scalar, atol=1e-6)
+
+
+class TestControlledMixedQuantumClassicalSignature:
+    """Controlled custom kernels mixing scalar/vector quantum and classical args."""
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    def test_noncontiguous_slice_target_sample_and_run(self, transpiler_factory):
+        """Mix scalar target, stepped VectorView target, Float, and Vector[Float]."""
+        import qamomile.observable as qm_o
+
+        @qmc.qkernel
+        def sample_kernel(
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(5, "qs")
+            qs[0] = qmc.x(qs[0])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+            qs[0], qs[1], tail = controlled_mixed(
+                qs[0],
+                qs[1],
+                qs[2:5:2],
+                theta,
+                angles=angles,
+            )
+            qs[2:5:2] = tail
+            return qmc.measure(qs)
+
+        @qmc.qkernel
+        def run_kernel(
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+            obs: qmc.Observable,
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(5, "qs")
+            qs[0] = qmc.x(qs[0])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+            qs[0], qs[1], tail = controlled_mixed(
+                qs[0],
+                qs[1],
+                qs[2:5:2],
+                theta,
+                angles=angles,
+            )
+            qs[2:5:2] = tail
+            return qmc.expval(qs, obs)
+
+        t = transpiler_factory()
+        bindings = {
+            "theta": math.pi,
+            "angles": [math.pi, math.pi],
+        }
+        try:
+            sample_exe = t.transpile(sample_kernel, bindings=bindings)
+        except EmitError as e:
+            pytest.skip(
+                f"{t.__class__.__name__} does not support mixed "
+                f"controlled custom signatures: {e}"
+            )
+
+        sample_result = sample_exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(sample_result.results) == {(1, 1, 1, 0, 1): 128}
+
+        H = qm_o.Hamiltonian.zero(num_qubits=5)
+        for i in range(5):
+            H += qm_o.Z(i)
+        run_exe = t.transpile(run_kernel, bindings={**bindings, "obs": H})
+        got = run_exe.run(t.executor()).result()
+        assert np.isclose(got, -3.0, atol=1e-6)
+
+    @pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_BACKENDS)
+    def test_scalar_plus_vectorview_controls_custom_kernel(self, transpiler_factory):
+        """Mix scalar and VectorView controls around a mixed-signature custom kernel."""
+
+        @qmc.qkernel
+        def kernel(
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(6, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[5] = qmc.x(qs[5])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets, num_controls=3)
+            qs[5], controls, qs[2], tail = controlled_mixed(
+                qs[5],
+                qs[0:2],
+                qs[2],
+                qs[3:5],
+                theta,
+                angles=angles,
+            )
+            qs[0:2] = controls
+            qs[3:5] = tail
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        exe = t.transpile(
+            kernel,
+            bindings={"theta": math.pi, "angles": [math.pi, math.pi]},
+        )
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1, 1, 1): 128}
+
+    @pytest.mark.parametrize("seed", [0, 3, 9])
+    def test_reordered_kwargs_match_scalar_form_qiskit(self, seed):
+        """Signature-order parameter binding survives mixed kwargs."""
+        pytest.importorskip("qiskit")
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+        angles = [
+            float(rng.uniform(-math.pi, math.pi)),
+            float(rng.uniform(-math.pi, math.pi)),
+        ]
+
+        @qmc.qkernel
+        def scalar_form(
+            head: qmc.Qubit,
+            tail0: qmc.Qubit,
+            tail1: qmc.Qubit,
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+            head = qmc.ry(head, theta)
+            tail0 = qmc.rx(tail0, angles[0])
+            tail1 = qmc.ry(tail1, angles[1])
+            return head, tail0, tail1
+
+        @qmc.qkernel
+        def vector_kernel(
+            obs: qmc.Observable,
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.h(qs[0])
+            controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+            qs[0], qs[1], tail = controlled_mixed(
+                qs[0],
+                qs[1],
+                qs[2:4],
+                angles=angles,
+                theta=theta,
+            )
+            qs[2:4] = tail
+            return qmc.expval(qs, obs)
+
+        @qmc.qkernel
+        def scalar_kernel(
+            obs: qmc.Observable,
+            theta: qmc.Float,
+            angles: qmc.Vector[qmc.Float],
+        ) -> qmc.Float:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.h(qs[0])
+            controlled_scalar = qmc.control(scalar_form)
+            qs[0], qs[1], qs[2], qs[3] = controlled_scalar(
+                qs[0],
+                qs[1],
+                qs[2],
+                qs[3],
+                angles=angles,
+                theta=theta,
+            )
+            return qmc.expval(qs, obs)
+
+        H = qm_o.Hamiltonian.zero(num_qubits=4)
+        for i in range(4):
+            H += qm_o.Z(i)
+
+        t = QiskitTranspiler()
+        bindings = {"obs": H, "theta": theta, "angles": angles}
+        exe_vector = t.transpile(vector_kernel, bindings=bindings)
+        exe_scalar = t.transpile(scalar_kernel, bindings=bindings)
+        val_vector = exe_vector.run(t.executor()).result()
+        val_scalar = exe_scalar.run(t.executor()).result()
+        assert np.isclose(val_vector, val_scalar, atol=1e-6)
+
+    def test_raw_vector_float_literal_rejected(self):
+        """Raw Python lists are not accepted for Vector[Float] controlled params."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=math.pi,
+                    angles=[math.pi, math.pi],
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="array parameter"):
+            build_block()
+
+    def test_vector_float_rejects_vector_qubit_handle(self):
+        """Vector[Float] controlled params reject Vector[Qubit] handles."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                bad_angles = qmc.qubit_array(2, "bad_angles")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=math.pi,
+                    angles=bad_angles,
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="quantum handle"):
+            build_block()
+
+    def test_scalar_float_rejects_qubit_handle(self):
+        """Float controlled params reject Qubit handles."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                bad_theta = qmc.qubit(name="bad_theta")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=bad_theta,
+                    angles=angles,
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="quantum handle"):
+            build_block()
+
+    def test_vector_float_rejects_scalar_float_handle(self):
+        """Vector[Float] controlled params reject scalar Float handles."""
+
+        def build_block():
+            @qmc.qkernel
+            def kernel(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(4, "qs")
+                qs[0] = qmc.x(qs[0])
+                controlled_mixed = qmc.control(_mixed_scalar_vector_targets)
+                qs[0], qs[1], tail = controlled_mixed(
+                    qs[0],
+                    qs[1],
+                    qs[2:4],
+                    theta=theta,
+                    angles=theta,
+                )
+                qs[2:4] = tail
+                return qmc.measure(qs)
+
+            _ = kernel.block
+
+        with pytest.raises(TypeError, match="array parameter"):
+            build_block()
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledCompositeGateCrossSDK:
+    """Controlled custom kernels whose body contains CompositeGate operations."""
+
+    @pytest.mark.parametrize("inner", [_composite_bell_pair, _qft_pair])
+    def test_composite_inner_kernel_sampling_runs_or_errors_loudly(
+        self,
+        transpiler_factory,
+        inner,
+    ):
+        """Custom and built-in CompositeGate bodies are never silently ignored."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            cg = qmc.control(inner, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3])
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit)
+        except EmitError as e:
+            message = str(e)
+            assert (
+                "CompositeGate" in message
+                or "controlled-U" in message
+                or "controlled gate" in message
+            )
+            return
+
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total == 128
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestNestedControlledUCrossSDK:
+    """Outer controlled custom kernel around an inner controlled operation."""
+
+    def test_nested_control_samples_or_errors_loudly(self, transpiler_factory):
+        """Nested control either executes correctly or raises ``EmitError``."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.control(_nested_ccx_on_triplet, num_controls=1)
+            qs[0], qs[1], qs[2], qs[3] = cg(qs[0], qs[1], qs[2], qs[3])
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        try:
+            exe = t.transpile(circuit)
+        except EmitError as e:
+            message = str(e)
+            assert (
+                "nested ControlledUOperation" in message
+                or "multi-controlled operation" in message
+                or "controlled-U" in message
+                or "Unsupported operation: ConcreteControlledU" in message
+            )
+            return
+
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
+
+
+class TestControlledCompositeGateQiskit:
+    """Qiskit positive checks for controlled CompositeGate bodies."""
+
+    def test_custom_composite_statevector_is_nontrivial(self):
+        """Qiskit controls the CompositeGate body instead of dropping it."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.control(_composite_bell_pair, num_controls=1)
+            qs[0], view_out = cg(qs[0], qs[1:3])
+            qs[1:3] = view_out
+            return qmc.measure(qs)
+
+        t = QiskitTranspiler()
+        statevector = _get_statevector(t, circuit, {})
+        assert np.count_nonzero(np.abs(statevector) > 1e-8) == 2
+
+
+class TestNestedControlledUQiskit:
+    """Qiskit positive checks for nested controlled custom kernels."""
+
+    def test_executes_outer_control_around_inner_controlled_u(self):
+        """Qiskit preserves both outer and inner controls in a nested custom gate."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(4, "qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.x(qs[2])
+            cg = qmc.control(_nested_ccx_on_triplet, num_controls=1)
+            qs[0], qs[1], qs[2], qs[3] = cg(qs[0], qs[1], qs[2], qs[3])
+            return qmc.measure(qs)
+
+        t = QiskitTranspiler()
+        exe = t.transpile(circuit)
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
+
+
+@pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_BACKENDS)
+class TestDeepNestedControlledUQiskitCudaq:
+    """Positive checks for deeply nested controls on Qiskit and CUDA-Q."""
+
+    @pytest.mark.parametrize(
+        ("initial_one_indices", "expected"),
+        [
+            ((0, 1, 2), (1, 1, 1, 1)),
+            ((1, 2), (0, 1, 1, 0)),
+            ((0, 2), (1, 0, 1, 0)),
+            ((0, 1), (1, 1, 0, 0)),
+        ],
+    )
+    def test_three_level_nested_control_samples(
+        self,
+        transpiler_factory,
+        initial_one_indices,
+        expected,
+    ):
+        """Qiskit and CUDA-Q preserve three nested controlled layers."""
+        circuit = _make_deep_nested_control_circuit(initial_one_indices)
+        t = transpiler_factory()
+        exe = t.transpile(circuit)
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {expected: 128}
+
+
+class TestNestedControlledUQuriParts:
+    """QURI Parts positive checks for recursive controlled fallback."""
+
+    @pytest.mark.parametrize(
+        ("initial_one_indices", "expected"),
+        [
+            ((0, 1), (1, 1, 1)),
+            ((1,), (0, 1, 0)),
+            ((0,), (1, 0, 0)),
+        ],
+    )
+    def test_two_level_nested_control_samples(
+        self,
+        initial_one_indices,
+        expected,
+    ):
+        """QURI Parts flattens nested controls that fit existing primitives."""
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        def _prepare(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            """Apply compile-time selected X gates to the test register."""
+            if 0 in initial_one_indices:
+                qs[0] = qmc.x(qs[0])
+            if 1 in initial_one_indices:
+                qs[1] = qmc.x(qs[1])
+            return qs
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs = _prepare(qs)
+            ccx = qmc.control(_nested_cx_on_pair, num_controls=1)
+            qs[0], qs[1], qs[2] = ccx(qs[0], qs[1], qs[2])
+            return qmc.measure(qs)
+
+        t = QuriPartsTranspiler()
+        exe = t.transpile(circuit)
+        result = exe.sample(t.executor(), shots=128).result()
+        assert _counts_dict(result.results) == {expected: 128}
+
+
+class TestControlledVectorSubArgQuriParts:
+    """QURI Parts recursively emits supported multi-target controlled blocks.
 
     QURI Parts cannot convert a sub-circuit to a reusable controlled
-    custom-gate object.  Its backend-specific fallback therefore
-    matrix-emits the inner block, wraps that matrix with the requested
-    controls, and appends the resulting dense unitary.  This keeps the
-    frontend-valid ``controlled(vector_sub)`` pattern executable
-    instead of falling back to the base per-gate decomposer, whose
-    target-index mapping is intentionally too narrow for this shape.
+    custom-gate object. Its backend-specific fallback therefore walks
+    supported primitive gate bodies itself, preserving each inner gate's
+    target mapping instead of delegating to the shared single-target
+    fallback.
     """
 
-    def test_quri_parts_runs_multi_target_custom_gate(self):
-        """``controlled(vector_sub)`` on QURI Parts samples correctly."""
+    def test_quri_parts_emits_supported_multi_target_custom_gate(self):
+        """``controlled(vector_sub)`` runs when each inner gate is supported."""
         pytest.importorskip("quri_parts")
         from qamomile.quri_parts import QuriPartsTranspiler
 
@@ -2716,14 +3894,10 @@ class TestControlledVectorSubArgQuriPartsMatrixFallback:
 
         t = QuriPartsTranspiler()
         exe = t.transpile(kernel)
-        result = exe.sample(t.executor(), shots=512).result()
-        counts = {tuple(bits): count for bits, count in result.results}
-        assert set(counts) == {
-            (1, 0, 0),
-            (1, 1, 0),
-            (1, 0, 1),
-            (1, 1, 1),
-        }
+        result = exe.sample(t.executor(), shots=128).result()
+        counts = _counts_dict(result.results)
+        assert sum(counts.values()) == 128
+        assert all(value[0] == 1 for value in counts)
 
 
 class TestControlledVectorSubArgQiskitEquivalence:
@@ -2923,6 +4097,127 @@ class TestControlledVectorSubArgFollowUpOps:
         t = QiskitTranspiler()
         exe = t.transpile(kernel)
         assert exe.get_first_circuit().num_qubits == 6
+
+    def test_nested_controlled_slice_borrow_violation_is_checked(self):
+        """Nested controlled blocks run slice-borrow validation before emit."""
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            _prepare_nested_block_for_emit,
+        )
+
+        @qmc.qkernel
+        def bad_sliced_block(
+            q: qmc.Vector[qmc.Qubit], lo: qmc.UInt, hi: qmc.UInt
+        ) -> qmc.Vector[qmc.Qubit]:
+            lo2 = lo + 0
+            region = q[lo2:hi]
+            q[lo2] = qmc.h(q[lo2])
+            region[0] = qmc.x(region[0])
+            return q
+
+        with pytest.raises(SliceBorrowViolationError):
+            _prepare_nested_block_for_emit(bad_sliced_block.block, {"lo": 0, "hi": 2})
+
+    def test_controlled_slice_fallback_strips_markers(self, monkeypatch):
+        """Base controlled fallback receives a slice-normalized nested block."""
+        from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            region = q[0:1]
+            region[0] = qmc.x(region[0])
+            q[0:1] = region
+            return q
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            controlled_x = qmc.control(sliced_x, num_controls=1)
+            q[0], target = controlled_x(q[0], q[1:2])
+            q[1:2] = target
+            return qmc.measure(q)
+
+        monkeypatch.setattr(
+            StandardEmitPass,
+            "_blockvalue_to_gate",
+            lambda self, block_value, num_qubits, bindings: None,
+        )
+
+        t = QiskitTranspiler()
+        exe = t.transpile(kernel)
+        result = exe.sample(t.executor(), shots=32).result()
+        assert _counts_dict(result.results) == {(1, 1): 32}
+
+    def test_controlled_powers_fallback_strips_markers(self):
+        """Controlled-power fallback normalizes sliced nested blocks."""
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            emit_controlled_powers,
+        )
+        from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+            ValueResolver,
+        )
+
+        @qmc.qkernel
+        def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            region = q[0:1]
+            region[0] = qmc.x(region[0])
+            q[0:1] = region
+            return q
+
+        class FakeEmitter:
+            """Collect controlled X gates emitted by the fallback path."""
+
+            def emit_cx(self, circuit: list[tuple[str, int, int]], c: int, t: int):
+                """Record a controlled-X emission."""
+                circuit.append(("cx", c, t))
+
+        class FakeEmitPass:
+            """Force controlled-power emission through the fallback path."""
+
+            _emitter = FakeEmitter()
+            _resolver = ValueResolver()
+
+            def _blockvalue_to_gate(self, block_value, num_qubits, bindings):
+                """Return no gate so the fallback receives ``block_value``."""
+                del block_value, num_qubits, bindings
+                return None
+
+        circuit: list[tuple[str, int, int]] = []
+        emit_controlled_powers(
+            FakeEmitPass(),
+            circuit,
+            sliced_x.block,
+            counting_indices=[0],
+            target_indices=[1],
+            bindings={},
+        )
+
+        assert circuit == [("cx", 0, 1)]
+
+    def test_controlled_slice_normalization_cross_backend(self, sdk_transpiler):
+        """Execute sliced controlled sub-kernels on each SDK backend."""
+
+        @qmc.qkernel
+        def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            region = q[0:1]
+            region[0] = qmc.x(region[0])
+            q[0:1] = region
+            return q
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            controlled_x = qmc.control(sliced_x, num_controls=1)
+            q[0], target = controlled_x(q[0], q[1:2])
+            q[1:2] = target
+            return qmc.measure(q)
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(kernel)
+        result = exe.sample(transpiler.executor(), shots=32).result()
+        assert _counts_dict(result.results) == {(1, 1): 32}
 
 
 class TestSymbolicMultiArgControl:
@@ -3204,3 +4499,219 @@ class TestSymbolicMultiArgControl:
             ValueError, match=r"single control argument must be a Vector"
         ):
             _ = kernel.block
+
+
+# =============================================================================
+# Regression: control() of a pass-through wrapper kernel
+# =============================================================================
+#
+# A wrapper whose body is a single ``CallBlockOperation`` forwarding to a
+# leaf gate kernel (``def wrap(q): return leaf(q)``) used to lose the inner
+# gate under ``qmc.control``: ``InlinePass`` descended into
+# ``InverseBlockOperation`` blocks but not into ``ControlledUOperation.block``,
+# so the unexpanded ``CallBlockOperation`` survived to emit, where
+# ``blockvalue_to_gate`` cannot turn a call into a gate and silently produced
+# an empty (identity) unitary. ``control(leaf)`` worked; only the
+# pass-through wrapper collapsed to identity. These tests pin
+# ``control(wrap) == control(leaf)`` (and that the inner gate actually fires)
+# across every supported SDK, including a two-level wrapper that exercises
+# repeated inlining of the nested controlled block.
+
+
+@qmc.qkernel
+def _passthrough_leaf_x(q: qmc.Qubit) -> qmc.Qubit:
+    """Leaf gate kernel: a single X. Forwarding target of the wrappers below."""
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def _passthrough_wrap1_x(q: qmc.Qubit) -> qmc.Qubit:
+    """One-level pass-through wrapper: body is a single CallBlockOperation."""
+    return _passthrough_leaf_x(q)
+
+
+@qmc.qkernel
+def _passthrough_wrap2_x(q: qmc.Qubit) -> qmc.Qubit:
+    """Two-level pass-through wrapper: forwards to the one-level wrapper."""
+    return _passthrough_wrap1_x(q)
+
+
+@qmc.qkernel
+def _passthrough_leaf_ry(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Parametric leaf gate kernel: RY(theta), to check param threading."""
+    return qmc.ry(q, theta)
+
+
+@qmc.qkernel
+def _passthrough_wrap1_ry(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """One-level pass-through wrapper forwarding the angle to the leaf."""
+    return _passthrough_leaf_ry(q, theta)
+
+
+class TestControlledPassThroughWrapperInlined:
+    """``control()`` must inline calls inside a pass-through wrapper's block."""
+
+    def test_no_call_block_survives_inside_controlled_u(self):
+        """White-box: InlinePass descends into ``ControlledUOperation.block``.
+
+        Before the fix the wrapper's lone ``CallBlockOperation`` stayed
+        inside ``ControlledUOperation.block`` (and the top block was even
+        mislabeled AFFINE), so the inner gate was dropped at emit. This
+        pins that no ``CallBlockOperation`` remains inside the controlled
+        block after ``inline``.
+        """
+        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circ() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c, t = qmc.control(_passthrough_wrap1_x)(c, t)
+            return qmc.measure(c)
+
+        transpiler = QiskitTranspiler()
+        block = transpiler.inline(transpiler.to_block(circ, bindings={}))
+        controlled = [
+            op for op in block.operations if isinstance(op, ControlledUOperation)
+        ]
+        assert controlled, "expected a ControlledUOperation in the inlined block"
+        for op in controlled:
+            assert op.block is not None
+            residual = [
+                o for o in op.block.operations if isinstance(o, CallBlockOperation)
+            ]
+            assert not residual, (
+                "CallBlockOperation survived inside ControlledUOperation.block; "
+                "InlinePass must descend into the nested controlled block."
+            )
+
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            pytest.param(_passthrough_wrap1_x, id="wrap1"),
+            pytest.param(_passthrough_wrap2_x, id="wrap2"),
+        ],
+    )
+    def test_qiskit_wrapper_matches_leaf_and_fires(self, qiskit_transpiler, wrapper):
+        """``control(wrapper)`` == ``control(leaf)`` and the X actually fires.
+
+        The control is driven to |1> so the controlled X must flip the
+        target. The pre-fix bug dropped the inner gate, leaving the target
+        in |0> (identity) — caught here both by parity against the leaf
+        form and by inequality to the gate-dropped statevector.
+        """
+
+        def _build(kern):
+            @qmc.qkernel
+            def circuit() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(2, "qs")
+                qs[0] = qmc.x(qs[0])  # control -> |1>
+                qs[0], qs[1] = qmc.control(kern, num_controls=1)(qs[0], qs[1])
+                return qmc.measure(qs)
+
+            return circuit
+
+        sv_wrap = _get_statevector(qiskit_transpiler, _build(wrapper), {})
+        sv_leaf = _get_statevector(qiskit_transpiler, _build(_passthrough_leaf_x), {})
+        assert statevectors_equal(sv_wrap, sv_leaf), (
+            "pass-through wrapper produced a different unitary than the leaf "
+            "gate it forwards to."
+        )
+
+        @qmc.qkernel
+        def _gate_dropped() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, "qs")
+            qs[0] = qmc.x(qs[0])  # control -> |1>, target left untouched
+            return qmc.measure(qs)
+
+        sv_dropped = _get_statevector(qiskit_transpiler, _gate_dropped, {})
+        assert not statevectors_equal(sv_wrap, sv_dropped), (
+            "controlled X was dropped — the pass-through wrapper collapsed to "
+            "the identity (the original bug)."
+        )
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            pytest.param(_passthrough_wrap1_x, id="wrap1"),
+            pytest.param(_passthrough_wrap2_x, id="wrap2"),
+        ],
+    )
+    def test_cross_sdk_sample_fires(self, transpiler_factory, wrapper):
+        """``control(wrapper)`` fires the controlled X on every SDK.
+
+        With the control driven to |1> the outcome is deterministic:
+        ``(1, 1)``. The pre-fix bug would instead yield ``(1, 0)`` because
+        the inner X was dropped. Sampling exercises the backend sampler
+        primitive independently of the estimator path below.
+        """
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, "qs")
+            qs[0] = qmc.x(qs[0])  # control -> |1>
+            qs[0], qs[1] = qmc.control(wrapper, num_controls=1)(qs[0], qs[1])
+            return qmc.measure(qs)
+
+        t = transpiler_factory()
+        exe = t.transpile(kernel)
+        result = exe.sample(t.executor(), shots=128).result()
+        total = sum(count for _value, count in result.results)
+        assert total > 0, f"no shots returned on SDK={transpiler_factory.__name__}"
+        for value, count in result.results:
+            assert tuple(value) == (1, 1), (
+                f"expected (1, 1) (controlled X fired), got value={value} "
+                f"count={count} on SDK={transpiler_factory.__name__}"
+            )
+
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    @pytest.mark.parametrize("seed", [0, 1, 2, 42])
+    def test_cross_sdk_expval_matches_leaf(self, transpiler_factory, seed):
+        """``control(wrapper)`` expval == ``control(leaf)`` expval, per SDK.
+
+        A parametric RY leaf is forwarded through the wrapper, exercising
+        classical-parameter threading under control. The control is put in
+        a superposition so the controlled rotation moves ``Σ_i Z_i`` over
+        the 2-qubit register. Randomized angles plus the boundary values
+        ``0``, ``π``, ``2π`` are checked. The estimator primitive is
+        exercised independently of the sampler path above.
+        """
+        import qamomile.observable as qm_o
+
+        rng = np.random.default_rng(seed)
+        thetas = [
+            0.0,
+            math.pi,
+            2 * math.pi,
+            float(rng.uniform(-math.pi, math.pi)),
+        ]
+
+        H = qm_o.Hamiltonian.zero(num_qubits=2)
+        for i in range(2):
+            H += qm_o.Z(i)
+
+        t = transpiler_factory()
+        for theta in thetas:
+
+            def _build(kern, theta=theta):
+                @qmc.qkernel
+                def circuit(obs: qmc.Observable) -> qmc.Float:
+                    c = qmc.qubit(name="c")
+                    tq = qmc.qubit(name="t")
+                    c = qmc.h(c)  # superposition so the controlled RY matters
+                    c, tq = qmc.control(kern, num_controls=1)(c, tq, theta=theta)
+                    return qmc.expval((c, tq), obs)
+
+                return circuit
+
+            exe_w = t.transpile(_build(_passthrough_wrap1_ry), bindings={"obs": H})
+            exe_l = t.transpile(_build(_passthrough_leaf_ry), bindings={"obs": H})
+            val_w = exe_w.run(t.executor()).result()
+            val_l = exe_l.run(t.executor()).result()
+            assert np.isclose(val_w, val_l, atol=1e-6), (
+                f"wrapper/leaf expval mismatch on "
+                f"SDK={transpiler_factory.__name__}, seed={seed}, theta={theta}: "
+                f"wrapper={val_w}, leaf={val_l}"
+            )

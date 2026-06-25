@@ -1,5 +1,7 @@
 """Tests for the CompositeGate API."""
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -15,7 +17,18 @@ from qamomile.circuit.ir.operation.composite_gate import (
     ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.types import FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
+    emit_iqft_with_strategy,
+    emit_qft_with_strategy,
+    emit_qpe_manual,
+    extract_phase_from_params,
+)
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+    ValueResolver,
+)
 from tests.circuit.conftest import run_statevector
 
 # =============================================================================
@@ -1313,6 +1326,315 @@ class TestBackwardsCompatibility:
         assert qft is not None
         assert iqft is not None
         assert qpe is not None
+
+
+class TestQPEPhaseExtraction:
+    """Regression tests for QPE fallback phase operand resolution."""
+
+    @staticmethod
+    def _emit_pass(parameters: set[str] | None = None) -> Any:
+        """Create the minimal emit-pass facade needed by phase extraction.
+
+        Args:
+            parameters (set[str] | None): Runtime parameter names that the
+                resolver must keep symbolic. Defaults to ``None``.
+
+        Returns:
+            Any: Object exposing the ``_resolver`` attribute consumed by
+                ``extract_phase_from_params``.
+        """
+        return type(
+            "EmitPassStub",
+            (),
+            {"_resolver": ValueResolver(parameters=parameters)},
+        )()
+
+    @staticmethod
+    def _qpe_op(phase_operand: Value) -> CompositeGateOperation:
+        """Create a block-free QPE operation with one phase operand.
+
+        Args:
+            phase_operand (Value): Classical phase operand to place after the
+                target qubit operand.
+
+        Returns:
+            CompositeGateOperation: QPE operation that exercises manual
+                fallback phase extraction.
+        """
+        target = Value(type=QubitType(), name="target")
+        return CompositeGateOperation(
+            operands=[target, phase_operand],
+            results=[],
+            gate_type=CompositeGateType.QPE,
+            num_target_qubits=1,
+            has_implementation=False,
+        )
+
+    @staticmethod
+    def _typed_op(gate_type: CompositeGateType) -> CompositeGateOperation:
+        """Create a minimal operation with the requested composite gate type.
+
+        Args:
+            gate_type (CompositeGateType): Composite gate type to assign.
+
+        Returns:
+            CompositeGateOperation: Block-free composite operation for direct
+                helper validation tests.
+        """
+        target = Value(type=QubitType(), name="target")
+        phase = Value(type=FloatType(), name="phase").with_const(0.25)
+        return CompositeGateOperation(
+            operands=[target, phase],
+            results=[],
+            gate_type=gate_type,
+            num_target_qubits=1,
+            has_implementation=False,
+        )
+
+    @staticmethod
+    def _qpe_op_with_params(params: list[Value]) -> CompositeGateOperation:
+        """Create a block-free QPE operation with explicit parameter operands.
+
+        Args:
+            params (list[Value]): Classical parameter operands to append after
+                the target qubit operand.
+
+        Returns:
+            CompositeGateOperation: QPE operation with the supplied parameter
+                operands.
+        """
+        target = Value(type=QubitType(), name="target")
+        return CompositeGateOperation(
+            operands=[target, *params],
+            results=[],
+            gate_type=CompositeGateType.QPE,
+            num_target_qubits=1,
+            has_implementation=False,
+        )
+
+    def test_extract_phase_from_bound_array_element(self):
+        """QPE fallback phase extraction reads a bound array element."""
+        parent = ArrayValue(type=FloatType(), name="theta")
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {"theta": np.array([0.125, 0.25])},
+        )
+
+        assert phase == pytest.approx(0.25)
+
+    def test_extract_phase_from_const_array_element_metadata(self):
+        """QPE fallback phase extraction reads frozen array literal metadata."""
+        parent = ArrayValue(
+            type=FloatType(),
+            name="theta",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.375])
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {},
+        )
+
+        assert phase == pytest.approx(0.375)
+
+    def test_extract_phase_from_bound_vector_view_element(self):
+        """QPE fallback phase extraction maps VectorView elements to root data."""
+        root = ArrayValue(type=FloatType(), name="gammas")
+        view = ArrayValue(
+            type=FloatType(),
+            name="gammas[slice]",
+            slice_of=root,
+            slice_start=Value(type=UIntType(), name="start").with_const(1),
+            slice_step=Value(type=UIntType(), name="step").with_const(2),
+        )
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="gamma_view_elem",
+            parent_array=view,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {"gammas": np.array([0.125, 0.25, 0.375, 0.5])},
+        )
+
+        assert phase == pytest.approx(0.5)
+
+    def test_extract_phase_from_const_vector_view_element_metadata(self):
+        """QPE fallback phase extraction maps VectorView elements to root literals."""
+        root = ArrayValue(
+            type=FloatType(),
+            name="gammas",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.25, 0.375, 0.5])
+        view = ArrayValue(
+            type=FloatType(),
+            name="gammas[slice]",
+            slice_of=root,
+            slice_start=Value(type=UIntType(), name="start").with_const(1),
+            slice_step=Value(type=UIntType(), name="step").with_const(2),
+        )
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="gamma_view_elem",
+            parent_array=view,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {},
+        )
+
+        assert phase == pytest.approx(0.5)
+
+    def test_extract_phase_leaves_symbolic_slice_bound_unresolved(self):
+        """QPE fallback phase extraction preserves unresolved VectorView bounds."""
+        root = ArrayValue(type=FloatType(), name="gammas")
+        view = ArrayValue(
+            type=FloatType(),
+            name="gammas[slice]",
+            slice_of=root,
+            slice_start=Value(type=UIntType(), name="start"),
+            slice_step=Value(type=UIntType(), name="step").with_const(1),
+        )
+        index = Value(type=UIntType(), name="idx").with_const(0)
+        phase_operand = Value(
+            type=FloatType(),
+            name="gamma_view_elem",
+            parent_array=view,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {"gammas": np.array([0.125, 0.25])},
+        )
+
+        assert phase is None
+
+    def test_extract_phase_leaves_runtime_parameter_array_unresolved(self):
+        """QPE fallback phase extraction preserves runtime parameter arrays."""
+        parent = ArrayValue(
+            type=FloatType(),
+            name="theta",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.375])
+        index = Value(type=UIntType(), name="idx").with_const(1)
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(parameters={"theta"}),
+            self._qpe_op(phase_operand),
+            {"theta": np.array([0.125, 0.25])},
+        )
+
+        assert phase is None
+
+    def test_extract_phase_leaves_symbolic_array_index_unresolved(self):
+        """QPE fallback phase extraction preserves unresolved symbolic indices."""
+        parent = ArrayValue(
+            type=FloatType(),
+            name="theta",
+        ).with_array_runtime_metadata(const_array=[0.125, 0.375])
+        index = Value(type=UIntType(), name="idx")
+        phase_operand = Value(
+            type=FloatType(),
+            name="theta_elem",
+            parent_array=parent,
+            element_indices=(index,),
+        )
+
+        phase = extract_phase_from_params(
+            self._emit_pass(),
+            self._qpe_op(phase_operand),
+            {},
+        )
+
+        assert phase is None
+
+    def test_extract_phase_rejects_multiple_concrete_parameters(self):
+        """QPE fallback phase extraction rejects ambiguous numeric params."""
+        first = Value(type=FloatType(), name="first").with_const(0.125)
+        second = Value(type=FloatType(), name="second").with_const(0.25)
+
+        with pytest.raises(EmitError, match="multiple numeric parameters"):
+            extract_phase_from_params(
+                self._emit_pass(),
+                self._qpe_op_with_params([first, second]),
+                {},
+            )
+
+    def test_extract_phase_rejects_non_qpe_operations(self):
+        """QPE phase extraction rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports QPE"):
+            extract_phase_from_params(
+                self._emit_pass(), self._typed_op(CompositeGateType.QFT), {}
+            )
+
+    def test_extract_phase_rejects_non_composite_operations(self):
+        """QPE phase extraction rejects non-composite operations."""
+        result = Value(type=QubitType(), name="q")
+        non_composite_op: Any = QInitOperation(operands=[], results=[result])
+
+        with pytest.raises(EmitError, match="only supports QPE"):
+            extract_phase_from_params(self._emit_pass(), non_composite_op, {})
+
+    def test_emit_qpe_manual_rejects_non_qpe_operations(self):
+        """Manual QPE emission rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports QPE"):
+            emit_qpe_manual(
+                self._emit_pass(),
+                None,
+                self._typed_op(CompositeGateType.QFT),
+                [],
+                {},
+            )
+
+    def test_emit_qft_with_strategy_rejects_non_qft_operations(self):
+        """QFT strategy emission rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports QFT"):
+            emit_qft_with_strategy(
+                self._emit_pass(),
+                None,
+                self._typed_op(CompositeGateType.IQFT),
+                [],
+            )
+
+    def test_emit_iqft_with_strategy_rejects_non_iqft_operations(self):
+        """IQFT strategy emission rejects mismatched composite gate types."""
+        with pytest.raises(EmitError, match="only supports IQFT"):
+            emit_iqft_with_strategy(
+                self._emit_pass(),
+                None,
+                self._typed_op(CompositeGateType.QFT),
+                [],
+            )
 
 
 class TestVectorQubitParamRejection:

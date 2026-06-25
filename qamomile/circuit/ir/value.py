@@ -62,11 +62,23 @@ class QFixedMetadata:
 
 @dataclasses.dataclass(frozen=True)
 class ArrayRuntimeMetadata:
-    """Metadata for array literals and explicit element identity tracking."""
+    """Metadata for array literals and explicit element identity tracking.
+
+    ``element_parent_uuids`` / ``element_parent_indices`` are parallel to
+    ``element_uuids``: for each tracked element they record the root array's
+    UUID and the element's index within that root (as resolved by
+    :func:`resolve_root_qubit_address` at trace time). They let an emit pass map
+    a packed element back to the physical qubit registered under the root
+    array's ``QubitAddress(root_uuid, index)`` key even when the element's own
+    UUID was never registered. The sentinel ``("", -1)`` marks an element with
+    no array parent (a standalone qubit), for which a flat UUID lookup is used.
+    """
 
     const_array: typing.Any = None
     element_uuids: tuple[str, ...] = ()
     element_logical_ids: tuple[str, ...] = ()
+    element_parent_uuids: tuple[str, ...] = ()
+    element_parent_indices: tuple[int, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,6 +97,137 @@ class ValueMetadata:
     qfixed: QFixedMetadata | None = None
     array_runtime: ArrayRuntimeMetadata | None = None
     dict_runtime: DictRuntimeMetadata | None = None
+
+
+def split_indexed_identifier(identifier: str) -> tuple[str, str] | None:
+    """Split a legacy indexed identifier into base and index suffix.
+
+    Args:
+        identifier (str): Identifier to inspect. Legacy carrier keys use the
+            ``"<base>_<index>"`` spelling, where ``index`` is decimal.
+
+    Returns:
+        tuple[str, str] | None: ``(base, index)`` when ``identifier`` carries a
+            numeric suffix, otherwise ``None``.
+    """
+    separator = identifier.rfind("_")
+    if separator <= 0:
+        return None
+    suffix = identifier[separator + 1 :]
+    if not suffix.isdigit():
+        return None
+    return identifier[:separator], suffix
+
+
+def remap_indexed_identifier(
+    identifier: str,
+    remap_identifier: typing.Callable[[str], str],
+) -> str:
+    """Remap an identifier while preserving a legacy index suffix.
+
+    Args:
+        identifier (str): Scalar identifier or legacy ``"<base>_<index>"``
+            carrier key.
+        remap_identifier (typing.Callable[[str], str]): Function that remaps
+            scalar identifiers and carrier-key bases.
+
+    Returns:
+        str: Remapped identifier. Numeric index suffixes are preserved after
+            remapping the base identifier.
+    """
+    parts = split_indexed_identifier(identifier)
+    if parts is None:
+        return remap_identifier(identifier)
+    base, suffix = parts
+    return f"{remap_identifier(base)}_{suffix}"
+
+
+def remap_value_metadata_references(
+    metadata: ValueMetadata,
+    remap_uuid: typing.Callable[[str], str],
+    remap_logical_id: typing.Callable[[str], str],
+) -> ValueMetadata:
+    """Rewrite UUID and logical-id references inside value metadata.
+
+    Args:
+        metadata (ValueMetadata): Metadata bundle whose embedded references
+            should be rewritten.
+        remap_uuid (typing.Callable[[str], str]): Function that maps scalar
+            UUID references (and carrier-key bases) to replacement UUIDs.
+        remap_logical_id (typing.Callable[[str], str]): Function that maps
+            scalar logical-id references (and carrier-key bases) to
+            replacement logical IDs.
+
+    Returns:
+        ValueMetadata: Metadata with every embedded UUID / logical-id reference
+            rewritten. Legacy ``"<uuid>_<index>"`` carrier keys keep their
+            index suffix while remapping the base UUID. The original bundle is
+            returned unchanged when no reference is rewritten.
+    """
+    new_cast = metadata.cast
+    if new_cast is not None:
+        new_cast = CastMetadata(
+            source_uuid=remap_uuid(new_cast.source_uuid),
+            qubit_uuids=tuple(
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_cast.qubit_uuids
+            ),
+            source_logical_id=(
+                remap_logical_id(new_cast.source_logical_id)
+                if new_cast.source_logical_id is not None
+                else None
+            ),
+            qubit_logical_ids=tuple(
+                remap_indexed_identifier(logical_id, remap_logical_id)
+                for logical_id in new_cast.qubit_logical_ids
+            ),
+        )
+
+    new_qfixed = metadata.qfixed
+    if new_qfixed is not None:
+        new_qfixed = QFixedMetadata(
+            qubit_uuids=tuple(
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_qfixed.qubit_uuids
+            ),
+            num_bits=new_qfixed.num_bits,
+            int_bits=new_qfixed.int_bits,
+        )
+
+    new_array_rt = metadata.array_runtime
+    if new_array_rt is not None:
+        new_array_rt = ArrayRuntimeMetadata(
+            const_array=new_array_rt.const_array,
+            element_uuids=tuple(
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_array_rt.element_uuids
+            ),
+            element_logical_ids=tuple(
+                remap_indexed_identifier(logical_id, remap_logical_id)
+                for logical_id in new_array_rt.element_logical_ids
+            ),
+            # Empty parent UUID is a sentinel for standalone or unresolved
+            # elements, not a Value UUID, so keep it unchanged.
+            element_parent_uuids=tuple(
+                remap_uuid(uuid_ref) if uuid_ref else uuid_ref
+                for uuid_ref in new_array_rt.element_parent_uuids
+            ),
+            element_parent_indices=new_array_rt.element_parent_indices,
+        )
+
+    if (
+        new_cast == metadata.cast
+        and new_qfixed == metadata.qfixed
+        and new_array_rt == metadata.array_runtime
+    ):
+        return metadata
+
+    return dataclasses.replace(
+        metadata,
+        cast=new_cast,
+        qfixed=new_qfixed,
+        array_runtime=new_array_rt,
+    )
 
 
 @typing.runtime_checkable
@@ -238,13 +381,89 @@ class _MetadataValueMixin:
             return ()
         return self.metadata.array_runtime.element_uuids
 
+    def get_element_parent_addresses(self) -> tuple[tuple[str, int] | None, ...]:
+        """Return per-element root ``(array_uuid, index)`` addresses.
+
+        Returns:
+            tuple[tuple[str, int] | None, ...]: Exactly one entry per element
+                in ``get_element_uuids()`` (same length, same order), so
+                callers can index by element position without a length check.
+                Each entry is the element's root ``(array_uuid, index)``
+                address, or ``None`` for a standalone qubit (recorded with the
+                ``("", -1)`` sentinel), for an element whose root could not be
+                resolved at trace time, or for any element whose parent address
+                was never recorded (e.g. metadata that only set
+                ``element_uuids``).
+        """
+        if self.metadata.array_runtime is None:
+            return ()
+        rt = self.metadata.array_runtime
+        # ``element_uuids`` / ``element_parent_uuids`` / ``element_parent_indices``
+        # are PARALLEL tuples: position i in each describes the same element i.
+        # The only code that populates the two parent tuples (``expval()``'s
+        # tuple lowering) always sets all three together, so at the sole call
+        # site they are equal length. We deliberately iterate by
+        # ``len(element_uuids)`` instead of ``zip``-ing the parent tuples so the
+        # result is ALWAYS one entry per element and stays index-aligned with
+        # ``get_element_uuids()`` -- the caller (``_build_qubit_map``) indexes it
+        # by element position. ``zip`` would instead stop at the shortest tuple
+        # and return fewer (or zero) entries for any value whose parent tuples
+        # were never set, silently misaligning the result with element_uuids.
+        # Defensive only: an element is "past the recorded parent info" once its
+        # index reaches the SHORTER of the two parent tuples. In practice the
+        # parent tuples are equal length to element_uuids (expval sets all three
+        # together), so this never triggers at the real call site -- it only
+        # keeps the result aligned with element_uuids for any value whose parent
+        # info was never recorded (those positions become None).
+        n_parent = min(len(rt.element_parent_uuids), len(rt.element_parent_indices))
+        result: list[tuple[str, int] | None] = []
+        for i in range(len(rt.element_uuids)):
+            if i >= n_parent:
+                result.append(None)
+                continue
+            parent_uuid = rt.element_parent_uuids[i]
+            parent_idx = rt.element_parent_indices[i]
+            # ``("", -1)`` is the sentinel written by ``expval()`` for a
+            # standalone qubit (no array parent) or an element whose root could
+            # not be resolved at trace time; decode it back to ``None`` so the
+            # caller skips the root-address fallback for that position.
+            if parent_uuid == "" or parent_idx < 0:
+                result.append(None)
+            else:
+                result.append((parent_uuid, parent_idx))
+        return tuple(result)
+
     def with_array_runtime_metadata(
         self,
         *,
         const_array: typing.Any = _UNSET,
         element_uuids: Sequence[str] | object = _UNSET,
         element_logical_ids: Sequence[str] | object = _UNSET,
+        element_parent_uuids: Sequence[str] | object = _UNSET,
+        element_parent_indices: Sequence[int] | object = _UNSET,
     ) -> typing.Self:
+        """Return a copy with updated array-runtime metadata.
+
+        Only the fields passed explicitly are changed; any field left as the
+        ``_UNSET`` sentinel keeps its current value.
+
+        Args:
+            const_array (typing.Any): Frozen literal array payload. Defaults to
+                ``_UNSET`` (keep current).
+            element_uuids (Sequence[str] | object): Per-element UUIDs. Defaults
+                to ``_UNSET`` (keep current).
+            element_logical_ids (Sequence[str] | object): Per-element
+                logical IDs. Defaults to ``_UNSET`` (keep current).
+            element_parent_uuids (Sequence[str] | object): Per-element root
+                array UUIDs (parallel to ``element_uuids``; ``""`` for a
+                standalone qubit). Defaults to ``_UNSET`` (keep current).
+            element_parent_indices (Sequence[int] | object): Per-element index
+                within the root array (parallel to ``element_uuids``; ``-1``
+                for a standalone qubit). Defaults to ``_UNSET`` (keep current).
+
+        Returns:
+            typing.Self: A new value carrying the merged array-runtime metadata.
+        """
         current = self.metadata.array_runtime or ArrayRuntimeMetadata()
         new_const_array = (
             current.const_array if const_array is _UNSET else _freeze_data(const_array)
@@ -259,6 +478,16 @@ class _MetadataValueMixin:
             if element_logical_ids is _UNSET
             else tuple(typing.cast(Sequence[str], element_logical_ids))
         )
+        new_element_parent_uuids = (
+            current.element_parent_uuids
+            if element_parent_uuids is _UNSET
+            else tuple(typing.cast(Sequence[str], element_parent_uuids))
+        )
+        new_element_parent_indices = (
+            current.element_parent_indices
+            if element_parent_indices is _UNSET
+            else tuple(typing.cast(Sequence[int], element_parent_indices))
+        )
         return self._replace_metadata(
             dataclasses.replace(
                 self.metadata,
@@ -266,6 +495,8 @@ class _MetadataValueMixin:
                     const_array=new_const_array,
                     element_uuids=new_element_uuids,
                     element_logical_ids=new_element_logical_ids,
+                    element_parent_uuids=new_element_parent_uuids,
+                    element_parent_indices=new_element_parent_indices,
                 ),
             )
         )
@@ -407,6 +638,134 @@ class ArrayValue(Value[T]):
             ``True`` iff ``slice_of`` is non-``None``.
         """
         return self.slice_of is not None
+
+
+def resolve_root_array_index(
+    array: "ArrayValue",
+    index: int,
+) -> tuple["ArrayValue", int] | None:
+    """Fold a view-local element index into the root array's index space.
+
+    Walks the ``slice_of`` chain root-ward, composing each strided view's
+    affine map ``parent_index = start + step * local_index``. This is the
+    array-level counterpart of :func:`resolve_root_qubit_address` (which
+    starts from an array-element ``Value``); both must stay consistent with
+    the composite carrier keys ``"<root_uuid>_<root_index>"`` registered by
+    ``QInitOperation`` at emit time.
+
+    Args:
+        array (ArrayValue): Array the index is local to. May be a root array
+            (``slice_of`` unset) or an arbitrarily nested strided view.
+        index (int): Element index in ``array``'s own index space.
+
+    Returns:
+        tuple[ArrayValue, int] | None: ``(root_array, composed_index)`` when
+            every slice bound on the chain is compile-time constant and
+            satisfies the frontend contract (non-negative ``slice_start``,
+            positive ``slice_step``). ``None`` when any ``slice_start`` /
+            ``slice_step`` on the chain is missing, symbolic, or violates
+            that contract; callers must then defer resolution rather than
+            guess. Out-of-contract bounds would compose ``index`` onto a
+            wrong root slot, so they are refused here too (the frontend
+            rejects them at trace time; this guard covers programmatically
+            constructed IR).
+    """
+    current = array
+    idx = index
+    while current.slice_of is not None:
+        # Symbolic view bounds cannot be folded to a fixed root index at
+        # this stage; defer to a resolver that has bindings available.
+        if (
+            current.slice_start is None
+            or current.slice_step is None
+            or not current.slice_start.is_constant()
+            or not current.slice_step.is_constant()
+        ):
+            return None
+        start = int(typing.cast(int, current.slice_start.get_const()))
+        step = int(typing.cast(int, current.slice_step.get_const()))
+        # Mirror the frontend slice contract (non-negative start, positive
+        # step); composing a negative start or non-positive step would remap
+        # ``idx`` onto a wrong root slot.
+        if start < 0 or step <= 0:
+            return None
+        idx = start + step * idx
+        current = current.slice_of
+    return current, idx
+
+
+def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
+    """Resolve an array-element value to its root ``(array_uuid, index)``.
+
+    Walks the ``parent_array`` / ``slice_of`` chain and composes the nested
+    affine slice maps, so ``view[i]`` resolves to
+    ``(root_uuid, start + step * i)`` for the composed ``(start, step)``. The
+    returned pair is the build-stable identity of the physical qubit slot: the
+    root array's ``QInitOperation`` always registers it as
+    ``QubitAddress(root_uuid, index)``, so this address resolves even when the
+    element's own (per-version) UUID was never registered.
+
+    The transpiler's resource allocator uses the same walk to resolve gate and
+    measurement operands; this shared helper keeps both call sites consistent.
+
+    Args:
+        value (Value): The value to resolve. Expected to be an array element
+            (``parent_array`` set with a single constant ``element_indices``
+            entry).
+
+    Returns:
+        tuple[str, int] | None: ``(root_array_uuid, composed_index)`` when
+            ``value`` is an array element with a constant index whose entire
+            ``slice_of`` chain has constant ``slice_start`` / ``slice_step``.
+            ``None`` when ``value`` is not an array element, when its index is
+            non-constant, or when any slice bound in the chain is non-constant
+            (those cases are deferred to the emit-time resolver, which has
+            bindings available). Also ``None`` for a negative constant index
+            or a chain frame with negative ``slice_start`` / non-positive
+            ``slice_step`` — composing those would silently address a wrong
+            root slot, so they are refused rather than guessed (the frontend
+            rejects them at trace time; this guard covers programmatically
+            constructed IR).
+    """
+    # Not an array element (e.g. a standalone qubit / scalar): there is no
+    # root array to address against.
+    #
+    # ``parent_array`` and ``element_indices`` are always set together -- an
+    # array-element access sets both, and ``next_version`` copies both -- so a
+    # fully-formed element has both and a non-element has neither; the
+    # "only one set" case does not normally arise. ``or`` (not ``and``) is still
+    # the right guard because BOTH are needed below (``element_indices[0]`` for
+    # the index, ``parent_array`` to walk to the root), so we bail to None if
+    # either is missing rather than risk an IndexError / None-walk.
+    if value.parent_array is None or not value.element_indices:
+        return None
+    idx_value = value.element_indices[0]
+    # A non-constant (symbolic / loop-variable) index cannot be pinned to a
+    # fixed physical slot at this stage. Return None to DEFER it to the
+    # emit-time resolver, which has the bindings to resolve it -- guessing here
+    # would silently bind to the wrong qubit.
+    if not idx_value.is_constant():
+        return None
+    idx = int(typing.cast(int, idx_value.get_const()))
+    # A negative local index would compose through the affine map below into
+    # a valid-but-wrong non-negative root index (``view[-1]`` for
+    # ``view = q[1:3]`` would address ``q[0]`` instead of ``q[2]``). The
+    # frontend rejects constant negative indices at trace time; refuse them
+    # here as well so programmatically constructed IR cannot slip through.
+    if idx < 0:
+        return None
+    # Walk the ``slice_of`` chain root-ward. Each strided view contributes the
+    # affine map ``parent_index = start + step * local_index``; composing them
+    # rewrites a (possibly nested) view element into the underlying root array's
+    # own index space, so the result matches the composite key QInit registered.
+    # ``resolve_root_array_index`` also refuses out-of-contract slice bounds
+    # (negative start / non-positive step) so the negative-index defense lives
+    # in one shared place.
+    resolved = resolve_root_array_index(value.parent_array, idx)
+    if resolved is None:
+        return None
+    root, root_idx = resolved
+    return (root.uuid, root_idx)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -23,6 +23,7 @@ from qamomile.circuit.ir.operation import (
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
+    InverseBlockOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -52,6 +53,10 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.parameter import ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
@@ -207,6 +212,7 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
     Covers operands, results, subclass-extra Value fields (via
     ``all_input_values``), nested control-flow op bodies, and nested
     Blocks inside ``CompositeGateOperation`` /
+    ``InverseBlockOperation`` /
     ``ControlledUOperation``.
 
     Args:
@@ -224,8 +230,14 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _walk_op_values(child, ctx)
-    if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
-        _walk_block_values(op.implementation_block, ctx)
+    if isinstance(op, CompositeGateOperation):
+        if op.implementation_block is not None:
+            _walk_block_values(op.implementation_block, ctx)
+    if isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            _walk_block_values(op.source_block, ctx)
+        if op.implementation_block is not None:
+            _walk_block_values(op.implementation_block, ctx)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _walk_block_values(op.block, ctx)
 
@@ -295,6 +307,12 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
     if isinstance(v, ArrayValue):
         for dim in v.shape:
             ctx.register_value(dim)
+        if v.slice_of is not None:
+            ctx.register_value(v.slice_of)
+        if v.slice_start is not None:
+            ctx.register_value(v.slice_start)
+        if v.slice_step is not None:
+            ctx.register_value(v.slice_step)
         return {
             "$type": "ArrayValue",
             "uuid": v.uuid,
@@ -304,6 +322,11 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
             "value_type": _encode_value_type(v.type),
             "metadata": _encode_metadata(v.metadata),
             "shape_refs": [d.uuid for d in v.shape],
+            "slice_of_ref": v.slice_of.uuid if v.slice_of is not None else None,
+            "slice_start_ref": (
+                v.slice_start.uuid if v.slice_start is not None else None
+            ),
+            "slice_step_ref": (v.slice_step.uuid if v.slice_step is not None else None),
         }
     if isinstance(v, Value):
         if v.parent_array is not None:
@@ -426,8 +449,9 @@ def _encode_array_runtime_metadata(
     Returns:
         dict[str, Any] | None: ``None`` when absent; else dict form
             with ``const_array`` (Python data, possibly numpy
-            wrapper), and UUID-string lists for element UUIDs /
-            logical_ids.
+            wrapper), UUID-string lists for element UUIDs /
+            logical_ids, and the parallel per-element root
+            ``(array_uuid, index)`` lists.
     """
     if m is None:
         return None
@@ -435,6 +459,8 @@ def _encode_array_runtime_metadata(
         "const_array": _encode_payload(m.const_array),
         "element_uuids": list(m.element_uuids),
         "element_logical_ids": list(m.element_logical_ids),
+        "element_parent_uuids": list(m.element_parent_uuids),
+        "element_parent_indices": list(m.element_parent_indices),
     }
 
 
@@ -818,6 +844,34 @@ def _encode_cinit(op: CInitOperation, ctx: _EncodeContext) -> dict[str, Any]:
     return _base_op_dict("CInitOperation", op)
 
 
+def _encode_slice_array(op: SliceArrayOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`SliceArrayOperation`.
+
+    Args:
+        op (SliceArrayOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("SliceArrayOperation", op)
+
+
+def _encode_release_slice_view(
+    op: ReleaseSliceViewOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`ReleaseSliceViewOperation`.
+
+    Args:
+        op (ReleaseSliceViewOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("ReleaseSliceViewOperation", op)
+
+
 def _encode_return(op: ReturnOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`ReturnOperation`.
 
@@ -1149,6 +1203,34 @@ def _encode_composite_gate(
     return d
 
 
+def _encode_inverse_block(
+    op: InverseBlockOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`InverseBlockOperation`.
+
+    Args:
+        op (InverseBlockOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus control / target counts, custom
+            name, source block, and fallback implementation block.
+    """
+    d = _base_op_dict("InverseBlockOperation", op)
+    d["num_control_qubits"] = op.num_control_qubits
+    d["num_target_qubits"] = op.num_target_qubits
+    d["custom_name"] = op.custom_name
+    d["source_block"] = (
+        _encode_block(op.source_block, ctx) if op.source_block is not None else None
+    )
+    d["implementation_block"] = (
+        _encode_block(op.implementation_block, ctx)
+        if op.implementation_block is not None
+        else None
+    )
+    return d
+
+
 def _encode_resource_metadata(
     m: ResourceMetadata | None,
 ) -> dict[str, Any] | None:
@@ -1187,6 +1269,8 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,
+    SliceArrayOperation: _encode_slice_array,
+    ReleaseSliceViewOperation: _encode_release_slice_view,
     ReturnOperation: _encode_return,
     ExpvalOp: _encode_expval,
     PauliEvolveOp: _encode_pauli_evolve,
@@ -1203,4 +1287,5 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
     CompositeGateOperation: _encode_composite_gate,
+    InverseBlockOperation: _encode_inverse_block,
 }

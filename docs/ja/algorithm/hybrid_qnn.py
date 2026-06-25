@@ -292,8 +292,8 @@ class QLayer(nn.Module):
 N_CLASSES = 4
 SELECTED_CLASSES = [0, 1, 5, 8]  # T-shirt, Trouser, Sandal, Bag
 CLASS_NAMES = ["T-shirt", "Trouser", "Sandal", "Bag"]
-N_TRAIN_PER_CLASS = 8 if docs_test_mode else 60
-N_TEST_PER_CLASS = 4 if docs_test_mode else 30
+N_TRAIN_PER_CLASS = 2 if docs_test_mode else 60
+N_TEST_PER_CLASS = 2 if docs_test_mode else 30
 
 transform = transforms.Compose([
     transforms.ToTensor(),

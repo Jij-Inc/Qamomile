@@ -84,6 +84,55 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 
 **Future fix**: extend controlled-U composite lowering so it can safely resolve sub-kernel parameterized slice widths from bindings and reflect those resolved widths in the backend target mapping.
 
+## `qmc.inverse` requires trace-time-resolvable control flow
+
+**When it bites**: `qmc.inverse(layer)(...)` is traced for a `layer` kernel whose quantum body contains control flow the eager inverse builder cannot resolve while constructing the fallback `implementation_block`:
+
+- `qmc.range(...)` bounds that are still symbolic at trace time raise `NotImplementedError`. Because `transpile(bindings=...)` bakes bindings into the trace before the inverse wrapper runs, a loop bound supplied via `bindings` resolves fine — the rejection only fires for bounds kept as runtime parameters (`parameters=[...]`) or for a bindings-free `build()`.
+- `if` / `while` / `for ... in items(...)` are rejected unconditionally — **even when `bindings` would resolve the condition at transpile time**. The fallback block is built eagerly at trace time, before `partial_eval` runs `CompileTimeIfLoweringPass`, so the traced block still contains the `IfOperation` / `WhileOperation` / `ForItemsOperation`. Loop bounds are the one control-flow input the inverter can resolve itself, because the bound constants ride directly on the operand `Value`s; a compile-time `if` would need the inverter to fold the branch on its own.
+
+**Why this trade-off was chosen**: the PR keeps inverse fallback blocks explicit in Qamomile IR so every backend has a correct decomposition when its native inverse path is unavailable. Deferring fallback construction would require a later transpiler pass to build the inverse after parameter shape resolution and to keep serialization/canonicalization compatible with a lazy inverse representation.
+
+**Future fix**: make inverse fallback construction lazy for blocks that need transpile-time shape, loop-bound, or branch resolution, or add a dedicated pass that lowers unresolved `InverseBlockOperation` implementations after `resolve_parameter_shapes` / `partial_eval`. That pass would also let bindings-resolved `if` branches invert by folding the selected branch.
+
+## `qmc.control` / `qmc.inverse` of a self-recursive kernel is unsupported
+
+**When it bites**: a self-recursive `@qkernel` — one whose body calls itself and stops via a base-case `if` on a compile-time-constant driver — is passed to `qmc.control` (or `qmc.inverse`). The same kernel transpiles fine when called directly (the `inline ↔ partial_eval` unroll loop folds the base case at the top level), but wrapping it in `qmc.control` makes compilation fail. `qmc.inverse` of such a kernel usually fails even earlier, at trace time, because the eager inverse builder rejects `if` / `while` / `for ... in items(...)` outright (see "`qmc.inverse` requires trace-time-resolvable control flow" above), so a recursive kernel with an `if` base case cannot reach the unroll loop through the inverse path at all.
+
+**Why this trade-off was chosen**: `qmc.control` embeds the controlled kernel's body as a nested `Block` in `ControlledUOperation.block` (and `qmc.inverse` similarly in `InverseBlockOperation`'s nested blocks). `InlinePass` descends into that block and unrolls one self-recursion layer per pass, but `partial_eval` (`ConstantFoldingPass` / `CompileTimeIfLoweringPass`) does not: its recursion driver (`OperationTransformer` in `qamomile/circuit/transpiler/passes/control_flow_visitor.py`) only enters `HasNestedOps` bodies (`For` / `ForItems` / `While` / `If`), never operation-owned blocks. So the base-case `if` inside `ControlledUOperation.block` is never folded, the self-call never disappears, and `unroll_recursion` (`qamomile/circuit/transpiler/transpiler.py`) cannot reach a fixed point. Teaching `partial_eval` to fold inside an operation-owned block is non-trivial: that block is a self-contained unitary with its own formal `input_values`, so the controlled-U's classical param operands must first be resolved to constants and mapped onto those formals (the pre-emit equivalent of emit-time `bind_block_params`) before a scoped fold can run — a new "scoped sub-evaluation into operation-owned blocks" capability rather than a one-line recursion. Given how exotic controlling a recursive kernel is, that work was deferred.
+
+Rather than spin the unroll loop to `MAX_UNROLL_DEPTH` and emit the generic "did not terminate after N iterations" error (which wrongly blames the bindings — the recursion does terminate and its driver is concrete), `unroll_recursion` now detects this shape and fails fast with a targeted error. The detection uses `count_unrollable_call_blocks` (`qamomile/circuit/transpiler/passes/inline.py`), which counts only the residual calls the loop can still resolve (top-level and inside `HasNestedOps` bodies — `For` / `ForItems` / `While` / `If` — but not inside `ControlledUOperation.block` / `InverseBlockOperation` blocks): when that count is zero while `count_call_blocks` is non-zero, every remaining call is trapped inside an operation-owned block, which is the signature of this limitation. The targeted message names `qmc.control` / `qmc.inverse` and points at the non-recursive-rewrite workaround. The genuinely non-terminating top-level recursion case still produces the original "did not terminate" message.
+
+**Workaround**: rewrite the kernel non-recursively — manually unrolled to the required depth — and pass that flat kernel to `qmc.control` / `qmc.inverse`. (A pass-through wrapper that simply forwards to a leaf kernel is fine and fully supported; only genuine self/mutual recursion inside the controlled body is rejected.)
+
+**Future fix**: add scoped partial evaluation into operation-owned blocks — resolve the `ControlledUOperation` / `InverseBlockOperation` classical param operands to constants, map them onto the nested block's formal inputs, and run `ConstantFoldingPass` + `CompileTimeIfLoweringPass` in that scope during each `unroll_recursion` iteration. Once the base-case `if` can be folded inside the block, the existing inline-unroll machinery converges and the targeted error becomes unreachable.
+
+## QURI Parts multi-controlled gates use a bounded dense unitary
+
+**When it bites**: a QURI Parts controlled-U fallback reduces to an irreducible multi-controlled single-qubit gate — three or more controls left after the shared structural reductions, e.g. the multi-controlled X gates `qamomile.circuit.modular_increment` / `modular_decrement` generate on larger registers. QURI Parts has no native multi-controlled gate object, so the gate is emitted as one dense `UnitaryMatrix` over the controls plus target. That path is capped at `_MAX_MC_MATRIX_QUBITS` (10) local qubits — a `2**(k+1)`-dimensional matrix — and raises `EmitError` beyond that. Multi-controlled rotation gates additionally require a compile-time-numeric angle, because the angle is baked into the dense matrix; a runtime-parametric angle raises `EmitError`.
+
+**Why this trade-off was chosen**: the dense matrix is exact, simple, and reuses QURI Parts' `add_UnitaryMatrix_gate`. A gate-synthesis decomposition (ancilla-assisted multi-controlled-X ladders, or recursive V-gate constructions) would avoid the exponential matrix size and support runtime-parametric angles, but needs ancilla management or many more primitive gates. The cap keeps emission memory bounded while covering realistic register sizes.
+
+**Future fix**: add an ancilla-based or recursive gate-synthesis decomposition for multi-controlled single-qubit gates in `qamomile/quri_parts/transpiler.py::QuriPartsEmitPass._emit_irreducible_multi_controlled_gate`, which would lift both the qubit-count cap and the compile-time-angle restriction.
+
+## CUDA-Q observe cannot estimate controlled modular arithmetic yet
+
+**When it bites**: running the controlled modular arithmetic expectation-value path on the CUDA-Q backend. Sampling uses a separate execution path, but `cudaq.observe()` does not yet support the runtime control flow used by these controlled modular arithmetic kernels.
+
+**Why this trade-off was chosen**: the controlled modular primitives are tested through `qmc.control(modular_increment)` / `qmc.control(modular_decrement)` rather than through backend-specific rewrites. CUDA-Q sampling can execute that shape through the generated runnable/sample paths, while observe currently rejects the runtime-control-flow shape. The limitation is marked with an explicit `pytest.xfail` in `tests/circuit/algorithm/arithmetic/test_modular.py::_expval_if_supported`.
+
+**Future fix**: remove the xfail once CUDA-Q observe supports this runtime-control-flow pattern, or add a CUDA-Q-specific expectation-value lowering that avoids the unsupported observe shape while preserving the same qkernel semantics.
+
+## Negative element indices are rejected, not normalized
+
+Python-style negative indexing on traced array handles — `vec[-1]`, `view[-1]`, `q[-1] = ...`, `mat[0, -1]` — raises `NotImplementedError` at trace time instead of selecting an element from the end. Symbolic indices that resolve to a negative value from bindings at compile or emit time stay unresolved and surface as the standard compile error (`Cannot resolve array size ...` / qubit resolution failure) instead of wrapping.
+
+**When it bites**: code written with Python container habits, e.g. `qmc.qubit_array(sizes[-1])` or `q[k - 1]` where `k` folds to `0`. The latter is usually a genuine precondition violation (see `phase_gadget` with empty `indices`), which now fails at trace time with a negative-index message rather than surviving to emit.
+
+**Why this trade-off was chosen**: negative-index semantics were never actually implemented. Root-container classical reads (`sizes[-1]`) only worked by accident of Python container indexing, while every slice-composed path silently mis-addressed: `sizes[1:3][-1]` read `sizes[0]` (the affine root composition `start + step * local` yields `1 + 1 * (-1) = 0`) and produced a wrong-sized circuit, a gate on `view[-1]` for `view = q[1:3]` was routed onto physical `q[0]` instead of `q[2]`, and `q[-1]` on a root qubit array tripped an internal allocator assertion claiming a transpiler bug. Rejecting negative constants in `ArrayBase._get_element` / `_return_element` — exactly where negative slice bounds were already rejected — eliminates the silent-miscompilation class without committing to wrap semantics. Defense-in-depth guards in the compile-time constant-folding resolver (`qamomile.circuit.transpiler.value_resolver.ValueResolver`), the emit resolver (`qamomile.circuit.transpiler.passes.emit_support.value_resolver.ValueResolver`), and the IR-level `resolve_root_qubit_address` / shared `resolve_root_array_index` refuse negative resolved indices and out-of-contract slice bounds (`start < 0`, `step <= 0`) so programmatically constructed IR and binding-resolved negatives cannot slip through either.
+
+**Future fix**: support Python semantics by normalizing `idx < 0` to `dim + idx` in `_get_element` when the dimension is a compile-time constant (rejecting only when the dimension is symbolic), and extend the same normalization to binding-resolved indices using the resolved view length. Until then, compute the index explicitly (e.g. `vec[n - 1]` with a bound `n`).
+
 ## Symbolic slice disjointness beyond direct unit-stride intervals
 
 **When it bites**: two symbolic slices on the same root are actually disjoint, but their disjointness cannot be expressed as direct unit-stride root-space intervals.
@@ -91,3 +140,36 @@ The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation becaus
 **Why this trade-off was chosen**: `_symbolic_slices_definitely_disjoint()` only compares direct `slice_step == 1` root slices as half-open intervals, such as `q[:k]` and `q[k:n]`. Strided symbolic slices, nested symbolic affine maps, and more complex symbolic arithmetic are treated conservatively as potentially overlapping.
 
 **Future fix**: add small proof helpers only for shapes that can be proven safely, such as parity partitions or limited affine intervals, without turning the borrow checker into a general symbolic inequality solver.
+
+## Tuple-form expval metadata cannot encode symbolic root indices
+
+**When it bites**: an inlined helper packs a qubit into tuple-form expval metadata, and the caller-side replacement is an element of a symbolic slice, such as `q[j:j+1][0]` where `j` is a `qmc.range(...)` loop variable. Conceptually, the shape is a scalar helper called on an element whose root index is still symbolic:
+
+```python
+@qmc.qkernel
+def helper(q: qmc.Qubit, obs: qmc.Observable) -> qmc.Float:
+    return qmc.expval((q,), obs)
+
+@qmc.qkernel
+def caller(obs: qmc.Observable) -> qmc.Float:
+    q = qmc.qubit_array(4, "q")
+    for j in qmc.range(4):
+        view = q[j : j + 1]
+        # The desired metadata root address for view[0] is (q.uuid, j),
+        # but the current metadata can only store integer indices.
+        helper(view[0], obs)
+```
+
+The concrete-index cases (`q[1]`, `q[1::2]`, or a slice bound that has already been resolved from compile-time bindings) are not affected. The limitation is about values that still carry a symbolic affine index when `ValueSubstitutor._substitute_metadata()` runs. The regression pin is an IR-level `xfail` rather than a backend execution test because current qkernel control-flow / expval composition hits other frontend and execution constraints before this metadata representation gap can be isolated cleanly.
+
+**Why this trade-off was chosen**: `ArrayRuntimeMetadata.element_parent_uuids` and `element_parent_indices` currently encode a root address as `(array_uuid: str, index: int)`. During inline substitution, `_substitute_metadata()` can promote a standalone sentinel `("", -1)` to a real root address only when `resolve_root_qubit_address()` can reduce the caller-side element to a constant root index. For `q[j:j+1][0]`, the desired root address is conceptually `(q.uuid, j)`, but `j` is a symbolic `Value`, not an `int`. Storing the slice view UUID plus local index, or leaving the standalone sentinel in place, is the only representable state today. The known gap is pinned by `tests/transpiler/test_value_mapping.py::TestArrayRuntimeMetadataSymbolicRootLimitations::test_scalar_inline_metadata_cannot_promote_symbolic_slice_parent`, which is marked `xfail(strict=True)` until metadata can represent symbolic affine root indices.
+
+**Future fix**: extend array-runtime metadata to carry a symbolic affine root expression, for example `(root_uuid, offset_value, stride_value, local_index_value)` or an equivalent small expression tree, and teach emit-time qubit-map construction to resolve that expression with the same binding resolver used for runtime slice chains. Once that exists, the xfail test should be flipped to a normal passing test and this limitation entry can be removed.
+
+## QFixed cast over a non-constant-bound slice view is rejected, not lowered
+
+**When it bites**: a sub-kernel casts a `Vector[Qubit]` parameter to `QFixed` (and typically measures it), and the caller supplies a slice view whose slice bounds are not compile-time constants — for example `sub(q[lo:hi])` where `lo` / `hi` are runtime parameters, or a compile-time `if` that selects such a view. The direct `qmc.cast(q[lo:hi], qmc.QFixed, ...)` form is already rejected at trace time by the frontend (`ValueError`, message mentioning symbolic slice bounds). This entry is about the same shape reaching the compiler indirectly: the cast is traced against a non-view sub-kernel parameter and only becomes a view when the caller's argument is substituted in, so the trace-time guard does not catch it.
+
+**Why this trade-off was chosen**: QFixed carrier qubits are recorded as composite keys `"<root_uuid>_<index>"` indexing into the root array's element space, and `QInitOperation` registers physical qubits under `QubitAddress(root_uuid, index)` in that same space. `resolve_root_array_index()` folds a view-local index through the `slice_of` chain (`start + step * i`) into root space, but only when every slice bound on the chain is a compile-time constant; a symbolic affine bound makes it return `None`. With no constant root index the carrier cannot be mapped to a physical qubit, and emitting a verbatim view-local key (`"<view_uuid>_<i>"`) would leave the carrier unregistered and silently drop the measurement at emit. Rather than fail silently, the inline value-substitution path raises `ValueError` (`ValueSubstitutor._resolve_mapped_carrier` in `qamomile/circuit/ir/value_mapping.py`, which lives in the IR layer and therefore cannot depend on the transpiler's `ValidationError`, so it mirrors the frontend's `ValueError`), and the compile-time-`if` lowering path raises `ValidationError` (`qamomile/circuit/transpiler/passes/compile_time_if_lowering.py`). This is the same `(array_uuid: str, index: int)` root-address representation gap described in "Tuple-form expval metadata cannot encode symbolic root indices" above, surfaced for QFixed carrier keys.
+
+**Future fix**: carry a symbolic affine root expression for carrier keys — the same direction proposed for the tuple-form expval metadata limitation, e.g. `(root_uuid, offset_value, stride_value, local_index_value)` — and resolve it at emit with the same binding resolver used for runtime slice chains, or fold the view bounds from `bindings` before carrier substitution runs. Either lets a binding-resolvable view drive the cast instead of being rejected.

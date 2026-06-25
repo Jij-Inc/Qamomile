@@ -23,6 +23,14 @@ from typing import (
 
 from qamomile.circuit.frontend.handle import Handle, Observable
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
+from qamomile.circuit.frontend.param_validation import (
+    _array_element_type,
+    _is_classical_param_decl,
+    _is_quantum_handle,
+    _is_uint_param_decl,
+    _validate_bound_handles,
+    _validate_classical_param_handle,
+)
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -36,7 +44,7 @@ if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
 
 # Type alias for parameter values
-ParamValue = Union[float, int, Float, UInt, Observable]
+ParamValue = Union[float, int, Handle]
 
 # Counter for synthesized-wrapper filenames; ensures distinct
 # ``linecache`` entries even when the same gate is wrapped multiple times.
@@ -139,10 +147,22 @@ class _ControlEntry:
             ``VectorView``, signalling that the consume is deferred and
             ``original`` should still be used to read the current
             ``ArrayValue``.
+        result_array (ArrayValue | None): For a whole-``Vector`` /
+            ``VectorView`` control entry, the freshly-versioned result
+            ``ArrayValue`` that the per-element scalar control results
+            are re-parented onto (see
+            :meth:`ControlledGate._build_control_results`).  The same
+            object is handed back by
+            :meth:`ControlledGate._wrap_entry_output` so the user-facing
+            output handle and the IR result scalars agree on the array
+            UUID, which is what lets the emit / allocation passes map the
+            output vector's per-element addresses.  ``None`` for scalar
+            ``Qubit`` controls and for every sub-quantum entry.
     """
 
     original: Any
     consumed: Any | None = None
+    result_array: ArrayValue | None = None
 
     @property
     def is_deferred_view(self) -> bool:
@@ -285,13 +305,7 @@ class ControlledGate:
         classical_names = [
             name
             for name, decl in kernel_input_types.items()
-            if (
-                decl is UInt
-                or decl is int
-                or decl is Float
-                or decl is float
-                or decl is Observable
-            )
+            if _is_classical_param_decl(decl)
         ]
         classical_set = set(classical_names)
 
@@ -316,17 +330,18 @@ class ControlledGate:
             if param_name not in params:
                 continue
             param_value = params[param_name]
+            declared = kernel_input_types[param_name]
             if isinstance(param_value, Handle):
+                _validate_classical_param_handle(param_name, declared, param_value)
                 operands.append(param_value.value)
                 continue
-            declared = kernel_input_types[param_name]
             if declared is Observable:
                 raise TypeError(
                     f"control(): parameter {param_name!r} is declared as "
                     f"Observable but received {type(param_value).__name__}. "
                     f"Pass an Observable handle from the enclosing qkernel."
                 )
-            if declared is UInt or declared is int:
+            if _is_uint_param_decl(declared):
                 # ``bool`` is technically an ``int`` subclass but its
                 # meaning differs; reject explicitly to match the
                 # qkernel decorator's literal-promotion rules.  ``float``
@@ -345,6 +360,14 @@ class ControlledGate:
                     name=f"ctrl_param_{param_name}",
                 ).with_const(int(param_value))
             else:
+                if _array_element_type(declared) is not None:
+                    raise TypeError(
+                        f"control(): parameter {param_name!r} is declared "
+                        f"as an array parameter but received "
+                        f"{type(param_value).__name__} ({param_value!r}). "
+                        f"Pass the corresponding Vector handle from the "
+                        f"caller kernel instead."
+                    )
                 # Float-declared param.  Accept Python int / float
                 # (auto-promote ``int`` as the qkernel decorator does)
                 # but reject ``bool`` so ``True`` doesn't surprise as
@@ -513,6 +536,13 @@ class ControlledGate:
             if running == num_controls:
                 return controls, list(args[idx:])
             if isinstance(arg, ArrayBase):
+                if not _is_quantum_handle(arg):
+                    raise ValueError(
+                        f"concrete num_controls: positional argument #{idx} "
+                        f"in the control region must be a Qubit, "
+                        f"Vector[Qubit], or VectorView[Qubit]; got "
+                        f"{type(arg).__name__} with non-quantum element type."
+                    )
                 length = arg._shape[0] if arg._shape else None
                 length_int = _as_int_const(length) if length is not None else None
                 if length_int is None:
@@ -573,11 +603,7 @@ class ControlledGate:
             list[Any]: The quantum handles from *sub_args_resolved* in
                 the same iteration order.
         """
-        from qamomile.circuit.frontend.handle.array import ArrayBase
-
-        return [
-            h for h in sub_args_resolved.values() if isinstance(h, (Qubit, ArrayBase))
-        ]
+        return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
 
     # ``_validate_no_alias_or_overlap`` used to live here as an entry-
     # point alias / overlap check, mirroring the
@@ -702,15 +728,7 @@ class ControlledGate:
         extras = sorted(set(sub_kwargs) - set(input_types))
         if extras:
             classical_names = [
-                n
-                for n, decl in input_types.items()
-                if (
-                    decl is UInt
-                    or decl is int
-                    or decl is Float
-                    or decl is float
-                    or decl is Observable
-                )
+                n for n, decl in input_types.items() if _is_classical_param_decl(decl)
             ]
             raise TypeError(
                 f"control(): unknown parameter(s) {extras!r}. "
@@ -798,11 +816,55 @@ class ControlledGate:
         """
         results: list[Value] = []
         for entry in consumed_controls:
-            operands_for_entry = self._expand_control_to_scalars(entry)
-            results.extend(op.next_version() for op in operands_for_entry)
+            results.extend(self._build_control_results(entry))
         for entry in consumed_sub_quantum:
             results.append(self._sub_quantum_operand_value(entry).next_version())
         return results
+
+    def _build_control_results(self, entry: _ControlEntry) -> list[Value]:
+        """Build the per-qubit result Values for one control entry.
+
+        A scalar ``Qubit`` control produces a single ``next_version``
+        scalar whose UUID the returned ``Qubit`` handle wraps directly,
+        so no array bookkeeping is needed.
+
+        A whole ``Vector`` / ``VectorView`` control is expanded into one
+        scalar result per covered qubit (mirroring the per-element
+        control operands), but every such scalar is re-parented onto a
+        freshly-versioned result ``ArrayValue`` recorded on ``entry``.
+        ``ConcreteControlledU`` keeps the control region as per-element
+        scalars (its operand / result contract), so without this
+        re-parenting the user-facing output ``Vector`` would wrap a
+        throwaway ``ArrayValue`` whose ``QubitAddress(uuid, i)`` keys are
+        never written by any pass — a later ``measure`` / element access
+        of the returned control vector would then resolve to nothing
+        (silently measuring all zeros).  Pointing the result scalars'
+        ``parent_array`` at the same array the output handle wraps is
+        what lets :meth:`_map_controlled_u_results` and the resource
+        allocator map the result vector's per-element addresses to the
+        control's physical qubits.
+
+        Args:
+            entry (_ControlEntry): One control entry from
+                :meth:`_consume_with_borrow_transfer`.
+
+        Returns:
+            list[Value]: One result ``Value`` per covered qubit, in
+                element order.
+        """
+        from qamomile.circuit.frontend.handle.array import ArrayBase
+
+        operand_scalars = self._expand_control_to_scalars(entry)
+        source = entry.original if entry.is_deferred_view else entry.consumed
+        if not isinstance(source, ArrayBase):
+            return [scalar.next_version() for scalar in operand_scalars]
+
+        result_array = cast(ArrayValue, source.value).next_version()
+        entry.result_array = result_array
+        return [
+            dataclasses.replace(scalar.next_version(), parent_array=result_array)
+            for scalar in operand_scalars
+        ]
 
     @staticmethod
     def _expand_control_to_scalars(entry: _ControlEntry) -> list[Value]:
@@ -1000,14 +1062,19 @@ class ControlledGate:
     ) -> Any:
         """Build a single output handle for one control or sub-quantum entry.
 
-        Two ``ArrayBase`` shapes are handled:
+        Three ``ArrayBase`` shapes are handled:
 
-        - Per-element scalar results (``ConcreteControlledU`` controls
-          where a ``Vector`` / ``VectorView`` was expanded to scalars
-          by :meth:`_expand_control_to_scalars`).  No single
-          ``ArrayValue`` exists in ``op.results`` for the entry, so a
-          fresh ``next_version`` of the source array is synthesised
-          and used as the wrapper handle's value.
+        - Per-element scalar results with a recorded ``result_array``
+          (``ConcreteControlledU`` whole-``Vector`` / ``VectorView``
+          controls).  :meth:`_build_control_results` already created the
+          next-version result ``ArrayValue`` and re-parented the scalar
+          results onto it, recording it on ``entry.result_array``; the
+          wrapper handle re-uses that exact array so the output handle
+          and the IR result scalars agree on the array UUID the emit /
+          allocation passes map.
+        - Per-element scalar results with no recorded ``result_array``
+          (legacy fallback).  A fresh ``next_version`` of the source
+          array is synthesised and used as the wrapper handle's value.
         - Single ``ArrayValue`` result (``SymbolicControlledU`` control
           pool, or ``Vector`` / ``VectorView`` sub-kernel argument).
           The IR-side ``next_version`` is already laid out for us; the
@@ -1046,12 +1113,17 @@ class ControlledGate:
             )
 
         assert isinstance(original, ArrayBase)
-        # Discriminate the two shapes by inspecting the caller-supplied
-        # result list: a single ``ArrayValue`` means the IR already
-        # carries the next-version array we should hand back; anything
-        # else is a per-element scalar list and we synthesise a fresh
-        # ``next_version`` from the source array.
-        if len(entry_results) == 1 and isinstance(entry_results[0], ArrayValue):
+        # Discriminate the shapes.  A control entry with a recorded
+        # ``result_array`` (set by :meth:`_build_control_results` for a
+        # whole-``Vector`` / ``VectorView`` control) hands that exact
+        # array back, so the output handle and the per-element scalar
+        # results share its UUID.  Otherwise a single ``ArrayValue`` in
+        # the result list means the IR already carries the next-version
+        # array; anything else is a legacy per-element scalar list and a
+        # fresh ``next_version`` of the source array is synthesised.
+        if entry.result_array is not None:
+            new_av = entry.result_array
+        elif len(entry_results) == 1 and isinstance(entry_results[0], ArrayValue):
             new_av = entry_results[0]
         else:
             source_for_av: Any = original if entry.is_deferred_view else entry.consumed
@@ -1121,6 +1193,12 @@ class ControlledGate:
 
         controls, sub_positional = self._split_controls_by_count(args, num_controls)
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            sub_args_resolved,
+            context="control()",
+            allow_broadcast=True,
+        )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(
@@ -1424,6 +1502,12 @@ class ControlledGate:
         )
 
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            sub_args_resolved,
+            context="control()",
+            allow_broadcast=True,
+        )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
             raise ValueError(
@@ -1537,8 +1621,6 @@ class ControlledGate:
                 consumes at this boundary (required-positional plus
                 any positionally-overridden default-valued params).
         """
-        from qamomile.circuit.frontend.handle.array import ArrayBase
-
         # ``ControlledGate.__init__`` validates that ``input_types`` is
         # a dict and ``signature`` is an ``inspect.Signature``, so both
         # accesses are safe to use directly.
@@ -1566,7 +1648,7 @@ class ControlledGate:
         extra_for_defaults = 0
         for i in range(max(max_peel, 0)):
             candidate = args[-(i + 1)]
-            if isinstance(candidate, (Qubit, ArrayBase)):
+            if _is_quantum_handle(candidate):
                 break
             extra_for_defaults += 1
 
@@ -1609,7 +1691,7 @@ def _classify_callable_param(annotation: Any) -> str:
     return "unknown"
 
 
-def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
+def _qkernel_for_callable(fn: Callable[..., Any], caller: str = "control") -> QKernel:
     """Synthesize a ``@qkernel`` wrapper around a built-in gate callable.
 
     Inspects the callable's signature to classify each parameter, then
@@ -1639,16 +1721,17 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     module lock so we never compile the same wrapper twice.
 
     Args:
-        fn: The callable to wrap.  Each parameter must have a type
-            annotation that resolves to ``Qubit``, ``Float``/``float``, or
-            ``UInt``/``int`` — possibly inside a ``Union`` (e.g., the
-            ``Union[Qubit, Vector[Qubit]]`` used by broadcast gate
-            functions).  A qkernel-backed ``CompositeGate`` produced by
-            the function-form decorator is accepted by reusing its
-            implementation qkernel.
+        fn (Callable[..., Any]): The callable to wrap.  Each parameter
+            must have a type annotation that resolves to ``Qubit``,
+            ``Float``/``float``, or ``UInt``/``int`` — possibly inside a
+            ``Union`` (e.g., the ``Union[Qubit, Vector[Qubit]]`` used by
+            broadcast gate functions).  A qkernel-backed
+            ``CompositeGate`` produced by the function-form decorator is
+            accepted by reusing its implementation qkernel.
+        caller (str): Public helper name to use in diagnostics.
 
     Returns:
-        A ``QKernel`` whose body forwards every argument by keyword to
+        QKernel: A ``QKernel`` whose body forwards every argument by keyword to
         the original callable (``return __qmc_target__(name=name, ...)``
         in ``fn``'s original signature order, where ``__qmc_target__``
         is the wrapper-globals binding for ``fn``).  The wrapper itself
@@ -1693,7 +1776,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     if not callable(fn):
         raise TypeError(
-            f"control(): expected a QKernel or a built-in gate function, "
+            f"{caller}(): expected a QKernel or a built-in gate function, "
             f"got {type(fn).__name__}."
         )
 
@@ -1703,7 +1786,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         sig = inspect.signature(fn)
     except (TypeError, ValueError) as e:
         raise TypeError(
-            f"control(): cannot inspect signature of {fn_name!r}: {e}. "
+            f"{caller}(): cannot inspect signature of {fn_name!r}: {e}. "
             f"Wrap the function in @qmc.qkernel manually."
         ) from e
 
@@ -1746,7 +1829,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             inspect.Parameter.KEYWORD_ONLY,
         ):
             raise TypeError(
-                f"control(): callable {fn_name!r} uses *args/**kwargs, "
+                f"{caller}(): callable {fn_name!r} uses *args/**kwargs, "
                 f"positional-only, or keyword-only parameters, which "
                 f"cannot be auto-wrapped (the synthesized wrapper places "
                 f"all params in the standard POSITIONAL_OR_KEYWORD slot). "
@@ -1762,7 +1845,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # ``@qmc.qkernel`` directly anyway.
         if param.default is not inspect.Parameter.empty:
             raise TypeError(
-                f"control(): parameter {param_name!r} of {fn_name!r} "
+                f"{caller}(): parameter {param_name!r} of {fn_name!r} "
                 f"has a default value ({param.default!r}), which the "
                 f"wrapper synthesizer does not propagate. Wrap the "
                 f"function in @qmc.qkernel manually."
@@ -1783,7 +1866,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # symmetric with the ``__name__`` collision guard above.
         if param_name in _RESERVED_WRAPPER_NAMES:
             raise TypeError(
-                f"control(): parameter {param_name!r} of {fn_name!r} "
+                f"{caller}(): parameter {param_name!r} of {fn_name!r} "
                 f"collides with a reserved wrapper-internal name "
                 f"({sorted(_RESERVED_WRAPPER_NAMES)}). Wrap the function "
                 f"in @qmc.qkernel manually or rename the parameter."
@@ -1791,7 +1874,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         annotation = type_hints.get(param_name, param.annotation)
         if annotation is inspect.Parameter.empty:
             raise TypeError(
-                f"control(): parameter {param_name!r} of {fn_name!r} has "
+                f"{caller}(): parameter {param_name!r} of {fn_name!r} has "
                 f"no type annotation. Wrap the function in @qmc.qkernel "
                 f"manually."
             )
@@ -1804,7 +1887,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             classical_args.append((param_name, "UInt"))
         else:
             raise TypeError(
-                f"control(): parameter {param_name!r} of {fn_name!r} has "
+                f"{caller}(): parameter {param_name!r} of {fn_name!r} has "
                 f"annotation {annotation!r}; only Qubit, Float, UInt (or "
                 f"unions including those types, e.g. "
                 f"Union[Qubit, Vector[Qubit]]) are supported. Wrap the "
@@ -1814,7 +1897,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     if not qubit_args:
         raise TypeError(
-            f"control(): callable {fn_name!r} has no Qubit parameters; "
+            f"{caller}(): callable {fn_name!r} has no Qubit parameters; "
             f"a controlled gate requires at least one target qubit."
         )
 
@@ -1937,7 +2020,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             # behind.
             linecache.cache.pop(filename, None)
             raise TypeError(
-                f"control(): failed to synthesize a wrapper for "
+                f"{caller}(): failed to synthesize a wrapper for "
                 f"{fn_name!r}: {e}. Wrap the function in @qmc.qkernel "
                 f"manually."
             ) from e
