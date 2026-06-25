@@ -25,7 +25,12 @@ from qamomile.circuit.algorithm.basic import (  # noqa: E402
     superposition_vector,
 )
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import GateOperation, GateOperationType
+from qamomile.circuit.ir.canonical import content_hash
+from qamomile.circuit.ir.operation import (
+    GateOperation,
+    GateOperationType,
+    InverseBlockOperation,
+)
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
@@ -81,6 +86,53 @@ def _measure_kernel(q: qmc.Qubit) -> qmc.Bit:
     """Kernel that exercises a measurement-derived classical bit."""
     q = qmc.h(q)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Kernel that emits a first-class inverse block operation."""
+    q = qmc.inverse(_scalar_gate)(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_inner(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Single nested helper for inverse source-block serialization."""
+    q = qmc.rx(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_outer(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Outer helper that leaves a CallBlockOperation before inline."""
+    q = qmc.h(q)
+    q = _nested_inverse_inner(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _nested_inverse_kernel(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Kernel whose inverse source block contains a nested call."""
+    q = qmc.inverse(_nested_inverse_outer)(q, theta)
+    return q
+
+
+@qmc.qkernel
+def _view_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Vector layer applied to a slice view by ``_view_inverse_kernel``."""
+    qs = qmc.h(qs)
+    qs = qmc.s(qs)
+    return qs
+
+
+@qmc.qkernel
+def _view_inverse_kernel() -> qmc.Vector[qmc.Bit]:
+    """Kernel whose inverse block operand is a strided slice view."""
+    qs = qmc.qubit_array(4, "qs")
+    view = qs[1:4]
+    view = qmc.inverse(_view_layer)(view)
+    qs[1:4] = view
+    return qmc.measure(qs)
 
 
 @qmc.qkernel
@@ -172,6 +224,77 @@ class TestRoundTripStructure:
             assert original.kind == restored_slot.kind
             assert original.ndim == restored_slot.ndim
             assert isinstance(restored_slot.type, type(original.type))
+
+    def test_inverse_block_round_trip_preserves_source_and_fallback(self):
+        """InverseBlockOperation persists its source and fallback blocks."""
+        block = _to_affine(_inverse_kernel)
+        restored = load_json(dump_json(block))
+        inverse_ops = [
+            op for op in restored.operations if isinstance(op, InverseBlockOperation)
+        ]
+
+        assert len(inverse_ops) == 1
+        assert inverse_ops[0].source_block is not None
+        assert inverse_ops[0].source_block.name == "_scalar_gate"
+        assert inverse_ops[0].implementation_block is not None
+        assert inverse_ops[0].implementation_block.name.endswith("_inverse")
+
+    def test_inverse_block_nested_blocks_are_inlined(self):
+        """Nested inverse source and fallback blocks can serialize and hash."""
+        block = _to_affine(_nested_inverse_kernel)
+        inverse_op = next(
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        )
+
+        assert inverse_op.source_block is not None
+        assert inverse_op.implementation_block is not None
+        assert inverse_op.source_block.kind is BlockKind.AFFINE
+        assert inverse_op.implementation_block.kind is BlockKind.AFFINE
+        assert not any(
+            isinstance(op, CallBlockOperation)
+            for op in inverse_op.source_block.operations
+        )
+        assert not any(
+            isinstance(op, CallBlockOperation)
+            for op in inverse_op.implementation_block.operations
+        )
+
+        restored = load_json(dump_json(block))
+        assert load_msgpack(dump_msgpack(block)).kind == block.kind
+        assert content_hash(restored) == content_hash(block)
+
+    def test_inverse_block_view_operand_round_trips_slice_fields(self):
+        """A sliced view operand keeps its slice refs across the round-trip.
+
+        ``ArrayValue.slice_of`` / ``slice_start`` / ``slice_step`` carry
+        the affine map that resolves view elements to root-array qubits
+        at emit time; dropping them on the wire would make the restored
+        inverse block unresolvable.
+        """
+        block = _to_affine(_view_inverse_kernel)
+        original = next(
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        )
+        original_operand = cast(ArrayValue, original.target_qubits[0])
+        assert original_operand.slice_of is not None
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            inverse_op = next(
+                op
+                for op in restored.operations
+                if isinstance(op, InverseBlockOperation)
+            )
+            operand = cast(ArrayValue, inverse_op.target_qubits[0])
+            assert operand.slice_of is not None
+            assert operand.slice_of.uuid == original_operand.slice_of.uuid
+            assert operand.slice_start is not None
+            assert operand.slice_start.get_const() == 1
+            assert operand.slice_step is not None
+            assert operand.slice_step.get_const() == 1
+            assert content_hash(restored) == content_hash(block)
 
     def test_input_value_types_preserved(self):
         """Input Value types match across the round-trip."""
@@ -265,6 +388,108 @@ class TestRoundTripIRFeatures:
         """
         block = _to_affine(_loop_kernel)
         assert len(dump_msgpack(block)) <= len(dump_json(block))
+
+
+class TestCastCarrierKeyRoundTrip:
+    """Legacy composite cast/QFixed carrier keys survive serialization.
+
+    Carrier keys use the ``"<root_uuid>_<index>"`` spelling and live in
+    ``CastOperation.qubit_mapping`` and in the cast / QFixed metadata of the
+    cast result. The wire formats treat them as opaque strings, so a
+    round-trip must preserve them verbatim — and therefore preserve the
+    ``content_hash`` of a block carrying them.
+    """
+
+    @staticmethod
+    def _carrier_keys(block: Block) -> list[tuple[str, tuple[str, ...]]]:
+        """Collect every composite carrier key in a block, order-stable.
+
+        Args:
+            block (Block): Block to scan for cast/QFixed carrier keys.
+
+        Returns:
+            list[tuple[str, tuple[str, ...]]]: ``(source, keys)`` pairs for the
+                ``CastOperation.qubit_mapping`` and the cast / QFixed metadata
+                of each cast result, in operation order.
+        """
+        from qamomile.circuit.ir.operation.cast import CastOperation
+
+        collected: list[tuple[str, tuple[str, ...]]] = []
+        for op in block.operations:
+            if isinstance(op, CastOperation):
+                collected.append(("qubit_mapping", tuple(op.qubit_mapping)))
+            for result in op.results:
+                metadata = getattr(result, "metadata", None)
+                if metadata is None:
+                    continue
+                if metadata.cast is not None:
+                    collected.append(("cast", tuple(metadata.cast.qubit_uuids)))
+                if metadata.qfixed is not None:
+                    collected.append(("qfixed", tuple(metadata.qfixed.qubit_uuids)))
+        return collected
+
+    def test_whole_array_cast_carrier_keys_round_trip(self):
+        """A sub-kernel cast carrier survives all three wire formats.
+
+        Inlining ``sub(q)`` rebases the carrier keys onto the caller's array;
+        the round-trip must keep those rebased keys byte-identical.
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            return qmc.measure(qmc.cast(q, qmc.QFixed, int_bits=0))
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            anc = qmc.qubit("anc")
+            q = qmc.qubit_array(2, "q")
+            anc = qmc.x(anc)
+            return sub(q)
+
+        block = _to_affine(circuit)
+        original_keys = self._carrier_keys(block)
+        # The cast carries two carrier qubits, so the keys are non-empty.
+        assert any(keys for _, keys in original_keys), original_keys
+
+        for restored in (
+            from_dict(to_dict(block)),
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert content_hash(restored) == content_hash(block)
+            assert self._carrier_keys(restored) == original_keys
+
+    def test_slice_view_cast_carrier_keys_round_trip(self):
+        """Root-space carrier keys from a strided-view cast round-trip intact.
+
+        ``sub(q[1::2])`` folds the carrier indices into the root array's index
+        space (``_1`` / ``_3``); the round-trip must preserve that folding.
+        """
+
+        @qmc.qkernel
+        def sub(q: qmc.Vector[qmc.Qubit]) -> qmc.Float:
+            return qmc.measure(qmc.cast(q, qmc.QFixed, int_bits=0))
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            return sub(q[1::2])
+
+        block = _to_affine(circuit)
+        original_keys = self._carrier_keys(block)
+        # Every carrier key should be a composite ``<uuid>_<index>`` key whose
+        # index is in root space (1 or 3), proving the fold happened pre-encode.
+        flat = [key for _, keys in original_keys for key in keys]
+        assert flat, original_keys
+        assert all(key.rsplit("_", 1)[1] in {"1", "3"} for key in flat), flat
+
+        for restored in (
+            from_dict(to_dict(block)),
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert content_hash(restored) == content_hash(block)
+            assert self._carrier_keys(restored) == original_keys
 
 
 # ---------------------------------------------------------------------------

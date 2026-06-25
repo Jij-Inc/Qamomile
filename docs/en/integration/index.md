@@ -21,6 +21,12 @@ Run Qiskit circuits on qBraid-supported devices.
 :::
 
 :::{card}
+:header: **Qiskit Support**
+:link: qiskit_support
+Transpile to Qiskit, run local simulators, and inspect native Qiskit circuit features.
+:::
+
+:::{card}
 :header: **QURI Parts Support**
 :link: quri_parts_support
 Transpile to QURI Parts and run on a Qulacs state-vector simulator.

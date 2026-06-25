@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 from typing import cast
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -23,11 +24,15 @@ from qamomile.circuit.ir.canonical import (
 )
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
+from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
     QubitType,
     UIntType,
 )
+from qamomile.circuit.ir.types.q_register import QFixedType
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
@@ -451,6 +456,90 @@ class TestMetadataUUIDRewrite:
         assert cqf.metadata.qfixed is not None
         assert cqf.metadata.qfixed.qubit_uuids == (cq0.uuid, cq1.uuid)
 
+    def test_indexed_carrier_keys_preserve_suffixes(self):
+        """Legacy carrier keys remap their root UUID without losing indices."""
+        source = ArrayValue(type=QubitType(), name="q")
+        qf = Value(
+            type=FloatType(),
+            name="qf",
+            metadata=ValueMetadata(
+                cast=CastMetadata(
+                    source_uuid=source.uuid,
+                    source_logical_id=source.logical_id,
+                    qubit_uuids=(f"{source.uuid}_1", f"{source.uuid}_3"),
+                    qubit_logical_ids=(
+                        f"{source.logical_id}_1",
+                        f"{source.logical_id}_3",
+                    ),
+                ),
+                qfixed=QFixedMetadata(
+                    qubit_uuids=(f"{source.uuid}_1", f"{source.uuid}_3"),
+                    num_bits=2,
+                    int_bits=0,
+                ),
+                array_runtime=ArrayRuntimeMetadata(
+                    element_uuids=(f"{source.uuid}_1", f"{source.uuid}_3"),
+                    element_logical_ids=(
+                        f"{source.logical_id}_1",
+                        f"{source.logical_id}_3",
+                    ),
+                ),
+            ),
+        )
+        block = _make_minimal_block(input_values=[source], output_values=[qf])
+
+        canon = canonicalize(block)
+
+        canon_source = canon.input_values[0]
+        canon_qf = canon.output_values[0]
+        assert canon_qf.metadata.cast is not None
+        assert canon_qf.metadata.cast.qubit_uuids == (
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        )
+        assert canon_qf.metadata.cast.qubit_logical_ids == (
+            f"{canon_source.logical_id}_1",
+            f"{canon_source.logical_id}_3",
+        )
+        assert canon_qf.metadata.qfixed is not None
+        assert canon_qf.metadata.qfixed.qubit_uuids == (
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        )
+        assert canon_qf.metadata.array_runtime is not None
+        assert canon_qf.metadata.array_runtime.element_uuids == (
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        )
+
+    def test_cast_operation_mapping_preserves_index_suffixes(self):
+        """CastOperation.qubit_mapping remaps composite-key bases only."""
+        source = ArrayValue(type=QubitType(), name="q")
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        qf = Value(type=result_type, name="qf")
+        op = CastOperation(
+            operands=[source],
+            results=[qf],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{source.uuid}_1", f"{source.uuid}_3"],
+        )
+        block = _make_minimal_block(
+            input_values=[source],
+            output_values=[qf],
+            operations=[op],
+        )
+
+        canon = canonicalize(block)
+
+        canon_source = canon.input_values[0]
+        canon_op = canon.operations[0]
+        assert isinstance(canon_op, CastOperation)
+        assert canon_op.qubit_mapping == [
+            f"{canon_source.uuid}_1",
+            f"{canon_source.uuid}_3",
+        ]
+
     def test_array_runtime_element_uuids_rewritten(self):
         """ArrayRuntimeMetadata element-UUID lists track canonical UUIDs."""
         e0 = Value(type=FloatType(), name="e0")
@@ -499,6 +588,63 @@ class TestMetadataUUIDRewrite:
         assert canon.input_values[0].metadata.scalar == ScalarMetadata(
             parameter_name="theta"
         )
+
+
+class TestCarrierKeyCanonicalStability:
+    """Canonical-form stability for blocks carrying composite carrier keys."""
+
+    @staticmethod
+    def _build_cast_block() -> Block:
+        """Build a structurally fixed cast block with fresh UUIDs.
+
+        Returns:
+            Block: Minimal AFFINE block with a CastOperation whose result
+                carries composite carrier keys in cast / qfixed metadata and
+                in ``CastOperation.qubit_mapping``.
+        """
+        source = ArrayValue(type=QubitType(), name="q")
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        qf = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=source.uuid,
+                source_logical_id=source.logical_id,
+                qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                qubit_logical_ids=[
+                    f"{source.logical_id}_0",
+                    f"{source.logical_id}_1",
+                ],
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        op = CastOperation(
+            operands=[source],
+            results=[qf],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{source.uuid}_0", f"{source.uuid}_1"],
+        )
+        return _make_minimal_block(
+            input_values=[source],
+            output_values=[qf],
+            operations=[op],
+        )
+
+    def test_content_hash_deterministic_across_builds(self):
+        """Two fresh builds of the same cast kernel hash identically."""
+        assert content_hash(self._build_cast_block()) == content_hash(
+            self._build_cast_block()
+        )
+
+    def test_canonicalize_idempotent_with_carrier_keys(self):
+        """Re-canonicalizing a canonical block with carrier keys is stable."""
+        canon = canonicalize(self._build_cast_block())
+        again = canonicalize(canon)
+        assert to_canonical_bytes(canon) == to_canonical_bytes(again)
 
 
 # ---------------------------------------------------------------------------
@@ -585,3 +731,225 @@ class TestParametersOrdering:
             output_values=[alpha, beta],
         )
         assert to_canonical_bytes(block_in_order) == to_canonical_bytes(block_reversed)
+
+
+@qmc.qkernel
+def _slice_view_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Vector layer inverted on a slice view by the twin kernels below."""
+    qs = qmc.h(qs)
+    qs = qmc.s(qs)
+    return qs
+
+
+@qmc.qkernel
+def _slice_view_inverse_a() -> qmc.Vector[qmc.Bit]:
+    """Kernel whose inverse block operand is a strided slice view."""
+    qs = qmc.qubit_array(4, "qs")
+    view = qs[1:4]
+    view = qmc.inverse(_slice_view_layer)(view)
+    qs[1:4] = view
+    return qmc.measure(qs)
+
+
+@qmc.qkernel
+def _slice_view_inverse_b() -> qmc.Vector[qmc.Bit]:
+    """Structural twin of ``_slice_view_inverse_a``."""
+    qs = qmc.qubit_array(4, "qs")
+    view = qs[1:4]
+    view = qmc.inverse(_slice_view_layer)(view)
+    qs[1:4] = view
+    return qmc.measure(qs)
+
+
+class TestCanonicalizeSliceViews:
+    """Slice-view refs are remapped into the canonical UUID space."""
+
+    def test_slice_refs_remapped_to_canonical_values(self):
+        """``slice_of`` / ``slice_start`` / ``slice_step`` are canonicalized.
+
+        The view operand of an inverse block references its root array
+        and slice bounds by Value identity; canonicalize must rewrite
+        those references with the same mapping as every other use of
+        the root array, otherwise the canonical block leaks build-time
+        UUIDs and content hashes diverge between identical builds.
+        """
+        from qamomile.circuit.ir.operation.inverse_block import (
+            InverseBlockOperation,
+        )
+        from qamomile.circuit.ir.operation.operation import QInitOperation
+
+        block = _to_affine(_slice_view_inverse_a)
+        original_operand = cast(
+            ArrayValue,
+            next(
+                op for op in block.operations if isinstance(op, InverseBlockOperation)
+            ).target_qubits[0],
+        )
+        assert original_operand.slice_of is not None
+
+        canonical = canonicalize(block)
+        operand = cast(
+            ArrayValue,
+            next(
+                op
+                for op in canonical.operations
+                if isinstance(op, InverseBlockOperation)
+            ).target_qubits[0],
+        )
+        root = next(
+            op.results[0]
+            for op in canonical.operations
+            if isinstance(op, QInitOperation)
+        )
+
+        assert operand.slice_of is not None
+        assert operand.slice_of.uuid != original_operand.slice_of.uuid
+        assert operand.slice_of.uuid == root.uuid
+        assert operand.slice_start is not None
+        assert operand.slice_start.get_const() == 1
+        assert operand.slice_step is not None
+        assert operand.slice_step.get_const() == 1
+
+    def test_slice_view_twins_same_hash(self):
+        """Two identical builds with slice-view operands hash equally."""
+        hash_a = content_hash(_to_affine(_slice_view_inverse_a))
+        hash_b = content_hash(_to_affine(_slice_view_inverse_b))
+        assert hash_a == hash_b
+
+
+# ---------------------------------------------------------------------------
+# param_slots: preservation, serialize round-trip, hash participation
+# ---------------------------------------------------------------------------
+
+
+def _block_with_bound_slot(bound_value: np.ndarray) -> Block:
+    """Build a minimal AFFINE Block whose manifest carries ``bound_value``.
+
+    The Block has no values or operations, so any content-hash
+    difference between two such Blocks is attributable to the
+    ``param_slots`` manifest alone.
+
+    Args:
+        bound_value (np.ndarray): Payload stored on the single
+            ``COMPILE_TIME_BOUND`` slot.
+
+    Returns:
+        Block: An otherwise-empty AFFINE Block with a one-slot
+            ``param_slots`` manifest.
+    """
+    return Block(
+        name="manual",
+        kind=BlockKind.AFFINE,
+        param_slots=(
+            ParamSlot(
+                name="weights",
+                type=FloatType(),
+                kind=ParamKind.COMPILE_TIME_BOUND,
+                ndim=1,
+                bound_value=bound_value,
+            ),
+        ),
+    )
+
+
+class TestParamSlotsPreservation:
+    """``Block.param_slots`` must survive canonicalize and serialization."""
+
+    def test_canonicalize_preserves_param_slots_verbatim(self):
+        """A non-empty manifest is carried over unchanged.
+
+        Regression: the canonical Block used to be rebuilt without
+        ``param_slots``, silently resetting the manifest to ``()``.
+        """
+        block = _to_affine(_h_then_rx)
+        assert block.param_slots, "fixture kernel must produce a non-empty manifest"
+        canon = canonicalize(block)
+        assert canon.param_slots == block.param_slots
+
+    def test_canonicalize_and_remap_preserves_param_slots(self):
+        """The remap-table variant carries the manifest too."""
+        block = _to_affine(_h_then_rx)
+        canon, _, _ = canonicalize_and_remap(block)
+        assert canon.param_slots == block.param_slots
+
+    def test_canonicalize_then_serialize_keeps_manifest(self):
+        """canonicalize → dump_json/load_json keeps every slot field.
+
+        Covers the documented flow "canonicalize first for
+        build-independent identity, then serialize", including a
+        ``COMPILE_TIME_BOUND`` slot with a numpy ``bound_value``.
+        """
+        affine = _to_affine(_h_then_rx)
+        bound = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+        block = dataclasses.replace(
+            affine,
+            param_slots=(
+                *affine.param_slots,
+                ParamSlot(
+                    name="weights",
+                    type=FloatType(),
+                    kind=ParamKind.COMPILE_TIME_BOUND,
+                    ndim=1,
+                    bound_value=bound,
+                ),
+            ),
+        )
+        canon = canonicalize(block)
+        restored = load_json(dump_json(canon))
+        assert len(restored.param_slots) == len(canon.param_slots) == 2
+        for original, restored_slot in zip(canon.param_slots, restored.param_slots):
+            assert restored_slot.name == original.name
+            assert restored_slot.kind == original.kind
+            assert restored_slot.ndim == original.ndim
+            assert isinstance(restored_slot.type, type(original.type))
+            assert restored_slot.default == original.default
+            assert restored_slot.differentiable == original.differentiable
+        restored_bound = restored.param_slots[-1].bound_value
+        assert isinstance(restored_bound, np.ndarray)
+        assert np.array_equal(restored_bound, bound)
+
+
+class TestParamSlotsHashParticipation:
+    """``param_slots`` is functional and participates in ``content_hash``."""
+
+    def test_dropping_manifest_changes_hash(self):
+        """Stripping a non-empty manifest changes the content hash."""
+        block = _to_affine(_h_then_rx)
+        stripped = dataclasses.replace(block, param_slots=())
+        assert content_hash(block) != content_hash(stripped)
+
+    def test_slot_kind_changes_hash(self):
+        """Rebinding a slot from RUNTIME_PARAMETER to COMPILE_TIME_BOUND changes the hash."""
+        block = _to_affine(_h_then_rx)
+        rebound = dataclasses.replace(
+            block,
+            param_slots=tuple(
+                dataclasses.replace(
+                    slot, kind=ParamKind.COMPILE_TIME_BOUND, bound_value=0.5
+                )
+                for slot in block.param_slots
+            ),
+        )
+        assert content_hash(block) != content_hash(rebound)
+
+    def test_equal_numpy_bound_values_hash_equal(self):
+        """Separately constructed arrays with equal content hash identically."""
+        hash_a = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
+        hash_b = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
+        assert hash_a == hash_b
+
+    def test_large_numpy_bound_values_hash_by_content(self):
+        """Arrays indistinguishable under truncated ``repr`` still hash apart."""
+        base = np.zeros(2048)
+        tweaked = base.copy()
+        tweaked[1500] = 1.0
+        # Pin printoptions so the repr-collision precondition is
+        # deterministic regardless of any global ``np.set_printoptions``:
+        # 2048 > threshold elides the middle (where index 1500 differs),
+        # so both arrays render identically and repr-based hashing would
+        # collide on this pair.
+        with np.printoptions(threshold=1000, edgeitems=3):
+            assert repr(base) == repr(tweaked)
+        assert content_hash(_block_with_bound_slot(base)) != content_hash(
+            _block_with_bound_slot(tweaked)
+        )

@@ -480,6 +480,34 @@ def _cudaq_transpiler():
     return CudaqTranspiler()
 
 
+def _statevector_no_aer(circuit) -> np.ndarray:
+    """Strip measurements, unroll for_loops, and simulate without qiskit-aer.
+
+    The cudaq-marked cross-backend tests must not execute qiskit-aer in
+    the same process as cudaq (multiple OpenMP runtimes — see
+    tests/_cudaq_isolation.py), so their Qiskit reference statevector is
+    computed with the pure-Python ``qiskit.quantum_info.Statevector``
+    after ``UnrollForLoops`` removes the runtime-loop instructions that
+    ``Statevector`` cannot simulate.
+
+    Args:
+        circuit: Compiled Qiskit circuit (may contain ``for_loop`` ops).
+
+    Returns:
+        np.ndarray: Complex amplitudes of the unitary core.
+    """
+    from qiskit.quantum_info import Statevector
+    from qiskit.transpiler import PassManager
+    from qiskit.transpiler.passes import UnrollForLoops
+
+    stripped = QuantumCircuit(*circuit.qregs)
+    for instr in circuit.data:
+        if instr.operation.name not in ("measure", "save_statevector"):
+            stripped.append(instr)
+    unrolled = PassManager([UnrollForLoops()]).run(stripped)
+    return np.asarray(Statevector(unrolled).data)
+
+
 def _cudaq_statevector(cudaq_circuit) -> np.ndarray:
     """Simulate a fully-bound CUDA-Q STATIC artifact via ``cudaq.get_state``."""
     import cudaq
@@ -558,9 +586,14 @@ class TestCrossBackendCompilation:
         assert qp_circuit.qubit_count == 1
         assert _rz_count_quri_parts(qp_circuit) == self._EXPECTED_RZ_PER_STEP[order]
 
+    @pytest.mark.cudaq
     @pytest.mark.parametrize("order", [1, 2, 4])
     def test_cudaq_rz_count_matches_qiskit(self, order: int) -> None:
-        """CUDA-Q emits the same per-step RZ count as Qiskit / QURI Parts."""
+        """CUDA-Q emits the same per-step RZ count as Qiskit / QURI Parts.
+
+        Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+        session is unsafe — see tests/_cudaq_isolation.py.
+        """
         tr = _cudaq_transpiler()
         exe = tr.transpile(
             _rabi_trotter,
@@ -642,7 +675,10 @@ class TestCrossBackendStatevector:
         overlap = abs(np.vdot(sv_qiskit, sv_quri_parts))
         assert overlap > 1.0 - 1e-10
 
+    @pytest.mark.cudaq
     def test_cudaq_matches_exact_propagator(self) -> None:
+        """CUDA-Q reproduces the exact propagator; ``-m cudaq`` sessions
+        only (see tests/_cudaq_isolation.py)."""
         tr = _cudaq_transpiler()
         exe = tr.transpile(
             _rabi_trotter,
@@ -657,8 +693,14 @@ class TestCrossBackendStatevector:
         overlap = abs(np.vdot(_exact_state(), sv))
         assert overlap > 1.0 - self._TOLERANCE
 
+    @pytest.mark.cudaq
     def test_cudaq_statevector_matches_qiskit(self) -> None:
-        """Same kernel + same bindings → same state on both backends."""
+        """Same kernel + same bindings → same state on both backends.
+
+        Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+        session is unsafe — see tests/_cudaq_isolation.py. The Qiskit
+        reference therefore uses the Aer-free ``_statevector_no_aer``.
+        """
         cudaq_tr = _cudaq_transpiler()
         bindings = {
             "order": 4,
@@ -666,7 +708,7 @@ class TestCrossBackendStatevector:
             "gamma": T_EVOLVE,
             "step": self._STEP,
         }
-        sv_qiskit = _statevector(
+        sv_qiskit = _statevector_no_aer(
             QiskitTranspiler()
             .transpile(_rabi_trotter, bindings=bindings)
             .compiled_quantum[0]
@@ -760,7 +802,10 @@ class TestCrossBackendDistribution:
         n0, n1 = self._sample(_quri_parts_transpiler())
         self._assert_matches_exact(n0, n1)
 
+    @pytest.mark.cudaq
     def test_cudaq(self) -> None:
+        """CUDA-Q sampling matches the Born probabilities; ``-m cudaq``
+        sessions only (see tests/_cudaq_isolation.py)."""
         n0, n1 = self._sample(_cudaq_transpiler())
         self._assert_matches_exact(n0, n1)
 
@@ -903,8 +948,14 @@ class TestRandomHamiltonianConvergence:
         overlap = abs(np.vdot(sv_qk, sv_qp))
         assert overlap > 1.0 - 1e-10, f"cross-backend overlap {overlap:.15f}"
 
+    @pytest.mark.cudaq
     def test_cudaq_matches_qiskit(self) -> None:
-        """Same Hamiltonian + order 4 + step 16 → matching states."""
+        """Same Hamiltonian + order 4 + step 16 → matching states.
+
+        Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+        session is unsafe — see tests/_cudaq_isolation.py. The Qiskit
+        reference therefore uses the Aer-free ``_statevector_no_aer``.
+        """
         cudaq_tr = _cudaq_transpiler()
         hs, _ = _random_two_part_hamiltonian()
         bindings = {
@@ -916,7 +967,7 @@ class TestRandomHamiltonianConvergence:
 
         # Both backends use the same little-endian basis-index ordering,
         # so the raw statevectors are directly comparable up to a phase.
-        sv_qk = _statevector(
+        sv_qk = _statevector_no_aer(
             QiskitTranspiler()
             .transpile(_rabi_trotter_2q, bindings=bindings)
             .compiled_quantum[0]

@@ -21,6 +21,12 @@ qBraid対応デバイスでQiskit回路を実行します。
 :::
 
 :::{card}
+:header: **Qiskit サポート**
+:link: qiskit_support
+Qiskitへトランスパイルし、ローカルシミュレータで実行し、Qiskitネイティブ回路機能を確認します。
+:::
+
+:::{card}
 :header: **QURI Parts サポート**
 :link: quri_parts_support
 QURI Partsへトランスパイルし、Qulacs状態ベクトルシミュレータで実行します。

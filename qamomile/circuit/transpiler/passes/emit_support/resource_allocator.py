@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import numbers
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -22,6 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
@@ -37,6 +41,7 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitMap,
 )
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+    ValueResolver,
     resolve_qubit_key,
 )
 
@@ -59,9 +64,38 @@ class ResourceAllocator:
     adding new physical resources.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, resolver: ValueResolver | None = None) -> None:
+        """Initialize allocator state.
+
+        Args:
+            resolver (ValueResolver | None): Emit value resolver that carries
+                runtime parameter names and binding lookup rules. Defaults to
+                None, which creates a resolver without runtime parameters.
+        """
         self._next_qubit_index: int = 0
         self._next_clbit_index: int = 0
+        self._resolver = resolver or ValueResolver()
+
+    @staticmethod
+    def _coerce_nonnegative_integral_size(value: Any) -> int | None:
+        """Coerce a non-negative, non-boolean integral value to a Python int.
+
+        Args:
+            value (Any): Candidate structural size value resolved from IR
+                constants, compile-time bindings, or bound array elements.
+
+        Returns:
+            int | None: The coerced integer size, or None when ``value`` is
+                negative, not an integral numeric value, or is a boolean.
+        """
+        # Python bool is an Integral subclass, but it is never a valid size.
+        # NumPy bool scalars are rejected because they are not Integral values.
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, numbers.Integral):
+            size = int(value)
+            return size if size >= 0 else None
+        return None
 
     def allocate(
         self,
@@ -285,7 +319,7 @@ class ResourceAllocator:
             elif isinstance(op, PauliEvolveOp):
                 self._allocate_pauli_evolve(op, qubit_map)
 
-            elif isinstance(op, CompositeGateOperation):
+            elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
@@ -407,32 +441,45 @@ class ResourceAllocator:
         size_val: "Value",
         bindings: dict[str, Any],
     ) -> int | None:
-        """Resolve a size Value to a concrete integer."""
+        """Resolve a size Value to a concrete integer.
+
+        Args:
+            size_val (Value): IR value used as a qubit-array size.
+                Constants, bound scalar values, shape-dimension values, and
+                array-element values are supported when compile-time concrete.
+            bindings (dict[str, Any]): Compile-time bindings available to the
+                emit pass, keyed by parameter names or value UUIDs.
+
+        Returns:
+            int | None: Concrete integer size, or None when the value cannot
+                be resolved at allocation time.
+        """
         import re
 
         if size_val.is_constant():
-            return int(size_val.get_const())
+            return self._coerce_nonnegative_integral_size(size_val.get_const())
 
-        # Value with parent_array (e.g., hi.shape[0])
-        if size_val.parent_array is not None:
-            array_name = size_val.parent_array.name
-            if array_name in bindings:
-                array_data = bindings[array_name]
-                if hasattr(array_data, "__len__"):
-                    return len(array_data)
+        # Array element (e.g., sizes[0]): delegate to the emit value resolver
+        # so bound containers and VectorView slices follow the same lookup
+        # rules as other emit-time value resolution paths.  Resolver refusal
+        # is final here; symbolic array-element sizes must stay unresolved.
+        if size_val.parent_array is not None and size_val.element_indices:
+            return self._coerce_nonnegative_integral_size(
+                self._resolver.resolve_bound_value(size_val, bindings)
+            )
 
         # Check by name, then uuid in bindings
         if size_val.name and size_val.name in bindings:
             bound = bindings[size_val.name]
-            if isinstance(bound, (int, float)):
-                return int(bound)
+            if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
+                return size
             if hasattr(bound, "__len__"):
                 return len(bound)
 
         if size_val.uuid in bindings:
             bound = bindings[size_val.uuid]
-            if isinstance(bound, (int, float)):
-                return int(bound)
+            if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
+                return size
 
         # Dimension naming pattern (e.g., "hi_dim0" -> array "hi", dimension 0).
         # Handles cases where parent_array is None after inlining.
@@ -678,10 +725,10 @@ class ResourceAllocator:
 
     def _allocate_composite(
         self,
-        op: CompositeGateOperation,
+        op: CompositeGateOperation | InverseBlockOperation,
         qubit_map: QubitMap,
     ) -> None:
-        """Allocate resources for a CompositeGateOperation."""
+        """Allocate resources for a composite-like quantum operation."""
         all_qubits = op.control_qubits + op.target_qubits
         self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 
