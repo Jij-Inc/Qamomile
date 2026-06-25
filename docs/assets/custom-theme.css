@@ -26,45 +26,47 @@
   --qamomile-card-text-dark: #D1D5DB;
   --qamomile-card-header-text: #111827;
   --qamomile-card-header-text-dark: #F9FAFB;
+  --qamomile-feature-card-bg: var(--qamomile-amber-600);
+  --qamomile-feature-card-text: #FFFFFF;
   --qamomile-colab-hover: #E18435;
   --qamomile-white: #FFFFFF;
 }
 
-/* Tailwind blue utility remaps. */
-.text-blue-50, .dark\:text-blue-50:is(.dark *) { color: var(--qamomile-amber-50) !important; }
-.text-blue-200, .dark\:text-blue-200:is(.dark *) { color: var(--qamomile-amber-200) !important; }
-.text-blue-400, .hover\:text-blue-400:hover, .dark\:text-blue-400:is(.dark *), .dark\:hover\:text-blue-400:hover:is(.dark *) { color: var(--qamomile-amber-400) !important; }
-.text-blue-500, .hover\:text-blue-500:hover, .dark\:text-blue-500:is(.dark *) { color: var(--qamomile-amber-500) !important; }
-.text-blue-600, .hover\:text-blue-600:hover { color: var(--qamomile-amber-600) !important; }
-.text-blue-700, .hover\:text-blue-700:hover { color: var(--qamomile-amber-700) !important; }
-.text-blue-800 { color: var(--qamomile-amber-800) !important; }
-.text-blue-900 { color: var(--qamomile-amber-900) !important; }
+/* Tailwind blue utility remaps. Attribute selectors avoid escaping variant names. */
+:is([class~="text-blue-50"], .dark [class~="dark:text-blue-50"]) { color: var(--qamomile-amber-50) !important; }
+:is([class~="text-blue-200"], .dark [class~="dark:text-blue-200"]) { color: var(--qamomile-amber-200) !important; }
+:is([class~="text-blue-400"], [class~="hover:text-blue-400"]:hover, .dark [class~="dark:text-blue-400"], .dark [class~="dark:hover:text-blue-400"]:hover) { color: var(--qamomile-amber-400) !important; }
+:is([class~="text-blue-500"], [class~="hover:text-blue-500"]:hover, .dark [class~="dark:text-blue-500"]) { color: var(--qamomile-amber-500) !important; }
+:is([class~="text-blue-600"], [class~="hover:text-blue-600"]:hover) { color: var(--qamomile-amber-600) !important; }
+:is([class~="text-blue-700"], [class~="hover:text-blue-700"]:hover) { color: var(--qamomile-amber-700) !important; }
+[class~="text-blue-800"] { color: var(--qamomile-amber-800) !important; }
+[class~="text-blue-900"] { color: var(--qamomile-amber-900) !important; }
 
-.bg-blue-50 { background-color: var(--qamomile-amber-50) !important; }
-.bg-blue-50\/80 { background-color: var(--qamomile-amber-50-80) !important; }
-.bg-blue-100, .hover\:bg-blue-100:hover { background-color: var(--qamomile-amber-100) !important; }
-.bg-blue-300\/30 { background-color: var(--qamomile-amber-300-30) !important; }
-.bg-blue-500 { background-color: var(--qamomile-amber-500) !important; }
-.bg-blue-600, .group[aria-selected=true] .group-aria-selected\:bg-blue-600 { background-color: var(--qamomile-amber-600) !important; }
-.bg-blue-800, .hover\:bg-blue-800:hover, .dark\:hover\:bg-blue-800:hover:is(.dark *) { background-color: var(--qamomile-amber-800) !important; }
-.bg-blue-900 { background-color: var(--qamomile-amber-900) !important; }
-.dark\:bg-blue-900\/30:is(.dark *) { background-color: var(--qamomile-amber-900-30) !important; }
+[class~="bg-blue-50"] { background-color: var(--qamomile-amber-50) !important; }
+[class~="bg-blue-50/80"] { background-color: var(--qamomile-amber-50-80) !important; }
+:is([class~="bg-blue-100"], [class~="hover:bg-blue-100"]:hover) { background-color: var(--qamomile-amber-100) !important; }
+[class~="bg-blue-300/30"] { background-color: var(--qamomile-amber-300-30) !important; }
+[class~="bg-blue-500"] { background-color: var(--qamomile-amber-500) !important; }
+:is([class~="bg-blue-600"], .group[aria-selected="true"] [class~="group-aria-selected:bg-blue-600"]) { background-color: var(--qamomile-amber-600) !important; }
+:is([class~="bg-blue-800"], [class~="hover:bg-blue-800"]:hover, .dark [class~="dark:hover:bg-blue-800"]:hover) { background-color: var(--qamomile-amber-800) !important; }
+[class~="bg-blue-900"] { background-color: var(--qamomile-amber-900) !important; }
+.dark [class~="dark:bg-blue-900/30"] { background-color: var(--qamomile-amber-900-30) !important; }
 
-.border-blue-200 { border-color: var(--qamomile-amber-200) !important; }
-.border-blue-400, .dark\:hover\:border-blue-400:hover:is(.dark *) { border-color: var(--qamomile-amber-400) !important; }
-.border-blue-500, .hover\:border-blue-500:hover, .focus\:border-blue-500:focus, .dark\:hover\:border-blue-500:hover:is(.dark *), .dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: var(--qamomile-amber-500) !important; }
-.border-blue-500\/60, .dark\:border-blue-500\/60:is(.dark *) { border-color: var(--qamomile-amber-500-60) !important; }
-.border-blue-600, .hover\:border-blue-600:hover { border-color: var(--qamomile-amber-600) !important; }
-.border-blue-800, .dark\:border-blue-800:is(.dark *) { border-color: var(--qamomile-amber-800) !important; }
-.border-b-blue-600 { border-bottom-color: var(--qamomile-amber-600) !important; }
-.border-l-blue-400, .dark\:border-l-blue-400:is(.dark *) { border-left-color: var(--qamomile-amber-400) !important; }
-.border-l-blue-500, .hover\:border-l-blue-500:hover { border-left-color: var(--qamomile-amber-500) !important; }
-.ring-blue-500, .hover\:ring-blue-500:hover, .focus\:ring-blue-500:focus, .focus-visible\:ring-blue-500:focus-visible, .dark\:hover\:ring-blue-500:hover:is(.dark *), .dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: var(--qamomile-amber-500) !important; }
-.outline-blue-200 { outline-color: var(--qamomile-amber-200) !important; }
-.fill-blue-900 { fill: var(--qamomile-amber-900) !important; }
+[class~="border-blue-200"] { border-color: var(--qamomile-amber-200) !important; }
+:is([class~="border-blue-400"], .dark [class~="dark:hover:border-blue-400"]:hover) { border-color: var(--qamomile-amber-400) !important; }
+:is([class~="border-blue-500"], [class~="hover:border-blue-500"]:hover, [class~="focus:border-blue-500"]:focus, .dark [class~="dark:hover:border-blue-500"]:hover, .dark [class~="dark:focus:border-blue-500"]:focus) { border-color: var(--qamomile-amber-500) !important; }
+:is([class~="border-blue-500/60"], .dark [class~="dark:border-blue-500/60"]) { border-color: var(--qamomile-amber-500-60) !important; }
+:is([class~="border-blue-600"], [class~="hover:border-blue-600"]:hover) { border-color: var(--qamomile-amber-600) !important; }
+:is([class~="border-blue-800"], .dark [class~="dark:border-blue-800"]) { border-color: var(--qamomile-amber-800) !important; }
+[class~="border-b-blue-600"] { border-bottom-color: var(--qamomile-amber-600) !important; }
+:is([class~="border-l-blue-400"], .dark [class~="dark:border-l-blue-400"]) { border-left-color: var(--qamomile-amber-400) !important; }
+:is([class~="border-l-blue-500"], [class~="hover:border-l-blue-500"]:hover) { border-left-color: var(--qamomile-amber-500) !important; }
+:is([class~="ring-blue-500"], [class~="hover:ring-blue-500"]:hover, [class~="focus:ring-blue-500"]:focus, [class~="focus-visible:ring-blue-500"]:focus-visible, .dark [class~="dark:hover:ring-blue-500"]:hover, .dark [class~="dark:focus:ring-blue-500"]:focus) { --tw-ring-color: var(--qamomile-amber-500) !important; }
+[class~="outline-blue-200"] { outline-color: var(--qamomile-amber-200) !important; }
+[class~="fill-blue-900"] { fill: var(--qamomile-amber-900) !important; }
 
 /* Search hits combine text-blue-* with group-aria-selected:text-white. */
-.group[aria-selected=true] .group-aria-selected\:text-white {
+.group[aria-selected="true"] [class~="group-aria-selected:text-white"] {
   color: var(--qamomile-amber-50) !important;
 }
 
@@ -111,24 +113,27 @@
 }
 
 /* Front-page feature cards below the Qamomile introduction. */
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card {
-  background-color: var(--qamomile-amber-600) !important;
-  border-color: var(--qamomile-amber-600) !important;
-  color: var(--qamomile-white) !important;
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card,
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-header {
+  background-color: var(--qamomile-feature-card-bg) !important;
 }
 
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card {
+  border-color: var(--qamomile-feature-card-bg) !important;
+}
+
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card,
 :is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card * {
-  color: var(--qamomile-white) !important;
+  color: var(--qamomile-feature-card-text) !important;
+}
+
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-header {
+  border-bottom: 0 !important;
 }
 
 :is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-body > p:first-child {
   font-size: 1.06rem;
   line-height: 1.35;
-}
-
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-header {
-  background-color: var(--qamomile-amber-600) !important;
-  border-bottom: 0 !important;
 }
 
 /* Tag chips emitted by docs/scripts/build_doc_tags.py. */
@@ -247,17 +252,7 @@ a.tag-chip::before {
   .cell-output,
   .notebook-output,
   article figure
-) img,
-:is(
-  [data-name="safe-output-image"],
-  .jp-OutputArea,
-  .jupyter-output,
-  .thebe-output,
-  .cell_output,
-  .cell-output,
-  .notebook-output,
-  article figure
-) svg:not([data-slot="icon"]) {
+) :is(img, svg:not([data-slot="icon"])) {
   max-width: 100%;
   height: auto;
   cursor: zoom-in;
