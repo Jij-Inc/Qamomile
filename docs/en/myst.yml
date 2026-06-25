@@ -17,6 +17,8 @@ project:
     cache: true
   toc:
     - file: index.md
+    - title: Installation
+      file: installation_guide.md
     - title: Tutorials
       file: tutorial/index.md
       children:

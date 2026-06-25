@@ -6,9 +6,30 @@ slug: integration
 
 Notes on using Qamomile together with external libraries and quantum platforms.
 
-## All articles
+::::{grid} 1 1 1 1
 
-- [Using OMMX Quantum Benchmarks (1): Implementing and Benchmarking Quantum Algorithms with Qamomile](ommx_quantum_benchmarks_qaoa) — Drive QAOA on a LABS instance loaded from the OMMX Quantum Benchmarks dataset and compare against SCIP
-- [qBraid Support](qbraid_executor) — Run Qiskit circuits on qBraid-supported devices
-- [Qiskit Support](qiskit_support) — Transpile to Qiskit, run local simulators, and inspect native Qiskit circuit features
-- [QURI Parts Support](quri_parts_support) — Transpile to QURI Parts and run on a Qulacs state-vector simulator
+:::{card}
+:header: **Using OMMX Quantum Benchmarks (1): Implementing and Benchmarking Quantum Algorithms with Qamomile**
+:link: ommx_quantum_benchmarks_qaoa
+Drive QAOA on a LABS instance loaded from the OMMX Quantum Benchmarks dataset and compare against SCIP.
+:::
+
+:::{card}
+:header: **qBraid Support**
+:link: qbraid_executor
+Run Qiskit circuits on qBraid-supported devices.
+:::
+
+:::{card}
+:header: **Qiskit Support**
+:link: qiskit_support
+Transpile to Qiskit, run local simulators, and inspect native Qiskit circuit features.
+:::
+
+:::{card}
+:header: **QURI Parts Support**
+:link: quri_parts_support
+Transpile to QURI Parts and run on a Qulacs state-vector simulator.
+:::
+
+::::
