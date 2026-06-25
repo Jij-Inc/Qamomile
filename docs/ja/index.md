@@ -2,16 +2,48 @@
 
 **Qamomile**（カモミール、/ˈkæməˌmiːl/）は、カモミールの花にちなんで名付けられました。カモミールは穏やかさと明瞭さの象徴として知られるハーブです。
 
-Qamomileは、量子回路を型付きのPython関数として記述できる量子プログラミングSDKです。作成した量子回路は、Qiskit、CUDA-Q、QURI Parts、qBraidなどの量子SDKで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような直接実行できない回路のリソース推定も可能です。
-
 :::{note}
 Qamomileは現在も活発に開発中であり、リリース間で破壊的変更が加わる可能性があります。
 不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new)でお知らせいただけると助かります。
 :::
 
+## Qamomileとは？
+
+Qamomileは、量子回路を型付きのPython関数として記述できる量子プログラミングSDKです。作成した量子回路は、Qiskit、CUDA-Q、QURI Parts、qBraidなどの量子SDKで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような直接実行できない回路のリソース推定も可能です。
+
+::::{grid} 1 1 3 3
+
+:::{card}
+**Pythonによる量子回路記述**
+
+型付きのPython関数で量子回路を表現し、通常のコードのように可視化・確認・再利用できます。
+:::
+
+:::{card}
+**多様なバックエンド対応**
+
+Qiskit、CUDA-Q、QURI Parts、qBraidなどへ、同じ量子回路をそのまま展開できます。
+:::
+
+:::{card}
+**数理最適化との連携**
+
+QUBOやIsingモデルを量子アルゴリズムへつなぎ、最適化問題の実装と実行を一貫して扱えます。
+:::
+
+::::
+
 ---
 
 ## クイックスタート
+
+Qamomileはpipからインストールすることができます。
+
+```bash
+pip install qamomile
+```
+
+以下は、Qamomileによる量子アルゴリズムの実行例です。詳細は、[はじめての量子カーネル](tutorial/01_your_first_quantum_kernel.ipynb)を参照してください。
 
 ```python
 import math
@@ -46,9 +78,6 @@ result = exe.sample(
 
 print(result.results)
 ```
-
-量子カーネルが測定結果を返す場合は、`sample()`を使います。
-`qmc.expval(...)`で計算した期待値を返す場合は、`run()`を使います。
 
 ---
 

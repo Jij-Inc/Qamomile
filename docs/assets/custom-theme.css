@@ -1,108 +1,103 @@
-/* Qamomile Chamomile Theme — Override Tailwind blue with warm amber
+/* Qamomile Chamomile Theme
  *
- * Color palette derived from circuit visualization style (style.py):
- *   Gate face color: #E8B878 (Warm honey amber / chamomile tea)
- *
- * Blue → Chamomile mapping:
- *   50:  #FDF8F0    100: #F9EDD8    200: #F0DCC0    300: #E8C898
- *   400: #D4A05C    500: #C08A40    600: #A87430    700: #8B5E25
- *   800: #6E4A1C    900: #5A3A15
+ * The MyST theme uses Tailwind blue utility classes for links, hover states,
+ * borders, search hits, and buttons. This file remaps those utilities to the
+ * warm amber palette used by Qamomile circuit visualizations.
  */
 
-/* === Text colors === */
-.text-blue-50  { color: #FDF8F0 !important; }
-.text-blue-200 { color: #F0DCC0 !important; }
-.text-blue-400 { color: #D4A05C !important; }
-.text-blue-500 { color: #C08A40 !important; }
-.text-blue-600 { color: #A87430 !important; }
-.text-blue-700 { color: #8B5E25 !important; }
-.text-blue-800 { color: #6E4A1C !important; }
-.text-blue-900 { color: #5A3A15 !important; }
-
-/* === Background colors === */
-.bg-blue-50 { background-color: #FDF8F0 !important; }
-.bg-blue-50\/80 { background-color: rgba(253, 248, 240, 0.8) !important; }
-.bg-blue-100 { background-color: #F9EDD8 !important; }
-.bg-blue-300\/30 { background-color: rgba(232, 200, 152, 0.19) !important; }
-.bg-blue-500 { background-color: #C08A40 !important; }
-.bg-blue-600 { background-color: #A87430 !important; }
-.bg-blue-800 { background-color: #6E4A1C !important; }
-.bg-blue-900 { background-color: #5A3A15 !important; }
-
-/* === Border colors === */
-.border-blue-200 { border-color: #F0DCC0 !important; }
-.border-blue-400 { border-color: #D4A05C !important; }
-.border-blue-500 { border-color: #C08A40 !important; }
-.border-blue-500\/60 { border-color: rgba(192, 138, 64, 0.6) !important; }
-.border-blue-600 { border-color: #A87430 !important; }
-.border-blue-800 { border-color: #6E4A1C !important; }
-.border-b-blue-600 { border-bottom-color: #A87430 !important; }
-.border-l-blue-400 { border-left-color: #D4A05C !important; }
-.border-l-blue-500 { border-left-color: #C08A40 !important; }
-
-/* === Ring, outline, fill === */
-.ring-blue-500 { --tw-ring-color: #C08A40 !important; }
-.outline-blue-200 { outline-color: #F0DCC0 !important; }
-.fill-blue-900 { fill: #5A3A15 !important; }
-
-/* === Hover states === */
-.hover\:border-blue-500:hover { border-color: #C08A40 !important; }
-.hover\:border-blue-600:hover { border-color: #A87430 !important; }
-.hover\:border-l-blue-500:hover { border-left-color: #C08A40 !important; }
-.hover\:bg-blue-100:hover { background-color: #F9EDD8 !important; }
-.hover\:bg-blue-800:hover { background-color: #6E4A1C !important; }
-.hover\:text-blue-400:hover { color: #D4A05C !important; }
-.hover\:text-blue-500:hover { color: #C08A40 !important; }
-.hover\:text-blue-600:hover { color: #A87430 !important; }
-.hover\:text-blue-700:hover { color: #8B5E25 !important; }
-.hover\:ring-blue-500:hover { --tw-ring-color: #C08A40 !important; }
-
-/* === Focus states === */
-.focus\:border-blue-500:focus { border-color: #C08A40 !important; }
-.focus\:ring-blue-500:focus { --tw-ring-color: #C08A40 !important; }
-.focus-visible\:ring-blue-500:focus-visible { --tw-ring-color: #C08A40 !important; }
-
-/* === Group selected state === */
-.group[aria-selected=true] .group-aria-selected\:bg-blue-600 {
-  background-color: #A87430 !important;
+:root {
+  --qamomile-amber-50: #FDF8F0;
+  --qamomile-amber-100: #F9EDD8;
+  --qamomile-amber-200: #F0DCC0;
+  --qamomile-amber-300: #E8C898;
+  --qamomile-amber-400: #D4A05C;
+  --qamomile-amber-500: #C08A40;
+  --qamomile-amber-600: #A87430;
+  --qamomile-amber-700: #8B5E25;
+  --qamomile-amber-800: #6E4A1C;
+  --qamomile-amber-900: #5A3A15;
+  --qamomile-amber-50-80: rgba(253, 248, 240, 0.8);
+  --qamomile-amber-300-30: rgba(232, 200, 152, 0.19);
+  --qamomile-amber-500-60: rgba(192, 138, 64, 0.6);
+  --qamomile-amber-600-60: rgba(168, 116, 48, 0.6);
+  --qamomile-amber-800-45: rgba(110, 74, 28, 0.45);
+  --qamomile-amber-900-30: rgba(90, 58, 21, 0.19);
+  --qamomile-card-text: #4B5563;
+  --qamomile-card-text-dark: #D1D5DB;
+  --qamomile-card-header-text: #111827;
+  --qamomile-card-header-text-dark: #F9FAFB;
+  --qamomile-colab-hover: #E18435;
+  --qamomile-white: #FFFFFF;
 }
 
-/* Search hits add text-blue-* classes, while the selected result also applies
- * group-aria-selected:text-white. Our blue->amber remap uses !important on the
- * text-blue-* utilities, so it overrides that selected-state white text unless
- * we restate the group-aria-selected:text-white rule with !important here.
- */
+/* Tailwind blue utility remaps. */
+.text-blue-50, .dark\:text-blue-50:is(.dark *) { color: var(--qamomile-amber-50) !important; }
+.text-blue-200, .dark\:text-blue-200:is(.dark *) { color: var(--qamomile-amber-200) !important; }
+.text-blue-400, .hover\:text-blue-400:hover, .dark\:text-blue-400:is(.dark *), .dark\:hover\:text-blue-400:hover:is(.dark *) { color: var(--qamomile-amber-400) !important; }
+.text-blue-500, .hover\:text-blue-500:hover, .dark\:text-blue-500:is(.dark *) { color: var(--qamomile-amber-500) !important; }
+.text-blue-600, .hover\:text-blue-600:hover { color: var(--qamomile-amber-600) !important; }
+.text-blue-700, .hover\:text-blue-700:hover { color: var(--qamomile-amber-700) !important; }
+.text-blue-800 { color: var(--qamomile-amber-800) !important; }
+.text-blue-900 { color: var(--qamomile-amber-900) !important; }
+
+.bg-blue-50 { background-color: var(--qamomile-amber-50) !important; }
+.bg-blue-50\/80 { background-color: var(--qamomile-amber-50-80) !important; }
+.bg-blue-100, .hover\:bg-blue-100:hover { background-color: var(--qamomile-amber-100) !important; }
+.bg-blue-300\/30 { background-color: var(--qamomile-amber-300-30) !important; }
+.bg-blue-500 { background-color: var(--qamomile-amber-500) !important; }
+.bg-blue-600, .group[aria-selected=true] .group-aria-selected\:bg-blue-600 { background-color: var(--qamomile-amber-600) !important; }
+.bg-blue-800, .hover\:bg-blue-800:hover, .dark\:hover\:bg-blue-800:hover:is(.dark *) { background-color: var(--qamomile-amber-800) !important; }
+.bg-blue-900 { background-color: var(--qamomile-amber-900) !important; }
+.dark\:bg-blue-900\/30:is(.dark *) { background-color: var(--qamomile-amber-900-30) !important; }
+
+.border-blue-200 { border-color: var(--qamomile-amber-200) !important; }
+.border-blue-400, .dark\:hover\:border-blue-400:hover:is(.dark *) { border-color: var(--qamomile-amber-400) !important; }
+.border-blue-500, .hover\:border-blue-500:hover, .focus\:border-blue-500:focus, .dark\:hover\:border-blue-500:hover:is(.dark *), .dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: var(--qamomile-amber-500) !important; }
+.border-blue-500\/60, .dark\:border-blue-500\/60:is(.dark *) { border-color: var(--qamomile-amber-500-60) !important; }
+.border-blue-600, .hover\:border-blue-600:hover { border-color: var(--qamomile-amber-600) !important; }
+.border-blue-800, .dark\:border-blue-800:is(.dark *) { border-color: var(--qamomile-amber-800) !important; }
+.border-b-blue-600 { border-bottom-color: var(--qamomile-amber-600) !important; }
+.border-l-blue-400, .dark\:border-l-blue-400:is(.dark *) { border-left-color: var(--qamomile-amber-400) !important; }
+.border-l-blue-500, .hover\:border-l-blue-500:hover { border-left-color: var(--qamomile-amber-500) !important; }
+.ring-blue-500, .hover\:ring-blue-500:hover, .focus\:ring-blue-500:focus, .focus-visible\:ring-blue-500:focus-visible, .dark\:hover\:ring-blue-500:hover:is(.dark *), .dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: var(--qamomile-amber-500) !important; }
+.outline-blue-200 { outline-color: var(--qamomile-amber-200) !important; }
+.fill-blue-900 { fill: var(--qamomile-amber-900) !important; }
+
+/* Search hits combine text-blue-* with group-aria-selected:text-white. */
 .group[aria-selected=true] .group-aria-selected\:text-white {
-  color: #FDF8F0 !important;
+  color: var(--qamomile-amber-50) !important;
 }
 
-/* === Dark mode === */
-.dark\:border-blue-500\/60:is(.dark *) { border-color: rgba(192, 138, 64, 0.6) !important; }
-.dark\:border-blue-800:is(.dark *) { border-color: #6E4A1C !important; }
-.dark\:border-l-blue-400:is(.dark *) { border-left-color: #D4A05C !important; }
-.dark\:bg-blue-900\/30:is(.dark *) { background-color: rgba(90, 58, 21, 0.19) !important; }
-.dark\:text-blue-50:is(.dark *) { color: #FDF8F0 !important; }
-.dark\:text-blue-200:is(.dark *) { color: #F0DCC0 !important; }
-.dark\:text-blue-400:is(.dark *) { color: #D4A05C !important; }
-.dark\:text-blue-500:is(.dark *) { color: #C08A40 !important; }
-.dark\:hover\:border-blue-400:hover:is(.dark *) { border-color: #D4A05C !important; }
-.dark\:hover\:border-blue-500:hover:is(.dark *) { border-color: #C08A40 !important; }
-.dark\:hover\:bg-blue-800:hover:is(.dark *) { background-color: #6E4A1C !important; }
-.dark\:hover\:text-blue-400:hover:is(.dark *) { color: #D4A05C !important; }
-.dark\:hover\:ring-blue-500:hover:is(.dark *) { --tw-ring-color: #C08A40 !important; }
-.dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: #C08A40 !important; }
-.dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: #C08A40 !important; }
-
-/* === Admonitions === */
+/* Admonitions. */
 .dark .myst-admonition-note .myst-admonition-header {
-  background-color: rgba(168, 116, 48, 0.6) !important;
+  background-color: var(--qamomile-amber-600-60) !important;
 }
 
-/* === Card headers === */
+/* Cards. */
+.myst-card {
+  color: var(--qamomile-card-text) !important;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.dark .myst-card {
+  color: var(--qamomile-card-text-dark) !important;
+}
+
+.myst-card :is(a, code, li, p, strong) {
+  color: inherit !important;
+}
+
 .myst-card-header {
-  background-color: #F9EDD8 !important;
-  color: #5A3A15 !important;
-  border-bottom-color: #F0DCC0 !important;
+  background-color: var(--qamomile-amber-100) !important;
+  border-bottom-color: var(--qamomile-amber-200) !important;
+  color: var(--qamomile-card-header-text) !important;
+}
+
+.dark .myst-card-header {
+  background-color: var(--qamomile-amber-800-45) !important;
+  border-bottom-color: var(--qamomile-amber-800) !important;
+  color: var(--qamomile-card-header-text-dark) !important;
 }
 
 .myst-card-header a {
@@ -115,27 +110,34 @@
   text-decoration: underline;
 }
 
-.dark .myst-card-header {
-  background-color: rgba(110, 74, 28, 0.45) !important;
-  color: #FDF8F0 !important;
-  border-bottom-color: #6E4A1C !important;
+/* Front-page feature cards below the Qamomile introduction. */
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card {
+  background-color: var(--qamomile-amber-600) !important;
+  border-color: var(--qamomile-amber-600) !important;
+  color: var(--qamomile-white) !important;
 }
 
-/* === Tag chips ===
- * Pill-shaped clickable tag labels emitted by docs/scripts/build_doc_tags.py.
- * They appear in:
- *   - the Browse-by-tag block injected into each section index.md,
- *   - the global tags landing page (tags/index.md),
- *   - the Browse-by-tag header and article cards on per-tag pages,
- *   - the auto-tags chip block at the top of every tagged article,
- *   - the article cards injected into section index pages.
- */
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card * {
+  color: var(--qamomile-white) !important;
+}
+
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-body > p:first-child {
+  font-size: 1.06rem;
+  line-height: 1.35;
+}
+
+:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-header {
+  background-color: var(--qamomile-amber-600) !important;
+  border-bottom: 0 !important;
+}
+
+/* Tag chips emitted by docs/scripts/build_doc_tags.py. */
 a.tag-chip {
   display: inline-block;
   padding: 0.15em 0.75em;
   margin: 0.18em 0.12em;
-  background-color: #F9EDD8;
-  color: #8B5E25;
+  background-color: var(--qamomile-amber-100);
+  color: var(--qamomile-amber-700);
   border-radius: 999px;
   font-size: 0.88em;
   font-weight: 500;
@@ -145,8 +147,8 @@ a.tag-chip {
 }
 
 a.tag-chip:hover {
-  background-color: #F0DCC0;
-  color: #6E4A1C;
+  background-color: var(--qamomile-amber-200);
+  color: var(--qamomile-amber-800);
   text-decoration: none;
 }
 
@@ -156,21 +158,17 @@ a.tag-chip::before {
   opacity: 0.55;
 }
 
-/* Dark mode: deeper amber tint that reads against the dark background. */
 .dark a.tag-chip {
-  background-color: rgba(110, 74, 28, 0.45);
-  color: #F0DCC0;
+  background-color: var(--qamomile-amber-800-45);
+  color: var(--qamomile-amber-200);
 }
 
 .dark a.tag-chip:hover {
-  background-color: rgba(168, 116, 48, 0.6);
-  color: #FDF8F0;
+  background-color: var(--qamomile-amber-600-60);
+  color: var(--qamomile-amber-50);
 }
 
-/* Section index cards: thumbnails + tags emitted into _build_src by
- * docs/scripts/build_doc_tags.py. The thumbnail floats to the right of the
- * card body so existing hand-written summaries remain the main text.
- */
+/* Section index cards. */
 .qamomile-section-card-thumb-wrap {
   float: right;
   width: min(9rem, 38%);
@@ -184,7 +182,7 @@ a.tag-chip::before {
   object-fit: cover;
   box-sizing: border-box;
   border-radius: 6px;
-  background-color: #FFFFFF;
+  background-color: var(--qamomile-white);
 }
 
 .qamomile-section-card-thumb-default {
@@ -198,7 +196,7 @@ a.tag-chip::before {
 }
 
 .dark .qamomile-section-card-thumb {
-  background-color: #FFFFFF;
+  background-color: var(--qamomile-white);
 }
 
 @media (max-width: 640px) {
@@ -209,71 +207,57 @@ a.tag-chip::before {
   }
 }
 
-/* Google Colab launch button (injected at build output) */
+/* Google Colab launch button injected into build output. */
 .qamomile-colab-button {
   display: inline-flex;
   width: 24px;
   height: 24px;
   margin-left: 0.5rem;
-  text-decoration: none;
   color: inherit;
   opacity: 0.65;
+  text-decoration: none;
   align-items: center;
   justify-content: center;
 }
 
 .qamomile-colab-button:hover {
-  color: #E18435;
+  color: var(--qamomile-colab-hover);
   opacity: 1;
 }
 
 .qamomile-colab-icon {
   width: 16px;
   height: 16px;
-  border-radius: 9999px;
   border: 1px solid currentColor;
+  border-radius: 9999px;
+  font-family: system-ui, sans-serif;
   font-size: 10px;
   font-weight: 700;
   line-height: 14px;
   text-align: center;
-  font-family: system-ui, sans-serif;
 }
 
-/* === Cell-output media: shrink to column width + click-to-zoom hint ===
- *
- * lightbox.js binds a click handler to every <img>/<svg> emitted into
- * a notebook cell output and opens an overlay with the figure at its
- * natural size. We give the thumbnail a `cursor: zoom-in` cue so the
- * affordance is discoverable, and we also reinforce the `max-width:
- * 100%` constraint here as a defence-in-depth fallback in case the
- * inherited Tailwind / mystmd rule does not fire (e.g. on a stray svg
- * emitted with explicit `width="...pt"` attributes that some renderers
- * honour over CSS unless an explicit `max-width` is asserted at the
- * cell-output scope).
- *
- * The selector list mirrors lightbox.js's SELECTOR so the cursor
- * affordance and the click handler stay in sync. mystmd's matplotlib
- * outputs land inside `[data-name="safe-output-image"]`; the rest are
- * fallbacks for classic Jupyter (`.jp-OutputArea`), Jupyter Book /
- * nbsphinx (`.cell_output`), Thebe live-execution (`.thebe-output`),
- * and figure-based renderers.
- */
-[data-name="safe-output-image"] img,
-[data-name="safe-output-image"] svg,
-.jp-OutputArea img,
-.jp-OutputArea svg:not([data-slot="icon"]),
-.jupyter-output img,
-.jupyter-output svg:not([data-slot="icon"]),
-.thebe-output img,
-.thebe-output svg:not([data-slot="icon"]),
-.cell_output img,
-.cell_output svg:not([data-slot="icon"]),
-.cell-output img,
-.cell-output svg:not([data-slot="icon"]),
-.notebook-output img,
-.notebook-output svg:not([data-slot="icon"]),
-article figure img,
-article figure svg:not([data-slot="icon"]) {
+/* Cell-output media thumbnails handled by docs/assets/lightbox.js. */
+:is(
+  [data-name="safe-output-image"],
+  .jp-OutputArea,
+  .jupyter-output,
+  .thebe-output,
+  .cell_output,
+  .cell-output,
+  .notebook-output,
+  article figure
+) img,
+:is(
+  [data-name="safe-output-image"],
+  .jp-OutputArea,
+  .jupyter-output,
+  .thebe-output,
+  .cell_output,
+  .cell-output,
+  .notebook-output,
+  article figure
+) svg:not([data-slot="icon"]) {
   max-width: 100%;
   height: auto;
   cursor: zoom-in;

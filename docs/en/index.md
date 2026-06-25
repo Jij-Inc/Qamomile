@@ -2,16 +2,48 @@
 
 **Qamomile** (pronounced /ˈkæməˌmiːl/, like "chamomile") is named after the chamomile flower — a symbol of calm and clarity.
 
-Qamomile is a quantum programming SDK for writing quantum circuits as typed Python functions. You can run the circuits you build on quantum SDKs such as Qiskit, CUDA-Q, QURI Parts, and qBraid. Furthermore, Qamomile supports symbolic algebraic resource estimation and can estimate resources for circuits containing black-box oracles, even when those circuits cannot be executed directly.
-
 :::{note}
 Qamomile is under active development, and breaking changes may be introduced between releases.
 If you find a bug, we'd really appreciate it if you could let us know via [GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new).
 :::
 
+## What is Qamomile?
+
+Qamomile is a quantum programming SDK for writing quantum circuits as typed Python functions. You can run the circuits you build on quantum SDKs such as Qiskit, CUDA-Q, QURI Parts, and qBraid. Furthermore, Qamomile supports symbolic algebraic resource estimation and can estimate resources for circuits containing black-box oracles, even when those circuits cannot be executed directly.
+
+::::{grid} 1 1 3 3
+
+:::{card}
+**Quantum circuits in Python**
+
+Write circuits as typed Python functions, then draw, check, and reuse them like regular code.
+:::
+
+:::{card}
+**One program, many backends**
+
+Move between Qiskit, CUDA-Q, QURI Parts, and qBraid without rewriting your circuit.
+:::
+
+:::{card}
+**Made for optimization**
+
+Connect QUBO and Ising models to quantum algorithms, then implement and run optimization workflows end to end.
+:::
+
+::::
+
 ---
 
 ## Quick start
+
+Qamomile can be installed from pip.
+
+```bash
+pip install qamomile
+```
+
+The following example runs a quantum algorithm with Qamomile. For details, see [Your First Quantum Kernel](tutorial/01_your_first_quantum_kernel.ipynb).
 
 ```python
 import math
@@ -46,9 +78,6 @@ result = exe.sample(
 
 print(result.results)
 ```
-
-If a kernel returns measurement results, use `sample()`.
-If it returns an expectation value computed with `qmc.expval(...)`, use `run()`.
 
 ---
 
