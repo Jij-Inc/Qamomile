@@ -39,6 +39,7 @@
 # %%
 # Import numerical, plotting, simulator, and Qamomile utilities.
 import math
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -259,10 +260,11 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 
 # %%
 # Set the counting-register sizes, sampling settings, and target eigenstate.
-COUNTING_BIT_OPTIONS = tuple(range(3, 10))
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+COUNTING_BIT_OPTIONS = tuple(range(3, 6)) if docs_test_mode else tuple(range(3, 10))
 DRAW_COUNTING_BITS = 3
 EXAMPLE_COUNTING_BITS = 3
-SHOTS = 4096
+SHOTS = 512 if docs_test_mode else 4096
 SAMPLER_SEED = 321
 TARGET_BASIS = 1  # |01>
 
