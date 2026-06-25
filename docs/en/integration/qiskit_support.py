@@ -86,6 +86,7 @@ plt.show()
 # We write the QAOA quantum circuit for solving MaxCut as a `@qkernel`.
 # The recipe is the same as in the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb).
 # After preparing a uniform superposition in the computational basis, we alternately apply cost and mixer layers $p$ times, then measure in the computational basis.
+# The expectation-value qkernel is introduced later in the `run()` section so the circuit diagram below shows the sampling ansatz directly rather than a wrapper around a state-preparation helper.
 #
 # :::{tip}
 # Qamomile's rotation gates follow the $e^{-i\theta/2}$ convention.
@@ -131,22 +132,6 @@ def mixer_layer(
 
 
 @qmc.qkernel
-def qaoa_state(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return q
-
-
-@qmc.qkernel
 def qaoa_ansatz(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -155,22 +140,11 @@ def qaoa_ansatz(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
     return qmc.measure(q)
-
-
-@qmc.qkernel
-def qaoa_energy(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    H: qmc.Observable,
-) -> qmc.Float:
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
-    return qmc.expval(q, H)
 
 
 # %% [markdown]
@@ -347,15 +321,33 @@ for (i, j), Jij in spin_model.quad.items():
 for i, hi in spin_model.linear.items():
     cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
+# Define the expectation-value qkernel.
+@qmc.qkernel
+def qaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return qmc.expval(q, obs)
+
+
 # Transpile the expectation-value qkernel and evaluate it with `run()`.
 expval_executable = transpiler.transpile(
-    qaoa_energy,
+    qaoa_expval,
     bindings={
         "p": p,
         "quad": spin_model.quad,
         "linear": spin_model.linear,
         "n": num_nodes,
-        "H": cost_hamiltonian,
+        "obs": cost_hamiltonian,
     },
     parameters=["gammas", "betas"],
 )
@@ -589,3 +581,9 @@ assert np.isfinite(noisy_energy)
 # - `QiskitExecutor` supports both `executable.sample()` for measured qkernels and `executable.run()` / `executor.estimate(...)` for expectation values, using `AerSimulator` by default and accepting any Qiskit execution target object through `transpiler.executor(backend=...)`.
 # - The Qiskit integration uses native mid-circuit measurement, dynamic `for_loop` / `if_else` / `while_loop`, runtime classical expressions, `PauliEvolutionGate`, and `QFTGate` where Qiskit provides a high-level representation.
 # - Aer noise models, provider execution targets, and qBraid-wrapped Qiskit devices can be used without re-transpiling the qkernel; Qamomile's optimization helpers use the same Qiskit circuit interface.
+
+# %% [markdown]
+# ### See also
+#
+# - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow on the CUDA-Q backend, including CUDA-Q targets and `observe`.
+# - [QURI Parts Support](quri_parts_support.ipynb) covers the same workflow on QURI Parts, including Qulacs sampling and QURI Parts estimator paths.

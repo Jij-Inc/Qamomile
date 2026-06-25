@@ -298,15 +298,19 @@ plt.show()
 # ここで得た最適パラメータ(`opt_gammas`、`opt_betas`)を、以降の例でも使います。
 
 # %% [markdown]
-# ## `cudaq.observe`による期待値計算
+# ## 期待値計算
 #
-# `STATIC` CUDA-Q artifactでは、`CudaqExecutor.estimate(circuit, hamiltonian, params=...)`が内部で`cudaq.observe()`を呼び出します。
-# 上の測定付きQAOAアンザッツも、状態準備回路としてそのまま使えます。`STATIC` artifactでは、Qamomileは終端測定を生成されたCUDA-Q量子カーネルに書き込みません。
-# サンプリング時には最後の測定を別途扱うため、同じartifactを`cudaq.observe()`にも渡せます。
-# QAOAの最適化でも、同じ回路を保ったまま`ExecutableProgram.sample()`とデコードの組み合わせを`executor.estimate(circuit, hamiltonian, params=...)`に置き換えられます。
+# Qamomileでは、量子回路の出力に対する期待値を量子カーネル内の`qmc.expval(...)`で記述します。
+# これをCUDA-Qへトランスパイルすると、`ExecutableProgram.run(executor, bindings=...)`で呼び出せる実行可能オブジェクトになります。
+# CUDA-Q向けの`run()`は、Qamomileのパラメータ情報を使ってランタイムパラメータをバインドし、そのうえでCUDA-Qの`observe` APIを呼び出します。
+#
+# ここではまずQamomileの`run()`経路を使い、その後で生成済みのCUDA-Q artifactを`executor.estimate(...)`へ直接渡す低レベルの経路を見ます。
+
+# %% [markdown]
+# ### `run()`
 #
 # まず$H_C = \sum_{(i,j) \in E} Z_i Z_j$をQamomileの`Hamiltonian`として組み立てます。
-# その後、`transpile()`が出力したCUDA-Q artifactに対して`executor.estimate`を呼び出します。
+# その後、期待値計算用の量子カーネルをトランスパイルし、最適化済みQAOAパラメータで評価します。
 
 # %%
 cost_hamiltonian = qm_o.Hamiltonian()
@@ -318,6 +322,61 @@ for (i, j), Jij in spin_model.quad.items():
 for i, hi in spin_model.linear.items():
     cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
+# 期待値計算用の量子カーネルを定義します。
+@qmc.qkernel
+def qaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return qmc.expval(q, obs)
+
+
+# 期待値計算用の量子カーネルをトランスパイルし、`run()`で評価します。
+expval_executable = transpiler.transpile(
+    qaoa_expval,
+    bindings={
+        "p": p,
+        "quad": spin_model.quad,
+        "linear": spin_model.linear,
+        "n": num_nodes,
+        "obs": cost_hamiltonian,
+    },
+    parameters=["gammas", "betas"],
+)
+energy_from_run = expval_executable.run(
+    executor,
+    bindings={"gammas": opt_gammas, "betas": opt_betas},
+).result()
+
+print(f"ExecutableProgram.run: {energy_from_run:+.10f}")
+assert np.isfinite(energy_from_run)
+
+# %% [markdown]
+# QamomileのAPIだけで扱う場合は、`ExecutableProgram.run(...)`を使うのがおすすめです。
+# Observableと名前付きランタイムパラメータの`bindings`は、Qamomileの`ExecutableProgram`が管理します。
+#
+# 次のセクションでは、より低レベルの経路を開き、`transpile()`が出力したCUDA-Q artifactを`executor.estimate(...)`に直接渡します。
+
+# %% [markdown]
+# ### `cudaq.observe`
+#
+# `STATIC` CUDA-Q artifactでは、`CudaqExecutor.estimate(circuit, hamiltonian, params=...)`が内部で`cudaq.observe()`を呼び出します。
+# 上の測定付きQAOAアンザッツも、状態準備回路としてそのまま使えます。`STATIC` artifactでは、Qamomileは終端測定を生成されたCUDA-Q量子カーネルに書き込みません。
+# サンプリング時には最後の測定を別途扱うため、同じartifactを`cudaq.observe()`にも渡せます。
+# QAOAの最適化でも、同じ回路を保ったまま`ExecutableProgram.sample()`とデコードの組み合わせを`executor.estimate(circuit, hamiltonian, params=...)`に置き換えられます。
+#
+# `executor.estimate(...)`に直接渡す場合は、CUDA-Q artifactが期待するフラットなパラメータ順を自分で用意します。
+
+# %%
 unbound_circuit = executable.get_first_circuit()
 assert unbound_circuit is not None
 assert unbound_circuit.execution_mode == ExecutionMode.STATIC
@@ -342,53 +401,10 @@ energy_via_estimate = executor.estimate(
     unbound_circuit, cost_hamiltonian, params=flat_params
 )
 print(f"executor.estimate: {energy_via_estimate:+.10f}")
-assert np.isfinite(energy_via_estimate)
-
-# %% [markdown]
-# `ExecutableProgram.run(...)`で、期待値を返す量子カーネルを直接実行することもできます。
-# 次の量子カーネルでは、ObservableをQamomileのランタイム引数として受け取り、測定ビットではなく`qmc.expval(...)`を返します。
-# この高レベルな経路でも`CudaqExecutor.estimate`に到達しますが、Observableとパラメータの`bindings`はQamomileの`ExecutableProgram`が管理します。
-
-
-# %%
-@qmc.qkernel
-def qaoa_expval(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    obs: qmc.Observable,
-) -> qmc.Float:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return qmc.expval(q, obs)
-
-
-expval_executable = transpiler.transpile(
-    qaoa_expval,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-        "obs": cost_hamiltonian,
-    },
-    parameters=["gammas", "betas"],
-)
-energy_from_run = expval_executable.run(
-    executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-).result()
-
-print(f"ExecutableProgram.run: {energy_from_run:+.10f}")
 assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 
 # %% [markdown]
-# 両方の経路は数値精度の範囲で一致します。
+# `run()`と`executor.estimate(...)`の両方の経路は数値精度の範囲で一致します。
 # 同じQAOA状態を、同じIsingコストハミルトニアンに対して評価しているためです。
 # また、最適化後パラメータでのこのノイズなし期待値は、先ほど出力した標本平均エネルギーともショットノイズの範囲で一致するはずです。
 
@@ -401,11 +417,13 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # `ExecutableProgram`が出力済みのCUDA-Q artifactを持ち、executorが実行時に使うtargetを選ぶ、という役割分担になっているためです。
 # 選択できるシミュレータtargetの一覧は、CUDA-Q公式ドキュメントの[Circuit Simulation](https://nvidia.github.io/cuda-quantum/latest/using/simulators.html)で確認できます。また、CUDA-Qの[Running on a GPU](https://nvidia.github.io/cuda-quantum/latest/using/basics/run_kernel.html#running-on-a-gpu)セクションでも、同じ`qpp-cpu` / `nvidia` targetの使い分けが紹介されています。
 #
+# :::{note}
 # このチュートリアルはGoogle Colabでも実行できます。
 # GPU targetを試すには、ノートブックを実行する前にGPUランタイムを選び、そのランタイムに合うCUDA-Q用の追加依存グループをインストールしてください。
 # CUDA-Qでは、CPUシミュレータtargetとして`qpp-cpu`を、ローカルNVIDIA GPUシミュレータtargetとして`nvidia`を使えます。
+# :::
 #
-# 具体例として、**同じ**最適化済みQAOAの`ExecutableProgram`をCPU targetとGPU targetでサンプリングします。
+# 具体例として、同じ最適化済みQAOAの`ExecutableProgram`をCPU targetとGPU targetでサンプリングします。
 # ここでの両方の実行はノイズなしです。CUDA-Qのnoise modelは設定せず、同じQAOA回路と同じパラメータベクトルを使います。
 # さらに、それぞれのサンプリング直前に同じCUDA-Q random seedを設定します。
 # 有限ショットのサンプルは各targetのシミュレータが生成するため、生のショット順序の完全一致ではなく、サンプル平均エネルギーが許容範囲で近いことを確認し、エネルギーヒストグラムを可視化します。
@@ -615,3 +633,4 @@ else:
 # ### 関連ページ
 #
 # - [QURI Partsサポート](quri_parts_support.ipynb)では、同じMaxCut QAOAの流れをQURI Partsバックエンドで扱います。
+# - [Qiskitサポート](qiskit_support.ipynb)では、同じ流れをQiskitで扱い、Aerシミュレータ、Qiskit primitive、Qiskitネイティブの回路機能も確認します。

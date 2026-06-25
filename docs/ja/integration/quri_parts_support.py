@@ -92,9 +92,9 @@ plt.show()
 # %% [markdown]
 # ## `@qkernel`によるQAOAアンザッツの構築
 #
-# QAOAの状態、サンプリング用アンザッツ、期待値計算を、再利用可能な量子カーネルとして書きます。
-# レシピは[MaxCutに対するQAOAチュートリアル](../algorithm/qaoa_maxcut.ipynb)と同じです。計算基底の一様な重ね合わせ状態を準備した後、コスト層とミキサー層を$p$回交互に適用します。
-# サンプリング用の量子カーネルでは最後の状態を計算基底で測定し、期待値計算用の量子カーネルでは同じ状態をHamiltonianに対して評価します。
+# QAOAの各層とサンプリング用アンザッツを、再利用可能な量子カーネルとして書きます。
+# レシピは[MaxCutに対するQAOAチュートリアル](../algorithm/qaoa_maxcut.ipynb)と同じです。計算基底の一様な重ね合わせ状態を準備した後、コスト層とミキサー層を$p$回交互に適用し、最後に計算基底で測定します。
+# 期待値計算用の量子カーネルは後の`run()`セクションで定義します。こうしておくと、下の回路図では状態準備用のラッパーではなく、サンプリング用アンザッツそのものを確認できます。
 #
 # :::{tip}
 # Qamomileの回転ゲートは$e^{-i\theta/2}$という規約に従います。
@@ -141,22 +141,6 @@ def mixer_layer(
 
 
 @qmc.qkernel
-def qaoa_state(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return q
-
-
-@qmc.qkernel
 def qaoa_ansatz(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -165,22 +149,11 @@ def qaoa_ansatz(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
     return qmc.measure(q)
-
-
-@qmc.qkernel
-def qaoa_energy(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    H: qmc.Observable,
-) -> qmc.Float:
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
-    return qmc.expval(q, H)
 
 
 # %% [markdown]
@@ -345,15 +318,33 @@ for (i, j), Jij in spin_model.quad.items():
 for i, hi in spin_model.linear.items():
     cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
+# 期待値計算用の量子カーネルを定義します。
+@qmc.qkernel
+def qaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return qmc.expval(q, obs)
+
+
 # 期待値計算用の量子カーネルをトランスパイルし、`run()`で評価します。
 expval_executable = transpiler.transpile(
-    qaoa_energy,
+    qaoa_expval,
     bindings={
         "p": p,
         "quad": spin_model.quad,
         "linear": spin_model.linear,
         "n": num_nodes,
-        "H": cost_hamiltonian,
+        "obs": cost_hamiltonian,
     },
     parameters=["gammas", "betas"],
 )
@@ -494,8 +485,10 @@ noisy_result = executable.sample(
 ).result()
 
 # 両方のサンプル集合をデコードし、平均Isingエネルギーを比較します。
-clean_energy = spin_model.decode_from_sampleresult(clean_result).energy_mean()
-noisy_energy = spin_model.decode_from_sampleresult(noisy_result).energy_mean()
+clean_decoded = spin_model.decode_from_sampleresult(clean_result)
+noisy_decoded = spin_model.decode_from_sampleresult(noisy_result)
+clean_energy = clean_decoded.energy_mean()
+noisy_energy = noisy_decoded.energy_mean()
 print(f"noiseless sampler mean energy: {clean_energy:+.4f}")
 print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 
@@ -515,3 +508,9 @@ print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 # - `QuriPartsExecutor`は、デフォルトのQulacs状態ベクトルシミュレータ上で、QAOA形式のサンプリングを行う`executable.sample()`、`qmc.expval(...)`を返す量子カーネル向けの`executable.run()`、回路を直接扱う期待値計算の`executor.estimate(...)`をサポートします。
 # - `estimate_expectation`は、渡された回路にフリーパラメータが残っているかどうかに応じて、QURI Partsのパラメトリックestimatorと非パラメトリックestimatorを切り替えます。通常は`executor.estimate()`を使えば、この切り替えを意識せずに済みます。
 # - QURI Partsの`NoiseSimulator`ベースのsamplerなど、独自のsamplerやestimatorは`transpiler.executor(...)`経由で差し替えられます。量子カーネルをトランスパイルし直す必要はありません。
+
+# %% [markdown]
+# ### 関連ページ
+#
+# - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Qバックエンドで扱います。
+# - [Qiskitサポート](qiskit_support.ipynb)では、同じ流れをQiskitで扱い、Aerシミュレータ、Qiskit primitive、Qiskitネイティブの回路機能も確認します。

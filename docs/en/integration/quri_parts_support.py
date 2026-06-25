@@ -29,6 +29,7 @@
 
 # %%
 # Collect every library used in this tutorial in one place.
+from collections import Counter
 import os
 
 import matplotlib.pyplot as plt
@@ -93,9 +94,9 @@ plt.show()
 # %% [markdown]
 # ## Building the QAOA ansatz with `@qkernel`
 #
-# We write reusable qkernels for the QAOA state, sampling ansatz, and expectation-value evaluation.
-# The recipe is the same as in the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). After preparing a uniform superposition in the computational basis, we alternately apply cost and mixer layers $p$ times.
-# The sampling qkernel measures the final state in the computational basis, while the expectation-value qkernel evaluates the same state against a Hamiltonian.
+# We write reusable qkernels for the QAOA layers and the sampling ansatz.
+# The recipe is the same as in the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). After preparing a uniform superposition in the computational basis, we alternately apply cost and mixer layers $p$ times, then measure in the computational basis.
+# The expectation-value qkernel is introduced later in the `run()` section so the circuit diagram below shows the sampling ansatz directly rather than a wrapper around a state-preparation helper.
 #
 # :::{tip}
 # Qamomile's rotation gates follow the $e^{-i\theta/2}$ convention.
@@ -145,23 +146,6 @@ def mixer_layer(
 
 
 @qmc.qkernel
-def qaoa_state(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
-    # Prepare the final QAOA state without measuring it.
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return q
-
-
-@qmc.qkernel
 def qaoa_ansatz(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -171,23 +155,11 @@ def qaoa_ansatz(
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
     # Measure the final QAOA state for sampling.
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
     return qmc.measure(q)
-
-
-@qmc.qkernel
-def qaoa_energy(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    H: qmc.Observable,
-) -> qmc.Float:
-    # Evaluate the same QAOA state against a Hamiltonian observable.
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
-    return qmc.expval(q, H)
 
 
 # %% [markdown]
@@ -353,15 +325,33 @@ for (i, j), Jij in spin_model.quad.items():
 for i, hi in spin_model.linear.items():
     cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
+# Define the expectation-value qkernel.
+@qmc.qkernel
+def qaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return qmc.expval(q, obs)
+
+
 # Transpile the expectation-value qkernel and evaluate it with `run()`.
 expval_executable = transpiler.transpile(
-    qaoa_energy,
+    qaoa_expval,
     bindings={
         "p": p,
         "quad": spin_model.quad,
         "linear": spin_model.linear,
         "n": num_nodes,
-        "H": cost_hamiltonian,
+        "obs": cost_hamiltonian,
     },
     parameters=["gammas", "betas"],
 )
@@ -502,8 +492,10 @@ noisy_result = executable.sample(
 ).result()
 
 # Decode both sample sets to compare their mean Ising energies.
-clean_energy = spin_model.decode_from_sampleresult(clean_result).energy_mean()
-noisy_energy = spin_model.decode_from_sampleresult(noisy_result).energy_mean()
+clean_decoded = spin_model.decode_from_sampleresult(clean_result)
+noisy_decoded = spin_model.decode_from_sampleresult(noisy_result)
+clean_energy = clean_decoded.energy_mean()
+noisy_energy = noisy_decoded.energy_mean()
 print(f"noiseless sampler mean energy: {clean_energy:+.4f}")
 print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 
@@ -573,3 +565,4 @@ plt.show()
 # ### See also
 #
 # - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow on the CUDA-Q backend.
+# - [Qiskit Support](qiskit_support.ipynb) covers the same workflow on Qiskit, including Aer simulators, Qiskit primitives, and native Qiskit circuit features.

@@ -296,15 +296,19 @@ plt.show()
 # The optimized parameters from this run (`opt_gammas`, `opt_betas`) are reused throughout the rest of this page.
 
 # %% [markdown]
-# ## Expectation values with `cudaq.observe`
+# ## Expectation values
 #
-# For `STATIC` CUDA-Q artifacts, `CudaqExecutor.estimate(circuit, hamiltonian, params=...)` calls `cudaq.observe()` under the hood.
-# The measured QAOA ansatz above is still usable as a state-preparation circuit because Qamomile does not write terminal measurements into the generated CUDA-Q kernel for `STATIC` artifacts.
-# Sampling handles the final measurement separately, so the same emitted artifact can also be used by `cudaq.observe()`.
-# In a QAOA optimizer, you can keep the same circuit and replace `ExecutableProgram.sample()` plus decoding with `executor.estimate(circuit, hamiltonian, params=...)`.
+# In Qamomile, you write expectation values in a qkernel with `qmc.expval(...)`.
+# When this is transpiled to CUDA-Q, it becomes an executable object that can be called with `ExecutableProgram.run(executor, bindings=...)`.
+# For CUDA-Q, `run()` uses Qamomile's recorded parameter information to bind runtime parameters before calling CUDA-Q's `observe` API.
+#
+# We first use Qamomile's `run()` path, then open the lower-level path that passes the generated CUDA-Q artifact directly to `executor.estimate(...)`.
+
+# %% [markdown]
+# ### `run()`
 #
 # First build a Qamomile `Hamiltonian` for $H_C = \sum_{(i,j) \in E} Z_i Z_j$.
-# Then call `executor.estimate` on the CUDA-Q artifact emitted by `transpile()`.
+# Then transpile the expectation-value qkernel and evaluate it at the optimized QAOA parameters.
 
 # %%
 cost_hamiltonian = qm_o.Hamiltonian()
@@ -316,6 +320,61 @@ for (i, j), Jij in spin_model.quad.items():
 for i, hi in spin_model.linear.items():
     cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
+# Define the expectation-value qkernel.
+@qmc.qkernel
+def qaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return qmc.expval(q, obs)
+
+
+# Transpile the expectation-value qkernel and evaluate it with `run()`.
+expval_executable = transpiler.transpile(
+    qaoa_expval,
+    bindings={
+        "p": p,
+        "quad": spin_model.quad,
+        "linear": spin_model.linear,
+        "n": num_nodes,
+        "obs": cost_hamiltonian,
+    },
+    parameters=["gammas", "betas"],
+)
+energy_from_run = expval_executable.run(
+    executor,
+    bindings={"gammas": opt_gammas, "betas": opt_betas},
+).result()
+
+print(f"ExecutableProgram.run: {energy_from_run:+.10f}")
+assert np.isfinite(energy_from_run)
+
+# %% [markdown]
+# `ExecutableProgram.run(...)` is the recommended route when you work through the Qamomile API.
+# The observable and named runtime parameter bindings are managed by Qamomile's `ExecutableProgram`.
+#
+# The next section opens the lower-level path and passes the CUDA-Q artifact emitted by `transpile()` directly to `executor.estimate(...)`.
+
+# %% [markdown]
+# ### `cudaq.observe`
+#
+# For `STATIC` CUDA-Q artifacts, `CudaqExecutor.estimate(circuit, hamiltonian, params=...)` calls `cudaq.observe()` under the hood.
+# The measured QAOA ansatz above is still usable as a state-preparation circuit because Qamomile does not write terminal measurements into the generated CUDA-Q kernel for `STATIC` artifacts.
+# Sampling handles the final measurement separately, so the same emitted artifact can also be used by `cudaq.observe()`.
+# In a QAOA optimizer, you can keep the same circuit and replace `ExecutableProgram.sample()` plus decoding with `executor.estimate(circuit, hamiltonian, params=...)`.
+#
+# When calling `executor.estimate(...)` directly, you provide the flat parameter order expected by the CUDA-Q artifact yourself.
+
+# %%
 unbound_circuit = executable.get_first_circuit()
 assert unbound_circuit is not None
 assert unbound_circuit.execution_mode == ExecutionMode.STATIC
@@ -340,53 +399,10 @@ energy_via_estimate = executor.estimate(
     unbound_circuit, cost_hamiltonian, params=flat_params
 )
 print(f"executor.estimate: {energy_via_estimate:+.10f}")
-assert np.isfinite(energy_via_estimate)
-
-# %% [markdown]
-# `ExecutableProgram.run(...)` can also drive expectation-value kernels directly.
-# In the next kernel, the observable is a Qamomile runtime argument and the kernel returns `qmc.expval(...)` instead of measured bits.
-# This higher-level path also reaches `CudaqExecutor.estimate`, but the observable and parameter bindings are managed by Qamomile's `ExecutableProgram`.
-
-
-# %%
-@qmc.qkernel
-def qaoa_expval(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    obs: qmc.Observable,
-) -> qmc.Float:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return qmc.expval(q, obs)
-
-
-expval_executable = transpiler.transpile(
-    qaoa_expval,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-        "obs": cost_hamiltonian,
-    },
-    parameters=["gammas", "betas"],
-)
-energy_from_run = expval_executable.run(
-    executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-).result()
-
-print(f"ExecutableProgram.run: {energy_from_run:+.10f}")
 assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 
 # %% [markdown]
-# Both paths agree to numerical precision.
+# The `run()` and `executor.estimate(...)` paths agree to numerical precision.
 # They evaluate the same QAOA state against the same Ising cost Hamiltonian.
 # The resulting noise-free expectation value at the optimized parameters should also match the sample-mean energy printed earlier within shot noise.
 
@@ -399,11 +415,13 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # The `ExecutableProgram` carries the emitted CUDA-Q artifact, while the executor chooses the target used at execution time.
 # The list of simulator targets you can select is maintained in CUDA-Q's [Circuit Simulation](https://nvidia.github.io/cuda-quantum/latest/using/simulators.html) documentation, and CUDA-Q's [Running on a GPU](https://nvidia.github.io/cuda-quantum/latest/using/basics/run_kernel.html#running-on-a-gpu) section shows the same `qpp-cpu` / `nvidia` target pattern directly.
 #
+# :::{note}
 # This tutorial also works well in Google Colab.
 # To try the GPU target there, choose a GPU runtime before running the notebook, install the CUDA-Q extras that match the runtime, and then run the cells below.
 # CUDA-Q uses `qpp-cpu` as the CPU simulator target and `nvidia` as the local NVIDIA GPU simulator target.
+# :::
 #
-# As a concrete example, we sample the **same** optimized QAOA `ExecutableProgram` on the CPU and GPU targets.
+# As a concrete example, we sample the same optimized QAOA `ExecutableProgram` on the CPU and GPU targets.
 # Both runs below are noise-free: we do not install a CUDA-Q noise model, and each target uses the same QAOA circuit and the same parameter vector.
 # We also set the same CUDA-Q random seed before each sampling call.
 # The finite-shot samples are still produced by each target's simulator, so we compare the sampled mean energies with a tolerance and plot the energy histograms rather than relying on identical raw shot ordering.
@@ -610,3 +628,4 @@ else:
 # ### See also
 #
 # - [QURI Parts Support](quri_parts_support.ipynb) covers the same MaxCut QAOA workflow on the QURI Parts backend.
+# - [Qiskit Support](qiskit_support.ipynb) covers the same workflow on Qiskit, including Aer simulators, Qiskit primitives, and native Qiskit circuit features.
