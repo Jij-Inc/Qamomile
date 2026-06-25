@@ -18,7 +18,7 @@
 # tags: [algorithm, primitive, resource-estimation]
 # ---
 #
-# # Introduction to Quantum Phase Estimation
+# # Introduction to the Quantum Phase Estimation (QPE)
 #
 # Quantum Phase Estimation (QPE) estimates the eigenphase $\phi$ of a unitary
 # $U$ from an eigenstate $|\psi\rangle$ satisfying
