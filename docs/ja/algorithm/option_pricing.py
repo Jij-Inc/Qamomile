@@ -44,7 +44,7 @@ from qamomile.qiskit import QiskitTranspiler
 # ### 問題: オプションプライシング
 #
 # 金融リスクの計算は、大きな需要があります。
-# モンテカルロ (MC) 計算はその中心的な計算手法ですあり、Value at Risk (VaR) の推定や店頭デリバティブのプライシング決定など、幅広く用いられています。
+# モンテカルロ (MC) 計算はその中心的な計算手法であり、Value at Risk (VaR) の推定や店頭デリバティブのプライシング決定など、幅広く用いられています。
 # しかし収束が悪く、その誤差は $\varepsilon = \mathcal{O} (M^{-1/2})$ で減衰するという欠点があります。
 # ここで $M$ はサンプル数です。  
 # 対象となる確率分布が量子状態として準備される場合、量子振幅推定 (QAE) により、期待値などの統計量を $\mathcal{O} (M^{-1})$ で推定できることが知られています。
@@ -60,7 +60,7 @@ from qamomile.qiskit import QiskitTranspiler
 # もう一つの重要な先行研究として、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6)があります。
 # これはプライシングに対してではなく、VaR や Conditional Value at Risk (CVaR) に QAE を適用した研究です。
 # 先ほどの[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算を改良し、必要量子ビット数・ゲート数の大幅な削減に成功しました。  
-# そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算手法をオプションプラインシングに拡張し、NISQフレンドリーな実装を示しました。
+# そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算手法をオプションプライシングに拡張し、NISQフレンドリーな実装を示しました。
 #
 # ## アルゴリズム: NISQでのオプションプライシング計算
 #
@@ -79,7 +79,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # のようになります。
 # この重み $\sqrt{1-a}, \sqrt{a}$ を求めることを可能にするのが、QAEです。
-# これをオプションプラインシングに応用することを考えましょう。
+# これをオプションプライシングに応用することを考えましょう。
 # アセットが取りうる値を $S_i$、その値が出る確率を $p_i$ とします。
 # ペイオフ $f$ を伴うオプションに対し、演算子 $\mathcal{A}$ が以下のような状態を作れるとします。
 #
@@ -115,7 +115,7 @@ from qamomile.qiskit import QiskitTranspiler
 # $$
 #
 # は、制御 $R_y$ ゲートのみで効率的に実装することができます。
-# $i$ を量子ビット $j$ ($j \in \{0, 1, \dots, n-1\}$) を用いて $i=\sum_{j=0}^{n-1} 2^j j$ のようにバイナリ表現したものと $R_y$ の加法性を組合せることで、各量子ビット $\vert j \rangle$ をコントロールとしてペイオフ量子ビットに $R_y (2 \cdot 2^j f_1)$ をかけるだけで、$\sin [f(i)]$ を実現することができます。
+# $i$ を量子ビット $j$ ($j \in \{0, 1, \dots, n-1\}$) を用いて $i=\sum_{j=0}^{n-1} 2^j b_j \ (b_j \in \{0, 1\})$ のようにバイナリ表現したものと $R_y$ の加法性を組合せることで、各量子ビット $\vert j \rangle$ をコントロールとしてペイオフ量子ビットに $R_y (2 \cdot 2^j f_1)$ をかけるだけで、$\sin [f(i)]$ を実現することができます。
 # $f_0$ は定数であることから、単純な $R_y$ で実装することができます。
 # $R_y (\alpha) R_y (\beta) = R_y (\alpha + \beta)$ のような加法性から、これらを組合せることで $\vert i \rangle_n [\cos (f_0 + f_1 i ) \vert 0 \rangle + \sin (f_0 + f_1 i ) \vert 1 \rangle]$ を実装することができることがわかります。
 #
@@ -158,7 +158,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # のように $f(i)$ を規格化したもので、その値の範囲は $\tilde{f}(i) \in [-1, 1]$ となります。
 # ここで、$f_\mathrm{max} = \max_i f(i), f_\mathrm{min} = \min_i f(i)$ です。
-# (11)式から、ペイオフ量子ビットが $\vert 1 \rangle$ となる確率は
+# (7)式から、ペイオフ量子ビットが $\vert 1 \rangle$ となる確率は
 #
 # $$
 # P_1 
