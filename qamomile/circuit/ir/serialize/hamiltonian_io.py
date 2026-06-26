@@ -94,7 +94,7 @@ def hamiltonian_to_dict(h: Hamiltonian) -> dict[str, Any]:
         )
     terms: list[list[Any]] = []
     for operators, coeff in h.terms.items():
-        ops_wire = [[op.pauli.name, int(op.index)] for op in operators]
+        ops_wire = [_operator_to_wire(op) for op in operators]
         terms.append([ops_wire, _coeff_to_wire(coeff)])
     return {
         _HAMILTONIAN_TAG: True,
@@ -137,12 +137,7 @@ def dict_to_hamiltonian(d: dict[str, Any]) -> Hamiltonian:
     """
     if not is_hamiltonian_wrapper(d):
         raise ValueError("dict_to_hamiltonian() called with a non-wrapper dict")
-    num_qubits = d.get("num_qubits")
-    if num_qubits is not None and (not is_plain_int(num_qubits) or num_qubits < 0):
-        raise ValueError(
-            f"Hamiltonian wrapper 'num_qubits' must be a non-negative int or "
-            f"None, got {num_qubits!r}"
-        )
+    num_qubits = _num_qubits_from_wire(d.get("num_qubits"))
     raw_terms = d.get("terms")
     if not isinstance(raw_terms, list):
         raise ValueError("Hamiltonian wrapper 'terms' must be a list")
@@ -166,6 +161,22 @@ def dict_to_hamiltonian(d: dict[str, Any]) -> Hamiltonian:
         operators = tuple(_operator_from_wire(raw_op) for raw_op in raw_ops)
         h.add_term(operators, _coeff_from_wire(raw_coeff))
     return h
+
+
+def _operator_to_wire(op: PauliOperator) -> list[Any]:
+    """Encode one ``PauliOperator`` into a ``[pauli_name, qubit_index]`` entry.
+
+    The inverse of :func:`_operator_from_wire`.
+
+    Args:
+        op (PauliOperator): The operator to encode.
+
+    Returns:
+        list[Any]: A two-element list ``[pauli_name, qubit_index]`` whose
+            first element is the ``Pauli`` member name (``"X"`` / ``"Y"`` /
+            ``"Z"`` / ``"I"``) and second element is a plain Python int.
+    """
+    return [op.pauli.name, int(op.index)]
 
 
 def _operator_from_wire(raw_op: Any) -> PauliOperator:
@@ -317,3 +328,29 @@ def _num_qubits_to_wire(num_qubits: Any) -> int | None:
             f"Hamiltonian declared num_qubits must be non-negative, got {num_qubits!r}"
         )
     return num_qubits
+
+
+def _num_qubits_from_wire(raw: Any) -> int | None:
+    """Decode and validate a wrapper's declared register width.
+
+    The inverse of :func:`_num_qubits_to_wire`. ``None`` (an undeclared
+    width) is a legitimate value and passes through unchanged; any other
+    value must be a non-negative, non-bool int.
+
+    Args:
+        raw (Any): The wire value of the ``num_qubits`` field — ``None`` or
+            an int.
+
+    Returns:
+        int | None: ``None`` unchanged, or the validated non-negative int.
+
+    Raises:
+        ValueError: If ``raw`` is neither ``None`` nor a non-negative int
+            (``bool`` is rejected even though it subclasses int).
+    """
+    if raw is not None and (not is_plain_int(raw) or raw < 0):
+        raise ValueError(
+            f"Hamiltonian wrapper 'num_qubits' must be a non-negative int or "
+            f"None, got {raw!r}"
+        )
+    return raw
