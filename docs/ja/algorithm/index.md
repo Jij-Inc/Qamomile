@@ -19,4 +19,5 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 - [量子カーネル法](quantum_kernel_classification) — 量子特徴マップとカーネル法を使ってmake_circlesデータセットの分類を行う
 - [Quantum-enhanced MCMCを実装する](qe_mcmc) — トロッター分解による時間発展を利用して、Quantum-enhanced MCMCを実装
 - [Möttönen振幅エンコーディング](mottonen_amplitude_encoding) — Gray符号Ry/Rz多重制御回転で任意の実数・複素振幅ベクトルを準備する。3つの入力モード（具体値、バインドされた`Vector[Float]`、ランタイムパラメトリックな角度）を扱う
+- [多次元量子フーリエ変換](multidimensional_qft) — 多次元量子フーリエ変換の実装例の紹介、さらにグリッド数が2のべき乗でない場合に対応するための古典前処理手法を示した
 - [PCEによるMaxCut](pce_maxcut) — Pauli Correlation Encodingを使い、20変数MaxCutを**わずか3量子ビット**で解く。ハードウェア効率的なアンザッツをtanh緩和された代理損失で学習し、符号丸めで離散解を復元する
