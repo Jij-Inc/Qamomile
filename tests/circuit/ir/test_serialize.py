@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 
 # Real algorithm kernels used by TestRealAlgorithmRoundTrip below.
 from qamomile.circuit.algorithm.basic import (  # noqa: E402
@@ -41,6 +42,10 @@ from qamomile.circuit.ir.serialize import (
     load_json,
     load_msgpack,
     to_dict,
+)
+from qamomile.circuit.ir.serialize.hamiltonian_io import (
+    dict_to_hamiltonian,
+    hamiltonian_to_dict,
 )
 from qamomile.circuit.ir.serialize.numpy_io import array_to_dict, dict_to_array
 from qamomile.circuit.ir.types.primitives import (
@@ -181,6 +186,22 @@ def _symbolic_multi_arg_controlled(
     op = qmc.control(qmc.x, num_controls=nc)
     ctrl_main, prefix, target = op(ctrl_main, prefix, target)
     return ctrl_main, prefix, target
+
+
+@qmc.qkernel
+def _trotter_observable_kernel(
+    q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], t: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Trotter-style kernel whose ``Vector[Observable]`` is bound at build time.
+
+    Binding ``Hs`` bakes the ``Hamiltonian`` objects into
+    ``ParamSlot.bound_value`` and ``ArrayRuntimeMetadata.const_array``,
+    which the serializer must carry through the ``$hamiltonian``
+    payload wrapper.
+    """
+    for i in qmc.range(Hs.shape[0]):
+        q = qmc.pauli_evolve(q, Hs[i], t)
+    return qmc.measure(q)
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +603,207 @@ class TestNumpyWrapper:
         assert isinstance(restored_slot.bound_value, np.ndarray)
         assert np.array_equal(restored_slot.bound_value, original)
         assert restored_slot.bound_value.dtype == original.dtype
+
+
+# ---------------------------------------------------------------------------
+# Hamiltonian payloads (bound Observable parameters)
+# ---------------------------------------------------------------------------
+
+
+class TestHamiltonianPayloadRoundTrip:
+    """A bound ``Vector[Observable]`` kernel round-trips its Hamiltonians."""
+
+    @pytest.mark.parametrize(
+        "dump, load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+        ids=["json", "msgpack"],
+    )
+    def test_bound_observable_vector_round_trip(self, dump, load):
+        """``to_dict`` / ``content_hash`` equality plus payload fidelity.
+
+        The documented Trotter pattern binds a list of Hamiltonians at
+        build time; both wire formats must reproduce the exact
+        intermediate dict, the canonical content hash, and Hamiltonian
+        payloads equal to the originals in both ``ParamSlot.bound_value``
+        and the Hs array's ``const_array`` metadata.
+        """
+        hs = [1.2 * qm_o.Z(0), 0.8 * qm_o.X(0)]
+        block = InlinePass().run(
+            _trotter_observable_kernel.build(Hs=hs, parameters=["t"])
+        )
+        restored = load(dump(block))
+
+        assert to_dict(restored) == to_dict(block)
+        assert content_hash(restored) == content_hash(block)
+
+        slot = next(s for s in restored.param_slots if s.name == "Hs")
+        assert slot.kind == ParamKind.COMPILE_TIME_BOUND
+        assert isinstance(slot.bound_value, list)
+        assert slot.bound_value == hs
+        for restored_h, original_h in zip(slot.bound_value, hs):
+            assert isinstance(restored_h, qm_o.Hamiltonian)
+            assert repr(restored_h) == repr(original_h)
+            assert restored_h.num_qubits == original_h.num_qubits
+
+        hs_value = next(v for v in restored.input_values if v.name == "Hs")
+        assert hs_value.metadata.array_runtime is not None
+        const_array = hs_value.metadata.array_runtime.const_array
+        assert const_array is not None
+        assert list(const_array) == hs
+
+
+class TestHamiltonianWrapper:
+    """Direct unit tests for the ``$hamiltonian`` payload codec."""
+
+    def test_wire_shape_matches_schema(self):
+        """The wrapper dict has exactly the documented shape."""
+        wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
+        assert wrapper == {
+            "$hamiltonian": True,
+            "terms": [[[["Z", 0]], 1.2]],
+            "constant": 0.0,
+            "num_qubits": 1,
+        }
+
+    def test_round_trip_preserves_term_order_and_complex_coeffs(self):
+        """Complex coefficients and term insertion order survive the wrapper.
+
+        ``X(0) * Y(0)`` folds to ``1j * Z(0)`` and is inserted after the
+        ``Y(2)`` term, so the term dict is NOT sorted by qubit index —
+        order preservation is what keeps ``repr`` (and thus
+        ``content_hash``) stable across the round-trip.
+        """
+        h = (1 + 0.5j) * qm_o.Y(2) + qm_o.X(0) * qm_o.Y(0)
+        restored = dict_to_hamiltonian(hamiltonian_to_dict(h))
+        assert restored == h
+        assert repr(restored) == repr(h)
+        assert list(restored.terms) == list(h.terms)
+        for original_coeff, restored_coeff in zip(
+            h.terms.values(), restored.terms.values()
+        ):
+            assert type(restored_coeff) is type(original_coeff)
+            assert restored_coeff == original_coeff
+
+    def test_multi_qubit_product_round_trip(self):
+        """A multi-operator Pauli product keeps every factor."""
+        h = 0.7 * qm_o.Z(0) * qm_o.Z(1) + 0.3 * qm_o.X(0)
+        restored = dict_to_hamiltonian(hamiltonian_to_dict(h))
+        assert restored == h
+        assert repr(restored) == repr(h)
+
+    def test_float_coeff_stays_float(self):
+        """A real coefficient is not widened to complex by the round-trip."""
+        h = 1.2 * qm_o.Z(0)
+        restored = dict_to_hamiltonian(hamiltonian_to_dict(h))
+        (coeff,) = restored.terms.values()
+        assert type(coeff) is float
+        assert coeff == 1.2
+
+    def test_constant_and_declared_num_qubits_preserved(self):
+        """An int constant and the declared register width round-trip."""
+        h = qm_o.Hamiltonian.identity(2, num_qubits=5)
+        restored = dict_to_hamiltonian(hamiltonian_to_dict(h))
+        assert restored.constant == 2
+        assert type(restored.constant) is int
+        assert restored.num_qubits == 5
+
+    def test_numpy_scalar_coefficients_serialize_as_plain_numbers(self):
+        """numpy scalar coefficients (np.float64 / np.complex128) round-trip.
+
+        Real Hamiltonian builders carry numpy scalars — e.g. a coefficient
+        from ``np.sqrt(...)`` is an ``np.float64`` — which are not Python
+        ``float`` / ``complex`` instances. The wrapper coerces them via
+        ``.item()`` so they serialize like plain numbers (and decode back to
+        Python scalars) instead of being rejected as unencodable.
+        """
+        h = qm_o.Hamiltonian()
+        h.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), np.float64(np.sqrt(2.0)))
+        h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 1),), np.complex128(0.5 + 0.25j))
+        h.constant = np.float64(2.0)
+        restored = dict_to_hamiltonian(hamiltonian_to_dict(h))
+        real_coeff, complex_coeff = restored.terms.values()
+        assert type(real_coeff) is float
+        assert type(complex_coeff) is complex
+        assert type(restored.constant) is float
+        # value fidelity: numpy scalars coerce to the equal Python scalar,
+        # so the reconstructed Hamiltonian compares equal term-for-term.
+        assert restored == h
+
+    def test_numpy_bool_constant_rejected(self):
+        """A ``numpy.bool_`` constant is rejected like a Python ``bool``.
+
+        Hamiltonian coefficients are never boolean. Setting the constant to a
+        ``numpy.bool_`` reaches the guard directly (unlike ``add_term``, whose
+        internal ``phase * coeff`` would coerce a bool to a float first), and
+        ``.item()`` collapses it to a Python ``bool`` so the guard fires.
+        """
+        h = qm_o.Hamiltonian()
+        h.constant = np.bool_(True)
+        with pytest.raises(TypeError, match="must not be bool"):
+            hamiltonian_to_dict(h)
+
+    def test_negative_num_qubits_rejected(self):
+        """A negative declared register width is rejected on decode."""
+        wrapper = hamiltonian_to_dict(qm_o.Hamiltonian.identity(1.0, num_qubits=2))
+        wrapper["num_qubits"] = -1
+        with pytest.raises(ValueError, match="non-negative int"):
+            dict_to_hamiltonian(wrapper)
+
+    def test_numpy_int_declared_num_qubits_coerced_on_encode(self):
+        """A numpy integer declared width is coerced to a Python int on encode.
+
+        ``Hamiltonian(num_qubits=np.int64(...))`` stores a numpy scalar; without
+        coercion the wrapper would carry a non-JSON-serializable value and
+        ``dump_json`` would fail. The encoder ``.item()``-coerces it to a plain
+        int and the width round-trips.
+        """
+        h = qm_o.Hamiltonian(num_qubits=np.int64(3))
+        h.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)
+        wrapper = hamiltonian_to_dict(h)
+        assert type(wrapper["num_qubits"]) is int
+        assert wrapper["num_qubits"] == 3
+        restored = dict_to_hamiltonian(wrapper)
+        assert restored.num_qubits == h.num_qubits
+
+    def test_negative_declared_num_qubits_rejected_on_encode(self):
+        """A negative declared register width is rejected when encoding."""
+        h = qm_o.Hamiltonian(num_qubits=-1)
+        with pytest.raises(ValueError, match="non-negative"):
+            hamiltonian_to_dict(h)
+
+    def test_empty_operator_list_rejected(self):
+        """A term with an empty operator list is rejected on decode.
+
+        The encoder never emits an empty operator list — the constant lives in
+        the dedicated ``constant`` field — so an empty list is malformed wire
+        data that would otherwise fold into the constant via ``add_term`` and
+        double-encode it.
+        """
+        wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
+        wrapper["terms"].append([[], 3.0])
+        with pytest.raises(ValueError, match="non-empty list"):
+            dict_to_hamiltonian(wrapper)
+
+    def test_negative_qubit_index_rejected(self):
+        """A negative qubit index in a term operator is rejected on decode."""
+        wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
+        wrapper["terms"][0][0][0][1] = -1
+        with pytest.raises(ValueError, match="non-negative int"):
+            dict_to_hamiltonian(wrapper)
+
+    def test_unknown_pauli_name_rejected(self):
+        """A Pauli name outside the allow-map raises on decode."""
+        wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
+        wrapper["terms"][0][0][0][0] = "Q"
+        with pytest.raises(ValueError, match="allow-map"):
+            dict_to_hamiltonian(wrapper)
+
+    def test_malformed_coefficient_rejected(self):
+        """A non-numeric coefficient raises on decode."""
+        wrapper = hamiltonian_to_dict(1.2 * qm_o.Z(0))
+        wrapper["terms"][0][1] = "not-a-number"
+        with pytest.raises(ValueError, match="coefficient"):
+            dict_to_hamiltonian(wrapper)
 
 
 # ---------------------------------------------------------------------------
