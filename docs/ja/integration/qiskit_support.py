@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [integration, optimization, variational, circuit-compilation]
+# tags: [integration, optimization, variational]
 # ---
 #
 # # Qiskitサポート

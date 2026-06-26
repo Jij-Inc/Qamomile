@@ -21,9 +21,7 @@
 #
 # This page shows how to use Qamomile's [CUDA-Q](https://nvidia.github.io/cuda-quantum/latest/) quantum SDK integration through a concrete optimization problem.
 # In this tutorial, we use QAOA optimization for a small MaxCut instance as an example. We transpile a Qamomile qkernel to CUDA-Q, then run sampling and expectation-value evaluation.
-# A `CUDA-Q target` is the execution backend CUDA-Q uses for kernel execution, such as the `qpp-cpu` CPU simulator, the `nvidia` GPU simulator, or a configured QPU backend.
-# `CudaqExecutor` uses the currently selected CUDA-Q target. If you do not choose a target explicitly, CUDA-Q uses its default target, so the examples below run in a local CPU-only environment without extra configuration.
-# Later, we run the same QAOA circuit on the CPU target (`qpp-cpu`) and GPU target (`nvidia`) and compare the sampled results and execution time.
+# Later, we run the same QAOA circuit on CPU and GPU simulators and compare the sampled results and execution time.
 # Along the way, we inspect the generated CUDA-Q source and compare Qamomile's `STATIC` and `RUNNABLE` CUDA-Q execution modes.
 
 # %%
@@ -225,7 +223,6 @@ print(cudaq_artifact.source)
 # `executable.sample(executor, bindings=..., shots=...)` returns a `SampleJob`.
 # Calling `.result()` gives a `SampleResult`, which `BinaryModel.decode_from_sampleresult` decodes into a `BinarySampleSet` of spin variables $(+1 / -1)$.
 # This lets us count cut edges without any additional conversion.
-# `CudaqExecutor()` runs against the currently selected CUDA-Q target: the execution backend CUDA-Q uses for kernel calls.
 
 # %%
 rng = np.random.default_rng(42)
@@ -410,7 +407,9 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # %% [markdown]
 # ## Choosing CUDA-Q targets: Using the GPU target
 #
-# `CudaqExecutor()` uses the current CUDA-Q target, while `CudaqExecutor(target=...)` or `CudaqTranspiler.executor(target=...)` selects a target explicitly.
+# A `CUDA-Q target` is the execution backend CUDA-Q uses for kernel calls, such as the `qpp-cpu` CPU simulator, the `nvidia` GPU simulator, or a configured QPU backend.
+# `CudaqExecutor()` uses the currently selected CUDA-Q target. If you do not choose a target explicitly, CUDA-Q uses its default target, so the examples above run in a local CPU-only environment without extra configuration.
+# `CudaqExecutor(target=...)` or `CudaqTranspiler.executor(target=...)` selects a target explicitly.
 # The custom executor can be used anywhere `executor` appeared above.
 # Changing the CUDA-Q target does not require re-transpiling the kernel.
 # The `ExecutableProgram` carries the emitted CUDA-Q artifact, while the executor chooses the target used at execution time.
