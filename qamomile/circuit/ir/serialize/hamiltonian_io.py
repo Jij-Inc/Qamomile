@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from qamomile._utils import is_plain_int
 from qamomile.observable.hamiltonian import Hamiltonian, Pauli, PauliOperator
 
 _HAMILTONIAN_TAG = "$hamiltonian"
@@ -137,7 +138,7 @@ def dict_to_hamiltonian(d: dict[str, Any]) -> Hamiltonian:
     if not is_hamiltonian_wrapper(d):
         raise ValueError("dict_to_hamiltonian() called with a non-wrapper dict")
     num_qubits = d.get("num_qubits")
-    if num_qubits is not None and (not _is_plain_int(num_qubits) or num_qubits < 0):
+    if num_qubits is not None and (not is_plain_int(num_qubits) or num_qubits < 0):
         raise ValueError(
             f"Hamiltonian wrapper 'num_qubits' must be a non-negative int or "
             f"None, got {num_qubits!r}"
@@ -193,7 +194,7 @@ def _operator_from_wire(raw_op: Any) -> PauliOperator:
             f"Pauli name {name!r} is not in the serialization allow-map "
             f"{sorted(_PAULI_BY_NAME)}"
         )
-    if not _is_plain_int(index) or index < 0:
+    if not is_plain_int(index) or index < 0:
         raise ValueError(
             f"Pauli operator qubit index must be a non-negative int, got {index!r}"
         )
@@ -306,7 +307,7 @@ def _num_qubits_to_wire(num_qubits: Any) -> int | None:
         return None
     if isinstance(num_qubits, np.generic):
         num_qubits = num_qubits.item()
-    if not _is_plain_int(num_qubits):
+    if not is_plain_int(num_qubits):
         raise TypeError(
             f"Hamiltonian declared num_qubits must be an int or None, got "
             f"{type(num_qubits).__name__}"
@@ -316,15 +317,3 @@ def _num_qubits_to_wire(num_qubits: Any) -> int | None:
             f"Hamiltonian declared num_qubits must be non-negative, got {num_qubits!r}"
         )
     return num_qubits
-
-
-def _is_plain_int(value: Any) -> bool:
-    """Return True for ints that are not bools.
-
-    Args:
-        value (Any): The value to check.
-
-    Returns:
-        bool: ``True`` when ``value`` is an ``int`` and not a ``bool``.
-    """
-    return isinstance(value, int) and not isinstance(value, bool)
