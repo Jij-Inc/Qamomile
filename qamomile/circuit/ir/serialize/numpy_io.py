@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from qamomile._utils import is_plain_int
+
 # Allow-list of dtype names the decoder accepts. Anything outside this
 # set raises ValueError. Keep limited to dtypes qamomile actually uses
 # in IR payloads (binding values + metadata).
@@ -119,9 +121,7 @@ def dict_to_array(d: dict[str, Any]) -> np.ndarray:
             f"allow-list {sorted(_ALLOWED_DTYPES)}"
         )
     raw_shape = d.get("shape")
-    if not isinstance(raw_shape, list) or not all(
-        isinstance(x, int) for x in raw_shape
-    ):
+    if not isinstance(raw_shape, list) or not all(is_plain_int(x) for x in raw_shape):
         raise ValueError("numpy wrapper 'shape' must be a list of ints")
     shape = tuple(raw_shape)
     data = d.get("data")

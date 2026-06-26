@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     CompositeGateOperation,
@@ -707,7 +708,7 @@ def _decode_qreg_width(value: Any, ctx: _DecodeContext) -> Any:
     Raises:
         ValueError: If the width has an unrecognized shape.
     """
-    if isinstance(value, int):
+    if is_plain_int(value):
         return value
     if isinstance(value, dict) and "$value_ref" in value:
         return _materialize_as_value(ctx, value["$value_ref"])
@@ -1325,7 +1326,7 @@ def _decode_power(value: Any, ctx: _DecodeContext) -> Any:
     Raises:
         ValueError: If the payload shape is unrecognized.
     """
-    if isinstance(value, int):
+    if is_plain_int(value):
         return value
     if isinstance(value, dict) and "$value_ref" in value:
         return _materialize_as_value(ctx, value["$value_ref"])
