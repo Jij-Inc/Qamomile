@@ -21,7 +21,8 @@
 #
 # このページでは、具体的な最適化問題を通して、Qamomileの[CUDA-Q](https://nvidia.github.io/cuda-quantum/latest/)量子SDK連携を紹介します。
 # このチュートリアルでは、小さなMaxCutインスタンスに対するQAOA最適化を例に、Qamomileの量子カーネルをCUDA-Q向けにトランスパイルし、サンプリングと期待値評価を行います。
-# `CudaqExecutor`は現在activeなCUDA-Q targetを使います。既定ではCUDA-QのローカルCPUシミュレータが使われるため、以下の例は追加設定なしでローカルCPU上で実行できます。
+# `CUDA-Q target`は、CUDA-Qが量子カーネルを実行するために使う実行バックエンドです。たとえばCPUシミュレータの`qpp-cpu`、GPUシミュレータの`nvidia`、設定済みの実機QPU向けtargetなどがあります。
+# `CudaqExecutor`は現在選択されているCUDA-Q targetを使います。targetを明示しない場合はCUDA-Qの既定targetが使われるため、CPUのみのローカル環境では追加設定なしで以下の例を実行できます。
 # 後半では、同じQAOA回路をCPU target(`qpp-cpu`)とGPU target(`nvidia`)で実行し、サンプル結果と実行時間を比較します。
 # その過程で、生成されたCUDA-Qソースを確認し、Qamomileの`STATIC` modeと`RUNNABLE` modeの違いも確認します。
 
@@ -226,7 +227,7 @@ print(cudaq_artifact.source)
 # `executable.sample(executor, bindings=..., shots=...)`は`SampleJob`を返します。
 # `.result()`で得られる`SampleResult`は、`BinaryModel.decode_from_sampleresult`でスピン変数$(+1 / -1)$の`BinarySampleSet`へデコードできます。
 # これにより、追加の変換なしでカット辺を数えられます。
-# `CudaqExecutor()`は現在activeなCUDA-Q target上で動作します。既定ではCUDA-QのローカルCPUシミュレータです。
+# `CudaqExecutor()`は現在選択されているCUDA-Q target上で動作します。これはCUDA-Qが量子カーネル呼び出しに使う実行バックエンドです。
 
 # %%
 rng = np.random.default_rng(42)

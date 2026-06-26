@@ -21,7 +21,8 @@
 #
 # This page shows how to use Qamomile's [CUDA-Q](https://nvidia.github.io/cuda-quantum/latest/) quantum SDK integration through a concrete optimization problem.
 # In this tutorial, we use QAOA optimization for a small MaxCut instance as an example. We transpile a Qamomile qkernel to CUDA-Q, then run sampling and expectation-value evaluation.
-# `CudaqExecutor` uses the currently active CUDA-Q target. By default, CUDA-Q's local CPU simulator is used, so the examples below run on a local CPU without any extra configuration.
+# A `CUDA-Q target` is the execution backend CUDA-Q uses for kernel execution, such as the `qpp-cpu` CPU simulator, the `nvidia` GPU simulator, or a configured QPU backend.
+# `CudaqExecutor` uses the currently selected CUDA-Q target. If you do not choose a target explicitly, CUDA-Q uses its default target, so the examples below run in a local CPU-only environment without extra configuration.
 # Later, we run the same QAOA circuit on the CPU target (`qpp-cpu`) and GPU target (`nvidia`) and compare the sampled results and execution time.
 # Along the way, we inspect the generated CUDA-Q source and compare Qamomile's `STATIC` and `RUNNABLE` CUDA-Q execution modes.
 
@@ -224,7 +225,7 @@ print(cudaq_artifact.source)
 # `executable.sample(executor, bindings=..., shots=...)` returns a `SampleJob`.
 # Calling `.result()` gives a `SampleResult`, which `BinaryModel.decode_from_sampleresult` decodes into a `BinarySampleSet` of spin variables $(+1 / -1)$.
 # This lets us count cut edges without any additional conversion.
-# `CudaqExecutor()` runs against the currently active CUDA-Q target; by default that is CUDA-Q's local CPU simulator.
+# `CudaqExecutor()` runs against the currently selected CUDA-Q target: the execution backend CUDA-Q uses for kernel calls.
 
 # %%
 rng = np.random.default_rng(42)
