@@ -141,8 +141,11 @@ plt.show()
 # Here we use three qubits for each coordinate register, one for the $x$ direction and one for the $y$ direction.
 # In other words, we zero-pad the data so that each dimension has $2^3 = 8$ grid points.
 
+
 # %%
-def padding_array(array_2d: np.ndarray, num_x_target: int, num_y_target: int) -> np.ndarray:
+def padding_array(
+    array_2d: np.ndarray, num_x_target: int, num_y_target: int
+) -> np.ndarray:
     num_x, num_y = array_2d.shape
     pad_width_x = num_x_target - num_x
     pad_width_y = num_y_target - num_y
@@ -150,7 +153,9 @@ def padding_array(array_2d: np.ndarray, num_x_target: int, num_y_target: int) ->
     pad_x_right = int(np.floor(pad_width_x / 2.0))
     pad_y_left = int(np.ceil(pad_width_y / 2.0))
     pad_y_right = int(np.floor(pad_width_y / 2.0))
-    array_2d_padding = np.pad(array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right)))
+    array_2d_padding = np.pad(
+        array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right))
+    )
     return array_2d_padding
 
 
@@ -176,6 +181,7 @@ plt.show()
 # #### Implementing the flat-top window function
 #
 # Next, implement a window function to suppress side lobes.
+
 
 # %%
 def w5(N: int) -> np.ndarray:
@@ -210,6 +216,7 @@ plt.show()
 #
 # Use Qamomile's `QFT` class to implement multidimensional QFT.
 
+
 # %%
 @qmc.qkernel
 def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -241,6 +248,7 @@ exe = transpiler.transpile(qft_for_multidimension, bindings={"inputs": f_flatten
 #
 # Run the transpiled program and map the sampled bitstrings to probabilities on the two-dimensional reciprocal-space grid.
 
+
 # %%
 def compute_prob(result: SampleResult) -> np.ndarray:
     prob = np.zeros(f_padding.shape)
@@ -260,6 +268,7 @@ prob = compute_prob(result1)
 # ### Comparison with a classical method: Fast Fourier transform (FFT)
 #
 # For comparison, compute the result obtained by applying the classical FFT to the same input.
+
 
 # %%
 def compute_classical_fft(f: np.ndarray) -> np.ndarray:

@@ -26,7 +26,7 @@
 # 多次元量子フーリエ変換実装を通して、Qamomileの使い方を学ぶことができます。
 
 # %%
-# Install the latest Qamomile through pip! 
+# Install the latest Qamomile through pip!
 # # !pip install qamomile
 
 # %%
@@ -141,22 +141,28 @@ plt.show()
 # ここでは、$x$方向と$y$方向の座標レジスタそれぞれに3量子ビットを使います。
 # すなわち、各次元が$2^3 = 8$個のグリッド点を持つようにゼロ埋めします。
 
+
 # %%
-def padding_array(array_2d: np.ndarray, num_x_target: int, num_y_target: int) -> np.ndarray:
-    num_x, num_y = array_2d.shape    
+def padding_array(
+    array_2d: np.ndarray, num_x_target: int, num_y_target: int
+) -> np.ndarray:
+    num_x, num_y = array_2d.shape
     pad_width_x = num_x_target - num_x
     pad_width_y = num_y_target - num_y
     pad_x_left = int(np.ceil(pad_width_x / 2.0))
     pad_x_right = int(np.floor(pad_width_x / 2.0))
     pad_y_left = int(np.ceil(pad_width_y / 2.0))
     pad_y_right = int(np.floor(pad_width_y / 2.0))
-    array_2d_padding = np.pad(array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right)))
+    array_2d_padding = np.pad(
+        array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right))
+    )
     return array_2d_padding
+
 
 Nqx = 3
 Nqy = 3
-Nx_target = 2 ** Nqx
-Ny_target = 2 ** Nqy
+Nx_target = 2**Nqx
+Ny_target = 2**Nqy
 f_padding = padding_array(f, Nx_target, Ny_target)
 
 # %% [markdown]
@@ -176,12 +182,14 @@ plt.show()
 #
 # 続いてはサイドローブを抑えるために、窓関数の実装を行いましょう。
 
+
 # %%
 def w5(N: int) -> np.ndarray:
     a = np.array([0.1881, 0.36923, 0.28702, 0.13077, 0.02488])
     n = np.arange(N)
     results = [(-1) ** k * a[k] * np.cos(2 * np.pi * k * n / N) for k in range(5)]
     return sum(results)
+
 
 wx = w5(Nx_target)
 wy = w5(Ny_target)
@@ -208,12 +216,13 @@ plt.show()
 #
 # Qamomileの`QFT`クラスを用いて、多次元QFTを実装しましょう。
 
+
 # %%
 @qmc.qkernel
 def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
     N = Nqx + Nqy
     q = qmc.qubit_array(N, name="q")
-    q = amplitude_encoding(q, inputs)  
+    q = amplitude_encoding(q, inputs)
     q[0:Nqx] = qmc.qft(q[0:Nqx])
     q[Nqx:N] = qmc.qft(q[Nqx:N])
     return qmc.measure(q)
@@ -239,6 +248,7 @@ exe = transpiler.transpile(qft_for_multidimension, bindings={"inputs": f_flatten
 #
 # トランスパイルしたものを実行し、サンプリングされたビット列を2次元の逆格子空間グリッド上の確率にマッピングしましょう。
 
+
 # %%
 def compute_prob(result: SampleResult) -> np.ndarray:
     prob = np.zeros(f_padding.shape)
@@ -249,6 +259,7 @@ def compute_prob(result: SampleResult) -> np.ndarray:
         prob[kx, ky] += count / total
     return prob
 
+
 result1 = exe.sample(transpiler.executor(), shots=2**14).result()
 prob = compute_prob(result1)
 
@@ -258,6 +269,7 @@ prob = compute_prob(result1)
 #
 # 比較のため、同じ入力に対して古典FFTを適用した場合の結果も計算しましょう。
 
+
 # %%
 def compute_classical_fft(f: np.ndarray) -> np.ndarray:
     Nx_target, Ny_target = f.shape
@@ -265,6 +277,7 @@ def compute_classical_fft(f: np.ndarray) -> np.ndarray:
     fft = np.fft.ifft2(f_normalized) * np.sqrt(Nx_target * Ny_target)
     prob = np.abs(fft) ** 2
     return prob
+
 
 prob_classical = compute_classical_fft(f_padding)
 
