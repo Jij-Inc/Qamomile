@@ -21,3 +21,4 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 - [Möttönen振幅エンコーディング](mottonen_amplitude_encoding) — Gray符号Ry/Rz多重制御回転で任意の実数・複素振幅ベクトルを準備する。3つの入力モード（具体値、バインドされた`Vector[Float]`、ランタイムパラメトリックな角度）を扱う
 - [多次元量子フーリエ変換](multidimensional_qft) — 多次元量子フーリエ変換の実装例の紹介、さらにグリッド数が2のべき乗でない場合に対応するための古典前処理手法を示した
 - [PCEによるMaxCut](pce_maxcut) — Pauli Correlation Encodingを使い、20変数MaxCutを**わずか3量子ビット**で解く。ハードウェア効率的なアンザッツをtanh緩和された代理損失で学習し、符号丸めで離散解を復元する
+- [グラフ彩色のためのAlternating Operator Ansatz](aoa_coloring_problem) — Dicke状態による初期状態とXYミキサーを使い、ワンホットの可行部分空間に留まったままK彩色問題をAlternating Operator Ansatzで解く

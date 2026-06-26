@@ -1,5 +1,18 @@
 """Algorithm building blocks for quantum circuits."""
 
+from .aoa import (
+    aoa_layers,
+    aoa_state_basis_state,
+    aoa_state_dicke,
+    aoa_state_superposition,
+    basis_state_preparation,
+    hubo_aoa_layers,
+    hubo_aoa_state_basis_state,
+    hubo_aoa_state_dicke,
+    hubo_aoa_state_superposition,
+    xy_mixer,
+    xy_pair_rotation,
+)
 from .arithmetic import (
     modular_decrement,
     modular_increment,
@@ -51,6 +64,18 @@ __all__ = [
     "hubo_ising_cost",
     "hubo_qaoa_layers",
     "hubo_qaoa_state",
+    # AOA
+    "basis_state_preparation",
+    "aoa_layers",
+    "aoa_state_superposition",
+    "aoa_state_dicke",
+    "aoa_state_basis_state",
+    "hubo_aoa_layers",
+    "hubo_aoa_state_superposition",
+    "hubo_aoa_state_dicke",
+    "hubo_aoa_state_basis_state",
+    "xy_mixer",
+    "xy_pair_rotation",
     # Basic layers
     "rx_layer",
     "ry_layer",
