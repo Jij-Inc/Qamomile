@@ -1256,10 +1256,11 @@ def emit_controlled_pauli_evolve(
             operation="PauliEvolveOp",
         )
 
-    # Resolve the target register against the block-local qubit map. The
-    # shared §12.1 helper walks the slice chain and returns one physical
-    # index per element, the controlled-emission analogue of the
-    # ``resolve_slice_chain`` lookup the uncontrolled path performs.
+    # Resolve the target register against the block-local qubit map.
+    # ``_expand_quantum_operands_to_phys`` walks the operand's slice chain and
+    # returns one physical qubit index per element — the controlled-emission
+    # analogue of the ``resolve_slice_chain`` lookup the uncontrolled path
+    # performs.
     qubit_indices = _expand_quantum_operands_to_phys(
         emit_pass, op.qubits, qubit_map, bindings, operation="PauliEvolveOp"
     )
@@ -1272,6 +1273,9 @@ def emit_controlled_pauli_evolve(
         )
 
     for operators, coeff in hamiltonian:
+        # Validate Hermiticity of every term (including ones skipped below)
+        # before emitting it, folded into the emission pass to avoid a second
+        # walk over a large Hamiltonian.
         if abs(coeff.imag) > 1e-10:
             raise EmitError(
                 f"PauliEvolveOp requires a Hermitian Hamiltonian "
@@ -1279,8 +1283,6 @@ def emit_controlled_pauli_evolve(
                 f"{coeff} on term {operators}.",
                 operation="PauliEvolveOp",
             )
-
-    for operators, coeff in hamiltonian:
         if abs(coeff) < 1e-15 or len(operators) == 0:
             continue
         # RZ(theta) = exp(-i*theta*Z/2); exp(-i*gamma*c*P) needs
