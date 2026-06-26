@@ -36,6 +36,7 @@ from qamomile.circuit.ir.operation.gate import (
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
@@ -305,6 +306,10 @@ def emit_controlled_operations(
             )
             _map_inverse_block_results(
                 op, inverse_control_groups, inverse_target_groups, qubit_map
+            )
+        elif isinstance(op, PauliEvolveOp):
+            emit_controlled_pauli_evolve(
+                emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
         elif isinstance(op, ForOperation):
             from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
@@ -1158,6 +1163,250 @@ def _emit_irreducible(
     emit_pass._emit_irreducible_multi_controlled_gate(
         circuit, gate_type, control_indices, target_idx, angle
     )
+
+
+def emit_controlled_pauli_evolve(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: PauliEvolveOp,
+    control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit ``exp(-i * gamma * H)`` under accumulated controls.
+
+    Lowers a controlled Pauli evolution by exploiting that each Pauli
+    term's evolution ``exp(-i * theta * P)`` factors as
+    ``U_dagger * RZ(2 * theta) * U`` where ``U`` (the basis change onto
+    the Z axis followed by the parity CX ladder) is Clifford and thus
+    control-independent. Controlling a conjugated gate is
+    ``U_dagger * C[RZ] * U`` with ``U`` / ``U_dagger`` applied
+    unconditionally: when every control is ``0`` the central ``RZ``
+    becomes the identity and ``U_dagger * I * U = I``. Only the central
+    ``RZ`` therefore carries the controls, which keeps the dense
+    multi-controlled cost to a single rotation per Hamiltonian term
+    instead of controlling every basis-change and ladder gate.
+
+    The basis-change (``H`` / ``SDG`` / ``S``) and CX-ladder gates are
+    emitted uncontrolled through ``emit_pass._emitter``; the central
+    ``RZ`` is routed through :func:`_emit_mc_rotation`, which dispatches
+    to ``emit_crz`` for a single control and to the backend's
+    ``_emit_irreducible_multi_controlled_gate`` hook for two or more.
+
+    A constant (identity) Hamiltonian term ``c * I`` is a global phase
+    ``exp(-i * gamma * c)`` for the uncontrolled evolution (correctly
+    dropped by :func:`emit_pauli_evolve`), but under controls it becomes
+    an *observable* relative phase on the all-controls-on subspace, so it
+    MUST be emitted here. It is realized as a ``P(-gamma * c)`` on one
+    control conditioned on the remaining controls (``emit_p`` for a single
+    control, a controlled / dense ``P`` for more), matching Qiskit's
+    native ``PauliEvolutionGate`` whose ``SparsePauliOp`` carries the
+    constant.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass; provides the
+            value resolver, gate emitter, and the multi-controlled
+            rotation hook.
+        circuit (Any): Backend circuit being emitted into.
+        op (PauliEvolveOp): The Pauli evolution operation inside the
+            controlled block.
+        control_indices (list[int]): Accumulated physical control
+            qubits. Must be non-empty.
+        qubit_map (QubitMap): Block-local qubit map the operation's
+            quantum operands resolve against; updated in place with the
+            evolved-register result addresses.
+        bindings (dict[str, Any]): Bindings visible inside the block,
+            used to resolve the Hamiltonian, gamma, and register shape.
+
+    Raises:
+        EmitError: If ``control_indices`` is empty, the observable does
+            not resolve to a Hamiltonian, gamma cannot be resolved, the
+            Hamiltonian is non-Hermitian (a term or the constant has a
+            non-real coefficient), the register size does not match the
+            Hamiltonian, a term qubit cannot be resolved, or (for two or
+            more controls, or a nonzero constant term) the angle is
+            runtime-parametric and the backend's dense multi-controlled
+            path requires a compile-time-numeric angle.
+    """
+    import qamomile.observable as qm_o
+    from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
+        _resolve_gamma,
+    )
+
+    if not control_indices:
+        raise EmitError(
+            "emit_controlled_pauli_evolve requires at least one control.",
+            operation="PauliEvolveOp",
+        )
+
+    hamiltonian = emit_pass._resolver.resolve_bound_value(op.observable, bindings)
+    if not isinstance(hamiltonian, qm_o.Hamiltonian):
+        raise EmitError(
+            f"PauliEvolveOp requires a Hamiltonian binding. "
+            f"Observable '{op.observable.name}' not found or not a Hamiltonian.",
+            operation="PauliEvolveOp",
+        )
+
+    gamma = _resolve_gamma(emit_pass, op, bindings)
+    if gamma is None:
+        raise EmitError(
+            "Cannot resolve gamma parameter for PauliEvolveOp. "
+            "gamma must be a concrete float binding or a declared "
+            "parameter (scalar or array element).",
+            operation="PauliEvolveOp",
+        )
+
+    # Resolve the target register against the block-local qubit map.
+    # ``_expand_quantum_operands_to_phys`` walks the operand's slice chain and
+    # returns one physical qubit index per element — the controlled-emission
+    # analogue of the ``resolve_slice_chain`` lookup the uncontrolled path
+    # performs.
+    qubit_indices = _expand_quantum_operands_to_phys(
+        emit_pass, op.qubits, qubit_map, bindings, operation="PauliEvolveOp"
+    )
+    if len(qubit_indices) != hamiltonian.num_qubits:
+        raise EmitError(
+            f"PauliEvolveOp qubit count mismatch: qubit register has "
+            f"{len(qubit_indices)} qubits but Hamiltonian acts on "
+            f"{hamiltonian.num_qubits} qubits.",
+            operation="PauliEvolveOp",
+        )
+
+    for operators, coeff in hamiltonian:
+        # Validate Hermiticity of every term (including ones skipped below)
+        # before emitting it, folded into the emission pass to avoid a second
+        # walk over a large Hamiltonian.
+        if abs(coeff.imag) > 1e-10:
+            raise EmitError(
+                f"PauliEvolveOp requires a Hermitian Hamiltonian "
+                f"(real coefficients), but found complex coefficient "
+                f"{coeff} on term {operators}.",
+                operation="PauliEvolveOp",
+            )
+        if abs(coeff) < 1e-15 or len(operators) == 0:
+            continue
+        # RZ(theta) = exp(-i*theta*Z/2); exp(-i*gamma*c*P) needs
+        # theta = 2*gamma*c. Concrete gamma stays float, parametric gamma
+        # stays a backend parameter expression so a single-control
+        # ``emit_crz`` path can bind it at run time.
+        angle: Any
+        if isinstance(gamma, (int, float)):
+            angle = 2.0 * float(coeff.real * gamma)
+        else:
+            # Parametric gamma: scale the backend parameter by 2*coeff for
+            # the central RZ. Backends whose runtime parameter type exposes
+            # no Python arithmetic (e.g. QURI Parts' Rust-backed Parameter)
+            # cannot express this scaling, so surface a clear EmitError
+            # instead of a raw TypeError. (Independently, the dense
+            # multi-controlled path used for two or more controls rejects a
+            # parametric angle because it cannot be baked into a matrix.)
+            try:
+                angle = (2.0 * float(coeff.real)) * gamma
+            except TypeError as exc:
+                raise EmitError(
+                    "Controlled Pauli evolution requires a compile-time-"
+                    "numeric gamma on this backend: its runtime parameter "
+                    "type does not support the angle scaling (2 * coeff * "
+                    "gamma) needed for the controlled central RZ. Bind gamma "
+                    "to a concrete value before transpilation.",
+                    operation="PauliEvolveOp",
+                ) from exc
+        term_qubit_indices = [qubit_indices[item.index] for item in operators]
+        pauli_types = [item.pauli for item in operators]
+
+        # Basis change onto Z (uncontrolled; the Clifford ``U``).
+        for qi, pi in zip(term_qubit_indices, pauli_types):
+            if pi == qm_o.Pauli.X:
+                emit_pass._emitter.emit_h(circuit, qi)
+            elif pi == qm_o.Pauli.Y:
+                emit_pass._emitter.emit_sdg(circuit, qi)
+                emit_pass._emitter.emit_h(circuit, qi)
+            # Z and I are already diagonal in the Z basis: no basis change.
+
+        # CX ladder (uncontrolled) wrapping the controlled central RZ.
+        if len(term_qubit_indices) == 1:
+            _emit_mc_rotation(
+                emit_pass,
+                circuit,
+                GateOperationType.RZ,
+                control_indices,
+                term_qubit_indices[0],
+                angle,
+            )
+        else:
+            for step in range(len(term_qubit_indices) - 1):
+                emit_pass._emitter.emit_cx(
+                    circuit,
+                    term_qubit_indices[step],
+                    term_qubit_indices[step + 1],
+                )
+            _emit_mc_rotation(
+                emit_pass,
+                circuit,
+                GateOperationType.RZ,
+                control_indices,
+                term_qubit_indices[-1],
+                angle,
+            )
+            for step in range(len(term_qubit_indices) - 2, -1, -1):
+                emit_pass._emitter.emit_cx(
+                    circuit,
+                    term_qubit_indices[step],
+                    term_qubit_indices[step + 1],
+                )
+
+        # Undo basis change (uncontrolled; the Clifford ``U_dagger``).
+        for qi, pi in reversed(list(zip(term_qubit_indices, pauli_types))):
+            if pi == qm_o.Pauli.X:
+                emit_pass._emitter.emit_h(circuit, qi)
+            elif pi == qm_o.Pauli.Y:
+                emit_pass._emitter.emit_h(circuit, qi)
+                emit_pass._emitter.emit_s(circuit, qi)
+            # Z and I had no basis change to undo.
+
+    # Controlled constant (identity) term. ``exp(-i*gamma*c*I)`` is a global
+    # phase for the uncontrolled evolution, but under controls it is an
+    # observable relative phase on the all-controls-on subspace, so it must
+    # be emitted. ``P(lambda) = diag(1, e^{i*lambda})`` with lambda = -gamma*c
+    # puts e^{-i*gamma*c} on the all-ones control subspace (no factor of two:
+    # this is a direct phase, not an RZ). It is applied to one control,
+    # conditioned on the rest.
+    constant = hamiltonian.constant
+    if abs(constant) > 1e-15:
+        if abs(constant.imag) > 1e-10:
+            raise EmitError(
+                f"PauliEvolveOp requires a Hermitian Hamiltonian (real "
+                f"coefficients), but found a complex constant {constant}.",
+                operation="PauliEvolveOp",
+            )
+        try:
+            if isinstance(gamma, (int, float)):
+                phase = -float(constant.real * gamma)
+            else:
+                phase = (-float(constant.real)) * gamma
+        except TypeError as exc:
+            raise EmitError(
+                "Controlled Pauli evolution requires a compile-time-numeric "
+                "gamma on this backend: its runtime parameter type does not "
+                "support the constant-term phase scaling (gamma * constant). "
+                "Bind gamma to a concrete value before transpilation.",
+                operation="PauliEvolveOp",
+            ) from exc
+        if len(control_indices) == 1:
+            emit_pass._emitter.emit_p(circuit, control_indices[0], phase)
+        else:
+            _emit_mc_rotation(
+                emit_pass,
+                circuit,
+                GateOperationType.P,
+                control_indices[:-1],
+                control_indices[-1],
+                phase,
+            )
+
+    # PauliEvolve never moves qubits: the evolved register occupies the
+    # same physical slots as the input register.
+    _map_operand_result_groups([op.evolved_qubits], [qubit_indices], qubit_map)
 
 
 def resolve_power(

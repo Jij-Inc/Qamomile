@@ -1043,14 +1043,6 @@ class FrontendExecutionCase:
     unsupported_backends: frozenset[str] = dataclasses.field(default_factory=frozenset)
 
 
-# QURI Parts has no native multi-controlled gate object and does not yet
-# lower a controlled PauliEvolveOp through its recursive fallback, so the
-# controlled-pauli-evolve case still raises EmitError there. Multi-target
-# and irreducible multi-control single-qubit shapes are now supported via
-# the dense UnitaryMatrix path, so they no longer belong to this set.
-QURI_PARTS_CONTROLLED_PAULI_EVOLVE_UNSUPPORTED = frozenset({"quri_parts"})
-
-
 FRONTEND_EXECUTION_CASES = [
     FrontendExecutionCase(
         name="native-gates",
@@ -1232,7 +1224,6 @@ FRONTEND_EXECUTION_CASES = [
             "gamma": math.pi / 2,
             "obs": qm_o.Z(1),
         },
-        unsupported_backends=QURI_PARTS_CONTROLLED_PAULI_EVOLVE_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="sliced-pauli-evolve",
