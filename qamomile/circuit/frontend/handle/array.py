@@ -1707,14 +1707,28 @@ def _as_int_const(value: int | UInt) -> int | None:
     """Return the Python ``int`` for ``value`` if it is a compile-time constant.
 
     Args:
-        value: Either a raw Python ``int`` or a ``UInt`` handle whose
-            backing ``Value`` may or may not carry a constant.
+        value (int | UInt): Either a raw Python ``int`` or a ``UInt``
+            handle whose backing ``Value`` may or may not carry a
+            constant. A ``bool`` is rejected: ``True`` / ``False`` are not
+            valid integer constants for a slice bound or length even though
+            ``bool`` subclasses ``int`` (this is the slice-bound counterpart
+            of the index guard in :meth:`ArrayBase._make_uint_index`, which
+            ``_as_int_const`` would otherwise let through — e.g. ``q[0:True]``
+            silently becoming ``q[0:1]``).
 
     Returns:
-        The int when ``value`` is an ``int`` directly, or a ``UInt``
-        whose ``.value`` is constant and resolvable to an ``int``.
-        ``None`` otherwise (i.e. when ``value`` is a symbolic ``UInt``).
+        int | None: The int when ``value`` is a plain ``int`` directly, or a
+            ``UInt`` whose ``.value`` is constant and resolvable to an
+            ``int``; ``None`` when ``value`` is a symbolic ``UInt``.
+
+    Raises:
+        TypeError: If ``value`` is a ``bool``.
     """
+    if isinstance(value, bool):
+        raise TypeError(
+            f"a bool is not a valid integer here (got {value!r}); a slice "
+            f"bound or length must be a plain int."
+        )
     if isinstance(value, int):
         return value
     if isinstance(value, UInt) and value.value.is_constant():

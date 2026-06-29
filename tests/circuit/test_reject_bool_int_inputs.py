@@ -75,12 +75,12 @@ class TestArrayIndexRejectsBool:
             qs[flag] = qmc.h(qs[flag])
             return qs
 
-        with pytest.raises(TypeError, match="bool is not a valid index"):
+        with pytest.raises(TypeError, match="must be a plain int"):
             kernel.block  # noqa: B018
 
     @pytest.mark.parametrize("flag", [True, False])
-    def test_slice_bound_rejects_bool(self, flag):
-        """A bool slice bound (``qs[True:3]``) is rejected."""
+    def test_slice_start_bound_rejects_bool(self, flag):
+        """A bool slice start (``qs[True:3]``) is rejected."""
 
         @qmc.qkernel
         def kernel(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -89,7 +89,41 @@ class TestArrayIndexRejectsBool:
             qs[flag:3] = view
             return qs
 
-        with pytest.raises(TypeError, match="bool is not a valid index"):
+        with pytest.raises(TypeError, match="must be a plain int"):
+            kernel.block  # noqa: B018
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_slice_stop_bound_rejects_bool(self, flag):
+        """A bool slice stop (``qs[0:True]``) is rejected.
+
+        The stop bound does not flow through ``_make_uint_index`` (it is
+        handled via ``_compute_slice_length`` / ``_as_int_const``), so it
+        needs its own guard; without it ``qs[0:True]`` silently became
+        ``qs[0:1]``.
+        """
+
+        @qmc.qkernel
+        def kernel(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            view = qs[0:flag]
+            view = qmc.h(view)
+            qs[0:flag] = view
+            return qs
+
+        with pytest.raises(TypeError, match="must be a plain int"):
+            kernel.block  # noqa: B018
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_slice_step_bound_rejects_bool(self, flag):
+        """A bool slice step (``qs[0:4:True]``) is rejected."""
+
+        @qmc.qkernel
+        def kernel(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            view = qs[0:4:flag]
+            view = qmc.h(view)
+            qs[0:4:flag] = view
+            return qs
+
+        with pytest.raises(TypeError, match="must be a plain int"):
             kernel.block  # noqa: B018
 
     def test_integer_index_and_slice_still_work(self):
