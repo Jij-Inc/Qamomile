@@ -24,7 +24,7 @@ from .frontend.operation.cast import cast
 from .frontend.operation.control import control
 from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.expval import expval
-from .frontend.operation.inverse import inverse
+from .frontend.operation.inverse import inverse, uncompute
 from .frontend.operation.measurement import measure
 from .frontend.operation.pauli_evolve import pauli_evolve
 from .frontend.operation.qubit_gates import (
@@ -97,6 +97,7 @@ __all__ = [
     "CompositeGate",
     "control",
     "inverse",
+    "uncompute",
     "cast",
     "bit",
     "float_",
