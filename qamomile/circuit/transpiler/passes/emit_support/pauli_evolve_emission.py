@@ -20,18 +20,8 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
 
+from .pauli_evolve_constants import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
 from .qubit_address import QubitAddress, QubitMap
-
-# Hamiltonian coefficients whose magnitude is at or below this are treated as
-# zero and skipped: no gate is emitted for a negligible term. (Floating-point
-# slack so coefficients that cancel to ~0 during Hamiltonian arithmetic do not
-# emit spurious gates.)
-PAULI_TERM_ZERO_ATOL = 1e-15
-# A coefficient (a term's or the Hamiltonian's constant) whose imaginary part
-# exceeds this fails the Hermiticity requirement: Pauli evolution exp(-i*g*H)
-# is unitary only for a Hermitian H, i.e. real coefficients. The slack absorbs
-# floating-point imaginary residue from complex arithmetic.
-HERMITIAN_IMAG_ATOL = 1e-10
 
 
 def _resolve_gamma(
