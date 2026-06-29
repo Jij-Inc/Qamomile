@@ -89,6 +89,7 @@ from qamomile.circuit.ir.value import (
     ValueMetadata,
 )
 
+from .hamiltonian_io import dict_to_hamiltonian, is_hamiltonian_wrapper
 from .numpy_io import dict_to_array, is_array_wrapper
 from .schema import SCHEMA_VERSION
 
@@ -576,7 +577,8 @@ def _decode_payload(value: Any) -> Any:
     Returns:
         Any: The reconstructed Python value (primitives unchanged,
             list / dict recursed, numpy wrappers expanded into
-            ``np.ndarray``).
+            ``np.ndarray``, Hamiltonian wrappers expanded into
+            ``qamomile.observable.Hamiltonian``).
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -584,10 +586,12 @@ def _decode_payload(value: Any) -> Any:
         return bytes(value)
     if is_array_wrapper(value):
         return dict_to_array(value)
+    if is_hamiltonian_wrapper(value):
+        return dict_to_hamiltonian(value)
     if isinstance(value, list):
         return [_decode_payload(x) for x in value]
     if isinstance(value, dict):
-        # Plain dict (not a numpy wrapper); recurse on values.
+        # Plain dict (not a numpy / Hamiltonian wrapper); recurse on values.
         return {k: _decode_payload(v) for k, v in value.items()}
     return value
 

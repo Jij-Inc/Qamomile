@@ -83,7 +83,9 @@ from qamomile.circuit.ir.value import (
     ValueBase,
     ValueMetadata,
 )
+from qamomile.observable.hamiltonian import Hamiltonian
 
+from .hamiltonian_io import hamiltonian_to_dict
 from .numpy_io import array_to_dict
 from .schema import SCHEMA_VERSION
 
@@ -523,7 +525,9 @@ def _encode_payload(value: Any) -> Any:
 
     Supports primitives (``None``, ``bool``, ``int``, ``float``,
     ``str``), homogeneous containers (``list``, ``tuple``, ``dict``),
-    numpy arrays, and ``numpy`` scalar types. Falls through to raising
+    numpy arrays, ``numpy`` scalar types, and
+    ``qamomile.observable.Hamiltonian`` (the bound value of an
+    ``Observable`` kernel parameter). Falls through to raising
     ``TypeError`` for unknown types so an unencodable binding never
     silently slips into the wire format.
 
@@ -546,13 +550,16 @@ def _encode_payload(value: Any) -> Any:
     if isinstance(value, np.generic):
         # Cast numpy scalar to its closest Python primitive.
         return value.item()
+    if isinstance(value, Hamiltonian):
+        return hamiltonian_to_dict(value)
     if isinstance(value, (list, tuple)):
         return [_encode_payload(x) for x in value]
     if isinstance(value, dict):
         return {str(k): _encode_payload(v) for k, v in value.items()}
     raise TypeError(
         f"Cannot encode payload of type {type(value).__name__!r}; supported types "
-        f"are primitives, bytes, list/tuple, dict, np.ndarray, np.generic."
+        f"are primitives, bytes, list/tuple, dict, np.ndarray, np.generic, "
+        f"Hamiltonian."
     )
 
 
