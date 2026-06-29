@@ -264,6 +264,24 @@ def _cpe_two_hamiltonians(
     return qmc.measure(q)
 
 
+@qmc.qkernel
+def _cpe_vector_hamiltonian(
+    hams: qmc.Vector[qmc.Observable], gamma: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Controlled evolution whose Hamiltonian is an element of a Vector[Observable].
+
+    Exercises that a vector-of-observables element (``hams[1]``, a non-zero
+    index) resolves correctly through ``resolve_bound_value`` (``index_array``)
+    in the controlled path.
+    """
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.h(q[0])
+    ce = qmc.control(_evolve_layer)
+    q[0], target = ce(q[0], q[1:2], ham=hams[1], gamma=gamma)
+    q[1:2] = target
+    return qmc.measure(q)
+
+
 # ---------------------------------------------------------------------------
 # Hamiltonian builders (seeded; single-term or pairwise-commuting only)
 # ---------------------------------------------------------------------------
@@ -659,6 +677,33 @@ def test_controlled_pauli_evolve_distinct_hamiltonians_resolve_independently(
     qk_exe = QiskitTranspiler().transpile(_cpe_two_hamiltonians, bindings=bindings)
     qp_exe = _quri_parts_transpiler().transpile(
         _cpe_two_hamiltonians, bindings=bindings
+    )
+    sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
+    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+
+    assert _fidelity_err(sv_qk, sv_qp) < 1e-9
+
+
+@pytest.mark.parametrize("seed", [0, 1, 7])
+def test_controlled_pauli_evolve_vector_observable_element(seed: int) -> None:
+    """A Vector[Observable] element resolves correctly in the controlled path.
+
+    Binds a ``Vector[Observable]`` and evolves under ``hams[1]`` (a non-zero
+    index) inside ``qmc.control``; the QURI Parts statevector must match
+    Qiskit, confirming ``resolve_bound_value`` indexes the bound vector
+    correctly under control just as the uncontrolled path does.
+    """
+    rng = np.random.default_rng(seed)
+    hams = [
+        rng.uniform(0.3, 1.5) * qm_o.X(0),
+        rng.uniform(0.3, 1.5) * qm_o.Z(0) + rng.uniform(0.3, 1.5),  # the bound one
+    ]
+    gamma = float(rng.uniform(0.2, 2.6))
+    bindings = {"hams": hams, "gamma": gamma}
+
+    qk_exe = QiskitTranspiler().transpile(_cpe_vector_hamiltonian, bindings=bindings)
+    qp_exe = _quri_parts_transpiler().transpile(
+        _cpe_vector_hamiltonian, bindings=bindings
     )
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
     sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
