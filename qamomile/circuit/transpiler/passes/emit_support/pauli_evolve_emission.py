@@ -19,8 +19,8 @@ if TYPE_CHECKING:
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
 
-from .pauli_evolve_constants import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
 from .qubit_address import QubitAddress, QubitMap
 
 

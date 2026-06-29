@@ -1229,12 +1229,12 @@ def emit_controlled_pauli_evolve(
             path requires a compile-time-numeric angle.
     """
     import qamomile.observable as qm_o
-    from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_constants import (
-        HERMITIAN_IMAG_ATOL,
-        PAULI_TERM_ZERO_ATOL,
-    )
     from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
         _resolve_gamma,
+    )
+    from qamomile.observable.hamiltonian import (
+        HERMITIAN_IMAG_ATOL,
+        PAULI_TERM_ZERO_ATOL,
     )
 
     if not control_indices:
