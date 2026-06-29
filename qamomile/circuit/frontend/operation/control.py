@@ -190,6 +190,29 @@ class ControlledGate:
     """
 
     def __init__(self, qkernel: "QKernel", num_controls: int | UInt = 1) -> None:
+        """Wrap a kernel (or built-in gate callable) as a controlled operation.
+
+        Args:
+            qkernel (QKernel): The kernel to control. Must expose a dict
+                ``input_types`` attribute and an ``inspect.Signature``
+                ``signature`` attribute.
+            num_controls (int | UInt): Number of control qubits. A concrete
+                ``int`` must be >= 1; a symbolic ``UInt`` defers validation
+                to emit time. Defaults to 1. A ``bool`` is rejected: it is
+                not a valid control count even though ``bool`` subclasses
+                ``int``.
+
+        Raises:
+            TypeError: If ``num_controls`` is a ``bool``, or if ``qkernel``
+                does not expose a dict ``input_types`` / an
+                ``inspect.Signature`` ``signature``.
+            ValueError: If a concrete ``int`` ``num_controls`` is < 1.
+        """
+        if isinstance(num_controls, bool):
+            raise TypeError(
+                f"num_controls must be a positive integer or UInt, got bool "
+                f"({num_controls})."
+            )
         if isinstance(num_controls, int) and num_controls < 1:
             raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
         # For UInt (symbolic), validation is deferred to emit time

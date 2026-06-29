@@ -6,6 +6,7 @@ import typing
 import uuid
 from typing import Generic, Iterator, TypeVar, overload
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
@@ -386,12 +387,24 @@ class ArrayBase(Handle, Generic[T]):
         """Create a UInt from an integer index.
 
         Args:
-            idx (int): The Python integer index to wrap.
+            idx (int): The Python integer index to wrap. A ``bool`` is
+                rejected: ``True`` / ``False`` are not valid indices even
+                though ``bool`` subclasses ``int`` (a bare
+                ``isinstance(idx, int)`` would otherwise let ``arr[True]``
+                silently alias ``arr[1]``).
 
         Returns:
             UInt: A handle whose underlying Value carries ``idx`` as a
                 compile-time constant.
+
+        Raises:
+            TypeError: If ``idx`` is not a plain ``int`` (e.g. a ``bool``).
         """
+        if not is_plain_int(idx):
+            raise TypeError(
+                f"array index must be a plain int, got {type(idx).__name__} "
+                f"({idx!r}); bool is not a valid index."
+            )
         return UInt(
             value=Value(type=UIntType(), name=f"idx_{idx}").with_const(idx),
             init_value=idx,
