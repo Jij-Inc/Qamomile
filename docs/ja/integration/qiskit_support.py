@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [integration, optimization, variational, circuit-compilation]
+# tags: [integration, optimization, variational]
 # ---
 #
 # # Qiskitサポート
@@ -86,6 +86,7 @@ plt.show()
 # MaxCutを解くためのQAOA回路を`@qkernel`として記述します。
 # レシピは[MaxCutに対するQAOAチュートリアル](../algorithm/qaoa_maxcut.ipynb)と同じです。
 # 計算基底の一様な重ね合わせ状態を準備した後、コスト層とミキサー層を$p$回交互に適用し、最後に計算基底で測定します。
+# 期待値計算用の量子カーネルは後の`run()`セクションで定義します。こうしておくと、下の回路図では状態準備用のラッパーではなく、サンプリング用アンザッツそのものを確認できます。
 #
 # :::{tip}
 # Qamomileの回転ゲートは$e^{-i\theta/2}$という規約に従います。
@@ -128,21 +129,6 @@ def mixer_layer(
     return q
 
 @qmc.qkernel
-def qaoa_state(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return q
-
-@qmc.qkernel
 def qaoa_ansatz(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -151,21 +137,11 @@ def qaoa_ansatz(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
     return qmc.measure(q)
-
-@qmc.qkernel
-def qaoa_energy(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    H: qmc.Observable,
-) -> qmc.Float:
-    q = qaoa_state(p, quad, linear, n, gammas, betas)
-    return qmc.expval(q, H)
 
 
 # %% [markdown]
@@ -339,15 +315,33 @@ for (i, j), Jij in spin_model.quad.items():
 for i, hi in spin_model.linear.items():
     cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
+# 期待値計算用の量子カーネルを定義します。
+@qmc.qkernel
+def qaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    obs: qmc.Observable,
+) -> qmc.Float:
+    q = superposition(n)
+    for layer in qmc.range(p):
+        q = cost_layer(quad, linear, q, gammas[layer])
+        q = mixer_layer(q, betas[layer])
+    return qmc.expval(q, obs)
+
+
 # 期待値計算用の量子カーネルをトランスパイルし、`run()`で評価します。
 expval_executable = transpiler.transpile(
-    qaoa_energy,
+    qaoa_expval,
     bindings={
         "p": p,
         "quad": spin_model.quad,
         "linear": spin_model.linear,
         "n": num_nodes,
-        "H": cost_hamiltonian,
+        "obs": cost_hamiltonian,
     },
     parameters=["gammas", "betas"],
 )
@@ -576,3 +570,9 @@ assert np.isfinite(noisy_energy)
 # - `QiskitExecutor`は、測定を返す量子カーネル向けの`executable.sample()`と、期待値向けの`executable.run()` / `executor.estimate(...)`の両方をサポートします。デフォルトでは`AerSimulator`を使い、`transpiler.executor(backend=...)`から任意のQiskit実行対象オブジェクトを受け取れます。
 # - Qiskit連携は、Qiskitが高い抽象度の回路命令を持つ箇所では、回路途中の測定、動的`for_loop` / `if_else` / `while_loop`、ランタイム古典式、`PauliEvolutionGate`、`QFTGate`をネイティブに出力します。
 # - Aerノイズモデル、providerが提供する実行対象、qBraidでラップしたQiskitデバイスを、qkernelを再トランスパイルせずに使えます。`qamomile.optimization`のヘルパーも、同じQiskit回路を受け渡す仕組みを使っています。
+
+# %% [markdown]
+# ### 関連ページ
+#
+# - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Qバックエンドで扱い、CUDA-Q targetや`observe`も確認します。
+# - [QURI Partsサポート](quri_parts_support.ipynb)では、同じ流れをQURI Partsで扱い、Qulacs samplerやQURI Parts estimatorの経路も確認します。

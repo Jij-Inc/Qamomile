@@ -27,6 +27,12 @@ Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multip
 :::
 
 :::{card}
+:header: **Multidimensional Quantum Fourier Transform**
+:link: multidimensional_qft
+Implement multidimensional QFT and classical preprocessing for inputs whose grid sizes are not powers of two.
+:::
+
+:::{card}
 :header: **Pauli Correlation Encoding (PCE)**
 :link: pce_maxcut
 Solve a 20-variable MaxCut on just 3 qubits with Pauli Correlation Encoding, training a hardware-efficient ansatz against a tanh-relaxed surrogate and decoding via sign rounding.

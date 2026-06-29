@@ -9,6 +9,12 @@ Notes on using Qamomile together with external libraries and quantum platforms.
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **CUDA-Q Support**
+:link: cudaq_support
+Transpile MaxCut QAOA to CUDA-Q and run sampling and expectation-value workflows.
+:::
+
+:::{card}
 :header: **Using OMMX Quantum Benchmarks (1): Implementing and Benchmarking Quantum Algorithms with Qamomile**
 :link: ommx_quantum_benchmarks_qaoa
 Drive QAOA on a LABS instance loaded from the OMMX Quantum Benchmarks dataset and compare against SCIP.

@@ -9,6 +9,12 @@ Qamomileを外部ライブラリや量子プラットフォームと組み合わ
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **CUDA-Qサポート**
+:link: cudaq_support
+MaxCut QAOAをCUDA-Qへトランスパイルし、サンプリングと期待値計算を実行します。
+:::
+
+:::{card}
 :header: **OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク**
 :link: ommx_quantum_benchmarks_qaoa
 OMMX Quantum Benchmarksから取得したLABSインスタンス上でQAOAを動かし、SCIPと比較します。
