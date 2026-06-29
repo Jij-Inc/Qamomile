@@ -1230,6 +1230,8 @@ def emit_controlled_pauli_evolve(
     """
     import qamomile.observable as qm_o
     from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
+        HERMITIAN_IMAG_ATOL,
+        PAULI_TERM_ZERO_ATOL,
         _resolve_gamma,
     )
 
@@ -1256,6 +1258,43 @@ def emit_controlled_pauli_evolve(
             operation="PauliEvolveOp",
         )
 
+    def scaled_gamma(factor: float) -> Any:
+        """Scale ``gamma`` by a real ``factor`` for a controlled rotation angle.
+
+        ``gamma`` is either a concrete ``float`` (compile-time bound) or a
+        backend runtime-parameter expression. ``factor`` is the term-specific
+        real scale: ``2 * coeff`` for a Pauli term's central RZ, or
+        ``-constant`` for the identity-term phase.
+
+        Args:
+            factor (float): Real multiplier applied to ``gamma``.
+
+        Returns:
+            Any: ``factor * gamma`` — a Python ``float`` for concrete gamma,
+                or a backend parameter expression for a runtime-parametric one.
+
+        Raises:
+            EmitError: If ``gamma`` is a runtime parameter whose backend type
+                exposes no Python arithmetic (e.g. QURI Parts' Rust-backed
+                ``Parameter``), so the scaling cannot be expressed. The raw
+                ``TypeError`` is converted into a clear compile-time error
+                pointing at binding ``gamma`` to a concrete value. (A
+                concrete ``float`` gamma never raises; two-or-more controls
+                additionally need a numeric angle because the dense
+                multi-controlled matrix bakes the angle in.)
+        """
+        try:
+            return factor * gamma
+        except TypeError as exc:
+            raise EmitError(
+                "Controlled Pauli evolution requires a compile-time-numeric "
+                "gamma on this backend: its runtime parameter type does not "
+                "support the angle scaling needed for the controlled "
+                "rotations. Bind gamma to a concrete value before "
+                "transpilation.",
+                operation="PauliEvolveOp",
+            ) from exc
+
     # Resolve the target register against the block-local qubit map.
     # ``_expand_quantum_operands_to_phys`` walks the operand's slice chain and
     # returns one physical qubit index per element — the controlled-emission
@@ -1276,41 +1315,18 @@ def emit_controlled_pauli_evolve(
         # Validate Hermiticity of every term (including ones skipped below)
         # before emitting it, folded into the emission pass to avoid a second
         # walk over a large Hamiltonian.
-        if abs(coeff.imag) > 1e-10:
+        if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
             raise EmitError(
                 f"PauliEvolveOp requires a Hermitian Hamiltonian "
                 f"(real coefficients), but found complex coefficient "
                 f"{coeff} on term {operators}.",
                 operation="PauliEvolveOp",
             )
-        if abs(coeff) < 1e-15 or len(operators) == 0:
+        if abs(coeff) < PAULI_TERM_ZERO_ATOL or len(operators) == 0:
             continue
-        # RZ(theta) = exp(-i*theta*Z/2); exp(-i*gamma*c*P) needs
-        # theta = 2*gamma*c. Concrete gamma stays float, parametric gamma
-        # stays a backend parameter expression so a single-control
-        # ``emit_crz`` path can bind it at run time.
-        angle: Any
-        if isinstance(gamma, (int, float)):
-            angle = 2.0 * float(coeff.real * gamma)
-        else:
-            # Parametric gamma: scale the backend parameter by 2*coeff for
-            # the central RZ. Backends whose runtime parameter type exposes
-            # no Python arithmetic (e.g. QURI Parts' Rust-backed Parameter)
-            # cannot express this scaling, so surface a clear EmitError
-            # instead of a raw TypeError. (Independently, the dense
-            # multi-controlled path used for two or more controls rejects a
-            # parametric angle because it cannot be baked into a matrix.)
-            try:
-                angle = (2.0 * float(coeff.real)) * gamma
-            except TypeError as exc:
-                raise EmitError(
-                    "Controlled Pauli evolution requires a compile-time-"
-                    "numeric gamma on this backend: its runtime parameter "
-                    "type does not support the angle scaling (2 * coeff * "
-                    "gamma) needed for the controlled central RZ. Bind gamma "
-                    "to a concrete value before transpilation.",
-                    operation="PauliEvolveOp",
-                ) from exc
+        # RZ(theta) = exp(-i*theta*Z/2), so exp(-i*gamma*coeff*P) needs the
+        # central rotation theta = 2*gamma*coeff.
+        angle = scaled_gamma(2.0 * float(coeff.real))
         term_qubit_indices = [qubit_indices[item.index] for item in operators]
         pauli_types = [item.pauli for item in operators]
 
@@ -1372,26 +1388,17 @@ def emit_controlled_pauli_evolve(
     # this is a direct phase, not an RZ). It is applied to one control,
     # conditioned on the rest.
     constant = hamiltonian.constant
-    if abs(constant) > 1e-15:
-        if abs(constant.imag) > 1e-10:
+    if abs(constant) > PAULI_TERM_ZERO_ATOL:
+        if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
             raise EmitError(
                 f"PauliEvolveOp requires a Hermitian Hamiltonian (real "
                 f"coefficients), but found a complex constant {constant}.",
                 operation="PauliEvolveOp",
             )
-        try:
-            if isinstance(gamma, (int, float)):
-                phase = -float(constant.real * gamma)
-            else:
-                phase = (-float(constant.real)) * gamma
-        except TypeError as exc:
-            raise EmitError(
-                "Controlled Pauli evolution requires a compile-time-numeric "
-                "gamma on this backend: its runtime parameter type does not "
-                "support the constant-term phase scaling (gamma * constant). "
-                "Bind gamma to a concrete value before transpilation.",
-                operation="PauliEvolveOp",
-            ) from exc
+        # exp(-i*gamma*c*I) -> e^{-i*gamma*c} on the all-controls-on subspace,
+        # i.e. P(lambda) with lambda = -gamma*c (no factor of two: a direct
+        # phase, not an RZ).
+        phase = scaled_gamma(-float(constant.real))
         if len(control_indices) == 1:
             emit_pass._emitter.emit_p(circuit, control_indices[0], phase)
         else:
