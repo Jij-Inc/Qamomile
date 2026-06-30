@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
 
 from .qubit_address import QubitAddress, QubitMap
 
@@ -125,7 +126,7 @@ def emit_pauli_evolve(
 
     # Validate Hermitian (real coefficients)
     for operators, coeff in hamiltonian:
-        if abs(coeff.imag) > 1e-10:
+        if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
             raise EmitError(
                 f"PauliEvolveOp requires a Hermitian Hamiltonian "
                 f"(real coefficients), but found complex coefficient "
@@ -154,7 +155,7 @@ def emit_pauli_evolve(
 
     # Emit each Hamiltonian term using the Pauli gadget technique
     for operators, coeff in hamiltonian:
-        if abs(coeff) < 1e-15:
+        if abs(coeff) < PAULI_TERM_ZERO_ATOL:
             continue
         # RZ(theta) = exp(-i*theta*Z/2), so to get exp(-i*gamma*c*P)
         # we need theta = 2*gamma*c. Works for both concrete gamma

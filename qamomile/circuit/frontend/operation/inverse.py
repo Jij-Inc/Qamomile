@@ -13,6 +13,7 @@ from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
 from qamomile.circuit.frontend.operation.control import _qkernel_for_callable
+from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.qkernel import (
     QKernel,
     _promote_literal_to_handle,
@@ -1495,7 +1496,12 @@ class InverseGate:
             BoundArguments: Bound and default-filled argument mapping.
 
         Raises:
-            TypeError: If any final argument is not a frontend `Handle`.
+            TypeError: If any final argument is not a frontend `Handle`, or
+                if a bound `Handle` does not match its declared parameter
+                type -- a quantum handle bound to a classical parameter, a
+                scalar `Qubit` bound to a `Vector[Qubit]` parameter (or the
+                reverse), or an array of the wrong rank. The latter checks
+                are delegated to `param_validation._validate_bound_handles`.
         """
         bound_args = self._qkernel.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
@@ -1512,6 +1518,16 @@ class InverseGate:
                     f"inverse(): argument {name!r} must be a Handle instance, "
                     f"got {type(value).__name__}."
                 )
+        # Fail fast on argument type mismatches (a quantum handle bound to a
+        # classical parameter, a scalar / rank mismatch on a quantum array,
+        # ...) before any handle is consumed, using the same shared validator
+        # as the plain qkernel call and the controlled-gate call. Inverse does
+        # not broadcast, so allow_broadcast stays False.
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            bound_args.arguments,
+            context=f"{self._qkernel.name}()",
+        )
         return bound_args
 
     def _select_block(self, arguments: dict[str, Any]) -> Block:

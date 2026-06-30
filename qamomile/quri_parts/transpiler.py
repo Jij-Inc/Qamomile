@@ -17,12 +17,12 @@ from qamomile.circuit.ir.operation.composite_gate import (
 )
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
-    ConcreteControlledU,
     ControlledUOperation,
     GateOperation,
     GateOperationType,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
@@ -41,9 +41,13 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _bind_and_populate_block_inputs,
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
-    _map_controlled_u_results,
     _populate_input_qubit_map,
+    _prepare_nested_block_for_emit,
     emit_controlled_gate,
+    emit_controlled_pauli_evolve,
+    emit_multi_controlled_gate,
+    map_nested_controlled_u_results,
+    resolve_controlled_u_call,
     resolve_power,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
@@ -175,6 +179,124 @@ def _scale_quri_angle(angle: Any, factor: float) -> Any:
     return {angle: factor}
 
 
+_MAX_MC_MATRIX_QUBITS = 10
+"""Upper bound on controls + target for the dense local-unitary path.
+
+A multi-controlled single-qubit gate over ``k`` controls is emitted as a
+dense ``2**(k+1)``-dimensional ``UnitaryMatrix`` gate; the matrix grows
+4x per extra control, so the path is capped to keep emission memory
+bounded (10 local qubits -> a 1024x1024 matrix).
+"""
+
+
+def _single_qubit_gate_unitary(
+    gate_type: GateOperationType,
+    angle: Any,
+) -> "np.ndarray | None":
+    """Return the exact 2x2 unitary for a single-qubit gate type.
+
+    Args:
+        gate_type (GateOperationType): Single-qubit gate kind.
+        angle (Any): Resolved rotation angle for rotation-like gates
+            (must be a concrete real number), or ``None`` for fixed
+            gates.
+
+    Returns:
+        np.ndarray | None: The 2x2 complex unitary, or ``None`` when
+            ``gate_type`` is not a single-qubit gate or the angle is
+            symbolic (a backend parameter expression rather than a
+            number).
+    """
+    if gate_type in (
+        GateOperationType.P,
+        GateOperationType.RX,
+        GateOperationType.RY,
+        GateOperationType.RZ,
+    ):
+        if not isinstance(angle, Real):
+            return None
+        angle_rad = float(angle)
+        if gate_type == GateOperationType.P:
+            return np.array([[1.0, 0.0], [0.0, np.exp(1j * angle_rad)]])
+        if gate_type == GateOperationType.RX:
+            cos = np.cos(angle_rad / 2.0)
+            sin = np.sin(angle_rad / 2.0)
+            return np.array([[cos, -1j * sin], [-1j * sin, cos]])
+        if gate_type == GateOperationType.RY:
+            cos = np.cos(angle_rad / 2.0)
+            sin = np.sin(angle_rad / 2.0)
+            return np.array([[cos, -sin], [sin, cos]])
+        return np.array(
+            [[np.exp(-0.5j * angle_rad), 0.0], [0.0, np.exp(0.5j * angle_rad)]]
+        )
+
+    inv_sqrt2 = 1.0 / np.sqrt(2.0)
+    fixed_unitaries = {
+        GateOperationType.H: np.array(
+            [[inv_sqrt2, inv_sqrt2], [inv_sqrt2, -inv_sqrt2]]
+        ),
+        GateOperationType.X: np.array([[0.0, 1.0], [1.0, 0.0]]),
+        GateOperationType.Y: np.array([[0.0, -1j], [1j, 0.0]]),
+        GateOperationType.Z: np.array([[1.0, 0.0], [0.0, -1.0]]),
+        GateOperationType.S: np.array([[1.0, 0.0], [0.0, 1j]]),
+        GateOperationType.SDG: np.array([[1.0, 0.0], [0.0, -1j]]),
+        GateOperationType.T: np.array([[1.0, 0.0], [0.0, np.exp(1j * np.pi / 4.0)]]),
+        GateOperationType.TDG: np.array([[1.0, 0.0], [0.0, np.exp(-1j * np.pi / 4.0)]]),
+    }
+    return fixed_unitaries.get(gate_type)
+
+
+def _emit_quri_multi_controlled_unitary_matrix(
+    circuit: Any,
+    control_indices: list[int],
+    target_index: int,
+    unitary: "np.ndarray",
+) -> None:
+    """Emit a multi-controlled single-qubit gate as a dense local unitary.
+
+    Builds the ``2**(k+1)``-dimensional matrix that applies ``unitary``
+    to the target exactly when all ``k`` controls are one, and appends
+    it as a QURI Parts ``UnitaryMatrix`` gate over
+    ``[*control_indices, target_index]``.
+
+    Args:
+        circuit (Any): QURI Parts circuit being emitted into.
+        control_indices (list[int]): Physical control qubits.
+        target_index (int): Physical target qubit.
+        unitary (np.ndarray): 2x2 complex unitary applied to the
+            target.
+
+    Raises:
+        EmitError: If controls + target exceed the dense-matrix qubit
+            cap (``_MAX_MC_MATRIX_QUBITS``).
+    """
+    local_qubits = [*control_indices, target_index]
+    if len(local_qubits) > _MAX_MC_MATRIX_QUBITS:
+        raise EmitError(
+            f"QURI Parts multi-controlled gate over {len(local_qubits)} "
+            f"local qubits exceeds the dense-unitary cap of "
+            f"{_MAX_MC_MATRIX_QUBITS}; rewrite the kernel to use fewer "
+            f"controls or run it on a backend with native multi-control "
+            f"support.",
+            operation="ControlledGate",
+        )
+    num_controls = len(control_indices)
+    dimension = 2 ** len(local_qubits)
+    matrix = np.eye(dimension, dtype=np.complex128)
+    active_mask = (1 << num_controls) - 1
+    target_mask = 1 << num_controls
+    for basis in range(dimension):
+        if basis & active_mask != active_mask or basis & target_mask:
+            continue
+        basis_zero = basis
+        basis_one = basis | target_mask
+        matrix[basis_zero, basis_zero] = unitary[0, 0]
+        matrix[basis_zero, basis_one] = unitary[0, 1]
+        matrix[basis_one, basis_zero] = unitary[1, 0]
+        matrix[basis_one, basis_one] = unitary[1, 1]
+    circuit.add_UnitaryMatrix_gate(local_qubits, matrix.tolist())
+
+
 def _emit_quri_c3x_matrix(
     circuit: Any,
     control_indices: list[int],
@@ -186,19 +308,21 @@ def _emit_quri_c3x_matrix(
         circuit (Any): QURI Parts circuit being emitted into.
         control_indices (list[int]): Three physical control qubits.
         target_index (int): Physical target qubit.
+
+    Raises:
+        EmitError: Propagated from
+            :func:`_emit_quri_multi_controlled_unitary_matrix` if the
+            local width exceeds the dense-unitary cap. With three
+            controls the width is four, well under the cap, so this
+            cannot fire in practice; it is documented for parity with
+            the general helper.
     """
-    local_qubits = [*control_indices, target_index]
-    num_controls = len(control_indices)
-    dimension = 2 ** len(local_qubits)
-    matrix = np.zeros((dimension, dimension), dtype=np.complex128)
-    active_mask = (1 << num_controls) - 1
-    target_mask = 1 << num_controls
-    for basis in range(dimension):
-        output = basis
-        if basis & active_mask == active_mask:
-            output ^= target_mask
-        matrix[output, basis] = 1.0
-    circuit.add_UnitaryMatrix_gate(local_qubits, matrix.tolist())
+    _emit_quri_multi_controlled_unitary_matrix(
+        circuit,
+        control_indices,
+        target_index,
+        np.array([[0.0, 1.0], [1.0, 0.0]]),
+    )
 
 
 def _emit_quri_controlled_gate(
@@ -220,8 +344,10 @@ def _emit_quri_controlled_gate(
         bindings (dict[str, Any]): Bindings used to resolve gate angles.
 
     Raises:
-        EmitError: If the accumulated controls require decomposition that
-            this QURI Parts fallback intentionally leaves to a follow-up PR.
+        EmitError: If the gate cannot be lowered under the accumulated
+            controls (e.g. a parametric rotation angle on the dense
+            multi-controlled matrix path, or a local width beyond the
+            dense-unitary cap).
     """
     if not control_indices:
         raise EmitError(
@@ -349,12 +475,8 @@ def _emit_quri_controlled_gate(
         )
         return
 
-    raise EmitError(
-        "Cannot emit QURI Parts controlled-U: recursive controlled fallback "
-        "reached a multi-controlled operation that requires decomposition "
-        "not implemented in this PR "
-        f"(controls={control_indices}, gate={op.gate_type!r}).",
-        operation="ControlledUOperation",
+    emit_multi_controlled_gate(
+        emit_pass, circuit, op, control_indices, target_indices, bindings
     )
 
 
@@ -549,6 +671,12 @@ def _emit_quri_nested_controlled_u(
 ) -> None:
     """Emit a nested controlled-U by flattening controls at emit time.
 
+    Resolves the nested operation through the shared
+    ``resolve_controlled_u_call`` helper, which handles concrete and
+    symbolic operand layouts alike — including the loop-dependent
+    ``qmc.control(qmc.x, num_controls=k)`` shape that stays a
+    ``SymbolicControlledU`` until each unrolled iteration binds ``k``.
+
     Args:
         emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
         circuit (Any): QURI Parts circuit being built.
@@ -561,71 +689,27 @@ def _emit_quri_nested_controlled_u(
             block.
 
     Raises:
-        EmitError: If the nested op is symbolic, lacks a block, or cannot
-            be lowered by the guarded recursive fallback.
+        EmitError: If the nested op lacks a block, its controls or
+            targets cannot be resolved, or the inner body cannot be
+            lowered by the guarded recursive fallback.
     """
-    if not isinstance(op, ConcreteControlledU):
-        raise EmitError(
-            "QURI Parts recursive controlled fallback only supports "
-            "concrete nested ControlledUOperation values.",
-            operation="ControlledUOperation",
-        )
-    if op.block is None:
-        raise EmitError(
-            "QURI Parts recursive controlled fallback cannot emit a nested "
-            "ControlledUOperation without an inner block.",
-            operation="ControlledUOperation",
-        )
-
-    nested_controls = [
-        index
-        for operand in op.control_operands
-        for index in _expand_quantum_operands_to_phys(
-            emit_pass, operand, qubit_map, bindings
-        )
-    ]
-    remaining_operands = op.operands[op.num_controls :]
-    target_qubit_operands = [
-        operand for operand in remaining_operands if operand.type.is_quantum()
-    ]
-    param_operands = [
-        operand
-        for operand in remaining_operands
-        if operand.type.is_classical() or operand.type.is_object()
-    ]
-    target_index_groups = [
-        _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
-        for operand in target_qubit_operands
-    ]
-    target_indices = [index for group in target_index_groups for index in group]
-    local_bindings = emit_pass._resolver.bind_block_params(
-        op.block, param_operands, bindings
-    )
-    _bind_quantum_input_shapes(
-        emit_pass, op.block, target_qubit_operands, bindings, local_bindings
-    )
+    resolved = resolve_controlled_u_call(emit_pass, op, qubit_map, bindings)
+    block = _prepare_nested_block_for_emit(resolved.block, resolved.local_bindings)
     inner_qubit_map = _build_quri_controlled_qubit_map(
-        emit_pass, op.block, target_indices, local_bindings
+        emit_pass, block, resolved.target_phys, resolved.local_bindings
     )
-    effective_controls = outer_control_indices + nested_controls
+    effective_controls = outer_control_indices + resolved.control_phys
     power = resolve_power(emit_pass, op, bindings)
     for _ in range(power):
         _emit_quri_controlled_operations(
             emit_pass,
             circuit,
-            op.block.operations,
+            block.operations,
             effective_controls,
             inner_qubit_map,
-            local_bindings,
+            resolved.local_bindings,
         )
-    _map_controlled_u_results(
-        op,
-        op.num_controls,
-        nested_controls,
-        target_qubit_operands,
-        target_index_groups,
-        qubit_map,
-    )
+    map_nested_controlled_u_results(op, resolved, qubit_map)
 
 
 def _emit_quri_controlled_operations(
@@ -705,10 +789,21 @@ def _emit_quri_controlled_operations(
                     loop_bindings,
                 )
             continue
+        if isinstance(op, PauliEvolveOp):
+            # Reuse the shared lowering: it emits the basis-change and CX
+            # ladder uncontrolled and routes only the central RZ through
+            # the multi-control machinery, which dispatches to ``emit_crz``
+            # for one control and to this backend's dense
+            # ``_emit_irreducible_multi_controlled_gate`` for two or more.
+            emit_controlled_pauli_evolve(
+                emit_pass, circuit, op, control_indices, qubit_map, bindings
+            )
+            continue
         raise EmitError(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
             "CompositeGateOperation values, InverseBlockOperation values, "
+            "PauliEvolveOp values, "
             "ReturnOperation, and statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",
@@ -889,6 +984,59 @@ class QuriPartsEmitPass(
                 qubit_map,
                 bindings,
             )
+
+    def _emit_irreducible_multi_controlled_gate(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        gate_type: GateOperationType,
+        control_indices: list[int],
+        target_idx: int,
+        angle: Any,
+    ) -> None:
+        """Emit an irreducible multi-controlled gate as a dense unitary.
+
+        QURI Parts has no native multi-controlled gate object, so
+        single-qubit gates that still carry two or more controls after
+        the shared structural reductions are emitted as one bounded
+        ``UnitaryMatrix`` gate over ``controls + target``.
+
+        Args:
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                QURI Parts circuit being built.
+            gate_type (GateOperationType): Single-qubit gate kind.
+            control_indices (list[int]): Physical control qubits.
+            target_idx (int): Physical target qubit.
+            angle (Any): Resolved rotation angle for rotation-like
+                gates, or ``None`` for fixed gates. Must be a concrete
+                real number — runtime-parametric angles cannot be baked
+                into a dense matrix.
+
+        Raises:
+            EmitError: If the angle is a runtime parameter expression,
+                the gate type has no known 2x2 unitary, or the local
+                width exceeds the dense-unitary cap.
+        """
+        unitary = _single_qubit_gate_unitary(gate_type, angle)
+        if unitary is None:
+            if angle is not None and not isinstance(angle, Real):
+                raise EmitError(
+                    f"QURI Parts cannot emit a "
+                    f"{len(control_indices)}-controlled "
+                    f"{gate_type.name} with a runtime-parametric angle: "
+                    f"the dense multi-controlled matrix path requires a "
+                    f"compile-time numeric angle. Bind the angle before "
+                    f"transpilation.",
+                    operation="ControlledGate",
+                )
+            raise EmitError(
+                f"QURI Parts cannot emit a {len(control_indices)}-"
+                f"controlled {gate_type.name}: no dense single-qubit "
+                f"unitary is defined for this gate type.",
+                operation="ControlledGate",
+            )
+        _emit_quri_multi_controlled_unitary_matrix(
+            circuit, control_indices, target_idx, unitary
+        )
 
     def _emit_custom_composite(
         self,

@@ -519,7 +519,7 @@ class ValueResolver:
         self,
         v: "Value",
         bindings: dict[str, Any],
-    ) -> Any:
+    ) -> Any | None:
         """Index into a bound array container at the operand's element indices.
 
         Refuses to index when the parent array's name is in
@@ -532,6 +532,29 @@ class ValueResolver:
         guard is defense-in-depth: even if a future caller forgets the
         op-level guard, array indexing for runtime parameters returns
         ``None`` here.
+
+        Args:
+            v (Value): The element Value to resolve. Must carry a
+                ``parent_array``; scalar Values resolve to ``None``.
+            bindings (dict[str, Any]): The active emit-time bindings.
+
+        Returns:
+            Any | None: The resolved element, or ``None`` when the access
+                is genuinely symbolic at emit time (unresolved indices or
+                slice bounds, a runtime parameter array, or a container
+                that is absent from compile-time data).
+
+        Raises:
+            EmitError: If every index resolved to a concrete int and the
+                root array's container holds compile-time data, but the
+                access fails against that data — either an out-of-range
+                index (``IndexError``; e.g. a loop-unrolled ``theta[i]``
+                with ``i >= len(theta)``) or a shape mismatch (``KeyError``
+                /``TypeError``; the bound value is not an int-indexable
+                array of the expected shape). Falling back to ``None`` in
+                these cases would let the element reach symbolic-parameter
+                creation, where every failing access silently shared one
+                phantom runtime parameter (or a silent ``0.0``).
         """
         parent = v.parent_array
         # Only element Values carry a parent array; scalar Values cannot be
@@ -562,10 +585,53 @@ class ValueResolver:
         for i in indices:
             try:
                 container = container[i]
-            except (IndexError, KeyError, TypeError):
-                # Out-of-range or non-indexable containers are unresolved
-                # rather than guessed.
-                return None
+            except IndexError as exc:
+                # Every guard above already passed: the indices are
+                # concrete ints, the array is not a runtime parameter,
+                # and the container holds known compile-time data. The
+                # access is therefore genuinely out of range, not
+                # symbolic — fail fast instead of falling through to
+                # phantom-parameter creation.
+                try:
+                    length = len(container)
+                except TypeError:
+                    # Some objects define ``__len__`` but still raise on
+                    # ``len()`` (e.g. 0-d NumPy arrays). Fall back to an
+                    # unqualified message rather than masking the real
+                    # out-of-range error with a length-formatting failure.
+                    length = None
+                length_note = f" of length {length}" if length is not None else ""
+                raise EmitError(
+                    f"Index {i} is out of range for compile-time bound "
+                    f"array '{root_parent.name}'{length_note}. Bind data "
+                    f"covering every index reached at emit time (e.g. "
+                    f"every unrolled loop iteration), or declare "
+                    f"'{root_parent.name}' in `parameters` to keep its "
+                    f"elements symbolic.",
+                    operation="array element resolution",
+                ) from exc
+            except (KeyError, TypeError) as exc:
+                # The same guards that make an IndexError here a genuine
+                # out-of-range access also make a KeyError / TypeError a
+                # genuine shape mismatch: the root array is not a runtime
+                # parameter, its container is resolved compile-time data,
+                # and every index is a concrete non-negative int. A
+                # KeyError (the container is a dict) or TypeError (the
+                # container is a scalar over-indexed by a deeper index, or
+                # an otherwise non-indexable bound object) therefore means
+                # the bound data is not an int-indexable array of the
+                # expected shape. Returning None would fall through to the
+                # same phantom-parameter / silent-0.0 hazard as the
+                # out-of-range case, so fail fast instead.
+                raise EmitError(
+                    f"Compile-time bound array '{root_parent.name}' could "
+                    f"not be indexed at index {i}: the bound value is not "
+                    f"an indexable array of the expected shape (got "
+                    f"{type(container).__name__}). Bind a correctly shaped "
+                    f"array for '{root_parent.name}', or declare it in "
+                    f"`parameters` to keep its elements symbolic.",
+                    operation="array element resolution",
+                ) from exc
         return container
 
     def _resolve_array_element_location(
