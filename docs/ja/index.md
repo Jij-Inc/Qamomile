@@ -147,6 +147,24 @@ Qamomileが提供するAPIの使い方、引数、戻り値を確認できます
 
 ---
 
+## 引用
+
+研究でQamomileを使用する場合は、以下を引用してください。
+
+```bibtex
+@INPROCEEDINGS{11249901,
+  author={Huang, Wei-Hao and Matsuyama, Hiromichi and Tam, Wai-Hong and Sato, Keisuke and Yamashiro, Yu},
+  booktitle={2025 IEEE International Conference on Quantum Computing and Engineering (QCE)},
+  title={Qamomile: A Cross-SDK Bridge for Quantum Optimization},
+  year={2025},
+  volume={02},
+  pages={516-517},
+  doi={10.1109/QCE65121.2025.10423}
+}
+```
+
+---
+
 ## リンク
 
 - [GitHubリポジトリ](https://github.com/Jij-Inc/Qamomile)

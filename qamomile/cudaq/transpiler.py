@@ -641,6 +641,133 @@ def _has_runtime_control_flow(
     return False
 
 
+def _pauli_evolve_constant_is_significant(
+    resolver: Any, op: PauliEvolveOp, bindings: dict[str, Any]
+) -> bool:
+    """Return whether ``op``'s Hamiltonian carries a droppable constant phase.
+
+    Reports ``True`` when the constant (identity) term is provably non-zero,
+    and -- conservatively -- also when the observable cannot be resolved to a
+    Hamiltonian from ``bindings`` (so an unknown constant is never silently
+    dropped).  ``False`` only when the constant is provably negligible.
+
+    Args:
+        resolver (Any): The emit pass value resolver.
+        op (PauliEvolveOp): The Pauli evolution op to inspect.
+        bindings (dict[str, Any]): Bindings used to resolve the observable.
+
+    Returns:
+        bool: ``True`` if a non-negligible (or unresolvable) constant exists.
+    """
+    import qamomile.observable as qm_o
+    from qamomile.observable.hamiltonian import PAULI_TERM_ZERO_ATOL
+
+    hamiltonian = resolver.resolve_bound_value(op.observable, bindings)
+    if not isinstance(hamiltonian, qm_o.Hamiltonian):
+        return True
+    try:
+        constant = complex(hamiltonian.constant)
+    except (TypeError, ValueError):
+        return True
+    return abs(constant) >= PAULI_TERM_ZERO_ATOL
+
+
+def _subtree_drops_constant_phase(
+    resolver: Any, operations: Sequence[Operation], bindings: dict[str, Any]
+) -> bool:
+    """Return whether a PauliEvolveOp unreachable by the phase walker drops a constant.
+
+    Walks the same nested-block channels the controlled-helper validator
+    descends -- ``HasNestedOps.nested_op_lists()`` (``for`` / ``if`` / item
+    loops), a ``CompositeGateOperation``'s implementation block, an
+    ``InverseBlockOperation``'s source / implementation blocks, and a
+    ``ControlledUOperation``'s controlled block -- and reports whether any
+    reachable ``PauliEvolveOp`` carries a constant phase that the
+    constant-phase emitter cannot re-apply through that construct.  Used to
+    decide between raising and skipping for nested shapes the emitter does
+    not unroll itself; a zero-constant nested ``pauli_evolve`` stays a no-op.
+
+    Args:
+        resolver (Any): The emit pass value resolver.
+        operations (Sequence[Operation]): Operations to scan.
+        bindings (dict[str, Any]): Best-effort bindings for the scan.
+
+    Returns:
+        bool: ``True`` if a droppable constant phase is (or may be) present.
+    """
+    for op in operations:
+        if isinstance(op, PauliEvolveOp):
+            if _pauli_evolve_constant_is_significant(resolver, op, bindings):
+                return True
+            continue
+        if isinstance(op, HasNestedOps):
+            if any(
+                _subtree_drops_constant_phase(resolver, nested, bindings)
+                for nested in op.nested_op_lists()
+            ):
+                return True
+            continue
+        if isinstance(op, CompositeGateOperation):
+            block = op.implementation_block
+            if block is not None and _subtree_drops_constant_phase(
+                resolver, block.operations, bindings
+            ):
+                return True
+            continue
+        if isinstance(op, InverseBlockOperation):
+            if any(
+                block is not None
+                and _subtree_drops_constant_phase(resolver, block.operations, bindings)
+                for block in (op.source_block, op.implementation_block)
+            ):
+                return True
+            continue
+        if isinstance(op, ControlledUOperation):
+            block = op.block
+            if (
+                block is not None
+                and hasattr(block, "operations")
+                and _subtree_drops_constant_phase(resolver, block.operations, bindings)
+            ):
+                return True
+            continue
+    return False
+
+
+def _resolve_real_constant(hamiltonian: Any) -> float:
+    """Return the real part of a Hamiltonian's constant term, validating it.
+
+    Args:
+        hamiltonian (Any): The resolved Hamiltonian whose constant (identity)
+            term is read.
+
+    Returns:
+        float: The real part of the constant term.
+
+    Raises:
+        EmitError: If the constant is non-numeric, or has a non-negligible
+            imaginary part (a non-Hermitian Hamiltonian whose ``exp(-i*gamma*H)``
+            evolution would not be unitary).
+    """
+    from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL
+
+    try:
+        constant = complex(hamiltonian.constant)
+    except (TypeError, ValueError) as exc:
+        raise EmitError(
+            f"PauliEvolveOp constant term {hamiltonian.constant!r} is not a "
+            f"numeric value.",
+            operation="PauliEvolveOp",
+        ) from exc
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+        raise EmitError(
+            f"PauliEvolveOp requires a Hermitian Hamiltonian (real constant "
+            f"term), but found constant {hamiltonian.constant}.",
+            operation="PauliEvolveOp",
+        )
+    return constant.real
+
+
 def _validate_controlled_helper_unitary_ops(
     operations: Sequence[Operation],
     bindings: dict[str, Any],
@@ -1070,6 +1197,145 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         """
         super()._emit_custom_composite(circuit, op, impl, qubit_indices, bindings)
 
+    def _emit_pauli_evolve(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: PauliEvolveOp,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit Pauli evolution natively via CUDA-Q ``exp_pauli``.
+
+        Overrides the shared gadget (``h`` / ``sdg`` / ``rz`` + CX-ladder)
+        decomposition: each Hamiltonian term ``coeff * P`` becomes a single
+        ``exp_pauli(-gamma * coeff, qubits, P)`` call, letting CUDA-Q's
+        compiler synthesize and optimize the rotation.  The Hamiltonian's
+        constant (identity) term stays an unobservable global phase here and
+        is dropped, exactly as the gadget did; under ``qmc.control`` it is
+        re-applied by :meth:`_emit_controlled_constant_phases` (CUDA-Q
+        forbids ``exp_pauli`` of an all-identity word, so it must never be
+        emitted as a term).
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (PauliEvolveOp): Pauli evolution operation.
+            qubit_map (QubitMap): Quantum value to physical qubit map.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If the observable is not a Hamiltonian, gamma cannot
+                be resolved, the qubit count mismatches the Hamiltonian, or a
+                coefficient is non-real (non-Hermitian).
+        """
+        import qamomile.observable as qm_o
+        from qamomile.observable.hamiltonian import (
+            HERMITIAN_IMAG_ATOL,
+            PAULI_TERM_ZERO_ATOL,
+        )
+
+        hamiltonian = self._resolver.resolve_bound_value(op.observable, bindings)
+        if not isinstance(hamiltonian, qm_o.Hamiltonian):
+            raise EmitError(
+                f"PauliEvolveOp requires a Hamiltonian binding. "
+                f"Observable '{op.observable.name}' not found or not a Hamiltonian.",
+                operation="PauliEvolveOp",
+            )
+
+        gamma = _resolve_gamma(self, op, bindings)
+        if gamma is None:
+            raise EmitError(
+                "Cannot resolve gamma parameter for PauliEvolveOp. "
+                "gamma must be a concrete float binding or a declared "
+                "parameter (scalar or array element).",
+                operation="PauliEvolveOp",
+            )
+
+        input_array = op.qubits
+        assert isinstance(input_array, ArrayValue)
+        num_h_qubits = hamiltonian.num_qubits
+        if input_array.shape:
+            n_resolved = self._resolver.resolve_int_value(
+                input_array.shape[0], bindings
+            )
+            if n_resolved is not None and n_resolved != num_h_qubits:
+                raise EmitError(
+                    f"PauliEvolveOp qubit count mismatch: "
+                    f"qubit register has {n_resolved} qubits but "
+                    f"Hamiltonian acts on {num_h_qubits} qubits.",
+                    operation="PauliEvolveOp",
+                )
+
+        for operators, coeff in hamiltonian:
+            if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
+                raise EmitError(
+                    f"PauliEvolveOp requires a Hermitian Hamiltonian "
+                    f"(real coefficients), but found complex coefficient "
+                    f"{coeff} on term {operators}.",
+                    operation="PauliEvolveOp",
+                )
+        # Validate the constant (identity) term is real too. It is dropped as
+        # a global phase here, but a complex constant means a non-Hermitian
+        # Hamiltonian whose evolution is non-unitary, so it must not pass
+        # silently (the shared controlled path enforces the same).
+        _resolve_real_constant(hamiltonian)
+
+        root_av, slice_start, slice_step = self._resolver.resolve_slice_chain(
+            input_array, bindings, operation="PauliEvolveOp"
+        )
+        qubit_indices: list[int] = []
+        for i in range(num_h_qubits):
+            addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
+            if addr in qubit_map:
+                qubit_indices.append(qubit_map[addr])
+            else:
+                raise EmitError(
+                    f"Cannot resolve qubit index {i} for PauliEvolveOp. "
+                    f"Key '{addr!s}' not found in qubit_map.",
+                    operation="PauliEvolveOp",
+                )
+
+        emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
+        for operators, coeff in hamiltonian:
+            if abs(coeff) < PAULI_TERM_ZERO_ATOL:
+                continue
+            # Build the term from its non-identity factors only: CUDA-Q
+            # rejects an all-identity ``exp_pauli`` word, and identity
+            # factors contribute nothing to the rotation.
+            term_qubits: list[int] = []
+            pauli_letters: list[str] = []
+            for op_item in operators:
+                if op_item.pauli == qm_o.Pauli.I:  # identity factor -- skip
+                    continue
+                term_qubits.append(qubit_indices[op_item.index])
+                pauli_letters.append(qm_o.PAULI_TO_CHAR[op_item.pauli])
+            if not term_qubits:
+                continue
+            # ``exp_pauli`` realizes exp(+i*theta*P); to get
+            # exp(-i*gamma*coeff*P) set theta = -gamma*coeff (no factor of
+            # two, unlike the RZ gadget which uses 2*gamma*coeff).
+            angle: Any
+            if isinstance(gamma, (int, float)):
+                angle = -float(coeff.real * gamma)
+            else:
+                angle = (-float(coeff.real)) * gamma
+            emitter.emit_exp_pauli(circuit, term_qubits, "".join(pauli_letters), angle)
+
+        # Map the result array onto the same physical qubits, mirroring the
+        # shared ``emit_pauli_evolve`` bookkeeping so downstream lookups via
+        # either the result uuid or its slice-chain root resolve.
+        result_array = op.evolved_qubits
+        assert isinstance(result_array, ArrayValue)
+        result_root, result_start, result_step = self._resolver.resolve_slice_chain(
+            result_array, bindings, operation="PauliEvolveOp"
+        )
+        for i, phys_idx in enumerate(qubit_indices):
+            direct_addr = QubitAddress(result_array.uuid, i)
+            if direct_addr not in qubit_map:
+                qubit_map[direct_addr] = phys_idx
+            root_addr = QubitAddress(result_root.uuid, result_start + result_step * i)
+            if root_addr not in qubit_map:
+                qubit_map[root_addr] = phys_idx
+
     def _emit_inverse_block(
         self,
         circuit: CudaqKernelArtifact,
@@ -1295,6 +1561,244 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 target_indices,
                 uses_thetas,
             )
+
+        # ``cudaq.control`` controls only the helper's emitted gates.  The
+        # helper lowers each PauliEvolveOp through the *uncontrolled* path,
+        # which drops the Hamiltonian's constant (identity) term as an
+        # unobservable global phase.  Under control that phase is
+        # observable, so re-apply it explicitly on the controls.
+        self._emit_controlled_constant_phases(
+            circuit,
+            block_value.operations,
+            control_indices,
+            power,
+            bindings,
+            emitter,
+        )
+
+    def _emit_controlled_constant_phases(
+        self,
+        circuit: CudaqKernelArtifact,
+        operations: list[Any],
+        control_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+        emitter: CudaqKernelEmitter,
+    ) -> None:
+        """Emit the controlled identity-term phases the helper body dropped.
+
+        The native ``cudaq.control(helper)`` path lowers every
+        ``PauliEvolveOp`` through the uncontrolled path, which discards each
+        Hamiltonian's constant (identity) term ``c`` as an unobservable
+        global phase ``exp(-i * gamma * c)``.  ``cudaq.control`` wraps only
+        the helper's emitted gates, so that global phase is lost -- yet
+        under control it is an observable relative phase between the
+        control-on and control-off branches.  For every ``PauliEvolveOp``
+        the helper emits, this re-applies the missing phase as a
+        multi-controlled ``P(-power * gamma * c)`` on the controls (a plain
+        phase gate when there is a single control), mirroring the shared
+        :func:`emit_controlled_pauli_evolve` constant-term handling.  The
+        ``power`` factor accounts for the controlled-U**power repetition of
+        the helper call above.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            operations (list[Any]): Controlled block body operations.
+            control_indices (list[int]): Physical outer control qubits.
+            power (int): Controlled-U power applied to the helper.
+            bindings (dict[str, Any]): Controlled-body bindings.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+
+        Raises:
+            EmitError: If a ``PauliEvolveOp`` with a non-zero constant term
+                is nested inside a construct whose controlled constant-phase
+                contribution cannot be resolved here; raising avoids
+                silently dropping an observable phase.
+        """
+        if power == 0 or not control_indices:
+            return
+        self._collect_controlled_constant_phases(
+            circuit, operations, control_indices, power, bindings, emitter
+        )
+
+    def _collect_controlled_constant_phases(
+        self,
+        circuit: CudaqKernelArtifact,
+        operations: list[Any],
+        control_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+        emitter: CudaqKernelEmitter,
+    ) -> None:
+        """Walk ``operations`` and emit each PauliEvolveOp's controlled phase.
+
+        Mirrors the compile-time control-flow unrolling the uncontrolled
+        helper body performs (``for`` loops and constant ``if`` branches),
+        so the emitted phases line up one-for-one with the gadgets the
+        helper actually produced.  Any other construct that could hide a
+        ``PauliEvolveOp`` -- composite, inverse, nested controlled-U, or an
+        item loop -- raises only when that op would drop a non-zero constant
+        phase; a zero-constant nested ``pauli_evolve`` stays a no-op.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            operations (list[Any]): Operations to walk.
+            control_indices (list[int]): Physical outer control qubits.
+            power (int): Controlled-U power applied to the helper.
+            bindings (dict[str, Any]): Current body bindings.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+
+        Raises:
+            EmitError: On a ``PauliEvolveOp`` with a non-zero constant term
+                nested in an unsupported construct, or when ``for`` / ``if``
+                control flow guarding such an op cannot be resolved at
+                compile time.
+        """
+        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (  # noqa: I001
+            _bind_loop_var,
+            resolve_loop_bounds,
+        )
+
+        for op in operations:
+            if isinstance(op, PauliEvolveOp):
+                self._emit_one_controlled_constant_phase(
+                    circuit, op, control_indices, power, bindings, emitter
+                )
+                continue
+            if isinstance(op, ForOperation):
+                start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
+                if start is None or stop is None or step is None:
+                    if _subtree_drops_constant_phase(
+                        self._resolver, op.operations, bindings
+                    ):
+                        raise EmitError(
+                            "Cannot resolve ForOperation bounds while emitting the "
+                            "controlled PauliEvolve constant phase; the identity-term "
+                            "phase would be dropped under control.",
+                            operation="PauliEvolveOp",
+                        )
+                    continue
+                for i in range(start, stop, step):
+                    loop_bindings = bindings.copy()
+                    _bind_loop_var(loop_bindings, op, i)
+                    self._collect_controlled_constant_phases(
+                        circuit,
+                        op.operations,
+                        control_indices,
+                        power,
+                        loop_bindings,
+                        emitter,
+                    )
+                continue
+            if isinstance(op, IfOperation):
+                resolved = resolve_if_condition(op.condition, bindings)
+                # The controlled-helper validator already rejected
+                # measurement-dependent ``if``s, so a reachable IfOperation
+                # has a compile-time-constant condition here.
+                if resolved is None:
+                    if _subtree_drops_constant_phase(
+                        self._resolver, op.true_operations, bindings
+                    ) or _subtree_drops_constant_phase(
+                        self._resolver, op.false_operations, bindings
+                    ):
+                        raise EmitError(
+                            "Cannot resolve IfOperation condition while emitting the "
+                            "controlled PauliEvolve constant phase.",
+                            operation="PauliEvolveOp",
+                        )
+                    continue
+                selected = op.true_operations if resolved else op.false_operations
+                self._collect_controlled_constant_phases(
+                    circuit, selected, control_indices, power, bindings, emitter
+                )
+                continue
+            # Any other construct that could transitively hide a
+            # PauliEvolveOp (composite / inverse / nested controlled-U /
+            # item loop): raise only when a non-zero constant phase would
+            # actually be dropped.  A zero-constant nested pauli_evolve is
+            # unaffected and stays a no-op here.
+            if _subtree_drops_constant_phase(self._resolver, [op], bindings):
+                raise EmitError(
+                    f"CUDA-Q controlled PauliEvolve constant-phase emission does not "
+                    f"support a PauliEvolveOp with a non-zero constant term nested "
+                    f"inside {type(op).__name__}; its Hamiltonian's identity-term "
+                    f"phase would be silently dropped under control.  Restructure the "
+                    f"controlled sub-kernel so the pauli_evolve appears directly "
+                    f"(optionally inside a compile-time for-loop or if-branch).",
+                    operation="PauliEvolveOp",
+                )
+            # Plain gates / binops / returns contribute no constant phase.
+
+    def _emit_one_controlled_constant_phase(
+        self,
+        circuit: CudaqKernelArtifact,
+        op: PauliEvolveOp,
+        control_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+        emitter: CudaqKernelEmitter,
+    ) -> None:
+        """Emit ``P(-power * gamma * c)`` on the controls for one PauliEvolveOp.
+
+        Resolves the Hamiltonian's constant term ``c`` and ``gamma`` the
+        same way the body emit does, then applies the missing identity-term
+        phase as a multi-controlled phase gate, matching the shared
+        :func:`emit_controlled_pauli_evolve` formula ``P(-gamma * c)``.
+        No-op when ``c`` is negligible, so constant-free Hamiltonians keep
+        their previous emission byte-for-byte.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact being built.
+            op (PauliEvolveOp): Pauli evolution op in the controlled body.
+            control_indices (list[int]): Physical outer control qubits
+                (guaranteed non-empty by the caller).
+            power (int): Controlled-U power applied to the helper.
+            bindings (dict[str, Any]): Current controlled-body bindings.
+            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+
+        Raises:
+            EmitError: If the observable is not a Hamiltonian, gamma cannot
+                be resolved, or the constant term is non-real (the
+                evolution would be non-unitary).
+        """
+        import qamomile.observable as qm_o
+        from qamomile.observable.hamiltonian import PAULI_TERM_ZERO_ATOL
+
+        hamiltonian = self._resolver.resolve_bound_value(op.observable, bindings)
+        if not isinstance(hamiltonian, qm_o.Hamiltonian):
+            raise EmitError(
+                f"PauliEvolveOp requires a Hamiltonian binding. "
+                f"Observable '{op.observable.name}' not found or not a Hamiltonian.",
+                operation="PauliEvolveOp",
+            )
+
+        constant_real = _resolve_real_constant(hamiltonian)
+        if abs(constant_real) < PAULI_TERM_ZERO_ATOL:
+            return
+
+        gamma = _resolve_gamma(self, op, bindings)
+        if gamma is None:
+            raise EmitError(
+                "Cannot resolve gamma parameter for PauliEvolveOp. "
+                "gamma must be a concrete float binding or a declared "
+                "parameter (scalar or array element).",
+                operation="PauliEvolveOp",
+            )
+
+        # exp(-i*gamma*c*I) is a global phase exp(-i*gamma*c) on the target
+        # register; controlled, it is P(-gamma*c) on the controls.  Folding
+        # the controlled-U power gives P(-power*gamma*c).  emit_multi_-
+        # controlled_p reduces to a plain phase gate for a single control.
+        scale = -float(power) * constant_real
+        phase: Any
+        if isinstance(gamma, (int, float)):
+            phase = scale * float(gamma)
+        else:
+            phase = scale * gamma
+
+        emitter.emit_multi_controlled_p(
+            circuit, control_indices[:-1], control_indices[-1], phase
+        )
 
     def _emit_cudaq_controlled_ops(
         self,

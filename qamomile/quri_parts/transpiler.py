@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
@@ -43,6 +44,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _populate_input_qubit_map,
     _prepare_nested_block_for_emit,
     emit_controlled_gate,
+    emit_controlled_pauli_evolve,
     emit_multi_controlled_gate,
     map_nested_controlled_u_results,
     resolve_controlled_u_call,
@@ -787,10 +789,21 @@ def _emit_quri_controlled_operations(
                     loop_bindings,
                 )
             continue
+        if isinstance(op, PauliEvolveOp):
+            # Reuse the shared lowering: it emits the basis-change and CX
+            # ladder uncontrolled and routes only the central RZ through
+            # the multi-control machinery, which dispatches to ``emit_crz``
+            # for one control and to this backend's dense
+            # ``_emit_irreducible_multi_controlled_gate`` for two or more.
+            emit_controlled_pauli_evolve(
+                emit_pass, circuit, op, control_indices, qubit_map, bindings
+            )
+            continue
         raise EmitError(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
             "CompositeGateOperation values, InverseBlockOperation values, "
+            "PauliEvolveOp values, "
             "ReturnOperation, and statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",

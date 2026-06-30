@@ -578,6 +578,19 @@ class TestNumpyWrapper:
         with pytest.raises(ValueError, match="data length"):
             dict_to_array(wrapper)
 
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_decoder_rejects_bool_shape_dim(self, flag):
+        """A boolean shape dimension is rejected (bool is not a plain int).
+
+        ``json.loads('[true, 2]')`` yields ``[True, 2]`` and ``bool``
+        subclasses ``int``, so a bare ``isinstance(x, int)`` would accept
+        the dim and silently reshape with ``True == 1``.
+        """
+        wrapper = array_to_dict(np.array([1.0, 2.0]))
+        wrapper["shape"] = [flag, 2]
+        with pytest.raises(ValueError, match="list of ints"):
+            dict_to_array(wrapper)
+
     def test_numpy_array_in_param_slot_bound_value(self):
         """A numpy ``bound_value`` on a ParamSlot round-trips via JSON.
 
@@ -829,6 +842,62 @@ class TestDecoderSafety:
         d["block"]["value_table"][0]["value_type"]["$type"] = "__rogue__"
         with pytest.raises(ValueError, match="ValueType"):
             from_dict(d)
+
+
+# ---------------------------------------------------------------------------
+# bool rejected where a plain int is required (bool subclasses int)
+# ---------------------------------------------------------------------------
+
+
+class TestRejectBoolInIntFields:
+    """Width and power fields reject ``bool`` via ``is_plain_int``.
+
+    ``bool`` is an ``int`` subclass, so a bare ``isinstance(x, int)``
+    accepts ``True`` / ``False``. Register widths and ControlledU powers
+    are integers where a boolean is meaningless, and on the decode side a
+    malformed payload could otherwise smuggle a bool into an int slot.
+    """
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_encode_qreg_width_rejects_bool(self, flag):
+        """``_encode_qreg_width`` refuses a bool width."""
+        from qamomile.circuit.ir.serialize.encode import _encode_qreg_width
+
+        with pytest.raises(TypeError, match="width must be int or Value"):
+            _encode_qreg_width(flag)
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_encode_power_rejects_bool(self, flag):
+        """``_encode_power`` refuses a bool power."""
+        from qamomile.circuit.ir.serialize.encode import _encode_power
+
+        with pytest.raises(TypeError, match="power must be int or Value"):
+            _encode_power(flag)
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_decode_qreg_width_rejects_bool(self, flag):
+        """``_decode_qreg_width`` refuses a bool width payload."""
+        from qamomile.circuit.ir.serialize.decode import (
+            _decode_qreg_width,
+            _DecodeContext,
+        )
+
+        with pytest.raises(ValueError, match="unrecognized width payload"):
+            _decode_qreg_width(flag, _DecodeContext([]))
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_decode_power_rejects_bool_payload(self, flag):
+        """A bool ``power`` in a ControlledU payload is rejected by ``from_dict``."""
+        payload = to_dict(_to_affine(_controlled_phase))
+        controlled = [
+            op
+            for op in payload["block"]["operations"]
+            if op["$type"].endswith("ControlledU")
+        ]
+        assert controlled, [op["$type"] for op in payload["block"]["operations"]]
+        controlled[0]["power"] = flag
+        with pytest.raises(ValueError, match="unrecognized power payload"):
+            from_dict(payload)
 
 
 # ---------------------------------------------------------------------------
