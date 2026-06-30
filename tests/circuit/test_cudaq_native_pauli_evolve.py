@@ -81,7 +81,7 @@ def _cudaq_statevector(artifact) -> np.ndarray:
     Returns:
         np.ndarray: Complex amplitudes of the kernel state.
     """
-    import cudaq
+    cudaq = pytest.importorskip("cudaq")
 
     return np.array(cudaq.get_state(artifact.kernel_func))
 

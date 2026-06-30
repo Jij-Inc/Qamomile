@@ -734,6 +734,40 @@ def _subtree_drops_constant_phase(
     return False
 
 
+def _resolve_real_constant(hamiltonian: Any) -> float:
+    """Return the real part of a Hamiltonian's constant term, validating it.
+
+    Args:
+        hamiltonian (Any): The resolved Hamiltonian whose constant (identity)
+            term is read.
+
+    Returns:
+        float: The real part of the constant term.
+
+    Raises:
+        EmitError: If the constant is non-numeric, or has a non-negligible
+            imaginary part (a non-Hermitian Hamiltonian whose ``exp(-i*gamma*H)``
+            evolution would not be unitary).
+    """
+    from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL
+
+    try:
+        constant = complex(hamiltonian.constant)
+    except (TypeError, ValueError) as exc:
+        raise EmitError(
+            f"PauliEvolveOp constant term {hamiltonian.constant!r} is not a "
+            f"numeric value.",
+            operation="PauliEvolveOp",
+        ) from exc
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+        raise EmitError(
+            f"PauliEvolveOp requires a Hermitian Hamiltonian (real constant "
+            f"term), but found constant {hamiltonian.constant}.",
+            operation="PauliEvolveOp",
+        )
+    return constant.real
+
+
 def _validate_controlled_helper_unitary_ops(
     operations: Sequence[Operation],
     bindings: dict[str, Any],
@@ -1239,6 +1273,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                     f"{coeff} on term {operators}.",
                     operation="PauliEvolveOp",
                 )
+        # Validate the constant (identity) term is real too. It is dropped as
+        # a global phase here, but a complex constant means a non-Hermitian
+        # Hamiltonian whose evolution is non-unitary, so it must not pass
+        # silently (the shared controlled path enforces the same).
+        _resolve_real_constant(hamiltonian)
 
         root_av, slice_start, slice_step = self._resolver.resolve_slice_chain(
             input_array, bindings, operation="PauliEvolveOp"
@@ -1725,10 +1764,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 evolution would be non-unitary).
         """
         import qamomile.observable as qm_o
-        from qamomile.observable.hamiltonian import (
-            HERMITIAN_IMAG_ATOL,
-            PAULI_TERM_ZERO_ATOL,
-        )
+        from qamomile.observable.hamiltonian import PAULI_TERM_ZERO_ATOL
 
         hamiltonian = self._resolver.resolve_bound_value(op.observable, bindings)
         if not isinstance(hamiltonian, qm_o.Hamiltonian):
@@ -1738,14 +1774,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 operation="PauliEvolveOp",
             )
 
-        constant = complex(hamiltonian.constant)
-        if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
-            raise EmitError(
-                f"PauliEvolveOp requires a Hermitian Hamiltonian (real constant "
-                f"term), but found constant {hamiltonian.constant}.",
-                operation="PauliEvolveOp",
-            )
-        constant_real = constant.real
+        constant_real = _resolve_real_constant(hamiltonian)
         if abs(constant_real) < PAULI_TERM_ZERO_ATOL:
             return
 

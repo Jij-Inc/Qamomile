@@ -131,7 +131,7 @@ def _cudaq_statevector(artifact) -> np.ndarray:
     Returns:
         np.ndarray: Complex amplitudes of the kernel state.
     """
-    import cudaq
+    cudaq = pytest.importorskip("cudaq")
 
     return np.array(cudaq.get_state(artifact.kernel_func))
 
@@ -206,3 +206,14 @@ class TestControlledPauliEvolveConstant:
         """No constant offset -> no extra phase, and still matches Qiskit."""
         err = _fidelity_error(_single_control_kernel(_evolve), qm_o.X(0) + 0.0, 0.5)
         assert err < 1e-9
+
+    def test_complex_constant_is_rejected(self) -> None:
+        """A non-real constant term (non-Hermitian) raises EmitError, not a
+        silently non-unitary circuit."""
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.cudaq import CudaqTranspiler
+
+        ham = qm_o.X(0) + 1j  # complex constant -> exp(-i*gamma*H) non-unitary
+        kernel = _single_control_kernel(_evolve)
+        with pytest.raises(EmitError):
+            CudaqTranspiler().transpile(kernel, bindings={"ham": ham, "gamma": 0.5})
