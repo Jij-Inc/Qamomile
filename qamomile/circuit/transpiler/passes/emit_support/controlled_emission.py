@@ -1482,10 +1482,11 @@ def emit_controlled_u_multi_arg(
     # may be a scalar Value (one physical qubit) or an ArrayValue
     # (one physical qubit per element).
     control_operands = op.operands[: op.num_control_args]
-    control_phys: list[int] = []
-    for q in control_operands:
-        indices = _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
-        control_phys.extend(indices)
+    control_index_groups = [
+        _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
+        for q in control_operands
+    ]
+    control_phys = [index for group in control_index_groups for index in group]
 
     if len(control_phys) != nc:
         raise EmitError(
@@ -1550,20 +1551,18 @@ def emit_controlled_u_multi_arg(
     # to the result so downstream ``view_out[i]`` lookups resolve.
     from qamomile.circuit.ir.value import ArrayValue as _ArrayValue
 
-    control_results = op.results[: op.num_control_args]
-    for src, dst in zip(control_operands, control_results):
-        if isinstance(src, _ArrayValue):
-            for addr, idx in list(qubit_map.items()):
-                if addr.matches_array(src.uuid):
-                    result_addr = QubitAddress(dst.uuid, addr.element_index)
-                    if result_addr not in qubit_map:
-                        qubit_map[result_addr] = idx
-        else:
-            src_addr = QubitAddress(src.uuid)
-            if src_addr in qubit_map:
-                dst_addr = QubitAddress(dst.uuid)
-                if dst_addr not in qubit_map:
-                    qubit_map[dst_addr] = qubit_map[src_addr]
+    control_result_pairs = [
+        (result, group)
+        for result, group in zip(
+            op.results[: op.num_control_args], control_index_groups
+        )
+        if result.type.is_quantum()
+    ]
+    _map_operand_result_groups(
+        [result for result, _ in control_result_pairs],
+        [group for _, group in control_result_pairs],
+        qubit_map,
+    )
 
     sub_quantum_results = [
         r for r in op.results[op.num_control_args :] if r.type.is_quantum()

@@ -323,7 +323,7 @@ class ResourceAllocator:
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
-                self._allocate_controlled_u(op, qubit_map)
+                self._allocate_controlled_u(op, qubit_map, bindings)
 
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
@@ -736,8 +736,18 @@ class ResourceAllocator:
         self,
         op: ControlledUOperation,
         qubit_map: QubitMap,
+        bindings: dict[str, Any],
     ) -> None:
-        """Allocate resources for a ControlledUOperation."""
+        """Allocate resources for a controlled-U operation.
+
+        Args:
+            op (ControlledUOperation): Controlled-U operation whose quantum
+                operands and pass-through results need physical qubit slots.
+            qubit_map (QubitMap): Mutable mapping from IR qubit addresses to
+                physical qubit indices.
+            bindings (dict[str, Any]): Active compile-time bindings used to
+                resolve symbolic array-element controls.
+        """
         if isinstance(op, SymbolicControlledU):
             from qamomile.circuit.ir.value import ArrayValue
 
@@ -776,7 +786,18 @@ class ResourceAllocator:
                                 qubit_map[result_addr] = idx
                 else:
                     src_addr = QubitAddress(src.uuid)
-                    if src_addr not in qubit_map:
+                    physical = qubit_map.get(src_addr)
+                    if (
+                        physical is None
+                        and src.parent_array is not None
+                        and src.element_indices
+                    ):
+                        physical = self._resolver.resolve_qubit_index(
+                            src, qubit_map, bindings
+                        )
+                        if physical is not None:
+                            qubit_map[src_addr] = physical
+                    elif physical is None:
                         # Scalar control whose UUID is first introduced
                         # at this ``SymbolicControlledU`` -- typically a
                         # top-level ``@qkernel`` ``Qubit`` input
@@ -787,11 +808,13 @@ class ResourceAllocator:
                         # the fresh-slot allocation here so emit does
                         # not later trip on a missing scalar mapping
                         # for the control prefix.
-                        qubit_map[src_addr] = self._next_qubit_index
+                        physical = self._next_qubit_index
+                        qubit_map[src_addr] = physical
                         self._next_qubit_index += 1
-                    dst_addr = QubitAddress(dst.uuid)
-                    if dst_addr not in qubit_map:
-                        qubit_map[dst_addr] = qubit_map[src_addr]
+                    if physical is not None:
+                        dst_addr = QubitAddress(dst.uuid)
+                        if dst_addr not in qubit_map:
+                            qubit_map[dst_addr] = physical
             sub_quantum_operands = [
                 v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
             ]
