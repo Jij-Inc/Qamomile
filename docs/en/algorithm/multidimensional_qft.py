@@ -234,7 +234,7 @@ def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]
 # %% [markdown]
 # ### Transpiling the circuit
 #
-# Transpile the QFT circuit implemented above for the Qiskit backend.
+# Transpile the QFT circuit implemented above for Qiskit.
 # Bind the flattened input amplitudes at compile time through `bindings`.
 
 # %%

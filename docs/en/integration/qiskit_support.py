@@ -585,5 +585,5 @@ assert np.isfinite(noisy_energy)
 # %% [markdown]
 # ### See also
 #
-# - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow on the CUDA-Q backend, including CUDA-Q targets and `observe`.
+# - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow with CUDA-Q, including CUDA-Q targets and `observe`.
 # - [QURI Parts Support](quri_parts_support.ipynb) covers the same workflow on QURI Parts, including Qulacs sampling and QURI Parts estimator paths.

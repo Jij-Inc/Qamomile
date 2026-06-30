@@ -574,5 +574,5 @@ assert np.isfinite(noisy_energy)
 # %% [markdown]
 # ### 関連ページ
 #
-# - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Qバックエンドで扱い、CUDA-Q targetや`observe`も確認します。
+# - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Q連携で扱い、CUDA-Q targetや`observe`も確認します。
 # - [QURI Partsサポート](quri_parts_support.ipynb)では、同じ流れをQURI Partsで扱い、Qulacs samplerやQURI Parts estimatorの経路も確認します。
