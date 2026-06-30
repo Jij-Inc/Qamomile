@@ -26,13 +26,13 @@
 #
 # - Debug a kernel that fails somewhere between tracing and emission
 # - Write a custom compiler pass
-# - Add a new backend (e.g., a different quantum SDK)
+# - Add a new quantum SDK integration
 # - Simply understand what `transpile()` actually does
 #
 # We will walk a small `@qkernel` through the pipeline stage by stage using the
 # step-by-step public API on `Transpiler`, inspect the intermediate
-# representation at each step, and compare how two backends (Qiskit and
-# QURI Parts) turn the same plan into different circuits.
+# representation at each step, and compare how two quantum SDK integrations
+# (Qiskit and QURI Parts) turn the same plan into different circuits.
 
 # %%
 # Install the latest Qamomile through pip!

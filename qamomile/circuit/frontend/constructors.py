@@ -21,14 +21,36 @@ def uint(arg: str) -> UInt: ...
 
 
 def uint(arg: int | str) -> UInt:
-    """Create a UInt handle from an integer literal or declare a named UInt parameter."""
-    name = str(arg) if isinstance(arg, str) else "uint_const"
+    """Create a UInt handle from an integer literal or a named parameter.
+
+    Args:
+        arg (int | str): An integer literal to bake in as a compile-time
+            constant, or a ``str`` naming a symbolic UInt parameter. A
+            ``bool`` is rejected: ``True`` / ``False`` are not valid integer
+            values here even though ``bool`` subclasses ``int``. (Sign is
+            not validated here -- a negative literal is accepted and baked
+            in as-is.)
+
+    Returns:
+        UInt: A constant-valued handle for an ``int`` argument, or a named
+            symbolic handle for a ``str`` argument.
+
+    Raises:
+        TypeError: If ``arg`` is neither a plain ``int`` nor a ``str``
+            (in particular, if it is a ``bool``).
+    """
+    # Reject bool first with an explicit guard (not is_plain_int): is_plain_int
+    # alone would send a bool to the ``str`` (named-parameter) branch below and
+    # build a malformed UInt(name=True) rather than raising.
+    if isinstance(arg, bool):
+        raise TypeError(f"uint() argument must be an int or str, got bool ({arg}).")
     if isinstance(arg, int):
-        value = Value(type=ir_type.UIntType(), name=name).with_const(arg)
+        value = Value(type=ir_type.UIntType(), name="uint_const").with_const(arg)
         return UInt(value=value, init_value=arg)
-    else:
-        value = Value(type=ir_type.UIntType(), name=name)
+    if isinstance(arg, str):
+        value = Value(type=ir_type.UIntType(), name=arg)
         return UInt(name=arg, value=value)
+    raise TypeError(f"uint() argument must be an int or str, got {type(arg).__name__}.")
 
 
 @typing.overload
