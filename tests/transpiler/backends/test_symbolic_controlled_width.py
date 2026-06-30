@@ -475,8 +475,5 @@ def test_cudaq_symbolic_controlled_u_does_not_allocate_phantoms(
 def test_scalar_input_symbolic_control_allocator_preserves_fresh_result_alias():
     """Fresh scalar controls still map their results for later use."""
     block = scalar_input_symbolic_control_then_use.build(parameters=["num_controls"])
-    qubit_map, _ = ResourceAllocator(ValueResolver()).allocate(
-        block.operations,
-        bindings={"num_controls": 2},
-    )
+    qubit_map, _ = ResourceAllocator(ValueResolver()).allocate(block.operations)
     assert max(qubit_map.values()) + 1 == 3
