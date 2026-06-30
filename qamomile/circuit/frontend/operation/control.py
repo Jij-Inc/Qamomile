@@ -208,6 +208,11 @@ class ControlledGate:
                 ``inspect.Signature`` ``signature``.
             ValueError: If a concrete ``int`` ``num_controls`` is < 1.
         """
+        # Reject bool explicitly (not via is_plain_int): the only numeric guard
+        # here is ``isinstance(int) and < 1`` with no else branch, so swapping in
+        # is_plain_int would keep True stored as the control count and silently
+        # regress False (== 0) past the ``< 1`` check. Mirrors the bool guard in
+        # _normalize_power below.
         if isinstance(num_controls, bool):
             raise TypeError(
                 f"num_controls must be a positive integer or UInt, got bool "

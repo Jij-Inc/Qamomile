@@ -400,6 +400,10 @@ class ArrayBase(Handle, Generic[T]):
         Raises:
             TypeError: If ``idx`` is not a plain ``int`` (e.g. a ``bool``).
         """
+        # is_plain_int covers element indices and slice start/step (both reach
+        # here via _coerce_index, where the arg is already int-typed). The slice
+        # ``stop`` bound never flows through here -- it is guarded in
+        # _as_int_const instead.
         if not is_plain_int(idx):
             raise TypeError(
                 f"array index must be a plain int, got {type(idx).__name__} "
@@ -1724,6 +1728,11 @@ def _as_int_const(value: int | UInt) -> int | None:
     Raises:
         TypeError: If ``value`` is a ``bool``.
     """
+    # Explicit bool guard rather than is_plain_int: a bool routed to the
+    # symbolic (``None``) return path below would make a slice bound look
+    # symbolic instead of being rejected. This is the slice-bound counterpart
+    # to the index guard in ArrayBase._make_uint_index; a slice ``stop`` bound
+    # only reaches here, never _make_uint_index (e.g. q[0:True] -> q[0:1]).
     if isinstance(value, bool):
         raise TypeError(
             f"a bool is not a valid integer here (got {value!r}); a slice "

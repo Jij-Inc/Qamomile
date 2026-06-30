@@ -40,6 +40,9 @@ def uint(arg: int | str) -> UInt:
         TypeError: If ``arg`` is neither a plain ``int`` nor a ``str``
             (in particular, if it is a ``bool``).
     """
+    # Reject bool first with an explicit guard (not is_plain_int): is_plain_int
+    # alone would send a bool to the ``str`` (named-parameter) branch below and
+    # build a malformed UInt(name=True) rather than raising.
     if isinstance(arg, bool):
         raise TypeError(f"uint() argument must be an int or str, got bool ({arg}).")
     if isinstance(arg, int):
