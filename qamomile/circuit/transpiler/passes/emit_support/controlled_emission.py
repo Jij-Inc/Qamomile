@@ -42,11 +42,13 @@ from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
 )
+from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
+    map_array_result_group,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
     QubitMap,
-    map_array_result_group,
 )
 
 if TYPE_CHECKING:
@@ -1542,18 +1544,13 @@ def emit_controlled_u_multi_arg(
     # to the result so downstream ``view_out[i]`` lookups resolve.
     from qamomile.circuit.ir.value import ArrayValue as _ArrayValue
 
-    control_result_pairs = [
-        (result, group)
-        for result, group in zip(
-            op.results[: op.num_control_args], control_index_groups
-        )
-        if result.type.is_quantum()
-    ]
-    _map_operand_result_groups(
-        [result for result, _ in control_result_pairs],
-        [group for _, group in control_result_pairs],
-        qubit_map,
-    )
+    control_results = []
+    control_result_groups = []
+    for result, group in zip(op.results[: op.num_control_args], control_index_groups):
+        if result.type.is_quantum():
+            control_results.append(result)
+            control_result_groups.append(group)
+    _map_operand_result_groups(control_results, control_result_groups, qubit_map)
 
     sub_quantum_results = [
         r for r in op.results[op.num_control_args :] if r.type.is_quantum()

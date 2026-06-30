@@ -8,6 +8,11 @@ from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
+from .physical_index_map import (
+    array_element_mapping,
+    copy_array_element_aliases,
+    map_array_element_aliases,
+)
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
 from .value_resolver import ValueResolver, resolve_qubit_key
 
@@ -150,12 +155,10 @@ def remap_static_phi_outputs(
 
         if output.type.is_quantum():
             if isinstance(output, ArrayValue):
-                is_array_src = isinstance(selected_val, ArrayValue)
-                for addr, phys_idx in list(qubit_map.items()):
-                    if is_array_src and addr.matches_array(selected_val.uuid):
-                        out_addr = QubitAddress(output.uuid, addr.element_index)
-                        if out_addr not in qubit_map:
-                            qubit_map[out_addr] = phys_idx
+                if isinstance(selected_val, ArrayValue):
+                    copy_array_element_aliases(
+                        selected_val.uuid, output.uuid, qubit_map
+                    )
             else:
                 key, _ = resolve_qubit_key(selected_val)
                 scalar_addr = QubitAddress(selected_val.uuid)
@@ -195,20 +198,20 @@ def map_phi_outputs(
 
         if output.type.is_quantum():
             if isinstance(output, ArrayValue):
-                true_is_array = isinstance(true_val, ArrayValue)
-                false_is_array = isinstance(false_val, ArrayValue)
-                true_mapping: dict[int, int] = {}
-                false_mapping: dict[int, int] = {}
-                for addr, phys_idx in qubit_map.items():
-                    if true_is_array and addr.matches_array(true_val.uuid):
-                        assert addr.element_index is not None
-                        true_mapping[addr.element_index] = phys_idx
-                    if false_is_array and addr.matches_array(false_val.uuid):
-                        assert addr.element_index is not None
-                        false_mapping[addr.element_index] = phys_idx
+                true_mapping = (
+                    array_element_mapping(true_val.uuid, qubit_map)
+                    if isinstance(true_val, ArrayValue)
+                    else {}
+                )
+                false_mapping = (
+                    array_element_mapping(false_val.uuid, qubit_map)
+                    if isinstance(false_val, ArrayValue)
+                    else {}
+                )
 
                 if true_mapping or false_mapping:
                     all_indices = set(true_mapping) | set(false_mapping)
+                    output_mapping: dict[int, int] = {}
                     for idx in sorted(all_indices):
                         true_idx = true_mapping.get(idx)
                         false_idx = false_mapping.get(idx)
@@ -224,9 +227,8 @@ def map_phi_outputs(
                                 "resources across branches",
                                 operation="PhiOp",
                             )
-                        out_addr = QubitAddress(output.uuid, idx)
-                        if out_addr not in qubit_map:
-                            qubit_map[out_addr] = true_idx
+                        output_mapping[idx] = true_idx
+                    map_array_element_aliases(output.uuid, output_mapping, qubit_map)
             else:
 
                 def _resolve_one(source: Any) -> int | None:
@@ -270,18 +272,18 @@ def map_phi_outputs(
                 secondary = false_src if true_src is not None else true_src
 
                 if primary is not None:
-                    for addr, phys_idx in list(clbit_map.items()):
-                        if addr.matches_array(primary.uuid):
-                            assert addr.element_index is not None
-                            out_addr = QubitAddress(output.uuid, addr.element_index)
-                            if out_addr not in clbit_map:
-                                clbit_map[out_addr] = phys_idx
-                            if secondary is not None:
-                                sec_addr = QubitAddress(
-                                    secondary.uuid, addr.element_index
-                                )
-                                if sec_addr in clbit_map:
-                                    clbit_map[sec_addr] = phys_idx
+                    primary_mapping = array_element_mapping(primary.uuid, clbit_map)
+                    map_array_element_aliases(
+                        output.uuid,
+                        primary_mapping,
+                        clbit_map,
+                        map_base_address=False,
+                    )
+                    if secondary is not None:
+                        for element_index, phys_idx in primary_mapping.items():
+                            sec_addr = QubitAddress(secondary.uuid, element_index)
+                            if sec_addr in clbit_map:
+                                clbit_map[sec_addr] = phys_idx
             else:
                 # Scalar Bit phi: resolve vector-element sources to their
                 # root clbit key so a measured ``Vector[Bit]`` element merged

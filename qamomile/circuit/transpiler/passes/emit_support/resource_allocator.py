@@ -35,11 +35,13 @@ from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
+from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
+    copy_array_element_aliases,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
     QubitMap,
-    copy_array_element_aliases,
 )
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
     ValueResolver,
