@@ -8534,3 +8534,92 @@ class TestWhileIfSharedLocalPhi:
 
         with pytest.raises((DependencyError, EmitError)):
             _transpile_and_get_circuit(circuit)
+
+
+class TestCommonFallbackMappedWalker:
+    """Exercise the shared controlled fallback via a gateless Qiskit pass.
+
+    Monkeypatching ``QiskitEmitPass._blockvalue_to_gate`` to return None
+    forces the shared mapped walker (the path QURI Parts-like backends
+    take), so its output can be statevector-compared against Qiskit's
+    native custom-controlled-gate emission of the same kernel.
+    """
+
+    @staticmethod
+    def _force_fallback(monkeypatch) -> None:
+        """Disable block-to-gate conversion on the Qiskit emit pass."""
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        monkeypatch.setattr(
+            QiskitEmitPass,
+            "_blockvalue_to_gate",
+            lambda self, *args, **kwargs: None,
+        )
+
+    def test_multi_target_inner_block_matches_native_gate_path(
+        self, monkeypatch
+    ) -> None:
+        """Multi-target controlled sub-kernel: fallback equals native path."""
+
+        @qmc.qkernel
+        def multi_target(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[0], qs[2] = qmc.cx(qs[0], qs[2])
+            qs[1] = qmc.rz(qs[1], 0.375)
+            return qs
+
+        controlled = qmc.control(multi_target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            c = qmc.qubit("c")
+            qs = qmc.qubit_array(3, "qs")
+            c = qmc.h(c)
+            qs[1] = qmc.x(qs[1])
+            c, qs = controlled(c, qs)
+            bits = qmc.measure(qs)
+            return bits
+
+        _, native_circuit = _transpile_and_get_circuit(circuit)
+        native_sv = _run_statevector(native_circuit, decompose=True)
+
+        self._force_fallback(monkeypatch)
+        _, fallback_circuit = _transpile_and_get_circuit(circuit)
+        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
+
+        assert statevectors_equal(fallback_sv, native_sv)
+
+    def test_controlled_modular_increment_matches_native_gate_path(
+        self, monkeypatch
+    ) -> None:
+        """Nested symbolic MCX composition: fallback equals native path.
+
+        ``modular_increment`` wraps ``qmc.control(qmc.x,
+        num_controls=k)`` inside a ``qmc.range`` loop, so the shared
+        walker must unroll the loop, resolve the loop-dependent nested
+        ``SymbolicControlledU``, and compose its controls with the
+        outer one (the 1D periodic Poisson shift shape).
+        """
+        from qamomile.circuit import modular_increment
+
+        controlled_shift = qmc.control(modular_increment)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            c = qmc.qubit("c")
+            qs = qmc.qubit_array(2, "qs")
+            c = qmc.h(c)
+            qs[0] = qmc.x(qs[0])
+            c, qs = controlled_shift(c, qs)
+            bits = qmc.measure(qs)
+            return bits
+
+        _, native_circuit = _transpile_and_get_circuit(circuit)
+        native_sv = _run_statevector(native_circuit, decompose=True)
+
+        self._force_fallback(monkeypatch)
+        _, fallback_circuit = _transpile_and_get_circuit(circuit)
+        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
+
+        assert statevectors_equal(fallback_sv, native_sv)

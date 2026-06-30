@@ -25,10 +25,10 @@
 #
 # - トレーシングからemissionの間のどこかで失敗するカーネルをデバッグしたい
 # - カスタムコンパイラパスを書きたい
-# - 新しいバックエンド（別の量子SDKなど）を追加したい
+# - 新しい量子SDK連携を追加したい
 # - `transpile()`が実際に何をしているのかを単純に理解したい
 #
-# 小さな`@qkernel`を`Transpiler`のステップ実行用公開APIでパイプラインを1段ずつ通し、各ステップで中間表現を確認します。そして同じプランを2つのバックエンド（QiskitとQURI Parts）がどのように異なる回路へ変換するかを比較します。
+# 小さな`@qkernel`を`Transpiler`のステップ実行用公開APIでパイプラインを1段ずつ通し、各ステップで中間表現を確認します。そして同じプランを2つの量子SDK連携（QiskitとQURI Parts）がどのように異なる回路へ変換するかを比較します。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -576,7 +576,7 @@ except ModuleNotFoundError:
 #
 # 1. **回路の型。** Qiskitは`Parameter`オブジェクトを埋め込んだ`QuantumCircuit`をemitします。QURI PartsはパラメータがQURI Partsの`Parameter`インスタンスである`LinearMappedParametricQuantumCircuit`をemitします。どちらもQamomileの`parameter_names`を同じ形で往復します。
 # 2. **測定。** Qiskitの回路は`measure`命令で終わります（`measurement_mode=NATIVE`）。QURI Partsの回路は測定ゲートを持ちません。サンプリングは実行時にexecutorが処理します（`measurement_mode=STATIC`）。
-# 3. **複合ゲート。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Partsバックエンドはライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
+# 3. **複合ゲート。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Parts連携ではライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
 
 # %% [markdown]
 # ## 8. コントリビュータ向けのポインタ

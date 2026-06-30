@@ -122,7 +122,7 @@
 # 次節からは、いちばんシンプルな3量子ビット bit-flip 符号で、この流れを実装していきます。
 
 # %% [markdown]
-# 実装に入る前に、Qamomile と Qiskit バックエンドを読み込み、補助関数を2つ用意します。`_first_bit_distribution` と `_sample_first_bit` は、カーネルをコンパイル・実行して先頭ビットの 0/1 集計を返すだけのユーティリティです。QEC の本筋ではないので、読み飛ばして構いません。
+# 実装に入る前に、QamomileとQiskit連携を読み込み、補助関数を2つ用意します。`_first_bit_distribution`と`_sample_first_bit`は、カーネルをコンパイル・実行して先頭ビットの0/1集計を返すだけのユーティリティです。QECの本筋ではないので、読み飛ばして構いません。
 
 # %%
 import math

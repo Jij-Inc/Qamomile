@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     CompositeGateOperation,
@@ -89,6 +90,7 @@ from qamomile.circuit.ir.value import (
     ValueMetadata,
 )
 
+from .hamiltonian_io import dict_to_hamiltonian, is_hamiltonian_wrapper
 from .numpy_io import dict_to_array, is_array_wrapper
 from .schema import SCHEMA_VERSION
 
@@ -576,7 +578,8 @@ def _decode_payload(value: Any) -> Any:
     Returns:
         Any: The reconstructed Python value (primitives unchanged,
             list / dict recursed, numpy wrappers expanded into
-            ``np.ndarray``).
+            ``np.ndarray``, Hamiltonian wrappers expanded into
+            ``qamomile.observable.Hamiltonian``).
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -584,10 +587,12 @@ def _decode_payload(value: Any) -> Any:
         return bytes(value)
     if is_array_wrapper(value):
         return dict_to_array(value)
+    if is_hamiltonian_wrapper(value):
+        return dict_to_hamiltonian(value)
     if isinstance(value, list):
         return [_decode_payload(x) for x in value]
     if isinstance(value, dict):
-        # Plain dict (not a numpy wrapper); recurse on values.
+        # Plain dict (not a numpy / Hamiltonian wrapper); recurse on values.
         return {k: _decode_payload(v) for k, v in value.items()}
     return value
 
@@ -703,7 +708,7 @@ def _decode_qreg_width(value: Any, ctx: _DecodeContext) -> Any:
     Raises:
         ValueError: If the width has an unrecognized shape.
     """
-    if isinstance(value, int):
+    if is_plain_int(value):
         return value
     if isinstance(value, dict) and "$value_ref" in value:
         return _materialize_as_value(ctx, value["$value_ref"])
@@ -1321,7 +1326,7 @@ def _decode_power(value: Any, ctx: _DecodeContext) -> Any:
     Raises:
         ValueError: If the payload shape is unrecognized.
     """
-    if isinstance(value, int):
+    if is_plain_int(value):
         return value
     if isinstance(value, dict) and "$value_ref" in value:
         return _materialize_as_value(ctx, value["$value_ref"])
