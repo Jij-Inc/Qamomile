@@ -10,6 +10,7 @@ from qamomile.circuit.ir.value import ArrayValue, Value
 
 from .physical_index_map import (
     array_element_mapping,
+    array_element_mappings,
     copy_array_element_aliases,
     map_array_element_aliases,
 )
@@ -198,16 +199,14 @@ def map_phi_outputs(
 
         if output.type.is_quantum():
             if isinstance(output, ArrayValue):
-                true_mapping = (
-                    array_element_mapping(true_val.uuid, qubit_map)
-                    if isinstance(true_val, ArrayValue)
-                    else {}
-                )
-                false_mapping = (
-                    array_element_mapping(false_val.uuid, qubit_map)
-                    if isinstance(false_val, ArrayValue)
-                    else {}
-                )
+                array_sources = {
+                    source.uuid
+                    for source in (true_val, false_val)
+                    if isinstance(source, ArrayValue)
+                }
+                mappings = array_element_mappings(array_sources, qubit_map)
+                true_mapping = mappings.get(true_val.uuid, {})
+                false_mapping = mappings.get(false_val.uuid, {})
 
                 if true_mapping or false_mapping:
                     all_indices = set(true_mapping) | set(false_mapping)

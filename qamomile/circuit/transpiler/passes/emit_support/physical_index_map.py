@@ -27,10 +27,10 @@ def map_array_result_group(
             place with element addresses and, when available, the base result
             address.
     """
-    element_mapping = {
-        element_index: physical for element_index, physical in enumerate(index_group)
-    }
-    map_array_element_aliases(result_uuid, element_mapping, index_map)
+    for element_index, physical in enumerate(index_group):
+        index_map[QubitAddress(result_uuid, element_index)] = physical
+    if index_group:
+        index_map[QubitAddress(result_uuid)] = index_group[0]
 
 
 def array_element_mapping(
@@ -54,6 +54,31 @@ def array_element_mapping(
             assert element_index is not None
             mapping[element_index] = physical
     return mapping
+
+
+def array_element_mappings(
+    source_uuids: set[str],
+    index_map: Mapping[QubitAddress, int],
+) -> dict[str, dict[int, int]]:
+    """Collect array element mappings for multiple source arrays.
+
+    Args:
+        source_uuids (set[str]): UUIDs of the arrays whose element addresses
+            should be collected.
+        index_map (Mapping[QubitAddress, int]): Physical-index map to read.
+
+    Returns:
+        dict[str, dict[int, int]]: Mapping from each requested source UUID to
+            its element-index-to-physical-index mapping.
+    """
+    if not source_uuids:
+        return {}
+
+    mappings: dict[str, dict[int, int]] = {uuid: {} for uuid in source_uuids}
+    for addr, physical in index_map.items():
+        if addr.uuid in source_uuids and addr.element_index is not None:
+            mappings[addr.uuid][addr.element_index] = physical
+    return mappings
 
 
 def map_array_element_aliases(
