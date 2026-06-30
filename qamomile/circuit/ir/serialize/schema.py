@@ -90,6 +90,35 @@ JSON I/O converts ``data`` bytes to a base64 string at the JSON
 boundary and back on read; msgpack passes the bytes through as a
 ``bin`` native type.
 
+Hamiltonian payloads
+--------------------
+
+``ParamSlot.bound_value`` and ``ArrayRuntimeMetadata.const_array``
+may carry ``qamomile.observable.Hamiltonian`` objects — the bound
+values of ``Observable`` kernel parameters (e.g. a Trotter kernel
+built with ``bindings={"Hs": [1.2 * Z(0), 0.8 * X(0)]}``). They are
+encoded with the tagged-dict wrapper defined in
+:mod:`qamomile.circuit.ir.serialize.hamiltonian_io`::
+
+    {
+        "$hamiltonian": True,
+        "terms": [
+            [[["Z", 0], ["X", 1]], <coeff>],   # one Pauli product per entry
+            ...
+        ],
+        "constant": <coeff>,
+        "num_qubits": <int | None>             # declared register width
+    }
+
+``<coeff>`` is a plain int / float, or — for complex coefficients —
+``{"$complex": True, "real": <float>, "imag": <float>}``. Term order
+follows the Hamiltonian's own term-dict iteration order and the
+float-vs-complex distinction is preserved, so the reconstructed
+object is ``repr``-identical to the original; both properties feed
+``content_hash``, which stringifies opaque payloads via ``repr``.
+The wrapper contains no raw bytes, so both wire formats carry it
+unchanged.
+
 Forward compatibility
 ---------------------
 
@@ -117,5 +146,9 @@ from __future__ import annotations
 # that know the tag can still read older payloads.  The ``ArrayValue``
 # slice-view refs (``slice_of_ref`` / ``slice_start_ref`` /
 # ``slice_step_ref``) follow the same additive pattern: payloads
-# written before they existed decode to a non-sliced array.
+# written before they existed decode to a non-sliced array.  The
+# ``$hamiltonian`` payload wrapper (with its ``$complex`` coefficient
+# sub-wrapper) is additive too: pre-existing payloads contain no such
+# wrapper (encoding a Hamiltonian used to raise ``TypeError``), so v1
+# readers that know the tag can still read every older payload.
 SCHEMA_VERSION: int = 1

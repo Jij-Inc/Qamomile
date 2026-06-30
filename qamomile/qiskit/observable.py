@@ -48,20 +48,12 @@ def hamiltonian_to_sparse_pauli_op(hamiltonian: qm_o.Hamiltonian) -> "SparsePaul
     if abs(hamiltonian.constant) > 1e-15:
         pauli_list.append(("I" * n_qubits, hamiltonian.constant))
 
-    # Pauli character mapping
-    pauli_char_map = {
-        qm_o.Pauli.I: "I",
-        qm_o.Pauli.X: "X",
-        qm_o.Pauli.Y: "Y",
-        qm_o.Pauli.Z: "Z",
-    }
-
     # Convert each term
     for operators, coeff in hamiltonian.terms.items():
         # Build Pauli string
         paulis = ["I"] * n_qubits
         for op in operators:
-            paulis[op.index] = pauli_char_map[op.pauli]
+            paulis[op.index] = qm_o.PAULI_TO_CHAR[op.pauli]
 
         # Qiskit uses little-endian: rightmost character is qubit 0
         # So we need to reverse the order

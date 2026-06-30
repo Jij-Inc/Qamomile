@@ -536,5 +536,5 @@ print(f"QAOA hit rate on E* = {ref_E}: {hit_rate:.1%}  ({final_shots} shots)")
 # QUBO via `Instance.to_qubo()`, and reuse the same `BinaryModel` +
 # QAOA ansatz + transpile loop. Larger instances will
 # eventually outgrow local simulators, at which point the same
-# `executable` can be re-targeted to other Qamomile backends
+# `executable` can be re-targeted to other Qamomile quantum SDK integrations
 # (`QuriPartsTranspiler`, `CudaqTranspiler`, …) or real hardware.

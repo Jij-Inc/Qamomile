@@ -6,6 +6,7 @@ import typing
 import uuid
 from typing import Generic, Iterator, TypeVar, overload
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
@@ -383,11 +384,66 @@ class ArrayBase(Handle, Generic[T]):
         return self._shape
 
     def _make_uint_index(self, idx: int) -> UInt:
-        """Create a UInt from an integer index."""
+        """Create a UInt from an integer index.
+
+        Args:
+            idx (int): The Python integer index to wrap. A ``bool`` is
+                rejected: ``True`` / ``False`` are not valid indices even
+                though ``bool`` subclasses ``int`` (a bare
+                ``isinstance(idx, int)`` would otherwise let ``arr[True]``
+                silently alias ``arr[1]``).
+
+        Returns:
+            UInt: A handle whose underlying Value carries ``idx`` as a
+                compile-time constant.
+
+        Raises:
+            TypeError: If ``idx`` is not a plain ``int`` (e.g. a ``bool``).
+        """
+        # is_plain_int covers element indices and slice start/step (both reach
+        # here via _coerce_index, where the arg is already int-typed). The slice
+        # ``stop`` bound never flows through here -- it is guarded in
+        # _as_int_const instead.
+        if not is_plain_int(idx):
+            raise TypeError(
+                f"array index must be a plain int, got {type(idx).__name__} "
+                f"({idx!r}); bool is not a valid index."
+            )
         return UInt(
             value=Value(type=UIntType(), name=f"idx_{idx}").with_const(idx),
             init_value=idx,
         )
+
+    @staticmethod
+    def _reject_negative_const_indices(indices: tuple[UInt, ...]) -> None:
+        """Reject element indices that carry a negative compile-time constant.
+
+        Python-style negative indexing is not supported for array element
+        access. On sliced views the emit-time affine root composition
+        ``root = start + step * local`` would silently address the wrong
+        root slot (e.g. ``v[-1]`` for ``v = q[1:3]`` resolves to ``q[0]``
+        instead of ``q[2]``), so the access is rejected before any IR is
+        built — mirroring the negative ``start`` / ``stop`` / ``step``
+        rejection in ``_make_slice_view``.
+
+        Args:
+            indices (tuple[UInt, ...]): Element indices to validate. Only
+                indices whose underlying Value is a compile-time constant
+                are checked; symbolic indices are deferred to emit-time
+                resolution, which refuses negative resolved values.
+
+        Raises:
+            NotImplementedError: If any index is a negative compile-time
+                constant.
+        """
+        for idx in indices:
+            idx_const = _as_int_const(idx)
+            if idx_const is not None and idx_const < 0:
+                raise NotImplementedError(
+                    f"Negative index is not supported for array element "
+                    f"access (got index={idx_const}).  Use a non-negative "
+                    f"value or compute the index explicitly."
+                )
 
     def _format_index(self, indices: tuple[UInt, ...]) -> str:
         """Format indices for element naming and parameter tracking."""
@@ -445,6 +501,9 @@ class ArrayBase(Handle, Generic[T]):
         """Get an element at the given indices.
 
         Raises:
+            NotImplementedError: If any index is a negative compile-time
+                constant — Python-style negative indexing is not
+                supported (see ``_reject_negative_const_indices``).
             QubitConsumedError: If the array (or the targeted slot) was
                 already destroyed by a prior destructive operation
                 (``measure`` / ``cast`` / ``expval``).
@@ -452,6 +511,12 @@ class ArrayBase(Handle, Generic[T]):
                 or the slot is currently owned by a ``VectorView`` slice
                 (whether on ``self`` or a nested outer view).
         """
+        # Reject constant negative indices before any borrow-table or IR
+        # side effect: a negative index built into the IR would either
+        # silently compose to the wrong root slot through a view's affine
+        # map or surface much later as an internal allocator assertion.
+        self._reject_negative_const_indices(indices)
+
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 
@@ -461,10 +526,10 @@ class ArrayBase(Handle, Generic[T]):
         # length-3 array — from being built into the IR. For a measured
         # ``Vector[Bit]`` such an element would otherwise compose to a
         # valid-but-wrong root clbit at emit time and be read silently. Only
-        # the ``idx >= dim`` overflow is rejected here: negative indices are
-        # a separate (unsupported) concern already diagnosed downstream, and
-        # symbolic indices / dimensions (loop variables, runtime parameters)
-        # carry no provable range and are deferred to emit-time resolution.
+        # the ``idx >= dim`` overflow is rejected here: negative indices were
+        # already rejected above, and symbolic indices / dimensions (loop
+        # variables, runtime parameters) carry no provable range and are
+        # deferred to emit-time resolution.
         if len(indices) == 1 and self._shape:
             idx_const = _as_int_const(indices[0])
             dim_const = _as_int_const(self._shape[0])
@@ -597,6 +662,9 @@ class ArrayBase(Handle, Generic[T]):
             value: The handle being written back.
 
         Raises:
+            NotImplementedError: If any index is a negative compile-time
+                constant — Python-style negative indexing is not
+                supported (see ``_reject_negative_const_indices``).
             QubitConsumedError: If the array was already consumed.
             AffineTypeError: If the index was borrowed **and** the value
                 was not borrowed from this array (``value.parent is not self``).
@@ -610,6 +678,10 @@ class ArrayBase(Handle, Generic[T]):
             UInt handles from ``_get_element`` and thus matches the borrow
             key reliably.
         """
+        # Mirror the read-side rejection so ``arr[-1] = value`` cannot
+        # register a borrow-table entry under a negative key either.
+        self._reject_negative_const_indices(indices)
+
         target_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 
@@ -845,7 +917,9 @@ class Vector(ArrayBase[T]):
 
         Raises:
             NotImplementedError: If the slice uses a non-positive step or
-                negative start/stop values, which are not yet supported.
+                negative start/stop values, or if an element index is a
+                negative constant — Python-style negative indexing is not
+                yet supported.
         """
         if isinstance(index, slice):
             return self._make_slice_view(index)
@@ -1637,14 +1711,33 @@ def _as_int_const(value: int | UInt) -> int | None:
     """Return the Python ``int`` for ``value`` if it is a compile-time constant.
 
     Args:
-        value: Either a raw Python ``int`` or a ``UInt`` handle whose
-            backing ``Value`` may or may not carry a constant.
+        value (int | UInt): Either a raw Python ``int`` or a ``UInt``
+            handle whose backing ``Value`` may or may not carry a
+            constant. A ``bool`` is rejected: ``True`` / ``False`` are not
+            valid integer constants for a slice bound or length even though
+            ``bool`` subclasses ``int`` (this is the slice-bound counterpart
+            of the index guard in :meth:`ArrayBase._make_uint_index`, which
+            ``_as_int_const`` would otherwise let through — e.g. ``q[0:True]``
+            silently becoming ``q[0:1]``).
 
     Returns:
-        The int when ``value`` is an ``int`` directly, or a ``UInt``
-        whose ``.value`` is constant and resolvable to an ``int``.
-        ``None`` otherwise (i.e. when ``value`` is a symbolic ``UInt``).
+        int | None: The int when ``value`` is a plain ``int`` directly, or a
+            ``UInt`` whose ``.value`` is constant and resolvable to an
+            ``int``; ``None`` when ``value`` is a symbolic ``UInt``.
+
+    Raises:
+        TypeError: If ``value`` is a ``bool``.
     """
+    # Explicit bool guard rather than is_plain_int: a bool routed to the
+    # symbolic (``None``) return path below would make a slice bound look
+    # symbolic instead of being rejected. This is the slice-bound counterpart
+    # to the index guard in ArrayBase._make_uint_index; a slice ``stop`` bound
+    # only reaches here, never _make_uint_index (e.g. q[0:True] -> q[0:1]).
+    if isinstance(value, bool):
+        raise TypeError(
+            f"a bool is not a valid integer here (got {value!r}); a slice "
+            f"bound or length must be a plain int."
+        )
     if isinstance(value, int):
         return value
     if isinstance(value, UInt) and value.value.is_constant():

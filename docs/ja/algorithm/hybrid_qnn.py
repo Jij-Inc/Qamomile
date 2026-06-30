@@ -16,8 +16,7 @@
 # ---
 # tags: [algorithm, machine-learning, variational]
 # ---
-
-# %% [markdown]
+#
 # # ハイブリッド量子ニューラルネットワーク (HQNN)
 #
 # このチュートリアルでは、古典ニューラルネットワーク層と量子変分回路層を組み合わせた**ハイブリッド量子ニューラルネットワーク** (HQNN) を Fashion-MNIST データセットで構築します。量子層は Qamomile の `@qkernel` API で定義し、パラメータシフトルールを用いて PyTorch の学習パイプラインに統合します。
