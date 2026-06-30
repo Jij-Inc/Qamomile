@@ -39,6 +39,7 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
     QubitMap,
+    copy_array_element_aliases,
 )
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
     ValueResolver,
@@ -636,17 +637,7 @@ class ResourceAllocator:
                 # or a ``MeasureVectorOperation`` on the result)
                 # trips the ``_resolve_root_qubit_address`` assertion.
                 if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
-                    copied = False
-                    for addr, idx in list(qubit_map.items()):
-                        if addr.matches_array(operand.uuid):
-                            new_addr = QubitAddress(result.uuid, addr.element_index)
-                            if new_addr not in qubit_map:
-                                qubit_map[new_addr] = idx
-                                copied = True
-                    if copied and result_addr not in qubit_map:
-                        first_elem = QubitAddress(result.uuid, 0)
-                        if first_elem in qubit_map:
-                            qubit_map[result_addr] = qubit_map[first_elem]
+                    copy_array_element_aliases(operand.uuid, result.uuid, qubit_map)
                     continue
 
                 chain_addr = self._resolve_root_qubit_address(operand)
@@ -717,11 +708,7 @@ class ResourceAllocator:
         """
         input_qubits = op.qubits
         result_qubits = op.evolved_qubits
-        for addr, idx in list(qubit_map.items()):
-            if addr.matches_array(input_qubits.uuid):
-                result_addr = QubitAddress(result_qubits.uuid, addr.element_index)
-                if result_addr not in qubit_map:
-                    qubit_map[result_addr] = idx
+        copy_array_element_aliases(input_qubits.uuid, result_qubits.uuid, qubit_map)
 
     def _allocate_composite(
         self,
@@ -779,11 +766,7 @@ class ResourceAllocator:
                 src = op.operands[i]
                 dst = op.results[i]
                 if isinstance(src, ArrayValue):
-                    for addr, idx in list(qubit_map.items()):
-                        if addr.matches_array(src.uuid):
-                            result_addr = QubitAddress(dst.uuid, addr.element_index)
-                            if result_addr not in qubit_map:
-                                qubit_map[result_addr] = idx
+                    copy_array_element_aliases(src.uuid, dst.uuid, qubit_map)
                 else:
                     src_addr = QubitAddress(src.uuid)
                     physical = qubit_map.get(src_addr)

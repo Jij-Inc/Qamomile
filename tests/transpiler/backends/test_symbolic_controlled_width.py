@@ -4,6 +4,8 @@ Note: Do NOT use ``from __future__ import annotations`` in this file.
 The qkernel AST transformer relies on resolved type annotations.
 """
 
+from typing import Any
+
 import pytest
 
 import qamomile.circuit as qmc
@@ -301,16 +303,19 @@ def _symbolic_mcz_bindings() -> dict[str, int]:
     }
 
 
-def _qiskit_circuit(kernel, bindings: dict | None = None):
+def _qiskit_circuit(
+    kernel: qmc.QKernel,
+    bindings: dict[str, Any] | None = None,
+) -> Any:
     """Transpile a kernel and return the first Qiskit circuit.
 
     Args:
-        kernel: QKernel to transpile with the Qiskit backend.
-        bindings (dict | None): Compile-time bindings passed to
+        kernel (qmc.QKernel): QKernel to transpile with the Qiskit backend.
+        bindings (dict[str, Any] | None): Compile-time bindings passed to
             ``transpile``. Defaults to None.
 
     Returns:
-        QuantumCircuit: First emitted Qiskit circuit.
+        Any: First emitted Qiskit circuit.
     """
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
@@ -319,12 +324,15 @@ def _qiskit_circuit(kernel, bindings: dict | None = None):
     return exe.compiled_quantum[0].circuit
 
 
-def _quri_parts_width(kernel, bindings: dict | None = None) -> int:
+def _quri_parts_width(
+    kernel: qmc.QKernel,
+    bindings: dict[str, Any] | None = None,
+) -> int:
     """Transpile a kernel and return the QURI Parts circuit width.
 
     Args:
-        kernel: QKernel to transpile with the QURI Parts backend.
-        bindings (dict | None): Compile-time bindings passed to
+        kernel (qmc.QKernel): QKernel to transpile with the QURI Parts backend.
+        bindings (dict[str, Any] | None): Compile-time bindings passed to
             ``transpile``. Defaults to None.
 
     Returns:
@@ -337,12 +345,15 @@ def _quri_parts_width(kernel, bindings: dict | None = None) -> int:
     return exe.compiled_quantum[0].circuit.qubit_count
 
 
-def _cudaq_width(kernel, bindings: dict | None = None) -> int:
+def _cudaq_width(
+    kernel: qmc.QKernel,
+    bindings: dict[str, Any] | None = None,
+) -> int:
     """Transpile a kernel and return the CUDA-Q artifact width.
 
     Args:
-        kernel: QKernel to transpile with the CUDA-Q backend.
-        bindings (dict | None): Compile-time bindings passed to
+        kernel (qmc.QKernel): QKernel to transpile with the CUDA-Q backend.
+        bindings (dict[str, Any] | None): Compile-time bindings passed to
             ``transpile``. Defaults to None.
 
     Returns:

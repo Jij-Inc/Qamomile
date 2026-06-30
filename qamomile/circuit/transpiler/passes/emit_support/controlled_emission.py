@@ -46,6 +46,7 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
     QubitMap,
+    map_array_result_group,
 )
 
 if TYPE_CHECKING:
@@ -428,12 +429,7 @@ def _map_operand_result_groups(
 
     for result, group in zip(results, index_groups):
         if isinstance(result, ArrayValue):
-            for j, phys in enumerate(group):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if group:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = group[0]
+            map_array_result_group(result.uuid, group, qubit_map)
         elif group:
             qubit_map[QubitAddress(result.uuid)] = group[0]
 
@@ -1406,12 +1402,7 @@ def emit_controlled_u_with_symbolic_indices(
             break
         indices = target_index_groups[i]
         if isinstance(result, _ArrayValue):
-            for j, phys in enumerate(indices):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if indices:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = indices[0]
+            map_array_result_group(result.uuid, indices, qubit_map)
         else:
             if indices:
                 qubit_map[QubitAddress(result.uuid)] = indices[0]
@@ -1572,12 +1563,7 @@ def emit_controlled_u_multi_arg(
             break
         indices = target_index_groups[i]
         if isinstance(result, _ArrayValue):
-            for j, phys in enumerate(indices):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if indices:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = indices[0]
+            map_array_result_group(result.uuid, indices, qubit_map)
         else:
             if indices:
                 qubit_map[QubitAddress(result.uuid)] = indices[0]
@@ -2965,12 +2951,7 @@ def _map_controlled_u_results(
             # that subscript the result via ``result[i]`` (which
             # produces ``Value(parent_array=result, element_indices=…)``)
             # and callers that address the whole array both resolve.
-            for j, phys in enumerate(indices):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if indices:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = indices[0]
+            map_array_result_group(result.uuid, indices, qubit_map)
         else:
             if indices:
                 qubit_map[QubitAddress(result.uuid)] = indices[0]
