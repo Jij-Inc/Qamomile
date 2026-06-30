@@ -409,7 +409,7 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # %% [markdown]
 # ## CUDA-Q targetの選択: GPU targetの利用
 #
-# `CUDA-Q target`は、CUDA-Qが量子カーネル呼び出しに使う実行バックエンドです。たとえばCPUシミュレータの`qpp-cpu`、GPUシミュレータの`nvidia`、設定済みの実機QPU向けtargetなどがあります。
+# `CUDA-Q target`は、CUDA-Qが量子カーネル呼び出しに使う実行先です。たとえばCPUシミュレータの`qpp-cpu`、GPUシミュレータの`nvidia`、設定済みの実機QPU向けtargetなどがあります。
 # `CudaqExecutor()`は現在選択されているCUDA-Q targetを使います。targetを明示しない場合はCUDA-Qの既定targetが使われるため、上の例はCPUのみのローカル環境でも追加設定なしで実行できます。
 # `CudaqExecutor(target=...)`または`CudaqTranspiler.executor(target=...)`はtargetを明示的に選択します。
 # 差し替えたexecutorは、上で使った`executor`の位置にそのまま当てはめられます。
@@ -566,7 +566,7 @@ plt.show()
 # `STATIC` artifactでは、生成されたCUDA-Qソースに明示的な終端測定は入りません。そのため、CUDA-Qの`sample` APIと`observe` APIに対応しています。
 #
 # Qamomileの量子カーネルは、ハードウェアレベルの実行を想定し、回路途中の測定結果に基づく古典制御フローを記述することができます（詳しくは[古典制御フローパターン](../tutorial/07_classical_flow_patterns.ipynb)を参照してください）。
-# そのため、量子カーネルが`if`分岐や`while`ループのようなランタイム測定に依存する制御フローを含む場合、CUDA-Qバックエンドは`ExecutionMode.RUNNABLE` artifactを出力します。
+# そのため、量子カーネルが`if`分岐や`while`ループのようなランタイム測定に依存する制御フローを含む場合、CUDA-Q連携は`ExecutionMode.RUNNABLE` artifactを出力します。
 # `RUNNABLE` artifactでは、生成されたソースに明示的な`mz(...)`測定が入り、`cudaq.run()`で実行されます。
 # 次の小さなfeed-forward回路で、この経路を確認します。
 
@@ -622,7 +622,7 @@ else:
 # %% [markdown]
 # ## まとめ
 #
-# このチュートリアルでは、MaxCut向けのQAOA量子カーネルをCUDA-Qバックエンドへトランスパイルし、サンプリング、期待値計算、CPU/GPU targetの切り替え、古典制御フローを含む回路の実行までを確認しました。
+# このチュートリアルでは、MaxCut向けのQAOA量子カーネルをCUDA-Qへトランスパイルし、サンプリング、期待値計算、CPU/GPU targetの切り替え、古典制御フローを含む回路の実行までを確認しました。
 #
 # - `CudaqTranspiler`が出力するCUDA-Q artifactはPythonソースとして確認でき、ランタイムパラメータを保ったまま再利用できます。
 # - 同じ`ExecutableProgram`を`qpp-cpu`と`nvidia` GPU targetで実行でき、targetの選択はexecutor側で切り替えられます。
@@ -632,5 +632,5 @@ else:
 # %% [markdown]
 # ### 関連ページ
 #
-# - [QURI Partsサポート](quri_parts_support.ipynb)では、同じMaxCut QAOAの流れをQURI Partsバックエンドで扱います。
+# - [QURI Partsサポート](quri_parts_support.ipynb)では、同じMaxCut QAOAの流れをQURI Parts連携で扱います。
 # - [Qiskitサポート](qiskit_support.ipynb)では、同じ流れをQiskitで扱い、Aerシミュレータ、Qiskit primitive、Qiskitネイティブの回路機能も確認します。

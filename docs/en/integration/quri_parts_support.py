@@ -564,5 +564,5 @@ plt.show()
 # %% [markdown]
 # ### See also
 #
-# - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow on the CUDA-Q backend.
+# - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow with CUDA-Q.
 # - [Qiskit Support](qiskit_support.ipynb) covers the same workflow on Qiskit, including Aer simulators, Qiskit primitives, and native Qiskit circuit features.

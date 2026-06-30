@@ -6,7 +6,7 @@ Qamomile can be installed via standard package managers, such as pip.
 pip install qamomile
 ```
 
-Qiskit is included as the default execution backend.
+Qiskit is included as the default quantum SDK integration.
 
 ```python
 from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
@@ -14,7 +14,7 @@ from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
 
 ## Supported quantum SDKs
 
-Qamomile supports multiple quantum SDKs as execution backends. To use an additional backend, install its optional dependencies.
+Qamomile supports multiple quantum SDK integrations. To use an additional quantum SDK, install its optional dependencies.
 
 ::::{tab-set}
 

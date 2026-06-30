@@ -20,7 +20,7 @@ Write circuits as typed Python functions, then draw, check, and reuse them like 
 :::
 
 :::{card}
-**One program, many backends**
+**One program, many quantum SDKs**
 
 Move between Qiskit, CUDA-Q, QURI Parts, and qBraid without rewriting your circuit.
 :::
@@ -88,7 +88,7 @@ print(result.results)
 :::{card}
 :header: **Installation**
 :link: installation_guide.md
-Install Qamomile itself, then add execution backends such as CUDA-Q, QURI Parts, and qBraid as needed.
+Install Qamomile itself, then add quantum SDK integrations such as CUDA-Q, QURI Parts, and qBraid as needed.
 :::
 
 :::{card}

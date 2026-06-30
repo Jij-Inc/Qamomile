@@ -512,5 +512,5 @@ print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
 # %% [markdown]
 # ### 関連ページ
 #
-# - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Qバックエンドで扱います。
+# - [CUDA-Qサポート](cudaq_support.ipynb)では、同じMaxCut QAOAの流れをCUDA-Q連携で扱います。
 # - [Qiskitサポート](qiskit_support.ipynb)では、同じ流れをQiskitで扱い、Aerシミュレータ、Qiskit primitive、Qiskitネイティブの回路機能も確認します。

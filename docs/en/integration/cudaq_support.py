@@ -407,7 +407,7 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # %% [markdown]
 # ## Choosing CUDA-Q targets: Using the GPU target
 #
-# A `CUDA-Q target` is the execution backend CUDA-Q uses for kernel calls, such as the `qpp-cpu` CPU simulator, the `nvidia` GPU simulator, or a configured QPU backend.
+# A `CUDA-Q target` is the execution target CUDA-Q uses for kernel calls, such as the `qpp-cpu` CPU simulator, the `nvidia` GPU simulator, or a configured QPU target.
 # `CudaqExecutor()` uses the currently selected CUDA-Q target. If you do not choose a target explicitly, CUDA-Q uses its default target, so the examples above run in a local CPU-only environment without extra configuration.
 # `CudaqExecutor(target=...)` or `CudaqTranspiler.executor(target=...)` selects a target explicitly.
 # The custom executor can be used anywhere `executor` appeared above.
@@ -564,7 +564,7 @@ plt.show()
 # `STATIC` artifacts have no explicit terminal measurement in the generated CUDA-Q source, so they are compatible with CUDA-Q's `sample` and `observe` APIs.
 #
 # Qamomile quantum kernels are designed with hardware-level execution in mind and can express classical control flow based on mid-circuit measurement results (see [Classical Flow Patterns](../tutorial/07_classical_flow_patterns.ipynb) for details).
-# For this reason, if a quantum kernel contains control flow that depends on runtime measurements, such as `if` branches or `while` loops, the CUDA-Q backend emits an `ExecutionMode.RUNNABLE` artifact instead.
+# For this reason, if a quantum kernel contains control flow that depends on runtime measurements, such as `if` branches or `while` loops, the CUDA-Q integration emits an `ExecutionMode.RUNNABLE` artifact instead.
 # `RUNNABLE` artifacts use explicit `mz(...)` measurements in the generated source and execute through `cudaq.run()`.
 # The following tiny feed-forward circuit demonstrates that path.
 
@@ -617,7 +617,7 @@ else:
 # %% [markdown]
 # ## Summary
 #
-# In this tutorial, we transpiled a MaxCut QAOA quantum kernel to the CUDA-Q backend, then exercised sampling, expectation-value estimation, CPU/GPU target selection, and execution of a circuit with classical control flow.
+# In this tutorial, we transpiled a MaxCut QAOA quantum kernel to CUDA-Q, then exercised sampling, expectation-value estimation, CPU/GPU target selection, and execution of a circuit with classical control flow.
 #
 # - The CUDA-Q artifact emitted by `CudaqTranspiler` keeps inspectable Python source and can be reused with runtime parameters.
 # - The same `ExecutableProgram` can run on the `qpp-cpu` target or the `nvidia` GPU target, with target selection handled by the executor.
@@ -627,5 +627,5 @@ else:
 # %% [markdown]
 # ### See also
 #
-# - [QURI Parts Support](quri_parts_support.ipynb) covers the same MaxCut QAOA workflow on the QURI Parts backend.
+# - [QURI Parts Support](quri_parts_support.ipynb) covers the same MaxCut QAOA workflow with QURI Parts.
 # - [Qiskit Support](qiskit_support.ipynb) covers the same workflow on Qiskit, including Aer simulators, Qiskit primitives, and native Qiskit circuit features.

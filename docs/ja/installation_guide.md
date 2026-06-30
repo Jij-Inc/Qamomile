@@ -6,7 +6,7 @@ Qamomileは、pipなどの標準的なパッケージマネージャでインス
 pip install qamomile
 ```
 
-Qiskitはデフォルトの実行バックエンドとして含まれています。
+Qiskitはデフォルトの量子SDK連携として含まれています。
 
 ```python
 from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
@@ -14,7 +14,7 @@ from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
 
 ## 対応する量子SDK
 
-Qamomileは、複数の量子SDKを実行バックエンドとしてサポートしています。追加のバックエンドを使う場合は、必要な依存関係をオプションとしてインストールします。
+Qamomileは、複数の量子SDK連携をサポートしています。追加の量子SDKを使う場合は、必要な依存関係をオプションとしてインストールします。
 
 ::::{tab-set}
 

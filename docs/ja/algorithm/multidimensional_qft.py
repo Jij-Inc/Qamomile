@@ -234,7 +234,7 @@ def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]
 # %% [markdown]
 # ### 回路のトランスパイル
 #
-# 先ほど実装したQFT回路をQiskitバックエンド向けにトランスパイルしましょう。
+# 先ほど実装したQFT回路をQiskit向けにトランスパイルしましょう。
 # 平坦化した入力振幅を、`bindings`を通じてトランスパイル時に指定します。
 
 # %%

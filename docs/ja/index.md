@@ -20,7 +20,7 @@ Qamomileは、量子回路を型付きのPython関数として記述できる量
 :::
 
 :::{card}
-**多様なバックエンド対応**
+**多様な量子SDK対応**
 
 Qiskit、CUDA-Q、QURI Parts、qBraidなどへ、同じ量子回路をそのまま展開できます。
 :::
@@ -88,7 +88,7 @@ print(result.results)
 :::{card}
 :header: **インストール**
 :link: installation_guide.md
-Qamomile本体に加えて、CUDA-Q、QURI Parts、qBraidなどの実行バックエンドを必要に応じてインストールします。
+Qamomile本体に加えて、CUDA-Q、QURI Parts、qBraidなどの量子SDK連携を必要に応じてインストールします。
 :::
 
 :::{card}
