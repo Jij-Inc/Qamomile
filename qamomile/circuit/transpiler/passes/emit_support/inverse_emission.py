@@ -25,6 +25,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _gate_matches_qubit_count,
     _prepare_nested_block_for_emit,
 )
+from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
+    map_array_result_group,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
@@ -391,9 +394,6 @@ def _map_inverse_block_results(
     ]
     for result, indices in zip(target_results, target_index_groups):
         if isinstance(result, ArrayValue):
-            for i, phys in enumerate(indices):
-                qubit_map[QubitAddress(result.uuid, i)] = phys
-            if indices:
-                qubit_map[QubitAddress(result.uuid)] = indices[0]
+            map_array_result_group(result.uuid, indices, qubit_map)
         elif indices:
             qubit_map[QubitAddress(result.uuid)] = indices[0]
