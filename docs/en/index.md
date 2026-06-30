@@ -147,6 +147,24 @@ How to use the APIs provided by Qamomile, including their arguments and return v
 
 ---
 
+## Citation
+
+If you use Qamomile in your research, please cite:
+
+```bibtex
+@INPROCEEDINGS{11249901,
+  author={Huang, Wei-Hao and Matsuyama, Hiromichi and Tam, Wai-Hong and Sato, Keisuke and Yamashiro, Yu},
+  booktitle={2025 IEEE International Conference on Quantum Computing and Engineering (QCE)},
+  title={Qamomile: A Cross-SDK Bridge for Quantum Optimization},
+  year={2025},
+  volume={02},
+  pages={516-517},
+  doi={10.1109/QCE65121.2025.10423}
+}
+```
+
+---
+
 ## Links
 
 - [GitHub Repository](https://github.com/Jij-Inc/Qamomile)
