@@ -1224,8 +1224,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 
         Raises:
             EmitError: If the observable is not a Hamiltonian, gamma cannot
-                be resolved, the qubit count mismatches the Hamiltonian, or a
-                coefficient is non-real (non-Hermitian).
+                be resolved, the Hamiltonian is larger than the qubit
+                register, or a coefficient is non-real (non-Hermitian).
         """
         import qamomile.observable as qm_o
         from qamomile.observable.hamiltonian import (
@@ -1253,15 +1253,19 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         input_array = op.qubits
         assert isinstance(input_array, ArrayValue)
         num_h_qubits = hamiltonian.num_qubits
+        register_qubit_count = num_h_qubits
         if input_array.shape:
             n_resolved = self._resolver.resolve_int_value(
                 input_array.shape[0], bindings
             )
-            if n_resolved is not None and n_resolved != num_h_qubits:
+            if n_resolved is not None:
+                register_qubit_count = n_resolved
+            if n_resolved is not None and num_h_qubits > n_resolved:
                 raise EmitError(
                     f"PauliEvolveOp qubit count mismatch: "
                     f"qubit register has {n_resolved} qubits but "
-                    f"Hamiltonian acts on {num_h_qubits} qubits.",
+                    f"Hamiltonian acts on {num_h_qubits} qubits. "
+                    f"The Hamiltonian must not be larger than the register.",
                     operation="PauliEvolveOp",
                 )
 
@@ -1282,17 +1286,18 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         root_av, slice_start, slice_step = self._resolver.resolve_slice_chain(
             input_array, bindings, operation="PauliEvolveOp"
         )
-        qubit_indices: list[int] = []
-        for i in range(num_h_qubits):
+        register_qubit_indices: list[int] = []
+        for i in range(register_qubit_count):
             addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
             if addr in qubit_map:
-                qubit_indices.append(qubit_map[addr])
+                register_qubit_indices.append(qubit_map[addr])
             else:
                 raise EmitError(
                     f"Cannot resolve qubit index {i} for PauliEvolveOp. "
                     f"Key '{addr!s}' not found in qubit_map.",
                     operation="PauliEvolveOp",
                 )
+        qubit_indices = register_qubit_indices[:num_h_qubits]
 
         emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
         for operators, coeff in hamiltonian:
@@ -1328,7 +1333,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         result_root, result_start, result_step = self._resolver.resolve_slice_chain(
             result_array, bindings, operation="PauliEvolveOp"
         )
-        for i, phys_idx in enumerate(qubit_indices):
+        for i, phys_idx in enumerate(register_qubit_indices):
             direct_addr = QubitAddress(result_array.uuid, i)
             if direct_addr not in qubit_map:
                 qubit_map[direct_addr] = phys_idx

@@ -351,8 +351,15 @@ def test_smaller_hamiltonian_is_identity_padded():
         probs = np.abs(Statevector(circuit).data) ** 2
         expected = np.zeros(4)
         expected[0] = 1.0
-        assert np.allclose(probs, expected), (
-            f"use_native={use_native}: padded evolution changed populations: {probs}"
+        np.testing.assert_allclose(
+            probs,
+            expected,
+            atol=1e-12,
+            rtol=0.0,
+            err_msg=(
+                f"use_native={use_native}: "
+                f"padded evolution changed populations: {probs}"
+            ),
         )
 
 

@@ -18,6 +18,10 @@ so no qiskit-aer simulation runs in the same process as cudaq.
 
 from __future__ import annotations
 
+import importlib.machinery
+import sys
+import types
+
 import numpy as np
 import pytest
 
@@ -48,6 +52,50 @@ def _evolve_even(ham: qmc.Observable, gamma: qmc.Float) -> qmc.Vector[qmc.Bit]:
         q[i] = qmc.h(q[i])
     q[0::2] = qmc.pauli_evolve(q[0::2], ham, gamma)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _padded_evolve_then_x(
+    q: qmc.Vector[qmc.Qubit],
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Use the untouched tail slot after a narrower Hamiltonian evolution."""
+    q = qmc.pauli_evolve(q, ham, gamma)
+    q[1] = qmc.x(q[1])
+    return q
+
+
+@qmc.qkernel
+def _controlled_padded_evolve_then_x(
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Control a vector helper whose Hamiltonian is narrower than its target."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled = qmc.control(_padded_evolve_then_x)
+    q[0], targets = controlled(q[0], q[1:3], ham=ham, gamma=gamma)
+    q[1:3] = targets
+    return qmc.measure(q)
+
+
+def _install_fake_cudaq_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install a minimal CUDA-Q module for source-generation tests.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pytest monkeypatch fixture used to
+            install the fake module for the current test only.
+    """
+    fake_cudaq = types.ModuleType("cudaq")
+    fake_cudaq.__spec__ = importlib.machinery.ModuleSpec("cudaq", loader=None)
+    fake_cudaq.kernel = lambda func: func
+
+    class qubit:
+        """Stand in for the ``cudaq.qubit`` type annotation."""
+
+    fake_cudaq.qubit = qubit
+    monkeypatch.setitem(sys.modules, "cudaq", fake_cudaq)
 
 
 def _qiskit_statevector(circuit) -> np.ndarray:
@@ -113,6 +161,24 @@ def _fidelity_error(kernel, bindings) -> float:
     overlap = abs(np.vdot(sv_qiskit, sv_cudaq))
     norm = np.linalg.norm(sv_qiskit) * np.linalg.norm(sv_cudaq)
     return 1.0 - overlap / norm
+
+
+def test_controlled_helper_pads_narrow_hamiltonian(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA-Q helper emission preserves tail slots after padded evolution."""
+    from qamomile.cudaq.transpiler import CudaqTranspiler
+
+    _install_fake_cudaq_module(monkeypatch)
+
+    exe = CudaqTranspiler().transpile(
+        _controlled_padded_evolve_then_x,
+        bindings={"ham": qm_o.Z(0), "gamma": 0.5},
+    )
+    source = exe.compiled_quantum[0].circuit.source
+
+    assert 'exp_pauli(-0.5, [t0], "Z")' in source
+    assert "x(t1)" in source
 
 
 _X, _Y, _Z = qm_o.X, qm_o.Y, qm_o.Z
