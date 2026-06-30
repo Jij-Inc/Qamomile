@@ -41,6 +41,22 @@ from typing import Iterator
 
 import numpy as np
 
+# Numerical tolerances for interpreting Hamiltonian coefficients. They live
+# with the Hamiltonian (rather than in any backend / emit module) because they
+# describe properties of the operator itself and are shared across consumers:
+# Hamiltonian arithmetic here, observable conversion, and the Pauli-evolution
+# emit paths.
+#
+# A coefficient whose magnitude is at or below this is treated as zero (the
+# term is dropped / not emitted). The slack keeps coefficients that cancel to
+# ~0 during arithmetic from lingering or emitting spurious gates.
+PAULI_TERM_ZERO_ATOL = 1e-15
+# A coefficient whose imaginary part exceeds this fails the Hermiticity
+# requirement: a Hamiltonian is Hermitian (real coefficients) only within this
+# slack, which absorbs floating-point imaginary residue from complex
+# arithmetic. ``exp(-i * gamma * H)`` is unitary only for a Hermitian ``H``.
+HERMITIAN_IMAG_ATOL = 1e-10
+
 
 class Pauli(enum.Enum):
     """
@@ -57,6 +73,16 @@ class Pauli(enum.Enum):
     Y = 1
     Z = 2
     I = 3  # noqa: E741
+
+
+# Single-character label for each Pauli operator (identity included). Shared
+# so emitters and formatters do not each re-define the same mapping.
+PAULI_TO_CHAR: dict[Pauli, str] = {
+    Pauli.I: "I",
+    Pauli.X: "X",
+    Pauli.Y: "Y",
+    Pauli.Z: "Z",
+}
 
 
 # Dense 2x2 matrices for each single-qubit Pauli. Hoisted to module level
@@ -310,8 +336,6 @@ class Hamiltonian:
         h_str = ""
         counter = 0
 
-        pauli_map = {Pauli.X: "X", Pauli.Y: "Y", Pauli.Z: "Z"}
-
         for term, coeff in self.terms.items():
             term_str = ""
 
@@ -319,7 +343,7 @@ class Hamiltonian:
                 if op.pauli == Pauli.I:
                     continue
 
-                pauli_str = pauli_map.get(op.pauli, "")
+                pauli_str = PAULI_TO_CHAR.get(op.pauli, "")
                 term_str += f"{pauli_str}_{{{op.index}}}"
 
             # At first term or h_str is still empty, we don't need to add a sign
@@ -512,11 +536,11 @@ class Hamiltonian:
                     else:
                         h.constant += phase * coeff1 * coeff2
 
-            if not math.isclose(abs(other.constant), 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(other.constant), 0.0, abs_tol=PAULI_TERM_ZERO_ATOL):
                 for terms, coeff1 in self.terms.items():
                     h.add_term(terms, coeff1 * other.constant)
 
-            if not math.isclose(abs(self.constant), 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(self.constant), 0.0, abs_tol=PAULI_TERM_ZERO_ATOL):
                 for terms, coeff2 in other.terms.items():
                     h.add_term(terms, coeff2 * self.constant)
 

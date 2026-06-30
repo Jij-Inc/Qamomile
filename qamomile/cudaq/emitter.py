@@ -723,6 +723,34 @@ class CudaqKernelEmitter:
         self._emit(f"rz({a}, {self._qref(qubit2)})")
         self._emit(f"x.ctrl({self._qref(qubit1)}, {self._qref(qubit2)})")
 
+    def emit_exp_pauli(
+        self,
+        circuit: CudaqKernelArtifact,
+        qubit_indices: list[int],
+        pauli_str: str,
+        angle: float | Any,
+    ) -> None:
+        """Emit a native ``exp_pauli`` Pauli evolution term.
+
+        Implements ``exp(i * angle * P)`` for a single Pauli term ``P``,
+        where ``pauli_str[k]`` acts on ``qubit_indices[k]``.  CUDA-Q applies
+        the ``j``-th character of the word to the ``j``-th qubit in the
+        passed list, so the word and qubit list share the same order and no
+        reversal is needed (verified against the Qiskit ``PauliEvolutionGate``
+        reference for asymmetric multi-qubit terms such as ``X0 Z1``).
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            qubit_indices (list[int]): Physical qubit slots ``pauli_str``
+                acts on, in natural (``pauli_str[k]`` -> ``qubit_indices[k]``)
+                order.
+            pauli_str (str): Pauli letters (``X`` / ``Y`` / ``Z``) for the
+                term, one per entry in ``qubit_indices``.
+            angle (float | Any): Rotation angle or CUDA-Q source expression.
+        """
+        qubits = ", ".join(self._qref(i) for i in qubit_indices)
+        self._emit(f'exp_pauli({self._angle_expr(angle)}, [{qubits}], "{pauli_str}")')
+
     # ------------------------------------------------------------------
     # Three-qubit gates
     # ------------------------------------------------------------------
