@@ -179,7 +179,16 @@ class ValueResolver:
                 container = container[concrete_index]
             except (IndexError, KeyError, TypeError):
                 # Shape/type mismatches mean this Value is not resolvable
-                # from the available compile-time data.
+                # from the available compile-time data. Unlike the
+                # emit-time resolver (which raises ``EmitError`` on a
+                # concrete out-of-range index into compile-time data),
+                # this resolver stays permissive on purpose: it feeds
+                # constant folding and compile-time-if lowering, where
+                # "unresolved" legitimately means "keep symbolic" —
+                # folding visits branches that compile-time-if lowering
+                # may later discard, so a hard error here could reject
+                # dead code. Out-of-range accesses that survive to emit
+                # are rejected there, before parameter creation.
                 return None
         return _normalize_bound_scalar(container)
 
