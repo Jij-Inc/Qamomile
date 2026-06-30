@@ -190,11 +190,14 @@ class ControlledGate:
     """
 
     def __init__(self, qkernel: "QKernel", num_controls: int | UInt = 1) -> None:
-        """Wrap a kernel (or built-in gate callable) as a controlled operation.
+        """Wrap a ``QKernel`` as a controlled operation.
 
         Args:
-            qkernel (QKernel): The kernel to control. Must expose a dict
-                ``input_types`` attribute and an ``inspect.Signature``
+            qkernel (QKernel): The kernel to control. Built-in gate callables
+                are not accepted directly here -- :func:`control` synthesizes a
+                wrapper ``QKernel`` for them before instantiating
+                ``ControlledGate`` -- so by this point ``qkernel`` must expose a
+                dict ``input_types`` attribute and an ``inspect.Signature``
                 ``signature`` attribute.
             num_controls (int | UInt): Number of control qubits. A concrete
                 ``int`` must be >= 1; a symbolic ``UInt`` defers validation
