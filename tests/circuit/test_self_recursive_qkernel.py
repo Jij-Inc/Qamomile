@@ -90,6 +90,37 @@ def test_non_terminating_recursion_raises():
         tr.transpile(_outer_of_non_terminating, bindings={"k": 3})
 
 
+@qmc.qkernel
+def _control_of_rec() -> qmc.Bit:
+    """Control a self-recursive kernel — unsupported, must fail clearly."""
+    ctrl = qmc.qubit(name="ctrl")
+    q = qmc.qubit(name="q")
+    ctrl, q = qmc.control(_rec)(ctrl, k=2, q=q)
+    return qmc.measure(ctrl)
+
+
+def test_control_of_recursive_kernel_raises_targeted_error():
+    """Controlling a self-recursive kernel fails with a cause-specific error.
+
+    The recursion lives inside ``ControlledUOperation.block``, where
+    ``partial_eval`` never folds the base-case ``if`` (it does not descend
+    into operation-owned blocks). The unroll loop must recognise that every
+    residual call is trapped there and raise a targeted message naming
+    ``qmc.control`` / ``qmc.inverse`` — not the generic "did not terminate
+    after N iterations" message, which would wrongly blame the (perfectly
+    valid, terminating) bindings.
+    """
+    tr = QiskitTranspiler()
+    with pytest.raises(FrontendTransformError) as excinfo:
+        tr.transpile(_control_of_rec, bindings={})
+    message = str(excinfo.value)
+    assert "self-recursive" in message and "qmc.control" in message
+    # The generic non-termination wording must NOT be used here: the
+    # recursion terminates and the driver is concrete; the real cause is
+    # the control/inverse-of-recursion limitation.
+    assert "did not terminate" not in message
+
+
 def test_non_recursive_kernel_still_works():
     """Regression: forward-ref machinery must not affect non-recursive
     kernels."""

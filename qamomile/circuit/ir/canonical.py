@@ -28,16 +28,31 @@ Output guarantees:
     3. ``canonicalize`` is idempotent: running it twice on the same
        Block yields the same canonical bytes as running it once.
 
+Canonical-bytes scope:
+    Display-only fields (``Block.name``, ``Block.output_names``,
+    ``Value.name``) are excluded from ``to_canonical_bytes``;
+    functional fields are included. ``Block.label_args`` (input port
+    names by position) and ``Block.param_slots`` (the kernel's
+    classical parameter contract) are both functional: two Blocks
+    whose operations match but whose parameter manifests differ (e.g.,
+    a slot rebound from ``RUNTIME_PARAMETER`` to
+    ``COMPILE_TIME_BOUND``) hash differently. ``param_slots`` holds no
+    Value/UUID references, so ``canonicalize`` carries the tuple over
+    verbatim with nothing to remap.
+
 Limitations:
     - ``Value.parent_array`` cycles (a Value whose ``parent_array`` is
       itself reachable from the Value's siblings) are not constructed
       by the frontend today; the canonicalizer assumes the
       Value-reference graph through ``parent_array`` and
       ``element_indices`` is acyclic.
-    - ``ValueMetadata.dict_runtime.bound_data`` and
-      ``ArrayRuntimeMetadata.const_array`` may carry arbitrary frozen
-      Python data; hash stability for these requires that contained
-      objects have a stable ``repr``.
+    - ``ValueMetadata.dict_runtime.bound_data``,
+      ``ArrayRuntimeMetadata.const_array``, and
+      ``ParamSlot.default`` / ``ParamSlot.bound_value`` may carry
+      arbitrary frozen Python data. ``numpy.ndarray`` payloads (except
+      object-dtype arrays) are hashed from their raw buffer
+      (dtype + shape + bytes) and are therefore exempt; hash stability
+      for any other object type requires a stable ``repr``.
 """
 
 from __future__ import annotations
@@ -47,6 +62,8 @@ import enum
 import hashlib
 import uuid as _uuid
 from typing import Any, cast
+
+import numpy as np
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
@@ -66,6 +83,7 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueMetadata,
+    remap_indexed_identifier,
     remap_value_metadata_references,
 )
 
@@ -87,7 +105,8 @@ def canonicalize(block: Block) -> Block:
     Returns:
         Block: A new Block with canonical UUIDs. ``Block.kind`` matches
             the input. Existing input/output ordering, operation
-            ordering, and metadata structure are preserved.
+            ordering, metadata structure, and the ``param_slots``
+            manifest (carried over verbatim) are preserved.
 
     Raises:
         ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
@@ -343,6 +362,9 @@ class _Canonicalizer:
             operations=new_operations,
             kind=block.kind,
             parameters=new_parameters,
+            # ParamSlot is frozen and holds no Value/UUID references, so
+            # the manifest is shared verbatim — there is nothing to remap.
+            param_slots=block.param_slots,
         )
         self._block_cache[id(block)] = new_block
         return new_block
@@ -393,7 +415,10 @@ class _Canonicalizer:
         if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
             new_op = dataclasses.replace(
                 new_op,
-                qubit_mapping=[self._remap_uuid(u) for u in new_op.qubit_mapping],
+                qubit_mapping=[
+                    remap_indexed_identifier(u, self._remap_uuid)
+                    for u in new_op.qubit_mapping
+                ],
             )
 
         if (
@@ -545,7 +570,20 @@ class _Canonicalizer:
         return cloned
 
     def _canonical_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
-        """Rewrite UUID and logical_id references inside ValueMetadata."""
+        """Rewrite UUID and logical_id references inside ValueMetadata.
+
+        ``ScalarMetadata`` and ``DictRuntimeMetadata`` carry no UUID
+        references; ``CastMetadata``, ``QFixedMetadata``, and
+        ``ArrayRuntimeMetadata`` do and are rewritten through the
+        active remap tables.
+
+        Args:
+            metadata (ValueMetadata): Original metadata bundle.
+
+        Returns:
+            ValueMetadata: A new bundle with rewritten UUID / logical_id
+                references and untouched scalar / dict-runtime sections.
+        """
         return remap_value_metadata_references(
             metadata,
             self._remap_uuid,
@@ -562,10 +600,11 @@ def _token(obj: Any) -> str:
     """Render an arbitrary Python value into a stable string token.
 
     Handles the small set of types appearing in IR metadata: scalars,
-    enums, tuples/lists, dicts (sorted by key), ``ValueBase`` instances
-    (rendered as a compact ``<ClassName:UUID>`` reference since the
-    full state is emitted in the value-declaration section), and
-    ``ValueType`` instances (rendered via ``.label()`` to avoid
+    enums, ``numpy.ndarray`` (rendered as dtype + shape + a digest of
+    the raw buffer), tuples/lists, dicts (sorted by key), ``ValueBase``
+    instances (rendered as a compact ``<ClassName:UUID>`` reference
+    since the full state is emitted in the value-declaration section),
+    and ``ValueType`` instances (rendered via ``.label()`` to avoid
     embedding memory addresses from the default ``object.__repr__``).
     Falls back to ``repr`` for anything else; callers that store
     opaque Python objects in metadata must ensure those objects have a
@@ -573,7 +612,8 @@ def _token(obj: Any) -> str:
 
     Args:
         obj (Any): A Python value reachable from canonical IR data
-            (Value metadata field, operation dataclass field, etc.).
+            (Value metadata field, operation dataclass field,
+            ``ParamSlot`` payload, etc.).
 
     Returns:
         str: A deterministic string token suitable for inclusion in
@@ -587,6 +627,19 @@ def _token(obj: Any) -> str:
         return repr(obj)
     if isinstance(obj, enum.Enum):
         return f"{type(obj).__name__}.{obj.name}"
+    if isinstance(obj, np.ndarray) and not obj.dtype.hasobject:
+        # ``repr`` is unusable as array identity: it truncates large
+        # arrays (different arrays collide) and obeys process-global
+        # ``np.printoptions`` (equal arrays diverge). Hash the raw
+        # buffer instead. Object-dtype arrays have no content-defined
+        # buffer and fall through to the ``repr`` fallback below.
+        data = np.ascontiguousarray(obj)
+        # Feed the contiguous buffer to the hasher as a flat ``uint8``
+        # memoryview (buffer protocol) so no extra ``bytes`` copy of a
+        # potentially large array is allocated; ``ascontiguousarray``
+        # already guarantees a C-contiguous buffer.
+        digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
+        return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
     if isinstance(obj, ValueBase):
         return _value_token(obj)
     if isinstance(obj, ValueType):
@@ -823,8 +876,9 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     ``Block.name`` and ``Block.output_names`` are display-only labels
     and are intentionally omitted from canonical bytes; two
     structurally-identical kernels with different function names hash
-    equally. ``Block.label_args`` is functional (it names input
-    parameters by position) and is included.
+    equally. ``Block.label_args`` (input parameter names by position)
+    and ``Block.param_slots`` (the kernel's classical parameter
+    contract) are functional and are included.
 
     Args:
         block (Block): The canonical Block to render.
@@ -835,6 +889,7 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     pad = _INLINE_INDENT * indent
     out.append(f"{pad}BLOCK kind={block.kind.name}")
     out.append(f"{pad}{_INLINE_INDENT}label_args={_token(block.label_args)}")
+    out.append(f"{pad}{_INLINE_INDENT}param_slots={_token(block.param_slots)}")
 
     declared: list[ValueBase] = []
     seen: set[str] = set()

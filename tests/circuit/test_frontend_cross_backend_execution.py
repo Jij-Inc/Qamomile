@@ -1070,9 +1070,6 @@ class FrontendExecutionCase:
     unsupported_backends: frozenset[str] = dataclasses.field(default_factory=frozenset)
 
 
-QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED = frozenset({"quri_parts"})
-
-
 FRONTEND_EXECUTION_CASES = [
     FrontendExecutionCase(
         name="native-gates",
@@ -1212,7 +1209,6 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 1, 0), (1, 1, 1)},
         expected_expval=0.0,
         run_bindings={"obs": qm_o.Z(2)},
-        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="symbolic-control-indices",
@@ -1255,7 +1251,6 @@ FRONTEND_EXECUTION_CASES = [
             "gamma": math.pi / 2,
             "obs": qm_o.Z(1),
         },
-        unsupported_backends=QURI_PARTS_CONTROLLED_FALLBACK_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="sliced-pauli-evolve",

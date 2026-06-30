@@ -40,7 +40,10 @@ def resolve_qubit_key(qubit: "Value") -> tuple[QubitAddress | None, bool]:
             ``address`` is the root-space address for a resolvable array
             element, ``None`` for an array element whose index or slice
             bounds are symbolic at this binding-free stage, and a scalar
-            UUID address for non-array qubits.
+            UUID address for non-array qubits. A negative constant index
+            (or an out-of-contract slice bound) also yields ``None``:
+            ``resolve_root_qubit_address`` refuses it rather than letting it
+            silently address a wrong root slot.
     """
     if qubit.parent_array is not None and qubit.element_indices:
         idx_value = qubit.element_indices[0]
@@ -74,7 +77,24 @@ class ValueResolver:
         qubit_map: QubitMap,
         bindings: dict[str, Any],
     ) -> QubitResolutionResult:
-        """Resolve a Value to a physical qubit index with detailed failure info."""
+        """Resolve a Value to a physical qubit index with detailed failure info.
+
+        Args:
+            v (Value): The qubit Value to resolve. May be a scalar qubit or
+                an array element (possibly through a sliced view chain).
+            qubit_map (QubitMap): Mapping from ``QubitAddress`` to physical
+                qubit indices built by the resource allocator.
+            bindings (dict[str, Any]): Active emit-time bindings used to
+                resolve symbolic element indices and slice bounds.
+
+        Returns:
+            QubitResolutionResult: Success with the physical index, or a
+                failure carrying a ``ResolutionFailureReason`` — including
+                ``NEGATIVE_INDEX`` when a resolved element index is negative
+                or a resolved slice bound violates the frontend contract
+                (non-negative start, positive step); composing those through
+                the affine map would silently address a wrong root slot.
+        """
         if v.parent_array is not None and v.element_indices:
             parent_uuid = v.parent_array.uuid
             idx_value = v.element_indices[0]
@@ -164,6 +184,21 @@ class ValueResolver:
                     )
 
             if idx is not None:
+                # A negative local index must fail before the slice-chain
+                # walk: the affine composition ``start + step * idx`` can
+                # turn it into a valid-but-wrong non-negative root index
+                # (e.g. ``view[-1]`` for ``view = q[1:3]`` would silently
+                # address ``q[0]`` instead of ``q[2]``).
+                if idx < 0:
+                    return QubitResolutionResult(
+                        success=False,
+                        failure_reason=ResolutionFailureReason.NEGATIVE_INDEX,
+                        failure_details=(
+                            f"Index {idx} for array '{v.parent_array.name}' "
+                            f"is negative; Python-style negative indexing "
+                            f"is not supported."
+                        ),
+                    )
                 # Walk any slice_of chain attached to the parent so
                 # sliced views resolve to their root parent's physical
                 # qubit.  For ordinary (non-sliced) arrays the while
@@ -188,6 +223,20 @@ class ValueResolver:
                                 f"Slice bounds for view over '{parent.slice_of.name}' "
                                 f"could not be resolved; start={parent.slice_start.name}, "
                                 f"step={parent.slice_step.name}."
+                            ),
+                        )
+                    # Symbolic slice bounds resolved from bindings must
+                    # satisfy the same contract the frontend enforces for
+                    # constant bounds: non-negative start, positive step.
+                    if int(start_val) < 0 or int(step_val) <= 0:
+                        return QubitResolutionResult(
+                            success=False,
+                            failure_reason=ResolutionFailureReason.NEGATIVE_INDEX,
+                            failure_details=(
+                                f"Slice bounds for view over "
+                                f"'{parent.slice_of.name}' resolved to "
+                                f"start={int(start_val)}, step={int(step_val)}; "
+                                f"start must be non-negative and step positive."
                             ),
                         )
                     idx = int(start_val) + int(step_val) * idx
@@ -254,7 +303,9 @@ class ValueResolver:
 
         Raises:
             EmitError: If any ``slice_start`` or ``slice_step`` in the
-                chain resolves to a non-numeric or unbound value.
+                chain resolves to a non-numeric or unbound value, or to
+                bounds violating the frontend contract (negative start or
+                non-positive step).
 
         Example:
             >>> # For ``view = q[1::2]`` where ``q`` has 4 qubits:
@@ -279,6 +330,19 @@ class ValueResolver:
                     f"'{cur.slice_of.name}': start={cur.slice_start}, "
                     f"step={cur.slice_step}. Slice views require concrete "
                     f"start/step at emit time.",
+                    operation=operation,
+                )
+            # Symbolic slice bounds resolved from bindings must satisfy
+            # the same contract the frontend enforces for constant bounds
+            # (non-negative start, positive step); composing a negative
+            # start or non-positive step would silently remap view
+            # elements onto wrong root slots.
+            if int(sub_start) < 0 or int(sub_step) <= 0:
+                raise EmitError(
+                    f"Invalid slice bounds for view of "
+                    f"'{cur.slice_of.name}': start={int(sub_start)}, "
+                    f"step={int(sub_step)}. Slice start must be "
+                    f"non-negative and step positive.",
                     operation=operation,
                 )
             # Compose: if current (start, step) maps view-local i to
@@ -455,7 +519,7 @@ class ValueResolver:
         self,
         v: "Value",
         bindings: dict[str, Any],
-    ) -> Any:
+    ) -> Any | None:
         """Index into a bound array container at the operand's element indices.
 
         Refuses to index when the parent array's name is in
@@ -468,6 +532,29 @@ class ValueResolver:
         guard is defense-in-depth: even if a future caller forgets the
         op-level guard, array indexing for runtime parameters returns
         ``None`` here.
+
+        Args:
+            v (Value): The element Value to resolve. Must carry a
+                ``parent_array``; scalar Values resolve to ``None``.
+            bindings (dict[str, Any]): The active emit-time bindings.
+
+        Returns:
+            Any | None: The resolved element, or ``None`` when the access
+                is genuinely symbolic at emit time (unresolved indices or
+                slice bounds, a runtime parameter array, or a container
+                that is absent from compile-time data).
+
+        Raises:
+            EmitError: If every index resolved to a concrete int and the
+                root array's container holds compile-time data, but the
+                access fails against that data — either an out-of-range
+                index (``IndexError``; e.g. a loop-unrolled ``theta[i]``
+                with ``i >= len(theta)``) or a shape mismatch (``KeyError``
+                /``TypeError``; the bound value is not an int-indexable
+                array of the expected shape). Falling back to ``None`` in
+                these cases would let the element reach symbolic-parameter
+                creation, where every failing access silently shared one
+                phantom runtime parameter (or a silent ``0.0``).
         """
         parent = v.parent_array
         # Only element Values carry a parent array; scalar Values cannot be
@@ -498,10 +585,53 @@ class ValueResolver:
         for i in indices:
             try:
                 container = container[i]
-            except (IndexError, KeyError, TypeError):
-                # Out-of-range or non-indexable containers are unresolved
-                # rather than guessed.
-                return None
+            except IndexError as exc:
+                # Every guard above already passed: the indices are
+                # concrete ints, the array is not a runtime parameter,
+                # and the container holds known compile-time data. The
+                # access is therefore genuinely out of range, not
+                # symbolic — fail fast instead of falling through to
+                # phantom-parameter creation.
+                try:
+                    length = len(container)
+                except TypeError:
+                    # Some objects define ``__len__`` but still raise on
+                    # ``len()`` (e.g. 0-d NumPy arrays). Fall back to an
+                    # unqualified message rather than masking the real
+                    # out-of-range error with a length-formatting failure.
+                    length = None
+                length_note = f" of length {length}" if length is not None else ""
+                raise EmitError(
+                    f"Index {i} is out of range for compile-time bound "
+                    f"array '{root_parent.name}'{length_note}. Bind data "
+                    f"covering every index reached at emit time (e.g. "
+                    f"every unrolled loop iteration), or declare "
+                    f"'{root_parent.name}' in `parameters` to keep its "
+                    f"elements symbolic.",
+                    operation="array element resolution",
+                ) from exc
+            except (KeyError, TypeError) as exc:
+                # The same guards that make an IndexError here a genuine
+                # out-of-range access also make a KeyError / TypeError a
+                # genuine shape mismatch: the root array is not a runtime
+                # parameter, its container is resolved compile-time data,
+                # and every index is a concrete non-negative int. A
+                # KeyError (the container is a dict) or TypeError (the
+                # container is a scalar over-indexed by a deeper index, or
+                # an otherwise non-indexable bound object) therefore means
+                # the bound data is not an int-indexable array of the
+                # expected shape. Returning None would fall through to the
+                # same phantom-parameter / silent-0.0 hazard as the
+                # out-of-range case, so fail fast instead.
+                raise EmitError(
+                    f"Compile-time bound array '{root_parent.name}' could "
+                    f"not be indexed at index {i}: the bound value is not "
+                    f"an indexable array of the expected shape (got "
+                    f"{type(container).__name__}). Bind a correctly shaped "
+                    f"array for '{root_parent.name}', or declare it in "
+                    f"`parameters` to keep its elements symbolic.",
+                    operation="array element resolution",
+                ) from exc
         return container
 
     def _resolve_array_element_location(
@@ -525,7 +655,10 @@ class ValueResolver:
         Returns:
             tuple[ArrayValue, tuple[int, ...]] | None: The root array and
                 concrete indices into its container, or ``None`` when any
-                index or slice bound is unresolved.
+                index or slice bound is unresolved, when a resolved index
+                is negative (Python-style wrapping is refused), or when a
+                resolved slice bound violates the frontend contract
+                (non-negative start, positive step).
         """
         resolved_indices: list[int] = []
         # Resolve local element indices first. Any symbolic index keeps the
@@ -534,6 +667,12 @@ class ValueResolver:
             i = self.resolve_int_value(idx, bindings)
             if i is None:
                 # Symbolic element indices stay unresolved at emit time.
+                return None
+            if i < 0:
+                # Negative indices must not reach Python container
+                # indexing (where they would silently wrap) or the slice
+                # affine composition below (where they would silently
+                # address a wrong root slot).
                 return None
             resolved_indices.append(i)
 
@@ -555,6 +694,12 @@ class ValueResolver:
             step = self.resolve_int_value(cur.slice_step, bindings)
             if start is None or step is None:
                 # Symbolic slice bounds stay unresolved at emit time.
+                return None
+            if start < 0 or step <= 0:
+                # Bounds resolved from bindings must satisfy the same
+                # contract the frontend enforces for constant bounds
+                # (non-negative start, positive step); anything else
+                # would compose a wrong root index.
                 return None
             root_index = start + step * root_index
             cur = cur.slice_of

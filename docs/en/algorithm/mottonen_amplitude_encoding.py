@@ -29,7 +29,7 @@
 # starting from $|0\rangle^{\otimes n}$. It is the entry door for any
 # algorithm that consumes classical data as a quantum state — including
 # HHL-style linear-system solvers, kernel methods, and many quantum
-# simulation protocols. Qamomile ships a backend-portable implementation
+# simulation protocols. Qamomile ships a quantum-SDK-portable implementation
 # under `qamomile.circuit.algorithm.state_preparation`, based on the
 # uniformly controlled rotation construction of Möttönen, Vartiainen,
 # Bergholm and Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` (the

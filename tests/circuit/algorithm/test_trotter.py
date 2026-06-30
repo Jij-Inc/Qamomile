@@ -537,9 +537,16 @@ def _rz_count_quri_parts(qp_circuit) -> int:
     return sum(1 for g in bound.gates if g.name == "RZ")
 
 
-def _rz_count_cudaq(cudaq_circuit) -> int:
-    """Count ``rz(`` call sites in the CUDA-Q kernel source."""
-    return cudaq_circuit.source.count("rz(")
+def _exp_pauli_count_cudaq(cudaq_circuit) -> int:
+    """Count ``exp_pauli(`` call sites in the CUDA-Q kernel source.
+
+    CUDA-Q lowers each ``pauli_evolve`` term to a native ``exp_pauli``
+    rather than the ``h`` / ``rz`` gadget the other backends use, so the
+    cross-backend per-step invariant is "one ``exp_pauli`` per Pauli
+    rotation", which equals the Qiskit / QURI Parts per-step RZ count for
+    the single-qubit terms in ``HS_2TERM``.
+    """
+    return cudaq_circuit.source.count("exp_pauli(")
 
 
 class TestCrossBackendCompilation:
@@ -588,8 +595,12 @@ class TestCrossBackendCompilation:
 
     @pytest.mark.cudaq
     @pytest.mark.parametrize("order", [1, 2, 4])
-    def test_cudaq_rz_count_matches_qiskit(self, order: int) -> None:
-        """CUDA-Q emits the same per-step RZ count as Qiskit / QURI Parts.
+    def test_cudaq_exp_pauli_count_matches_qiskit_rz(self, order: int) -> None:
+        """CUDA-Q emits one ``exp_pauli`` per Qiskit / QURI Parts per-step RZ.
+
+        CUDA-Q lowers ``pauli_evolve`` natively via ``exp_pauli`` instead of
+        the ``h`` / ``rz`` gadget, so the matching per-step invariant counts
+        ``exp_pauli`` calls rather than ``rz`` gates.
 
         Runs in ``-m cudaq`` sessions only: loading cudaq into a default
         session is unsafe — see tests/_cudaq_isolation.py.
@@ -606,7 +617,7 @@ class TestCrossBackendCompilation:
         )
         cq_circuit = exe.compiled_quantum[0].circuit
         assert cq_circuit.num_qubits == 1
-        assert _rz_count_cudaq(cq_circuit) == self._EXPECTED_RZ_PER_STEP[order]
+        assert _exp_pauli_count_cudaq(cq_circuit) == self._EXPECTED_RZ_PER_STEP[order]
 
 
 class TestCrossBackendStatevector:
