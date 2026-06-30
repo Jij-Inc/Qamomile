@@ -75,6 +75,16 @@ class Pauli(enum.Enum):
     I = 3  # noqa: E741
 
 
+# Single-character label for each Pauli operator (identity included). Shared
+# so emitters and formatters do not each re-define the same mapping.
+PAULI_TO_CHAR: dict[Pauli, str] = {
+    Pauli.I: "I",
+    Pauli.X: "X",
+    Pauli.Y: "Y",
+    Pauli.Z: "Z",
+}
+
+
 # Dense 2x2 matrices for each single-qubit Pauli. Hoisted to module level
 # so ``Hamiltonian.to_numpy()`` does not rebuild them on every call.
 _PAULI_MATRICES: dict[Pauli, np.ndarray] = {
@@ -326,8 +336,6 @@ class Hamiltonian:
         h_str = ""
         counter = 0
 
-        pauli_map = {Pauli.X: "X", Pauli.Y: "Y", Pauli.Z: "Z"}
-
         for term, coeff in self.terms.items():
             term_str = ""
 
@@ -335,7 +343,7 @@ class Hamiltonian:
                 if op.pauli == Pauli.I:
                     continue
 
-                pauli_str = pauli_map.get(op.pauli, "")
+                pauli_str = PAULI_TO_CHAR.get(op.pauli, "")
                 term_str += f"{pauli_str}_{{{op.index}}}"
 
             # At first term or h_str is still empty, we don't need to add a sign

@@ -1295,7 +1295,6 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 )
 
         emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
-        pauli_char = {qm_o.Pauli.X: "X", qm_o.Pauli.Y: "Y", qm_o.Pauli.Z: "Z"}
         for operators, coeff in hamiltonian:
             if abs(coeff) < PAULI_TERM_ZERO_ATOL:
                 continue
@@ -1305,11 +1304,10 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             term_qubits: list[int] = []
             pauli_letters: list[str] = []
             for op_item in operators:
-                letter = pauli_char.get(op_item.pauli)
-                if letter is None:  # Pauli.I -- skip
+                if op_item.pauli == qm_o.Pauli.I:  # identity factor -- skip
                     continue
                 term_qubits.append(qubit_indices[op_item.index])
-                pauli_letters.append(letter)
+                pauli_letters.append(qm_o.PAULI_TO_CHAR[op_item.pauli])
             if not term_qubits:
                 continue
             # ``exp_pauli`` realizes exp(+i*theta*P); to get
