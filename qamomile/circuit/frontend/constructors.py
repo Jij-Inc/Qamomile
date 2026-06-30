@@ -26,11 +26,12 @@ def uint(arg: int | str) -> UInt:
     """Create a UInt handle from an integer literal or a named parameter.
 
     Args:
-        arg (int | str): A non-negative integer literal to bake in as a
-            compile-time constant, or a ``str`` naming a symbolic UInt
-            parameter. A ``bool`` is rejected: ``True`` / ``False`` are not
-            valid integer values here even though ``bool`` subclasses
-            ``int``.
+        arg (int | str): An integer literal to bake in as a compile-time
+            constant, or a ``str`` naming a symbolic UInt parameter. A
+            ``bool`` is rejected: ``True`` / ``False`` are not valid integer
+            values here even though ``bool`` subclasses ``int``. (Sign is
+            not validated here -- a negative literal is accepted and baked
+            in as-is.)
 
     Returns:
         UInt: A constant-valued handle for an ``int`` argument, or a named
