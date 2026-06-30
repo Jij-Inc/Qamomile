@@ -41,6 +41,22 @@ from typing import Iterator
 
 import numpy as np
 
+# Numerical tolerances for interpreting Hamiltonian coefficients. They live
+# with the Hamiltonian (rather than in any backend / emit module) because they
+# describe properties of the operator itself and are shared across consumers:
+# Hamiltonian arithmetic here, observable conversion, and the Pauli-evolution
+# emit paths.
+#
+# A coefficient whose magnitude is at or below this is treated as zero (the
+# term is dropped / not emitted). The slack keeps coefficients that cancel to
+# ~0 during arithmetic from lingering or emitting spurious gates.
+PAULI_TERM_ZERO_ATOL = 1e-15
+# A coefficient whose imaginary part exceeds this fails the Hermiticity
+# requirement: a Hamiltonian is Hermitian (real coefficients) only within this
+# slack, which absorbs floating-point imaginary residue from complex
+# arithmetic. ``exp(-i * gamma * H)`` is unitary only for a Hermitian ``H``.
+HERMITIAN_IMAG_ATOL = 1e-10
+
 
 class Pauli(enum.Enum):
     """
@@ -512,11 +528,11 @@ class Hamiltonian:
                     else:
                         h.constant += phase * coeff1 * coeff2
 
-            if not math.isclose(abs(other.constant), 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(other.constant), 0.0, abs_tol=PAULI_TERM_ZERO_ATOL):
                 for terms, coeff1 in self.terms.items():
                     h.add_term(terms, coeff1 * other.constant)
 
-            if not math.isclose(abs(self.constant), 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(self.constant), 0.0, abs_tol=PAULI_TERM_ZERO_ATOL):
                 for terms, coeff2 in other.terms.items():
                     h.add_term(terms, coeff2 * self.constant)
 
