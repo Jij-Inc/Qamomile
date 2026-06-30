@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     CompositeGateOperation,
@@ -638,7 +639,7 @@ def _encode_qreg_width(width: Any) -> Any:
     Raises:
         TypeError: If the width is neither.
     """
-    if isinstance(width, int):
+    if is_plain_int(width):
         return width
     if isinstance(width, Value):
         return {"$value_ref": width.uuid}
@@ -1168,7 +1169,7 @@ def _encode_power(power: Any) -> Any:
     Raises:
         TypeError: If ``power`` is neither.
     """
-    if isinstance(power, int):
+    if is_plain_int(power):
         return power
     if isinstance(power, Value):
         return {"$value_ref": power.uuid}
