@@ -1220,8 +1220,8 @@ def emit_controlled_pauli_evolve(
         EmitError: If ``control_indices`` is empty, the observable does
             not resolve to a Hamiltonian, gamma cannot be resolved, the
             Hamiltonian is non-Hermitian (a term or the constant has a
-            non-real coefficient), the register size does not match the
-            Hamiltonian, a term qubit cannot be resolved, or (for two or
+            non-real coefficient), the Hamiltonian is larger than the
+            register, a term qubit cannot be resolved, or (for two or
             more controls, or a nonzero constant term) the angle is
             runtime-parametric and the backend's dense multi-controlled
             path requires a compile-time-numeric angle.
@@ -1229,6 +1229,7 @@ def emit_controlled_pauli_evolve(
     import qamomile.observable as qm_o
     from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
         _resolve_gamma,
+        validate_hamiltonian_within_register,
     )
     from qamomile.observable.hamiltonian import (
         HERMITIAN_IMAG_ATOL,
@@ -1303,13 +1304,11 @@ def emit_controlled_pauli_evolve(
     qubit_indices = _expand_quantum_operands_to_phys(
         emit_pass, op.qubits, qubit_map, bindings, operation="PauliEvolveOp"
     )
-    if len(qubit_indices) != hamiltonian.num_qubits:
-        raise EmitError(
-            f"PauliEvolveOp qubit count mismatch: qubit register has "
-            f"{len(qubit_indices)} qubits but Hamiltonian acts on "
-            f"{hamiltonian.num_qubits} qubits.",
-            operation="PauliEvolveOp",
-        )
+    # A Hamiltonian smaller than the register is embedded by acting only
+    # on its declared qubits (the leading ``num_qubits`` entries of
+    # ``qubit_indices``); the register-wide result mapping at the end of
+    # this function keeps the untouched tail resolvable.
+    validate_hamiltonian_within_register(hamiltonian.num_qubits, len(qubit_indices))
 
     for operators, coeff in hamiltonian:
         # Validate Hermiticity of every term (including ones skipped below)

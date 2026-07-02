@@ -545,6 +545,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         # a Parameter (or ParameterExpression) as ``time``.
         from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
             _resolve_gamma,
+            validate_hamiltonian_within_register,
         )
 
         gamma = _resolve_gamma(self, op, bindings)
@@ -555,8 +556,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         # Validate qubit count: logical array size vs Hamiltonian. A
         # Hamiltonian smaller than the register is embedded into the
         # register (identity on the untouched qubits) by appending the
-        # evolution gate onto only its declared qubits below; only a
-        # Hamiltonian *larger* than the register is a genuine error.
+        # evolution gate onto only its declared qubits below.
         input_array = op.qubits
         num_h_qubits = hamiltonian.num_qubits
         from qamomile.circuit.ir.value import ArrayValue
@@ -565,13 +565,8 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             n_resolved = self._resolver.resolve_int_value(
                 input_array.shape[0], bindings
             )
-            if n_resolved is not None and num_h_qubits > n_resolved:
-                raise EmitError(
-                    f"PauliEvolveOp qubit count mismatch: "
-                    f"qubit register has {n_resolved} qubits but "
-                    f"Hamiltonian acts on {num_h_qubits} qubits. "
-                    f"The Hamiltonian must not be larger than the register.",
-                )
+            if n_resolved is not None:
+                validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
         # Validate Hermitian (real coefficients)
         for operators, coeff in hamiltonian:
@@ -581,6 +576,17 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     f"(real coefficients), but found complex coefficient "
                     f"{coeff} on term {operators}.",
                 )
+
+        if num_h_qubits == 0:
+            # An empty / constant-only Hamiltonian evolves the register by
+            # at most a global phase: emit nothing, matching the shared
+            # gadget path (which skips identity terms). Building the gate
+            # anyway would fail: ``hamiltonian_to_sparse_pauli_op`` widens a
+            # 0-qubit Hamiltonian to a 1-qubit ``SparsePauliOp(["I"])``, so
+            # appending its ``PauliEvolutionGate`` onto the empty qubit list
+            # raises a raw Qiskit ``CircuitError``. The result register
+            # stays resolvable through the allocator's element aliases.
+            return
 
         qubit_indices: list[int] = []
         for i in range(num_h_qubits):

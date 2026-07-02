@@ -363,8 +363,51 @@ def test_smaller_hamiltonian_is_identity_padded():
         )
 
 
-def test_larger_hamiltonian_raises():
-    """A Hamiltonian wider than the register is still a genuine error."""
+@pytest.mark.parametrize("use_native", [True, False])
+@pytest.mark.parametrize("constant", [0.0, 2.0])
+def test_zero_qubit_hamiltonian_is_noop(use_native, constant):
+    """An empty / constant-only Hamiltonian evolves as the identity.
+
+    ``Hamiltonian.num_qubits == 0`` means the evolution is at most a
+    global phase. It must transpile as a no-op on both the native
+    ``PauliEvolutionGate`` path (which previously crashed with a raw
+    Qiskit ``CircuitError``: the 0-qubit Hamiltonian widens to a 1-qubit
+    ``SparsePauliOp(["I"])`` whose gate cannot be appended onto an empty
+    qubit list) and the shared gadget fallback.
+    """
+    import numpy as np
+    from qiskit.quantum_info import Statevector
+
+    H = qm_o.Hamiltonian()
+    H += constant
+
+    exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+        _wrap_pauli_evolve,
+        bindings={"n": 2, "hamiltonian": H, "gamma": 0.5},
+    )
+    circuit = exe.compiled_quantum[0].circuit.remove_final_measurements(inplace=False)
+    probs = np.abs(Statevector(circuit).data) ** 2
+    expected = np.zeros(4)
+    expected[0] = 1.0
+    np.testing.assert_allclose(
+        probs,
+        expected,
+        atol=1e-12,
+        rtol=0.0,
+        err_msg=(
+            f"use_native={use_native}, constant={constant}: "
+            f"0-qubit Hamiltonian evolution changed populations: {probs}"
+        ),
+    )
+
+
+@pytest.mark.parametrize("use_native", [True, False])
+def test_larger_hamiltonian_raises(use_native):
+    """A Hamiltonian wider than the register is still a genuine error.
+
+    Covers both the native ``PauliEvolutionGate`` path and the shared
+    gadget fallback, which validate independently.
+    """
     from qamomile.circuit.transpiler.errors import EmitError
 
     H = qm_o.Hamiltonian()
@@ -373,7 +416,7 @@ def test_larger_hamiltonian_raises():
         1.0,
     )  # acts on 3 qubits
 
-    transpiler = QiskitTranspiler(use_native_composite=False)
+    transpiler = QiskitTranspiler(use_native_composite=use_native)
     with pytest.raises(EmitError, match="qubit count mismatch"):
         transpiler.transpile(
             _wrap_pauli_evolve,

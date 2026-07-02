@@ -77,6 +77,7 @@ from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
+    validate_hamiltonian_within_register,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
@@ -1260,14 +1261,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             )
             if n_resolved is not None:
                 register_qubit_count = n_resolved
-            if n_resolved is not None and num_h_qubits > n_resolved:
-                raise EmitError(
-                    f"PauliEvolveOp qubit count mismatch: "
-                    f"qubit register has {n_resolved} qubits but "
-                    f"Hamiltonian acts on {num_h_qubits} qubits. "
-                    f"The Hamiltonian must not be larger than the register.",
-                    operation="PauliEvolveOp",
-                )
+                validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
         for operators, coeff in hamiltonian:
             if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
@@ -2496,16 +2490,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             operation="PauliEvolveOp",
         )
         # A Hamiltonian smaller than the register is embedded by acting
-        # only on its declared qubits (the leading ``num_qubits`` slots);
-        # only a Hamiltonian *larger* than the register is a real error.
-        if hamiltonian.num_qubits > len(qubit_indices):
-            raise EmitError(
-                f"PauliEvolveOp qubit count mismatch: qubit register has "
-                f"{len(qubit_indices)} qubits but Hamiltonian acts on "
-                f"{hamiltonian.num_qubits} qubits. "
-                f"The Hamiltonian must not be larger than the register.",
-                operation="PauliEvolveOp",
-            )
+        # only on its declared qubits (the leading ``num_qubits`` slots).
+        validate_hamiltonian_within_register(hamiltonian.num_qubits, len(qubit_indices))
         for operators, coeff in hamiltonian:
             if abs(coeff.imag) > 1e-10:
                 raise EmitError(

@@ -781,6 +781,50 @@ def padded_pauli_evolve_run(
 
 
 @qmc.qkernel
+def _evolve_narrow_then_flip_tail(
+    q: qmc.Vector[qmc.Qubit],
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Evolve under a register-narrower Hamiltonian, then use the tail slot."""
+    q = qmc.pauli_evolve(q, ham, gamma)
+    q[1] = qmc.x(q[1])
+    return q
+
+
+@qmc.qkernel
+def controlled_padded_pauli_evolve_sample(
+    ham: qmc.Observable, gamma: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Control a helper whose Hamiltonian is narrower than its target vector.
+
+    Controlled variant of the #467 regression: the controlled emission
+    paths must identity-pad the narrow Hamiltonian exactly like the
+    uncontrolled paths, and the untouched tail slot must stay
+    addressable (the helper flips it under control).
+    """
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_evolve = qmc.control(_evolve_narrow_then_flip_tail)
+    q[0], targets = controlled_evolve(q[0], q[1:3], ham=ham, gamma=gamma)
+    q[1:3] = targets
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_padded_pauli_evolve_run(
+    ham: qmc.Observable, gamma: qmc.Float, obs: qmc.Observable
+) -> qmc.Float:
+    """Run expval after a controlled register-narrower evolution."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_evolve = qmc.control(_evolve_narrow_then_flip_tail)
+    q[0], targets = controlled_evolve(q[0], q[1:3], ham=ham, gamma=gamma)
+    q[1:3] = targets
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
 def sliced_pauli_evolve_sample(
     ham: qmc.Observable,
     gamma: qmc.Float,
@@ -1331,6 +1375,27 @@ FRONTEND_EXECUTION_CASES = [
             "ham": qm_o.Z(0),
             "gamma": 0.5,
             "obs": qm_o.Z(0),
+        },
+    ),
+    # Controlled variant of the #467 regression: the identity-padding rule
+    # must hold inside ``qmc.control`` too (the shared controlled emission
+    # used by QuriParts and the Qiskit fallback, and the CUDA-Q helper
+    # kernels). With the control on, the helper evolves q[1] under Z(0)
+    # (a pure phase on the |0> state) and flips the tail slot q[2], so the
+    # Z-basis sample and <Z(2)> stay deterministic.
+    FrontendExecutionCase(
+        name="controlled-padded-pauli-evolve",
+        sample_kernel=controlled_padded_pauli_evolve_sample,
+        run_kernel=controlled_padded_pauli_evolve_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1),
+        expected_support={(1, 0, 1)},
+        expected_expval=-1.0,
+        sample_bindings={"ham": qm_o.Z(0), "gamma": 0.5},
+        run_bindings={
+            "ham": qm_o.Z(0),
+            "gamma": 0.5,
+            "obs": qm_o.Z(2),
         },
     ),
 ]
