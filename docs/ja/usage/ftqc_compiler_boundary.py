@@ -23,7 +23,7 @@
 # 新しいFTQCのアイデアをcircuit IR、resource-estimation workload、backend emitter機能、またはドキュメントのどこで扱うべきかを判断するための設計チェックリストです。
 
 # %%
-# Install the latest Qamomile through pip!
+# 最新のQamomileをpipからインストールします！
 # # !pip install qamomile
 
 # %%
