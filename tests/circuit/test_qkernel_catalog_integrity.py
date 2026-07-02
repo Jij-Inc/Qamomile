@@ -9,8 +9,6 @@ exercise concrete bindings, which previously let invalid ``min_params``
 concrete shapes) ship unnoticed.
 """
 
-import inspect
-
 import pytest
 
 from tests.circuit.qkernel_catalog import QKERNEL_CATALOG
@@ -30,6 +28,6 @@ def test_entry_builds_with_min_params(entry):
 )
 def test_metadata_names_are_kernel_arguments(entry):
     """param_names and min_params keys must name real kernel arguments."""
-    kernel_args = set(inspect.signature(entry.qkernel.func).parameters)
+    kernel_args = set(entry.qkernel.signature.parameters.keys())
     assert set(entry.param_names) <= kernel_args
-    assert set(entry.min_params) <= kernel_args
+    assert set(entry.min_params.keys()) <= kernel_args
