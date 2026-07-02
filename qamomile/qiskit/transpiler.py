@@ -522,11 +522,33 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         qubit_map: QubitMap,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit Pauli evolution using Qiskit's PauliEvolutionGate."""
+        """Emit Pauli evolution using Qiskit's PauliEvolutionGate.
+
+        Falls back to the shared gadget decomposition — always via
+        ``_emit_gadget_pauli_evolve``, which completes the Hamiltonian's
+        constant term as a circuit global phase — when native composite
+        emission is disabled or the native path cannot resolve the
+        Hamiltonian, gamma, or qubit indices.
+
+        Args:
+            circuit (QuantumCircuit): Qiskit circuit being emitted into.
+            op (PauliEvolveOp): The Pauli evolution operation to emit.
+            qubit_map (QubitMap): Physical qubit map the operation's
+                quantum operands resolve against; updated in place with
+                the evolved-register result addresses.
+            bindings (dict[str, Any]): Active emit bindings used to
+                resolve the Hamiltonian, gamma, and register shape.
+
+        Raises:
+            EmitError: If the Hamiltonian is non-Hermitian (a term or the
+                constant has a non-real coefficient), the Hamiltonian is
+                larger than the register, or the gadget fallback cannot
+                resolve the Hamiltonian, gamma, or a term qubit.
+        """
         import qamomile.observable as qm_o
 
         if not self._use_native_composite:
-            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
             return
 
         # Resolve Hamiltonian from bindings
@@ -537,7 +559,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         if hamiltonian is None and hasattr(obs_value, "uuid"):
             hamiltonian = bindings.get(obs_value.uuid)
         if not isinstance(hamiltonian, qm_o.Hamiltonian):
-            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
             return
 
         # Resolve gamma: concrete float OR backend Parameter for parametric
@@ -550,7 +572,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         gamma = _resolve_gamma(self, op, bindings)
         if gamma is None:
-            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
             return
 
         # Validate qubit count: logical array size vs Hamiltonian. A
@@ -620,7 +642,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             if addr in qubit_map:
                 qubit_indices.append(qubit_map[addr])
             else:
-                super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+                self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
                 return
 
         try:
@@ -636,7 +658,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             circuit.append(evo_gate, qubit_indices)
         except ImportError:
             # Fallback to manual decomposition when Qiskit library unavailable
-            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
             return
 
         # Map result array to same physical qubits
@@ -645,6 +667,109 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             result_addr = QubitAddress(result_array.uuid, i)
             if result_addr not in qubit_map:
                 qubit_map[result_addr] = phys_idx
+
+    def _emit_gadget_pauli_evolve(
+        self,
+        circuit: "QuantumCircuit",
+        op: "PauliEvolveOp",
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Delegate to the shared gadget emitter and complete the constant term.
+
+        The shared gadget decomposition emits only the Hamiltonian's
+        Pauli terms — a constant (identity) term contributes no gates
+        there, so it is silently dropped. Every gadget delegation from
+        ``_emit_pauli_evolve`` goes through this wrapper so the dropped
+        constant is re-applied as a Qiskit global phase exactly once,
+        keeping the fallback's phase behavior aligned with the native
+        ``PauliEvolutionGate`` path (whose ``SparsePauliOp`` carries the
+        constant).
+
+        Args:
+            circuit (QuantumCircuit): Qiskit circuit being emitted into.
+            op (PauliEvolveOp): The Pauli evolution operation to emit.
+            qubit_map (QubitMap): Physical qubit map the operation's
+                quantum operands resolve against; updated in place with
+                the evolved-register result addresses.
+            bindings (dict[str, Any]): Active emit bindings used to
+                resolve the Hamiltonian, gamma, and register shape.
+
+        Raises:
+            EmitError: Propagated from the shared gadget emitter
+                (unresolvable Hamiltonian / gamma / term qubit,
+                non-Hermitian term coefficient, or a Hamiltonian larger
+                than the register), or raised by the constant-phase
+                completion when the constant term has a non-real
+                coefficient.
+        """
+        super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+        self._emit_gadget_constant_phase(circuit, op, bindings)
+
+    def _emit_gadget_constant_phase(
+        self,
+        circuit: "QuantumCircuit",
+        op: "PauliEvolveOp",
+        bindings: dict[str, Any],
+    ) -> None:
+        """Re-apply the constant term dropped by the gadget decomposition.
+
+        ``exp(-i*gamma*H)`` with ``H = ... + c`` carries the phase
+        ``exp(-i*gamma*c)``. Standalone this is an unobservable global
+        phase, but when the emitted circuit is converted to a gate and
+        placed under controls (``_blockvalue_to_gate`` + ``Gate.control``)
+        Qiskit promotes the definition's global phase to the observable
+        relative phase on the all-controls-on subspace — matching the
+        native ``PauliEvolutionGate`` path, the shared controlled path's
+        explicit ``P(-gamma*c)`` on a control, and CUDA-Q's controlled
+        constant re-application. Hamiltonian and gamma resolution mirrors
+        the shared gadget emitter (same resolver and ``_resolve_gamma``),
+        so whenever the gadget emission succeeded the constant resolves
+        identically; if either is unresolvable this method is a no-op
+        (every such reachable case has already raised inside the gadget
+        emission).
+
+        Args:
+            circuit (QuantumCircuit): Circuit the gadget fallback just
+                emitted into; its ``global_phase`` is updated in place.
+            op (PauliEvolveOp): The Pauli evolution operation being
+                emitted.
+            bindings (dict[str, Any]): Active emit bindings used to
+                resolve the Hamiltonian and gamma.
+
+        Raises:
+            EmitError: If the constant term has a non-real coefficient
+                (non-Hermitian Hamiltonian).
+        """
+        import qamomile.observable as qm_o
+        from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
+            _resolve_gamma,
+        )
+        from qamomile.observable.hamiltonian import (
+            HERMITIAN_IMAG_ATOL,
+            PAULI_TERM_ZERO_ATOL,
+        )
+
+        hamiltonian = self._resolver.resolve_bound_value(op.observable, bindings)
+        if not isinstance(hamiltonian, qm_o.Hamiltonian):
+            return
+        constant = hamiltonian.constant
+        if abs(constant) <= PAULI_TERM_ZERO_ATOL:
+            return
+        if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+            raise EmitError(
+                f"PauliEvolveOp requires a Hermitian Hamiltonian "
+                f"(real coefficients), but found a complex constant "
+                f"{constant}.",
+                operation="PauliEvolveOp",
+            )
+        gamma = _resolve_gamma(self, op, bindings)
+        if gamma is None:
+            return
+        # Works for both concrete float gamma and a backend Parameter
+        # (ParameterExpression global phase is bound together with the
+        # rest of the circuit parameters).
+        circuit.global_phase += -float(constant.real) * gamma
 
 
 class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
