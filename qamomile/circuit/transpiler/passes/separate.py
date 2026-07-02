@@ -289,7 +289,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # correctly. Computing this transitively is what makes a chain like
         # ``(phase * 2) - 1`` feeding a gate fully absorbable while a value read
         # back by later classical work stays in its own classical segment.
-        self._absorbable_op_ids = self._compute_absorbable(block.operations)
+        # The consumers map is computed once and shared with
+        # ``_classify_runtime_exprs`` below to avoid a second traversal of the
+        # nested control flow.
+        consumers = self._build_consumers_map(block.operations)
+        self._absorbable_op_ids = self._compute_absorbable(block.operations, consumers)
 
         # Runtime-expression placement sets: a ``RuntimeClassicalExpr``
         # (measurement-derived classical op) may be consumed in-circuit
@@ -299,7 +303,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         (
             self._quantum_consumed_expr_ids,
             self._host_evaluated_expr_ids,
-        ) = self._classify_runtime_exprs(block.operations)
+        ) = self._classify_runtime_exprs(block.operations, consumers)
 
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
@@ -659,7 +663,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 return True
         return False
 
-    def _compute_absorbable(self, operations: list[Operation]) -> set[int]:
+    def _compute_absorbable(
+        self,
+        operations: list[Operation],
+        consumers: dict[str, list[Operation]],
+    ) -> set[int]:
         """Compute the set of classical ops safe to fold into a quantum segment.
 
         A classical op is *absorbable* when it is non-measurement, feeds a
@@ -684,13 +692,14 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         Args:
             operations (list[Operation]): Top-level operations of the block.
+            consumers (dict[str, list[Operation]]): ``value_uuid ->
+                [consumer, ...]`` map over the whole op tree, as built by
+                :meth:`_build_consumers_map`.
 
         Returns:
             set[int]: ``id()`` of every classical op (top-level or nested) that
                 is safe with respect to the quantum-segment absorption.
         """
-        consumers = self._build_consumers_map(operations)
-
         # Candidates: every classical op (recursing into control-flow bodies)
         # that is non-measurement, quantum-feeding, and not a block output.
         classical_ops = self._collect_classical_ops(operations)
@@ -763,6 +772,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
     def _classify_runtime_exprs(
         self,
         operations: list[Operation],
+        consumers: dict[str, list[Operation]],
     ) -> tuple[set[int], set[int]]:
         """Classify each ``RuntimeClassicalExpr`` by where it must execute.
 
@@ -791,6 +801,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         Args:
             operations (list[Operation]): Top-level operations of the block.
+            consumers (dict[str, list[Operation]]): ``value_uuid ->
+                [consumer, ...]`` map over the whole op tree, as built by
+                :meth:`_build_consumers_map`.
 
         Returns:
             tuple[set[int], set[int]]: ``(quantum_consumed, host_evaluated)``
@@ -805,7 +818,6 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         ]
         if not exprs:
             return set(), set()
-        consumers = self._build_consumers_map(operations)
 
         # Ops that execute host-side when reached: every top-level op whose
         # effective kind is CLASSICAL, plus everything nested inside one.
