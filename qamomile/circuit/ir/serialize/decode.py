@@ -857,7 +857,7 @@ def _container_operands_results(
             ``TupleValue``, mirroring what the frontend stores there.
     """
     operands = cast(
-        "list[Value]",
+        list[Value],
         [ctx.materialize(ref) for ref in d.get("operand_refs", ())],
     )
     results = [_materialize_as_value(ctx, ref) for ref in d.get("result_refs", ())]
