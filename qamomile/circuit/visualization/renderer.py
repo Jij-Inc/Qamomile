@@ -490,11 +490,12 @@ class MatplotlibRenderer:
     ) -> None:
         """Draw the if/else branch boxes for an unfolded IfOperation.
 
-        Each branch (``iterations[0]`` = true, ``iterations[1]`` = else) is
-        wrapped in a dash-dot rounded box spanning its gates' x-range and the
-        if's affected wires, labelled ``if <cond>:`` and ``else:`` respectively.
-        The boxes are drawn behind the gates so the gates remain legible; gates
-        themselves are drawn by the caller after this method returns.
+        The true branch (``iterations[0]``) and, when present, the else branch
+        (``iterations[1]``) are wrapped in dash-dot rounded boxes spanning their
+        gates' x-ranges and the if's affected wires. The boxes are labelled
+        ``if <cond>:`` and ``else:`` respectively, and are drawn behind the
+        gates so the gates remain legible; gates themselves are drawn by the
+        caller after this method returns.
 
         Args:
             fig (Figure): Target matplotlib figure (carries ``_qm_ax``).

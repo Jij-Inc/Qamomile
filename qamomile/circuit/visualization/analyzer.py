@@ -1824,9 +1824,10 @@ class CircuitAnalyzer:
         ``CompileTimeIfLoweringPass`` before visual analysis runs, so this method
         only handles conditions that survive — measurement-backed runtime
         ``if`` and symbolic (unbound) classical ``if``. When ``fold_ifs`` is
-        enabled it returns a single ``VFoldedBlock`` summarizing the true
-        branch; otherwise it returns a ``VUnfoldedSequence`` carrying both
-        branches for side-by-side rendering.
+        enabled it returns a single ``VFoldedBlock`` summarizing the true branch
+        and, when present, the else branch; otherwise it returns a
+        ``VUnfoldedSequence`` carrying the surviving branch alternatives for
+        side-by-side rendering.
 
         Args:
             op (IfOperation): The if/else operation to visualize.
