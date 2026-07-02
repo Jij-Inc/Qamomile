@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
 )
@@ -249,6 +250,23 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
                 self._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            elif isinstance(op, StoreArrayElementOperation):
+                # Classical element stores execute host-side in classical
+                # segments (ClassicalExecutor) or fold at compile time.
+                # One reaching a quantum segment means the stored contents
+                # feed a quantum op without being compile-time resolvable;
+                # silently skipping it would emit stale gate parameters.
+                from qamomile.circuit.transpiler.errors import EmitError
+
+                raise EmitError(
+                    f"Classical array element store into "
+                    f"'{op.array.name or 'array'}' reached the quantum "
+                    f"segment. Stored elements consumed by quantum gates "
+                    f"must be compile-time resolvable: bind the array and "
+                    f"the stored value via `bindings` instead of "
+                    f"`parameters`, or restructure the kernel so the "
+                    f"stored elements are not used as gate parameters."
+                )
             elif isinstance(op, CastOperation):
                 handle_cast(self, op, qubit_map)
             elif isinstance(op, BinOp):

@@ -12,12 +12,13 @@ from qamomile.circuit.ir.operation import (
     SliceArrayOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.value_resolver import (
     ValueResolver as UnifiedValueResolver,
@@ -82,8 +83,13 @@ class ConstantFoldingPass(Pass[Block, Block]):
         # Track folded values: uuid -> constant Value
         folded_values: dict[str, Value] = {}
 
+        # Block-output UUIDs: a folded store whose result is returned must
+        # stay in the IR so the classical executor materializes the value
+        # at runtime (folding records compile-time metadata only).
+        output_uuids = {v.uuid for v in input.output_values if isinstance(v, ValueBase)}
+
         # Process operations
-        new_ops = self._fold_operations(input.operations, folded_values)
+        new_ops = self._fold_operations(input.operations, folded_values, output_uuids)
 
         return dataclasses.replace(input, operations=new_ops)
 
@@ -91,11 +97,32 @@ class ConstantFoldingPass(Pass[Block, Block]):
         self,
         operations: list[Operation],
         folded_values: dict[str, Value],
+        output_uuids: set[str] | None = None,
     ) -> list[Operation]:
         """Process operations, folding constant BinOps."""
         outer_self = self
+        block_output_uuids = output_uuids or set()
 
         class ConstantFoldingTransformer(OperationTransformer):
+            def __init__(self) -> None:
+                """Initialize the transformer with zero control-flow depth."""
+                self._nesting_depth = 0
+
+            def _transform_control_flow(self, op: Operation) -> Operation:
+                """Recurse into control-flow bodies, tracking nesting depth.
+
+                Args:
+                    op (Operation): The (possibly control-flow) operation.
+
+                Returns:
+                    Operation: The operation with nested bodies transformed.
+                """
+                self._nesting_depth += 1
+                try:
+                    return super()._transform_control_flow(op)
+                finally:
+                    self._nesting_depth -= 1
+
             def transform_operation(self, op: Operation) -> Operation | None:
                 if isinstance(op, BinOp):
                     folded = outer_self._try_fold_binop(op, folded_values)
@@ -104,6 +131,36 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         # Just record the mapping for later substitution
                         folded_values[op.results[0].uuid] = folded
                         return None
+
+                # Classical array element stores fold only at the top
+                # level: inside a loop body the store executes once per
+                # iteration (possibly zero times), so a single folded
+                # contents snapshot would be wrong.
+                if (
+                    isinstance(op, StoreArrayElementOperation)
+                    and self._nesting_depth == 0
+                ):
+                    substituted = cast(
+                        StoreArrayElementOperation,
+                        outer_self._substitute_folded_operands(op, folded_values),
+                    )
+                    folded_array = outer_self._try_fold_store_array_element(
+                        substituted, folded_values
+                    )
+                    if folded_array is not None:
+                        folded_values[op.results[0].uuid] = folded_array
+                        if op.results[0].uuid in block_output_uuids:
+                            # Returned arrays still need a runtime store so
+                            # the executor can materialize the output; the
+                            # substituted result carries the folded
+                            # contents for compile-time readers.
+                            return outer_self._substitute_folded_results(
+                                substituted, folded_values
+                            )
+                        return None
+                    return outer_self._substitute_folded_results(
+                        substituted, folded_values
+                    )
 
                 # SliceArrayOperation is purely declarative: its result
                 # (a sliced ``ArrayValue``) already carries all required
@@ -182,6 +239,73 @@ class ConstantFoldingPass(Pass[Block, Block]):
             name=f"folded_{op.results[0].name}",
             uuid=op.results[0].uuid,  # Keep same UUID for substitution
         ).with_const(result_value)
+
+    def _try_fold_store_array_element(
+        self,
+        op: StoreArrayElementOperation,
+        folded_values: dict[str, Value],
+    ) -> ArrayValue | None:
+        """Try to fold a classical element store into constant array contents.
+
+        A store folds when the source array's contents, the index, and the
+        stored value are all compile-time resolvable (const metadata,
+        bindings, or previously folded values).  The folded result is the
+        op's result ``ArrayValue`` (same UUID) carrying the updated
+        ``const_array`` metadata, so downstream element reads resolve
+        against the post-store contents.
+
+        Args:
+            op (StoreArrayElementOperation): The store with operands
+                already substituted from ``folded_values``.
+            folded_values (dict[str, Value]): Map from folded value UUIDs
+                to their constant replacements.
+
+        Returns:
+            ArrayValue | None: The result value with updated
+                ``const_array`` metadata, or ``None`` when any input is
+                not compile-time resolvable (the store then executes at
+                runtime) or the constant index is out of range (left for
+                the runtime path to reject loudly).
+        """
+        if len(op.operands) != 3:
+            # Multi-dimensional stores are rejected at the frontend; leave
+            # any programmatically constructed op for runtime rejection.
+            return None
+
+        array_value = op.operands[0]
+        if not isinstance(array_value, ArrayValue):
+            return None
+
+        container = array_value.get_const_array()
+        if container is None:
+            name = array_value.name
+            if name and name in self._bindings:
+                container = self._bindings[name]
+            elif array_value.is_parameter():
+                param_name = array_value.parameter_name()
+                if param_name and param_name in self._bindings:
+                    container = self._bindings[param_name]
+        if container is None:
+            return None
+
+        stored = self._resolve_value(op.operands[1], folded_values)
+        index = self._resolve_value(op.operands[2], folded_values)
+        if stored is None or index is None:
+            return None
+
+        try:
+            concrete_index = int(index)
+            elements = list(container)
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= concrete_index < len(elements):
+            return None
+
+        elements[concrete_index] = stored
+        result = op.results[0]
+        if not isinstance(result, ArrayValue):
+            return None
+        return result.with_array_runtime_metadata(const_array=tuple(elements))
 
     def _resolve_value(
         self,

@@ -12,7 +12,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     PhiOp,
 )
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    StoreArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -20,7 +23,13 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    resolve_root_array_index,
+)
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.segments import ClassicalSegment
@@ -72,6 +81,8 @@ class ClassicalExecutor:
             self._execute_phi(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
+        elif isinstance(op, StoreArrayElementOperation):
+            self._execute_store_array_element(op, context, results, scoped_locals)
         elif isinstance(op, ForOperation):
             self._execute_for(op, context, results, scoped_locals)
         elif isinstance(op, ForItemsOperation):
@@ -249,6 +260,149 @@ class ClassicalExecutor:
         if op.results:
             results[op.results[0].uuid] = value
 
+    def _execute_store_array_element(
+        self,
+        op: StoreArrayElementOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Execute a classical array element store.
+
+        Reads the current contents of the source array, replaces the
+        addressed element with the stored value, and records the updated
+        container under the result value's UUID.
+
+        Inside a loop body the same store op executes once per iteration
+        while the IR carries a single ``source -> result`` version pair.
+        To keep iterations cumulative, the base contents are taken from
+        the op's own previous result (``results[result.uuid]``) when
+        present, falling back to the source array otherwise.  In that
+        loop-carried mode, an operand that reads an element of the *same
+        logical array* would see the pre-loop contents instead of the
+        previous iteration's — a silent divergence from Python
+        semantics — so such stores are rejected loudly.
+
+        Args:
+            op (StoreArrayElementOperation): The store to execute.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map; the updated
+                container is recorded under ``op.results[0].uuid``.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Raises:
+            ExecutionError: If the source array contents cannot be
+                resolved, the index is out of range, or a loop-carried
+                store reads an element of the same logical array.
+        """
+        result_value = op.results[0]
+
+        if result_value.uuid in results:
+            # Loop-carried iteration: continue from the previous
+            # iteration's contents and reject same-array element reads
+            # (they would silently see stale pre-loop data).
+            self._reject_stale_same_array_read(op)
+            base = results[result_value.uuid]
+        else:
+            base = self._resolve_store_base(op.array, context, results, scoped_locals)
+
+        index_values = op.index_values
+        if len(index_values) != 1:
+            raise ExecutionError(
+                f"StoreArrayElementOperation supports 1-D arrays only; "
+                f"got {len(index_values)} indices."
+            )
+        index = int(self._get_value(index_values[0], context, results, scoped_locals))
+
+        elements = list(base)
+        if not 0 <= index < len(elements):
+            raise ExecutionError(
+                f"Store index {index} is out of range for array "
+                f"'{op.array.name}' of length {len(elements)}."
+            )
+        elements[index] = self._get_value(
+            op.stored_value, context, results, scoped_locals
+        )
+        results[result_value.uuid] = tuple(elements)
+
+    def _reject_stale_same_array_read(self, op: StoreArrayElementOperation) -> None:
+        """Reject loop-carried stores that read the same logical array.
+
+        The IR carries one ``source -> result`` array version pair per
+        store op, so operand element reads always reference a fixed
+        source version.  Across loop iterations that version no longer
+        reflects earlier iterations' writes; evaluating such a read
+        would silently diverge from Python's sequential semantics (e.g.
+        ``bits[i] = bits[i - 1]`` would copy the original contents
+        instead of propagating).  Called only in loop-carried mode.
+
+        Args:
+            op (StoreArrayElementOperation): The store being executed.
+
+        Raises:
+            ExecutionError: If the stored value or any index reads an
+                element of the same logical array the store writes.
+        """
+        result_logical = op.results[0].logical_id
+        for operand in (op.stored_value, *op.index_values):
+            parent = getattr(operand, "parent_array", None)
+            if parent is not None and parent.logical_id == result_logical:
+                raise ExecutionError(
+                    f"Classical array element store into "
+                    f"'{op.array.name}' reads an element of the same "
+                    f"array inside a loop; self-referential in-loop "
+                    f"updates are not supported yet.  Restructure the "
+                    f"kernel to read from a different array or perform "
+                    f"the update outside the loop."
+                )
+
+    def _resolve_store_base(
+        self,
+        array_value: ArrayValue,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> Any:
+        """Resolve the full contents of a store's source array.
+
+        Tries the whole-container lookup used for reads
+        (:meth:`_get_array_data`) first, then falls back to assembling
+        per-element composite carrier keys (``"<uuid>_<index>"``) — the
+        format under which measurement results are loaded into the
+        execution context.
+
+        Args:
+            array_value (ArrayValue): The store's source array operand.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Results map of the current segment.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Returns:
+            Any: A sequence with the array's current contents.
+
+        Raises:
+            ExecutionError: If neither a whole container nor per-element
+                keys can be resolved.
+        """
+        container = self._get_array_data(array_value, context, results, scoped_locals)
+        if container is not None:
+            return container
+
+        elements: list[Any] = []
+        i = 0
+        while context.has(f"{array_value.uuid}_{i}"):
+            elements.append(context.get(f"{array_value.uuid}_{i}"))
+            i += 1
+        if elements:
+            return tuple(elements)
+
+        raise ExecutionError(
+            f"Array contents for '{array_value.name}' could not be "
+            f"resolved for element store."
+        )
+
     def _execute_for(
         self,
         op: ForOperation,
@@ -389,6 +543,16 @@ class ClassicalExecutor:
             indexed_key = f"{parent.name}[{indices[0]}]"
             if context.has(indexed_key):
                 return context.get(indexed_key)
+            # Measurement results are loaded into the context under
+            # per-element composite carrier keys ("<root_uuid>_<index>").
+            # Compose slice views back onto the root so a view-local
+            # index addresses the right physical slot.
+            resolved = resolve_root_array_index(parent, indices[0])
+            if resolved is not None:
+                root_array, root_index = resolved
+                composite_key = f"{root_array.uuid}_{root_index}"
+                if context.has(composite_key):
+                    return context.get(composite_key)
 
         raise ExecutionError(
             f"Array element {parent.name}{indices} could not be resolved"

@@ -6,6 +6,8 @@ import dataclasses
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
 from qamomile.circuit.ir.operation.gate import MeasureOperation, MeasureVectorOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.value import Value, ValueBase
@@ -168,6 +170,9 @@ class AnalyzePass(Pass[Block, Block]):
         # Check inputs/outputs are classical
         self._validate_io_classical(input)
 
+        # Reject classical element stores inside runtime if/else branches
+        self._reject_stores_in_if_branches(input.operations)
+
         # Build dependency graph
         dependency_graph = self._build_dependency_graph(input.operations)
 
@@ -203,6 +208,63 @@ class AnalyzePass(Pass[Block, Block]):
                     f"got {value.type.label()}",
                     value_name=value.name,
                 )
+
+    def _reject_stores_in_if_branches(self, operations: list[Operation]) -> None:
+        """Reject classical element stores nested under a runtime if/else.
+
+        A ``StoreArrayElementOperation`` produces a fresh SSA version of
+        the array, but the frontend's branch tracing has no phi merge for
+        array values: post-if reads would reference the branch-local
+        version unconditionally, silently diverging from Python semantics
+        when the branch is not taken.  Compile-time ``if``s (classical
+        conditions resolvable from ``bindings``) were already flattened by
+        ``CompileTimeIfLoweringPass`` before this pass runs, so only
+        runtime (measurement-backed) branches reach this check.
+
+        Args:
+            operations (list[Operation]): Operations to scan.  Recurses
+                through all control flow; any store anywhere inside an
+                ``IfOperation`` branch (including nested loops) is
+                rejected.
+
+        Raises:
+            ValidationError: If a classical element store appears inside
+                an if/else branch.
+        """
+
+        def contains_store(ops: list[Operation]) -> bool:
+            """Return whether any (nested) op is a classical element store.
+
+            Args:
+                ops (list[Operation]): Operations to scan recursively.
+
+            Returns:
+                bool: ``True`` if a ``StoreArrayElementOperation`` is
+                    found at any nesting depth.
+            """
+            for op in ops:
+                if isinstance(op, StoreArrayElementOperation):
+                    return True
+                if isinstance(op, HasNestedOps) and any(
+                    contains_store(body) for body in op.nested_op_lists()
+                ):
+                    return True
+            return False
+
+        for op in operations:
+            if isinstance(op, IfOperation):
+                if any(contains_store(body) for body in op.nested_op_lists()):
+                    raise ValidationError(
+                        "Classical array element assignment inside an "
+                        "if/else branch is not supported: array values "
+                        "have no phi merge, so the write would apply "
+                        "regardless of the branch taken. Restructure the "
+                        "kernel to perform the assignment outside the "
+                        "branch."
+                    )
+            elif isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    self._reject_stores_in_if_branches(body)
 
     def _build_dependency_graph(
         self,
