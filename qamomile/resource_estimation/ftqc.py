@@ -8,8 +8,12 @@ from typing import Any
 import sympy as sp
 
 from qamomile.circuit.estimator import ResourceEstimate
-
-_SympyLike = sp.Expr | int | float
+from qamomile.resource_estimation._common import (
+    _as_expr,
+    _SympyLike,
+    _validate_nonnegative,
+    _validate_positive,
+)
 
 
 @dataclass(frozen=True)
@@ -619,15 +623,23 @@ class FTQCPhysicalResourceEstimate:
         physical_qubits (sp.Expr): Physical qubit proxy.
         runtime_seconds (sp.Expr): Runtime proxy in seconds.
         architecture_values (dict[str, sp.Expr]): Architecture parameters
-            used for the physical lift.
+            used for the physical lift. Must contain
+            ``logical_cycle_time_seconds`` and
+            ``non_clifford_throughput_per_second``.
         parameters (dict[str, sp.Symbol]): Free symbols appearing in logical
             and physical quantities.
 
+    Raises:
+        ValueError: If ``architecture_values`` is missing an architecture
+            key required by the runtime properties.
+
     Example:
+        >>> import sympy as sp
+        >>> from dataclasses import replace
         >>> from qamomile.resource_estimation import GateCount, ResourceEstimate
         >>> logical = ResourceEstimate(
-        ...     qubits=10,
-        ...     gates=GateCount.zero().with_total(100),
+        ...     qubits=sp.Integer(10),
+        ...     gates=replace(GateCount.zero(), total=sp.Integer(100)),
         ... )
         >>> physical = estimate_physical_resources(logical, FTQCCostModel(2, 1, 3, 4))
         >>> physical.physical_qubits
@@ -639,8 +651,25 @@ class FTQCPhysicalResourceEstimate:
     non_clifford_count: sp.Expr
     physical_qubits: sp.Expr
     runtime_seconds: sp.Expr
-    architecture_values: dict[str, sp.Expr] = field(default_factory=dict)
+    architecture_values: dict[str, sp.Expr]
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
+
+    _REQUIRED_ARCHITECTURE_KEYS = (
+        "logical_cycle_time_seconds",
+        "non_clifford_throughput_per_second",
+    )
+
+    def __post_init__(self) -> None:
+        """Validate that runtime-critical architecture values are present.
+
+        Raises:
+            ValueError: If ``architecture_values`` is missing an architecture
+                key required by the runtime properties.
+        """
+        _validate_architecture_keys(
+            self.architecture_values,
+            self._REQUIRED_ARCHITECTURE_KEYS,
+        )
 
     def substitute(self, **values: int | float) -> FTQCPhysicalResourceEstimate:
         """Substitute concrete values into logical and physical quantities.
@@ -776,15 +805,22 @@ class FTQCActiveVolumeResourceEstimate:
         active_volume (sp.Expr): Active-volume operation cost proxy.
         runtime_seconds (sp.Expr): Runtime proxy in seconds.
         architecture_values (dict[str, sp.Expr]): Architecture parameters
-            used for the active-volume lift.
+            used for the active-volume lift. Must contain
+            ``active_volume_throughput_per_second``.
         parameters (dict[str, sp.Symbol]): Free symbols appearing in logical
             and active-volume quantities.
 
+    Raises:
+        ValueError: If ``architecture_values`` is missing an architecture
+            key required by the runtime properties.
+
     Example:
+        >>> import sympy as sp
+        >>> from dataclasses import replace
         >>> from qamomile.resource_estimation import GateCount, ResourceEstimate
         >>> logical = ResourceEstimate(
-        ...     qubits=5,
-        ...     gates=GateCount.zero().with_total(10),
+        ...     qubits=sp.Integer(5),
+        ...     gates=replace(GateCount.zero(), total=sp.Integer(10)),
         ... )
         >>> estimate = estimate_active_volume_resources(
         ...     logical,
@@ -799,8 +835,22 @@ class FTQCActiveVolumeResourceEstimate:
     non_clifford_count: sp.Expr
     active_volume: sp.Expr
     runtime_seconds: sp.Expr
-    architecture_values: dict[str, sp.Expr] = field(default_factory=dict)
+    architecture_values: dict[str, sp.Expr]
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
+
+    _REQUIRED_ARCHITECTURE_KEYS = ("active_volume_throughput_per_second",)
+
+    def __post_init__(self) -> None:
+        """Validate that runtime-critical architecture values are present.
+
+        Raises:
+            ValueError: If ``architecture_values`` is missing an architecture
+                key required by the runtime properties.
+        """
+        _validate_architecture_keys(
+            self.architecture_values,
+            self._REQUIRED_ARCHITECTURE_KEYS,
+        )
 
     def substitute(self, **values: int | float) -> FTQCActiveVolumeResourceEstimate:
         """Substitute concrete values into active-volume quantities.
@@ -1051,24 +1101,17 @@ def estimate_active_volume_resources(
 def resource_estimate_expressions(logical: ResourceEstimate) -> tuple[sp.Expr, ...]:
     """Return all symbolic expressions carried by a resource estimate.
 
+    The gate-count fields are enumerated by ``GateCount.expressions()`` so
+    that this helper stays in sync with the field list owned by
+    ``qamomile.circuit.estimator``.
+
     Args:
         logical (ResourceEstimate): Logical estimate to inspect.
 
     Returns:
         tuple[sp.Expr, ...]: Logical resource expressions.
     """
-    return (
-        logical.qubits,
-        logical.gates.total,
-        logical.gates.single_qubit,
-        logical.gates.two_qubit,
-        logical.gates.multi_qubit,
-        logical.gates.t_gates,
-        logical.gates.clifford_gates,
-        logical.gates.rotation_gates,
-        *logical.gates.oracle_calls.values(),
-        *logical.gates.oracle_queries.values(),
-    )
+    return (logical.qubits, *logical.gates.expressions())
 
 
 def _collect_parameters(*expressions: sp.Expr) -> dict[str, sp.Symbol]:
@@ -1088,48 +1131,26 @@ def _collect_parameters(*expressions: sp.Expr) -> dict[str, sp.Symbol]:
     return {str(symbol): symbol for symbol in sorted(symbols, key=str)}
 
 
-def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
-    """Convert a numeric or symbolic value to a SymPy expression.
+def _validate_architecture_keys(
+    architecture_values: dict[str, sp.Expr],
+    required_keys: tuple[str, ...],
+) -> None:
+    """Validate that an estimate carries its required architecture values.
 
     Args:
-        value (sp.Expr | int | float): Value to convert.
-        name (str): Field name used in error messages.
-
-    Returns:
-        sp.Expr: Converted SymPy expression.
-
-    Raises:
-        TypeError: If ``value`` cannot be sympified.
-    """
-    try:
-        return sp.sympify(value)
-    except (TypeError, sp.SympifyError) as exc:
-        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
-
-
-def _validate_positive(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is positive when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
+        architecture_values (dict[str, sp.Expr]): Architecture parameters
+            attached to a physical or active-volume estimate.
+        required_keys (tuple[str, ...]): Keys the estimate's runtime
+            properties index unconditionally.
 
     Raises:
-        ValueError: If SymPy can prove that ``expr`` is not positive.
+        ValueError: If any required key is missing, naming the missing keys.
     """
-    if expr.is_positive is False:
-        raise ValueError(f"{name} must be positive.")
-
-
-def _validate_nonnegative(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is nonnegative when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is negative.
-    """
-    if expr.is_nonnegative is False:
-        raise ValueError(f"{name} must be nonnegative.")
+    missing = [key for key in required_keys if key not in architecture_values]
+    if missing:
+        raise ValueError(
+            "architecture_values is missing required keys: "
+            + ", ".join(missing)
+            + ". Build estimates via estimate_physical_resources / "
+            "estimate_active_volume_resources, or provide these keys directly."
+        )
