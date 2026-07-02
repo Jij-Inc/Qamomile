@@ -35,6 +35,9 @@ from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
+from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
+    copy_array_element_aliases,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
@@ -323,7 +326,7 @@ class ResourceAllocator:
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
-                self._allocate_controlled_u(op, qubit_map)
+                self._allocate_controlled_u(op, qubit_map, bindings)
 
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
@@ -636,17 +639,7 @@ class ResourceAllocator:
                 # or a ``MeasureVectorOperation`` on the result)
                 # trips the ``_resolve_root_qubit_address`` assertion.
                 if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
-                    copied = False
-                    for addr, idx in list(qubit_map.items()):
-                        if addr.matches_array(operand.uuid):
-                            new_addr = QubitAddress(result.uuid, addr.element_index)
-                            if new_addr not in qubit_map:
-                                qubit_map[new_addr] = idx
-                                copied = True
-                    if copied and result_addr not in qubit_map:
-                        first_elem = QubitAddress(result.uuid, 0)
-                        if first_elem in qubit_map:
-                            qubit_map[result_addr] = qubit_map[first_elem]
+                    copy_array_element_aliases(operand.uuid, result.uuid, qubit_map)
                     continue
 
                 chain_addr = self._resolve_root_qubit_address(operand)
@@ -717,11 +710,7 @@ class ResourceAllocator:
         """
         input_qubits = op.qubits
         result_qubits = op.evolved_qubits
-        for addr, idx in list(qubit_map.items()):
-            if addr.matches_array(input_qubits.uuid):
-                result_addr = QubitAddress(result_qubits.uuid, addr.element_index)
-                if result_addr not in qubit_map:
-                    qubit_map[result_addr] = idx
+        copy_array_element_aliases(input_qubits.uuid, result_qubits.uuid, qubit_map)
 
     def _allocate_composite(
         self,
@@ -736,8 +725,18 @@ class ResourceAllocator:
         self,
         op: ControlledUOperation,
         qubit_map: QubitMap,
+        bindings: dict[str, Any],
     ) -> None:
-        """Allocate resources for a ControlledUOperation."""
+        """Allocate resources for a controlled-U operation.
+
+        Args:
+            op (ControlledUOperation): Controlled-U operation whose quantum
+                operands and pass-through results need physical qubit slots.
+            qubit_map (QubitMap): Mutable mapping from IR qubit addresses to
+                physical qubit indices.
+            bindings (dict[str, Any]): Active compile-time bindings used to
+                resolve symbolic array-element controls.
+        """
         if isinstance(op, SymbolicControlledU):
             from qamomile.circuit.ir.value import ArrayValue
 
@@ -769,14 +768,21 @@ class ResourceAllocator:
                 src = op.operands[i]
                 dst = op.results[i]
                 if isinstance(src, ArrayValue):
-                    for addr, idx in list(qubit_map.items()):
-                        if addr.matches_array(src.uuid):
-                            result_addr = QubitAddress(dst.uuid, addr.element_index)
-                            if result_addr not in qubit_map:
-                                qubit_map[result_addr] = idx
+                    copy_array_element_aliases(src.uuid, dst.uuid, qubit_map)
                 else:
                     src_addr = QubitAddress(src.uuid)
-                    if src_addr not in qubit_map:
+                    physical = qubit_map.get(src_addr)
+                    if (
+                        physical is None
+                        and src.parent_array is not None
+                        and src.element_indices
+                    ):
+                        physical = self._resolver.resolve_qubit_index(
+                            src, qubit_map, bindings
+                        )
+                        if physical is not None:
+                            qubit_map[src_addr] = physical
+                    elif physical is None:
                         # Scalar control whose UUID is first introduced
                         # at this ``SymbolicControlledU`` -- typically a
                         # top-level ``@qkernel`` ``Qubit`` input
@@ -787,11 +793,13 @@ class ResourceAllocator:
                         # the fresh-slot allocation here so emit does
                         # not later trip on a missing scalar mapping
                         # for the control prefix.
-                        qubit_map[src_addr] = self._next_qubit_index
+                        physical = self._next_qubit_index
+                        qubit_map[src_addr] = physical
                         self._next_qubit_index += 1
-                    dst_addr = QubitAddress(dst.uuid)
-                    if dst_addr not in qubit_map:
-                        qubit_map[dst_addr] = qubit_map[src_addr]
+                    if physical is not None:
+                        dst_addr = QubitAddress(dst.uuid)
+                        if dst_addr not in qubit_map:
+                            qubit_map[dst_addr] = physical
             sub_quantum_operands = [
                 v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
             ]
