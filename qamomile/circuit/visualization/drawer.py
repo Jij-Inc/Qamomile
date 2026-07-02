@@ -33,6 +33,7 @@ def _prepare_graph_for_visualization(graph: Block) -> Block:
             analysis.
 
     Raises:
+        ValidationError: If compile-time if lowering rejects the input graph.
         ValueError: If the graph has an unknown ``BlockKind``.
     """
     from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
