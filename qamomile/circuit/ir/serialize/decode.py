@@ -624,7 +624,15 @@ def _decode_payload(value: Any) -> Any:
         return dict_to_array(value)
     if is_hamiltonian_wrapper(value):
         return dict_to_hamiltonian(value)
-    if isinstance(value, dict) and value.get("$tuple") is not None:
+    # Match the encoder's output exactly: a ``$tuple`` wrapper is a
+    # single-key dict. A plain payload dict that merely happens to carry
+    # a ``"$tuple"`` key alongside others (only reachable via a
+    # hand-crafted payload — the encoder rejects reserved keys in plain
+    # dicts) falls through to the plain-dict branch below rather than
+    # being mis-decoded as a wrapper and silently dropping its other
+    # keys. This mirrors the ``$bytes_b64`` single-key check in
+    # ``json_io``.
+    if isinstance(value, dict) and len(value) == 1 and "$tuple" in value:
         elements = value["$tuple"]
         if not isinstance(elements, list):
             raise ValueError(

@@ -1326,11 +1326,24 @@ class TestTuplePayloadFidelity:
         assert _decode_payload([[0, 1], 1.5]) == [[0, 1], 1.5]
 
     def test_malformed_tuple_wrapper_rejected(self):
-        """A ``$tuple`` wrapper whose elements are not a list raises."""
+        """A single-key ``$tuple`` wrapper whose elements are not a list raises."""
         from qamomile.circuit.ir.serialize.decode import _decode_payload
 
         with pytest.raises(ValueError, match=r"\$tuple"):
             _decode_payload({"$tuple": "not-a-list"})
+
+    def test_multi_key_dict_with_tuple_key_is_not_a_wrapper(self):
+        """A dict carrying ``$tuple`` alongside other keys decodes as a plain dict.
+
+        Only a single-key ``{"$tuple": [...]}`` is a wrapper (the
+        encoder's exact output). A hand-crafted multi-key dict must not
+        be mis-decoded as a wrapper — its other keys must survive and a
+        non-list ``$tuple`` value must not raise.
+        """
+        from qamomile.circuit.ir.serialize.decode import _decode_payload
+
+        payload = {"$tuple": "not-a-list", "other": 1}
+        assert _decode_payload(payload) == payload
 
 
 # ---------------------------------------------------------------------------
