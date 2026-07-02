@@ -27,6 +27,7 @@ from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
     ValueBase,
+    ValueLike,
     resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.errors import ValidationError
@@ -551,15 +552,15 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     def _substitute_output_values(
         self,
-        output_values: list[Value],
+        output_values: list[ValueLike],
         subst: dict[str, ValueBase],
-    ) -> list[Value]:
+    ) -> list[ValueLike]:
         """Apply phi substitution to block output values."""
         if not subst:
             return output_values
 
         substitutor = ValueSubstitutor(subst, transitive=True)
-        new_outputs = []
+        new_outputs: list[ValueLike] = []
         for ov in output_values:
             substituted = substitutor.substitute_value(ov)
             if isinstance(substituted, Value):
@@ -576,7 +577,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         self,
         operations: list[Operation],
         dead_uuids: set[str],
-        output_values: list[Value] | None = None,
+        output_values: list[ValueLike] | None = None,
     ) -> list[Operation]:
         """Remove operations whose results are only consumed by dead UUIDs.
 

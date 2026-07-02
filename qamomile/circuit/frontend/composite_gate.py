@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Sequence, overload
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Sequence, cast, overload
 
 from qamomile.circuit.frontend.handle.primitives import Qubit
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
@@ -14,7 +14,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.decomposition import DecompositionStrategy
@@ -377,8 +377,8 @@ class CompositeGate(abc.ABC):
         # Create Block from traced operations (no QInitOperations)
         block = Block(
             operations=decomp_tracer.operations,
-            input_values=input_values,
-            output_values=return_values,
+            input_values=cast(list[ValueLike], input_values),
+            output_values=cast(list[ValueLike], return_values),
             name=self.custom_name or self.gate_type.value,
             kind=BlockKind.HIERARCHICAL,
         )

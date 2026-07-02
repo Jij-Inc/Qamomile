@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from qamomile.circuit.ir.operation import Operation
@@ -57,6 +58,44 @@ _RUNTIME_TO_CONDOP_KIND: dict[RuntimeOpKind, CondOpKind] = {
     RuntimeOpKind.AND: CondOpKind.AND,
     RuntimeOpKind.OR: CondOpKind.OR,
 }
+
+
+def resolve_runtime_array_location(
+    array: ArrayValue,
+    indices: tuple[int, ...],
+    resolve_int: Callable[[Value], int | None],
+) -> tuple[ArrayValue, tuple[int, ...]] | None:
+    """Resolve local array indices through runtime-bound slice views.
+
+    Args:
+        array: Array whose local indices should be resolved. May be a root
+            array or a ``slice_of`` view chain.
+        indices: Concrete indices in ``array``'s local coordinate space.
+        resolve_int: Callback used to evaluate ``slice_start`` /
+            ``slice_step`` values against the current runtime state.
+
+    Returns:
+        The root array and indices in root coordinates, or ``None`` when a
+        slice bound is unresolved or violates the frontend slice contract.
+    """
+    if len(indices) != 1:
+        return array, indices
+
+    idx = indices[0]
+    if idx < 0:
+        return None
+
+    current = array
+    while current.slice_of is not None:
+        if current.slice_start is None or current.slice_step is None:
+            return None
+        start = resolve_int(current.slice_start)
+        step = resolve_int(current.slice_step)
+        if start is None or step is None or start < 0 or step <= 0:
+            return None
+        idx = start + step * idx
+        current = current.slice_of
+    return current, (idx,)
 
 
 class ClassicalExecutor:
@@ -529,9 +568,61 @@ class ClassicalExecutor:
             if context.has(indexed_key):
                 return context.get(indexed_key)
 
+        resolved_location = resolve_runtime_array_location(
+            parent,
+            indices,
+            lambda v: self._get_optional_int_value(
+                v,
+                context,
+                results,
+                scoped_locals,
+            ),
+        )
+        if resolved_location is not None:
+            root, root_indices = resolved_location
+            root_container = self._get_array_data(root, context, results, scoped_locals)
+            if root_container is not None:
+                if len(root_indices) == 1:
+                    return root_container[root_indices[0]]
+                return root_container[root_indices]
+
+            if len(root_indices) == 1:
+                root_key = f"{root.uuid}_{root_indices[0]}"
+                if root_key in results:
+                    return results[root_key]
+                if context.has(root_key):
+                    return context.get(root_key)
+                root_indexed_key = f"{root.name}[{root_indices[0]}]"
+                if context.has(root_indexed_key):
+                    return context.get(root_indexed_key)
+
         raise ExecutionError(
             f"Array element {parent.name}{indices} could not be resolved"
         )
+
+    def _get_optional_int_value(
+        self,
+        value: Value,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> int | None:
+        """Resolve ``value`` to ``int`` when available.
+
+        Args:
+            value: Scalar value to resolve.
+            context: Execution context holding measured values and bindings.
+            results: Segment-local results.
+            scoped_locals: Loop/branch-local values.
+
+        Returns:
+            Integer value, or ``None`` when the value is not currently
+            resolvable.
+        """
+        try:
+            return int(self._get_value(value, context, results, scoped_locals))
+        except ExecutionError:
+            return None
 
     def _get_array_data(
         self,

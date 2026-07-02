@@ -8,7 +8,7 @@ from enum import Enum, auto
 from typing import TypeAlias
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 
 class SegmentKind(Enum):
@@ -131,8 +131,9 @@ class MultipleQuantumSegmentsError(Exception):
 class ProgramABI:
     """Runtime-visible ABI for a segmented program."""
 
-    public_inputs: dict[str, Value] = dataclasses.field(default_factory=dict)
+    public_inputs: dict[str, ValueLike] = dataclasses.field(default_factory=dict)
     output_refs: list[str] = dataclasses.field(default_factory=list)
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

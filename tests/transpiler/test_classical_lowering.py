@@ -38,6 +38,9 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeOpKind,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.value import TupleValue
+from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
 
 
 def _walk_ops(operations):
@@ -52,6 +55,49 @@ def _walk_ops(operations):
 def _count_ops_of_type(operations, op_type) -> int:
     """Count operations of ``op_type`` across the op tree, recursing nested ops."""
     return sum(1 for op in _walk_ops(operations) if isinstance(op, op_type))
+
+
+class _CountsExecutor(QuantumExecutor[object]):
+    """Return fixed raw counts while ignoring the backend circuit."""
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        """Store fixed counts returned by ``execute``.
+
+        Args:
+            counts (dict[str, int]): Raw backend bitstring counts.
+        """
+        self._counts = counts
+
+    def execute(self, circuit: object, shots: int) -> dict[str, int]:
+        """Return the fixed raw counts.
+
+        Args:
+            circuit (object): Ignored backend circuit.
+            shots (int): Ignored shot count.
+
+        Returns:
+            dict[str, int]: Fixed raw backend bitstring counts.
+        """
+        return self._counts
+
+    def bind_parameters(
+        self,
+        circuit: object,
+        bindings: dict[str, float],
+        parameter_metadata: ParameterMetadata,
+    ) -> object:
+        """Return the circuit unchanged.
+
+        Args:
+            circuit (object): Backend circuit to bind.
+            bindings (dict[str, float]): Runtime parameter bindings.
+            parameter_metadata (ParameterMetadata): Parameter metadata for
+                ``bindings``.
+
+        Returns:
+            object: The original circuit.
+        """
+        return circuit
 
 
 @qmc.qkernel
@@ -1048,6 +1094,364 @@ class TestMeasurementDerivedOutput:
             .result()
         )
         assert result.results == [(expected, 50)]
+
+    def test_condop_output_sample_aggregates_postprocessed_values(self, transpiler):
+        """``sample()`` aggregates counts by the postprocessed return value,
+        not by the raw backend bitstring that produced that value."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qs = qmc.qubit_array(2, name="qs")
+            qs = qmc.h(qs)
+            bits = qmc.measure(qs)
+            return bits[0] & bits[1]
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(
+                _CountsExecutor({"00": 1, "01": 2, "10": 3, "11": 4}),
+                shots=10,
+            )
+            .result()
+        )
+        assert result.results == [(0, 6), (1, 4)]
+
+    def test_tuple_output_resolves_expr_and_measured_vector_elements(self, transpiler):
+        """Tuple outputs may mix host-computed expressions with direct
+        measured ``Vector[Bit]`` elements."""
+
+        @qmc.qkernel
+        def kernel() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+            qs = qmc.qubit_array(2, name="qs")
+            qs[0] = qmc.x(qs[0])
+            bits = qmc.measure(qs)
+            return bits[0] & bits[1], bits[0], bits[1]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(_CountsExecutor({"01": 5}), shots=5).result().results == [
+            ((0, 1, 0), 5)
+        ]
+        assert exe.run(_CountsExecutor({"01": 1})).result() == (0, 1, 0)
+
+    def test_vector_output_sample_still_reconstructs_measured_bits(self, transpiler):
+        """Whole ``Vector[Bit]`` outputs still reconstruct from measured
+        indexed context entries."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, name="qs")
+            return qmc.measure(qs)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(_CountsExecutor({"01": 5}), shots=5)
+            .result()
+        )
+        assert result.results == [((1, 0), 5)]
+
+    def test_qfixed_output_sample_still_uses_decoded_values(self, transpiler):
+        """QFixed measurement still samples post-classical decoded floats."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Float:
+            qs = qmc.qubit_array(2, name="qs")
+            qf = qmc.cast(qs, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(
+                _CountsExecutor({"00": 2, "01": 3, "10": 5, "11": 7}),
+                shots=17,
+            )
+            .result()
+        )
+        assert result.results == [(0.0, 2), (0.25, 3), (0.5, 5), (0.75, 7)]
+
+    def test_slice_output_resolves_measured_vector_view(self, transpiler):
+        """A whole sliced ``Vector[Bit]`` output reconstructs from the root
+        measured vector entries."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, name="qs")
+            bits = qmc.measure(qs)
+            return bits[1:]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(_CountsExecutor({"110": 4}), shots=4).result().results == [
+            ((1, 1), 4)
+        ]
+        assert exe.run(_CountsExecutor({"110": 1})).result() == (1, 1)
+
+    def test_runtime_slice_output_resolves_measured_vector_view(self, transpiler):
+        """A whole sliced output with a runtime-bound start resolves using
+        execution bindings."""
+
+        @qmc.qkernel
+        def kernel(lo: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, name="qs")
+            bits = qmc.measure(qs)
+            return bits[lo:]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(
+            _CountsExecutor({"110": 4}),
+            shots=4,
+            bindings={"lo": 1},
+        ).result().results == [((1, 1), 4)]
+        assert exe.run(_CountsExecutor({"110": 1}), bindings={"lo": 1}).result() == (
+            1,
+            1,
+        )
+
+    def test_runtime_slice_element_output_resolves_root_entry(self, transpiler):
+        """A direct element output from a runtime-bound slice resolves to the
+        corresponding root measured vector entry."""
+
+        @qmc.qkernel
+        def kernel(lo: qmc.UInt) -> qmc.Bit:
+            qs = qmc.qubit_array(3, name="qs")
+            bits = qmc.measure(qs)
+            view = bits[lo:]
+            return view[0]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(
+            _CountsExecutor({"010": 3}),
+            shots=3,
+            bindings={"lo": 1},
+        ).result().results == [(1, 3)]
+        assert exe.run(_CountsExecutor({"010": 1}), bindings={"lo": 1}).result() == 1
+
+    def test_expr_output_reads_sliced_element_in_classical_executor(self, transpiler):
+        """Host-side runtime expressions can read elements of measured vector
+        slice views."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qs = qmc.qubit_array(3, name="qs")
+            bits = qmc.measure(qs)
+            view = bits[1:]
+            return view[1] & bits[0]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(_CountsExecutor({"101": 6}), shots=6).result().results == [
+            (1, 6)
+        ]
+        assert exe.run(_CountsExecutor({"101": 1})).result() == 1
+
+    def test_tuple_input_output_resolves_runtime_name_binding(self, transpiler):
+        """A tuple-typed input returned as a structural output resolves from
+        runtime bindings."""
+
+        @qmc.qkernel
+        def kernel(
+            pair: qmc.Tuple[qmc.UInt, qmc.UInt],
+        ) -> qmc.Tuple[qmc.UInt, qmc.UInt]:
+            q = qmc.qubit("q")
+            _ = qmc.measure(q)
+            return pair
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(
+            transpiler.executor(), shots=5, bindings={"pair": (2, 3)}
+        ).result().results == [((2, 3), 5)]
+        assert exe.run(transpiler.executor(), bindings={"pair": (2, 3)}).result() == (
+            2,
+            3,
+        )
+
+    def test_tuple_input_element_output_resolves_runtime_binding(self, transpiler):
+        """A scalar element of a tuple-typed input resolves from runtime
+        bindings."""
+
+        @qmc.qkernel
+        def kernel(pair: qmc.Tuple[qmc.UInt, qmc.UInt]) -> qmc.UInt:
+            q = qmc.qubit("q")
+            _ = qmc.measure(q)
+            return pair[0]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.plan is not None
+        assert isinstance(exe.plan.abi.public_inputs["pair"], TupleValue)
+        assert exe.sample(
+            transpiler.executor(), shots=5, bindings={"pair": (2, 3)}
+        ).result().results == [(2, 5)]
+        assert exe.run(transpiler.executor(), bindings={"pair": (2, 3)}).result() == 2
+
+    def test_tuple_input_element_expr_reads_runtime_binding(self, transpiler):
+        """Post-classical expressions can read scalar elements of tuple-typed
+        runtime bindings."""
+
+        @qmc.qkernel
+        def kernel(pair: qmc.Tuple[qmc.UInt, qmc.UInt]) -> qmc.UInt:
+            q = qmc.qubit("q")
+            _ = qmc.measure(q)
+            return pair[0] + pair[1]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(
+            transpiler.executor(), shots=5, bindings={"pair": (2, 3)}
+        ).result().results == [(5, 5)]
+        assert exe.run(transpiler.executor(), bindings={"pair": (2, 3)}).result() == 5
+
+    def test_subqkernel_tuple_output_can_be_indexed_by_caller(self, transpiler):
+        """A tuple returned by a sub-qkernel keeps its element handles."""
+
+        @qmc.qkernel
+        def identity(
+            pair: qmc.Tuple[qmc.UInt, qmc.UInt],
+        ) -> qmc.Tuple[qmc.UInt, qmc.UInt]:
+            return pair
+
+        @qmc.qkernel
+        def kernel(pair: qmc.Tuple[qmc.UInt, qmc.UInt]) -> qmc.UInt:
+            q = qmc.qubit("q")
+            _ = qmc.measure(q)
+            returned = identity(pair)
+            return returned[0] + returned[1]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(
+            transpiler.executor(), shots=5, bindings={"pair": (2, 3)}
+        ).result().results == [(5, 5)]
+        assert exe.run(transpiler.executor(), bindings={"pair": (2, 3)}).result() == 5
+
+    def test_tuple_input_element_alias_does_not_override_public_input(self, transpiler):
+        """Tuple element aliases must not overwrite a same-named public
+        runtime input."""
+
+        @qmc.qkernel
+        def kernel(
+            pair: qmc.Tuple[qmc.UInt, qmc.UInt],
+            pair_0: qmc.UInt,
+        ) -> qmc.UInt:
+            q = qmc.qubit("q")
+            _ = qmc.measure(q)
+            return pair_0 + pair[0]
+
+        exe = transpiler.transpile(kernel)
+        assert exe.sample(
+            transpiler.executor(),
+            shots=5,
+            bindings={"pair": (2, 3), "pair_0": 9},
+        ).result().results == [(11, 5)]
+        assert (
+            exe.run(
+                transpiler.executor(),
+                bindings={"pair": (2, 3), "pair_0": 9},
+            ).result()
+            == 11
+        )
+
+    def test_vector_uint_element_output_keeps_parent_container_fallback(
+        self, transpiler
+    ):
+        """A scalar element of a bound classical vector output still resolves
+        through its parent container."""
+
+        @qmc.qkernel
+        def kernel(input: qmc.Vector[qmc.UInt]) -> qmc.UInt:
+            q = qmc.qubit("q")
+            _ = qmc.measure(q)
+            return input[1]
+
+        exe = transpiler.transpile(kernel, bindings={"input": [4, 5, 6]})
+        assert exe.sample(transpiler.executor(), shots=3).result().results == [(5, 3)]
+        assert exe.run(transpiler.executor()).result() == 5
+
+    def test_dynamic_if_phi_expr_branch_output_uses_post_value(self, transpiler):
+        """A quantum-effective if returning a Phi with an expression branch
+        uses the host-computed Phi result, not a one-sided clbit alias."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            target = qmc.qubit("target")
+            qa = qmc.x(qa)
+            a = qmc.measure(qa)
+            out = a
+            if a:
+                target = qmc.x(target)
+                out = ~a
+            else:
+                out = a
+            return out
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+        assert result.result().results == [(0, 20)]
+
+    def test_dynamic_if_phi_shadow_computes_runtime_condition(self, transpiler):
+        """A post-classical shadow if also computes a runtime expression used
+        as the branch condition."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            qb = qmc.qubit("qb")
+            target = qmc.qubit("target")
+            qa = qmc.x(qa)
+            qb = qmc.x(qb)
+            a = qmc.measure(qa)
+            b = qmc.measure(qb)
+            out = a
+            if a & b:
+                target = qmc.x(target)
+                out = ~a
+            else:
+                out = a
+            return out
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+        assert result.result().results == [(0, 20)]
+
+    def test_dynamic_if_phi_different_direct_clbits_use_selected_branch(
+        self, transpiler
+    ):
+        """Different direct clbit Phi sources are selected host-side instead
+        of being collapsed into a single alias."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            qb = qmc.qubit("qb")
+            selq = qmc.qubit("sel")
+            target = qmc.qubit("target")
+            qb = qmc.x(qb)
+            a = qmc.measure(qa)
+            b = qmc.measure(qb)
+            sel = qmc.measure(selq)
+            out = a
+            if sel:
+                target = qmc.x(target)
+                out = a
+            else:
+                out = b
+            return out
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+        assert result.result().results == [(1, 20)]
+
+    def test_dynamic_if_phi_same_direct_clbit_still_resolves(self, transpiler):
+        """The safe same-clbit Phi case remains supported."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            target = qmc.qubit("target")
+            qa = qmc.x(qa)
+            a = qmc.measure(qa)
+            out = a
+            if a:
+                target = qmc.x(target)
+                out = a
+            else:
+                out = a
+            return out
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+        assert result.result().results == [(1, 20)]
 
     def test_condop_or_output_sample(self, transpiler):
         """``return a | b`` with ``a=1``, ``b=0`` samples ``1``."""

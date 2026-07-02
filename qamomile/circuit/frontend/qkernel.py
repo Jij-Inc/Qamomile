@@ -34,7 +34,7 @@ from qamomile.circuit.frontend.func_to_block import (
 )
 from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
-from qamomile.circuit.frontend.handle.containers import Dict
+from qamomile.circuit.frontend.handle.containers import Dict, Tuple
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.handle.utils import get_size as _get_size
 from qamomile.circuit.frontend.param_validation import _validate_bound_handles
@@ -43,7 +43,13 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueLike,
+)
 from qamomile.circuit.transpiler.errors import (
     FrontendTransformError,
     QubitRebindError,
@@ -61,6 +67,164 @@ def _get_array_element_type(pt: Any) -> type | None:
     if hasattr(pt, "__args__") and pt.__args__:
         return pt.__args__[0]
     return getattr(pt, "element_type", None)
+
+
+def _wrap_call_value(
+    value: ValueLike,
+    handle_type: Any,
+    provenance_map: dict[str, tuple[Any, tuple]],
+) -> Handle:
+    """Wrap a qkernel call result ValueLike in the matching frontend Handle.
+
+    Args:
+        value (ValueLike): IR value returned by a ``CallBlockOperation``.
+        handle_type (Any): Frontend type annotation for the returned value.
+        provenance_map (dict[str, tuple[Any, tuple]]): Mapping used to restore parent/index provenance for
+            quantum scalar values derived from caller array inputs.
+
+    Returns:
+        Handle: A frontend handle whose structural metadata matches
+            ``handle_type``.
+
+    Raises:
+        RuntimeError: If ``value`` and ``handle_type`` are structurally
+            incompatible.
+    """
+    if is_tuple_type(handle_type):
+        return _wrap_call_tuple_value(value, handle_type, provenance_map)
+    if is_dict_type(handle_type):
+        return _wrap_call_dict_value(value, handle_type, provenance_map)
+    if is_array_type(handle_type):
+        return _wrap_call_array_value(value, handle_type)
+    return _wrap_call_scalar_value(value, handle_type, provenance_map)
+
+
+def _wrap_call_tuple_value(
+    value: ValueLike,
+    handle_type: Any,
+    provenance_map: dict[str, tuple[Any, tuple]],
+) -> Tuple[Any, Any]:
+    """Wrap a ``TupleValue`` call result and recursively restore elements.
+
+    Args:
+        value (ValueLike): IR value to wrap.
+        handle_type (Any): Tuple frontend annotation.
+        provenance_map (dict[str, tuple[Any, tuple]]): Mapping used for scalar provenance restoration.
+
+    Returns:
+        Tuple: Tuple handle with initialized element handles.
+
+    Raises:
+        RuntimeError: If the value is not a ``TupleValue`` or arity differs
+            from the type annotation.
+    """
+    if not isinstance(value, TupleValue):
+        raise RuntimeError(
+            f"Expected TupleValue for tuple result, got {type(value).__name__}"
+        )
+    element_types = tuple(getattr(handle_type, "__args__", ()) or ())
+    if len(element_types) != len(value.elements):
+        raise RuntimeError(
+            f"Tuple result arity mismatch: annotation has {len(element_types)} "
+            f"element(s), value has {len(value.elements)}"
+        )
+    elements = tuple(
+        _wrap_call_value(element, element_type, provenance_map)
+        for element, element_type in zip(value.elements, element_types, strict=True)
+    )
+    return Tuple(value=value, _elements=elements)
+
+
+def _wrap_call_dict_value(
+    value: ValueLike,
+    handle_type: Any,
+    provenance_map: dict[str, tuple[Any, tuple]],
+) -> Dict[Any, Any]:
+    """Wrap a ``DictValue`` call result and restore key/value metadata.
+
+    Args:
+        value (ValueLike): IR value to wrap.
+        handle_type (Any): Dict frontend annotation.
+        provenance_map (dict[str, tuple[Any, tuple]]): Mapping used for scalar provenance restoration.
+
+    Returns:
+        Dict: Dict handle with key type and any static entries restored.
+
+    Raises:
+        RuntimeError: If the value is not a ``DictValue`` or the annotation is
+            missing key/value types.
+    """
+    if not isinstance(value, DictValue):
+        raise RuntimeError(
+            f"Expected DictValue for dict result, got {type(value).__name__}"
+        )
+    type_args = tuple(getattr(handle_type, "__args__", ()) or ())
+    if len(type_args) != 2:
+        raise RuntimeError("Dict result annotation is missing key/value types")
+    key_type, value_type = type_args
+    entries = [
+        (
+            _wrap_call_value(key, key_type, provenance_map),
+            _wrap_call_value(entry_value, value_type, provenance_map),
+        )
+        for key, entry_value in value.entries
+    ]
+    return Dict(value=value, _entries=entries, _key_type=key_type)
+
+
+def _wrap_call_array_value(value: ValueLike, handle_type: Any) -> ArrayBase[Any]:
+    """Wrap an ``ArrayValue`` nested inside a structural call result.
+
+    Args:
+        value (ValueLike): IR value to wrap.
+        handle_type (Any): Array frontend annotation.
+
+    Returns:
+        ArrayBase: Array handle with shape handles restored from the IR value.
+
+    Raises:
+        RuntimeError: If ``value`` is not an ``ArrayValue``.
+    """
+    if not isinstance(value, ArrayValue):
+        raise RuntimeError(
+            f"Expected ArrayValue for array result, got {type(value).__name__}"
+        )
+    actual_class = cast(
+        type[ArrayBase[Any]],
+        getattr(handle_type, "__origin__", handle_type),
+    )
+    shape = tuple(UInt(value=dim_val) for dim_val in value.shape)
+    return actual_class._create_from_value(value=value, shape=shape)
+
+
+def _wrap_call_scalar_value(
+    value: ValueLike,
+    handle_type: Any,
+    provenance_map: dict[str, tuple[Any, tuple]],
+) -> Handle:
+    """Wrap a scalar call result value in the matching frontend handle.
+
+    Args:
+        value (ValueLike): IR value to wrap.
+        handle_type (Any): Scalar frontend annotation.
+        provenance_map (dict[str, tuple[Any, tuple]]): Mapping used to restore parent/index provenance for
+            quantum scalars.
+
+    Returns:
+        Handle: Scalar frontend handle.
+
+    Raises:
+        RuntimeError: If ``value`` is not a scalar ``Value``.
+    """
+    if not isinstance(value, Value):
+        raise RuntimeError(
+            f"Expected Value for scalar result, got {type(value).__name__}"
+        )
+    actual_class = getattr(handle_type, "__origin__", handle_type)
+    if value.logical_id in provenance_map:
+        parent, indices = provenance_map[value.logical_id]
+        return actual_class(value=value, parent=parent, indices=indices)
+    return actual_class(value=value)
 
 
 def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
@@ -495,7 +659,7 @@ class QKernel(Generic[P, R]):
 
     def _emit_self_call_forward_ref(
         self,
-        inputs_map: dict[str, Value],
+        inputs_map: dict[str, ValueLike],
     ) -> CallBlockOperation:
         """Emit a CallBlockOperation for a self-call during build.
 
@@ -510,7 +674,7 @@ class QKernel(Generic[P, R]):
         input_types_list = [self.input_types[label] for label in label_args]
 
         claimed = [False] * len(operands)
-        results: list[Value] = []
+        results: list[ValueLike] = []
         for i, out_type in enumerate(self.output_types):
             matched_idx = _match_output_to_input(out_type, input_types_list, claimed)
             if matched_idx is not None:
@@ -530,7 +694,11 @@ class QKernel(Generic[P, R]):
                     )
                 results.append(Value(type=ir_type, name=f"{self.name}_result_{i}"))
 
-        op = CallBlockOperation(block=None, operands=operands, results=results)
+        op = CallBlockOperation(
+            block=None,
+            operands=cast(list[Value], operands),
+            results=cast(list[Value], results),
+        )
         self._pending_self_calls.append(op)
         return op
 
@@ -603,7 +771,7 @@ class QKernel(Generic[P, R]):
         )
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
-        inputs_map: dict[str, Value] = {}
+        inputs_map: dict[str, ValueLike] = {}
         # Track borrow provenance for input-derived quantum scalar handles.
         # After the call, return values with matching logical_id will have
         # their parent/indices restored so that borrow-return validation
@@ -833,16 +1001,14 @@ class QKernel(Generic[P, R]):
                 wrapped_results.append(
                     actual_class._create_from_value(value=val, shape=shape)
                 )
+            elif is_tuple_type(handle_type) or is_dict_type(handle_type):
+                wrapped_results.append(
+                    _wrap_call_value(val, handle_type, provenance_map)
+                )
             else:
-                # Instantiate the specific Handle type (Qubit, UInt, etc.)
-                # Restore borrow provenance for input-derived quantum scalars
-                if val.logical_id in provenance_map:
-                    parent, indices = provenance_map[val.logical_id]
-                    wrapped_results.append(
-                        handle_type(value=val, parent=parent, indices=indices)
-                    )
-                else:
-                    wrapped_results.append(handle_type(value=val))
+                wrapped_results.append(
+                    _wrap_call_scalar_value(val, handle_type, provenance_map)
+                )
 
         # Any ``VectorView`` input that did NOT get its borrow transferred
         # to a matching sliced result must still be consumed — the call
@@ -1629,7 +1795,7 @@ class QKernel(Generic[P, R]):
             # ORIGINAL UUIDs — substitution then misses the caller-side
             # references and downstream ops (e.g. ``qmc.measure``)
             # lose their operand mapping.
-            output_values: list[Value] = []
+            output_values: list[ValueLike] = []
             if result is not None:
                 if isinstance(result, tuple):
                     for r in result:
@@ -1640,13 +1806,16 @@ class QKernel(Generic[P, R]):
                         output_values.append(result.value)
             if emit_return_op:
                 tracer.add_operation(
-                    ReturnOperation(operands=output_values, results=[])
+                    ReturnOperation(
+                        operands=cast(list[Value], output_values),
+                        results=[],
+                    )
                 )
 
         # Extract input values for the Block. Outputs are populated
         # inside the trace context above so the optional
         # ReturnOperation can capture them.
-        input_values = [h.value for h in dummy_inputs.values()]
+        input_values: list[ValueLike] = [h.value for h in dummy_inputs.values()]
 
         param_slots = build_param_slots(
             signature=self.signature,

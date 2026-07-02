@@ -50,11 +50,14 @@ from qamomile.circuit.ir.serialize.hamiltonian_io import (
 from qamomile.circuit.ir.serialize.numpy_io import array_to_dict, dict_to_array
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
+    UIntType,
 )
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
+    DictValue,
     ScalarMetadata,
+    TupleValue,
     Value,
     ValueMetadata,
 )
@@ -1010,6 +1013,92 @@ class TestManualConstruction:
         assert restored.input_values[0].metadata.scalar == ScalarMetadata(
             const_value=0.5, parameter_name="theta"
         )
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_tuple_value_output_round_trip(self, dump, load):
+        """Structured ``TupleValue`` block outputs survive serialization."""
+        a = Value(type=UIntType(), name="a")
+        b = Value(type=UIntType(), name="b")
+        pair = TupleValue(name="pair", elements=(a, b))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[a, b],
+            output_values=[pair],
+            label_args=["a", "b"],
+            output_names=["pair"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.output_values[0], TupleValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_dict_value_output_round_trip(self, dump, load):
+        """Structured ``DictValue`` block outputs survive serialization."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        mapping = DictValue(name="mapping", entries=((key, value),))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[key, value],
+            output_values=[mapping],
+            label_args=["key", "value"],
+            output_names=["mapping"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.output_values[0], DictValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_tuple_value_input_round_trip(self, dump, load):
+        """Structured ``TupleValue`` block inputs survive serialization."""
+        a = Value(type=UIntType(), name="pair_0")
+        b = Value(type=UIntType(), name="pair_1")
+        pair = TupleValue(name="pair", elements=(a, b))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[pair],
+            output_values=[a],
+            label_args=["pair"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.input_values[0], TupleValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_dict_value_input_round_trip(self, dump, load):
+        """Structured ``DictValue`` block inputs survive serialization."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        mapping = DictValue(name="mapping", entries=((key, value),))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[mapping],
+            output_values=[value],
+            label_args=["mapping"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.input_values[0], DictValue)
 
     def test_extra_x_gate_changes_bytes(self):
         """Adding a gate changes the serialized bytes (regression guard)."""

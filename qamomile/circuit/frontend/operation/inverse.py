@@ -51,7 +51,7 @@ from qamomile.circuit.ir.operation.operation import (
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
 if TYPE_CHECKING:
@@ -411,7 +411,7 @@ class _BlockInverter:
             name=f"{block.name}_inverse",
             label_args=list(block.label_args),
             input_values=list(block.input_values),
-            output_values=output_values,
+            output_values=cast(list[ValueLike], output_values),
             operations=operations,
             kind=BlockKind.HIERARCHICAL,
             parameters=dict(block.parameters),

@@ -7,10 +7,14 @@ from abc import ABC, abstractmethod
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    PhiOp,
+    RuntimeClassicalExpr,
+)
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
+    IfOperation,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -20,7 +24,14 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueLike,
+)
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
@@ -131,6 +142,27 @@ def lower_operations(block: Block) -> Block:
     return dataclasses.replace(block, operations=lowered_ops)
 
 
+def collect_value_like_uuids(value: ValueLike) -> set[str]:
+    """Collect UUIDs contained in a value-like IR object.
+
+    Args:
+        value: Value-like object to inspect.
+
+    Returns:
+        UUIDs for ``value`` itself and any recursively contained tuple/dict
+        elements.
+    """
+    uuids = {value.uuid}
+    if isinstance(value, TupleValue):
+        for element in value.elements:
+            uuids.update(collect_value_like_uuids(element))
+    elif isinstance(value, DictValue):
+        for key, entry_value in value.entries:
+            uuids.update(collect_value_like_uuids(key))
+            uuids.update(collect_value_like_uuids(entry_value))
+    return uuids
+
+
 # =========================================================================
 # Segmentation strategy and pass
 # =========================================================================
@@ -185,9 +217,14 @@ class NisqSegmentationStrategy(SegmentationStrategy):
             elif isinstance(segment, ExpvalSegment):
                 steps.append(ExpvalStep(segment=segment, quantum_step_index=0))
 
+        public_inputs = dict(zip(block.label_args, block.input_values, strict=True))
+        for name, value in block.parameters.items():
+            public_inputs.setdefault(name, value)
+
         abi = ProgramABI(
-            public_inputs={name: value for name, value in block.parameters.items()},
+            public_inputs=public_inputs,
             output_refs=[v.uuid for v in block.output_values],
+            output_values=list(block.output_values),
         )
 
         return ProgramPlan(
@@ -239,6 +276,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """
         segments: list[Segment] = []
         self._boundaries: list[HybridBoundary] = []
+        self._current_block_operations = block.operations
 
         # Measurement-taint set: every value transitively derived from a
         # measurement result. Computed with the same dataflow utilities as
@@ -275,9 +313,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # would surface ``None``). Keeping it classical instead surfaces the
         # value, and if that forces a quantum-segment split the user gets an
         # explicit error rather than a silently wrong result.
-        self._block_output_uuids = {
-            v.uuid for v in block.output_values if isinstance(v, ValueBase)
-        }
+        self._block_output_uuids = set()
+        for value in block.output_values:
+            self._block_output_uuids.update(collect_value_like_uuids(value))
 
         # Absorbable set: classical ops (top-level or nested) whose results are
         # consumed exclusively by quantum / hybrid ops, or by other absorbable
@@ -293,6 +331,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # ``_classify_runtime_exprs`` below to avoid a second traversal of the
         # nested control flow.
         consumers = self._build_consumers_map(block.operations)
+        self._consumers = consumers
         self._absorbable_op_ids = self._compute_absorbable(block.operations, consumers)
 
         # Runtime-expression placement sets: a ``RuntimeClassicalExpr``
@@ -502,6 +541,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             if current_kind == OperationKind.CLASSICAL and pending_post:
                 current_ops.extend(pending_post)
                 pending_post = []
+
+            if isinstance(op, IfOperation) and op_kind == OperationKind.QUANTUM:
+                pending_post.extend(self._build_post_shadow_if_ops(op))
 
             current_ops.append(op)
 
@@ -768,6 +810,178 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         collector = ConsumerCollector()
         collector.visit_operations(operations)
         return collector.consumers
+
+    def _build_producer_map(
+        self,
+        operations: list[Operation],
+    ) -> dict[str, Operation]:
+        """Map each produced value UUID to the operation that writes it.
+
+        Args:
+            operations: Top-level operations of the block.
+
+        Returns:
+            Mapping from result UUID to the producing operation.
+        """
+
+        class ProducerCollector(ControlFlowVisitor):
+            """Collect result producers across nested operation trees."""
+
+            def __init__(self) -> None:
+                """Initialize the empty producer map."""
+                self.producers: dict[str, Operation] = {}
+
+            def visit_operation(self, op: Operation) -> None:
+                """Record result producers for ``op``.
+
+                Args:
+                    op: Operation being visited.
+
+                Returns:
+                    None: Mutates ``self.producers`` in place.
+                """
+                for result in op.results:
+                    if isinstance(result, ValueBase):
+                        self.producers[result.uuid] = op
+
+        collector = ProducerCollector()
+        collector.visit_operations(operations)
+        return collector.producers
+
+    def _build_post_shadow_if_ops(self, op: IfOperation) -> list[Operation]:
+        """Build host-side operations that recompute selected Phi outputs.
+
+        Args:
+            op: Quantum-effective ``IfOperation`` whose Phi outputs may be
+                needed after the quantum segment.
+
+        Returns:
+            Pure-classical operations to append to the post-quantum segment.
+        """
+        target_phis: list[PhiOp] = []
+        true_seeds: list[ValueBase] = []
+        false_seeds: list[ValueBase] = []
+
+        for phi in op.phi_ops:
+            if not self._phi_needs_host_value(phi):
+                continue
+            if not isinstance(phi.true_value, ValueBase) or not isinstance(
+                phi.false_value, ValueBase
+            ):
+                continue
+            true_ops = self._collect_classical_dependency_ops(
+                [phi.true_value],
+                op.true_operations,
+            )
+            false_ops = self._collect_classical_dependency_ops(
+                [phi.false_value],
+                op.false_operations,
+            )
+            if true_ops is None or false_ops is None:
+                continue
+            target_phis.append(phi)
+            true_seeds.append(phi.true_value)
+            false_seeds.append(phi.false_value)
+
+        if not target_phis:
+            return []
+
+        condition_prelude = self._collect_classical_dependency_ops(
+            [op.condition],
+            self._current_block_operations,
+        )
+        if condition_prelude is None:
+            condition_prelude = []
+
+        true_operations = self._collect_classical_dependency_ops(
+            true_seeds,
+            op.true_operations,
+        )
+        false_operations = self._collect_classical_dependency_ops(
+            false_seeds,
+            op.false_operations,
+        )
+        if true_operations is None or false_operations is None:
+            return []
+
+        shadow_if = dataclasses.replace(
+            op,
+            true_operations=true_operations,
+            false_operations=false_operations,
+            phi_ops=target_phis,
+            results=[phi.output for phi in target_phis],
+        )
+        return [*condition_prelude, shadow_if]
+
+    def _phi_needs_host_value(self, phi: PhiOp) -> bool:
+        """Return whether a Phi output must be available host-side.
+
+        Args:
+            phi: Phi operation to inspect.
+
+        Returns:
+            ``True`` when the Phi output is a block output or feeds a
+            host-side classical consumer.
+        """
+        output = phi.output
+        if isinstance(output, ArrayValue):
+            return False
+        if isinstance(output.type, QubitType):
+            return False
+        if output.uuid in self._block_output_uuids:
+            return True
+        for consumer in self._consumers.get(output.uuid, ()):
+            if isinstance(consumer, RuntimeClassicalExpr):
+                if id(consumer) in self._host_evaluated_expr_ids:
+                    return True
+                continue
+            if self._effective_kind(consumer) == OperationKind.CLASSICAL:
+                return True
+        return False
+
+    def _collect_classical_dependency_ops(
+        self,
+        seeds: list[ValueBase],
+        operations: list[Operation],
+    ) -> list[Operation] | None:
+        """Collect pure-classical producers needed by ``seeds``.
+
+        Args:
+            seeds: Values whose producers should be available.
+            operations: Operation scope from which producers may be copied.
+
+        Returns:
+            Ordered pure-classical producer operations, or ``None`` when a
+            needed producer is a nested operation that cannot be copied safely.
+        """
+        local_producers = self._build_producer_map(operations)
+        required_ids: set[int] = set()
+
+        def require(value: ValueBase) -> bool:
+            producer = local_producers.get(value.uuid)
+            if producer is None:
+                return True
+            if self._effective_kind(producer) != OperationKind.CLASSICAL:
+                return True
+            required_ids.add(id(producer))
+            for operand in producer.all_input_values():
+                if not require(operand):
+                    return False
+            return True
+
+        for seed in seeds:
+            if not require(seed):
+                return None
+
+        ordered: list[Operation] = []
+        remaining = set(required_ids)
+        for candidate in operations:
+            if id(candidate) in required_ids:
+                ordered.append(candidate)
+                remaining.discard(id(candidate))
+        if remaining:
+            return None
+        return ordered
 
     def _classify_runtime_exprs(
         self,

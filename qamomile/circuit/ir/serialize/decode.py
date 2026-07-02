@@ -87,6 +87,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
 )
 
@@ -243,8 +244,12 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
         raise ValueError("block dict is missing 'value_table' list")
     ctx = _DecodeContext(value_table)
 
-    input_values = [_materialize_as_value(ctx, ref) for ref in d["input_value_refs"]]
-    output_values = [_materialize_as_value(ctx, ref) for ref in d["output_value_refs"]]
+    input_values = [
+        _materialize_as_value_like(ctx, ref) for ref in d["input_value_refs"]
+    ]
+    output_values = [
+        _materialize_as_value_like(ctx, ref) for ref in d["output_value_refs"]
+    ]
     parameters = {
         k: _materialize_as_value(ctx, ref) for k, ref in d["parameters"].items()
     }
@@ -268,8 +273,8 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
 def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     """Materialize a UUID reference and assert it resolves to a ``Value``.
 
-    Used in positions like ``Block.input_values`` whose static type is
-    ``list[Value]``.
+    Used in positions like ``Block.parameters`` whose static type remains
+    restricted to ``Value``.
 
     Args:
         ctx (_DecodeContext): The active decode context.
@@ -286,6 +291,33 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     if not isinstance(v, Value):
         raise ValueError(
             f"expected Value or ArrayValue at uuid {uuid!r}, got {type(v).__name__}"
+        )
+    return v
+
+
+def _materialize_as_value_like(ctx: _DecodeContext, uuid: str) -> ValueLike:
+    """Materialize a UUID reference as any block-output value type.
+
+    Block inputs and outputs can be structural values such as ``TupleValue``
+    and ``DictValue`` in addition to scalar ``Value`` / ``ArrayValue``.
+    Parameters remain restricted to ``Value`` via ``_materialize_as_value``.
+
+    Args:
+        ctx (_DecodeContext): The active decode context.
+        uuid (str): The Value-like UUID.
+
+    Returns:
+        ValueLike: The materialized scalar, array, tuple, or dict value.
+
+    Raises:
+        ValueError: If the materialized object is not a supported output value
+            type.
+    """
+    v = ctx.materialize(uuid)
+    if not isinstance(v, (Value, TupleValue, DictValue)):
+        raise ValueError(
+            f"expected Value, ArrayValue, TupleValue, or DictValue at uuid "
+            f"{uuid!r}, got {type(v).__name__}"
         )
     return v
 

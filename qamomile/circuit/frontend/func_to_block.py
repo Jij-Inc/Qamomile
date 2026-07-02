@@ -25,7 +25,13 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
     ValueType,
 )
-from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueLike,
+)
 
 TYPE_MAPPING: dict[typing.Any, typing.Any] = {
     int: UIntType,
@@ -567,10 +573,10 @@ def func_to_block(func: typing.Callable) -> Block:
 
     # Extract the input Values from the dummy Handles
     label_args = list(dummy_inputs.keys())
-    input_values = [h.value for h in dummy_inputs.values()]
+    input_values: list[ValueLike] = [h.value for h in dummy_inputs.values()]
 
     # Extract return Values from result
-    return_values: list[Value] = []
+    return_values: list[ValueLike] = []
     if result is not None:
         if isinstance(result, tuple):
             for r in result:
@@ -583,7 +589,10 @@ def func_to_block(func: typing.Callable) -> Block:
                 return_values.append(result.value)
 
     # Always emit ReturnOperation (even for void returns with empty operands)
-    return_op = ReturnOperation(operands=return_values, results=[])
+    return_op = ReturnOperation(
+        operands=typing.cast(list[Value], return_values),
+        results=[],
+    )
     tracer.add_operation(return_op)
 
     # Re-fetch operations after adding ReturnOperation

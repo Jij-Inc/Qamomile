@@ -293,9 +293,9 @@ def map_phi_outputs(
                 true_clbit = clbit_map.get(true_addr)
                 false_clbit = clbit_map.get(false_addr)
 
-                if true_clbit is not None:
+                if (
+                    true_clbit is not None
+                    and false_clbit is not None
+                    and true_clbit == false_clbit
+                ):
                     clbit_map[QubitAddress(output.uuid)] = true_clbit
-                    if false_clbit is not None and false_clbit != true_clbit:
-                        clbit_map[false_addr] = true_clbit
-                elif false_clbit is not None:
-                    clbit_map[QubitAddress(output.uuid)] = false_clbit

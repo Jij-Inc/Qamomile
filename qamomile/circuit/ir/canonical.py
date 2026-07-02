@@ -82,6 +82,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     remap_indexed_identifier,
     remap_value_metadata_references,
@@ -339,8 +340,8 @@ class _Canonicalizer:
         if cached is not None:
             return cached
 
-        new_input_values: list[Value] = [
-            cast(Value, self.canonical_value(v)) for v in block.input_values
+        new_input_values: list[ValueLike] = [
+            cast(ValueLike, self.canonical_value(v)) for v in block.input_values
         ]
         new_parameters: dict[str, Value] = {
             key: cast(Value, self.canonical_value(block.parameters[key]))
@@ -349,8 +350,8 @@ class _Canonicalizer:
         new_operations: list[Operation] = [
             self.canonical_operation(op) for op in block.operations
         ]
-        new_output_values: list[Value] = [
-            cast(Value, self.canonical_value(v)) for v in block.output_values
+        new_output_values: list[ValueLike] = [
+            cast(ValueLike, self.canonical_value(v)) for v in block.output_values
         ]
 
         new_block = Block(

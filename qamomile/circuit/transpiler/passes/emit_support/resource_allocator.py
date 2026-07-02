@@ -284,7 +284,6 @@ class ResourceAllocator:
                         else loop_carried
                     )
                     carried_addr = self._condition_source_address(carried_val, bindings)
-                    carried_clbit = clbit_map.get(carried_addr)
 
                     # Alias the loop-carried condition to the initial
                     # while-condition clbit.  After body allocation the
@@ -292,11 +291,7 @@ class ResourceAllocator:
                     # (e.g. a phi-merged measurement from an if-else).
                     # We recursively trace IfOperation phi_ops and map all
                     # upstream branch-measurement UUIDs to the canonical clbit.
-                    if (
-                        saved_init_clbit is not None
-                        and carried_clbit is not None
-                        and saved_init_clbit != carried_clbit
-                    ):
+                    if saved_init_clbit is not None:
                         clbit_map[carried_addr] = saved_init_clbit
                         self._alias_loop_carried_clbits(
                             op.operations,
@@ -304,8 +299,6 @@ class ResourceAllocator:
                             saved_init_clbit,
                             clbit_map,
                         )
-                    elif saved_init_clbit is not None and carried_addr not in clbit_map:
-                        clbit_map[carried_addr] = saved_init_clbit
                 else:
                     assert False, (
                         "[FOR DEVELOPER] WhileOperation must have exactly 2 "

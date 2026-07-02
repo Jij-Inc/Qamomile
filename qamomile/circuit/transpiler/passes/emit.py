@@ -171,6 +171,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             compiled_classical=compiled_classical,
             compiled_expval=compiled_expval,
             output_refs=input.abi.output_refs,
+            output_values=input.abi.output_values,
         )
 
     def _compile_quantum(

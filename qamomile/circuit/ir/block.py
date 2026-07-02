@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from qamomile.circuit.ir.parameter import ParamSlot
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation import Operation
@@ -33,8 +33,8 @@ class Block:
 
     name: str = ""
     label_args: list[str] = dataclasses.field(default_factory=list)
-    input_values: list[Value] = dataclasses.field(default_factory=list)
-    output_values: list[Value] = dataclasses.field(default_factory=list)
+    input_values: list[ValueLike] = dataclasses.field(default_factory=list)
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
     output_names: list[str] = dataclasses.field(default_factory=list)
     operations: list["Operation"] = dataclasses.field(default_factory=list)
 
@@ -84,7 +84,7 @@ class Block:
         """Check if block contains no CallBlockOperations."""
         return self.kind in (BlockKind.AFFINE, BlockKind.ANALYZED)
 
-    def call(self, **kwargs: Value) -> "CallBlockOperation":
+    def call(self, **kwargs: ValueLike) -> "CallBlockOperation":
         """Create a CallBlockOperation against this block."""
         from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 
@@ -101,6 +101,6 @@ class Block:
 
         return CallBlockOperation(
             block=self,
-            operands=inputs,
-            results=results,
+            operands=cast(list[Value], inputs),
+            results=cast(list[Value], results),
         )
