@@ -661,3 +661,25 @@ def test_complex_constant_raises(use_native):
             _wrap_pauli_evolve,
             bindings={"n": 1, "hamiltonian": H, "gamma": 0.5},
         )
+
+
+@pytest.mark.parametrize("use_native", [True, False])
+def test_complex_constant_with_pauli_term_raises(use_native):
+    """A Pauli term plus a non-real constant raises the same clean EmitError on both paths.
+
+    Pins native/fallback alignment for num_h_qubits > 0: previously the
+    native path only validated the constant in its 0-qubit branch, letting
+    this Hamiltonian reach a raw Qiskit ValueError inside PauliEvolutionGate.
+    """
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    H = qm_o.Hamiltonian()
+    H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)
+    H += 2.0j
+
+    transpiler = QiskitTranspiler(use_native_composite=use_native)
+    with pytest.raises(EmitError, match="complex constant"):
+        transpiler.transpile(
+            _wrap_pauli_evolve,
+            bindings={"n": 1, "hamiltonian": H, "gamma": 0.5},
+        )

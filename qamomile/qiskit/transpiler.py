@@ -591,13 +591,32 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
         # Validate Hermitian (real coefficients)
+        from qamomile.observable.hamiltonian import (
+            HERMITIAN_IMAG_ATOL,
+            PAULI_TERM_ZERO_ATOL,
+        )
+
         for operators, coeff in hamiltonian:
-            if abs(coeff.imag) > 1e-10:
+            if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
                 raise EmitError(
                     f"PauliEvolveOp requires a Hermitian Hamiltonian "
                     f"(real coefficients), but found complex coefficient "
                     f"{coeff} on term {operators}.",
                 )
+
+        # Hamiltonian.__iter__ yields only the Pauli terms, so the loop
+        # above never sees the constant (identity) term. Validate it here
+        # for ALL Hamiltonians so the native path rejects a non-real
+        # constant with the same clean EmitError as the gadget fallback,
+        # instead of letting it slip through to a raw Qiskit ValueError
+        # inside PauliEvolutionGate (for num_h_qubits > 0).
+        if abs(hamiltonian.constant.imag) > HERMITIAN_IMAG_ATOL:
+            raise EmitError(
+                f"PauliEvolveOp requires a Hermitian Hamiltonian "
+                f"(real coefficients), but found a complex constant "
+                f"{hamiltonian.constant}.",
+                operation="PauliEvolveOp",
+            )
 
         if num_h_qubits == 0:
             # An empty / constant-only Hamiltonian evolves the register by
@@ -616,20 +635,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             # qubit list. (For ``num_h_qubits > 0`` the constant is already
             # carried inside the ``SparsePauliOp``, so this branch must not
             # apply.) The result register stays resolvable through the
-            # allocator's element aliases.
-            from qamomile.observable.hamiltonian import (
-                HERMITIAN_IMAG_ATOL,
-                PAULI_TERM_ZERO_ATOL,
-            )
-
+            # allocator's element aliases. The constant's Hermiticity was
+            # already validated above for all Hamiltonians, so only the
+            # magnitude check remains here.
             constant = hamiltonian.constant
             if abs(constant) > PAULI_TERM_ZERO_ATOL:
-                if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
-                    raise EmitError(
-                        f"PauliEvolveOp requires a Hermitian Hamiltonian "
-                        f"(real coefficients), but found a complex constant "
-                        f"{constant}.",
-                    )
                 # Works for both concrete float gamma and a backend
                 # Parameter (ParameterExpression global phase is bound
                 # together with the rest of the circuit parameters).
