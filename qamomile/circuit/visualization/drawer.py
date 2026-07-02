@@ -59,8 +59,9 @@ class MatplotlibDrawer:
         """Initialize the drawer.
 
         Args:
-            graph: Computation graph to visualize.
-            style: Visual style configuration. Uses DEFAULT_STYLE if None.
+            graph (Block): Computation graph to visualize.
+            style (CircuitStyle | None): Visual style configuration. Uses
+                DEFAULT_STYLE if None.
         """
         self.graph = _prepare_graph_for_visualization(graph)
         self.style = style or DEFAULT_STYLE
@@ -71,24 +72,35 @@ class MatplotlibDrawer:
         fold_loops: bool = True,
         expand_composite: bool = False,
         inline_depth: int | None = None,
+        fold_ifs: bool = False,
     ) -> Figure:
         """Generate a matplotlib Figure of the circuit.
 
         Args:
-            inline: If True, expand CallBlockOperation. If False, show as boxes.
-            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
-                       If False, expand loops and show all iterations.
-            expand_composite: If True, expand CompositeGateOperation (QFT, IQFT, etc.).
-                            If False (default), show as boxes. Independent of inline.
-            inline_depth: Maximum nesting depth for inline expansion. None means
-                         unlimited (default). 0 means no inlining, 1 means top-level
-                         only, etc. Only affects CallBlock/ControlledU, not CompositeGate.
+            inline (bool): If True, expand CallBlockOperation. If False, show
+                calls as boxes.
+            fold_loops (bool): If True (default), display ForOperation as
+                blocks instead of unrolling. If False, expand loops and show
+                all iterations.
+            expand_composite (bool): If True, expand CompositeGateOperation
+                nodes. If False (default), show them as boxes.
+            inline_depth (int | None): Maximum nesting depth for inline
+                expansion. None means unlimited. Only affects CallBlock and
+                ControlledU nodes, not CompositeGate.
+            fold_ifs (bool): If True, display IfOperation as folded summary
+                blocks. If False (default), show if/else branches side by side.
 
         Returns:
-            Figure object.
+            Figure: Matplotlib figure object.
         """
         analyzer = CircuitAnalyzer(
-            self.graph, self.style, inline, fold_loops, expand_composite, inline_depth
+            self.graph,
+            self.style,
+            inline=inline,
+            fold_loops=fold_loops,
+            expand_composite=expand_composite,
+            inline_depth=inline_depth,
+            fold_ifs=fold_ifs,
         )
         qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(self.graph)
 
@@ -107,6 +119,7 @@ class MatplotlibDrawer:
         *,
         inline: bool = False,
         fold_loops: bool = True,
+        fold_ifs: bool = False,
         expand_composite: bool = False,
         inline_depth: int | None = None,
         style: CircuitStyle | None = None,
@@ -118,23 +131,28 @@ class MatplotlibDrawer:
         specify the array size (e.g., ``inputs=3`` for a 3-qubit vector).
 
         Args:
-            kernel: A QKernel instance to visualize.
-            inline: If True, expand CallBlockOperation contents.
-            fold_loops: If True (default), display ForOperation as blocks.
-            expand_composite: If True, expand CompositeGateOperation.
-            inline_depth: Maximum nesting depth for inline expansion.
-            style: Visual style configuration.
-            **kwargs: Concrete values for kernel arguments. For Vector[Qubit]
-                     parameters, pass an integer size.
+            kernel (Any): A QKernel instance to visualize.
+            inline (bool): If True, expand CallBlockOperation contents.
+            fold_loops (bool): If True (default), display ForOperation as
+                blocks.
+            fold_ifs (bool): If True, display IfOperation as folded summary
+                blocks. If False (default), show if/else branches side by side.
+            expand_composite (bool): If True, expand CompositeGateOperation.
+            inline_depth (int | None): Maximum nesting depth for inline
+                expansion.
+            style (CircuitStyle | None): Visual style configuration.
+            **kwargs (Any): Concrete values for kernel arguments. For
+                Vector[Qubit] parameters, pass an integer size.
 
         Returns:
-            Figure object.
+            Figure: Matplotlib figure object.
         """
         graph = kernel._build_graph_for_visualization(**kwargs)
         drawer = cls(graph, style)
         return drawer.draw(
             inline=inline,
             fold_loops=fold_loops,
+            fold_ifs=fold_ifs,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
         )

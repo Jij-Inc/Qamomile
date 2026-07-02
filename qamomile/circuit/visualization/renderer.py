@@ -1228,7 +1228,7 @@ class MatplotlibRenderer:
             edge_color = self.style.for_loop_edge_color
             text_color = self.style.for_loop_text_color
             linestyle = "-"
-        elif node.kind == VFoldedKind.IF:  # Future use: not yet dispatched
+        elif node.kind == VFoldedKind.IF:
             face_color = self.style.if_face_color
             edge_color = self.style.if_edge_color
             text_color = self.style.if_text_color

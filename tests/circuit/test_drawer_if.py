@@ -5,14 +5,17 @@ Covers the three behaviors that make if/else drawable:
 - compile-time resolvable conditions (bindings or traced constants) are lowered
   to the selected branch, so no if box is drawn;
 - surviving conditions (measurement-backed runtime ``if``, symbolic classical
-  ``if``) render as a folded summary box under ``fold_loops=True`` or as
-  side-by-side if/else branch boxes under ``fold_loops=False``;
+  ``if``) render as side-by-side if/else branch boxes by default, or as a
+  folded summary box under ``fold_ifs=True``;
 - nested ifs render recursively.
 """
 
 import matplotlib
 
 matplotlib.use("Agg")
+
+from collections.abc import Iterable, Iterator
+from typing import Any
 
 from matplotlib.figure import Figure
 
@@ -31,6 +34,7 @@ from qamomile.circuit.visualization.visual_ir import (
     VGateKind,
     VInlineBlock,
     VisualCircuit,
+    VisualNode,
     VUnfoldedKind,
     VUnfoldedSequence,
 )
@@ -38,7 +42,15 @@ from qamomile.circuit.visualization.visual_ir import (
 
 @qmc.qkernel
 def runtime_if(q0: Qubit, q1: Qubit) -> Qubit:
-    """Measurement-backed if/else: X on the true branch, H on the else branch."""
+    """Build a measurement-backed if/else example.
+
+    Args:
+        q0 (Qubit): Qubit measured to decide the branch.
+        q1 (Qubit): Qubit transformed by the selected branch.
+
+    Returns:
+        Qubit: Updated ``q1``.
+    """
     cond = qmc.measure(q0)
     if cond:
         q1 = qmc.x(q1)
@@ -49,7 +61,15 @@ def runtime_if(q0: Qubit, q1: Qubit) -> Qubit:
 
 @qmc.qkernel
 def classical_if(q0: Qubit, flag: UInt) -> Qubit:
-    """Classical-condition if/else driven by an integer ``flag`` parameter."""
+    """Build a symbolic classical-condition if/else example.
+
+    Args:
+        q0 (Qubit): Qubit transformed by the selected branch.
+        flag (UInt): Classical flag compared with ``1``.
+
+    Returns:
+        Qubit: Updated ``q0``.
+    """
     if flag == 1:
         q0 = qmc.x(q0)
     else:
@@ -59,7 +79,15 @@ def classical_if(q0: Qubit, flag: UInt) -> Qubit:
 
 @qmc.qkernel
 def if_no_else(q0: Qubit, q1: Qubit) -> Qubit:
-    """Measurement-backed if with no else branch."""
+    """Build a measurement-backed if example with no else branch.
+
+    Args:
+        q0 (Qubit): Qubit measured to decide the branch.
+        q1 (Qubit): Qubit transformed only when the condition is true.
+
+    Returns:
+        Qubit: Updated ``q1``.
+    """
     cond = qmc.measure(q0)
     if cond:
         q1 = qmc.x(q1)
@@ -68,7 +96,15 @@ def if_no_else(q0: Qubit, q1: Qubit) -> Qubit:
 
 @qmc.qkernel
 def empty_true_if(q0: Qubit, q1: Qubit) -> Qubit:
-    """Measurement-backed if whose true branch is empty and else has a gate."""
+    """Build a measurement-backed if whose true branch is empty.
+
+    Args:
+        q0 (Qubit): Qubit measured to decide the branch.
+        q1 (Qubit): Qubit transformed only by the else branch.
+
+    Returns:
+        Qubit: Updated ``q1``.
+    """
     cond = qmc.measure(q0)
     if cond:
         pass
@@ -79,7 +115,16 @@ def empty_true_if(q0: Qubit, q1: Qubit) -> Qubit:
 
 @qmc.qkernel
 def nested_if(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
-    """Two-level nested if so recursive branch rendering can be checked."""
+    """Build a two-level nested if example.
+
+    Args:
+        q0 (Qubit): Qubit measured by the outer if.
+        q1 (Qubit): Qubit measured by the nested if.
+        q2 (Qubit): Qubit transformed by the selected leaf branch.
+
+    Returns:
+        Qubit: Updated ``q2``.
+    """
     c0 = qmc.measure(q0)
     if c0:
         c1 = qmc.measure(q1)
@@ -92,8 +137,15 @@ def nested_if(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
     return q2
 
 
-def _walk(nodes):
-    """Yield every VisualNode reachable from a list of root nodes."""
+def _walk(nodes: Iterable[VisualNode]) -> Iterator[VisualNode]:
+    """Yield every VisualNode reachable from a list of root nodes.
+
+    Args:
+        nodes (Iterable[VisualNode]): Root visual nodes to traverse.
+
+    Yields:
+        VisualNode: Each visual node reachable from ``nodes``.
+    """
     for node in nodes:
         yield node
         if isinstance(node, VInlineBlock):
@@ -103,8 +155,20 @@ def _walk(nodes):
                 yield from _walk(iteration)
 
 
-def _visual_circuit(kernel, *, fold_loops, **bindings) -> VisualCircuit:
-    """Trace ``kernel`` and run the visualization analyzer in isolation."""
+def _visual_circuit(
+    kernel: Any, *, fold_loops: bool = True, fold_ifs: bool = False, **bindings: Any
+) -> VisualCircuit:
+    """Trace ``kernel`` and run the visualization analyzer in isolation.
+
+    Args:
+        kernel (Any): QKernel-like object to trace.
+        fold_loops (bool): Whether loop operations should be folded.
+        fold_ifs (bool): Whether if operations should be folded.
+        **bindings (Any): Concrete draw-time bindings for kernel parameters.
+
+    Returns:
+        VisualCircuit: Visual IR produced by ``CircuitAnalyzer``.
+    """
     block = _prepare_graph_for_visualization(
         kernel._build_graph_for_visualization(**bindings)
     )
@@ -113,6 +177,7 @@ def _visual_circuit(kernel, *, fold_loops, **bindings) -> VisualCircuit:
         DEFAULT_STYLE,
         inline=False,
         fold_loops=fold_loops,
+        fold_ifs=fold_ifs,
         expand_composite=False,
         inline_depth=None,
     )
@@ -121,7 +186,14 @@ def _visual_circuit(kernel, *, fold_loops, **bindings) -> VisualCircuit:
 
 
 def _folded_ifs(vc: VisualCircuit) -> list[VFoldedBlock]:
-    """Collect every folded IF box in a visual circuit."""
+    """Collect every folded IF box in a visual circuit.
+
+    Args:
+        vc (VisualCircuit): Visual circuit to scan.
+
+    Returns:
+        list[VFoldedBlock]: Folded IF blocks in traversal order.
+    """
     return [
         n
         for n in _walk(vc.children)
@@ -130,7 +202,14 @@ def _folded_ifs(vc: VisualCircuit) -> list[VFoldedBlock]:
 
 
 def _unfolded_ifs(vc: VisualCircuit) -> list[VUnfoldedSequence]:
-    """Collect every unfolded IF sequence in a visual circuit."""
+    """Collect every unfolded IF sequence in a visual circuit.
+
+    Args:
+        vc (VisualCircuit): Visual circuit to scan.
+
+    Returns:
+        list[VUnfoldedSequence]: Unfolded IF sequences in traversal order.
+    """
     return [
         n
         for n in _walk(vc.children)
@@ -138,8 +217,15 @@ def _unfolded_ifs(vc: VisualCircuit) -> list[VUnfoldedSequence]:
     ]
 
 
-def _branch_gate_types(iteration) -> list[GateOperationType]:
-    """Return the gate types of the (non-measurement) gates in one branch."""
+def _branch_gate_types(iteration: Iterable[VisualNode]) -> list[GateOperationType]:
+    """Return the gate types of the non-measurement gates in one branch.
+
+    Args:
+        iteration (Iterable[VisualNode]): Visual nodes inside one IF branch.
+
+    Returns:
+        list[GateOperationType]: Gate types seen in traversal order.
+    """
     return [
         n.gate_type
         for n in _walk(iteration)
@@ -148,31 +234,42 @@ def _branch_gate_types(iteration) -> list[GateOperationType]:
 
 
 class TestFoldedIf:
-    """``fold_loops=True`` renders a surviving if as a single folded box."""
+    """``fold_ifs=True`` renders a surviving if as a single folded box."""
 
     def test_runtime_if_folds_to_one_if_box(self):
-        """A measurement-backed if becomes exactly one folded IF box."""
-        vc = _visual_circuit(runtime_if, fold_loops=True)
+        """A measurement-backed if becomes one folded IF box with both branches."""
+        vc = _visual_circuit(runtime_if, fold_ifs=True)
         folded = _folded_ifs(vc)
         assert len(folded) == 1
         # The condition label spells the measurement bit, not a placeholder.
         assert folded[0].header_label.startswith("if ")
         assert "measured" in folded[0].header_label
+        assert "else:" in folded[0].body_lines
+        assert any("h(" in line for line in folded[0].body_lines)
 
     def test_symbolic_classical_if_label_shows_predicate(self):
         """An unbound classical if renders its predicate, e.g. ``if flag == 1:``."""
-        vc = _visual_circuit(classical_if, fold_loops=True)
+        vc = _visual_circuit(classical_if, fold_ifs=True)
         folded = _folded_ifs(vc)
         assert len(folded) == 1
         assert folded[0].header_label == "if flag == 1:"
+        assert "else:" in folded[0].body_lines
+
+    def test_empty_true_branch_folded_summary_keeps_else(self):
+        """An empty true branch still shows pass and else in folded form."""
+        vc = _visual_circuit(empty_true_if, fold_ifs=True)
+        folded = _folded_ifs(vc)
+        assert len(folded) == 1
+        assert folded[0].body_lines[0] == "pass"
+        assert "else:" in folded[0].body_lines
 
 
 class TestUnfoldedIf:
-    """``fold_loops=False`` renders a surviving if as side-by-side branches."""
+    """The default renders surviving ifs as side-by-side branches."""
 
     def test_runtime_if_unfolds_into_two_branches(self):
         """A measurement-backed if/else yields one IF sequence with two branches."""
-        vc = _visual_circuit(runtime_if, fold_loops=False)
+        vc = _visual_circuit(runtime_if)
         unfolded = _unfolded_ifs(vc)
         assert len(unfolded) == 1
         assert len(unfolded[0].iterations) == 2
@@ -181,14 +278,14 @@ class TestUnfoldedIf:
 
     def test_branches_carry_their_own_gates(self):
         """Iteration 0 holds the true-branch X; iteration 1 holds the else H."""
-        vc = _visual_circuit(runtime_if, fold_loops=False)
+        vc = _visual_circuit(runtime_if)
         seq = _unfolded_ifs(vc)[0]
         assert _branch_gate_types(seq.iterations[0]) == [GateOperationType.X]
         assert _branch_gate_types(seq.iterations[1]) == [GateOperationType.H]
 
     def test_if_without_else_has_single_branch(self):
         """An if with no else unfolds to a single-branch IF sequence."""
-        vc = _visual_circuit(if_no_else, fold_loops=False)
+        vc = _visual_circuit(if_no_else)
         unfolded = _unfolded_ifs(vc)
         assert len(unfolded) == 1
         assert len(unfolded[0].iterations) == 1
@@ -196,7 +293,7 @@ class TestUnfoldedIf:
 
     def test_empty_true_branch_is_kept_for_rendering(self):
         """An empty true branch still occupies the IF branch slot."""
-        vc = _visual_circuit(empty_true_if, fold_loops=False)
+        vc = _visual_circuit(empty_true_if)
         unfolded = _unfolded_ifs(vc)
         assert len(unfolded) == 1
         assert len(unfolded[0].iterations) == 2
@@ -205,7 +302,7 @@ class TestUnfoldedIf:
 
     def test_condition_label_width_reserved_for_layout(self):
         """The IF sequence carries a positive header width for layout to reserve."""
-        vc = _visual_circuit(classical_if, fold_loops=False)
+        vc = _visual_circuit(classical_if)
         seq = _unfolded_ifs(vc)[0]
         assert seq.condition_label == "if flag == 1:"
         assert seq.condition_label_width > 0.0
@@ -217,11 +314,17 @@ class TestUnfoldedIf:
         the layout reserves), which is what keeps the boxes gap-free and the
         labels from overflowing.
         """
-        vc = _visual_circuit(classical_if, fold_loops=False)
+        vc = _visual_circuit(classical_if)
         seq = _unfolded_ifs(vc)[0]
         assert len(seq.branch_label_widths) == len(seq.iterations) == 2
         assert all(w > 0.0 for w in seq.branch_label_widths)
         assert seq.branch_label_widths[0] == seq.condition_label_width
+
+    def test_fold_loops_does_not_fold_if(self):
+        """Loop folding leaves if/else rendering expanded unless fold_ifs is set."""
+        vc = _visual_circuit(runtime_if, fold_loops=True)
+        assert not _folded_ifs(vc)
+        assert len(_unfolded_ifs(vc)) == 1
 
 
 class TestUnfoldedIfSpacing:
@@ -242,6 +345,15 @@ class TestUnfoldedIfSpacing:
 
         @qmc.qkernel
         def plain(q0: Qubit, q1: Qubit) -> tuple[Qubit, Qubit]:
+            """Build a plain two-qubit circuit without if labels.
+
+            Args:
+                q0 (Qubit): Qubit receiving an H gate.
+                q1 (Qubit): Qubit receiving an X gate.
+
+            Returns:
+                tuple[Qubit, Qubit]: Updated ``q0`` and ``q1``.
+            """
             q0 = qmc.h(q0)
             q1 = qmc.x(q1)
             return q0, q1
@@ -256,7 +368,14 @@ class TestBranchMeasurementWire:
     """A measurement inside an if branch is mid-circuit and keeps its wire."""
 
     def _measures(self, vc: VisualCircuit) -> list[VGate]:
-        """Collect every measurement VGate in a visual circuit."""
+        """Collect every measurement VGate in a visual circuit.
+
+        Args:
+            vc (VisualCircuit): Visual circuit to scan.
+
+        Returns:
+            list[VGate]: Measurement gates in traversal order.
+        """
         return [
             n
             for n in _walk(vc.children)
@@ -317,8 +436,8 @@ class TestCompileTimeResolution:
 
     def test_bound_true_draws_only_selected_branch(self):
         """``flag=1`` collapses to the true branch (X) with no if box."""
-        for fold in (True, False):
-            vc = _visual_circuit(classical_if, fold_loops=fold, flag=1)
+        for fold_ifs in (False, True):
+            vc = _visual_circuit(classical_if, fold_ifs=fold_ifs, flag=1)
             assert not _folded_ifs(vc)
             assert not _unfolded_ifs(vc)
             gates = [
@@ -330,7 +449,7 @@ class TestCompileTimeResolution:
 
     def test_bound_false_draws_only_else_branch(self):
         """``flag=0`` collapses to the else branch (H) with no if box."""
-        vc = _visual_circuit(classical_if, fold_loops=True, flag=0)
+        vc = _visual_circuit(classical_if, fold_ifs=True, flag=0)
         assert not _folded_ifs(vc)
         gates = [
             n.gate_type
@@ -369,23 +488,23 @@ class TestDrawEndToEnd:
     """``QKernel.draw`` returns a Figure for every if flavor without raising."""
 
     def test_runtime_if_draws(self):
-        """Measurement-backed if draws in both folded and unfolded modes."""
-        assert isinstance(runtime_if.draw(fold_loops=True), Figure)
-        assert isinstance(runtime_if.draw(fold_loops=False), Figure)
+        """Measurement-backed if draws in unfolded and folded-if modes."""
+        assert isinstance(runtime_if.draw(), Figure)
+        assert isinstance(runtime_if.draw(fold_ifs=True), Figure)
 
     def test_symbolic_classical_if_draws(self):
-        """Unbound classical if draws in both modes."""
-        assert isinstance(classical_if.draw(fold_loops=True), Figure)
-        assert isinstance(classical_if.draw(fold_loops=False), Figure)
+        """Unbound classical if draws in unfolded and folded-if modes."""
+        assert isinstance(classical_if.draw(), Figure)
+        assert isinstance(classical_if.draw(fold_ifs=True), Figure)
 
     def test_bound_classical_if_draws(self):
         """Bound classical if (compile-time resolved) draws without an if box."""
         assert isinstance(classical_if.draw(fold_loops=False, flag=1), Figure)
 
     def test_nested_if_draws(self):
-        """Nested if draws in both modes."""
-        assert isinstance(nested_if.draw(fold_loops=True), Figure)
-        assert isinstance(nested_if.draw(fold_loops=False), Figure)
+        """Nested if draws in unfolded and folded-if modes."""
+        assert isinstance(nested_if.draw(), Figure)
+        assert isinstance(nested_if.draw(fold_ifs=True), Figure)
 
     def test_empty_true_branch_draws_if_label(self):
         """The renderer keeps the IF label even when the true branch is empty."""

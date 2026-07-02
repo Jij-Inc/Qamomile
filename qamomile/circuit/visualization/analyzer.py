@@ -221,13 +221,29 @@ class CircuitAnalyzer:
         fold_loops: bool = True,
         expand_composite: bool = False,
         inline_depth: int | None = None,
+        fold_ifs: bool = False,
     ):
+        """Initialize the visualization analyzer.
+
+        Args:
+            graph (Block): Computation graph to analyze for rendering.
+            style (CircuitStyle): Visual style configuration.
+            inline (bool): Whether to inline CallBlockOperation contents.
+            fold_loops (bool): Whether to render loop operations as folded
+                summary blocks instead of materialized iterations.
+            expand_composite (bool): Whether to expand composite gates.
+            inline_depth (int | None): Maximum nesting depth for inline
+                expansion, or None for unlimited depth.
+            fold_ifs (bool): Whether to render IfOperation nodes as folded
+                summary blocks instead of side-by-side branches.
+        """
         self.graph = graph
         self.style = style
         self.inline = inline
         self.fold_loops = fold_loops
         self.expand_composite = expand_composite
         self.inline_depth = inline_depth
+        self.fold_ifs = fold_ifs
 
     def _should_inline_at_depth(self, depth: int) -> bool:
         """Whether to inline CallBlock/ControlledU at this nesting depth."""
@@ -1807,9 +1823,9 @@ class CircuitAnalyzer:
         Compile-time resolvable ``if``s are already lowered away by
         ``CompileTimeIfLoweringPass`` before visual analysis runs, so this method
         only handles conditions that survive — measurement-backed runtime
-        ``if`` and symbolic (unbound) classical ``if``. In folded mode it
-        returns a single ``VFoldedBlock`` summarizing the true branch; in
-        unfolded mode it returns a ``VUnfoldedSequence`` carrying both
+        ``if`` and symbolic (unbound) classical ``if``. When ``fold_ifs`` is
+        enabled it returns a single ``VFoldedBlock`` summarizing the true
+        branch; otherwise it returns a ``VUnfoldedSequence`` carrying both
         branches for side-by-side rendering.
 
         Args:
@@ -1828,8 +1844,7 @@ class CircuitAnalyzer:
 
         Returns:
             VFoldedBlock | VUnfoldedSequence: A folded summary box when
-                ``fold_loops`` is set, otherwise an unfolded two-branch
-                sequence.
+                ``fold_ifs`` is set, otherwise an unfolded two-branch sequence.
         """
         affected_qubits, affected_qubits_precise = self._collect_if_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
@@ -1840,21 +1855,18 @@ class CircuitAnalyzer:
         )
         condition_label = f"if {condition_expr}:" if condition_expr else "if cond:"
 
-        if self.fold_loops:
-            local_param_values = dict(param_values)
-            self._evaluate_loop_body_intermediates(
-                op.true_operations, local_param_values
+        if self.fold_ifs:
+            body_lines = self._format_folded_body_lines(
+                op.true_operations, param_values
             )
-            body_lines: list[str] = []
-            for body_op in op.true_operations:
-                expr = self._format_operation_as_expression(
-                    body_op,
-                    set(),
-                    body_operations=op.true_operations,
-                    param_values=local_param_values,
+            if op.false_operations:
+                if not body_lines:
+                    body_lines.append("pass")
+                body_lines.append("else:")
+                false_lines = self._format_folded_body_lines(
+                    op.false_operations, param_values
                 )
-                if expr:
-                    body_lines.extend(expr.split("\n"))
+                body_lines.extend(false_lines or ["pass"])
             if len(body_lines) > 3:
                 body_lines = body_lines[:3] + ["..."]
 
@@ -1917,6 +1929,35 @@ class CircuitAnalyzer:
             branch_label_widths=branch_label_widths,
         )
 
+    def _format_folded_body_lines(
+        self,
+        operations: list[Operation],
+        param_values: dict,
+    ) -> list[str]:
+        """Format operations for a folded control-flow summary body.
+
+        Args:
+            operations (list[Operation]): Branch or loop body operations to
+                summarize.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            list[str]: Human-readable operation expressions in order.
+        """
+        local_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(operations, local_param_values)
+        body_lines: list[str] = []
+        for body_op in operations:
+            expr = self._format_operation_as_expression(
+                body_op,
+                set(),
+                body_operations=operations,
+                param_values=local_param_values,
+            )
+            if expr:
+                body_lines.extend(expr.split("\n"))
+        return body_lines
+
     def _format_condition_expr(
         self,
         value: ValueBase | None,
@@ -1971,7 +2012,14 @@ class CircuitAnalyzer:
             return None
 
         def sub(operand: ValueBase | None) -> str:
-            """Format a binary operand, falling back to ``?`` when unknown."""
+            """Format a binary operand.
+
+            Args:
+                operand (ValueBase | None): Operand to format recursively.
+
+            Returns:
+                str: Formatted operand, or ``?`` when unknown.
+            """
             return (
                 self._format_condition_expr(
                     operand, body_operations, param_values, depth + 1
