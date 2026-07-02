@@ -20,7 +20,6 @@ from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     CompositeGateOperation,
-    ControlledUOperation,
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
@@ -91,6 +90,22 @@ from .numpy_io import array_to_dict
 from .schema import SCHEMA_VERSION
 
 _SUPPORTED_KINDS = frozenset({BlockKind.AFFINE, BlockKind.ANALYZED})
+
+# Tag keys reserved by the wire format's tagged-dict wrappers. A *plain*
+# payload dict must not carry any of these keys: the recursive payload
+# decoder (and, for ``$bytes_b64``, the JSON wire layer) dispatches on
+# them, so a user dict shaped like a wrapper would be silently
+# mis-decoded on load. The encoder rejects such dicts loudly instead.
+_RESERVED_PAYLOAD_KEYS = frozenset(
+    {
+        "$np_array",
+        "$hamiltonian",
+        "$complex",
+        "$tuple",
+        "$bytes_b64",
+        "$value_ref",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +192,13 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
 
     Args:
         block (Block): The block to encode.
-        ctx (_EncodeContext): The active encoding context.
+        ctx (_EncodeContext): The active encoding context. The context
+            is local to this block: nested Blocks embedded in
+            operations (``ControlledUOperation.block``,
+            ``CompositeGateOperation.implementation_block``, ...) are
+            encoded with fresh contexts so each block dict carries a
+            self-contained ``value_table`` instead of duplicating the
+            parent's full table on the wire.
 
     Returns:
         dict[str, Any]: The Block dict; see schema documentation.
@@ -194,6 +215,11 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
     for v in block.output_values:
         ctx.register_value(v)
 
+    # Encode operations before assembling the dict: operation encoders
+    # may register a few extra Values (e.g. SymbolicControlledU's
+    # ``num_controls``) into the table while encoding.
+    operations = [_encode_operation(op, ctx) for op in block.operations]
+
     return {
         "$type": "Block",
         "kind": block.kind.name,
@@ -205,18 +231,41 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
         "parameters": {k: v.uuid for k, v in block.parameters.items()},
         "param_slots": [_encode_param_slot(s) for s in block.param_slots],
         "value_table": ctx.value_table_dicts,
-        "operations": [_encode_operation(op, ctx) for op in block.operations],
+        "operations": operations,
     }
+
+
+def _encode_nested_block(sub: Block) -> dict[str, Any]:
+    """Encode a nested Block embedded in an Operation.
+
+    Nested blocks get a fresh :class:`_EncodeContext` so their
+    ``value_table`` contains only the Values reachable from the nested
+    block itself. This mirrors the decoder, which materializes each
+    block dict against its own local table, and keeps the wire size
+    linear in the IR size (sharing the parent context would re-emit
+    the parent's entire table once per nested block).
+
+    Args:
+        sub (Block): The nested Block
+            (``ControlledUOperation.block``,
+            ``CompositeGateOperation.implementation_block``,
+            ``InverseBlockOperation.source_block`` / fallback block).
+
+    Returns:
+        dict[str, Any]: The self-contained Block dict.
+    """
+    return _encode_block(sub, _EncodeContext())
 
 
 def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
     """Recursively register every Value referenced by ``op``.
 
     Covers operands, results, subclass-extra Value fields (via
-    ``all_input_values``), nested control-flow op bodies, and nested
-    Blocks inside ``CompositeGateOperation`` /
-    ``InverseBlockOperation`` /
-    ``ControlledUOperation``.
+    ``all_input_values``) and nested control-flow op bodies. Nested
+    Blocks embedded in ``CompositeGateOperation`` /
+    ``InverseBlockOperation`` / ``ControlledUOperation`` are NOT
+    walked here — they are encoded with their own local contexts by
+    :func:`_encode_nested_block`.
 
     Args:
         op (Operation): The op to walk.
@@ -233,33 +282,6 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _walk_op_values(child, ctx)
-    if isinstance(op, CompositeGateOperation):
-        if op.implementation_block is not None:
-            _walk_block_values(op.implementation_block, ctx)
-    if isinstance(op, InverseBlockOperation):
-        if op.source_block is not None:
-            _walk_block_values(op.source_block, ctx)
-        if op.implementation_block is not None:
-            _walk_block_values(op.implementation_block, ctx)
-    if isinstance(op, ControlledUOperation) and op.block is not None:
-        _walk_block_values(op.block, ctx)
-
-
-def _walk_block_values(sub: Block, ctx: _EncodeContext) -> None:
-    """Walk Values inside a nested Block embedded in an Operation.
-
-    Args:
-        sub (Block): The nested Block.
-        ctx (_EncodeContext): The active encoding context.
-    """
-    for v in sub.input_values:
-        ctx.register_value(v)
-    for v in sub.parameters.values():
-        ctx.register_value(v)
-    for op in sub.operations:
-        _walk_op_values(op, ctx)
-    for v in sub.output_values:
-        ctx.register_value(v)
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +554,13 @@ def _encode_payload(value: Any) -> Any:
     ``TypeError`` for unknown types so an unencodable binding never
     silently slips into the wire format.
 
+    Tuples are wrapped as ``{"$tuple": [...]}`` so the tuple-vs-list
+    distinction survives the round-trip. This is load-bearing for two
+    reasons: frontend metadata (``DictRuntimeMetadata.bound_data``,
+    ``ArrayRuntimeMetadata.const_array``) freezes containers to nested
+    tuples whose ``repr`` feeds ``content_hash``, and ``bound_data``
+    keys must stay hashable for ``DictValue.get_bound_data()``.
+
     Args:
         value (Any): The Python value to encode.
 
@@ -539,7 +568,12 @@ def _encode_payload(value: Any) -> Any:
         Any: A JSON / msgpack-friendly representation of ``value``.
 
     Raises:
-        TypeError: If ``value`` has no known wire representation.
+        TypeError: If ``value`` has no known wire representation, if a
+            dict payload has a non-``str`` key (which used to be
+            silently stringified and could not round-trip), or if a
+            dict payload carries a key reserved by the tagged-dict
+            wrappers (``$np_array``, ``$hamiltonian``, ``$tuple``, ...)
+            that would be mis-decoded as a wrapper on load.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -553,10 +587,27 @@ def _encode_payload(value: Any) -> Any:
         return value.item()
     if isinstance(value, Hamiltonian):
         return hamiltonian_to_dict(value)
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, tuple):
+        return {"$tuple": [_encode_payload(x) for x in value]}
+    if isinstance(value, list):
         return [_encode_payload(x) for x in value]
     if isinstance(value, dict):
-        return {str(k): _encode_payload(v) for k, v in value.items()}
+        encoded: dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"Cannot encode dict payload with non-str key "
+                    f"{k!r} ({type(k).__name__}); string keys are required "
+                    f"for a faithful JSON / msgpack round-trip."
+                )
+            if k in _RESERVED_PAYLOAD_KEYS:
+                raise TypeError(
+                    f"Cannot encode dict payload with reserved wire-format "
+                    f"key {k!r}; it would be mis-decoded as a tagged "
+                    f"wrapper on load."
+                )
+            encoded[k] = _encode_payload(v)
+        return encoded
     raise TypeError(
         f"Cannot encode payload of type {type(value).__name__!r}; supported types "
         f"are primitives, bytes, list/tuple, dict, np.ndarray, np.generic, "
@@ -1110,7 +1161,9 @@ def _encode_concrete_controlled(
     d = _base_op_dict("ConcreteControlledU", op)
     d["num_controls"] = op.num_controls
     d["power"] = _encode_power(op.power)
-    d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
+    d["unitary_block"] = (
+        _encode_nested_block(op.block) if op.block is not None else None
+    )
     return d
 
 
@@ -1152,7 +1205,9 @@ def _encode_symbolic_controlled(
     # default of 1 so existing v1 payloads stay readable.
     if op.num_control_args != 1:
         d["num_control_args"] = op.num_control_args
-    d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
+    d["unitary_block"] = (
+        _encode_nested_block(op.block) if op.block is not None else None
+    )
     return d
 
 
@@ -1201,7 +1256,7 @@ def _encode_composite_gate(
     d["strategy_name"] = op.strategy_name
     d["resource_metadata"] = _encode_resource_metadata(op.resource_metadata)
     d["implementation_block"] = (
-        _encode_block(op.implementation_block, ctx)
+        _encode_nested_block(op.implementation_block)
         if op.implementation_block is not None
         else None
     )
@@ -1229,10 +1284,10 @@ def _encode_inverse_block(
     d["num_target_qubits"] = op.num_target_qubits
     d["custom_name"] = op.custom_name
     d["source_block"] = (
-        _encode_block(op.source_block, ctx) if op.source_block is not None else None
+        _encode_nested_block(op.source_block) if op.source_block is not None else None
     )
     d["implementation_block"] = (
-        _encode_block(op.implementation_block, ctx)
+        _encode_nested_block(op.implementation_block)
         if op.implementation_block is not None
         else None
     )

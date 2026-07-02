@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from qamomile.circuit.frontend.decomposition import DecompositionConfig
 from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.parameter import ParamKind
 from qamomile.circuit.transpiler.errors import (
     FrontendTransformError,
     QamomileCompileError,
@@ -51,6 +52,107 @@ if TYPE_CHECKING:
     pass
 
 T = TypeVar("T")  # Backend circuit type
+
+
+def _validate_bindings_parameters_disjoint(
+    bindings: dict[str, Any] | None,
+    parameters: list[str] | None,
+) -> None:
+    """Reject argument names that appear in both bindings and parameters.
+
+    A name being in both is ambiguous (placeholder value vs runtime
+    symbol) and used to silently miscompile control-flow predicates
+    that depended on parameter-array elements; rejecting the overlap up
+    front keeps the contract unambiguous. Shared by :meth:`Transpiler.transpile`
+    and :meth:`Transpiler.transpile_block`.
+
+    Args:
+        bindings (dict[str, Any] | None): Compile-time bindings, or
+            None for no bindings.
+        parameters (list[str] | None): Runtime parameter names, or None
+            for the default parameter contract.
+
+    Raises:
+        ValueError: If any name appears in both collections.
+    """
+    if not bindings or not parameters:
+        return
+    overlap = set(parameters) & set(bindings.keys())
+    if overlap:
+        raise ValueError(
+            f"Parameter name(s) {sorted(overlap)} appear in both "
+            f"`parameters` and `bindings`. A name must be either "
+            f"compile-time bound (in `bindings`) or runtime symbolic "
+            f"(in `parameters`), not both. "
+            f"If you want this value baked into the circuit, remove "
+            f"it from `parameters`. If you want it as a runtime "
+            f"parameter, remove it from `bindings`."
+        )
+
+
+def _restore_baked_bindings(
+    block: Block,
+    bindings: dict[str, Any] | None,
+    parameters: list[str] | None,
+) -> dict[str, Any] | None:
+    """Reconstruct the compile-time bindings recorded in ``param_slots``.
+
+    A block that was traced with ``kernel.build(**bindings)`` records
+    each folded argument as a ``COMPILE_TIME_BOUND`` slot carrying its
+    ``bound_value`` (or Python-signature ``default``). Most of those
+    values are already baked into the IR metadata, but some are
+    consumed again at emit time from the ``bindings`` dict — most
+    notably ``Observable`` Hamiltonians. When the block crosses a
+    process boundary via serialization, the original ``bindings`` dict
+    is gone; this helper rebuilds it from the slot manifest so
+    :meth:`Transpiler.transpile_block` sees the same contract
+    :meth:`Transpiler.transpile` saw.
+
+    Args:
+        block (Block): The block whose ``param_slots`` carry the
+            recorded contract.
+        bindings (dict[str, Any] | None): Caller-supplied bindings for
+            slots that are still unresolved. Must not re-bind a slot
+            that was already compile-time bound at trace time.
+        parameters (list[str] | None): Caller-supplied runtime
+            parameter names. Must not name a compile-time-bound slot.
+
+    Returns:
+        dict[str, Any] | None: ``bindings`` merged with every baked
+            slot value, or ``None`` when the result is empty.
+
+    Raises:
+        ValueError: If ``bindings`` or ``parameters`` references a slot
+            that is already ``COMPILE_TIME_BOUND`` — the baked scalar
+            values are already folded into the IR, so a differing
+            re-bind (or a runtime re-interpretation) would silently
+            diverge from the emitted circuit. Rebuild the kernel with
+            new bindings instead.
+    """
+    merged = dict(bindings) if bindings else {}
+    parameter_names = set(parameters or ())
+    for slot in block.param_slots:
+        if slot.kind is not ParamKind.COMPILE_TIME_BOUND:
+            continue
+        baked = slot.bound_value if slot.bound_value is not None else slot.default
+        if slot.name in merged:
+            raise ValueError(
+                f"Argument {slot.name!r} was already compile-time bound when "
+                f"this block was traced; its value is baked into the IR and "
+                f"cannot be re-bound here. Re-build the kernel with the new "
+                f"binding instead."
+            )
+        if slot.name in parameter_names:
+            raise ValueError(
+                f"Argument {slot.name!r} was compile-time bound when this "
+                f"block was traced and cannot be turned into a runtime "
+                f"parameter here. Re-build the kernel with "
+                f"parameters=[{slot.name!r}] instead."
+            )
+        if baked is None:
+            continue
+        merged[slot.name] = baked
+    return merged or None
 
 
 @dataclass
@@ -567,18 +669,7 @@ class Transpiler(ABC, Generic[T]):
             9. plan: Build ProgramPlan (segment into C->Q->C steps)
             10. emit: Generate backend-specific code
         """
-        if bindings and parameters:
-            overlap = set(parameters) & set(bindings.keys())
-            if overlap:
-                raise ValueError(
-                    f"Parameter name(s) {sorted(overlap)} appear in both "
-                    f"`parameters` and `bindings`. A name must be either "
-                    f"compile-time bound (in `bindings`) or runtime symbolic "
-                    f"(in `parameters`), not both. "
-                    f"If you want this value baked into the circuit, remove "
-                    f"it from `parameters`. If you want it as a runtime "
-                    f"parameter, remove it from `bindings`."
-                )
+        _validate_bindings_parameters_disjoint(bindings, parameters)
 
         entrypoint_validator = EntrypointValidationPass()
 
@@ -605,6 +696,114 @@ class Transpiler(ABC, Generic[T]):
         # left untouched and continue through the existing emit-time fold
         # path. Runs before symbolic-shape validation and segmentation
         # so those passes see the rewritten IR.
+        analyzed = self.classical_lowering(analyzed)
+        analyzed = self.validate_symbolic_shapes(analyzed)
+        separated = self.plan(analyzed)
+        return self.emit(separated, bindings, parameters)
+
+    def transpile_block(
+        self,
+        block: Block,
+        bindings: dict[str, Any] | None = None,
+        parameters: list[str] | None = None,
+    ) -> ExecutableProgram[T]:
+        """Compile an IR ``Block`` into an executable, without a QKernel.
+
+        This is the entry point for IR that arrives as data rather than
+        as a Python function — most importantly a Block reconstructed
+        by :func:`qamomile.circuit.ir.serialize.load_json` /
+        :func:`~qamomile.circuit.ir.serialize.load_msgpack` in another
+        process (e.g. a workflow runner executing a quantum node of a
+        larger hybrid program). It runs the same pipeline as
+        :meth:`transpile` from the AFFINE stage onward; the
+        trace-stage passes (``to_block`` / ``inline`` /
+        ``unroll_recursion``) are skipped because an AFFINE block has
+        no ``CallBlockOperation`` left by contract.
+
+        The block's classical parameter contract travels with it in
+        ``Block.param_slots``, so the caller can bind compile-time
+        values (``bindings``) and select runtime parameters
+        (``parameters``) exactly as with :meth:`transpile`. Array
+        bindings resolve symbolic ``Vector`` shape dims here as well,
+        so a client may serialize an unbound kernel and let the
+        receiving side supply the problem-sized data.
+
+        Args:
+            block (Block): The block to compile. Must be
+                ``BlockKind.AFFINE`` or ``BlockKind.ANALYZED`` — the
+                kinds the IR serializer accepts. ``ANALYZED`` input is
+                re-analyzed (every pipeline pass is idempotent).
+            bindings (dict[str, Any] | None): Compile-time parameter
+                bindings keyed by kernel argument name, folded into the
+                IR by ``resolve_parameter_shapes`` / ``partial_eval``.
+                Must be disjoint from ``parameters``. Defaults to None.
+            parameters (list[str] | None): Argument names to preserve
+                as runtime parameters in the emitted backend circuit.
+                Defaults to None, meaning the block's recorded
+                ``param_slots`` contract decides (slots already marked
+                ``RUNTIME_PARAMETER`` stay runtime).
+
+        Returns:
+            ExecutableProgram[T]: Executable wrapping the backend
+                circuit and the parameter metadata needed to re-bind
+                runtime parameters.
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``, or if ``block.kind`` is not ``AFFINE``
+                / ``ANALYZED``.
+            EntrypointValidationError: If the block has quantum inputs
+                or outputs (executable entrypoints are classical-I/O
+                only).
+            QamomileCompileError: If compilation fails (validation,
+                dependency, or shape errors).
+
+        Example:
+            >>> from qamomile.circuit.ir.serialize import load_json
+            >>> block = load_json(wire_payload)
+            >>> transpiler = QiskitTranspiler()
+            >>> exe = transpiler.transpile_block(block)
+            >>> result = exe.sample(
+            ...     transpiler.executor(),
+            ...     shots=1024,
+            ...     bindings={"theta": 0.5},
+            ... ).result()
+        """
+        _validate_bindings_parameters_disjoint(bindings, parameters)
+
+        if block.kind not in (BlockKind.AFFINE, BlockKind.ANALYZED):
+            raise ValueError(
+                f"transpile_block() requires BlockKind.AFFINE or "
+                f"BlockKind.ANALYZED, got {block.kind.name}. Use "
+                f"transpile() for QKernels and inline HIERARCHICAL "
+                f"blocks first."
+            )
+        # Rewind ANALYZED to AFFINE so the pipeline re-runs analyze
+        # itself; the passes are idempotent, and AnalyzePass insists on
+        # AFFINE input.
+        if block.kind is BlockKind.ANALYZED:
+            block = replace(block, kind=BlockKind.AFFINE)
+
+        # Values folded at trace time (kernel.build bindings / defaults)
+        # are recorded in ``param_slots``; rebuild the bindings dict so
+        # emit-time consumers (e.g. Observable Hamiltonians) see the
+        # same contract transpile() saw before the block was
+        # serialized.
+        bindings = _restore_baked_bindings(block, bindings, parameters)
+
+        EntrypointValidationPass().run(block)
+        # ``substitute`` is intentionally skipped: SubstitutionPass
+        # rewrites CallBlockOperation targets, which cannot exist in an
+        # AFFINE block (they are gone by the serializer's contract), and
+        # the pass itself only accepts HIERARCHICAL input. Strategy-name
+        # substitution on already-inlined composite gates would need a
+        # kind-relaxed pass and is future work.
+        shape_resolved = self.resolve_parameter_shapes(block, bindings)
+        validated = self.affine_validate(shape_resolved)
+        partially_evaluated = self.partial_eval(validated, bindings)
+        partially_evaluated = self.slice_borrow_check(partially_evaluated)
+        partially_evaluated = self.strip_slice_ops(partially_evaluated)
+        analyzed = self.analyze(partially_evaluated)
         analyzed = self.classical_lowering(analyzed)
         analyzed = self.validate_symbolic_shapes(analyzed)
         separated = self.plan(analyzed)

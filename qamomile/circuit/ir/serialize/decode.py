@@ -15,7 +15,7 @@ not produced by the canonical encoder) raises ``ValueError``.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -243,10 +243,10 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
         raise ValueError("block dict is missing 'value_table' list")
     ctx = _DecodeContext(value_table)
 
-    input_values = [_materialize_as_value(ctx, ref) for ref in d["input_value_refs"]]
-    output_values = [_materialize_as_value(ctx, ref) for ref in d["output_value_refs"]]
+    input_values = [_materialize_io_value(ctx, ref) for ref in d["input_value_refs"]]
+    output_values = [_materialize_io_value(ctx, ref) for ref in d["output_value_refs"]]
     parameters = {
-        k: _materialize_as_value(ctx, ref) for k, ref in d["parameters"].items()
+        k: _materialize_io_value(ctx, ref) for k, ref in d["parameters"].items()
     }
     param_slots = tuple(_decode_param_slot(s, ctx) for s in d.get("param_slots", ()))
 
@@ -288,6 +288,36 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
             f"expected Value or ArrayValue at uuid {uuid!r}, got {type(v).__name__}"
         )
     return v
+
+
+def _materialize_io_value(ctx: _DecodeContext, uuid: str) -> Value:
+    """Materialize a UUID for a block-I/O or operand/result position.
+
+    ``Block.input_values`` / ``output_values`` / ``parameters`` and
+    operation operand / result lists are statically annotated as
+    ``Value``, but the tracer legitimately places container values
+    there too — a kernel taking a ``Dict`` argument holds a
+    ``DictValue`` in ``input_values``, and container-consuming ops
+    (``ForItemsOperation``, ...) reference ``TupleValue`` /
+    ``DictValue`` operands. Accept any decoded ``ValueBase`` here and
+    cast, mirroring what the encoder accepted on the way out.
+
+    Args:
+        ctx (_DecodeContext): The active decode context.
+        uuid (str): The Value UUID.
+
+    Returns:
+        Value: The materialized value. ``TupleValue`` / ``DictValue``
+            results are cast to ``Value`` to satisfy the IR dataclass
+            annotations, matching the runtime shape the tracer
+            produces.
+
+    Raises:
+        ValueError: Forwarded from
+            :meth:`_DecodeContext.materialize` when the UUID is
+            missing or cyclic.
+    """
+    return cast(Value, ctx.materialize(uuid))
 
 
 # ---------------------------------------------------------------------------
@@ -577,9 +607,14 @@ def _decode_payload(value: Any) -> Any:
 
     Returns:
         Any: The reconstructed Python value (primitives unchanged,
-            list / dict recursed, numpy wrappers expanded into
-            ``np.ndarray``, Hamiltonian wrappers expanded into
+            list / dict recursed, ``$tuple`` wrappers expanded into
+            ``tuple``, numpy wrappers expanded into ``np.ndarray``,
+            Hamiltonian wrappers expanded into
             ``qamomile.observable.Hamiltonian``).
+
+    Raises:
+        ValueError: If a ``$tuple`` wrapper's element payload is not a
+            list.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -589,10 +624,17 @@ def _decode_payload(value: Any) -> Any:
         return dict_to_array(value)
     if is_hamiltonian_wrapper(value):
         return dict_to_hamiltonian(value)
+    if isinstance(value, dict) and value.get("$tuple") is not None:
+        elements = value["$tuple"]
+        if not isinstance(elements, list):
+            raise ValueError(
+                f"$tuple wrapper elements must be a list, got {type(elements).__name__}"
+            )
+        return tuple(_decode_payload(x) for x in elements)
     if isinstance(value, list):
         return [_decode_payload(x) for x in value]
     if isinstance(value, dict):
-        # Plain dict (not a numpy / Hamiltonian wrapper); recurse on values.
+        # Plain dict (not a tagged wrapper); recurse on values.
         return {k: _decode_payload(v) for k, v in value.items()}
     return value
 
@@ -797,8 +839,8 @@ def _operands_results(
     Returns:
         tuple[list[Value], list[Value]]: ``(operands, results)``.
     """
-    operands = [_materialize_as_value(ctx, ref) for ref in d.get("operand_refs", ())]
-    results = [_materialize_as_value(ctx, ref) for ref in d.get("result_refs", ())]
+    operands = [_materialize_io_value(ctx, ref) for ref in d.get("operand_refs", ())]
+    results = [_materialize_io_value(ctx, ref) for ref in d.get("result_refs", ())]
     return operands, results
 
 

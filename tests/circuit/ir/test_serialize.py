@@ -1233,3 +1233,168 @@ class TestRealAlgorithmRoundTrip:
             if op["$type"] == "CompositeGateOperation"
         )
         assert composite["implementation_block"] == composite_r["implementation_block"]
+
+
+# ---------------------------------------------------------------------------
+# Container values in block I/O and operand positions
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _dict_coeff_kernel(
+    coeffs: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Dict-input kernel — a ``DictValue`` lands in ``input_values``."""
+    q = qmc.qubit_array(2, "q")
+    for (i, j), w in qmc.items(coeffs):
+        q[i] = qmc.rz(q[i], w)
+    return qmc.measure(q)
+
+
+class TestContainerIOValues:
+    """Blocks whose I/O or operands hold ``DictValue`` / ``TupleValue``.
+
+    The tracer legitimately places container values in
+    ``Block.input_values`` (a ``Dict`` kernel argument) and in
+    operand lists (``ForItemsOperation``); the decoder must accept
+    them there instead of insisting on scalar ``Value``.
+    """
+
+    def _bound_block(self) -> Block:
+        """Build the Dict-bound AFFINE block used by every test here."""
+        traced = _dict_coeff_kernel.build(coeffs={(0, 1): 0.5, (1, 0): 0.25})
+        return InlinePass().run(traced)
+
+    @pytest.mark.parametrize("fmt", ["json", "msgpack"])
+    def test_dict_input_kernel_round_trips(self, fmt: str):
+        """A Dict-input kernel round-trips through both wire formats."""
+        block = self._bound_block()
+        if fmt == "json":
+            restored = load_json(dump_json(block))
+        else:
+            restored = load_msgpack(dump_msgpack(block))
+        assert to_dict(restored) == to_dict(block)
+
+    def test_bound_data_keys_stay_hashable(self):
+        """Tuple dict keys survive as tuples so ``get_bound_data`` works."""
+        from qamomile.circuit.ir.value import DictValue
+
+        block = self._bound_block()
+        restored = load_json(dump_json(block))
+        dict_values = [v for v in restored.input_values if isinstance(v, DictValue)]
+        assert dict_values, "expected a DictValue in input_values"
+        assert dict_values[0].get_bound_data() == {(0, 1): 0.5, (1, 0): 0.25}
+
+    def test_content_hash_stable_across_round_trip(self):
+        """Round-tripping does not change the canonical content hash."""
+        from qamomile.circuit.ir.canonical import canonicalize
+
+        block = self._bound_block()
+        restored = load_json(dump_json(block))
+        assert content_hash(canonicalize(block)) == content_hash(canonicalize(restored))
+
+
+# ---------------------------------------------------------------------------
+# Tuple payload fidelity ($tuple wrapper)
+# ---------------------------------------------------------------------------
+
+
+class TestTuplePayloadFidelity:
+    """The tuple-vs-list distinction survives payload round-trips."""
+
+    def test_nested_tuple_round_trip(self):
+        """Nested tuples decode back as tuples, lists as lists."""
+        from qamomile.circuit.ir.serialize.decode import _decode_payload
+        from qamomile.circuit.ir.serialize.encode import _encode_payload
+
+        payload = ((0, 1), [1.5, (2, 3)], "s")
+        assert _decode_payload(_encode_payload(payload)) == payload
+        assert isinstance(_decode_payload(_encode_payload(payload)), tuple)
+
+    def test_empty_tuple_round_trip(self):
+        """The empty tuple round-trips as a tuple, not a list."""
+        from qamomile.circuit.ir.serialize.decode import _decode_payload
+        from qamomile.circuit.ir.serialize.encode import _encode_payload
+
+        assert _decode_payload(_encode_payload(())) == ()
+        assert isinstance(_decode_payload(_encode_payload(())), tuple)
+
+    def test_legacy_list_payload_still_decodes(self):
+        """Pre-``$tuple`` payloads (bare lists) decode unchanged."""
+        from qamomile.circuit.ir.serialize.decode import _decode_payload
+
+        assert _decode_payload([[0, 1], 1.5]) == [[0, 1], 1.5]
+
+    def test_malformed_tuple_wrapper_rejected(self):
+        """A ``$tuple`` wrapper whose elements are not a list raises."""
+        from qamomile.circuit.ir.serialize.decode import _decode_payload
+
+        with pytest.raises(ValueError, match=r"\$tuple"):
+            _decode_payload({"$tuple": "not-a-list"})
+
+
+# ---------------------------------------------------------------------------
+# Payload dict validation (loud failure over silent corruption)
+# ---------------------------------------------------------------------------
+
+
+class TestPayloadDictValidation:
+    """Plain payload dicts are validated at encode time."""
+
+    def test_non_str_key_rejected(self):
+        """A non-str dict key raises instead of being stringified."""
+        from qamomile.circuit.ir.serialize.encode import _encode_payload
+
+        with pytest.raises(TypeError, match="non-str key"):
+            _encode_payload({1: "x"})
+
+    def test_reserved_wrapper_key_rejected(self):
+        """A payload dict shaped like a tagged wrapper is rejected."""
+        from qamomile.circuit.ir.serialize.encode import _encode_payload
+
+        for key in ("$np_array", "$hamiltonian", "$tuple", "$bytes_b64"):
+            with pytest.raises(TypeError, match="reserved"):
+                _encode_payload({key: True})
+
+
+# ---------------------------------------------------------------------------
+# Nested blocks carry local value tables
+# ---------------------------------------------------------------------------
+
+
+class TestNestedBlockLocalValueTable:
+    """Operation-owned nested blocks get self-contained value tables.
+
+    Sharing the parent's context used to re-emit the parent's entire
+    ``value_table`` once per nested block on the wire (quadratic size
+    for ControlledU / composite-heavy kernels).
+    """
+
+    def test_nested_table_is_local_and_self_contained(self):
+        """The nested table holds only UUIDs the nested block references."""
+        payload = to_dict(_to_affine(_controlled_phase))["block"]
+        controlled = next(
+            op
+            for op in payload["operations"]
+            if op["$type"] in ("ConcreteControlledU", "SymbolicControlledU")
+        )
+        nested = controlled["unitary_block"]
+        assert nested is not None
+        top_uuids = {v["uuid"] for v in payload["value_table"]}
+        nested_uuids = {v["uuid"] for v in nested["value_table"]}
+        # Local: the nested table must not simply duplicate the parent's.
+        assert nested_uuids != top_uuids
+        # Self-contained: every ref inside the nested block resolves locally.
+        refs: set[str] = set()
+        refs.update(nested["input_value_refs"])
+        refs.update(nested["output_value_refs"])
+        for op in nested["operations"]:
+            refs.update(op.get("operand_refs", ()))
+            refs.update(op.get("result_refs", ()))
+        assert refs <= nested_uuids
+
+    def test_round_trip_unchanged_by_local_tables(self):
+        """Local nested tables do not change the decoded IR."""
+        block = _to_affine(_controlled_phase)
+        restored = load_json(dump_json(block))
+        assert to_dict(restored) == to_dict(block)

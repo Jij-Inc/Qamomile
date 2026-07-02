@@ -104,16 +104,35 @@ class TestPassDirectInvocation:
         )
         assert not gamma.shape[0].is_constant()
 
-    def test_hierarchical_block_kind_required(self):
+    def test_traced_block_kind_rejected(self):
+        """A TRACED block is rejected; the pass needs a full kernel body."""
         kernel = self._make_kernel()
         block = kernel.build(parameters=["gamma"])
-        # Simulate a post-inline block to ensure we reject the wrong kind.
-        affine = dataclasses.replace(block, kind=BlockKind.AFFINE)
+        traced = dataclasses.replace(block, kind=BlockKind.TRACED)
 
         from qamomile.circuit.transpiler.errors import ValidationError
 
         with pytest.raises(ValidationError):
-            ParameterShapeResolutionPass(bindings={"gamma": [0.0]}).run(affine)
+            ParameterShapeResolutionPass(bindings={"gamma": [0.0]}).run(traced)
+
+    def test_affine_block_kind_accepted(self):
+        """A post-inline AFFINE block is accepted (the transpile_block path).
+
+        Deserialized blocks receive their array bindings after the fact,
+        so the pass must run on AFFINE / ANALYZED input too, resolving
+        the symbolic dims while preserving the kind.
+        """
+        kernel = self._make_kernel()
+        block = kernel.build(parameters=["gamma"])
+        affine = dataclasses.replace(block, kind=BlockKind.AFFINE)
+
+        resolved = ParameterShapeResolutionPass(bindings={"gamma": [0.0]}).run(affine)
+
+        assert resolved.kind is BlockKind.AFFINE
+        gamma = next(
+            v for v in resolved.input_values if getattr(v, "name", None) == "gamma"
+        )
+        assert gamma.shape[0].is_constant()
 
 
 class TestEndToEndTranspile:

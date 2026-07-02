@@ -71,6 +71,22 @@ parameter slots, parent_array pointers, etc.) references Values by
 their canonical UUID string. The dict shape is therefore a tree
 (no Python-level cycles) plus a flat Value table.
 
+Block I/O and operand positions may reference container values
+(``TupleValue`` / ``DictValue``) as well as scalar ``Value`` /
+``ArrayValue`` — a kernel taking a ``Dict`` argument holds a
+``DictValue`` in ``input_value_refs``, and container-consuming ops
+reference them as operands. The decoder accepts any value-table entry
+in those positions.
+
+Nested Blocks embedded in operations (``ControlledUOperation``'s
+``unitary_block``, ``CompositeGateOperation``'s
+``implementation_block``, ``InverseBlockOperation``'s blocks) each
+carry their own self-contained ``value_table`` holding exactly the
+Values reachable from that nested block. Parent and nested tables may
+repeat a UUID; the decoder materializes each block dict against its
+own local table. (Encoders prior to this rule emitted the parent's
+full table into every nested block; such payloads remain decodable.)
+
 Numpy arrays
 ------------
 
@@ -119,6 +135,32 @@ object is ``repr``-identical to the original; both properties feed
 The wrapper contains no raw bytes, so both wire formats carry it
 unchanged.
 
+Tuple payloads
+--------------
+
+Python tuples inside payload positions (``ParamSlot.bound_value`` /
+``default``, ``ScalarMetadata.const_value``,
+``ArrayRuntimeMetadata.const_array``,
+``DictRuntimeMetadata.bound_data`` entries,
+``ResourceMetadata.custom_metadata``) are wrapped as::
+
+    {"$tuple": [<element>, ...]}
+
+so the tuple-vs-list distinction survives the round-trip. This is
+load-bearing: frontend metadata freezes containers to nested tuples
+whose ``repr`` feeds ``content_hash``, and ``bound_data`` keys must
+stay hashable for ``DictValue.get_bound_data()``. Bare JSON lists
+decode to Python lists exactly as before, so pre-``$tuple`` payloads
+remain readable (their tuples were written as lists and continue to
+decode as lists).
+
+Plain payload dicts are validated at encode time: keys must be
+``str`` (a non-str key used to be silently stringified and could not
+round-trip), and the reserved wrapper keys (``$np_array``,
+``$hamiltonian``, ``$complex``, ``$tuple``, ``$bytes_b64``,
+``$value_ref``) are rejected so a user dict can never be mis-decoded
+as a tagged wrapper.
+
 Forward compatibility
 ---------------------
 
@@ -150,5 +192,12 @@ from __future__ import annotations
 # ``$hamiltonian`` payload wrapper (with its ``$complex`` coefficient
 # sub-wrapper) is additive too: pre-existing payloads contain no such
 # wrapper (encoding a Hamiltonian used to raise ``TypeError``), so v1
-# readers that know the tag can still read every older payload.
+# readers that know the tag can still read every older payload.  The
+# ``$tuple`` payload wrapper follows the same pattern: older payloads
+# wrote tuples as bare lists and continue to decode as lists, while
+# new payloads preserve the tuple type.  Self-contained nested-block
+# value tables are an encoder-side change only — the decoder has
+# always materialized each block dict against its own table, so both
+# the old (parent-duplicating) and new (local) layouts decode
+# identically.
 SCHEMA_VERSION: int = 1

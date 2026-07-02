@@ -56,22 +56,58 @@ def _extract_concrete_shape(binding: Any) -> tuple[int, ...] | None:
 class ParameterShapeResolutionPass(Pass[Block, Block]):
     """Substitute symbolic parameter array shape dims with concrete constants.
 
-    Input: ``BlockKind.HIERARCHICAL`` (runs before ``InlinePass``).
+    Input: ``BlockKind.HIERARCHICAL`` (the ``transpile()`` path, before
+    ``InlinePass``) or ``BlockKind.AFFINE`` / ``BlockKind.ANALYZED``
+    (the ``transpile_block()`` path, where a deserialized block receives
+    its array bindings after the fact). The substitution itself is
+    kind-agnostic — it only rewrites shape-dim Values by UUID.
     Output: same block kind, with matching shape dim Values constant-folded.
     """
 
+    _SUPPORTED_KINDS = (
+        BlockKind.HIERARCHICAL,
+        BlockKind.AFFINE,
+        BlockKind.ANALYZED,
+    )
+
     def __init__(self, bindings: dict[str, Any] | None = None) -> None:
+        """Initialize the pass with the compile-time bindings.
+
+        Args:
+            bindings (dict[str, Any] | None): Compile-time parameter
+                bindings keyed by kernel argument name. Defaults to
+                None, meaning no substitutions are performed.
+        """
         self._bindings = bindings or {}
 
     @property
     def name(self) -> str:
+        """Return the pass name used in diagnostics.
+
+        Returns:
+            str: The literal ``"parameter_shape_resolution"``.
+        """
         return "parameter_shape_resolution"
 
     def run(self, input: Block) -> Block:
-        if input.kind != BlockKind.HIERARCHICAL:
+        """Fold bound parameter-array shape dims to constants.
+
+        Args:
+            input (Block): The block to rewrite. Must be
+                ``HIERARCHICAL``, ``AFFINE``, or ``ANALYZED``.
+
+        Returns:
+            Block: The block with every resolvable symbolic shape dim
+                replaced by a constant, preserving ``input.kind``.
+
+        Raises:
+            ValidationError: If ``input.kind`` is ``TRACED`` (the block
+                must at least be a fully traced kernel body).
+        """
+        if input.kind not in self._SUPPORTED_KINDS:
             raise ValidationError(
-                f"ParameterShapeResolutionPass expects HIERARCHICAL block, "
-                f"got {input.kind}"
+                f"ParameterShapeResolutionPass expects HIERARCHICAL, AFFINE, "
+                f"or ANALYZED block, got {input.kind}"
             )
 
         if not self._bindings:
