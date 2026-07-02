@@ -1332,8 +1332,8 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         id="simple_for_loop",
         qkernel=simple_for_loop,
         description="Simply for loop with parametric m iterations applying X gate on a single qubit",
-        param_names=("n", "m"),
-        min_params={"n": 1, "m": 2},
+        param_names=("m",),
+        min_params={"m": 2},
         tags=("clifford", "parametric"),
     ),
     QKernelEntry(
