@@ -1226,7 +1226,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         Raises:
             EmitError: If the observable is not a Hamiltonian, gamma cannot
                 be resolved, the Hamiltonian is larger than the qubit
-                register, or a coefficient is non-real (non-Hermitian).
+                register, a term coefficient or the constant (identity)
+                term is non-real (non-Hermitian), or a register qubit
+                cannot be resolved from the qubit map.
         """
         import qamomile.observable as qm_o
         from qamomile.observable.hamiltonian import (
