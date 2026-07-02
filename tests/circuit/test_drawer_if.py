@@ -67,6 +67,17 @@ def if_no_else(q0: Qubit, q1: Qubit) -> Qubit:
 
 
 @qmc.qkernel
+def empty_true_if(q0: Qubit, q1: Qubit) -> Qubit:
+    """Measurement-backed if whose true branch is empty and else has a gate."""
+    cond = qmc.measure(q0)
+    if cond:
+        pass
+    else:
+        q1 = qmc.x(q1)
+    return q1
+
+
+@qmc.qkernel
 def nested_if(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
     """Two-level nested if so recursive branch rendering can be checked."""
     c0 = qmc.measure(q0)
@@ -182,6 +193,15 @@ class TestUnfoldedIf:
         assert len(unfolded) == 1
         assert len(unfolded[0].iterations) == 1
         assert _branch_gate_types(unfolded[0].iterations[0]) == [GateOperationType.X]
+
+    def test_empty_true_branch_is_kept_for_rendering(self):
+        """An empty true branch still occupies the IF branch slot."""
+        vc = _visual_circuit(empty_true_if, fold_loops=False)
+        unfolded = _unfolded_ifs(vc)
+        assert len(unfolded) == 1
+        assert len(unfolded[0].iterations) == 2
+        assert unfolded[0].iterations[0] == []
+        assert _branch_gate_types(unfolded[0].iterations[1]) == [GateOperationType.X]
 
     def test_condition_label_width_reserved_for_layout(self):
         """The IF sequence carries a positive header width for layout to reserve."""
@@ -366,3 +386,11 @@ class TestDrawEndToEnd:
         """Nested if draws in both modes."""
         assert isinstance(nested_if.draw(fold_loops=True), Figure)
         assert isinstance(nested_if.draw(fold_loops=False), Figure)
+
+    def test_empty_true_branch_draws_if_label(self):
+        """The renderer keeps the IF label even when the true branch is empty."""
+        fig = empty_true_if.draw(fold_loops=False)
+        ax = fig._qm_ax  # type: ignore[attr-defined]
+        labels = [text.get_text() for text in ax.texts]
+        assert any(label.startswith("if ") for label in labels)
+        assert "else:" in labels

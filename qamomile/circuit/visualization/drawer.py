@@ -25,9 +25,12 @@ def _prepare_graph_for_visualization(graph: Block) -> Block:
         graph (Block): Freshly traced block to visualize.
 
     Returns:
-        Block: Graph with compile-time resolvable ``IfOperation`` nodes lowered
-            to their selected branch, while runtime/symbolic conditions remain
-            available for branch-box rendering.
+        Block: For ``TRACED``, ``AFFINE``, and ``HIERARCHICAL`` graphs, a graph
+            with compile-time resolvable ``IfOperation`` nodes lowered to their
+            selected branch while runtime/symbolic conditions remain available
+            for branch-box rendering. ``ANALYZED`` graphs are returned
+            unchanged because compile-time lowering must run before dependency
+            analysis.
 
     Raises:
         AssertionError: If the graph has an unknown ``BlockKind``.

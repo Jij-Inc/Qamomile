@@ -533,20 +533,70 @@ class MatplotlibRenderer:
         # always sit clear of this box.
         prev_right: float | None = None
         for i, span in enumerate(spans):
-            if span is None:
-                continue
-            gate_left, gate_right = span
             label = labels[i] if i < len(labels) else ""
+            label_width = label_widths[i] if i < len(label_widths) else 0.0
+
+            if span is None:
+                empty_span = self._empty_branch_x_span(
+                    i, spans, prev_right, pad, label_width
+                )
+                if empty_span is None:
+                    continue
+                box_left, box_right = empty_span
+                self._draw_if_branch_box(
+                    ax, box_left, box_right, box_bottom, box_top, label
+                )
+                prev_right = box_right
+                continue
+
+            gate_left, gate_right = span
 
             box_left = gate_left - pad if prev_right is None else prev_right
             box_right = gate_right + pad
-            if i < len(label_widths):
-                box_right = max(box_right, box_left + label_widths[i])
+            if label_width > 0:
+                box_right = max(box_right, box_left + label_width)
 
             self._draw_if_branch_box(
                 ax, box_left, box_right, box_bottom, box_top, label
             )
             prev_right = box_right
+
+    def _empty_branch_x_span(
+        self,
+        branch_index: int,
+        spans: list[tuple[float, float] | None],
+        prev_right: float | None,
+        pad: float,
+        label_width: float,
+    ) -> tuple[float, float] | None:
+        """Compute a minimal x-span for an empty IF branch label box.
+
+        Args:
+            branch_index (int): Index of the empty branch within ``spans``.
+            spans (list[tuple[float, float] | None]): Per-branch positioned
+                child extents. Empty branches have ``None`` entries.
+            prev_right (float | None): Right edge of the previously drawn
+                branch box, if any.
+            pad (float): Horizontal border padding used by branch boxes.
+            label_width (float): Reserved width for this branch's header label.
+
+        Returns:
+            tuple[float, float] | None: ``(left, right)`` extent for the empty
+                branch box, or None when no neighboring positioned branch can
+                anchor it.
+        """
+        min_width = max(label_width, self.style.gate_width)
+        if prev_right is not None:
+            return prev_right, prev_right + min_width
+
+        for next_span in spans[branch_index + 1 :]:
+            if next_span is None:
+                continue
+            next_left, _ = next_span
+            box_right = next_left - pad
+            return box_right - min_width, box_right
+
+        return None
 
     def _draw_if_branch_box(
         self,
