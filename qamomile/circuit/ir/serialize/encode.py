@@ -92,10 +92,14 @@ from .schema import SCHEMA_VERSION
 _SUPPORTED_KINDS = frozenset({BlockKind.AFFINE, BlockKind.ANALYZED})
 
 # Tag keys reserved by the wire format's tagged-dict wrappers. A *plain*
-# payload dict must not carry any of these keys: the recursive payload
-# decoder (and, for ``$bytes_b64``, the JSON wire layer) dispatches on
-# them, so a user dict shaped like a wrapper would be silently
-# mis-decoded on load. The encoder rejects such dicts loudly instead.
+# payload dict must not carry any of these keys. ``$np_array`` /
+# ``$hamiltonian`` / ``$tuple`` are dispatched on by the recursive
+# payload decoder and ``$bytes_b64`` by the JSON wire layer, so a user
+# dict shaped like one of those wrappers would be silently mis-decoded
+# on load. ``$complex`` and ``$value_ref`` are dispatched only in
+# non-payload positions today and are reserved defensively so a future
+# payload-level use cannot collide with existing data. The encoder
+# rejects such dicts loudly instead.
 _RESERVED_PAYLOAD_KEYS = frozenset(
     {
         "$np_array",
