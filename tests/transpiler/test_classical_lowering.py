@@ -6,7 +6,7 @@ dispatch them through a dedicated backend hook instead of the legacy
 fold-or-translate path. Non-measurement-derived classical ops are left
 unchanged so the existing fold paths continue to handle them.
 
-Tests cover three layers:
+Tests cover four layers:
 
 1. **IR rewriting** — synthetic kernels are run through ``transpile()``
    up to (and including) ``classical_lowering``; the resulting IR is
@@ -16,6 +16,14 @@ Tests cover three layers:
 2. **End-to-end** — the same kernels run on the qiskit simulator and
    produce correct results, exercising the full pipeline including the
    new ``_emit_runtime_classical_expr`` hook.
+
+3. **Segmentation** — white-box checks that an expr bridging a
+   measurement to a runtime if/while stays inside the single quantum
+   segment.
+
+4. **Host-side outputs** — an expr whose result is a block output (or
+   feeds host-side post-processing) is instead routed to a post-quantum
+   classical segment and evaluated per shot by ``ClassicalExecutor``.
 """
 
 from __future__ import annotations
@@ -982,3 +990,406 @@ class TestVectorBitElementProvenance:
             f"teleporting |{msg_bit}> must put Bob in |{msg_bit}>, got {result.results}"
         )
         assert sum(count for _, count in result.results) == 128
+
+
+# ---------------------------------------------------------------------------
+# Layer 4: measurement-derived classical outputs (host-side evaluation)
+# ---------------------------------------------------------------------------
+
+
+class TestMeasurementDerivedOutput:
+    """A measurement-derived classical expression returned as a kernel
+    output must be evaluated host-side and surfaced by the orchestrator.
+
+    Previously the segmenter unconditionally absorbed every
+    ``RuntimeClassicalExpr`` into the quantum segment, where nothing
+    surfaces its value: a kernel returning ``bits[0] & bits[1]`` sampled
+    ``[(None, shots)]``. The expr must instead land in a post-quantum
+    classical segment executed by ``ClassicalExecutor`` per shot.
+    """
+
+    @pytest.fixture
+    def transpiler(self):
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+
+    @pytest.mark.parametrize(
+        "flip_mask",
+        [
+            pytest.param((0, 0), id="00"),
+            pytest.param((0, 1), id="01"),
+            pytest.param((1, 0), id="10"),
+            pytest.param((1, 1), id="11"),
+        ],
+    )
+    def test_condop_and_output_sample(self, transpiler, flip_mask):
+        """``return bits[0] & bits[1]`` samples the host-computed AND of
+        the deterministic measurement outcomes (the original repro shape,
+        reading elements of a measured ``Vector[Bit]``)."""
+
+        @qmc.qkernel
+        def kernel(flip0: qmc.UInt, flip1: qmc.UInt) -> qmc.Bit:
+            qs = qmc.qubit_array(2, name="qs")
+            if flip0:
+                qs[0] = qmc.x(qs[0])
+            if flip1:
+                qs[1] = qmc.x(qs[1])
+            bits = qmc.measure(qs)
+            return bits[0] & bits[1]
+
+        expected = flip_mask[0] & flip_mask[1]
+        result = (
+            transpiler.transpile(
+                kernel, bindings={"flip0": flip_mask[0], "flip1": flip_mask[1]}
+            )
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(expected, 50)]
+
+    def test_condop_or_output_sample(self, transpiler):
+        """``return a | b`` with ``a=1``, ``b=0`` samples ``1``."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            a = qmc.measure(q0)
+            b = qmc.measure(q1)
+            return a | b
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(1, 50)]
+
+    def test_notop_output_sample(self, transpiler):
+        """``return ~a`` with ``a`` measured from ``|0>`` samples ``1``."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            a = qmc.measure(q0)
+            return ~a
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(1, 50)]
+
+    def test_condop_output_run(self, transpiler):
+        """The single-shot ``run()`` path resolves the host-computed
+        expression output the same way ``sample()`` does."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            q1 = qmc.x(q1)
+            a = qmc.measure(q0)
+            b = qmc.measure(q1)
+            return a & b
+
+        exe = transpiler.transpile(kernel)
+        assert exe.run(transpiler.executor()).result() == 1
+
+    def test_chained_exprs_output(self, transpiler):
+        """A chain of host-side expressions (``~(a & b)``) evaluates in
+        source order inside the post-quantum classical segment."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            a = qmc.measure(q0)
+            b = qmc.measure(q1)
+            s = a & b  # 1 & 0 = 0
+            return ~s
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(1, 50)]
+
+    @pytest.mark.parametrize(
+        "flip_second, expected",
+        [
+            pytest.param(True, 1, id="and-true"),
+            pytest.param(False, 0, id="and-false"),
+        ],
+    )
+    def test_expr_as_condition_and_output(self, transpiler, flip_second, expected):
+        """An expression consumed by an in-circuit ``if`` *and* returned is
+        placed in both worlds: the runtime if fires on the backend
+        expression while the returned value is recomputed host-side."""
+
+        @qmc.qkernel
+        def kernel(flip_b: qmc.UInt) -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.x(q0)
+            if flip_b:
+                q1 = qmc.x(q1)
+            a = qmc.measure(q0)
+            b = qmc.measure(q1)
+            s = a & b
+            if s:
+                q2 = qmc.x(q2)
+            return s, qmc.measure(q2)
+
+        result = (
+            transpiler.transpile(kernel, bindings={"flip_b": int(flip_second)})
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        # q2 is flipped exactly when s is true, so both outputs agree.
+        assert result.results == [((expected, expected), 50)]
+
+    def test_expr_between_measurements_sinks_past_quantum_ops(self, transpiler):
+        """A host-side expression written between measurements defers past
+        the remaining quantum ops instead of splitting the quantum segment
+        (no ``MultipleQuantumSegmentsError``) and still evaluates correctly."""
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+
+        @qmc.qkernel
+        def kernel() -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            a = qmc.measure(q0)
+            s = ~a
+            q1 = qmc.x(q1)
+            b = qmc.measure(q1)
+            return s, b
+
+        exe = transpiler.transpile(kernel)
+        quantum_steps = [
+            step for step in exe.plan.steps if isinstance(step.segment, QuantumSegment)
+        ]
+        assert len(quantum_steps) == 1
+        result = exe.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [((1, 1), 50)]
+
+    @pytest.mark.quri_parts
+    def test_condop_output_sample_quri_parts(self):
+        """Host-side evaluation makes measurement-derived outputs work on a
+        backend without dynamic-circuit (runtime classical expression)
+        support — previously the expr stranded in the quantum segment made
+        this kernel unexecutable on QURI Parts."""
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qs = qmc.qubit_array(2, name="qs")
+            qs[0] = qmc.x(qs[0])
+            qs[1] = qmc.x(qs[1])
+            bits = qmc.measure(qs)
+            return bits[0] & bits[1]
+
+        transpiler = QuriPartsTranspiler()
+        result = (
+            transpiler.transpile(kernel)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(1, 50)]
+
+
+class TestMeasurementDerivedOutputSegmentation:
+    """White-box checks of where segmentation places a
+    ``RuntimeClassicalExpr`` relative to the quantum segment."""
+
+    @pytest.fixture
+    def transpiler(self):
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+
+    def test_output_expr_lands_in_post_classical_segment(self, transpiler):
+        """An expr consumed only by the block output is routed to a
+        post-quantum classical segment, not the quantum segment."""
+        from qamomile.circuit.transpiler.segments import (
+            ClassicalSegment,
+            QuantumSegment,
+        )
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qs = qmc.qubit_array(2, name="qs")
+            qs[0] = qmc.x(qs[0])
+            bits = qmc.measure(qs)
+            return bits[0] & bits[1]
+
+        plan = transpiler.transpile(kernel).plan
+        quantum_segments = [
+            s.segment for s in plan.steps if isinstance(s.segment, QuantumSegment)
+        ]
+        classical_segments = [
+            s.segment for s in plan.steps if isinstance(s.segment, ClassicalSegment)
+        ]
+        assert len(quantum_segments) == 1
+        assert not any(
+            isinstance(op, RuntimeClassicalExpr)
+            for op in quantum_segments[0].operations
+        ), "output-only expr must not stay in the quantum segment"
+        assert any(
+            isinstance(op, RuntimeClassicalExpr)
+            for seg in classical_segments
+            for op in seg.operations
+        ), "output-only expr must be placed in a classical segment"
+
+    def test_condition_and_output_expr_duplicated(self, transpiler):
+        """An expr consumed by a runtime if *and* returned appears in both
+        the quantum segment (for backend emission) and a classical segment
+        (for host-side evaluation). Duplication is safe: the op is pure."""
+        from qamomile.circuit.transpiler.segments import (
+            ClassicalSegment,
+            QuantumSegment,
+        )
+
+        @qmc.qkernel
+        def kernel() -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.x(q0)
+            q1 = qmc.x(q1)
+            a = qmc.measure(q0)
+            b = qmc.measure(q1)
+            s = a & b
+            if s:
+                q2 = qmc.x(q2)
+            return s, qmc.measure(q2)
+
+        plan = transpiler.transpile(kernel).plan
+        quantum_ops = [
+            op
+            for s in plan.steps
+            if isinstance(s.segment, QuantumSegment)
+            for op in s.segment.operations
+        ]
+        classical_ops = [
+            op
+            for s in plan.steps
+            if isinstance(s.segment, ClassicalSegment)
+            for op in s.segment.operations
+        ]
+        assert any(isinstance(op, RuntimeClassicalExpr) for op in quantum_ops)
+        assert any(isinstance(op, RuntimeClassicalExpr) for op in classical_ops)
+
+    def test_condition_only_expr_stays_out_of_classical_segments(self, transpiler):
+        """An expr consumed only by a runtime if stays exclusive to the
+        quantum segment — no spurious host-side copy."""
+        from qamomile.circuit.transpiler.segments import ClassicalSegment
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.x(q0)
+            q1 = qmc.x(q1)
+            a = qmc.measure(q0)
+            b = qmc.measure(q1)
+            if a & b:
+                q2 = qmc.x(q2)
+            return qmc.measure(q2)
+
+        plan = transpiler.transpile(kernel).plan
+        classical_ops = [
+            op
+            for s in plan.steps
+            if isinstance(s.segment, ClassicalSegment)
+            for op in s.segment.operations
+        ]
+        assert not any(isinstance(op, RuntimeClassicalExpr) for op in classical_ops)
+
+
+class TestRuntimeExprHostDispatch:
+    """Unit coverage of ``ClassicalExecutor``'s ``RuntimeClassicalExpr``
+    dispatch: every ``RuntimeOpKind`` maps onto the shared ``eval_utils``
+    helper of its family. Constructed as synthetic IR because the frontend
+    cannot yet produce every kind under measurement taint (only ``& | ~``
+    on Bit; arithmetic and comparisons need the QFixed float path)."""
+
+    @staticmethod
+    def _execute_single(kind, operand_values):
+        """Run one synthetic ``RuntimeClassicalExpr`` and return its result.
+
+        Args:
+            kind (RuntimeOpKind): The expression kind to execute.
+            operand_values (list[int | float]): Concrete operand constants.
+
+        Returns:
+            Any: The value the executor stored for the result UUID.
+        """
+        from qamomile.circuit.ir.types.primitives import FloatType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.classical_executor import ClassicalExecutor
+        from qamomile.circuit.transpiler.execution_context import ExecutionContext
+        from qamomile.circuit.transpiler.segments import ClassicalSegment
+
+        operands = [
+            Value(type=FloatType(), name=f"in{i}").with_const(v)
+            for i, v in enumerate(operand_values)
+        ]
+        out = Value(type=FloatType(), name="out")
+        op = RuntimeClassicalExpr(operands=operands, results=[out], kind=kind)
+        segment = ClassicalSegment(operations=[op])
+        results = ClassicalExecutor().execute(segment, ExecutionContext())
+        return results[out.uuid]
+
+    @pytest.mark.parametrize(
+        "kind, lhs, rhs, expected",
+        [
+            pytest.param(RuntimeOpKind.ADD, 3, 4, 7, id="add"),
+            pytest.param(RuntimeOpKind.SUB, 9, 4, 5, id="sub"),
+            pytest.param(RuntimeOpKind.MUL, 3, 4, 12, id="mul"),
+            pytest.param(RuntimeOpKind.DIV, 8, 2, 4.0, id="div"),
+            pytest.param(RuntimeOpKind.FLOORDIV, 9, 4, 2, id="floordiv"),
+            pytest.param(RuntimeOpKind.MOD, 9, 4, 1, id="mod"),
+            pytest.param(RuntimeOpKind.POW, 2, 5, 32, id="pow"),
+            pytest.param(RuntimeOpKind.EQ, 3, 3, 1, id="eq"),
+            pytest.param(RuntimeOpKind.NEQ, 3, 4, 1, id="neq"),
+            pytest.param(RuntimeOpKind.LT, 3, 4, 1, id="lt"),
+            pytest.param(RuntimeOpKind.LE, 4, 4, 1, id="le"),
+            pytest.param(RuntimeOpKind.GT, 5, 4, 1, id="gt"),
+            pytest.param(RuntimeOpKind.GE, 4, 5, 0, id="ge"),
+            pytest.param(RuntimeOpKind.AND, 1, 0, 0, id="and"),
+            pytest.param(RuntimeOpKind.OR, 1, 0, 1, id="or"),
+        ],
+    )
+    def test_binary_kind_evaluates(self, kind, lhs, rhs, expected):
+        """Each binary ``RuntimeOpKind`` evaluates with the semantics of
+        its per-family ``eval_utils`` helper; booleans surface as ints."""
+        assert self._execute_single(kind, [lhs, rhs]) == expected
+
+    @pytest.mark.parametrize(
+        "operand, expected",
+        [pytest.param(1, 0, id="not-1"), pytest.param(0, 1, id="not-0")],
+    )
+    def test_not_kind_evaluates(self, operand, expected):
+        """The unary NOT kind negates its single operand."""
+        assert self._execute_single(RuntimeOpKind.NOT, [operand]) == expected
+
+    def test_division_by_zero_raises_execution_error(self):
+        """A failing evaluation (division by zero) raises ExecutionError
+        instead of silently storing ``None``."""
+        from qamomile.circuit.transpiler.errors import ExecutionError
+
+        with pytest.raises(ExecutionError, match="evaluation failed"):
+            self._execute_single(RuntimeOpKind.DIV, [1, 0])

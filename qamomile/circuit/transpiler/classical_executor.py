@@ -7,10 +7,15 @@ from typing import Any
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
+    BinOpKind,
     CompOp,
+    CompOpKind,
     CondOp,
+    CondOpKind,
     NotOp,
     PhiOp,
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
 )
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -24,6 +29,34 @@ from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.segments import ClassicalSegment
+
+# ``RuntimeOpKind`` → per-family kind tables for host-side evaluation of
+# ``RuntimeClassicalExpr``. Inverse of the forward maps used by
+# ``ClassicalLoweringPass`` (see ``arithmetic_operations``); dispatching
+# through the same ``eval_utils`` helpers as the ``BinOp`` / ``CompOp`` /
+# ``CondOp`` executors above keeps runtime-expression semantics identical
+# to compile-time folding.
+_RUNTIME_TO_BINOP_KIND: dict[RuntimeOpKind, BinOpKind] = {
+    RuntimeOpKind.ADD: BinOpKind.ADD,
+    RuntimeOpKind.SUB: BinOpKind.SUB,
+    RuntimeOpKind.MUL: BinOpKind.MUL,
+    RuntimeOpKind.DIV: BinOpKind.DIV,
+    RuntimeOpKind.FLOORDIV: BinOpKind.FLOORDIV,
+    RuntimeOpKind.MOD: BinOpKind.MOD,
+    RuntimeOpKind.POW: BinOpKind.POW,
+}
+_RUNTIME_TO_COMPOP_KIND: dict[RuntimeOpKind, CompOpKind] = {
+    RuntimeOpKind.EQ: CompOpKind.EQ,
+    RuntimeOpKind.NEQ: CompOpKind.NEQ,
+    RuntimeOpKind.LT: CompOpKind.LT,
+    RuntimeOpKind.LE: CompOpKind.LE,
+    RuntimeOpKind.GT: CompOpKind.GT,
+    RuntimeOpKind.GE: CompOpKind.GE,
+}
+_RUNTIME_TO_CONDOP_KIND: dict[RuntimeOpKind, CondOpKind] = {
+    RuntimeOpKind.AND: CondOpKind.AND,
+    RuntimeOpKind.OR: CondOpKind.OR,
+}
 
 
 class ClassicalExecutor:
@@ -68,6 +101,8 @@ class ClassicalExecutor:
             self._execute_notop(op, context, results, scoped_locals)
         elif isinstance(op, CondOp):
             self._execute_condop(op, context, results, scoped_locals)
+        elif isinstance(op, RuntimeClassicalExpr):
+            self._execute_runtime_expr(op, context, results, scoped_locals)
         elif isinstance(op, PhiOp):
             self._execute_phi(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
@@ -170,6 +205,81 @@ class ClassicalExecutor:
         result_value = evaluate_condop_values(op.kind, lhs, rhs)
         if result_value is None:
             raise ExecutionError(f"CondOp evaluation failed: kind={op.kind}")
+        if op.results:
+            results[op.results[0].uuid] = result_value
+
+    def _execute_runtime_expr(
+        self,
+        op: RuntimeClassicalExpr,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Evaluate a measurement-derived runtime expression host-side.
+
+        ``SegmentationPass`` routes a ``RuntimeClassicalExpr`` into a
+        classical segment when its result is a block output or feeds
+        host-side post-processing (in-circuit consumers instead keep the
+        op in the quantum segment, where backend emit lowers it). The
+        unified ``RuntimeOpKind`` is mapped back to its per-family kind
+        and delegated to the shared ``eval_utils`` helpers so evaluation
+        semantics match compile-time folding exactly. Boolean results are
+        coerced to ``int`` so Bit-typed outputs surface as ``0`` / ``1``,
+        consistent with directly measured bits.
+
+        Args:
+            op (RuntimeClassicalExpr): The runtime expression to evaluate.
+                Binary kinds read ``operands[0]`` / ``operands[1]``; the
+                unary NOT kind reads ``operands[0]`` only.
+            context (ExecutionContext): Execution context holding measured
+                bit values and bound parameters.
+            results (dict[str, Any]): Segment-local results keyed by value
+                UUID; the expression result is written here.
+            scoped_locals (dict[str, Any]): Loop-scoped local variables.
+
+        Raises:
+            ExecutionError: If ``op.kind`` is not a recognized
+                ``RuntimeOpKind`` or evaluation fails (e.g. division by
+                zero, operand type mismatch).
+        """
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_binop_values,
+            evaluate_compop_values,
+            evaluate_condop_values,
+            evaluate_notop_value,
+        )
+
+        kind = op.kind
+        result_value: float | int | bool | None
+        if kind is RuntimeOpKind.NOT:
+            operand = self._get_value(op.operands[0], context, results, scoped_locals)
+            result_value = evaluate_notop_value(operand)
+        else:
+            lhs = self._get_value(op.operands[0], context, results, scoped_locals)
+            rhs = self._get_value(op.operands[1], context, results, scoped_locals)
+            if kind in _RUNTIME_TO_COMPOP_KIND:
+                result_value = evaluate_compop_values(
+                    _RUNTIME_TO_COMPOP_KIND[kind], lhs, rhs
+                )
+            elif kind in _RUNTIME_TO_CONDOP_KIND:
+                result_value = evaluate_condop_values(
+                    _RUNTIME_TO_CONDOP_KIND[kind], lhs, rhs
+                )
+            elif kind in _RUNTIME_TO_BINOP_KIND:
+                result_value = evaluate_binop_values(
+                    _RUNTIME_TO_BINOP_KIND[kind], lhs, rhs
+                )
+            else:
+                raise ExecutionError(
+                    f"RuntimeClassicalExpr has unsupported kind: {kind}"
+                )
+        if result_value is None:
+            raise ExecutionError(
+                f"RuntimeClassicalExpr evaluation failed (division by zero or "
+                f"operand type mismatch): kind={kind}"
+            )
+        if isinstance(result_value, bool):
+            result_value = int(result_value)
         if op.results:
             results[op.results[0].uuid] = result_value
 
@@ -369,7 +479,31 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Resolve an array element from its parent container."""
+        """Resolve an array element from its parent container.
+
+        Resolution order: the parent container as a whole (results /
+        context / locals / constant / parameter), then per-element carrier
+        keys — the ``{array_uuid}_{index}`` composite key under which the
+        orchestrator stores measured bits (see
+        ``ProgramOrchestrator._load_measurements``), then the legacy
+        ``{array_name}[{index}]`` context key.
+
+        Args:
+            value (Value): The array-element value to resolve. Must carry
+                ``parent_array`` metadata.
+            context (ExecutionContext): Execution context holding measured
+                bits and bound parameters.
+            results (dict[str, Any]): Segment-local results keyed by value
+                UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped local variables.
+
+        Returns:
+            Any: The concrete element value.
+
+        Raises:
+            ExecutionError: If ``value`` has no parent array or the element
+                cannot be resolved through any lookup path.
+        """
         parent = value.parent_array
         if parent is None:
             raise ExecutionError(f"Value {value.name} is not an array element")
@@ -386,6 +520,11 @@ class ClassicalExecutor:
             return container[indices]
 
         if len(indices) == 1:
+            composite_key = f"{parent.uuid}_{indices[0]}"
+            if composite_key in results:
+                return results[composite_key]
+            if context.has(composite_key):
+                return context.get(composite_key)
             indexed_key = f"{parent.name}[{indices[0]}]"
             if context.has(indexed_key):
                 return context.get(indexed_key)
