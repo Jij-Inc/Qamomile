@@ -684,6 +684,42 @@ class Transpiler(ABC, Generic[T]):
         # each unroll step can have its base-case `if` folded before the
         # next unroll.  No-op when the block is already affine.
         affine = self.unroll_recursion(affine, bindings)
+        return self._compile_affine_to_executable(affine, bindings, parameters)
+
+    def _compile_affine_to_executable(
+        self,
+        affine: Block,
+        bindings: dict[str, Any] | None,
+        parameters: list[str] | None,
+    ) -> ExecutableProgram[T]:
+        """Run the shared AFFINE→executable tail of the pipeline.
+
+        This is the second half of :meth:`transpile` that is identical
+        for :meth:`transpile_block`: both reach an ``AFFINE`` block (one
+        by tracing + inlining a ``QKernel``, the other by deserializing
+        IR) and from there run the same fixed pass sequence
+        (``affine_validate`` → ``partial_eval`` → slice checks →
+        ``analyze`` → ``classical_lowering`` → ``validate_symbolic_shapes``
+        → ``plan`` → ``emit``). Keeping it in one place means a new tail
+        pass cannot be added to one entry point and forgotten on the
+        other.
+
+        Args:
+            affine (Block): A block at ``BlockKind.AFFINE`` (no residual
+                ``CallBlockOperation``s; shape dims already resolved by
+                the caller).
+            bindings (dict[str, Any] | None): Compile-time bindings, or
+                None. Threaded through ``partial_eval`` and ``emit``.
+            parameters (list[str] | None): Runtime parameter names, or
+                None. Threaded through ``emit``.
+
+        Returns:
+            ExecutableProgram[T]: The emitted backend executable.
+
+        Raises:
+            QamomileCompileError: If any pass in the tail rejects the IR
+                (affine, dependency, or shape violations).
+        """
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
         partially_evaluated = self.slice_borrow_check(partially_evaluated)
@@ -799,15 +835,7 @@ class Transpiler(ABC, Generic[T]):
         # substitution on already-inlined composite gates would need a
         # kind-relaxed pass and is future work.
         shape_resolved = self.resolve_parameter_shapes(block, bindings)
-        validated = self.affine_validate(shape_resolved)
-        partially_evaluated = self.partial_eval(validated, bindings)
-        partially_evaluated = self.slice_borrow_check(partially_evaluated)
-        partially_evaluated = self.strip_slice_ops(partially_evaluated)
-        analyzed = self.analyze(partially_evaluated)
-        analyzed = self.classical_lowering(analyzed)
-        analyzed = self.validate_symbolic_shapes(analyzed)
-        separated = self.plan(analyzed)
-        return self.emit(separated, bindings, parameters)
+        return self._compile_affine_to_executable(shape_resolved, bindings, parameters)
 
     def to_circuit(
         self,
