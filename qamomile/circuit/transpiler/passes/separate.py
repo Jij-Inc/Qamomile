@@ -289,7 +289,21 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # correctly. Computing this transitively is what makes a chain like
         # ``(phase * 2) - 1`` feeding a gate fully absorbable while a value read
         # back by later classical work stays in its own classical segment.
-        self._absorbable_op_ids = self._compute_absorbable(block.operations)
+        # The consumers map is computed once and shared with
+        # ``_classify_runtime_exprs`` below to avoid a second traversal of the
+        # nested control flow.
+        consumers = self._build_consumers_map(block.operations)
+        self._absorbable_op_ids = self._compute_absorbable(block.operations, consumers)
+
+        # Runtime-expression placement sets: a ``RuntimeClassicalExpr``
+        # (measurement-derived classical op) may be consumed in-circuit
+        # (runtime if/while conditions), host-side (block outputs, classical
+        # post-processing), or both. Computed once here; used by the routing
+        # loop below to decide quantum-segment vs classical-segment placement.
+        (
+            self._quantum_consumed_expr_ids,
+            self._host_evaluated_expr_ids,
+        ) = self._classify_runtime_exprs(block.operations, consumers)
 
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
@@ -299,6 +313,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # they end up computed inside the quantum circuit regardless of where
         # the user wrote them — never stranded in a classical prep segment.
         pending_absorbable: list[Operation] = []
+        # Host-evaluated runtime expressions encountered while inside the
+        # quantum segment. They are held here and flushed into the first
+        # post-quantum classical segment (creating one at the end of the
+        # stream if no classical op follows), so a runtime expression written
+        # between measurements never splits the quantum segment and never
+        # gets stranded inside it.
+        pending_post: list[Operation] = []
 
         for op in block.operations:
             # Skip ReturnOperation - it's a terminal operation handled separately
@@ -421,21 +442,38 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             if current_kind is None:
                 current_kind = op_kind
 
-            # Runtime classical expressions bridge a measurement to a
-            # runtime IfOperation/WhileOperation inside a single quantum
-            # segment. After ``ClassicalLoweringPass``, every measurement-
-            # derived classical op is represented as ``RuntimeClassicalExpr``,
-            # so this is a single type-check — no operand-typing heuristic
-            # needed. Examples that work under this rule but the old
-            # BitType-only heuristic could not handle:
-            #   ``if (s0 + 2 * s1 + 4 * s2) == 5:``  (UInt-typed BinOp/CompOp)
-            #   ``if measure(q) == bound_uint_param:`` (mixed Bit/UInt)
+            # Runtime classical expressions (measurement-derived classical
+            # ops, lowered by ``ClassicalLoweringPass``) are placed by
+            # consumer (see :meth:`_classify_runtime_exprs`):
+            #
+            # - An expr bridging a measurement to a runtime IfOperation /
+            #   WhileOperation condition (directly or through other
+            #   in-circuit exprs) stays inside the quantum segment so the
+            #   backend can lower it to a native classical expression.
+            #   Examples that work under this rule but the old BitType-only
+            #   heuristic could not handle:
+            #     ``if (s0 + 2 * s1 + 4 * s2) == 5:``  (UInt-typed BinOp/CompOp)
+            #     ``if measure(q) == bound_uint_param:`` (mixed Bit/UInt)
+            # - An expr whose result is a block output or feeds host-side
+            #   classical post-processing is deferred to a post-quantum
+            #   classical segment (``pending_post``) where
+            #   ``ClassicalExecutor`` computes it per shot. Keeping it in
+            #   the quantum segment would silently drop its value — nothing
+            #   in the quantum runtime surfaces expression results, so the
+            #   orchestrator would resolve the output to ``None``.
+            # - An expr consumed by both worlds is placed in both; it is
+            #   pure, so duplicate evaluation is safe.
             if (
                 op_kind == OperationKind.CLASSICAL
                 and current_kind == OperationKind.QUANTUM
                 and isinstance(op, RuntimeClassicalExpr)
             ):
-                current_ops.append(op)
+                if id(op) in self._quantum_consumed_expr_ids:
+                    current_ops.append(op)
+                    if id(op) in self._host_evaluated_expr_ids:
+                        pending_post.append(op)
+                else:
+                    pending_post.append(op)
                 continue
 
             if op_kind != current_kind and op_kind in (
@@ -456,6 +494,15 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 current_ops.extend(pending_absorbable)
                 pending_absorbable = []
 
+            # Entering (or continuing) a post-quantum classical segment:
+            # flush deferred runtime expressions first so ops that consume
+            # their results execute after them. ``pending_post`` only fills
+            # while the quantum segment is active, so any classical segment
+            # reached with a non-empty list is post-quantum.
+            if current_kind == OperationKind.CLASSICAL and pending_post:
+                current_ops.extend(pending_post)
+                pending_post = []
+
             current_ops.append(op)
 
         # Drain any held parameter-expression ops. They are normally emptied
@@ -473,6 +520,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         if current_ops:
             segment = self._create_segment(current_kind, current_ops)
             segments.append(segment)
+
+        # Deferred runtime expressions with no classical op after them in
+        # the stream (e.g. ``s = b0 & b1; return s``) still must run
+        # host-side: close the plan with a classical segment holding them.
+        if pending_post:
+            segments.append(ClassicalSegment(operations=pending_post))
 
         # Compute input/output refs for each segment
         self._compute_segment_io(segments, block)
@@ -610,7 +663,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 return True
         return False
 
-    def _compute_absorbable(self, operations: list[Operation]) -> set[int]:
+    def _compute_absorbable(
+        self,
+        operations: list[Operation],
+        consumers: dict[str, list[Operation]],
+    ) -> set[int]:
         """Compute the set of classical ops safe to fold into a quantum segment.
 
         A classical op is *absorbable* when it is non-measurement, feeds a
@@ -635,36 +692,14 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         Args:
             operations (list[Operation]): Top-level operations of the block.
+            consumers (dict[str, list[Operation]]): ``value_uuid ->
+                [consumer, ...]`` map over the whole op tree, as built by
+                :meth:`_build_consumers_map`.
 
         Returns:
             set[int]: ``id()`` of every classical op (top-level or nested) that
                 is safe with respect to the quantum-segment absorption.
         """
-
-        class ConsumerCollector(ControlFlowVisitor):
-            """Map each value UUID to the operations that read it."""
-
-            def __init__(self) -> None:
-                """Initialize the empty consumer map."""
-                self.consumers: dict[str, list[Operation]] = {}
-
-            def visit_operation(self, op: Operation) -> None:
-                """Record ``op`` as a consumer of each of its input values.
-
-                Args:
-                    op (Operation): The operation being visited.
-
-                Returns:
-                    None: Mutates ``self.consumers`` in place.
-                """
-                for v in op.all_input_values():
-                    if isinstance(v, ValueBase):
-                        self.consumers.setdefault(v.uuid, []).append(op)
-
-        collector = ConsumerCollector()
-        collector.visit_operations(operations)
-        consumers = collector.consumers
-
         # Candidates: every classical op (recursing into control-flow bodies)
         # that is non-measurement, quantum-feeding, and not a block output.
         classical_ops = self._collect_classical_ops(operations)
@@ -690,6 +725,215 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                     absorbable.discard(id(op))
                     changed = True
         return absorbable
+
+    def _build_consumers_map(
+        self,
+        operations: list[Operation],
+    ) -> dict[str, list[Operation]]:
+        """Map each value UUID to the operations that read it.
+
+        Walks the full operation tree (recursing through control-flow
+        bodies) and records every operation as a consumer of each of its
+        input values, including extra value fields exposed via
+        ``all_input_values`` (e.g. an ``IfOperation``'s condition).
+
+        Args:
+            operations (list[Operation]): Top-level operations of the block.
+
+        Returns:
+            dict[str, list[Operation]]: ``value_uuid -> [consumer, ...]``
+                over the whole tree.
+        """
+
+        class ConsumerCollector(ControlFlowVisitor):
+            """Map each value UUID to the operations that read it."""
+
+            def __init__(self) -> None:
+                """Initialize the empty consumer map."""
+                self.consumers: dict[str, list[Operation]] = {}
+
+            def visit_operation(self, op: Operation) -> None:
+                """Record ``op`` as a consumer of each of its input values.
+
+                Args:
+                    op (Operation): The operation being visited.
+
+                Returns:
+                    None: Mutates ``self.consumers`` in place.
+                """
+                for v in op.all_input_values():
+                    if isinstance(v, ValueBase):
+                        self.consumers.setdefault(v.uuid, []).append(op)
+
+        collector = ConsumerCollector()
+        collector.visit_operations(operations)
+        return collector.consumers
+
+    def _classify_runtime_exprs(
+        self,
+        operations: list[Operation],
+        consumers: dict[str, list[Operation]],
+    ) -> tuple[set[int], set[int]]:
+        """Classify each ``RuntimeClassicalExpr`` by where it must execute.
+
+        A runtime expression (a measurement-derived classical op lowered by
+        ``ClassicalLoweringPass``) can be consumed by two different worlds:
+
+        - **In-circuit**: its result feeds a quantum / hybrid operation —
+          in practice a runtime ``IfOperation`` / ``WhileOperation``
+          condition — or another in-circuit runtime expression. Such an
+          expr must ride inside the quantum segment so the backend emits
+          it as a native classical expression.
+        - **Host-side**: its result is a block output or is read by
+          classical post-processing (a classical-segment op, classical
+          control flow, or another host-evaluated expression). Such an
+          expr must land in a classical segment so ``ClassicalExecutor``
+          computes its value; stranded in a quantum segment it would be
+          silently dropped and the orchestrator would surface ``None``.
+
+        Both sets are transitive closures over the expression dataflow: an
+        expr feeding an in-circuit expr is itself in-circuit (the backend
+        expression tree needs its operands emitted too), and an expr read
+        by a host-evaluated expr must itself be host-evaluated (the host
+        evaluation needs its operand values). An expr may be in both sets
+        (e.g. used as an if condition *and* returned); segmentation then
+        places it in both segments, which is safe because the op is pure.
+
+        Args:
+            operations (list[Operation]): Top-level operations of the block.
+            consumers (dict[str, list[Operation]]): ``value_uuid ->
+                [consumer, ...]`` map over the whole op tree, as built by
+                :meth:`_build_consumers_map`.
+
+        Returns:
+            tuple[set[int], set[int]]: ``(quantum_consumed, host_evaluated)``
+                — ``id()`` sets of the runtime expressions that must be
+                placed in the quantum segment and evaluated host-side,
+                respectively.
+        """
+        exprs = [
+            op
+            for op in self._collect_classical_ops(operations)
+            if isinstance(op, RuntimeClassicalExpr)
+        ]
+        if not exprs:
+            return set(), set()
+
+        # Ops that execute host-side when reached: every top-level op whose
+        # effective kind is CLASSICAL, plus everything nested inside one.
+        # Consumers nested inside a QUANTUM-effective control op (e.g. the
+        # phi merges of a runtime if) execute in-circuit, not host-side,
+        # and must not drag their operand expressions into a classical
+        # segment.
+        top_level_ids = {id(op) for op in operations}
+        host_scope_ids: set[int] = set()
+        for top in operations:
+            if self._effective_kind(top) == OperationKind.CLASSICAL:
+                host_scope_ids |= self._collect_op_ids([top])
+
+        def result_consumers(op: Operation) -> list[Operation]:
+            """Collect the operations reading any result of ``op``.
+
+            Args:
+                op (Operation): The producer operation.
+
+            Returns:
+                list[Operation]: Consumers of ``op``'s results (``op``
+                    itself excluded).
+            """
+            found: list[Operation] = []
+            for result in op.results:
+                if isinstance(result, ValueBase):
+                    found.extend(
+                        c for c in consumers.get(result.uuid, ()) if c is not op
+                    )
+            return found
+
+        # In-circuit set: seeded by consumption from a quantum / hybrid op
+        # (a runtime if/while's effective kind is QUANTUM when its body
+        # holds gates); grown backward through expression chains until
+        # stable, so every operand-expr of an emitted expr is emitted too.
+        quantum_consumed: set[int] = set()
+        changed = True
+        while changed:
+            changed = False
+            for op in exprs:
+                if id(op) in quantum_consumed:
+                    continue
+                for consumer in result_consumers(op):
+                    if self._effective_kind(consumer) in (
+                        OperationKind.QUANTUM,
+                        OperationKind.HYBRID,
+                    ) or (
+                        isinstance(consumer, RuntimeClassicalExpr)
+                        and id(consumer) in quantum_consumed
+                    ):
+                        quantum_consumed.add(id(op))
+                        changed = True
+                        break
+
+        # Host-side set: an expr that will execute host-side (a top-level
+        # expr not consumed in-circuit, or an expr nested in host-executing
+        # classical control flow) must be evaluated by the executor; a
+        # block output must be available host-side even when also consumed
+        # in-circuit. Grown backward through expression chains and
+        # host-executing non-expression consumers until stable.
+        host_evaluated: set[int] = {
+            id(op)
+            for op in exprs
+            if (
+                (id(op) in top_level_ids or id(op) in host_scope_ids)
+                and id(op) not in quantum_consumed
+            )
+            or self._produces_block_output(op)
+        }
+        changed = True
+        while changed:
+            changed = False
+            for op in exprs:
+                if id(op) in host_evaluated:
+                    continue
+                for consumer in result_consumers(op):
+                    if isinstance(consumer, RuntimeClassicalExpr):
+                        needs_host = id(consumer) in host_evaluated
+                    else:
+                        needs_host = id(consumer) in host_scope_ids
+                    if needs_host:
+                        host_evaluated.add(id(op))
+                        changed = True
+                        break
+
+        return quantum_consumed, host_evaluated
+
+    def _collect_op_ids(self, operations: list[Operation]) -> set[int]:
+        """Collect ``id()`` of every op in the tree, recursing control flow.
+
+        Args:
+            operations (list[Operation]): Operations to walk (including
+                each op's nested control-flow bodies).
+
+        Returns:
+            set[int]: ``id()`` of every operation reachable from
+                ``operations``.
+        """
+        ids: set[int] = set()
+
+        class IdCollector(ControlFlowVisitor):
+            """Record the identity of every visited operation."""
+
+            def visit_operation(self, op: Operation) -> None:
+                """Add ``op``'s identity to the enclosing set.
+
+                Args:
+                    op (Operation): The operation being visited.
+
+                Returns:
+                    None: Mutates the enclosing ``ids`` set in place.
+                """
+                ids.add(id(op))
+
+        IdCollector().visit_operations(operations)
+        return ids
 
     def _collect_classical_ops(self, operations: list[Operation]) -> list[Operation]:
         """Collect every classical-kind op, recursing into control-flow bodies.
