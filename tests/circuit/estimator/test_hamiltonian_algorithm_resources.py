@@ -8,9 +8,14 @@ import sympy as sp
 import qamomile.observable as qm_o
 from qamomile.resource_estimation import (
     BlockEncodingResource,
+    FTQCActiveVolumeResourceEstimate,
     FTQCCostModel,
+    FTQCPhysicalResourceEstimate,
+    GateCount,
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
+    PauliHamiltonianResource,
+    ResourceEstimate,
     ResourceQuantity,
     SurfaceCodeCostModel,
     TrotterQPEWorkload,
@@ -243,15 +248,18 @@ def test_trotter_workload_exposes_weight_concentration_drivers():
     # The toy Hamiltonian has lambda_norm = |1| + |2| = 3. The
     # unitary-weight factor reduces this to 1, and representation error 1/5
     # leaves algorithmic precision 4/5, so QPE iterations are 1 / (4/5).
+    # Each iteration runs 10 Pauli rotations, so 25/2 rotations in total.
     assert sp.Abs(workload.effective_lambda_norm - 1) < sp.Float("1e-12")
     assert sp.Abs(workload_values["effective_lambda_norm"] - 1) < sp.Float("1e-12")
     assert workload_values["algorithmic_precision"] == sp.Rational(4, 5)
     assert sp.Abs(
         logical.gates.oracle_calls["qpe_iterations"] - sp.Rational(5, 4)
     ) < sp.Float("1e-12")
-    assert logical.gates.rotation_gates == 10
+    assert sp.Abs(logical.gates.rotation_gates - sp.Rational(25, 2)) < sp.Float("1e-12")
     assert sp.Abs(logical.gates.t_gates - sp.Rational(175, 2)) < sp.Float("1e-12")
-    assert logical_values["pauli_rotations"] == 10
+    assert sp.Abs(logical_values["pauli_rotations"] - sp.Rational(25, 2)) < sp.Float(
+        "1e-12"
+    )
     assert logical.qubits == 3
 
 
@@ -278,7 +286,7 @@ def test_trotter_workload_builds_from_reported_effective_lambda():
     )
     assert sp.Abs(workload.effective_lambda_norm - 2) < sp.Float("1e-12")
     assert sp.Abs(logical.gates.oracle_calls["qpe_iterations"] - 2) < sp.Float("1e-12")
-    assert sp.Abs(logical.gates.rotation_gates - 21) < sp.Float("1e-12")
+    assert sp.Abs(logical.gates.rotation_gates - 42) < sp.Float("1e-12")
     assert sp.Abs(logical.gates.t_gates - 462) < sp.Float("1e-12")
 
 
@@ -302,8 +310,8 @@ def test_trotter_workload_builds_from_openfermion_effective_lambda():
     assert sp.simplify(workload.effective_lambda_norm - 1) == 0
     assert logical.qubits == 4
     assert sp.simplify(logical.gates.oracle_calls["qpe_iterations"] - 1) == 0
-    assert logical.gates.rotation_gates == 10
-    assert sp.simplify(logical.gates.t_gates - 70) == 0
+    assert sp.Abs(logical.gates.rotation_gates - 10) < sp.Float("1e-12")
+    assert sp.Abs(logical.gates.t_gates - 70) < sp.Float("1e-12")
 
 
 def test_trotter_openfermion_workload_rejects_conflicting_weight_inputs():
@@ -345,7 +353,7 @@ def test_trotter_qpe_from_hamiltonian_summary():
 
     assert estimate.qubits == 3
     assert sp.simplify(estimate.gates.oracle_calls["qpe_iterations"] - 3) == 0
-    assert sp.simplify(estimate.gates.rotation_gates - 12) == 0
+    assert sp.simplify(estimate.gates.rotation_gates - 36) == 0
     assert sp.simplify(estimate.gates.t_gates - 180) == 0
 
 
@@ -441,6 +449,58 @@ def test_qubitized_qpe_adds_qpe_register_qubits_to_logical_footprint():
     assert estimate.qubits == 10
     assert estimate.gates.oracle_calls["qpe_iterations"] == 4
     assert estimate.gates.multi_qubit == 40
+
+
+def test_workload_reports_sparsity_separately_from_term_count():
+    """Explicit sparsity never shadows the true Pauli term count."""
+    summary = PauliHamiltonianResource(
+        n_qubits=20,
+        n_pauli_terms=100,
+        lambda_norm=50,
+        max_locality=4,
+    )
+    workload = HamiltonianQPEWorkload(
+        hamiltonian=summary,
+        walk_cost_toffoli=10,
+        representation=HamiltonianRepresentation.SPARSE_PAULI_LCU,
+        sparsity=10,
+    )
+
+    values = workload.resource_values()
+
+    assert values["n_pauli_terms"] == 100
+    assert values["sparsity"] == 10
+
+    rows = compare_resource_values(
+        summary,
+        workload,
+        quantities=(ResourceQuantity.N_PAULI_TERMS,),
+    )
+    assert rows[0].ratio == 1
+
+
+def test_physical_estimates_require_architecture_values():
+    """Directly constructed FTQC estimates validate architecture keys early."""
+    logical = ResourceEstimate(qubits=sp.Integer(3), gates=GateCount.zero())
+
+    with pytest.raises(ValueError, match="logical_cycle_time_seconds"):
+        FTQCPhysicalResourceEstimate(
+            logical=logical,
+            logical_depth=sp.Integer(10),
+            non_clifford_count=sp.Integer(5),
+            physical_qubits=sp.Integer(100),
+            runtime_seconds=sp.Integer(1),
+            architecture_values={},
+        )
+    with pytest.raises(ValueError, match="active_volume_throughput_per_second"):
+        FTQCActiveVolumeResourceEstimate(
+            logical=logical,
+            logical_gate_count=sp.Integer(10),
+            non_clifford_count=sp.Integer(2),
+            active_volume=sp.Integer(30),
+            runtime_seconds=sp.Integer(3),
+            architecture_values={},
+        )
 
 
 def test_workload_rejects_negative_representation_error():

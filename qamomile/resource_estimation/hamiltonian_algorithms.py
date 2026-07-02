@@ -9,12 +9,16 @@ from typing import Any
 import sympy as sp
 
 from qamomile.circuit.estimator import GateCount, ResourceEstimate
+from qamomile.resource_estimation._common import (
+    _as_expr,
+    _SympyLike,
+    _validate_nonnegative,
+    _validate_positive,
+)
 from qamomile.resource_estimation.hamiltonian import (
     PauliHamiltonianResource,
     summarize_openfermion_qubit_operator,
 )
-
-_SympyLike = sp.Expr | int | float
 
 
 class HamiltonianRepresentation(enum.StrEnum):
@@ -197,9 +201,14 @@ class HamiltonianQPEWorkload:
     def resource_values(self) -> dict[str, sp.Expr]:
         """Return canonical resource values exposed by the workload.
 
+        The Hamiltonian's ``n_pauli_terms`` is always the true term count of
+        the problem; the representation-level term count assumed by sparse
+        methods is reported separately under the ``sparsity`` key.
+
         Returns:
             dict[str, sp.Expr]: Hamiltonian summary values plus algorithm
-            workload parameters.
+            workload parameters, including ``sparsity`` when the workload
+            carries a sparse-method term count.
         """
         values = self.hamiltonian.resource_values()
         values["walk_cost_toffoli"] = _as_expr(
@@ -215,7 +224,7 @@ class HamiltonianQPEWorkload:
             "qpe_register_qubits",
         )
         if self.effective_sparsity is not None:
-            values["n_pauli_terms"] = self.effective_sparsity
+            values["sparsity"] = self.effective_sparsity
         return values
 
     def resource_values_for_precision(
@@ -894,6 +903,11 @@ def estimate_trotter_qpe_resources(
 ) -> ResourceEstimate:
     """Estimate logical single-ancilla Trotter-QPE resources.
 
+    The returned ``rotation_gates`` counts every Pauli rotation executed
+    across all QPE iterations, matching the total-count semantics of the
+    other ``GateCount`` fields, so ``t_gates == rotation_gates *
+    rotation_synthesis_t_gates`` always holds.
+
     Args:
         n_qubits (sp.Expr | int): Number of encoded Hamiltonian qubits.
         n_pauli_terms (sp.Expr | int): Number of Pauli terms.
@@ -956,11 +970,11 @@ def estimate_trotter_qpe_resources(
 
     effective_lambda = sp.simplify(lambda_expr * weight_factor)
     qpe_iterations = sp.simplify(effective_lambda / precision_expr)
-    pauli_rotations = sp.simplify(
+    rotations_per_iteration = sp.simplify(
         samples_expr * steps_expr * terms_expr * randomized_factor
     )
-    logical_depth = sp.simplify(qpe_iterations * pauli_rotations)
-    t_gates = sp.simplify(logical_depth * rotation_t)
+    pauli_rotations = sp.simplify(qpe_iterations * rotations_per_iteration)
+    t_gates = sp.simplify(pauli_rotations * rotation_t)
     return _build_logical_estimate(
         logical_qubits=logical_expr,
         total_gates=t_gates,
@@ -1293,50 +1307,3 @@ def _normalize_representation(
         raise ValueError(
             f"Unknown Hamiltonian representation {representation!r}; valid: {valid}."
         ) from exc
-
-
-def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
-    """Convert a numeric or symbolic value to a SymPy expression.
-
-    Args:
-        value (sp.Expr | int | float): Value to convert.
-        name (str): Field name used in error messages.
-
-    Returns:
-        sp.Expr: Converted SymPy expression.
-
-    Raises:
-        TypeError: If ``value`` cannot be sympified.
-    """
-    try:
-        return sp.sympify(value)
-    except (TypeError, sp.SympifyError) as exc:
-        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
-
-
-def _validate_positive(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is positive when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is not positive.
-    """
-    if expr.is_positive is False:
-        raise ValueError(f"{name} must be positive.")
-
-
-def _validate_nonnegative(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is nonnegative when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is negative.
-    """
-    if expr.is_nonnegative is False:
-        raise ValueError(f"{name} must be nonnegative.")

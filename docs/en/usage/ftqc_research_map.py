@@ -155,6 +155,9 @@ assert quantity_layers["runtime_seconds"] == qre.ResourceCategory.PHYSICAL
 # lifts.
 # It should not freeze a report format while the modeling surface is still
 # settling.
+# Sparse and compressed methods report their assumed term count under the
+# dedicated `sparsity` quantity, kept separate from the problem-level
+# `n_pauli_terms`.
 # For now, a reader can keep the paper map as ordinary data and feed the
 # selected quantities into `compare_resource_values()` or the workflow in
 # [FTQC resource workflow](ftqc_resource_workflow).
@@ -170,6 +173,7 @@ foundation_surfaces = {
     "qubitized QPE workloads": [
         "qpe_iterations",
         "walk_cost_toffoli",
+        "sparsity",
         "logical_qubits",
         "non_clifford_count",
     ],

@@ -145,6 +145,7 @@ assert quantity_layers["runtime_seconds"] == qre.ResourceCategory.PHYSICAL
 #
 # foundation layerは、quantity、workload、roughなphysical liftを公開します。
 # modeling surfaceがまだ固まっていない段階で、report formatまで固定する必要はありません。
+# sparse/compressed手法が仮定する項数は、problemレベルの`n_pauli_terms`とは別の専用quantityである`sparsity`として報告されます。
 # 今はpaper mapを通常のdataとして保ち、選んだquantityを`compare_resource_values()`または[FTQCリソースワークフロー](ftqc_resource_workflow)へ渡せば十分です。
 
 # %%
@@ -158,6 +159,7 @@ foundation_surfaces = {
     "qubitized QPE workloads": [
         "qpe_iterations",
         "walk_cost_toffoli",
+        "sparsity",
         "logical_qubits",
         "non_clifford_count",
     ],
