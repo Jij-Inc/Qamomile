@@ -137,19 +137,35 @@ class ValueResolver:
         if root_array is None:
             return None
 
-        # Prefer const_array metadata because bound Vector inputs created
-        # by the frontend keep their compile-time payload on the root
-        # ArrayValue itself. Slice views intentionally walk back to the
-        # root before this lookup so view-local indices address the same
-        # compile-time container the user originally bound.
-        container = root_array.get_const_array()
+        # A folded classical element store records the post-store array
+        # (same UUID, updated ``const_array``) in the context map; prefer
+        # it so element reads observe the store instead of any stale
+        # metadata or name-based fallback below.
+        container = None
+        root_uuid = getattr(root_array, "uuid", None)
+        context_parent = self._context.get(root_uuid) if root_uuid else None
+        if isinstance(context_parent, ArrayValue):
+            container = context_parent.get_const_array()
+        if container is None:
+            # Prefer const_array metadata because bound Vector inputs created
+            # by the frontend keep their compile-time payload on the root
+            # ArrayValue itself. Slice views intentionally walk back to the
+            # root before this lookup so view-local indices address the same
+            # compile-time container the user originally bound.
+            container = root_array.get_const_array()
         if container is None:
             # Fall back to explicit bindings for callers that resolve an
             # element Value against a separate binding map instead of an
-            # ArrayValue carrying const_array metadata.
+            # ArrayValue carrying const_array metadata.  The name-keyed
+            # binding describes the *initial* (version-0) contents of a
+            # kernel argument; a later SSA version (produced by a classical
+            # element store) must not resolve to it — staying unresolved is
+            # a conservative, loud outcome, while a stale hit would bake
+            # pre-store contents into the compiled program silently.
             parent_name = getattr(root_array, "name", None)
             parent_uuid = getattr(root_array, "uuid", None)
-            if parent_name in self._bindings:
+            parent_version = getattr(root_array, "version", 0)
+            if parent_name in self._bindings and parent_version == 0:
                 container = self._bindings[parent_name]
             elif parent_uuid in self._bindings:
                 container = self._bindings[parent_uuid]
