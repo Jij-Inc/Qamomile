@@ -338,6 +338,73 @@ class ClassicalExecutor:
         results[state_key] = updated
         results[result_value.uuid] = updated
 
+    def _materialize_loop_store_defaults(
+        self,
+        operations: list[Operation],
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Materialize zero-iteration defaults for loop-carried array stores.
+
+        Store operations inside a traced loop produce SSA result values
+        even when the loop executes zero times at runtime.  Python
+        semantics leave the array unchanged in that case, so each store
+        result in the loop body must resolve to the current pre-loop
+        contents until an executed iteration overwrites it.
+
+        Args:
+            operations (list[Operation]): Loop body operations to scan,
+                including nested control-flow bodies.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map seeded with
+                default store outputs.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Raises:
+            ExecutionError: If a store's source array cannot be resolved.
+        """
+        for op in operations:
+            if isinstance(op, StoreArrayElementOperation):
+                self._materialize_store_default(op, context, results, scoped_locals)
+            elif isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    self._materialize_loop_store_defaults(
+                        body, context, results, scoped_locals
+                    )
+
+    def _materialize_store_default(
+        self,
+        op: StoreArrayElementOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Record a store result as the current source-array contents.
+
+        Args:
+            op (StoreArrayElementOperation): Store whose result should
+                default to the pre-loop array state.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map updated under
+                both the store result UUID and the logical running-state key.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Raises:
+            ExecutionError: If the source array cannot be resolved.
+        """
+        result_value = op.results[0]
+        state_key = f"__store_array_state__:{result_value.logical_id}"
+        base = (
+            results[state_key]
+            if state_key in results
+            else self._resolve_store_base(op.array, context, results, scoped_locals)
+        )
+        results[state_key] = base
+        results[result_value.uuid] = base
+
     def _resolve_store_base(
         self,
         array_value: ArrayValue,
@@ -411,6 +478,9 @@ class ClassicalExecutor:
         if step == 0:
             raise ExecutionError("ForOperation step must not be zero")
 
+        self._materialize_loop_store_defaults(
+            op.operations, context, results, scoped_locals
+        )
         for loop_value in range(start, stop, step):
             loop_scope = scoped_locals.copy()
             loop_scope[op.loop_var] = loop_value
@@ -429,6 +499,9 @@ class ClassicalExecutor:
 
         iterable = self._get_iterable(op.operands[0], context, results, scoped_locals)
 
+        self._materialize_loop_store_defaults(
+            op.operations, context, results, scoped_locals
+        )
         for key, value in iterable:
             loop_scope = scoped_locals.copy()
             self._bind_for_items_key(loop_scope, op, key)

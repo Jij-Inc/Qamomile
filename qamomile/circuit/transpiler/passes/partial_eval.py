@@ -73,4 +73,10 @@ class PartialEvaluationPass(Pass[Block, Block]):
         # linearity check by ``StripSliceArrayOpsPass`` so segmentation
         # still sees a classical-op-free quantum segment stream.
         folded = ConstantFoldingPass(self._bindings, strip_slice_ops=False).run(input)
-        return CompileTimeIfLoweringPass(self._bindings).run(folded)
+        lowered = CompileTimeIfLoweringPass(self._bindings).run(folded)
+
+        # Compile-time-if lowering can hoist a live branch's store out of
+        # an IfOperation body. Run constant folding again so stores that
+        # were previously nested become top-level fold candidates before
+        # segmentation/emit decides whether they belong to a quantum segment.
+        return ConstantFoldingPass(self._bindings, strip_slice_ops=False).run(lowered)
