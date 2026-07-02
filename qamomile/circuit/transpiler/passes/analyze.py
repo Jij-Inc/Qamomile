@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -19,6 +21,10 @@ from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.value import Value, ValueBase
 from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
+    evaluate_classical_op_concrete,
+    resolve_compile_time_condition,
+)
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 
 # ---------------------------------------------------------------------------
@@ -152,7 +158,10 @@ def find_measurement_derived_values(
     return derived
 
 
-def reject_self_referential_loop_stores(operations: list[Operation]) -> None:
+def reject_self_referential_loop_stores(
+    operations: list[Operation],
+    bindings: dict[str, Any] | None = None,
+) -> None:
     """Reject in-loop classical element stores that read the same array.
 
     A loop body is traced once, so a ``StoreArrayElementOperation``
@@ -164,6 +173,15 @@ def reject_self_referential_loop_stores(operations: list[Operation]) -> None:
     (e.g. ``vals[i] = vals[0] + 1`` would write the same folded value
     every iteration).  Such stores are rejected at compile time.
 
+    ``IfOperation``s are classified with the same condition resolution
+    ``CompileTimeIfLoweringPass`` uses (via ``bindings``): a compile-time
+    condition contributes only its taken branch to the scan (a dead
+    branch is eliminated by the lowering pass, so a self-referential
+    store inside it never executes), while a runtime condition's
+    branches are skipped entirely — every store inside a runtime
+    if branch is rejected by ``AnalyzePass._reject_stores_in_if_branches``
+    regardless of self-reference.
+
     Exposed at module scope because it must run from two passes:
     ``PartialEvaluationPass`` calls it *before* constant folding (folding
     a bound element read to a constant erases the ``parent_array``
@@ -174,29 +192,106 @@ def reject_self_referential_loop_stores(operations: list[Operation]) -> None:
     Args:
         operations (list[Operation]): Operations to scan.  Recurses
             through all control flow; every loop at any nesting depth is
-            checked against all stores anywhere inside its body.
+            checked against the stores inside its body (if branches per
+            the classification above).
+        bindings (dict[str, Any] | None): Compile-time parameter bindings
+            used to resolve ``IfOperation`` conditions, matching what
+            ``CompileTimeIfLoweringPass`` will later resolve.  Defaults
+            to None (no bindings): only constant conditions resolve and
+            all others are treated as runtime — correct for the
+            ``AnalyzePass`` safety-net call, where compile-time ifs are
+            already lowered away and any store left inside an if branch
+            was already rejected.
 
     Raises:
         ValidationError: If a store inside a loop transitively reads an
             element of the same logical array it writes.
     """
+    resolved_bindings = bindings or {}
 
-    def flatten_ops(ops: list[Operation]) -> list[Operation]:
+    def prune_compile_time_ifs(
+        ops: list[Operation],
+        concrete_values: dict[str, Any],
+    ) -> list[Operation]:
+        """Replace compile-time-decidable ``IfOperation``s by their taken branch.
+
+        Mirrors ``CompileTimeIfLoweringPass``: conditions are resolved
+        with the shared ``resolve_compile_time_condition`` /
+        ``evaluate_classical_op_concrete`` helpers so the taken / dead /
+        runtime classification here cannot disagree with the branch the
+        lowering pass will actually keep.  For a resolved condition the
+        taken branch's operations are inlined (recursively pruned) and
+        each ``PhiOp`` is reduced to its selected source operand, so
+        phi-mediated dataflow out of the branch stays visible to the
+        dependency scan without dead-branch edges.  Runtime
+        ``IfOperation``s are kept intact: their branch stores are
+        excluded from the store scan below, while their dataflow keeps
+        feeding the dependency graph exactly as before.
+
+        Args:
+            ops (list[Operation]): Operations to prune, in program order.
+            concrete_values (dict[str, Any]): UUID-keyed concrete
+                classical-op results accumulated along the walk.
+                Updated in place (nested non-if bodies get a copy,
+                matching the lowering pass's scoping).
+
+        Returns:
+            list[Operation]: The pruned view of ``ops``.
+        """
+        pruned: list[Operation] = []
+        for op in ops:
+            evaluate_classical_op_concrete(op, concrete_values, resolved_bindings)
+            if isinstance(op, IfOperation):
+                taken = resolve_compile_time_condition(
+                    op.condition, concrete_values, resolved_bindings
+                )
+                if taken is None:
+                    pruned.append(op)
+                    continue
+                branch = op.true_operations if taken else op.false_operations
+                pruned.extend(prune_compile_time_ifs(branch, concrete_values))
+                for phi in op.phi_ops:
+                    if isinstance(phi, PhiOp):
+                        selected = phi.true_value if taken else phi.false_value
+                        pruned.append(dataclasses.replace(phi, operands=[selected]))
+                continue
+            if isinstance(op, HasNestedOps):
+                op = op.rebuild_nested(
+                    [
+                        prune_compile_time_ifs(body, dict(concrete_values))
+                        for body in op.nested_op_lists()
+                    ]
+                )
+            pruned.append(op)
+        return pruned
+
+    def flatten_ops(
+        ops: list[Operation],
+        *,
+        into_if_branches: bool = True,
+    ) -> list[Operation]:
         """Flatten operations recursively through nested control flow.
 
         Args:
             ops (list[Operation]): Operations to flatten.
+            into_if_branches (bool): When ``True`` (default), recurse
+                into ``IfOperation`` bodies too.  ``False`` skips them —
+                used to collect the loops and stores this check scans,
+                since stores inside a (runtime) if branch are rejected
+                by ``AnalyzePass._reject_stores_in_if_branches`` instead.
 
         Returns:
-            list[Operation]: All operations at every nesting depth,
-                including the control flow ops themselves.
+            list[Operation]: All reachable operations, including the
+                control flow ops themselves.
         """
         flat: list[Operation] = []
         for op in ops:
             flat.append(op)
+            if not into_if_branches and isinstance(op, IfOperation):
+                continue
             if isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
-                    flat.extend(flatten_ops(body))
+                    flat.extend(flatten_ops(body, into_if_branches=into_if_branches))
         return flat
 
     def register_value(value: ValueBase, table: dict[str, ValueBase]) -> None:
@@ -245,20 +340,26 @@ def reject_self_referential_loop_stores(operations: list[Operation]) -> None:
         return False
 
     def check_loop_body(body_ops: list[Operation]) -> None:
-        """Reject self-referential stores anywhere inside one loop body.
+        """Reject self-referential stores inside one (pruned) loop body.
 
         Builds a dependency graph restricted to the loop body (reads
         performed before the loop are loop-invariant and fold correctly,
         so they must not trigger a rejection) and BFS-walks it from each
-        store's value and index operands.
+        store's value and index operands.  The graph and value table
+        cover the full body — including surviving runtime-if internals,
+        so a store after an if still sees phi-mediated reads — while the
+        store scan itself skips if branches (those stores are rejected
+        by ``AnalyzePass._reject_stores_in_if_branches``).
 
         Args:
             body_ops (list[Operation]): The loop's top-level body
-                operations.
+                operations, already pruned of compile-time-decidable
+                if branches.
 
         Raises:
-            ValidationError: If a store's value or index transitively
-                reads an element of the array the store writes.
+            ValidationError: If a scanned store's value or index
+                transitively reads an element of the array the store
+                writes.
         """
         dependency_graph = build_dependency_graph(body_ops)
         flat_ops = flatten_ops(body_ops)
@@ -268,7 +369,7 @@ def reject_self_referential_loop_stores(operations: list[Operation]) -> None:
             for value in (*op.all_input_values(), *op.results):
                 register_value(value, value_table)
 
-        for op in flat_ops:
+        for op in flatten_ops(body_ops, into_if_branches=False):
             if not isinstance(op, StoreArrayElementOperation):
                 continue
             written_logical = op.results[0].logical_id
@@ -303,7 +404,8 @@ def reject_self_referential_loop_stores(operations: list[Operation]) -> None:
                         worklist.append(parent.uuid)
                 worklist.extend(dependency_graph.get(current, ()))
 
-    for op in flatten_ops(operations):
+    pruned_operations = prune_compile_time_ifs(operations, {})
+    for op in flatten_ops(pruned_operations, into_if_branches=False):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             check_loop_body(
                 [body_op for body in op.nested_op_lists() for body_op in body]
@@ -442,7 +544,12 @@ class AnalyzePass(Pass[Block, Block]):
         Thin wrapper for the module-level
         :func:`reject_self_referential_loop_stores` so
         ``PartialEvaluationPass`` can reuse the same check without
-        instantiating ``AnalyzePass``.
+        instantiating ``AnalyzePass``.  Called without bindings: by this
+        stage ``CompileTimeIfLoweringPass`` has already eliminated
+        compile-time ifs, so any surviving ``IfOperation`` classifies as
+        runtime and its branches are skipped — safe, because
+        :meth:`_reject_stores_in_if_branches` (run just before this
+        check) already rejected every store inside an if branch.
 
         Args:
             operations (list[Operation]): Operations to scan recursively.

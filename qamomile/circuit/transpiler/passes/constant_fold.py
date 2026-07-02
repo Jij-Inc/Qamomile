@@ -99,7 +99,30 @@ class ConstantFoldingPass(Pass[Block, Block]):
         folded_values: dict[str, Value],
         output_uuids: set[str] | None = None,
     ) -> list[Operation]:
-        """Process operations, folding constant BinOps."""
+        """Fold constant BinOps and top-level classical element stores.
+
+        Constant ``BinOp``s are removed from the stream and recorded in
+        ``folded_values`` for operand/result substitution.  Top-level
+        ``StoreArrayElementOperation``s whose inputs are all compile-time
+        resolvable are folded into updated ``const_array`` metadata on
+        the result; the folded store is stripped unless its result is a
+        block output (returned arrays keep the runtime store so the
+        executor materializes the final contents).  All other operations
+        get folded values substituted into their operands and results.
+
+        Args:
+            operations (list[Operation]): Operations to process.
+                Recurses through control-flow bodies; stores inside a
+                loop body never fold (they execute once per iteration).
+            folded_values (dict[str, Value]): Map from folded value
+                UUIDs to their constant replacements.  Updated in place.
+            output_uuids (set[str] | None): UUIDs of block output
+                values; a folded store producing one of these stays in
+                the IR.  Defaults to None (no outputs).
+
+        Returns:
+            list[Operation]: The transformed operation list.
+        """
         outer_self = self
         block_output_uuids = output_uuids or set()
 
@@ -277,7 +300,15 @@ class ConstantFoldingPass(Pass[Block, Block]):
             return None
 
         container = array_value.get_const_array()
-        if container is None:
+        if container is None and getattr(array_value, "version", 0) == 0:
+            # Name-keyed bindings (and parameter-name bindings) describe
+            # the *initial* (version-0) contents of a kernel argument.  A
+            # later SSA version — produced by a prior store that did NOT
+            # fold, so its result carries no ``const_array`` — must not
+            # fold against that stale pre-store snapshot.  Leaving
+            # ``container`` unresolved keeps the store as a correct
+            # runtime operation.  Mirrors the version guard in
+            # ``value_resolver._resolve_array_element``.
             name = array_value.name
             if name and name in self._bindings:
                 container = self._bindings[name]

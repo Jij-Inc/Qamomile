@@ -426,6 +426,55 @@ def test_loop_self_referential_store_via_arithmetic_rejected():
         )
 
 
+@qmc.qkernel
+def loop_conditional_self_referential_kernel(
+    dst: qmc.Vector[qmc.UInt],
+    src: qmc.Vector[qmc.UInt],
+    n: qmc.UInt,
+    flag: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.UInt], qmc.Vector[qmc.Bit]]:
+    for i in qmc.range(n):
+        dst[i] = src[i]
+        if flag:
+            dst[i] = dst[0]
+    qs = qmc.qubit_array(1, "qs")
+    bits = qmc.measure(qs)
+    return dst, bits
+
+
+def test_loop_self_ref_in_dead_branch_allowed():
+    """A self-referential store in a compile-time-dead branch is not rejected.
+
+    With ``flag`` bound to 0 the ``if`` branch is eliminated before it can
+    execute, so the enclosed ``dst[i] = dst[0]`` never runs and the loop
+    reduces to the cross-array copy ``dst[i] = src[i]``.
+    """
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(
+        loop_conditional_self_referential_kernel,
+        bindings={"dst": [0, 0, 0], "src": [7, 8, 9], "flag": 0},
+        parameters=["n"],
+    )
+    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": 3}).result()
+    assert tuple(int(v) for v in out_vals) == (7, 8, 9)
+
+
+def test_loop_self_ref_in_live_branch_rejected():
+    """A self-referential store in a compile-time-taken branch is still rejected.
+
+    With ``flag`` bound to 1 the ``if`` branch is hoisted into the loop, so
+    the enclosed ``dst[i] = dst[0]`` is a live self-referential store and
+    must be rejected at compile time (before folding erases provenance).
+    """
+    transpiler = QiskitTranspiler()
+    with pytest.raises(ValidationError, match="same array"):
+        transpiler.transpile(
+            loop_conditional_self_referential_kernel,
+            bindings={"dst": [0, 0, 0], "src": [7, 8, 9], "flag": 1},
+            parameters=["n"],
+        )
+
+
 # ---------------------------------------------------------------------------
 # Rejected forms (loud errors instead of silent drops)
 # ---------------------------------------------------------------------------

@@ -58,7 +58,12 @@ class PartialEvaluationPass(Pass[Block, Block]):
         # ConstantFoldingPass folds bound element reads to plain constants,
         # which both erases the parent-array provenance this check needs
         # and bakes the stale pre-loop value into every loop iteration.
-        reject_self_referential_loop_stores(input.operations)
+        # Bindings let the check resolve IfOperation conditions the same
+        # way CompileTimeIfLoweringPass will: a store inside a
+        # compile-time-dead branch is not rejected (the branch is about
+        # to be eliminated), while a compile-time-taken branch's store is
+        # still caught here, pre-fold.
+        reject_self_referential_loop_stores(input.operations, self._bindings)
 
         # Keep ``SliceArrayOperation`` nodes through partial_eval so
         # the downstream ``SliceBorrowCheckPass`` can use them as
