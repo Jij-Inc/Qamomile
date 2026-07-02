@@ -13,7 +13,15 @@ from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+    CompOpKind,
+    CondOp,
+    CondOpKind,
+    NotOp,
+)
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
@@ -61,6 +69,15 @@ if TYPE_CHECKING:
 
 
 _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
+
+
+# String markers appended to a node's scope path for the true / else branch of
+# an ``IfOperation`` (see ``_build_vif`` and the layout engine's unfolded-if
+# placement). They are the only non-integer scope-path elements any node key
+# carries, so their presence uniquely identifies a node nested inside an
+# if/else branch — used to keep mid-circuit measurements from terminating a
+# wire that the other branch never measured.
+_IF_BRANCH_SCOPE_KEYS: frozenset[str] = frozenset({"true", "false"})
 
 
 # Single source of truth for the TeX rendering of every built-in
@@ -140,6 +157,35 @@ _BUILTIN_TEX_LABELS: dict[str, str] = {
 # rendered label reads ``_phase(theta=π/2)`` rather than
 # ``_phase(ctrl_param_theta=π/2)``.
 _CTRL_PARAM_PREFIX: str = "ctrl_param_"
+
+
+# Infix symbols for spelling out an ``IfOperation`` condition (see
+# ``CircuitAnalyzer._format_condition_expr``).  A symbolic ``if`` whose
+# condition is not compile-time resolved is drawn with its predicate
+# rendered as source, e.g. ``if flag == 1:`` rather than ``if cond:``.
+# ``BinOpKind.MIN`` is intentionally absent — it has no infix form and
+# falls back to the anonymous-condition label.
+_COMP_OP_SYMBOLS: dict[CompOpKind, str] = {
+    CompOpKind.EQ: "==",
+    CompOpKind.NEQ: "!=",
+    CompOpKind.LT: "<",
+    CompOpKind.LE: "<=",
+    CompOpKind.GT: ">",
+    CompOpKind.GE: ">=",
+}
+_COND_OP_SYMBOLS: dict[CondOpKind, str] = {
+    CondOpKind.AND: "and",
+    CondOpKind.OR: "or",
+}
+_BIN_OP_SYMBOLS: dict[BinOpKind, str] = {
+    BinOpKind.ADD: "+",
+    BinOpKind.SUB: "-",
+    BinOpKind.MUL: "*",
+    BinOpKind.DIV: "/",
+    BinOpKind.FLOORDIV: "//",
+    BinOpKind.MOD: "%",
+    BinOpKind.POW: "**",
+}
 
 
 class CircuitAnalyzer:
@@ -958,10 +1004,18 @@ class CircuitAnalyzer:
                 )
 
             if isinstance(op, IfOperation):
-                raise NotImplementedError(
-                    "Circuit visualization does not yet support IfOperation. "
-                    "This feature will be added in a future release."
+                node = self._build_vif(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                    body_operations=ops,
                 )
+                result.append(node)
+                continue
 
             if isinstance(op, ForItemsOperation):
                 node = self._build_vfor_items(
@@ -1074,6 +1128,27 @@ class CircuitAnalyzer:
 
         return result
 
+    @staticmethod
+    def _node_key_in_if_branch(node_key: tuple) -> bool:
+        """Whether a node sits inside an if/else branch scope.
+
+        If-branch scopes are tagged with the ``"true"`` / ``"false"`` string
+        markers in the node key (see ``_build_vif`` and the layout engine's
+        unfolded-if placement). No other scope kind uses string markers, so
+        their presence uniquely identifies an if-branch nesting.
+
+        Args:
+            node_key (tuple): The node's scope key, of the form
+                ``(*scope_path, id(op))``.
+
+        Returns:
+            bool: True if any element of ``node_key`` is an if-branch marker,
+                meaning the node is nested inside a true/else branch.
+        """
+        return any(
+            isinstance(part, str) and part in _IF_BRANCH_SCOPE_KEYS for part in node_key
+        )
+
     def _build_vgate(
         self,
         op: Operation,
@@ -1118,6 +1193,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
                 kind=VGateKind.MEASURE,
+                terminates_wire=not self._node_key_in_if_branch(node_key),
             )
 
         if isinstance(op, MeasureVectorOperation):
@@ -1135,6 +1211,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
+                terminates_wire=not self._node_key_in_if_branch(node_key),
             )
 
         if isinstance(op, MeasureQFixedOperation):
@@ -1165,6 +1242,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=self.style.gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
+                terminates_wire=not self._node_key_in_if_branch(node_key),
             )
 
         if isinstance(op, CallBlockOperation):
@@ -1722,23 +1800,45 @@ class CircuitAnalyzer:
         param_values: dict,
         depth: int,
         scope_path: tuple,
+        body_operations: list[Operation] | None = None,
     ) -> VFoldedBlock | VUnfoldedSequence:
         """Build a Visual IR node for an IfOperation.
 
-        Note: This method is implemented for future use but currently not called,
-        because ``_build_visual_nodes`` raises ``NotImplementedError`` for
-        ``IfOperation``.  It will be connected once If-operation visualization
-        is fully enabled.
+        Compile-time resolvable ``if``s are already lowered away by
+        ``CompileTimeIfLoweringPass`` before visual analysis runs, so this method
+        only handles conditions that survive — measurement-backed runtime
+        ``if`` and symbolic (unbound) classical ``if``. In folded mode it
+        returns a single ``VFoldedBlock`` summarizing the true branch; in
+        unfolded mode it returns a ``VUnfoldedSequence`` carrying both
+        branches for side-by-side rendering.
+
+        Args:
+            op (IfOperation): The if/else operation to visualize.
+            node_key (tuple): Stable identity key for layout/render lookup.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+            depth (int): Current nesting depth for child expansion.
+            scope_path (tuple): Path of enclosing scope keys for child node keys.
+            body_operations (list[Operation] | None): Operations of the scope
+                enclosing ``op``, used to spell the condition predicate (e.g.
+                ``flag == 1``). Defaults to None, which falls back to the
+                anonymous ``if cond:`` label.
+
+        Returns:
+            VFoldedBlock | VUnfoldedSequence: A folded summary box when
+                ``fold_loops`` is set, otherwise an unfolded two-branch
+                sequence.
         """
         affected_qubits, affected_qubits_precise = self._collect_if_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
 
-        cond = op.condition
-        cond_name = getattr(cond, "name", None)
-        if cond_name is None or self._is_internal_temp_name(cond_name):
-            cond_name = "cond"
-        condition_label = f"if {cond_name}:"
+        condition_expr = self._format_condition_expr(
+            op.condition, body_operations, param_values
+        )
+        condition_label = f"if {condition_expr}:" if condition_expr else "if cond:"
 
         if self.fold_loops:
             local_param_values = dict(param_values)
@@ -1795,9 +1895,15 @@ class CircuitAnalyzer:
 
         iterations = [true_children]
         iteration_widths = [true_width]
+        branch_labels = [condition_label]
         if false_children:
             iterations.append(false_children)
             iteration_widths.append(false_width)
+            branch_labels.append("else:")
+
+        branch_label_widths = [
+            self._estimate_label_box_width(label) for label in branch_labels
+        ]
 
         return VUnfoldedSequence(
             node_key=node_key,
@@ -1807,7 +1913,109 @@ class CircuitAnalyzer:
             iteration_widths=iteration_widths,
             condition_label=condition_label,
             affected_qubits_precise=affected_qubits_precise,
+            condition_label_width=branch_label_widths[0],
+            branch_label_widths=branch_label_widths,
         )
+
+    def _format_condition_expr(
+        self,
+        value: ValueBase | None,
+        body_operations: list[Operation] | None,
+        param_values: dict | None,
+        depth: int = 0,
+    ) -> str | None:
+        """Spell an IfOperation condition as source-like text.
+
+        Walks the classical producer chain (CompOp / CondOp / NotOp / BinOp)
+        that computes ``value`` so a symbolic ``if`` renders as, e.g.,
+        ``flag == 1`` instead of an anonymous placeholder. A value with a
+        meaningful name (a measurement bit such as ``q0_measured``, or a bound
+        parameter) short-circuits to that name; a constant to its literal.
+
+        Args:
+            value (ValueBase | None): The condition value
+                (``IfOperation.condition``) or a sub-operand reached during
+                recursion. None yields None.
+            body_operations (list[Operation] | None): Operations of the scope
+                enclosing the ``if``, searched to find the producer of
+                ``value``. None disables producer lookup (name/const only).
+            param_values (dict | None): Resolved loop/parameter values used to
+                fold a symbolic operand to a constant when possible.
+            depth (int): Current recursion depth; guards against runaway or
+                cyclic producer chains. Defaults to 0.
+
+        Returns:
+            str | None: A human-readable predicate (e.g. ``"flag == 1"``,
+                ``"not done"``, ``"i < n"``), or None when ``value`` cannot be
+                described from name, constant, or a recognized producer.
+        """
+        if value is None:
+            return None
+
+        # A meaningful name (measurement bit, bound parameter) wins.
+        name = getattr(value, "name", None)
+        if name and not self._is_internal_temp_name(name):
+            return name
+
+        # Constant literal, possibly via param_values resolution.
+        if isinstance(value, Value):
+            const = self._evaluate_value(value, param_values or {})
+            if const is not None:
+                return str(const)
+
+        if depth >= 4 or not body_operations:
+            return None
+
+        producer = self._find_producer_op(value, body_operations)
+        if producer is None:
+            return None
+
+        def sub(operand: ValueBase | None) -> str:
+            """Format a binary operand, falling back to ``?`` when unknown."""
+            return (
+                self._format_condition_expr(
+                    operand, body_operations, param_values, depth + 1
+                )
+                or "?"
+            )
+
+        if isinstance(producer, CompOp) and producer.kind in _COMP_OP_SYMBOLS:
+            symbol = _COMP_OP_SYMBOLS[producer.kind]
+            return f"{sub(producer.operands[0])} {symbol} {sub(producer.operands[1])}"
+        if isinstance(producer, CondOp) and producer.kind in _COND_OP_SYMBOLS:
+            symbol = _COND_OP_SYMBOLS[producer.kind]
+            return f"{sub(producer.operands[0])} {symbol} {sub(producer.operands[1])}"
+        if isinstance(producer, NotOp):
+            return f"not {sub(producer.operands[0])}"
+        if isinstance(producer, BinOp) and producer.kind in _BIN_OP_SYMBOLS:
+            symbol = _BIN_OP_SYMBOLS[producer.kind]
+            return f"{sub(producer.operands[0])} {symbol} {sub(producer.operands[1])}"
+        return None
+
+    def _find_producer_op(
+        self,
+        value: ValueBase,
+        body_operations: list[Operation],
+    ) -> Operation | None:
+        """Find the operation in scope whose result is ``value``.
+
+        Args:
+            value (ValueBase): The value whose producing operation is sought.
+            body_operations (list[Operation]): Operations of the scope to scan.
+
+        Returns:
+            Operation | None: The first operation whose results include a value
+                with the same UUID as ``value``, or None if no producer is in
+                ``body_operations`` (e.g. ``value`` is a block input).
+        """
+        target = getattr(value, "uuid", None)
+        if target is None:
+            return None
+        for candidate in body_operations:
+            for result in candidate.results:
+                if getattr(result, "uuid", None) == target:
+                    return candidate
+        return None
 
     def _build_vfor_items(
         self,

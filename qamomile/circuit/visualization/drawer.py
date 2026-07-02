@@ -10,12 +10,37 @@ from typing import Any
 
 from matplotlib.figure import Figure
 
-from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.block import Block, BlockKind
 
 from .analyzer import CircuitAnalyzer
 from .layout import CircuitLayoutEngine
 from .renderer import MatplotlibRenderer
 from .style import DEFAULT_STYLE, CircuitStyle
+
+
+def _prepare_graph_for_visualization(graph: Block) -> Block:
+    """Apply visualization-only IR preparation before analysis.
+
+    Args:
+        graph (Block): Freshly traced block to visualize.
+
+    Returns:
+        Block: Graph with compile-time resolvable ``IfOperation`` nodes lowered
+            to their selected branch, while runtime/symbolic conditions remain
+            available for branch-box rendering.
+
+    Raises:
+        AssertionError: If the graph has an unknown ``BlockKind``.
+    """
+    from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
+        CompileTimeIfLoweringPass,
+    )
+
+    if graph.kind in (BlockKind.TRACED, BlockKind.AFFINE, BlockKind.HIERARCHICAL):
+        return CompileTimeIfLoweringPass().run(graph)
+    if graph.kind == BlockKind.ANALYZED:
+        return graph
+    raise AssertionError(f"Unknown block kind for visualization: {graph.kind}")
 
 
 class MatplotlibDrawer:
@@ -34,7 +59,7 @@ class MatplotlibDrawer:
             graph: Computation graph to visualize.
             style: Visual style configuration. Uses DEFAULT_STYLE if None.
         """
-        self.graph = graph
+        self.graph = _prepare_graph_for_visualization(graph)
         self.style = style or DEFAULT_STYLE
 
     def draw(

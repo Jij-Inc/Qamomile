@@ -40,6 +40,7 @@ from .visual_ir import (
     VisualCircuit,
     VisualNode,
     VSkip,
+    VUnfoldedKind,
     VUnfoldedSequence,
 )
 
@@ -460,6 +461,13 @@ class MatplotlibRenderer:
                 continue
 
             if isinstance(node, VUnfoldedSequence):
+                if node.kind == VUnfoldedKind.IF:
+                    # Draw the if/else branch boxes first (behind gates), then
+                    # the gates of each branch on top, so the boxes read as
+                    # mutually exclusive alternatives rather than a sequence.
+                    self._draw_vif_branch_boxes(
+                        fig, node, positions, block_widths, gate_widths
+                    )
                 for iteration_children in node.iterations:
                     self._draw_visual_nodes(
                         fig,
@@ -469,6 +477,214 @@ class MatplotlibRenderer:
                         gate_widths,
                     )
                 continue
+
+    def _draw_vif_branch_boxes(
+        self,
+        fig: Figure,
+        node: VUnfoldedSequence,
+        positions: dict[tuple, float],
+        block_widths: dict[tuple, float],
+        gate_widths: dict[tuple, float],
+    ) -> None:
+        """Draw the if/else branch boxes for an unfolded IfOperation.
+
+        Each branch (``iterations[0]`` = true, ``iterations[1]`` = else) is
+        wrapped in a dash-dot rounded box spanning its gates' x-range and the
+        if's affected wires, labelled ``if <cond>:`` and ``else:`` respectively.
+        The boxes are drawn behind the gates so the gates remain legible; gates
+        themselves are drawn by the caller after this method returns.
+
+        Args:
+            fig (Figure): Target matplotlib figure (carries ``_qm_ax``).
+            node (VUnfoldedSequence): The unfolded IF sequence to box.
+            positions (dict[tuple, float]): Node-key to center-x mapping.
+            block_widths (dict[tuple, float]): Node-key to block width mapping.
+            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
+
+        Returns:
+            None
+        """
+        affected_qubits = node.affected_qubits
+        if not affected_qubits:
+            return
+
+        ax = fig._qm_ax  # type: ignore[attr-defined]
+        pad = compute_border_padding(self.style, depth=0)
+        y_coords = [self.qubit_y[q] for q in affected_qubits]
+        min_y = min(y_coords)
+        max_y = max(y_coords)
+
+        text_height = self._calculate_text_height(ax, "if", self.style.subfont_size)
+        label_height = text_height + 2 * self.style.label_padding
+        box_bottom = min_y - self.style.gate_height / 2 - pad
+        box_top = max_y + self.style.gate_height / 2 + pad + label_height
+
+        labels = [node.condition_label or "if cond:", "else:"]
+        label_widths = node.branch_label_widths
+        spans = [
+            self._visual_x_span(children, positions, block_widths, gate_widths)
+            for children in node.iterations
+        ]
+
+        # Lay the branch boxes out left-to-right with no gap between them: each
+        # box starts exactly where the previous one ended. A box is widened to
+        # hold its header label using the same width estimate the layout
+        # reserved, so the label never overflows and the next branch's gates
+        # always sit clear of this box.
+        prev_right: float | None = None
+        for i, span in enumerate(spans):
+            if span is None:
+                continue
+            gate_left, gate_right = span
+            label = labels[i] if i < len(labels) else ""
+
+            box_left = gate_left - pad if prev_right is None else prev_right
+            box_right = gate_right + pad
+            if i < len(label_widths):
+                box_right = max(box_right, box_left + label_widths[i])
+
+            self._draw_if_branch_box(
+                ax, box_left, box_right, box_bottom, box_top, label
+            )
+            prev_right = box_right
+
+    def _draw_if_branch_box(
+        self,
+        ax: Axes,
+        box_left: float,
+        box_right: float,
+        box_bottom: float,
+        box_top: float,
+        label: str,
+    ) -> None:
+        """Draw one dash-dot branch box with a top-left header label.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            box_left (float): Left data-x edge of the box.
+            box_right (float): Right data-x edge of the box.
+            box_bottom (float): Bottom data-y edge of the box.
+            box_top (float): Top data-y edge of the box.
+            label (str): Header label drawn at the box's top-left (e.g.
+                ``"if flag == 1:"`` or ``"else:"``). Empty string draws no label.
+
+        Returns:
+            None
+        """
+        rect = mpatches.FancyBboxPatch(
+            (box_left, box_bottom),
+            box_right - box_left,
+            box_top - box_bottom,
+            boxstyle=mpatches.BoxStyle.Round(
+                pad=0, rounding_size=self.style.gate_corner_radius
+            ),
+            facecolor="none",
+            edgecolor=self.style.if_edge_color,
+            linewidth=1.5,
+            linestyle="-.",
+            zorder=PORDER_WIRE + 0.5,
+        )
+        ax.add_patch(rect)
+
+        if label:
+            ax.text(
+                box_left + self.style.label_horizontal_padding,
+                box_top - self.style.label_padding,
+                label,
+                ha="left",
+                va="top",
+                fontsize=self.style.subfont_size,
+                color=self.style.if_text_color,
+                fontweight="bold",
+                zorder=PORDER_TEXT,
+            )
+
+    def _visual_x_span(
+        self,
+        nodes: list[VisualNode],
+        positions: dict[tuple, float],
+        block_widths: dict[tuple, float],
+        gate_widths: dict[tuple, float],
+    ) -> tuple[float, float] | None:
+        """Compute the combined x-extent of a list of visual nodes.
+
+        Recurses into containers (``VInlineBlock`` children, nested
+        ``VUnfoldedSequence`` iterations) and bottoms out at ``VGate`` /
+        ``VFoldedBlock`` leaves, using each leaf's center position and width.
+
+        Args:
+            nodes (list[VisualNode]): Nodes to bound.
+            positions (dict[tuple, float]): Node-key to center-x mapping.
+            block_widths (dict[tuple, float]): Node-key to block width mapping.
+            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
+
+        Returns:
+            tuple[float, float] | None: ``(left, right)`` data-x extent, or None
+                when ``nodes`` contains no positioned leaf.
+        """
+        left: float | None = None
+        right: float | None = None
+        for node in nodes:
+            span = self._single_node_x_span(node, positions, block_widths, gate_widths)
+            if span is None:
+                continue
+            node_left, node_right = span
+            left = node_left if left is None else min(left, node_left)
+            right = node_right if right is None else max(right, node_right)
+        if left is None or right is None:
+            return None
+        return left, right
+
+    def _single_node_x_span(
+        self,
+        node: VisualNode,
+        positions: dict[tuple, float],
+        block_widths: dict[tuple, float],
+        gate_widths: dict[tuple, float],
+    ) -> tuple[float, float] | None:
+        """Compute the x-extent of a single visual node.
+
+        Args:
+            node (VisualNode): Node to bound.
+            positions (dict[tuple, float]): Node-key to center-x mapping.
+            block_widths (dict[tuple, float]): Node-key to block width mapping.
+            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
+
+        Returns:
+            tuple[float, float] | None: ``(left, right)`` data-x extent, or None
+                for zero-space nodes (``VSkip``) and unpositioned nodes.
+        """
+        if isinstance(node, VSkip):
+            return None
+        if isinstance(node, VInlineBlock):
+            return self._visual_x_span(
+                node.children, positions, block_widths, gate_widths
+            )
+        if isinstance(node, VUnfoldedSequence):
+            left: float | None = None
+            right: float | None = None
+            for branch_children in node.iterations:
+                span = self._visual_x_span(
+                    branch_children, positions, block_widths, gate_widths
+                )
+                if span is None:
+                    continue
+                node_left, node_right = span
+                left = node_left if left is None else min(left, node_left)
+                right = node_right if right is None else max(right, node_right)
+            if left is None or right is None:
+                return None
+            return left, right
+
+        key = node.node_key
+        if key not in positions:
+            return None
+        center = positions[key]
+        if isinstance(node, VFoldedBlock):
+            width = block_widths.get(key) or node.folded_width
+        else:  # VGate
+            width = gate_widths.get(key) or node.estimated_width
+        return center - width / 2, center + width / 2
 
     def _draw_vgate(
         self,

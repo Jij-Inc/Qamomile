@@ -101,11 +101,14 @@ class CircuitLayoutEngine:
             state.qubit_columns[q] = right_edge + self.style.gate_gap
             state.qubit_right_edges[q] = right_edge
 
-        # Record measurement positions for wire termination
-        if node.kind == VGateKind.MEASURE:
-            for q in affected_qubits:
-                state.qubit_end_positions[q] = min_column + op_half_width
-        elif node.kind == VGateKind.MEASURE_VECTOR:
+        # Record measurement positions for wire termination. A measurement
+        # inside an if/else branch is mid-circuit (``terminates_wire`` is
+        # False): the wire must continue past it so the other branch's range —
+        # where this qubit is never measured — still shows a wire.
+        if (
+            node.kind in (VGateKind.MEASURE, VGateKind.MEASURE_VECTOR)
+            and node.terminates_wire
+        ):
             for q in affected_qubits:
                 state.qubit_end_positions[q] = min_column + op_half_width
         elif node.kind == VGateKind.EXPVAL:
@@ -326,11 +329,22 @@ class CircuitLayoutEngine:
     ) -> None:
         """Place a VUnfoldedSequence node (unfolded For/ForItems/If)."""
         affected_qubits = node.affected_qubits
+        is_if = node.kind == VUnfoldedKind.IF
+        # Horizontal room the ``if <cond>:`` header needs; the else branch is
+        # pushed right by at least this much so the header neither overlaps the
+        # else box nor is clipped by the figure edge.
+        label_width = node.condition_label_width if is_if else 0.0
+
+        # x where the if construct begins, used to anchor label-room reservation.
+        if is_if and affected_qubits:
+            if_start = max(state.qubit_right_edges.get(q, 0.0) for q in affected_qubits)
+        else:
+            if_start = 0.0
 
         for i, iteration_children in enumerate(node.iterations):
             # For If: i=0 is "true", i=1 is "false"
             # For loops: i is iteration index
-            if node.kind == VUnfoldedKind.IF:  # Future use: not yet dispatched
+            if is_if:
                 iter_key = (*node.node_key, "true" if i == 0 else "false")
             else:
                 iter_key = (*node.node_key, i)
@@ -338,15 +352,37 @@ class CircuitLayoutEngine:
             # Align affected qubits only for IF branches (mutually exclusive
             # alternatives).  For FOR/FOR_ITEMS, skip synchronization so gates
             # on independent qubits pack at the same x-position.
-            if affected_qubits and node.kind == VUnfoldedKind.IF:
+            if affected_qubits and is_if:
                 max_edge = max(
                     state.qubit_right_edges.get(q, 0.0) for q in affected_qubits
                 )
+                # Branches after the first start past the previous branch's
+                # header label, not merely past its gates.
+                if i > 0:
+                    max_edge = max(max_edge, if_start + label_width)
                 for q in affected_qubits:
                     state.qubit_right_edges[q] = max_edge
                     state.qubit_columns[q] = max_edge + self.style.gate_gap
 
             self._place_visual_nodes(iteration_children, state, depth + 1, iter_key)
+
+        # Reserve header room past the last branch too, so a single-branch
+        # (no else) header and the trailing else header are not clipped.
+        if is_if and affected_qubits:
+            min_end = if_start + label_width
+            for q in affected_qubits:
+                if state.qubit_right_edges.get(q, 0.0) < min_end:
+                    state.qubit_right_edges[q] = min_end
+                    state.qubit_columns[q] = min_end + self.style.gate_gap
+            state.column = max(state.column, min_end + 1)
+            state.actual_width = max(state.actual_width, min_end + 0.5)
+
+            # Reserve vertical clearance for the ``if <cond>:`` / ``else:``
+            # headers, which are drawn above the topmost branch wire. Without
+            # this the header would collide with the wire directly above.
+            state.label_extents.append(
+                {"top_qubit": min(affected_qubits), "num_lines": 1}
+            )
 
     def _place_visual_nodes(
         self,
@@ -405,7 +441,7 @@ class CircuitLayoutEngine:
         state.actual_width = max(state.actual_width, state.column)
 
         qubit_y, max_above, max_below = self._compute_qubit_y_positions(
-            vc.num_qubits, state.block_ranges
+            vc.num_qubits, state.block_ranges, state.label_extents
         )
 
         return LayoutResult(
@@ -427,7 +463,10 @@ class CircuitLayoutEngine:
         )
 
     def _compute_qubit_y_positions(
-        self, num_qubits: int, block_ranges: list[dict]
+        self,
+        num_qubits: int,
+        block_ranges: list[dict],
+        label_extents: list[dict] | None = None,
     ) -> tuple[list[float], dict[int, float], dict[int, float]]:
         """Compute y-positions with variable spacing based on block borders.
 
@@ -439,11 +478,17 @@ class CircuitLayoutEngine:
             num_qubits: Total number of qubits.
             block_ranges: List of block range dicts from layout phase, each
                 containing 'qubit_indices', 'depth', 'start_x', 'end_x'.
+            label_extents: Header labels drawn above a wire that have no
+                block_ranges entry (unfolded if/else branch boxes). Each is
+                ``{"top_qubit": int, "num_lines": int}`` and only widens the
+                clearance above its top qubit. Defaults to None (treated as
+                empty).
 
         Returns:
             Tuple of (y_positions, max_above, max_below).
         """
-        if not block_ranges:
+        label_extents = label_extents or []
+        if not block_ranges and not label_extents:
             max_above: dict[int, float] = {}
             max_below: dict[int, float] = {}
             if num_qubits <= 1:
@@ -526,6 +571,15 @@ class CircuitLayoutEngine:
                     max_above[q] = max(max_above[q], gate_half + padding)
                 if q != bottom_q:
                     max_below[q] = max(max_below[q], gate_half + padding)
+
+        # Header-only labels (unfolded if/else boxes) have no block border but
+        # still draw a label above their top qubit; reserve room for it the
+        # same way a block border reserves room for its top label.
+        for label_extent in label_extents:
+            top_q = label_extent["top_qubit"]
+            num_lines = label_extent.get("num_lines", 1)
+            extent_above = gate_half + base_padding + num_lines * label_height
+            max_above[top_q] = max(max_above[top_q], extent_above)
 
         if num_qubits <= 1:
             return [0.0] * num_qubits, max_above, max_below
