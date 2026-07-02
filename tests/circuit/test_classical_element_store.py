@@ -217,6 +217,17 @@ def angle_store_kernel(vals: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(qs)
 
 
+@qmc.qkernel
+def compile_time_if_angle_store_kernel(
+    vals: qmc.Vector[qmc.Float], flag: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
+    qs = qmc.qubit_array(1, "qs")
+    if flag:
+        vals[1] = vals[0]
+    qs[0] = qmc.rx(qs[0], vals[1])
+    return qmc.measure(qs)
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 def test_stored_element_folds_into_gate_angle(seed):
     """Reading a stored element as a gate angle bakes the post-store value.
@@ -235,6 +246,22 @@ def test_stored_element_folds_into_gate_angle(seed):
         if inst.operation.name == "rx"
     ]
     np.testing.assert_allclose(emitted, [angle], atol=1e-12)
+
+
+def test_compile_time_if_store_folds_into_gate_angle():
+    """A live compile-time-if branch store folds before feeding a gate angle."""
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(
+        compile_time_if_angle_store_kernel,
+        bindings={"vals": [float(np.pi), 0.0], "flag": 1},
+    )
+    circuit = exe.compiled_quantum[0].circuit
+    emitted = [
+        float(inst.operation.params[0])
+        for inst in circuit.data
+        if inst.operation.name == "rx"
+    ]
+    np.testing.assert_allclose(emitted, [float(np.pi)], atol=1e-12)
 
 
 def test_stored_pi_angle_flips_qubit(backend):
@@ -327,6 +354,18 @@ def test_loop_two_stores_same_array():
     )
     out_vals, _ = exe.run(transpiler.executor(), bindings={"n": 3}).result()
     assert tuple(int(v) for v in out_vals) == (99, 6, 7)
+
+
+def test_loop_store_zero_iterations_returns_original_array():
+    """A zero-iteration loop preserves the pre-loop array contents."""
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(
+        loop_two_store_kernel,
+        bindings={"dst": [4, 5, 6], "src": [7, 8, 9]},
+        parameters=["n"],
+    )
+    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": 0}).result()
+    assert tuple(int(v) for v in out_vals) == (4, 5, 6)
 
 
 @pytest.mark.parametrize("seed, length", [(0, 2), (1, 3), (42, 5)])
