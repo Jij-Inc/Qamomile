@@ -65,6 +65,40 @@ def _resolve_gamma(
     return None
 
 
+def validate_hamiltonian_within_register(
+    num_h_qubits: int,
+    register_size: int,
+) -> None:
+    """Validate that a Hamiltonian fits within the target qubit register.
+
+    A Hamiltonian acting on fewer qubits than the register is embedded
+    into the register's qubit space (identity on the untouched qubits)
+    by acting only on its declared qubits; only a Hamiltonian *larger*
+    than the register is a genuine error. Every ``PauliEvolveOp`` emit
+    path (shared, backend-native, and controlled) must apply this same
+    rule through this helper so the size contract cannot drift between
+    backends.
+
+    Args:
+        num_h_qubits (int): Number of qubits the Hamiltonian acts on
+            (``Hamiltonian.num_qubits``).
+        register_size (int): Resolved element count of the target qubit
+            register.
+
+    Raises:
+        EmitError: If the Hamiltonian acts on more qubits than the
+            register provides.
+    """
+    if num_h_qubits > register_size:
+        raise EmitError(
+            f"PauliEvolveOp qubit count mismatch: "
+            f"qubit register has {register_size} qubits but "
+            f"Hamiltonian acts on {num_h_qubits} qubits. "
+            f"The Hamiltonian must not be larger than the register.",
+            operation="PauliEvolveOp",
+        )
+
+
 def emit_pauli_evolve(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -108,7 +142,8 @@ def emit_pauli_evolve(
             operation="PauliEvolveOp",
         )
 
-    # Validate qubit count: logical array size vs Hamiltonian
+    # Validate qubit count: logical array size vs Hamiltonian. A smaller
+    # Hamiltonian is embedded by acting only on its declared qubits below.
     input_array = op.qubits
     assert isinstance(input_array, ArrayValue)
     num_h_qubits = hamiltonian.num_qubits
@@ -116,13 +151,8 @@ def emit_pauli_evolve(
         n_resolved = emit_pass._resolver.resolve_int_value(
             input_array.shape[0], bindings
         )
-        if n_resolved is not None and n_resolved != num_h_qubits:
-            raise EmitError(
-                f"PauliEvolveOp qubit count mismatch: "
-                f"qubit register has {n_resolved} qubits but "
-                f"Hamiltonian acts on {num_h_qubits} qubits.",
-                operation="PauliEvolveOp",
-            )
+        if n_resolved is not None:
+            validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
     # Validate Hermitian (real coefficients)
     for operators, coeff in hamiltonian:

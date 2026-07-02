@@ -325,14 +325,182 @@ def test_native_fallback_statevector_match():
 # ---------------------------------------------------------------------------
 
 
-def test_qubit_count_mismatch_raises():
-    """Passing a 1-qubit Hamiltonian to a 2-qubit register should error."""
-    from qamomile.circuit.transpiler.errors import EmitError
+def test_smaller_hamiltonian_is_identity_padded():
+    """A Hamiltonian narrower than the register is embedded, not rejected.
+
+    Regression for #467: ``Z(0)`` (1 qubit) on a 2-qubit register must
+    transpile by acting only on q[0] (identity on q[1]) instead of
+    raising a qubit-count mismatch.
+    """
+    import numpy as np
+    from qiskit.quantum_info import Statevector
 
     H = qm_o.Hamiltonian()
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)  # 1-qubit
 
-    transpiler = QiskitTranspiler(use_native_composite=False)
+    for use_native in (True, False):
+        exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+            _wrap_pauli_evolve,
+            bindings={"n": 2, "hamiltonian": H, "gamma": 0.5},
+        )
+        circuit = exe.compiled_quantum[0].circuit.remove_final_measurements(
+            inplace=False
+        )
+        # exp(-i * Z_0 * 0.5) on |00> is a global phase; the populations of
+        # the statevector must remain concentrated on |00>.
+        probs = np.abs(Statevector(circuit).data) ** 2
+        expected = np.zeros(4)
+        expected[0] = 1.0
+        np.testing.assert_allclose(
+            probs,
+            expected,
+            atol=1e-12,
+            rtol=0.0,
+            err_msg=(
+                f"use_native={use_native}: "
+                f"padded evolution changed populations: {probs}"
+            ),
+        )
+
+
+@pytest.mark.parametrize("use_native", [True, False])
+@pytest.mark.parametrize("constant", [0.0, 2.0])
+def test_zero_qubit_hamiltonian_evolves_as_global_phase(use_native, constant):
+    """An empty / constant-only Hamiltonian emits no gates.
+
+    ``Hamiltonian.num_qubits == 0`` means the evolution is the global
+    phase ``exp(-i*gamma*constant)`` at most. Both Qiskit paths must
+    transpile (the native path previously crashed with a raw Qiskit
+    ``CircuitError``: the 0-qubit Hamiltonian widens to a 1-qubit
+    ``SparsePauliOp(["I"])`` whose gate cannot be appended onto an empty
+    qubit list) and leave the state on |00>. The native path additionally
+    records the phase on ``circuit.global_phase`` so that it survives as
+    an observable relative phase when the circuit is placed under
+    ``qmc.control``; the shared gadget fallback drops it (a documented
+    limitation of the gadget decomposition).
+    """
+    import numpy as np
+    from qiskit.quantum_info import Statevector
+
+    gamma = 0.5
+    H = qm_o.Hamiltonian()
+    H += constant
+
+    exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+        _wrap_pauli_evolve,
+        bindings={"n": 2, "hamiltonian": H, "gamma": gamma},
+    )
+    circuit = exe.compiled_quantum[0].circuit.remove_final_measurements(inplace=False)
+    state = np.asarray(Statevector(circuit).data)
+    expected = np.zeros(4, dtype=complex)
+    # exp(-i*gamma*H) on |00> with H = constant*I is exp(-i*gamma*constant)|00>.
+    # The fallback gadget cannot express a global phase, so it yields |00>.
+    expected[0] = np.exp(-1j * gamma * constant) if use_native else 1.0
+    np.testing.assert_allclose(
+        state,
+        expected,
+        atol=1e-12,
+        rtol=0.0,
+        err_msg=(
+            f"use_native={use_native}, constant={constant}: "
+            f"0-qubit Hamiltonian evolution produced wrong state: {state}"
+        ),
+    )
+
+
+@qmc.qkernel
+def _evolve_register(
+    q: qmc.Vector[qmc.Qubit],
+    hamiltonian: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Evolve a target register under ``hamiltonian`` (controlled-U body)."""
+    q = qmc.pauli_evolve(q, hamiltonian, gamma)
+    return q
+
+
+@qmc.qkernel
+def _inverse_evolve_register(
+    q: qmc.Vector[qmc.Qubit],
+    hamiltonian: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply the inverse evolution (controlled-U body with qmc.inverse)."""
+    inverse_evolve = qmc.inverse(_evolve_register)
+    q = inverse_evolve(q, hamiltonian=hamiltonian, gamma=gamma)
+    return q
+
+
+@pytest.mark.parametrize("invert", [False, True])
+def test_controlled_constant_only_hamiltonian_relative_phase(invert):
+    """A controlled constant-only evolution keeps the relative phase.
+
+    Uncontrolled, ``exp(-i*gamma*c*I)`` is an unobservable global phase,
+    but under ``qmc.control`` it becomes the observable relative phase
+    ``exp(-i*gamma*c)`` on the control's |1> branch. With the control in
+    |+> the statevector amplitude ratio between the control-1 and
+    control-0 subspaces must equal ``exp(-i*gamma*c)`` (and the conjugate
+    ``exp(+i*gamma*c)`` when the body is wrapped in ``qmc.inverse``,
+    which negates gamma). This pins the Qiskit-native global-phase
+    emission for 0-qubit Hamiltonians through gate conversion and
+    ``Gate.control``, matching the QuriParts / CUDA-Q controlled paths
+    which re-apply the constant explicitly.
+    """
+    import numpy as np
+    from qiskit.quantum_info import Statevector
+
+    gamma = 0.5
+    constant = 2.0
+    H = qm_o.Hamiltonian()
+    H += constant
+
+    body = _inverse_evolve_register if invert else _evolve_register
+
+    @qmc.qkernel
+    def controlled_const(
+        hamiltonian: qmc.Observable, gamma: qmc.Float
+    ) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(2, "q")
+        q[0] = qmc.h(q[0])
+        controlled_evolve = qmc.control(body)
+        q[0], targets = controlled_evolve(
+            q[0], q[1:2], hamiltonian=hamiltonian, gamma=gamma
+        )
+        q[1:2] = targets
+        return qmc.measure(q)
+
+    exe = QiskitTranspiler().transpile(
+        controlled_const, bindings={"hamiltonian": H, "gamma": gamma}
+    )
+    circuit = exe.compiled_quantum[0].circuit.remove_final_measurements(inplace=False)
+    state = np.asarray(Statevector(circuit).data)
+    sign = +1.0 if invert else -1.0
+    ratio = state[1] / state[0]
+    np.testing.assert_allclose(
+        ratio,
+        np.exp(sign * 1j * gamma * constant),
+        atol=1e-12,
+        rtol=0.0,
+        err_msg=f"invert={invert}: controlled constant phase ratio wrong: {ratio}",
+    )
+
+
+@pytest.mark.parametrize("use_native", [True, False])
+def test_larger_hamiltonian_raises(use_native):
+    """A Hamiltonian wider than the register is still a genuine error.
+
+    Covers both the native ``PauliEvolutionGate`` path and the shared
+    gadget fallback, which validate independently.
+    """
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    H = qm_o.Hamiltonian()
+    H.add_term(
+        (qm_o.PauliOperator(qm_o.Pauli.Z, 0), qm_o.PauliOperator(qm_o.Pauli.Z, 2)),
+        1.0,
+    )  # acts on 3 qubits
+
+    transpiler = QiskitTranspiler(use_native_composite=use_native)
     with pytest.raises(EmitError, match="qubit count mismatch"):
         transpiler.transpile(
             _wrap_pauli_evolve,

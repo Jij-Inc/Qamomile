@@ -545,6 +545,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         # a Parameter (or ParameterExpression) as ``time``.
         from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
             _resolve_gamma,
+            validate_hamiltonian_within_register,
         )
 
         gamma = _resolve_gamma(self, op, bindings)
@@ -552,7 +553,10 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
             return
 
-        # Validate qubit count: logical array size vs Hamiltonian
+        # Validate qubit count: logical array size vs Hamiltonian. A
+        # Hamiltonian smaller than the register is embedded into the
+        # register (identity on the untouched qubits) by appending the
+        # evolution gate onto only its declared qubits below.
         input_array = op.qubits
         num_h_qubits = hamiltonian.num_qubits
         from qamomile.circuit.ir.value import ArrayValue
@@ -561,12 +565,8 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             n_resolved = self._resolver.resolve_int_value(
                 input_array.shape[0], bindings
             )
-            if n_resolved is not None and n_resolved != num_h_qubits:
-                raise EmitError(
-                    f"PauliEvolveOp qubit count mismatch: "
-                    f"qubit register has {n_resolved} qubits but "
-                    f"Hamiltonian acts on {num_h_qubits} qubits.",
-                )
+            if n_resolved is not None:
+                validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
         # Validate Hermitian (real coefficients)
         for operators, coeff in hamiltonian:
@@ -576,6 +576,43 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     f"(real coefficients), but found complex coefficient "
                     f"{coeff} on term {operators}.",
                 )
+
+        if num_h_qubits == 0:
+            # An empty / constant-only Hamiltonian evolves the register by
+            # the global phase exp(-i*gamma*constant) only. Record it as
+            # the circuit's global phase instead of skipping it: standalone
+            # it stays unobservable, but when this circuit is converted to
+            # a gate and placed under controls (``_blockvalue_to_gate`` +
+            # ``Gate.control``) Qiskit promotes the definition's global
+            # phase to the observable relative phase on the all-controls-on
+            # subspace — matching how the shared controlled path and CUDA-Q
+            # re-apply the constant term under ``qmc.control``. Building
+            # the evolution gate instead would fail:
+            # ``hamiltonian_to_sparse_pauli_op`` widens a 0-qubit
+            # Hamiltonian to a 1-qubit ``SparsePauliOp(["I"])`` whose
+            # ``PauliEvolutionGate`` cannot be appended onto the empty
+            # qubit list. (For ``num_h_qubits > 0`` the constant is already
+            # carried inside the ``SparsePauliOp``, so this branch must not
+            # apply.) The result register stays resolvable through the
+            # allocator's element aliases.
+            from qamomile.observable.hamiltonian import (
+                HERMITIAN_IMAG_ATOL,
+                PAULI_TERM_ZERO_ATOL,
+            )
+
+            constant = hamiltonian.constant
+            if abs(constant) > PAULI_TERM_ZERO_ATOL:
+                if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+                    raise EmitError(
+                        f"PauliEvolveOp requires a Hermitian Hamiltonian "
+                        f"(real coefficients), but found a complex constant "
+                        f"{constant}.",
+                    )
+                # Works for both concrete float gamma and a backend
+                # Parameter (ParameterExpression global phase is bound
+                # together with the rest of the circuit parameters).
+                circuit.global_phase += -float(constant.real) * gamma
+            return
 
         qubit_indices: list[int] = []
         for i in range(num_h_qubits):
