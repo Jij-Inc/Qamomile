@@ -1854,6 +1854,20 @@ class CircuitAnalyzer:
             op.condition, body_operations, param_values
         )
         condition_label = f"if {condition_expr}:" if condition_expr else "if cond:"
+        condition_measure_info = self._condition_measure_info(
+            op.condition,
+            body_operations,
+            qubit_map,
+            logical_id_remap,
+            param_values,
+            scope_path,
+        )
+        condition_measure_node_key: tuple | None = None
+        condition_measure_qubit_indices: list[int] = []
+        if condition_measure_info is not None:
+            condition_measure_node_key, condition_measure_qubit_indices = (
+                condition_measure_info
+            )
 
         if self.fold_ifs:
             body_lines = self._format_folded_body_lines(
@@ -1883,6 +1897,8 @@ class CircuitAnalyzer:
                 folded_width=folded_width,
                 kind=VFoldedKind.IF,
                 affected_qubits_precise=affected_qubits_precise,
+                condition_measure_node_key=condition_measure_node_key,
+                condition_measure_qubit_indices=condition_measure_qubit_indices,
             )
 
         # Unfolded: build both branches
@@ -1930,7 +1946,119 @@ class CircuitAnalyzer:
             affected_qubits_precise=affected_qubits_precise,
             condition_label_width=branch_label_widths[0],
             branch_label_widths=branch_label_widths,
+            condition_measure_node_key=condition_measure_node_key,
+            condition_measure_qubit_indices=condition_measure_qubit_indices,
         )
+
+    def _condition_measure_info(
+        self,
+        value: ValueBase | None,
+        body_operations: list[Operation] | None,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        scope_path: tuple,
+    ) -> tuple[tuple, list[int]] | None:
+        """Return the direct measurement node that produced an IF condition.
+
+        Only a condition value produced directly by a measurement operation is
+        treated as measurement-derived. Compound predicates such as
+        ``not bit`` or ``bit and flag`` are produced by classical operations and
+        intentionally return None.
+
+        Args:
+            value (ValueBase | None): The IF condition value to inspect.
+            body_operations (list[Operation] | None): Operations in the scope
+                enclosing the IF operation.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+            scope_path (tuple): Path of enclosing scope keys.
+
+        Returns:
+            tuple[tuple, list[int]] | None: The producer node key and measured
+                qubit indices, or None when the condition is not produced
+                directly by a measurement operation.
+        """
+        if value is None or not body_operations:
+            return None
+
+        producer = self._find_direct_measure_producer_op(value, body_operations)
+        if producer is None:
+            return None
+
+        qubit_indices = self._measure_qubit_indices(
+            producer, qubit_map, logical_id_remap, param_values
+        )
+        return (*scope_path, id(producer)), qubit_indices
+
+    def _find_direct_measure_producer_op(
+        self,
+        value: ValueBase,
+        body_operations: list[Operation],
+    ) -> MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation | None:
+        """Find a measurement operation that directly produced ``value``.
+
+        Args:
+            value (ValueBase): The condition value to match against
+                measurement results.
+            body_operations (list[Operation]): Operations in the enclosing
+                scope.
+
+        Returns:
+            MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation | None:
+                The direct measurement producer, or None if ``value`` is
+                produced by another operation.
+        """
+        target_uuid = getattr(value, "uuid", None)
+        parent_array = getattr(value, "parent_array", None)
+        parent_uuid = getattr(parent_array, "uuid", None)
+        for candidate in body_operations:
+            if not isinstance(
+                candidate,
+                (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation),
+            ):
+                continue
+            for result in candidate.results:
+                result_uuid = getattr(result, "uuid", None)
+                if target_uuid is not None and result_uuid == target_uuid:
+                    return candidate
+                if parent_uuid is not None and result_uuid == parent_uuid:
+                    return candidate
+        return None
+
+    def _measure_qubit_indices(
+        self,
+        op: MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> list[int]:
+        """Resolve the qubit wires touched by a measurement operation.
+
+        Args:
+            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation):
+                Measurement operation whose quantum operand should be resolved.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            list[int]: Wire indices touched by ``op``. Empty when the operand
+                cannot be resolved.
+        """
+        if not op.operands:
+            return []
+        if isinstance(op, MeasureQFixedOperation):
+            return self._resolve_qfixed_carrier_indices(
+                op.operands[0], qubit_map, logical_id_remap
+            )
+        indices = self._resolve_operand_to_qubit_indices(
+            op.operands[0], qubit_map, logical_id_remap, param_values
+        )
+        return indices or []
 
     def _format_folded_body_lines(
         self,

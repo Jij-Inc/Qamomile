@@ -457,6 +457,8 @@ class MatplotlibRenderer:
                         node,
                         positions[node.node_key],
                         block_widths.get(node.node_key),
+                        positions,
+                        gate_widths,
                     )
                 continue
 
@@ -543,6 +545,16 @@ class MatplotlibRenderer:
                 if empty_span is None:
                     continue
                 box_left, box_right = empty_span
+                if i == 0:
+                    self._draw_condition_measure_connector(
+                        ax,
+                        node,
+                        box_left,
+                        box_bottom,
+                        box_top,
+                        positions,
+                        gate_widths,
+                    )
                 self._draw_if_branch_box(
                     ax, box_left, box_right, box_bottom, box_top, label
                 )
@@ -556,10 +568,74 @@ class MatplotlibRenderer:
             if label_width > 0:
                 box_right = max(box_right, box_left + label_width)
 
+            if i == 0:
+                self._draw_condition_measure_connector(
+                    ax,
+                    node,
+                    box_left,
+                    box_bottom,
+                    box_top,
+                    positions,
+                    gate_widths,
+                )
             self._draw_if_branch_box(
                 ax, box_left, box_right, box_bottom, box_top, label
             )
             prev_right = box_right
+
+    def _draw_condition_measure_connector(
+        self,
+        ax: Axes,
+        node: VFoldedBlock | VUnfoldedSequence,
+        box_left: float,
+        box_bottom: float,
+        box_top: float,
+        positions: dict[tuple, float],
+        gate_widths: dict[tuple, float],
+    ) -> None:
+        """Draw a solid connector from a condition measurement to its IF box.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            node (VFoldedBlock | VUnfoldedSequence): IF visual node carrying
+                condition-measurement metadata.
+            box_left (float): Left edge of the target IF box.
+            box_bottom (float): Bottom edge of the target IF box.
+            box_top (float): Top edge of the target IF box.
+            positions (dict[tuple, float]): Node-key to center-x mapping.
+            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
+
+        Returns:
+            None
+        """
+        measure_key = node.condition_measure_node_key
+        if measure_key is None or measure_key not in positions:
+            return
+        if not node.condition_measure_qubit_indices:
+            return
+
+        measure_qubit = node.condition_measure_qubit_indices[0]
+        if measure_qubit < 0 or measure_qubit >= len(self.qubit_y):
+            return
+
+        measure_width = gate_widths.get(measure_key, self.style.gate_width)
+        start_x = positions[measure_key] + measure_width / 2
+        if box_left <= start_x:
+            return
+
+        source_y = self.qubit_y[measure_qubit]
+        target_y = min(max(source_y, box_bottom), box_top)
+        ax.add_line(
+            mlines.Line2D(
+                [start_x, box_left],
+                [source_y, target_y],
+                color=self.style.if_edge_color,
+                linewidth=1.5,
+                linestyle="-",
+                solid_capstyle="butt",
+                zorder=PORDER_LINE,
+            )
+        )
 
     def _empty_branch_x_span(
         self,
@@ -1197,6 +1273,8 @@ class MatplotlibRenderer:
         node: VFoldedBlock,
         x_pos: float,
         block_width: float | None,
+        positions: dict[tuple, float],
+        gate_widths: dict[tuple, float],
     ) -> None:
         """Draw a folded control-flow block from VFoldedBlock."""
         affected_qubits = node.affected_qubits
@@ -1250,9 +1328,15 @@ class MatplotlibRenderer:
         y_center = (min_y + max_y) / 2
         box_top = y_center + height / 2
         box_bottom = y_center - height / 2
+        box_left = x_pos - width / 2
+
+        if node.kind == VFoldedKind.IF:
+            self._draw_condition_measure_connector(
+                ax, node, box_left, box_bottom, box_top, positions, gate_widths
+            )
 
         rect = mpatches.FancyBboxPatch(
-            (x_pos - width / 2, box_bottom),
+            (box_left, box_bottom),
             width,
             height,
             boxstyle=mpatches.BoxStyle.Round(

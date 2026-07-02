@@ -133,6 +133,8 @@ class VFoldedBlock:
     folded_width: float
     kind: VFoldedKind
     affected_qubits_precise: bool = True
+    condition_measure_node_key: tuple | None = None
+    condition_measure_qubit_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -160,6 +162,8 @@ class VUnfoldedSequence:
     # sizes each branch box to its header using the same estimate the layout
     # reserves, so the boxes butt together with no gap and no label overflow.
     branch_label_widths: list[float] = field(default_factory=list)
+    condition_measure_node_key: tuple | None = None
+    condition_measure_qubit_indices: list[int] = field(default_factory=list)
 
 
 @dataclass

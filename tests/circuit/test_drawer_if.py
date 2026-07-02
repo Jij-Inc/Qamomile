@@ -18,6 +18,7 @@ from collections.abc import Iterable, Iterator
 from typing import Any
 
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import Qubit, UInt
@@ -53,6 +54,24 @@ def runtime_if(q0: Qubit, q1: Qubit) -> Qubit:
     """
     cond = qmc.measure(q0)
     if cond:
+        q1 = qmc.x(q1)
+    else:
+        q1 = qmc.h(q1)
+    return q1
+
+
+@qmc.qkernel
+def inline_measure_if(q0: Qubit, q1: Qubit) -> Qubit:
+    """Build an if whose condition is an inline measurement call.
+
+    Args:
+        q0 (Qubit): Qubit measured directly in the condition.
+        q1 (Qubit): Qubit transformed by the selected branch.
+
+    Returns:
+        Qubit: Updated ``q1``.
+    """
+    if qmc.measure(q0):
         q1 = qmc.x(q1)
     else:
         q1 = qmc.h(q1)
@@ -233,6 +252,24 @@ def _branch_gate_types(iteration: Iterable[VisualNode]) -> list[GateOperationTyp
     ]
 
 
+def _if_connector_lines(fig: Figure) -> list[Line2D]:
+    """Collect solid IF-colored connector lines from a rendered figure.
+
+    Args:
+        fig (Figure): Rendered circuit figure.
+
+    Returns:
+        list[Line2D]: Lines that match the measurement-to-IF connector style.
+    """
+    ax = fig._qm_ax  # type: ignore[attr-defined]
+    return [
+        line
+        for line in ax.lines
+        if line.get_color() == DEFAULT_STYLE.if_edge_color
+        and line.get_linestyle() == "-"
+    ]
+
+
 class TestFoldedIf:
     """``fold_ifs=True`` renders a surviving if as a single folded box."""
 
@@ -246,6 +283,13 @@ class TestFoldedIf:
         assert "measured" in folded[0].header_label
         assert any(line.startswith("else:") for line in folded[0].body_lines)
         assert any("h(" in line for line in folded[0].body_lines)
+
+    def test_runtime_if_keeps_measurement_connector_metadata(self):
+        """A folded measurement-backed if knows which measurement feeds it."""
+        vc = _visual_circuit(runtime_if, fold_ifs=True)
+        folded = _folded_ifs(vc)[0]
+        assert folded.condition_measure_node_key is not None
+        assert folded.condition_measure_qubit_indices == [0]
 
     def test_symbolic_classical_if_label_shows_predicate(self):
         """An unbound classical if renders its predicate, e.g. ``if flag == 1:``."""
@@ -275,6 +319,27 @@ class TestUnfoldedIf:
         assert len(unfolded[0].iterations) == 2
         assert unfolded[0].condition_label is not None
         assert "measured" in unfolded[0].condition_label
+
+    def test_assigned_measurement_condition_carries_connector_metadata(self):
+        """``b = measure(q); if b:`` records the measurement feeding the IF."""
+        vc = _visual_circuit(runtime_if)
+        seq = _unfolded_ifs(vc)[0]
+        assert seq.condition_measure_node_key is not None
+        assert seq.condition_measure_qubit_indices == [0]
+
+    def test_inline_measurement_condition_carries_connector_metadata(self):
+        """``if measure(q):`` records the measurement feeding the IF."""
+        vc = _visual_circuit(inline_measure_if)
+        seq = _unfolded_ifs(vc)[0]
+        assert seq.condition_measure_node_key is not None
+        assert seq.condition_measure_qubit_indices == [0]
+
+    def test_symbolic_classical_condition_has_no_measurement_connector(self):
+        """A non-measurement condition does not draw as measurement-derived."""
+        vc = _visual_circuit(classical_if)
+        seq = _unfolded_ifs(vc)[0]
+        assert seq.condition_measure_node_key is None
+        assert seq.condition_measure_qubit_indices == []
 
     def test_branches_carry_their_own_gates(self):
         """Iteration 0 holds the true-branch X; iteration 1 holds the else H."""
@@ -500,6 +565,15 @@ class TestDrawEndToEnd:
         """Measurement-backed if draws in unfolded and folded-if modes."""
         assert isinstance(runtime_if.draw(), Figure)
         assert isinstance(runtime_if.draw(fold_ifs=True), Figure)
+
+    def test_runtime_if_draws_measurement_connector(self):
+        """Measurement-backed if draws a solid connector from measure to IF."""
+        assert len(_if_connector_lines(runtime_if.draw())) == 1
+        assert len(_if_connector_lines(runtime_if.draw(fold_ifs=True))) == 1
+
+    def test_inline_measurement_if_draws_connector(self):
+        """An inline measurement condition draws the same connector."""
+        assert len(_if_connector_lines(inline_measure_if.draw())) == 1
 
     def test_symbolic_classical_if_draws(self):
         """Unbound classical if draws in unfolded and folded-if modes."""

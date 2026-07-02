@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
-from .geometry import compute_block_box_bounds
+from .geometry import compute_block_box_bounds, compute_border_padding
 from .style import CircuitStyle
 from .types import (
     LayoutResult,
@@ -40,6 +40,25 @@ class CircuitLayoutEngine:
 
     def __init__(self, style: CircuitStyle):
         self.style = style
+
+    def _condition_measure_right_edge(
+        self, node_key: tuple | None, state: LayoutState
+    ) -> float | None:
+        """Return the right edge of a condition-producing measurement gate.
+
+        Args:
+            node_key (tuple | None): Node key of the measurement gate that
+                feeds an IF condition.
+            state (LayoutState): Current layout placement state.
+
+        Returns:
+            float | None: The measurement gate's right edge, or None when the
+                measurement has not been placed.
+        """
+        if node_key is None or node_key not in state.positions:
+            return None
+        width = state.gate_widths.get(node_key, self.style.gate_width)
+        return state.positions[node_key] + width / 2
 
     # ------------------------------------------------------------------
     # Place Phase: assign coordinates from pre-resolved Visual IR nodes
@@ -299,6 +318,13 @@ class CircuitLayoutEngine:
         loop_width = node.folded_width
         op_half_width = loop_width / 2
         gap = self.style.gate_gap
+        condition_measure_right = self._condition_measure_right_edge(
+            node.condition_measure_node_key, state
+        )
+        if condition_measure_right is not None:
+            start_column = max(
+                start_column, condition_measure_right + gap + op_half_width
+            )
 
         for q in affected_qubits:
             if q in state.qubit_right_edges:
@@ -338,6 +364,12 @@ class CircuitLayoutEngine:
         # x where the if construct begins, used to anchor label-room reservation.
         if is_if and affected_qubits:
             if_start = max(state.qubit_right_edges.get(q, 0.0) for q in affected_qubits)
+            condition_measure_right = self._condition_measure_right_edge(
+                node.condition_measure_node_key, state
+            )
+            if condition_measure_right is not None:
+                branch_box_pad = compute_border_padding(self.style, depth=0)
+                if_start = max(if_start, condition_measure_right + branch_box_pad)
         else:
             if_start = 0.0
 
@@ -356,6 +388,7 @@ class CircuitLayoutEngine:
                 max_edge = max(
                     state.qubit_right_edges.get(q, 0.0) for q in affected_qubits
                 )
+                max_edge = max(max_edge, if_start)
                 # Branches after the first start past the previous branch's
                 # header label, not merely past its gates.
                 if i > 0:
