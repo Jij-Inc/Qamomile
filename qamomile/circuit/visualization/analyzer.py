@@ -1988,8 +1988,8 @@ class CircuitAnalyzer:
         if producer is None:
             return None
 
-        qubit_indices = self._measure_qubit_indices(
-            producer, qubit_map, logical_id_remap, param_values
+        qubit_indices = self._measure_condition_qubit_indices(
+            value, producer, qubit_map, logical_id_remap, param_values
         )
         return (*scope_path, id(producer)), qubit_indices
 
@@ -2026,6 +2026,150 @@ class CircuitAnalyzer:
                     return candidate
                 if parent_uuid is not None and result_uuid == parent_uuid:
                     return candidate
+        return None
+
+    def _measure_condition_qubit_indices(
+        self,
+        value: ValueBase,
+        op: MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> list[int]:
+        """Resolve the measurement wires used by an IF condition value.
+
+        Args:
+            value (ValueBase): IF condition value produced by ``op``.
+            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation):
+                Measurement operation that directly produced ``value``.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            list[int]: Wire indices relevant to the condition. For a vector
+                measurement element such as ``bits[1]``, this narrows to the
+                corresponding measured qubit when the element index resolves.
+        """
+        if isinstance(op, MeasureVectorOperation):
+            wire = self._measure_vector_condition_wire(
+                value, op, qubit_map, logical_id_remap, param_values
+            )
+            if wire is not None:
+                return [wire]
+        return self._measure_qubit_indices(
+            op, qubit_map, logical_id_remap, param_values
+        )
+
+    def _measure_vector_condition_wire(
+        self,
+        value: ValueBase,
+        op: MeasureVectorOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> int | None:
+        """Resolve ``measure(qs)[i]`` to the measured ``qs[i]`` wire.
+
+        Args:
+            value (ValueBase): IF condition value, possibly an element of the
+                vector measurement result.
+            op (MeasureVectorOperation): Vector measurement producer.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            int | None: The corresponding measured qubit wire, or None when
+                the condition is not a resolvable vector element.
+        """
+        if not op.operands:
+            return None
+        index = self._condition_array_element_index(value, param_values)
+        if index is None:
+            return None
+        return self._resolve_array_operand_index_to_qubit(
+            op.operands[0], index, qubit_map, logical_id_remap, param_values
+        )
+
+    def _condition_array_element_index(
+        self,
+        value: ValueBase,
+        param_values: dict,
+    ) -> int | None:
+        """Resolve the first array-element index of a condition value.
+
+        Args:
+            value (ValueBase): Condition value to inspect.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            int | None: The concrete element index, or None when ``value`` is
+                not a resolvable array element.
+        """
+        if not isinstance(value, Value):
+            return None
+        if not (hasattr(value, "parent_array") and value.parent_array is not None):
+            return None
+        if not (hasattr(value, "element_indices") and value.element_indices):
+            return None
+
+        index_value = value.element_indices[0]
+        if index_value.is_constant():
+            index = index_value.get_const()
+        else:
+            index = self._evaluate_value(index_value, param_values)
+        if index is None:
+            return None
+        return int(index)
+
+    def _resolve_array_operand_index_to_qubit(
+        self,
+        operand: Value,
+        index: int,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> int | None:
+        """Resolve one element of a measured qubit array operand.
+
+        Args:
+            operand (Value): Quantum array operand of ``MeasureVectorOperation``.
+            index (int): Concrete element index selected from the measurement
+                result.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            int | None: The qubit wire corresponding to ``operand[index]``, or
+                None when the array operand cannot be resolved.
+        """
+        if not isinstance(operand, ArrayValue):
+            return None
+        resolved_lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
+        if getattr(operand, "slice_of", None) is not None:
+            chain = self._resolve_view_chain_to_root(operand, param_values)
+            if chain is None:
+                return None
+            root_av, start, step = chain
+            root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+            root_index = start + step * index
+            root_element_key = f"{root_lid}_[{root_index}]"
+            if root_element_key in qubit_map:
+                return qubit_map[root_element_key]
+            if root_lid in qubit_map:
+                return qubit_map[root_lid] + root_index
+            return None
+
+        element_key = f"{resolved_lid}_[{index}]"
+        if element_key in qubit_map:
+            return qubit_map[element_key]
+        if resolved_lid in qubit_map:
+            return qubit_map[resolved_lid] + index
         return None
 
     def _measure_qubit_indices(

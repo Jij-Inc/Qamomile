@@ -79,6 +79,23 @@ def inline_measure_if(q0: Qubit, q1: Qubit) -> Qubit:
 
 
 @qmc.qkernel
+def vector_measure_element_if() -> Qubit:
+    """Build an if whose condition is one bit of a vector measurement.
+
+    Returns:
+        Qubit: Updated target qubit.
+    """
+    qs = qmc.qubit_array(3, "qs")
+    target = qmc.qubit("target")
+    bits = qmc.measure(qs)
+    if bits[1]:
+        target = qmc.x(target)
+    else:
+        target = qmc.h(target)
+    return target
+
+
+@qmc.qkernel
 def classical_if(q0: Qubit, flag: UInt) -> Qubit:
     """Build a symbolic classical-condition if/else example.
 
@@ -334,6 +351,19 @@ class TestUnfoldedIf:
         assert seq.condition_measure_node_key is not None
         assert seq.condition_measure_qubit_indices == [0]
 
+    def test_vector_measurement_element_condition_uses_selected_wire(self):
+        """``if bits[1]:`` connects from the measured vector's second wire."""
+        vc = _visual_circuit(vector_measure_element_if)
+        measure = next(
+            n
+            for n in _walk(vc.children)
+            if isinstance(n, VGate) and n.kind == VGateKind.MEASURE_VECTOR
+        )
+        seq = _unfolded_ifs(vc)[0]
+        assert measure.qubit_indices == [0, 1, 2]
+        assert seq.condition_measure_node_key == measure.node_key
+        assert seq.condition_measure_qubit_indices == [1]
+
     def test_symbolic_classical_condition_has_no_measurement_connector(self):
         """A non-measurement condition does not draw as measurement-derived."""
         vc = _visual_circuit(classical_if)
@@ -574,6 +604,10 @@ class TestDrawEndToEnd:
     def test_inline_measurement_if_draws_connector(self):
         """An inline measurement condition draws the same connector."""
         assert len(_if_connector_lines(inline_measure_if.draw())) == 1
+
+    def test_vector_measurement_element_if_draws_connector(self):
+        """A vector-measurement element condition draws one connector."""
+        assert len(_if_connector_lines(vector_measure_element_if.draw())) == 1
 
     def test_symbolic_classical_if_draws(self):
         """Unbound classical if draws in unfolded and folded-if modes."""
