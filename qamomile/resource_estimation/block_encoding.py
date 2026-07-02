@@ -8,8 +8,12 @@ from typing import Any
 import sympy as sp
 
 from qamomile.circuit.estimator import GateCount, ResourceEstimate
-
-_SympyLike = sp.Expr | int | float
+from qamomile.resource_estimation._common import (
+    _as_expr,
+    _SympyLike,
+    _validate_nonnegative,
+    _validate_positive,
+)
 
 
 @dataclass(frozen=True)
@@ -240,50 +244,3 @@ def estimate_qubitized_qpe_resources_from_block_encoding(
             oracle_queries={},
         ),
     ).simplify()
-
-
-def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
-    """Convert a numeric or symbolic value to a SymPy expression.
-
-    Args:
-        value (sp.Expr | int | float): Value to convert.
-        name (str): Field name used in error messages.
-
-    Returns:
-        sp.Expr: Converted SymPy expression.
-
-    Raises:
-        TypeError: If ``value`` cannot be converted by SymPy.
-    """
-    try:
-        return sp.sympify(value)
-    except (TypeError, sp.SympifyError) as exc:
-        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
-
-
-def _validate_positive(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is positive when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is not positive.
-    """
-    if expr.is_positive is False:
-        raise ValueError(f"{name} must be positive.")
-
-
-def _validate_nonnegative(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is nonnegative when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is negative.
-    """
-    if expr.is_nonnegative is False:
-        raise ValueError(f"{name} must be nonnegative.")

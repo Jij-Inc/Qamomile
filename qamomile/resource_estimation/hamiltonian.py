@@ -7,8 +7,14 @@ from typing import Any
 
 import sympy as sp
 
-_SympyLike = sp.Expr | int | float
-_CoefficientLike = _SympyLike | complex
+from qamomile.resource_estimation._common import (
+    _as_expr,
+    _CoefficientLike,
+    _SympyLike,
+    _validate_nonnegative,
+    _validate_positive,
+)
+
 _OPENFERMION_PAULI_LABELS = frozenset({"X", "Y", "Z"})
 
 
@@ -59,7 +65,7 @@ class PauliHamiltonianResource:
         n_pauli_terms = _as_expr(self.n_pauli_terms, "n_pauli_terms")
         lambda_norm = _as_expr(self.lambda_norm, "lambda_norm")
         max_locality = _as_expr(self.max_locality, "max_locality")
-        constant = _coefficient_as_expr(self.constant, "constant")
+        constant = _as_expr(self.constant, "constant")
         _validate_positive(n_qubits, "n_qubits")
         _validate_nonnegative(n_pauli_terms, "n_pauli_terms")
         _validate_nonnegative(lambda_norm, "lambda_norm")
@@ -145,6 +151,13 @@ def summarize_pauli_hamiltonian(
 ) -> PauliHamiltonianResource:
     """Summarize a Qamomile Pauli Hamiltonian for resource estimates.
 
+    Terms whose coefficients cancelled to exactly zero are excluded from
+    every summary quantity, so ``n_pauli_terms``, ``lambda_norm``, and
+    ``max_locality`` all describe the same effective operator. Numeric
+    coefficients are accumulated in plain Python arithmetic before a single
+    SymPy conversion, keeping the summary linear-time with a small constant
+    even for chemistry-scale Hamiltonians.
+
     Args:
         hamiltonian (Any): ``qamomile.observable.Hamiltonian`` instance to
             summarize.
@@ -175,19 +188,30 @@ def summarize_pauli_hamiltonian(
         if n_qubits is None
         else _as_expr(n_qubits, "n_qubits")
     )
-    lambda_norm = sp.Integer(0)
+    numeric_norm: int | float = 0
+    symbolic_norm_terms: list[sp.Expr] = []
+    n_pauli_terms = 0
     max_locality = 0
     for operators, coeff in hamiltonian:
-        lambda_norm += _abs_as_expr(coeff)
+        if coeff == 0:
+            continue
+        n_pauli_terms += 1
         max_locality = max(max_locality, len(operators))
-    constant = _coefficient_as_expr(hamiltonian.constant, "constant")
+        if isinstance(coeff, (int, float, complex)):
+            numeric_norm += abs(coeff)
+        else:
+            symbolic_norm_terms.append(_abs_as_expr(coeff))
+    constant = _as_expr(hamiltonian.constant, "constant")
     if include_constant:
-        lambda_norm += _abs_as_expr(hamiltonian.constant)
+        numeric_norm += abs(hamiltonian.constant)
+    lambda_norm = sp.sympify(numeric_norm)
+    if symbolic_norm_terms:
+        lambda_norm = sp.simplify(sp.Add(lambda_norm, *symbolic_norm_terms))
 
     return PauliHamiltonianResource(
         n_qubits=n_expr,
-        n_pauli_terms=sp.Integer(len(hamiltonian)),
-        lambda_norm=sp.simplify(lambda_norm),
+        n_pauli_terms=sp.Integer(n_pauli_terms),
+        lambda_norm=lambda_norm,
         max_locality=sp.Integer(max_locality),
         constant=constant,
         constant_included=include_constant,
@@ -298,44 +322,6 @@ def summarize_openfermion_qubit_operator(
     )
 
 
-def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
-    """Convert a numeric or symbolic value to a SymPy expression.
-
-    Args:
-        value (sp.Expr | int | float): Value to convert.
-        name (str): Field name used in error messages.
-
-    Returns:
-        sp.Expr: Converted SymPy expression.
-
-    Raises:
-        TypeError: If ``value`` cannot be sympified.
-    """
-    try:
-        return sp.sympify(value)
-    except (TypeError, sp.SympifyError) as exc:
-        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
-
-
-def _coefficient_as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
-    """Convert a Hamiltonian coefficient to a SymPy expression.
-
-    Args:
-        value (sp.Expr | int | float | complex): Coefficient to convert.
-        name (str): Field name used in error messages.
-
-    Returns:
-        sp.Expr: Converted SymPy expression.
-
-    Raises:
-        TypeError: If ``value`` cannot be sympified.
-    """
-    try:
-        return sp.sympify(value)
-    except (TypeError, sp.SympifyError) as exc:
-        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
-
-
 def _abs_as_expr(value: _CoefficientLike) -> sp.Expr:
     """Return the symbolic absolute value of a numeric coefficient.
 
@@ -348,32 +334,4 @@ def _abs_as_expr(value: _CoefficientLike) -> sp.Expr:
     Raises:
         TypeError: If ``value`` cannot be converted into a SymPy expression.
     """
-    return sp.Abs(_coefficient_as_expr(value, "coefficient"))
-
-
-def _validate_positive(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is positive when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is not positive.
-    """
-    if expr.is_positive is False:
-        raise ValueError(f"{name} must be positive.")
-
-
-def _validate_nonnegative(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is nonnegative when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is negative.
-    """
-    if expr.is_nonnegative is False:
-        raise ValueError(f"{name} must be nonnegative.")
+    return sp.Abs(_as_expr(value, "coefficient"))

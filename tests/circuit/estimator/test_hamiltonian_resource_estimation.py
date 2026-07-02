@@ -36,6 +36,30 @@ def test_summarize_pauli_hamiltonian_extracts_lcu_quantities():
     )
 
 
+def test_summarize_pauli_hamiltonian_excludes_cancelled_terms():
+    """Terms whose coefficients cancel to zero do not inflate the summary."""
+    hamiltonian = qm_o.Z(0) + qm_o.X(0) - qm_o.X(0) + 2 * qm_o.Y(0) * qm_o.Y(1)
+
+    summary = summarize_pauli_hamiltonian(hamiltonian)
+
+    assert summary.n_pauli_terms == 2
+    assert summary.max_locality == 2
+    assert sp.Abs(summary.lambda_norm - 3) < sp.Float("1e-12")
+
+
+def test_summarize_pauli_hamiltonian_handles_symbolic_coefficients():
+    """Symbolic coefficients still contribute to the lambda norm."""
+    a = sp.Symbol("a", positive=True)
+    hamiltonian = qm_o.Hamiltonian(num_qubits=2)
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), a)
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 1),), 2.0)
+
+    summary = summarize_pauli_hamiltonian(hamiltonian)
+
+    assert summary.n_pauli_terms == 2
+    assert sp.simplify(summary.lambda_norm - (a + 2)) == 0
+
+
 def test_summarize_pauli_hamiltonian_accepts_qubit_count_override():
     """Hamiltonian summaries can carry an externally chosen encoded width."""
     summary = summarize_pauli_hamiltonian(qm_o.Z(0), n_qubits=4)

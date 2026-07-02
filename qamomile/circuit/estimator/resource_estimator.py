@@ -283,17 +283,6 @@ def _collect_parameters(qubits: sp.Expr, gates: GateCount) -> dict[str, sp.Symbo
         dict[str, sp.Symbol]: Free symbols keyed by their display names.
     """
     all_symbols: set[sp.Symbol] = set()
-    for expr in [
-        qubits,
-        gates.total,
-        gates.single_qubit,
-        gates.two_qubit,
-        gates.multi_qubit,
-        gates.t_gates,
-        gates.clifford_gates,
-        gates.rotation_gates,
-        *gates.oracle_calls.values(),
-        *gates.oracle_queries.values(),
-    ]:
+    for expr in [qubits, *gates.expressions()]:
         all_symbols.update(expr.free_symbols)  # type: ignore[arg-type]
     return {str(sym): sym for sym in sorted(all_symbols, key=str)}

@@ -10,8 +10,11 @@ from typing import Protocol
 import sympy as sp
 
 from qamomile.circuit.estimator import ResourceEstimate
-
-_SympyLike = sp.Expr | int | float
+from qamomile.resource_estimation._common import (
+    _as_expr,
+    _SympyLike,
+    _validate_nonnegative,
+)
 
 
 class ResourceCategory(enum.StrEnum):
@@ -54,6 +57,9 @@ class ResourceQuantity(enum.StrEnum):
             qubitized walk.
         QPE_REGISTER_QUBITS: Optional QPE readout-register qubits.
         WALK_COST_TOFFOLI: Toffoli cost of one qubitized walk.
+        SPARSITY: Nonzero term count assumed by sparse Hamiltonian
+            representations, distinct from the problem-level Pauli term
+            count.
         TARGET_PRECISION: Total target energy precision budget for an
             algorithm estimate.
         REPRESENTATION_ERROR: Error budget consumed by Hamiltonian
@@ -127,6 +133,7 @@ class ResourceQuantity(enum.StrEnum):
     REFLECTION_COST_TOFFOLI = "reflection_cost_toffoli"
     QPE_REGISTER_QUBITS = "qpe_register_qubits"
     WALK_COST_TOFFOLI = "walk_cost_toffoli"
+    SPARSITY = "sparsity"
     TARGET_PRECISION = "target_precision"
     REPRESENTATION_ERROR = "representation_error"
     ALGORITHMIC_PRECISION = "algorithmic_precision"
@@ -364,6 +371,13 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
         "Toffoli gates per walk",
         ResourceCategory.ALGORITHM,
         "Toffoli cost of one qubitized walk operator call.",
+    ),
+    ResourceQuantitySpec(
+        ResourceQuantity.SPARSITY,
+        "Sparsity",
+        "terms",
+        ResourceCategory.ALGORITHM,
+        "Nonzero term count assumed by sparse Hamiltonian representations.",
     ),
     ResourceQuantitySpec(
         ResourceQuantity.TARGET_PRECISION,
@@ -904,36 +918,3 @@ def _normalize_resource_quantity(
         raise ValueError(
             f"Unknown resource quantity {quantity!r}; valid: {valid}."
         ) from exc
-
-
-def _as_expr(value: _SympyLike, name: str) -> sp.Expr:
-    """Convert a numeric or symbolic value to a SymPy expression.
-
-    Args:
-        value (sp.Expr | int | float): Value to convert.
-        name (str): Field name used in error messages.
-
-    Returns:
-        sp.Expr: Converted SymPy expression.
-
-    Raises:
-        TypeError: If ``value`` cannot be converted by SymPy.
-    """
-    try:
-        return sp.sympify(value)
-    except (TypeError, sp.SympifyError) as exc:
-        raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
-
-
-def _validate_nonnegative(expr: sp.Expr, name: str) -> None:
-    """Validate that an expression is nonnegative when decidable.
-
-    Args:
-        expr (sp.Expr): Expression to validate.
-        name (str): Field name used in error messages.
-
-    Raises:
-        ValueError: If SymPy can prove that ``expr`` is negative.
-    """
-    if expr.is_nonnegative is False:
-        raise ValueError(f"{name} must be nonnegative.")
