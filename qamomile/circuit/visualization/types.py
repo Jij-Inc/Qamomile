@@ -109,6 +109,8 @@ class LayoutState:
     # entry (unfolded if/else branch boxes). Each entry is
     # ``{"top_qubit": int, "num_lines": int}`` and only contributes vertical
     # clearance above its top qubit; it never draws a border.
+    # Folded control-flow blocks use ``folded_block_extents`` instead because
+    # they draw a full bordered summary box centered on the affected qubits.
     label_extents: list[dict] = field(default_factory=list)
 
 

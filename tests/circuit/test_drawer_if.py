@@ -244,7 +244,7 @@ class TestFoldedIf:
         # The condition label spells the measurement bit, not a placeholder.
         assert folded[0].header_label.startswith("if ")
         assert "measured" in folded[0].header_label
-        assert "else:" in folded[0].body_lines
+        assert any(line.startswith("else:") for line in folded[0].body_lines)
         assert any("h(" in line for line in folded[0].body_lines)
 
     def test_symbolic_classical_if_label_shows_predicate(self):
@@ -253,7 +253,7 @@ class TestFoldedIf:
         folded = _folded_ifs(vc)
         assert len(folded) == 1
         assert folded[0].header_label == "if flag == 1:"
-        assert "else:" in folded[0].body_lines
+        assert any(line.startswith("else:") for line in folded[0].body_lines)
 
     def test_empty_true_branch_folded_summary_keeps_else(self):
         """An empty true branch still shows pass and else in folded form."""
@@ -261,7 +261,7 @@ class TestFoldedIf:
         folded = _folded_ifs(vc)
         assert len(folded) == 1
         assert folded[0].body_lines[0] == "pass"
-        assert "else:" in folded[0].body_lines
+        assert any(line.startswith("else:") for line in folded[0].body_lines)
 
 
 class TestUnfoldedIf:
@@ -337,6 +337,15 @@ class TestUnfoldedIfSpacing:
         # runtime_if: q0 carries the measurement, q1 carries the if/else box.
         # The "if q0_measured:" header sits above q1 (between q0 and q1), so the
         # q0->q1 gap must exceed the default wire spacing to make room for it.
+        gap = layout.qubit_y[0] - layout.qubit_y[1]
+        assert gap > DEFAULT_STYLE.qubit_base_spacing
+
+    def test_folded_if_body_does_not_crowd_wire_above(self):
+        """A multi-line folded IF box reserves vertical room above its wire."""
+        vc = _visual_circuit(runtime_if, fold_ifs=True)
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(vc)
+        # The folded IF is centered on q1 but has three text lines, so q0->q1
+        # spacing must grow to keep the box from overlapping q0's measurement.
         gap = layout.qubit_y[0] - layout.qubit_y[1]
         assert gap > DEFAULT_STYLE.qubit_base_spacing
 

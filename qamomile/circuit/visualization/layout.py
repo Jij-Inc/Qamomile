@@ -441,7 +441,10 @@ class CircuitLayoutEngine:
         state.actual_width = max(state.actual_width, state.column)
 
         qubit_y, max_above, max_below = self._compute_qubit_y_positions(
-            vc.num_qubits, state.block_ranges, state.label_extents
+            vc.num_qubits,
+            state.block_ranges,
+            state.label_extents,
+            state.folded_block_extents,
         )
 
         return LayoutResult(
@@ -467,6 +470,7 @@ class CircuitLayoutEngine:
         num_qubits: int,
         block_ranges: list[dict],
         label_extents: list[dict] | None = None,
+        folded_block_extents: dict[tuple, dict] | None = None,
     ) -> tuple[list[float], dict[int, float], dict[int, float]]:
         """Compute y-positions with variable spacing based on block borders.
 
@@ -483,12 +487,17 @@ class CircuitLayoutEngine:
                 ``{"top_qubit": int, "num_lines": int}`` and only widens the
                 clearance above its top qubit. Defaults to None (treated as
                 empty).
+            folded_block_extents: Folded summary boxes keyed by node key. Each
+                value contains ``affected_qubits`` and ``num_text_lines`` so the
+                vertical spacing can reserve the same text height rendered by
+                ``MatplotlibRenderer``. Defaults to None (treated as empty).
 
         Returns:
             Tuple of (y_positions, max_above, max_below).
         """
         label_extents = label_extents or []
-        if not block_ranges and not label_extents:
+        folded_block_extents = folded_block_extents or {}
+        if not block_ranges and not label_extents and not folded_block_extents:
             max_above: dict[int, float] = {}
             max_below: dict[int, float] = {}
             if num_qubits <= 1:
@@ -571,6 +580,27 @@ class CircuitLayoutEngine:
                     max_above[q] = max(max_above[q], gate_half + padding)
                 if q != bottom_q:
                     max_below[q] = max(max_below[q], gate_half + padding)
+
+        # Folded control-flow blocks are centered on their affected qubits and
+        # may be taller than a gate because they contain a multi-line summary.
+        # Reserve the rendered half-height plus a neighboring gate half-height
+        # so adjacent wires and gates do not collide with the summary box.
+        for folded_extent in folded_block_extents.values():
+            qubits = sorted(folded_extent.get("affected_qubits", []))
+            if not qubits:
+                continue
+            num_lines = folded_extent.get("num_text_lines", 1)
+            min_text_height = (
+                num_lines * self.style.line_height
+                + 2 * self.style.folded_box_text_v_padding
+            )
+            extent = max(gate_half, min_text_height / 2) + gate_half
+            top_q = qubits[0]
+            bottom_q = qubits[-1]
+            max_above[top_q] = max(max_above[top_q], extent)
+            max_below[bottom_q] = max(max_below[bottom_q], extent)
+            if len(qubits) == 1:
+                max_below[top_q] = max(max_below[top_q], extent)
 
         # Header-only labels (unfolded if/else boxes) have no block border but
         # still draw a label above their top qubit; reserve room for it the

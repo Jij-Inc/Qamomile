@@ -1862,11 +1862,14 @@ class CircuitAnalyzer:
             if op.false_operations:
                 if not body_lines:
                     body_lines.append("pass")
-                body_lines.append("else:")
                 false_lines = self._format_folded_body_lines(
                     op.false_operations, param_values
                 )
-                body_lines.extend(false_lines or ["pass"])
+                if false_lines:
+                    body_lines.append(f"else: {false_lines[0].lstrip()}")
+                    body_lines.extend(false_lines[1:])
+                else:
+                    body_lines.append("else: pass")
             if len(body_lines) > 3:
                 body_lines = body_lines[:3] + ["..."]
 
