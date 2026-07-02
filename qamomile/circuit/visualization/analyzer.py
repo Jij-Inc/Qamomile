@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
 
 
-# String markers appended to a node's scope path for the true / else branch of
+# String markers appended to a node's scope path for the true / false branch of
 # an ``IfOperation`` (see ``_build_vif`` and the layout engine's unfolded-if
 # placement). They are the only non-integer scope-path elements any node key
 # carries, so their presence uniquely identifies a node nested inside an
@@ -1159,7 +1159,7 @@ class CircuitAnalyzer:
 
         Returns:
             bool: True if any element of ``node_key`` is an if-branch marker,
-                meaning the node is nested inside a true/else branch.
+                meaning the node is nested inside a true/false branch.
         """
         return any(
             isinstance(part, str) and part in _IF_BRANCH_SCOPE_KEYS for part in node_key

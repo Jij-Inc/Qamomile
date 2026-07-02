@@ -33,7 +33,7 @@ def _prepare_graph_for_visualization(graph: Block) -> Block:
             analysis.
 
     Raises:
-        AssertionError: If the graph has an unknown ``BlockKind``.
+        ValueError: If the graph has an unknown ``BlockKind``.
     """
     from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
         CompileTimeIfLoweringPass,
@@ -43,7 +43,7 @@ def _prepare_graph_for_visualization(graph: Block) -> Block:
         return CompileTimeIfLoweringPass().run(graph)
     if graph.kind == BlockKind.ANALYZED:
         return graph
-    raise AssertionError(f"Unknown block kind for visualization: {graph.kind}")
+    raise ValueError(f"Unknown block kind for visualization: {graph.kind}")
 
 
 class MatplotlibDrawer:
