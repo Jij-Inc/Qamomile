@@ -602,6 +602,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     f"PauliEvolveOp requires a Hermitian Hamiltonian "
                     f"(real coefficients), but found complex coefficient "
                     f"{coeff} on term {operators}.",
+                    operation="PauliEvolveOp",
                 )
 
         # Hamiltonian.__iter__ yields only the Pauli terms, so the loop

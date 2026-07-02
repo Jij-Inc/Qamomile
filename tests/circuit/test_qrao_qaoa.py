@@ -626,14 +626,18 @@ def test_larger_hamiltonian_raises(use_native):
         )
 
 
-def test_complex_coefficient_raises():
-    """Hamiltonian with complex (non-Hermitian) coefficients should error."""
+@pytest.mark.parametrize("use_native", [True, False])
+def test_complex_coefficient_raises(use_native):
+    """Hamiltonian with complex (non-Hermitian) coefficients should error.
+
+    Covers both the native PauliEvolutionGate path and the gadget fallback.
+    """
     from qamomile.circuit.transpiler.errors import EmitError
 
     H = qm_o.Hamiltonian()
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0 + 0.5j)  # complex
 
-    transpiler = QiskitTranspiler(use_native_composite=False)
+    transpiler = QiskitTranspiler(use_native_composite=use_native)
     with pytest.raises(EmitError, match="Hermitian"):
         transpiler.transpile(
             _wrap_pauli_evolve,
