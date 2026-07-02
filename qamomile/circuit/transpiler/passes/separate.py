@@ -146,11 +146,11 @@ def collect_value_like_uuids(value: ValueLike) -> set[str]:
     """Collect UUIDs contained in a value-like IR object.
 
     Args:
-        value: Value-like object to inspect.
+        value (ValueLike): Value-like object to inspect.
 
     Returns:
-        UUIDs for ``value`` itself and any recursively contained tuple/dict
-        elements.
+        set[str]: UUIDs for ``value`` itself and any recursively contained
+            tuple/dict elements.
     """
     uuids = {value.uuid}
     if isinstance(value, TupleValue):
@@ -818,10 +818,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Map each produced value UUID to the operation that writes it.
 
         Args:
-            operations: Top-level operations of the block.
+            operations (list[Operation]): Top-level operations of the block.
 
         Returns:
-            Mapping from result UUID to the producing operation.
+            dict[str, Operation]: Mapping from result UUID to the producing
+                operation.
         """
 
         class ProducerCollector(ControlFlowVisitor):
@@ -835,7 +836,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 """Record result producers for ``op``.
 
                 Args:
-                    op: Operation being visited.
+                    op (Operation): Operation being visited.
 
                 Returns:
                     None: Mutates ``self.producers`` in place.
@@ -852,11 +853,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Build host-side operations that recompute selected Phi outputs.
 
         Args:
-            op: Quantum-effective ``IfOperation`` whose Phi outputs may be
-                needed after the quantum segment.
+            op (IfOperation): Quantum-effective ``IfOperation`` whose Phi
+                outputs may be needed after the quantum segment.
 
         Returns:
-            Pure-classical operations to append to the post-quantum segment.
+            list[Operation]: Pure-classical operations to append to the
+                post-quantum segment.
         """
         target_phis: list[PhiOp] = []
         true_seeds: list[ValueBase] = []
@@ -917,11 +919,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Return whether a Phi output must be available host-side.
 
         Args:
-            phi: Phi operation to inspect.
+            phi (PhiOp): Phi operation to inspect.
 
         Returns:
-            ``True`` when the Phi output is a block output or feeds a
-            host-side classical consumer.
+            bool: ``True`` when the Phi output is a block output or feeds a
+                host-side classical consumer.
         """
         output = phi.output
         if isinstance(output, ArrayValue):
@@ -947,12 +949,15 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Collect pure-classical producers needed by ``seeds``.
 
         Args:
-            seeds: Values whose producers should be available.
-            operations: Operation scope from which producers may be copied.
+            seeds (list[ValueBase]): Values whose producers should be
+                available.
+            operations (list[Operation]): Operation scope from which producers
+                may be copied.
 
         Returns:
-            Ordered pure-classical producer operations, or ``None`` when a
-            needed producer is a nested operation that cannot be copied safely.
+            list[Operation] | None: Ordered pure-classical producer operations,
+                or ``None`` when a needed producer is a nested operation that
+                cannot be copied safely.
         """
         local_producers = self._build_producer_map(operations)
         required_ids: set[int] = set()

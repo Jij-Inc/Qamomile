@@ -68,15 +68,18 @@ def resolve_runtime_array_location(
     """Resolve local array indices through runtime-bound slice views.
 
     Args:
-        array: Array whose local indices should be resolved. May be a root
-            array or a ``slice_of`` view chain.
-        indices: Concrete indices in ``array``'s local coordinate space.
-        resolve_int: Callback used to evaluate ``slice_start`` /
+        array (ArrayValue): Array whose local indices should be resolved. May
+            be a root array or a ``slice_of`` view chain.
+        indices (tuple[int, ...]): Concrete indices in ``array``'s local
+            coordinate space.
+        resolve_int (Callable[[Value], int | None]): Callback used to
+            evaluate ``slice_start`` /
             ``slice_step`` values against the current runtime state.
 
     Returns:
-        The root array and indices in root coordinates, or ``None`` when a
-        slice bound is unresolved or violates the frontend slice contract.
+        tuple[ArrayValue, tuple[int, ...]] | None: The root array and indices
+            in root coordinates, or ``None`` when a slice bound is unresolved
+            or violates the frontend slice contract.
     """
     if len(indices) != 1:
         return array, indices
@@ -610,14 +613,15 @@ class ClassicalExecutor:
         """Resolve ``value`` to ``int`` when available.
 
         Args:
-            value: Scalar value to resolve.
-            context: Execution context holding measured values and bindings.
-            results: Segment-local results.
-            scoped_locals: Loop/branch-local values.
+            value (Value): Scalar value to resolve.
+            context (ExecutionContext): Execution context holding measured
+                values and bindings.
+            results (dict[str, Any]): Segment-local results.
+            scoped_locals (dict[str, Any]): Loop/branch-local values.
 
         Returns:
-            Integer value, or ``None`` when the value is not currently
-            resolvable.
+            int | None: Integer value, or ``None`` when the value is not
+                currently resolvable.
         """
         try:
             return int(self._get_value(value, context, results, scoped_locals))

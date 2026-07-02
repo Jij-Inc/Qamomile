@@ -236,11 +236,13 @@ class ProgramOrchestrator(Generic[T]):
         top-level public inputs.
 
         Args:
-            context: Execution context seeded with user bindings.
-            public_inputs: Runtime-visible public inputs from the program ABI.
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            public_inputs (dict[str, ValueLike]): Runtime-visible public
+                inputs from the program ABI.
 
         Returns:
-            None.
+            None: This method mutates ``context`` in place.
         """
         top_level_names = set(public_inputs)
         for input_name, value in public_inputs.items():
@@ -262,14 +264,16 @@ class ProgramOrchestrator(Generic[T]):
         """Seed aliases for one tuple input's direct elements.
 
         Args:
-            context: Execution context seeded with user bindings.
-            tuple_name: Public input name for the tuple.
-            tuple_value: Tuple IR value whose elements should be aliased.
-            top_level_names: Names of all public inputs, used to avoid alias
-                collisions with separate top-level arguments.
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            tuple_name (str): Public input name for the tuple.
+            tuple_value (TupleValue): Tuple IR value whose elements should be
+                aliased.
+            top_level_names (set[str]): Names of all public inputs, used to
+                avoid alias collisions with separate top-level arguments.
 
         Returns:
-            None.
+            None: This method mutates ``context`` in place.
         """
         tuple_data = self._resolve_tuple_input_data(context, tuple_name, tuple_value)
         for index, element in enumerate(tuple_value.elements):
@@ -294,13 +298,14 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve a concrete tuple binding from context when available.
 
         Args:
-            context: Execution context seeded with user bindings.
-            tuple_name: Public input name for the tuple.
-            tuple_value: Tuple IR value.
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            tuple_name (str): Public input name for the tuple.
+            tuple_value (TupleValue): Tuple IR value.
 
         Returns:
-            The bound tuple-like object, or a private sentinel when only
-            indexed element bindings are available.
+            Any: The bound tuple-like object, or a private sentinel when only
+                indexed element bindings are available.
         """
         if context.has(tuple_value.uuid):
             return context.get(tuple_value.uuid)
@@ -320,13 +325,15 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve one tuple element from whole-tuple or indexed bindings.
 
         Args:
-            context: Execution context seeded with user bindings.
-            tuple_name: Public input name for the tuple.
-            index: Element index to resolve.
-            tuple_data: Whole tuple binding or the private missing sentinel.
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            tuple_name (str): Public input name for the tuple.
+            index (int): Element index to resolve.
+            tuple_data (Any): Whole tuple binding or the private missing
+                sentinel.
 
         Returns:
-            The concrete element value, or the private missing sentinel.
+            Any: The concrete element value, or the private missing sentinel.
         """
         if tuple_data is not _MISSING:
             try:
@@ -346,11 +353,12 @@ class ProgramOrchestrator(Generic[T]):
         """Return non-conflicting context aliases for a tuple element.
 
         Args:
-            element: Tuple element IR value.
-            top_level_names: Names of all public inputs.
+            element (Value): Tuple element IR value.
+            top_level_names (set[str]): Names of all public inputs.
 
         Returns:
-            Alias keys that do not collide with top-level public input names.
+            tuple[str, ...]: Alias keys that do not collide with top-level
+                public input names.
         """
         aliases: list[str] = []
         for alias in (element.name, element.parameter_name()):
@@ -367,12 +375,12 @@ class ProgramOrchestrator(Generic[T]):
         """Set a context value without overwriting explicit bindings.
 
         Args:
-            context: Execution context to update.
-            key: Context key to seed.
-            value: Concrete runtime value.
+            context (ExecutionContext): Execution context to update.
+            key (str): Context key to seed.
+            value (Any): Concrete runtime value.
 
         Returns:
-            None.
+            None: This method mutates ``context`` in place.
         """
         if not context.has(key):
             context.set(key, value)
@@ -616,14 +624,14 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve an output IR value from the execution context.
 
         Args:
-            value: Output IR value to resolve.
-            context: Execution context populated by measurement loading and
-                post-quantum classical execution.
+            value (ValueLike): Output IR value to resolve.
+            context (ExecutionContext): Execution context populated by
+                measurement loading and post-quantum classical execution.
 
         Returns:
-            Concrete Python value, or ``None`` when the output cannot be
-            found. The ``None`` fallback preserves the legacy output-ref
-            behavior for unresolved values.
+            Any: Concrete Python value, or ``None`` when the output cannot be
+                found. The ``None`` fallback preserves the legacy output-ref
+                behavior for unresolved values.
         """
         if isinstance(value, TupleValue):
             resolved = self._resolve_direct_output_value(value, context)
@@ -669,11 +677,13 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve a value directly from runtime state or static metadata.
 
         Args:
-            value: IR value-like object to resolve.
-            context: Execution context populated with bindings and results.
+            value (ValueLike): IR value-like object to resolve.
+            context (ExecutionContext): Execution context populated with
+                bindings and results.
 
         Returns:
-            Concrete value, or ``None`` when no direct binding/constant exists.
+            Any: Concrete value, or ``None`` when no direct binding/constant
+                exists.
         """
         if context.has(value.uuid):
             return context.get(value.uuid)
@@ -698,13 +708,13 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve a whole array output, including runtime-bound views.
 
         Args:
-            value: Array output value.
-            context: Execution context populated with measured bits and
-                runtime bindings.
+            value (ArrayValue): Array output value.
+            context (ExecutionContext): Execution context populated with
+                measured bits and runtime bindings.
 
         Returns:
-            Tuple of resolved elements, or ``None`` when the array cannot be
-            reconstructed.
+            Any | None: Tuple of resolved elements, or ``None`` when the array
+                cannot be reconstructed.
         """
         direct = self._resolve_direct_output_value(value, context)
         if direct is not None:
@@ -735,12 +745,13 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve an output UUID from context using legacy lookup rules.
 
         Args:
-            ref: Output UUID.
-            context: Execution context populated by execution.
+            ref (str): Output UUID.
+            context (ExecutionContext): Execution context populated by
+                execution.
 
         Returns:
-            Concrete Python value, tuple reconstructed from indexed entries, or
-            ``None`` when no value is available.
+            Any | None: Concrete Python value, tuple reconstructed from indexed
+                entries, or ``None`` when no value is available.
         """
         val = context.get(ref) if context.has(ref) else None
         if val is None:
@@ -761,12 +772,14 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve an array-element output through its parent array carrier.
 
         Args:
-            value: Output value that carries ``parent_array`` metadata.
-            context: Execution context populated by measurement loading.
+            value (Value): Output value that carries ``parent_array``
+                metadata.
+            context (ExecutionContext): Execution context populated by
+                measurement loading.
 
         Returns:
-            Concrete element value, or ``None`` when the element cannot be
-            resolved.
+            Any | None: Concrete element value, or ``None`` when the element
+                cannot be resolved.
         """
         parent = value.parent_array
         if parent is None:
@@ -818,11 +831,12 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve an array container from output-visible state.
 
         Args:
-            value: Array value to resolve.
-            context: Execution context populated with bindings and results.
+            value (ArrayValue): Array value to resolve.
+            context (ExecutionContext): Execution context populated with
+                bindings and results.
 
         Returns:
-            Concrete array-like container, or ``None`` when not available.
+            Any: Concrete array-like container, or ``None`` when not available.
         """
         resolved = self._resolve_output_ref(value.uuid, context)
         if resolved is not None:
@@ -838,12 +852,15 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve an array element from root-coordinate indices.
 
         Args:
-            array: Root array value.
-            indices: Concrete indices in ``array`` coordinates.
-            context: Execution context populated with measurements/bindings.
+            array (ArrayValue): Root array value.
+            indices (tuple[int, ...]): Concrete indices in ``array``
+                coordinates.
+            context (ExecutionContext): Execution context populated with
+                measurements/bindings.
 
         Returns:
-            Concrete element value, or ``None`` when no carrier is available.
+            Any: Concrete element value, or ``None`` when no carrier is
+                available.
         """
         container = self._resolve_array_container_output(array, context)
         if container is not None:
@@ -869,11 +886,13 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve output array indices to concrete integers.
 
         Args:
-            value: Array-element output value.
-            context: Execution context that may contain runtime index values.
+            value (Value): Array-element output value.
+            context (ExecutionContext): Execution context that may contain
+                runtime index values.
 
         Returns:
-            Tuple of integer indices, or ``None`` if any index is unresolved.
+            tuple[int, ...] | None: Tuple of integer indices, or ``None`` if
+                any index is unresolved.
         """
         indices: list[int] = []
         for index in value.element_indices:
@@ -898,11 +917,12 @@ class ProgramOrchestrator(Generic[T]):
         """Resolve a scalar integer value from execution context.
 
         Args:
-            value: Scalar value to resolve.
-            context: Execution context containing bindings/results.
+            value (Value): Scalar value to resolve.
+            context (ExecutionContext): Execution context containing
+                bindings/results.
 
         Returns:
-            Integer value, or ``None`` when unresolved.
+            int | None: Integer value, or ``None`` when unresolved.
         """
         if value.is_constant():
             return int(value.get_const())
@@ -920,12 +940,13 @@ class ProgramOrchestrator(Generic[T]):
         """Build an exact, hashable aggregation key for a sample result.
 
         Args:
-            value: Typed sample result value.
+            value (Any): Typed sample result value.
 
         Returns:
-            Hashable key that preserves container structure. Floating-point
-            values are not rounded; NaN values are not intentionally coalesced
-            because normal exact equality does not make two NaNs equal.
+            Hashable: Key that preserves container structure. Floating-point
+                values are not rounded; NaN values are not intentionally
+                coalesced because normal exact equality does not make two NaNs
+                equal.
         """
         if isinstance(value, tuple):
             return ("tuple", tuple(cls._sample_result_key(v) for v in value))
