@@ -277,11 +277,10 @@ class ClassicalExecutor:
         while the IR carries a single ``source -> result`` version pair.
         To keep iterations cumulative, the base contents are taken from
         the op's own previous result (``results[result.uuid]``) when
-        present, falling back to the source array otherwise.  In that
-        loop-carried mode, an operand that reads an element of the *same
-        logical array* would see the pre-loop contents instead of the
-        previous iteration's — a silent divergence from Python
-        semantics — so such stores are rejected loudly.
+        present, falling back to the source array otherwise.  Stores that
+        read an element of the same logical array they write (which would
+        see stale pre-loop contents in this loop-carried mode) are
+        rejected earlier, at compile time, by ``AnalyzePass``.
 
         Args:
             op (StoreArrayElementOperation): The store to execute.
@@ -293,16 +292,13 @@ class ClassicalExecutor:
 
         Raises:
             ExecutionError: If the source array contents cannot be
-                resolved, the index is out of range, or a loop-carried
-                store reads an element of the same logical array.
+                resolved or the index is out of range.
         """
         result_value = op.results[0]
 
         if result_value.uuid in results:
             # Loop-carried iteration: continue from the previous
-            # iteration's contents and reject same-array element reads
-            # (they would silently see stale pre-loop data).
-            self._reject_stale_same_array_read(op)
+            # iteration's contents.
             base = results[result_value.uuid]
         else:
             base = self._resolve_store_base(op.array, context, results, scoped_locals)
@@ -325,37 +321,6 @@ class ClassicalExecutor:
             op.stored_value, context, results, scoped_locals
         )
         results[result_value.uuid] = tuple(elements)
-
-    def _reject_stale_same_array_read(self, op: StoreArrayElementOperation) -> None:
-        """Reject loop-carried stores that read the same logical array.
-
-        The IR carries one ``source -> result`` array version pair per
-        store op, so operand element reads always reference a fixed
-        source version.  Across loop iterations that version no longer
-        reflects earlier iterations' writes; evaluating such a read
-        would silently diverge from Python's sequential semantics (e.g.
-        ``bits[i] = bits[i - 1]`` would copy the original contents
-        instead of propagating).  Called only in loop-carried mode.
-
-        Args:
-            op (StoreArrayElementOperation): The store being executed.
-
-        Raises:
-            ExecutionError: If the stored value or any index reads an
-                element of the same logical array the store writes.
-        """
-        result_logical = op.results[0].logical_id
-        for operand in (op.stored_value, *op.index_values):
-            parent = getattr(operand, "parent_array", None)
-            if parent is not None and parent.logical_id == result_logical:
-                raise ExecutionError(
-                    f"Classical array element store into "
-                    f"'{op.array.name}' reads an element of the same "
-                    f"array inside a loop; self-referential in-loop "
-                    f"updates are not supported yet.  Restructure the "
-                    f"kernel to read from a different array or perform "
-                    f"the update outside the loop."
-                )
 
     def _resolve_store_base(
         self,

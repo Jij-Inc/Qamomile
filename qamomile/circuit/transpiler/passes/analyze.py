@@ -7,7 +7,13 @@ import dataclasses
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    IfOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import MeasureOperation, MeasureVectorOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.value import Value, ValueBase
@@ -146,6 +152,164 @@ def find_measurement_derived_values(
     return derived
 
 
+def reject_self_referential_loop_stores(operations: list[Operation]) -> None:
+    """Reject in-loop classical element stores that read the same array.
+
+    A loop body is traced once, so a ``StoreArrayElementOperation``
+    inside a loop references a fixed pre-loop version of the array it
+    writes.  If the stored value or the store index reads an element of
+    that same logical array — directly or through classical arithmetic —
+    later iterations would observe stale pre-loop contents instead of
+    earlier iterations' writes, silently diverging from Python semantics
+    (e.g. ``vals[i] = vals[0] + 1`` would write the same folded value
+    every iteration).  Such stores are rejected at compile time.
+
+    Exposed at module scope because it must run from two passes:
+    ``PartialEvaluationPass`` calls it *before* constant folding (folding
+    a bound element read to a constant erases the ``parent_array``
+    provenance this check relies on — the fold is exactly what bakes the
+    stale pre-loop value into the loop body), and ``AnalyzePass`` calls
+    it again as a safety net for pipelines that skip ``partial_eval``.
+
+    Args:
+        operations (list[Operation]): Operations to scan.  Recurses
+            through all control flow; every loop at any nesting depth is
+            checked against all stores anywhere inside its body.
+
+    Raises:
+        ValidationError: If a store inside a loop transitively reads an
+            element of the same logical array it writes.
+    """
+
+    def flatten_ops(ops: list[Operation]) -> list[Operation]:
+        """Flatten operations recursively through nested control flow.
+
+        Args:
+            ops (list[Operation]): Operations to flatten.
+
+        Returns:
+            list[Operation]: All operations at every nesting depth,
+                including the control flow ops themselves.
+        """
+        flat: list[Operation] = []
+        for op in ops:
+            flat.append(op)
+            if isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    flat.extend(flatten_ops(body))
+        return flat
+
+    def register_value(value: ValueBase, table: dict[str, ValueBase]) -> None:
+        """Record a value and its structural references in ``table``.
+
+        Recurses through ``element_indices``, ``parent_array``, and
+        ``slice_of`` chains so the BFS below can resolve every UUID the
+        dependency graph may reach back to a ``Value``.
+
+        Args:
+            value (ValueBase): Value to record, keyed by UUID.
+            table (dict[str, ValueBase]): Mutable UUID-to-value map.
+        """
+        if value.uuid in table:
+            return
+        table[value.uuid] = value
+        for index in getattr(value, "element_indices", ()):
+            register_value(index, table)
+        parent = getattr(value, "parent_array", None)
+        if parent is not None:
+            register_value(parent, table)
+        slice_of = getattr(value, "slice_of", None)
+        if slice_of is not None:
+            register_value(slice_of, table)
+
+    def reads_written_array(value: ValueBase, written_logical: str) -> bool:
+        """Check whether a value is an element read of the written array.
+
+        Walks the ``parent_array`` / ``slice_of`` chain so element reads
+        through strided views of the written array are caught too.
+
+        Args:
+            value (ValueBase): Value to inspect.
+            written_logical (str): ``logical_id`` of the array the store
+                writes.
+
+        Returns:
+            bool: ``True`` if the value reads an element of the written
+                logical array.
+        """
+        chain = getattr(value, "parent_array", None)
+        while chain is not None:
+            if chain.logical_id == written_logical:
+                return True
+            chain = getattr(chain, "slice_of", None)
+        return False
+
+    def check_loop_body(body_ops: list[Operation]) -> None:
+        """Reject self-referential stores anywhere inside one loop body.
+
+        Builds a dependency graph restricted to the loop body (reads
+        performed before the loop are loop-invariant and fold correctly,
+        so they must not trigger a rejection) and BFS-walks it from each
+        store's value and index operands.
+
+        Args:
+            body_ops (list[Operation]): The loop's top-level body
+                operations.
+
+        Raises:
+            ValidationError: If a store's value or index transitively
+                reads an element of the array the store writes.
+        """
+        dependency_graph = build_dependency_graph(body_ops)
+        flat_ops = flatten_ops(body_ops)
+
+        value_table: dict[str, ValueBase] = {}
+        for op in flat_ops:
+            for value in (*op.all_input_values(), *op.results):
+                register_value(value, value_table)
+
+        for op in flat_ops:
+            if not isinstance(op, StoreArrayElementOperation):
+                continue
+            written_logical = op.results[0].logical_id
+            worklist = [v.uuid for v in (op.stored_value, *op.index_values)]
+            visited: set[str] = set()
+            while worklist:
+                current = worklist.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                value = value_table.get(current)
+                if value is not None:
+                    if reads_written_array(value, written_logical):
+                        raise ValidationError(
+                            f"Classical array element assignment into "
+                            f"'{op.array.name}' inside a loop reads an "
+                            f"element of the same array (directly or "
+                            f"through classical arithmetic): the loop "
+                            f"body references a fixed pre-loop array "
+                            f"version, so the read would not observe "
+                            f"earlier iterations' writes. Restructure "
+                            f"the kernel to read from a different array "
+                            f"or perform the update outside the loop."
+                        )
+                    # Follow structural references so same-array reads
+                    # hiding inside an element address are found too.
+                    worklist.extend(
+                        index.uuid for index in getattr(value, "element_indices", ())
+                    )
+                    parent = getattr(value, "parent_array", None)
+                    if parent is not None:
+                        worklist.append(parent.uuid)
+                worklist.extend(dependency_graph.get(current, ()))
+
+    for op in flatten_ops(operations):
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            check_loop_body(
+                [body_op for body in op.nested_op_lists() for body_op in body]
+            )
+
+
 class AnalyzePass(Pass[Block, Block]):
     """Analyze and validate an affine block.
 
@@ -172,6 +336,9 @@ class AnalyzePass(Pass[Block, Block]):
 
         # Reject classical element stores inside runtime if/else branches
         self._reject_stores_in_if_branches(input.operations)
+
+        # Reject in-loop classical element stores that read the same array
+        self._reject_self_referential_loop_stores(input.operations)
 
         # Build dependency graph
         dependency_graph = self._build_dependency_graph(input.operations)
@@ -265,6 +432,26 @@ class AnalyzePass(Pass[Block, Block]):
             elif isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
                     self._reject_stores_in_if_branches(body)
+
+    def _reject_self_referential_loop_stores(
+        self,
+        operations: list[Operation],
+    ) -> None:
+        """Reject in-loop classical element stores that read the same array.
+
+        Thin wrapper for the module-level
+        :func:`reject_self_referential_loop_stores` so
+        ``PartialEvaluationPass`` can reuse the same check without
+        instantiating ``AnalyzePass``.
+
+        Args:
+            operations (list[Operation]): Operations to scan recursively.
+
+        Raises:
+            ValidationError: If a store inside a loop transitively reads
+                an element of the same logical array it writes.
+        """
+        reject_self_referential_loop_stores(operations)
 
     def _build_dependency_graph(
         self,

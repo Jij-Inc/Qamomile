@@ -22,7 +22,6 @@ import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.transpiler.errors import (
     EmitError,
-    ExecutionError,
     ValidationError,
 )
 
@@ -302,9 +301,8 @@ def test_loop_index_cross_array_copy(seed, length):
 
 @qmc.qkernel
 def loop_self_referential_kernel(
-    vals: qmc.Vector[qmc.UInt],
+    vals: qmc.Vector[qmc.UInt], n: qmc.UInt
 ) -> tuple[qmc.Vector[qmc.UInt], qmc.Vector[qmc.Bit]]:
-    n = vals.shape[0]
     for i in qmc.range(1, n):
         vals[i] = vals[0]
     qs = qmc.qubit_array(1, "qs")
@@ -313,18 +311,46 @@ def loop_self_referential_kernel(
 
 
 def test_loop_self_referential_store_raises():
-    """Reading the written array inside a multi-iteration loop fails loudly.
+    """Reading the written array inside a runtime loop fails at compile time.
 
     The single traced store references a fixed pre-loop array version, so
-    iteration >= 2 would silently read stale contents; the executor rejects
-    it instead of diverging from Python semantics.
+    iteration >= 2 would silently read stale contents; the transpiler
+    rejects the kernel at compile time (pre-fold in partial_eval, again in
+    analyze) instead of diverging from Python semantics.
     """
     transpiler = QiskitTranspiler()
-    exe = transpiler.transpile(
-        loop_self_referential_kernel, bindings={"vals": [5, 0, 0]}
-    )
-    with pytest.raises(ExecutionError, match="same +array inside a loop"):
-        exe.run(transpiler.executor()).result()
+    with pytest.raises(ValidationError, match="same array"):
+        transpiler.transpile(
+            loop_self_referential_kernel,
+            bindings={"vals": [5, 0, 0]},
+            parameters=["n"],
+        )
+
+
+@qmc.qkernel
+def loop_arithmetic_self_referential_kernel(
+    vals: qmc.Vector[qmc.UInt], n: qmc.UInt
+) -> tuple[qmc.Vector[qmc.UInt], qmc.Vector[qmc.Bit]]:
+    for i in qmc.range(n):
+        vals[i] = vals[0] + 1
+    qs = qmc.qubit_array(1, "qs")
+    bits = qmc.measure(qs)
+    return vals, bits
+
+
+def test_loop_self_referential_store_via_arithmetic_rejected():
+    """A same-array read behind a BinOp (``vals[i] = vals[0] + 1``) is rejected.
+
+    The old immediate-operand runtime guard missed this arithmetic-intermediary
+    form and silently wrote the folded pre-loop value every iteration.
+    """
+    transpiler = QiskitTranspiler()
+    with pytest.raises(ValidationError, match="same array"):
+        transpiler.transpile(
+            loop_arithmetic_self_referential_kernel,
+            bindings={"vals": [10, 0, 0]},
+            parameters=["n"],
+        )
 
 
 # ---------------------------------------------------------------------------
