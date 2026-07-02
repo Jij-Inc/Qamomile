@@ -300,6 +300,79 @@ def test_loop_index_cross_array_copy(seed, length):
 
 
 @qmc.qkernel
+def loop_two_store_kernel(
+    dst: qmc.Vector[qmc.UInt], src: qmc.Vector[qmc.UInt], n: qmc.UInt
+) -> tuple[qmc.Vector[qmc.UInt], qmc.Vector[qmc.Bit]]:
+    for i in qmc.range(n):
+        dst[i] = src[i]
+        dst[0] = 99
+    qs = qmc.qubit_array(1, "qs")
+    bits = qmc.measure(qs)
+    return dst, bits
+
+
+def test_loop_two_stores_same_array():
+    """Two stores to one array in a loop body share one running snapshot.
+
+    Keying the loop-carried accumulation by each store op's own result
+    uuid made the stores blind to each other across iterations: the
+    trailing ``dst[0] = 99`` store kept re-basing from the pre-loop
+    contents, yielding (99, 0, 0) instead of (99, 6, 7).
+    """
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(
+        loop_two_store_kernel,
+        bindings={"dst": [0, 0, 0], "src": [5, 6, 7]},
+        parameters=["n"],
+    )
+    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": 3}).result()
+    assert tuple(int(v) for v in out_vals) == (99, 6, 7)
+
+
+@pytest.mark.parametrize("seed, length", [(0, 2), (1, 3), (42, 5)])
+def test_loop_two_stores_random_src(seed, length):
+    """Randomized sizes/contents keep both same-array stores cumulative."""
+    rng = np.random.default_rng(seed)
+    src = rng.integers(1, 50, size=length).tolist()
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(
+        loop_two_store_kernel,
+        bindings={"dst": [0] * length, "src": src},
+        parameters=["n"],
+    )
+    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": length}).result()
+    assert tuple(int(v) for v in out_vals) == (99, *src[1:])
+
+
+@qmc.qkernel
+def loop_pair_fill_kernel(
+    dst: qmc.Vector[qmc.UInt], n: qmc.UInt
+) -> tuple[qmc.Vector[qmc.UInt], qmc.Vector[qmc.Bit]]:
+    for i in qmc.range(n):
+        dst[2 * i] = 1
+        dst[2 * i + 1] = 2
+    qs = qmc.qubit_array(1, "qs")
+    bits = qmc.measure(qs)
+    return dst, bits
+
+
+@pytest.mark.parametrize("pairs, expected", [(1, (1, 2, 0, 0)), (2, (1, 2, 1, 2))])
+def test_loop_pair_fill_same_array(pairs, expected):
+    """Even/odd stores to one array interleave correctly across iterations.
+
+    With per-store-uuid accumulation, n=2 over four slots yielded
+    (1, 2, 0, 2): iteration 1's even-slot store never saw iteration 0's
+    odd-slot write and vice versa.
+    """
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(
+        loop_pair_fill_kernel, bindings={"dst": [0, 0, 0, 0]}, parameters=["n"]
+    )
+    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": pairs}).result()
+    assert tuple(int(v) for v in out_vals) == expected
+
+
+@qmc.qkernel
 def loop_self_referential_kernel(
     vals: qmc.Vector[qmc.UInt], n: qmc.UInt
 ) -> tuple[qmc.Vector[qmc.UInt], qmc.Vector[qmc.Bit]]:

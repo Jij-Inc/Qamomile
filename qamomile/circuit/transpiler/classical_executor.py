@@ -273,21 +273,27 @@ class ClassicalExecutor:
         addressed element with the stored value, and records the updated
         container under the result value's UUID.
 
-        Inside a loop body the same store op executes once per iteration
+        Inside a loop body each store op executes once per iteration
         while the IR carries a single ``source -> result`` version pair.
-        To keep iterations cumulative, the base contents are taken from
-        the op's own previous result (``results[result.uuid]``) when
-        present, falling back to the source array otherwise.  Stores that
-        read an element of the same logical array they write (which would
-        see stale pre-loop contents in this loop-carried mode) are
-        rejected earlier, at compile time, by ``AnalyzePass``.
+        To keep iterations cumulative — including bodies with multiple
+        stores to the same logical array — the running contents are
+        shared across all stores to that array via a namespaced
+        ``results`` key derived from the array's ``logical_id`` (stable
+        across SSA versions). Each store bases its update on that shared
+        snapshot when present (falling back to the source array on the
+        very first store) and writes the updated contents back to both
+        the shared key and its own ``result.uuid``. Stores that read an
+        element of the same logical array they write (which would see
+        stale pre-loop contents in this loop-carried mode) are rejected
+        earlier, at compile time, by ``AnalyzePass``.
 
         Args:
             op (StoreArrayElementOperation): The store to execute.
             context (ExecutionContext): Execution context holding
                 measurements and bindings.
             results (dict[str, Any]): Mutable results map; the updated
-                container is recorded under ``op.results[0].uuid``.
+                container is recorded under ``op.results[0].uuid`` and
+                under the array's shared running-state key.
             scoped_locals (dict[str, Any]): Loop-scoped variables.
 
         Raises:
@@ -296,10 +302,15 @@ class ClassicalExecutor:
         """
         result_value = op.results[0]
 
-        if result_value.uuid in results:
-            # Loop-carried iteration: continue from the previous
-            # iteration's contents.
-            base = results[result_value.uuid]
+        # The store's array and its result share one logical_id across SSA
+        # versions; the prefix keeps this running-state key from colliding
+        # with value-uuid / name keys in ``results``.
+        state_key = f"__store_array_state__:{result_value.logical_id}"
+
+        if state_key in results:
+            # A previous store to the same logical array (earlier in this
+            # iteration or in a previous one): continue from its contents.
+            base = results[state_key]
         else:
             base = self._resolve_store_base(op.array, context, results, scoped_locals)
 
@@ -320,7 +331,12 @@ class ClassicalExecutor:
         elements[index] = self._get_value(
             op.stored_value, context, results, scoped_locals
         )
-        results[result_value.uuid] = tuple(elements)
+        updated = tuple(elements)
+        # The shared key chains subsequent stores to the same logical array;
+        # the per-version uuid entry keeps downstream reads of this SSA
+        # version and block-output resolution via output_refs working.
+        results[state_key] = updated
+        results[result_value.uuid] = updated
 
     def _resolve_store_base(
         self,
