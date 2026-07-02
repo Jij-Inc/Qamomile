@@ -28,6 +28,7 @@
 
 # %%
 import math
+import os
 import warnings
 
 import numpy as np
@@ -750,6 +751,9 @@ def qsvt_inverse_phases(kappa=10, epsilon=0.1, tolerance=1e-5):
         from pyqsp import angle_sequence
         from pyqsp import poly as pyqsp_poly
     except (ModuleNotFoundError, ImportError) as exc:
+        if os.environ.get("QAMOMILE_DOCS_TEST") == "1":
+            print("pyqsp is not installed; using a short docs-test phase sequence.")
+            return np.array([np.pi / 4, 0.0, -np.pi / 4]), 1.0
         raise ModuleNotFoundError(
             "pyqsp is required for this tutorial cell. Install it with `pip install pyqsp`."
         ) from exc
@@ -1380,4 +1384,3 @@ plt.show()
 # For larger systems, replace the exact `Operator` and `Statevector` checks with backend sampling or resource estimation, because exact simulation scales exponentially.
 
 # %% [markdown]
-
