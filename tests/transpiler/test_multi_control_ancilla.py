@@ -263,6 +263,30 @@ def test_estimate_symbolic_num_controls_accepts_numpy_integral_shape() -> None:
     assert _estimate([op]) == 3
 
 
+def test_estimate_symbolic_num_controls_accepts_numpy_integral_binding() -> None:
+    """A NumPy integral num_controls binding resolves before width fallback."""
+    num_controls = Value(type=UIntType(), name="nc")
+    controls = ArrayValue(
+        type=QubitType(),
+        name="controls",
+        shape=(Value(type=UIntType(), name="n").with_const(10),),
+    )
+    target = _qubit("t")
+    operands = [controls, target]
+    op = SymbolicControlledU(
+        operands=operands,
+        results=[v.next_version() for v in operands],
+        num_controls=num_controls,
+        num_control_args=1,
+        block=Block(operations=[_fixed_gate(GateOperationType.X, 1)]),
+    )
+    demand = estimate_multi_control_ancilla_demand(
+        [op], ValueResolver(), {"nc": np.int64(3)}
+    )
+    # Resolved 3-control X -> 2 ancillas, not width-10 fallback -> 9.
+    assert demand == 2
+
+
 def test_estimate_symbolic_num_controls_rejects_unresolved_vector_width() -> None:
     """Operand-width fallback fails fast when vector width is unresolved."""
     num_controls = Value(type=UIntType(), name="nc")

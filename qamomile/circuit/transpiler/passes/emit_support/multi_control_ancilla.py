@@ -280,8 +280,10 @@ def _controlled_u_num_controls_upper_bound(
     if op.control_indices is not None:
         return len(op.control_indices)
     resolved = resolver.resolve_classical_value(op.num_controls, bindings)
-    if isinstance(resolved, int) and not isinstance(resolved, bool):
-        return max(resolved, 0)
+    if isinstance(resolved, bool):
+        pass
+    elif isinstance(resolved, numbers.Integral):
+        return max(int(resolved), 0)
     control_operands = [
         v for v in op.operands[: op.num_control_args] if v.type.is_quantum()
     ]
