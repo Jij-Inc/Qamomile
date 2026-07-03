@@ -166,6 +166,22 @@ def empty_single_branch_if(q0: Qubit, q1: Qubit) -> Qubit:
 
 
 @qmc.qkernel
+def symbolic_empty_single_branch_if(q0: Qubit, flag: UInt) -> Qubit:
+    """Build a symbolic if whose only branch is empty.
+
+    Args:
+        q0 (Qubit): Qubit returned unchanged.
+        flag (UInt): Symbolic value that keeps the IF at draw time.
+
+    Returns:
+        Qubit: Unchanged ``q0``.
+    """
+    if flag == 1:
+        pass
+    return q0
+
+
+@qmc.qkernel
 def nested_if(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
     """Build a two-level nested if example.
 
@@ -666,3 +682,10 @@ class TestDrawEndToEnd:
             labels = [text.get_text() for text in ax.texts]
             assert any(label.startswith("if ") for label in labels)
             assert len(_if_connector_lines(fig)) == 1
+
+    def test_symbolic_empty_single_branch_draws_if_label(self):
+        """The renderer keeps an empty symbolic single-branch IF visible."""
+        fig = symbolic_empty_single_branch_if.draw(fold_loops=False)
+        ax = fig._qm_ax  # type: ignore[attr-defined]
+        labels = [text.get_text() for text in ax.texts]
+        assert any(label.startswith("if ") for label in labels)
