@@ -79,7 +79,10 @@ from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind  # noqa: E402
-from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.errors import (  # noqa: E402
+    EmitError,
+    QamomileCompileError,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
 from qamomile.circuit.transpiler.segments import (  # noqa: E402
     ClassicalStep,
@@ -8423,7 +8426,13 @@ class TestUnresolvedStructuralSize:
     """Unresolved structural UInt must raise, not produce zero-size artifact."""
 
     def test_qubit_array_with_unresolved_size_raises(self):
-        """qubit_array(n) with parameters=["n"] must raise EmitError."""
+        """qubit_array(n) + range(n) with parameters=["n"] raises a compile error.
+
+        The runtime loop bound is diagnosed first, by
+        ``SymbolicShapeValidationPass``, with the actionable "Cannot unroll
+        loop" message (previously this surfaced later as an emit-time
+        ``EmitError`` / ``ValueError``).
+        """
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
@@ -8433,8 +8442,10 @@ class TestUnresolvedStructuralSize:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((EmitError, ValueError)):
+        with pytest.raises(QamomileCompileError) as exc_info:
             transpiler.transpile(circuit, parameters=["n"])
+        assert "Cannot unroll loop" in str(exc_info.value)
+        assert "'n'" in str(exc_info.value)
 
 
 class TestWhileIfSharedLocalPhi:

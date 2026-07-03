@@ -32,6 +32,7 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
@@ -159,9 +160,10 @@ class ResourceAllocator:
         """Recursively allocate resources from operations.
 
         Args:
-            operations (list[Operation]): Operations to inspect.
-            qubit_map (QubitMap): Mutable qubit-address map.
-            clbit_map (ClbitMap): Mutable clbit-address map.
+            operations (list[Operation]): Operations to walk, including
+                nested control-flow bodies.
+            qubit_map (QubitMap): Qubit address mapping mutated in place.
+            clbit_map (ClbitMap): Clbit address mapping mutated in place.
             bindings (dict[str, Any]): Compile-time bindings available for
                 structural size and condition resolution.
             alias_branch_local_bit_phis (bool): When ``True``, scalar Bit
@@ -172,11 +174,36 @@ class ResourceAllocator:
 
         Returns:
             None: Mutates ``qubit_map`` and ``clbit_map`` in place.
+
+        Raises:
+            EmitError: If a quantum array's size cannot be resolved from
+                ``bindings``, or if a ``QInitOperation`` allocates a
+                rank>1 quantum register — the ``QubitAddress`` keys
+                registered here carry a single flat index, so a
+                higher-rank register would silently alias distinct
+                elements onto the same physical qubit. The frontend
+                rejects such registers at construction time; this guard
+                covers hand-built or deserialized IR.
         """
         for op in operations:
             if isinstance(op, QInitOperation):
                 result = op.results[0]
                 if isinstance(result, ArrayValue):
+                    # ``len()`` is read into a variable so zuban does not
+                    # narrow the variadic shape tuple to fixed-length
+                    # forms that make ``result.shape[0]`` look out of
+                    # range below.
+                    rank = len(result.shape)
+                    if rank > 1:
+                        raise EmitError(
+                            f"Cannot allocate qubits for rank-{rank} "
+                            f"quantum register {result.name!r}: the qubit "
+                            f"addressing path is rank-1, so a higher-rank "
+                            f"register would silently alias distinct "
+                            f"elements onto the same physical qubit. Use a "
+                            f"1-D Vector[Qubit] with explicit index "
+                            f"arithmetic instead."
+                        )
                     # Allocate physical qubits for array elements using
                     # QubitAddress(array_uuid, i) keys.  At this stage only
                     # these composite keys are registered; the individual
@@ -187,8 +214,6 @@ class ResourceAllocator:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
                         if size is None:
-                            from qamomile.circuit.transpiler.errors import EmitError
-
                             raise EmitError(
                                 "Cannot resolve array size for qubit allocation. "
                                 "Structural UInt parameters must be bound at transpile time."
@@ -373,8 +398,6 @@ class ResourceAllocator:
                         and not condition_update_is_safe
                         and not condition_already_stable
                     ):
-                        from qamomile.circuit.transpiler.errors import EmitError
-
                         raise EmitError(
                             "WhileOperation loop-carried Bit conditions must be "
                             "updated by measurements produced inside the loop "

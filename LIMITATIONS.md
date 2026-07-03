@@ -1,6 +1,6 @@
 # Known Limitations
 
-This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, and the slice/control-flow work tracked by recent controlled-view fixes.
+This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, dict subscript lookup for container values, and the slice/control-flow work tracked by recent controlled-view fixes.
 
 ## Container-valued operands outgrow the current `Operation.operands` type annotation
 
@@ -11,6 +11,16 @@ Some IR operations legitimately carry container-valued operands even though the 
 **Why this trade-off was chosen**: widening `Operation.operands` globally to `list[ValueBase]` or a `ValueLike` alias would touch many passes and emitters whose local logic genuinely assumes scalar / array `Value` operands. Splitting container operands into dedicated fields would be cleaner for those operations but requires an IR-contract migration and encoder / decoder schema cleanup. The current fix keeps the behavioral repair local to the block-I/O and container-carrying-operation decoder paths, without weakening `_materialize_as_value`, which still guards positions where containers are invalid.
 
 **Future fix**: make the container operand contract explicit. Either widen `Operation.operands` to a shared `ValueLike` / `ValueBase` type and audit all passes for places that require scalar / array `Value`, or move container parameters onto operation-specific fields for `ForItemsOperation` and `InverseBlockOperation` so the base operand list stays strictly scalar / array. Once that contract is explicit, the decoder-side casts can be removed.
+
+## Dict subscript lookup does not yet support container values
+
+When `Dict[K, V]` uses a container value type such as `qmc.Tuple` or `qmc.Vector`, `Dict.__getitem__` raises `NotImplementedError`.
+
+**When it bites**: a symbolic dictionary lookup such as `d[key]` currently represents the result as a single scalar `Value`. That is sufficient for scalar values, but it cannot rebuild frontend handles for structured lookup results and cannot represent multi-value results in `DictGetItemOperation`, serialization, emission, or the classical executor.
+
+**Why this trade-off was chosen**: the existing dictionary lookup path is scalar-oriented end to end. Supporting structured values would require the frontend, IR operation result model, wire formats, emit passes, and classical executor to agree on how a single lookup produces multiple structured values. The current guard fails explicitly instead of tracing an incomplete container result that later stages cannot materialize correctly.
+
+**Future fix**: allow `DictGetItemOperation` to produce `TupleValue` or `ArrayValue` results, then extend frontend handle reconstruction, serialization, emission, and classical executor support for those structured results.
 
 ## Re-trace cost is uncached
 
@@ -32,15 +42,15 @@ When a qkernel calls itself during its own specialized re-trace, the inner self-
 
 **Future fix**: codex's short-term recommendation is *signature canonicalization* — replace the boolean `_specializing` flag with a set of currently-being-specialized `(parameters, bindings, qubit_sizes)` signatures, where each signature is resolved using only pure-const expressions already on each `Value` (literals, parameters with const bindings, simple `BinOp` / unary expressions over const operands). Same signature blocks (true infinite loop), different signature re-specializes. Add a maximum specialization-depth guard to bound pathological recursion. The long-term answer is deferred-shape composite IR (see the qft / iqft standalone no-op entry below), which makes this whole class of re-trace bug disappear.
 
-## `Matrix[Qubit]` / `Tensor[Qubit]` callee parameters skip specialization
+## Rank>1 quantum registers are explicitly rejected
 
-Higher-rank quantum-array parameters are not modeled in the `qubit_sizes` bucket. The specialization extractor leaves them out of all three buckets and continues, matching how `Dict` / `Tuple` / non-parameterizable runtime classicals are handled. The cached symbolic block is used for that argument position, with inline-time substitution wiring the caller's actual register through.
+Multi-dimensional quantum registers — `Matrix[Qubit]`, `Tensor[Qubit]`, and `qubit_array` with a tuple shape of more than one dimension — are rejected with `NotImplementedError` at construction / trace time. The quantum addressing path is rank-1 throughout: `QubitAddress` is a flat `(uuid, index)` pair, `ResourceAllocator` allocates `shape[0]` wires per register, and `resolve_root_qubit_address` plus the emit-time `ValueResolver` read `element_indices[0]` only. Before these guards a higher-rank register silently aliased distinct elements onto the same physical qubit: an X on element `(0, 1)` of a `(2, 2)` register also flipped the measurement of element `(0, 0)`, and a `(2, 2)` + `(4,)` program emitted 6 qubits instead of 8.
 
-**When it bites**: a callee that applies shape-dependent stdlib (`qmc.qft` / `qmc.iqft` / `qmc.qpe`) directly to a `Matrix[Qubit]` / `Tensor[Qubit]` parameter continues to silently no-op on those qubits — the same as the pre-#392 baseline for that specific case.
+**Where it is enforced**: `qubit_array()` rejects tuple shapes with more than one dimension before any tracer access; `ArrayBase.__post_init__` rejects wrapping any rank>1 quantum `ArrayValue` (covering `ArrayBase.create`, direct construction, and rank>1 values smuggled into a `Vector` wrapper); `create_dummy_input` rejects rank>1 quantum kernel parameters (`Matrix[Qubit]` / `Tensor[Qubit]` annotations, which bypass `__post_init__` via `object.__new__`); `QKernel._build_graph_with_qubit_arrays` rejects them on the `draw(name=size)` visualization path; and two defense-in-depth `EmitError` guards cover hand-built or deserialized IR — the `QInitOperation` branch of `ResourceAllocator._allocate_recursive` and `_populate_input_qubit_map` in the controlled-U emitter.
 
-**Why this trade-off was chosen**: raising `NotImplementedError` for every nested call carrying a higher-rank quantum argument would forbid composing any kernel that simply *takes* such an argument, including helpers that never touch shape-dependent stdlib on it. The silent-no-op trade-off is consistent with how `Dict` / `Tuple` / unbound runtime classicals are already handled in this PR.
+**Workaround**: allocate a 1-D `Vector[Qubit]` of the total size and compute flat indices explicitly (e.g. `q[i * ncols + j]`).
 
-**Future fix**: change `_extract_calltime_specialization`'s `qubit_sizes: dict[str, int]` to a `qubit_shapes: dict[str, tuple[int, ...]]` carrying the full shape, then route each entry through `_create_traced_block` with the full tuple instead of `(qubit_sizes[name],)`. `create_dummy_input` itself already accepts any-rank concrete shapes via its `shape=` kwarg and validates `len(shape) == ndim`, so the change is confined to the specialization data model and the one `_create_traced_block` call site. Alternatively, the deferred-shape composite IR (next entry) makes this entry moot.
+**Future fix**: row-major linearization at the physical-address layer. Keep `QubitAddress` flat, allocate `prod(shape)` wires in `ResourceAllocator`, and compute flat indices from the full `element_indices` plus the parent shape (strides) in `resolve_root_qubit_address` and the emit-time `ValueResolver` twins. The specialization data model would move from `qubit_sizes: dict[str, int]` to `qubit_shapes: dict[str, tuple[int, ...]]`; `create_dummy_input` already accepts any-rank concrete shapes via its `shape=` kwarg, so that change is confined to the specialization side. Once linearization lands, the guards above should be removed together and replaced by cross-backend execution tests parametrized over shapes (single-element X flips only the corresponding measured bit).
 
 ## `qmc.qft` / `qmc.iqft` standalone no-op fallback is preserved
 
