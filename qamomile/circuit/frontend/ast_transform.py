@@ -370,6 +370,31 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return_type_ast: ast.AST | None = None,
         extra_return_exprs: list[ast.expr] | None = None,
     ) -> tuple[ast.FunctionDef, str]:
+        """Build a generated helper function for a traced control-flow body.
+
+        Args:
+            name_prefix (str): Prefix for the unique generated name.
+            body_nodes (list[ast.stmt]): Already-transformed body
+                statements.
+            var_names (list[str]): Parameter names of the generated
+                function.
+            lineno (int): Source line for the generated node.
+            return_var_names (list[str] | None): Names returned by the
+                final return statement. Defaults to None, meaning
+                ``var_names``.
+            return_type_ast (ast.AST | None): Explicit return annotation.
+                Defaults to None (derived from the returned names, or
+                ``Any`` when probe expressions are appended).
+            extra_return_exprs (list[ast.expr] | None): Probe expressions
+                appended after the ordinary return values (used by the
+                if-rebind records for dead-after variables); forces the
+                tuple return form so callers can slice the probe tail
+                off positionally. Defaults to None.
+
+        Returns:
+            tuple[ast.FunctionDef, str]: The generated function node and
+                its unique name.
+        """
         func_name = self._get_unique_name(name_prefix)
         func_args = self._make_arguments(var_names)
 

@@ -1,5 +1,6 @@
 import builtins
 import contextlib
+import contextvars
 import copy
 import typing
 
@@ -760,7 +761,13 @@ def dead_rebind_binding(
 # branch-body function whose scope only contains that if's inputs, so a
 # dead-after variable defined further out is not in the call site's
 # ``locals()``; the enclosing emit_if's captured pre-bindings supply it.
-_ACTIVE_REBIND_PRE_BINDINGS: list[dict[str, typing.Any]] = []
+# Context-local (like the tracer's ``_current_tracer``) so concurrent
+# traces in different threads / async tasks cannot leak bindings into
+# each other; stored as an immutable tuple and updated via set/reset
+# tokens in ``emit_if``.
+_ACTIVE_REBIND_PRE_BINDINGS: contextvars.ContextVar[
+    tuple[dict[str, typing.Any], ...]
+] = contextvars.ContextVar("qamomile_active_rebind_pre_bindings", default=())
 
 
 def branch_rebind_pre_bindings(
@@ -793,7 +800,7 @@ def branch_rebind_pre_bindings(
         if name in frame_locals:
             captured[name] = frame_locals[name]
             continue
-        for enclosing in reversed(_ACTIVE_REBIND_PRE_BINDINGS):
+        for enclosing in reversed(_ACTIVE_REBIND_PRE_BINDINGS.get()):
             if name in enclosing:
                 captured[name] = enclosing[name]
                 break
@@ -988,12 +995,14 @@ def emit_if(
     # Expose this call's captured pre-bindings to nested emit_if call
     # sites while the branch bodies trace (see
     # ``branch_rebind_pre_bindings``).
-    _ACTIVE_REBIND_PRE_BINDINGS.append(dict(rebind_pre_bindings or {}))
+    stack_token = _ACTIVE_REBIND_PRE_BINDINGS.set(
+        _ACTIVE_REBIND_PRE_BINDINGS.get() + (dict(rebind_pre_bindings or {}),)
+    )
     try:
         true_tracer, true_result = _trace_branch(true_func, true_vars)
         false_tracer, false_result = _trace_branch(false_func, false_vars)
     finally:
-        _ACTIVE_REBIND_PRE_BINDINGS.pop()
+        _ACTIVE_REBIND_PRE_BINDINGS.reset(stack_token)
 
     # 3. Create IfOperation
     if_op = IfOperation(

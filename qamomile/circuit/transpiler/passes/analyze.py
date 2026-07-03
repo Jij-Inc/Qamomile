@@ -1008,7 +1008,7 @@ def _check_branch_quantum_discard(
     if_op: IfOperation,
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
-    reads_outside: set[str],
+    reads_outside: "_PathReads",
     promoted: dict[bool, list[BranchRebind]],
 ) -> None:
     """Check one runtime ``IfOperation``'s rebind records for discards.
@@ -1035,10 +1035,11 @@ def _check_branch_quantum_discard(
         concrete_values (dict[str, Any]): UUID-keyed concrete classical-op
             results accumulated up to this operation.
         bindings (dict[str, Any]): Compile-time parameter bindings.
-        reads_outside (set[str]): UUIDs read by operations outside this
-            if's subtree on the paths that reach it (rebind records
-            excluded, array ancestry included) — the values still owned
-            outside the if. Assembled path-sensitively by the scan.
+        reads_outside (_PathReads): Membership view of the UUIDs read by
+            operations outside this if's subtree on the paths that reach
+            it (rebind records excluded, array ancestry included) — the
+            values still owned outside the if. Assembled path-sensitively
+            by the scan.
         promoted (dict[bool, list[BranchRebind]]): Per-side records
             promoted from compile-time-TAKEN nested ifs.
 
@@ -1096,6 +1097,21 @@ def _check_branch_quantum_discard(
         raise _branch_quantum_discard_error(var_name, "true" if side else "false")
 
 
+@dataclasses.dataclass
+class _DiscardScanCaches:
+    """Shared memoization for one discard-scan invocation.
+
+    Attributes:
+        element_reads (dict[int, set[str]]): Per-``id(op)`` pruned-subtree
+            read sets (see :func:`_scope_element_reads`).
+        scope_counts (dict[int, dict[str, int]]): Per-``id(scope list)``
+            element read-count maps (see :func:`_scope_read_counts`).
+    """
+
+    element_reads: dict[int, set[str]] = dataclasses.field(default_factory=dict)
+    scope_counts: dict[int, dict[str, int]] = dataclasses.field(default_factory=dict)
+
+
 def _scope_element_reads(
     op: Operation,
     concrete_values: dict[str, Any],
@@ -1139,37 +1155,112 @@ def _scope_element_reads(
     return reads
 
 
-def _sibling_scope_reads(
+def _scope_read_counts(
     scope_ops: list[Operation],
-    exclude_op: Operation,
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
-    element_reads_cache: dict[int, set[str]],
-) -> set[str]:
-    """Reads of every element of a scope except one.
+    caches: _DiscardScanCaches,
+) -> dict[str, int]:
+    """Per-UUID count of scope elements whose subtree reads it.
+
+    Computed once per scope list (cached by list identity) so that
+    excluding any single element later is a constant-time count
+    adjustment instead of re-unioning the sibling sets per checked if.
 
     Args:
         scope_ops (list[Operation]): The scope's operation list.
-        exclude_op (Operation): The element whose subtree is excluded
-            (compared by identity).
         concrete_values (dict[str, Any]): Accumulated compile-time state
             for pruning the elements.
         bindings (dict[str, Any]): Compile-time parameter bindings.
-        element_reads_cache (dict[int, set[str]]): Shared per-element
-            read cache, updated in place.
+        caches (_DiscardScanCaches): Shared memoization, updated in place.
 
     Returns:
-        set[str]: Union of the pruned-subtree reads of all other
-            elements.
+        dict[str, int]: For each UUID, the number of scope elements whose
+            pruned subtree reads it.
     """
-    reads: set[str] = set()
+    cached = caches.scope_counts.get(id(scope_ops))
+    if cached is not None:
+        return cached
+    counts: dict[str, int] = {}
     for element in scope_ops:
-        if element is exclude_op:
-            continue
-        reads |= _scope_element_reads(
-            element, concrete_values, bindings, element_reads_cache
-        )
-    return reads
+        for read_uuid in _scope_element_reads(
+            element, concrete_values, bindings, caches.element_reads
+        ):
+            counts[read_uuid] = counts.get(read_uuid, 0) + 1
+    caches.scope_counts[id(scope_ops)] = counts
+    return counts
+
+
+class _PathReads:
+    """Membership-only view of the reads that execute on one path.
+
+    Represents, as a linked chain of scope contexts, the set of UUIDs
+    read by operations outside a given if subtree on the paths that
+    reach it. Each node contributes one scope's element read-counts with
+    one element excluded (the if or loop being descended into / checked)
+    plus optional extra reads (the entered side's phi operands); parent
+    nodes contribute the enclosing scopes the same way. The set is never
+    materialized — the discard check only probes membership for the few
+    record UUIDs — so building a node is O(1) beyond the per-scope count
+    map, which is computed once per scope.
+
+    Attributes:
+        _parent (_PathReads | None): The enclosing path context.
+        _scope_counts (dict[str, int]): Per-UUID element counts of this
+            node's scope.
+        _excluded_reads (set[str]): Reads of the excluded element (its
+            containment is subtracted from the counts).
+        _extra (set[str]): Additional reads carried on this path (the
+            entered side's phi operands, with array ancestry).
+    """
+
+    __slots__ = ("_parent", "_scope_counts", "_excluded_reads", "_extra")
+
+    def __init__(
+        self,
+        parent: "_PathReads | None",
+        scope_counts: dict[str, int],
+        excluded_reads: set[str],
+        extra: set[str],
+    ) -> None:
+        """Build one path-context node.
+
+        Args:
+            parent (_PathReads | None): The enclosing path context, or
+                None at the block's top level.
+            scope_counts (dict[str, int]): Per-UUID element counts of the
+                current scope (see :func:`_scope_read_counts`).
+            excluded_reads (set[str]): Pruned-subtree reads of the scope
+                element being excluded.
+            extra (set[str]): Additional reads that execute on this path.
+        """
+        self._parent = parent
+        self._scope_counts = scope_counts
+        self._excluded_reads = excluded_reads
+        self._extra = extra
+
+    def __contains__(self, uuid: str) -> bool:
+        """Whether any operation on this path (outside the subtree) reads
+        ``uuid``.
+
+        Args:
+            uuid (str): The value UUID to probe.
+
+        Returns:
+            bool: True when some non-excluded scope element at any level,
+                or an entered-side phi operand, reads the UUID.
+        """
+        node: _PathReads | None = self
+        while node is not None:
+            if uuid in node._extra:
+                return True
+            count = node._scope_counts.get(uuid, 0)
+            if uuid in node._excluded_reads:
+                count -= 1
+            if count > 0:
+                return True
+            node = node._parent
+        return False
 
 
 def _phi_side_operand_reads(if_op: IfOperation, side: bool) -> set[str]:
@@ -1203,8 +1294,8 @@ def _scan_branch_quantum_discards(
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
     measurement_tainted: set[str],
-    inherited_reads: set[str],
-    element_reads_cache: dict[int, set[str]],
+    inherited_reads: "_PathReads | None",
+    caches: _DiscardScanCaches,
 ) -> None:
     """Walk operations like the if-lowering pass, checking each runtime if.
 
@@ -1241,17 +1332,39 @@ def _scan_branch_quantum_discards(
         measurement_tainted (set[str]): UUIDs of values transitively
             derived from measurement results; an unresolvable if whose
             condition is in this set is runtime control flow.
-        inherited_reads (set[str]): UUIDs read by operations outside this
-            scope that execute on every path reaching it, per the
-            path-sensitive construction above.
-        element_reads_cache (dict[int, set[str]]): Shared per-element
-            pruned-subtree read cache (see :func:`_scope_element_reads`),
-            updated in place.
+        inherited_reads (_PathReads | None): Membership view of the reads
+            outside this scope that execute on every path reaching it,
+            per the path-sensitive construction above. None at the
+            block's top level.
+        caches (_DiscardScanCaches): Shared per-element / per-scope read
+            memoization, updated in place.
 
     Raises:
         QubitRebindError: If a runtime if branch rebinds a quantum
             variable whose pre-branch value has no owner on that path.
     """
+
+    def path_context(exclude_op: Operation, extra: set[str]) -> _PathReads:
+        """Build the path view outside one scope element.
+
+        Args:
+            exclude_op (Operation): The scope element being checked or
+                descended into (its subtree is excluded).
+            extra (set[str]): Additional reads carried on the path (the
+                entered side's phi operands), empty for checks.
+
+        Returns:
+            _PathReads: Membership view chaining to ``inherited_reads``.
+        """
+        return _PathReads(
+            inherited_reads,
+            _scope_read_counts(ops, concrete_values, bindings, caches),
+            _scope_element_reads(
+                exclude_op, concrete_values, bindings, caches.element_reads
+            ),
+            extra,
+        )
+
     for op in ops:
         evaluate_classical_op_concrete(op, concrete_values, bindings)
         if isinstance(op, IfOperation):
@@ -1260,20 +1373,13 @@ def _scan_branch_quantum_discards(
             )
             if taken is not None:
                 branch = op.true_operations if taken else op.false_operations
-                child_reads = (
-                    inherited_reads
-                    | _sibling_scope_reads(
-                        ops, op, concrete_values, bindings, element_reads_cache
-                    )
-                    | _phi_side_operand_reads(op, taken)
-                )
                 _scan_branch_quantum_discards(
                     branch,
                     concrete_values,
                     bindings,
                     measurement_tainted,
-                    child_reads,
-                    element_reads_cache,
+                    path_context(op, _phi_side_operand_reads(op, taken)),
+                    caches,
                 )
                 continue
             # Only a runtime (measurement-derived condition) if can
@@ -1296,36 +1402,28 @@ def _scan_branch_quantum_discards(
                     ),
                 }
                 if op.branch_rebinds or promoted[True] or promoted[False]:
-                    reads_outside = inherited_reads | _sibling_scope_reads(
-                        ops, op, concrete_values, bindings, element_reads_cache
-                    )
                     _check_branch_quantum_discard(
-                        op, concrete_values, bindings, reads_outside, promoted
+                        op,
+                        concrete_values,
+                        bindings,
+                        path_context(op, set()),
+                        promoted,
                     )
             for side, branch in (
                 (True, op.true_operations),
                 (False, op.false_operations),
             ):
-                child_reads = (
-                    inherited_reads
-                    | _sibling_scope_reads(
-                        ops, op, concrete_values, bindings, element_reads_cache
-                    )
-                    | _phi_side_operand_reads(op, side)
-                )
                 _scan_branch_quantum_discards(
                     branch,
                     dict(concrete_values),
                     bindings,
                     measurement_tainted,
-                    child_reads,
-                    element_reads_cache,
+                    path_context(op, _phi_side_operand_reads(op, side)),
+                    caches,
                 )
             continue
         if isinstance(op, HasNestedOps):
-            child_reads = inherited_reads | _sibling_scope_reads(
-                ops, op, concrete_values, bindings, element_reads_cache
-            )
+            child_reads = path_context(op, set())
             for body in op.nested_op_lists():
                 _scan_branch_quantum_discards(
                     body,
@@ -1333,7 +1431,7 @@ def _scan_branch_quantum_discards(
                     bindings,
                     measurement_tainted,
                     child_reads,
-                    element_reads_cache,
+                    caches,
                 )
         # Other operations carry no nested control flow to scan.
 
@@ -1441,8 +1539,8 @@ def reject_branch_internal_quantum_discard(
         {},
         resolved_bindings,
         measurement_tainted,
-        set(),
-        {},
+        None,
+        _DiscardScanCaches(),
     )
 
 
