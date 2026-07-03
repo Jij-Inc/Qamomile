@@ -141,8 +141,9 @@ def _build_classical_dependency_graph(
             nested control-flow bodies are walked recursively.
 
     Returns:
-        dict[str, set[str]]: Mapping ``result_uuid -> set(operand_uuid)``
-            restricted to classical dataflow.
+        dict[str, set[str]]: Mapping from a value UUID to the UUIDs it
+            depends on through classical operation results or metadata
+            references.
     """
 
     class ClassicalDependencyGraphBuilder(ControlFlowVisitor):
