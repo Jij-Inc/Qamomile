@@ -20,7 +20,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, TupleValue, Value
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
@@ -380,6 +380,66 @@ class TestPhiSubstitutionOutputs:
         assert lowered.output_values[0].uuid != phi_out.uuid, (
             "Block output should be substituted away from phi output UUID"
         )
+
+    def test_structural_output_substitution_synthetic(self):
+        """Tuple output elements are updated when phi values are substituted."""
+        true_value = _uint_val("true_value")
+        false_value = _uint_val("false_value")
+        flag = _uint_val("flag", const=1)
+        phi_out = _uint_val("phi_out")
+        phi = PhiOp(
+            operands=[flag, true_value, false_value],
+            results=[phi_out],
+        )
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_out],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+        tuple_out = TupleValue(name="pair", elements=(phi_out, false_value))
+        block = Block(
+            name="test",
+            operations=[if_op],
+            output_values=[tuple_out],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert len(lowered.output_values) == 1
+        output = lowered.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid == true_value.uuid
+        assert output.elements[0].uuid != phi_out.uuid
+
+    def test_structural_output_inner_condition_keeps_condition_producer(self):
+        """Tuple output elements keep condition producers alive after lowering."""
+        a = _uint_val("a", const=2)
+        b = _uint_val("b", const=1)
+        cond_result = _bit_val("cond")
+        comp_op = CompOp(
+            operands=[a, b],
+            results=[cond_result],
+            kind=CompOpKind.GT,
+        )
+        q = _qubit_val()
+        if_op, phi_out = _make_if_with_x_gate(cond_result, q)
+        tuple_out = TupleValue(name="pair", elements=(cond_result, phi_out))
+
+        block = Block(
+            name="test",
+            operations=[comp_op, if_op],
+            output_values=[tuple_out],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert _find_ops(lowered.operations, CompOp)
+        output = lowered.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid == cond_result.uuid
+        assert output.elements[1].uuid != phi_out.uuid
 
 
 # ---------------------------------------------------------------------------

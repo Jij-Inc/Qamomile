@@ -25,6 +25,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
+    DictValue,
+    TupleValue,
     Value,
     ValueBase,
     ValueLike,
@@ -644,10 +646,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         new_outputs: list[ValueLike] = []
         for ov in output_values:
             substituted = substitutor.substitute_value(ov)
-            if isinstance(substituted, Value):
-                new_outputs.append(substituted)
-            else:
-                new_outputs.append(ov)
+            new_outputs.append(cast(ValueLike, substituted))
         return new_outputs
 
     # ------------------------------------------------------------------
@@ -676,7 +675,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # Also include block output UUIDs as used.
         if output_values:
             for ov in output_values:
-                used_uuids.add(ov.uuid)
+                used_uuids.update(self._collect_value_like_uuids(ov))
 
         result: list[Operation] = []
         for op in operations:
@@ -698,6 +697,37 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         if len(result) < len(operations):
             return self._eliminate_dead_ops(result, dead_uuids, output_values)
         return result
+
+    @staticmethod
+    def _collect_value_like_uuids(value: ValueLike) -> set[str]:
+        """Collect UUIDs referenced by a block output value.
+
+        Args:
+            value (ValueLike): Scalar, array, tuple, or dict output value to
+                inspect.
+
+        Returns:
+            set[str]: UUIDs for ``value`` itself and any recursively contained
+                tuple/dict elements.
+        """
+        uuids = {value.uuid}
+        if isinstance(value, TupleValue):
+            for element in value.elements:
+                uuids.update(
+                    CompileTimeIfLoweringPass._collect_value_like_uuids(element)
+                )
+        elif isinstance(value, DictValue):
+            for key, entry_value in value.entries:
+                uuids.update(CompileTimeIfLoweringPass._collect_value_like_uuids(key))
+                uuids.update(
+                    CompileTimeIfLoweringPass._collect_value_like_uuids(entry_value)
+                )
+        elif isinstance(value, Value):
+            if value.parent_array is not None:
+                uuids.add(value.parent_array.uuid)
+            for idx in value.element_indices:
+                uuids.add(idx.uuid)
+        return uuids
 
     @staticmethod
     def _collect_used_uuids(op: Operation, used: set[str]) -> None:
