@@ -36,7 +36,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
@@ -1035,19 +1034,6 @@ def _encode_runtime_classical(
     return d
 
 
-def _encode_phi(op: PhiOp, ctx: _EncodeContext) -> dict[str, Any]:
-    """Encode :class:`PhiOp`.
-
-    Args:
-        op (PhiOp): The op.
-        ctx (_EncodeContext): The active encoding context.
-
-    Returns:
-        dict[str, Any]: Base op dict.
-    """
-    return _base_op_dict("PhiOp", op)
-
-
 def _encode_loop_carried_rebinds(
     rebinds: tuple[LoopCarriedRebind, ...],
 ) -> list[dict[str, Any]]:
@@ -1145,19 +1131,26 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
 def _encode_if(op: IfOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`IfOperation`.
 
+    Branch merges are encoded as two value-reference lists parallel to
+    ``results``: ``true_yield_refs[i]`` / ``false_yield_refs[i]`` are the
+    branch sources merged into ``results[i]``. The referenced Values are
+    already registered in the value table by the block-wide value walk.
+
     Args:
         op (IfOperation): The op.
         ctx (_EncodeContext): The active encoding context.
 
     Returns:
         dict[str, Any]: Base op dict plus ``true_body`` /
-            ``false_body`` operation lists and a parallel
-            ``phi_ops`` list.
+            ``false_body`` operation lists and the parallel
+            ``true_yield_refs`` / ``false_yield_refs`` UUID lists.
     """
     d = _base_op_dict("IfOperation", op)
     d["true_body"] = [_encode_operation(child, ctx) for child in op.true_operations]
     d["false_body"] = [_encode_operation(child, ctx) for child in op.false_operations]
-    d["phi_ops"] = [_encode_operation(p, ctx) for p in op.phi_ops]
+    merges = list(op.iter_merges())
+    d["true_yield_refs"] = [m.true_value.uuid for m in merges]
+    d["false_yield_refs"] = [m.false_value.uuid for m in merges]
     return d
 
 
@@ -1357,7 +1350,6 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     CondOp: _encode_condop,
     NotOp: _encode_notop,
     RuntimeClassicalExpr: _encode_runtime_classical,
-    PhiOp: _encode_phi,
     ForOperation: _encode_for,
     ForItemsOperation: _encode_for_items,
     WhileOperation: _encode_while,

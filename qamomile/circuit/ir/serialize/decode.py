@@ -41,7 +41,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     CondOpKind,
     NotOp,
-    PhiOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
@@ -1218,20 +1217,6 @@ def _decode_runtime_classical(
     return RuntimeClassicalExpr(operands=operands, results=results, kind=kind)
 
 
-def _decode_phi(d: dict[str, Any], ctx: _DecodeContext) -> PhiOp:
-    """Decode :class:`PhiOp`.
-
-    Args:
-        d (dict[str, Any]): The op dict.
-        ctx (_DecodeContext): The active decode context.
-
-    Returns:
-        PhiOp: The reconstructed op.
-    """
-    operands, results = _operands_results(d, ctx)
-    return PhiOp(operands=operands, results=results)
-
-
 def _decode_loop_carried_rebinds(
     d: dict[str, Any],
     ctx: _DecodeContext,
@@ -1343,32 +1328,46 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
 def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
     """Decode :class:`IfOperation`.
 
+    Branch merges arrive as ``true_yield_refs`` / ``false_yield_refs``
+    UUID lists parallel to ``results`` and are re-attached through
+    ``add_merge`` so the decoded op satisfies the merge invariants
+    ``iter_merges`` checks.
+
     Args:
         d (dict[str, Any]): The op dict.
         ctx (_DecodeContext): The active decode context.
 
     Returns:
         IfOperation: The reconstructed op, including true / false
-            branches and the phi-op list.
+            branches and the branch-merge slots.
+
+    Raises:
+        ValueError: If the yield-reference lists disagree with each
+            other or with ``results`` in length (corrupted payload).
     """
     operands, results = _operands_results(d, ctx)
     true_body = [_decode_operation(child, ctx) for child in d.get("true_body", ())]
     false_body = [_decode_operation(child, ctx) for child in d.get("false_body", ())]
-    phi_ops: list[PhiOp] = []
-    for raw in d.get("phi_ops", ()):
-        decoded = _decode_operation(raw, ctx)
-        if not isinstance(decoded, PhiOp):
-            raise ValueError(
-                f"IfOperation.phi_ops must be PhiOp, got {type(decoded).__name__}"
-            )
-        phi_ops.append(decoded)
-    return IfOperation(
+    true_refs = list(d.get("true_yield_refs", ()))
+    false_refs = list(d.get("false_yield_refs", ()))
+    if len(true_refs) != len(false_refs) or len(true_refs) != len(results):
+        raise ValueError(
+            "IfOperation merge data is inconsistent: "
+            f"{len(true_refs)} true_yield_refs / {len(false_refs)} "
+            f"false_yield_refs for {len(results)} results."
+        )
+    op = IfOperation(
         operands=operands,
-        results=results,
         true_operations=true_body,
         false_operations=false_body,
-        phi_ops=phi_ops,
     )
+    for true_ref, false_ref, result in zip(true_refs, false_refs, results, strict=True):
+        op.add_merge(
+            _materialize_as_value(ctx, true_ref),
+            _materialize_as_value(ctx, false_ref),
+            result,
+        )
+    return op
 
 
 def _decode_concrete_controlled(
@@ -1589,7 +1588,6 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "CondOp": _decode_condop,
     "NotOp": _decode_notop,
     "RuntimeClassicalExpr": _decode_runtime_classical,
-    "PhiOp": _decode_phi,
     "ForOperation": _decode_for,
     "ForItemsOperation": _decode_for_items,
     "WhileOperation": _decode_while,

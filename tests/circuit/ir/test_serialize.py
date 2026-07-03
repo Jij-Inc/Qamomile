@@ -34,6 +34,7 @@ from qamomile.circuit.ir.operation import (
     InverseBlockOperation,
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
     SCHEMA_VERSION,
@@ -119,6 +120,20 @@ def _measure_kernel(q: qmc.Qubit) -> qmc.Bit:
     """Kernel that exercises a measurement-derived classical bit."""
     q = qmc.h(q)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _if_merge_kernel() -> qmc.Bit:
+    """Measurement-conditioned if-else whose branches rebind a qubit."""
+    q = qmc.qubit(name="q")
+    q = qmc.h(q)
+    bit = qmc.measure(q)
+    r = qmc.qubit(name="r")
+    if bit:
+        r = qmc.x(r)
+    else:
+        r = qmc.h(r)
+    return qmc.measure(r)
 
 
 @qmc.qkernel
@@ -645,6 +660,68 @@ class TestRoundTripIRFeatures:
         assert to_dict(load_json(dump_json(block))) == original
         assert to_dict(load_msgpack(dump_msgpack(block))) == original
         assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    def test_if_operation_merge_round_trip(self):
+        """IfOperation branch merges survive both wire formats as yield refs.
+
+        The wire form encodes merges as ``true_yield_refs`` /
+        ``false_yield_refs`` UUID lists parallel to ``result_refs`` (no
+        embedded phi operation dicts); the decoded op must reproduce the
+        original ``iter_merges`` view exactly.
+        """
+        block = _to_affine(_if_merge_kernel)
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert if_ops, [type(op).__name__ for op in block.operations]
+        original_merges = [
+            [
+                (m.true_value.uuid, m.false_value.uuid, m.result.uuid)
+                for m in op.iter_merges()
+            ]
+            for op in if_ops
+        ]
+        assert all(original_merges), original_merges
+
+        payload = to_dict(block)
+        if_dicts = [
+            d for d in payload["block"]["operations"] if d.get("$type") == "IfOperation"
+        ]
+        assert if_dicts
+        for d in if_dicts:
+            assert "phi_ops" not in d
+            assert (
+                len(d["true_yield_refs"])
+                == len(d["false_yield_refs"])
+                == len(d["result_refs"])
+            )
+
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+
+        restored = load_json(dump_json(block))
+        restored_merges = [
+            [
+                (m.true_value.uuid, m.false_value.uuid, m.result.uuid)
+                for m in op.iter_merges()
+            ]
+            for op in restored.operations
+            if isinstance(op, IfOperation)
+        ]
+        assert restored_merges == original_merges
+        assert content_hash(restored) == content_hash(block)
+
+    def test_if_operation_mismatched_yield_refs_rejected(self):
+        """Corrupted yield-ref lists are rejected loudly at decode time."""
+        block = _to_affine(_if_merge_kernel)
+        payload = to_dict(block)
+        corrupted = False
+        for op_dict in payload["block"]["operations"]:
+            if op_dict.get("$type") == "IfOperation":
+                op_dict["true_yield_refs"] = op_dict["true_yield_refs"][:-1]
+                corrupted = True
+        assert corrupted
+        with pytest.raises(ValueError, match="merge data is inconsistent"):
+            from_dict(payload)
 
     def test_for_items_vector_key_round_trip(self):
         """``key_is_vector=True`` ForItemsOperation survives both formats."""
