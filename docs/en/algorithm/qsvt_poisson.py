@@ -191,59 +191,6 @@ print(np.round(h1**2 * A1).astype(int))
 # %%
 import qamomile.circuit as qmc
 
-# @qmc.qkernel
-# def apply_controlled_shift_plus_on_q(
-#     q: qmc.Vector[qmc.Qubit],
-#     control_index: qmc.UInt,
-#     num_system: qmc.UInt,
-# ) -> qmc.Vector[qmc.Qubit]:
-#     """Apply controlled |j> -> |j + 1 mod 2^num_system.
-
-#     Layout:
-#       q[0:num_system] = system
-#       q[control_index] = external control
-#     """
-#     for k in qmc.range(num_system):
-#         target_index = num_system - 1 - k
-
-#         # Controls are:
-#         #   q[control_index] and q[0:target_index]
-#         #
-#         # Number of controls:
-#         #   1 external control + target_index prefix controls
-#         mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-
-#         q[control_index], q[0:target_index], q[target_index] = mcx(
-#             q[control_index],
-#             q[0:target_index],
-#             q[target_index],
-#         )
-
-#     return q
-
-# @qmc.qkernel
-# def apply_controlled_shift_minus_on_q(
-#     q: qmc.Vector[qmc.Qubit],
-#     control_index: qmc.UInt,
-#     num_system: qmc.UInt,
-# ) -> qmc.Vector[qmc.Qubit]:
-#     """Apply controlled |j> -> |j - 1 mod 2^num_system.
-
-#     Layout:
-#       q[0:num_system] = system
-#       q[control_index] = external control
-#     """
-#     for target_index in qmc.range(num_system):
-#         mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-
-#         q[control_index], q[0:target_index], q[target_index] = mcx(
-#             q[control_index],
-#             q[0:target_index],
-#             q[target_index],
-#         )
-
-#     return q
-
 @qmc.qkernel
 def apply_1d_poisson_block_encoding_on_q(
     q: qmc.Vector[qmc.Qubit],
@@ -566,7 +513,7 @@ def apply_RPi_figure_13_4_on_q(
 # QSVT sequence factory
 # ============================================================
 
-def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases, num_signal=2):
+def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
     """Create the 1D Poisson QSVT kernel with a fixed phase count."""
     normalized_b = normalize_state(normalized_b)
 
@@ -577,6 +524,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases, num_signal=2):
     _check_power_of_two(expected_len)
 
     num_system = int(np.log2(expected_len))
+    num_signal = 2
 
     # Extra ancilla for Figure 13.4.
     rpi_aux = num_system + num_signal 
@@ -797,7 +745,6 @@ qsvt_kernel_1d_poc = make_qsvt_poisson_kernel_1d(
     n_1d,
     normalized_b1,
     poc_num_phases,
-    num_signal=2,
 )
 
 qsvt_poc_bindings = {
@@ -839,7 +786,6 @@ qsvt_kernel_1d = make_qsvt_poisson_kernel_1d(
     n_1d,
     normalized_b1,
     len(phi_qsvt),
-    num_signal=2,
 )
 
 qsvt_circuit_1d = transpiler.to_circuit(
