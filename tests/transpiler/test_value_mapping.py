@@ -7,11 +7,12 @@ Covers fixes for:
     ValueSubstitutor.substitute_value() now substitutes shape dimension UUIDs
     through the value_map so callers' concrete sizes propagate correctly.
 
-- Bug #6 (IfOperation phi_ops cloning/substitution):
-    UUIDRemapper.clone_operation() now recurses into IfOperation.phi_ops,
-    giving each PhiOp fresh UUIDs.
+- Bug #6 (IfOperation merge-slot cloning/substitution):
+    UUIDRemapper.clone_operation() now recurses into IfOperation merge
+    slots, giving each merged output fresh UUIDs.
     ValueSubstitutor.substitute_operation() now substitutes values inside
-    IfOperation.phi_ops so inlined phi operands are correctly remapped.
+    IfOperation merge slots so inlined merge operands are correctly
+    remapped.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.types.primitives import (
@@ -665,22 +665,17 @@ class TestCarrierMetadataMapping:
 
         cast_true = branch_cast("qf_true")
         cast_false = branch_cast("qf_false")
-        phi_out = Value(type=result_type, name="qf_phi").with_qfixed_metadata(
+        merge_out = Value(type=result_type, name="qf_phi").with_qfixed_metadata(
             qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
             num_bits=2,
             int_bits=0,
         )
-        phi = PhiOp(
-            operands=[condition, cast_true.results[0], cast_false.results[0]],
-            results=[phi_out],
-        )
         if_op = IfOperation(
             operands=[condition],
-            results=[phi_out],
             true_operations=[cast_true],
             false_operations=[cast_false],
-            phi_ops=[phi],
         )
+        if_op.add_merge(cast_true.results[0], cast_false.results[0], merge_out)
 
         remapper = UUIDRemapper()
         cloned = remapper.clone_operation(if_op)
@@ -692,8 +687,9 @@ class TestCarrierMetadataMapping:
             f"{cloned_source_uuid}_0",
             f"{cloned_source_uuid}_1",
         )
-        # The phi output and the operation result stay the same clone.
-        assert cloned.phi_ops[0].results[0] is cloned_out
+        # The merged output and the operation result stay the same clone.
+        merges = list(cloned.iter_merges())
+        assert merges[0].result is cloned_out
 
 
 class TestArrayValueShapeSubstitution:
@@ -740,121 +736,102 @@ class TestArrayValueShapeSubstitution:
 
 
 # ===========================================================================
-# Bug #6: IfOperation phi_ops cloning and substitution
+# Bug #6: IfOperation merge-slot cloning and substitution
 # ===========================================================================
 
 
-class TestIfOperationPhiOpsCloning:
-    """Tests that UUIDRemapper clones IfOperation.phi_ops."""
+class TestIfOperationMergeCloning:
+    """Tests that UUIDRemapper clones IfOperation merge slots."""
 
-    def test_phi_ops_are_cloned(self) -> None:
-        """Cloning IfOperation should also clone phi_ops."""
+    def test_merges_are_cloned(self) -> None:
+        """Cloning IfOperation should also clone its merge slots."""
         cond = _make_value("cond", BitType)
         true_q = _make_value("q_true", QubitType)
         false_q = _make_value("q_false", QubitType)
-        phi_output = _make_value("q_phi", QubitType)
-
-        phi = PhiOp(
-            operands=[cond, true_q, false_q],
-            results=[phi_output],
-        )
+        merge_output = _make_value("q_phi", QubitType)
 
         if_op = IfOperation(
             operands=[cond],
-            results=[phi_output],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
+        )
+        if_op.add_merge(true_q, false_q, merge_output)
+
+        remapper = UUIDRemapper()
+        cloned = remapper.clone_operation(if_op)
+
+        assert isinstance(cloned, IfOperation)
+        merges = list(cloned.iter_merges())
+        assert len(merges) == 1
+        # Merged output should have a fresh UUID
+        assert merges[0].result.uuid != merge_output.uuid
+
+    def test_empty_merges_is_preserved(self) -> None:
+        """IfOperation with no merge slots is cloned without error."""
+        cond = _make_value("cond", BitType)
+
+        if_op = IfOperation(
+            operands=[cond],
+            true_operations=[],
+            false_operations=[],
         )
 
         remapper = UUIDRemapper()
         cloned = remapper.clone_operation(if_op)
 
         assert isinstance(cloned, IfOperation)
-        assert len(cloned.phi_ops) == 1
-        cloned_phi = cloned.phi_ops[0]
-        assert isinstance(cloned_phi, PhiOp)
-        # Phi output should have a fresh UUID
-        assert cloned_phi.results[0].uuid != phi_output.uuid
+        assert len(list(cloned.iter_merges())) == 0
 
-    def test_phi_ops_empty_is_preserved(self) -> None:
-        """IfOperation with no phi_ops is cloned without error."""
+    def test_multiple_merges_are_all_cloned(self) -> None:
+        """IfOperation with multiple merge slots clones each one."""
         cond = _make_value("cond", BitType)
 
         if_op = IfOperation(
             operands=[cond],
-            results=[],
             true_operations=[],
             false_operations=[],
-            phi_ops=[],
         )
-
-        remapper = UUIDRemapper()
-        cloned = remapper.clone_operation(if_op)
-
-        assert isinstance(cloned, IfOperation)
-        assert len(cloned.phi_ops) == 0
-
-    def test_multiple_phi_ops_are_all_cloned(self) -> None:
-        """IfOperation with multiple phi_ops clones each one."""
-        cond = _make_value("cond", BitType)
-
-        phi_outputs = []
-        phis = []
+        merge_outputs = []
         for i in range(3):
             t = _make_value(f"t{i}", QubitType)
             f = _make_value(f"f{i}", QubitType)
             out = _make_value(f"phi{i}", QubitType)
-            phi_outputs.append(out)
-            phis.append(PhiOp(operands=[cond, t, f], results=[out]))
-
-        if_op = IfOperation(
-            operands=[cond],
-            results=phi_outputs,
-            true_operations=[],
-            false_operations=[],
-            phi_ops=phis,
-        )
+            merge_outputs.append(out)
+            if_op.add_merge(t, f, out)
 
         remapper = UUIDRemapper()
         cloned = remapper.clone_operation(if_op)
 
         assert isinstance(cloned, IfOperation)
-        assert len(cloned.phi_ops) == 3
-        for orig_phi, cloned_phi in zip(phis, cloned.phi_ops):
-            assert isinstance(cloned_phi, PhiOp)
-            assert cloned_phi.results[0].uuid != orig_phi.results[0].uuid
+        merges = list(cloned.iter_merges())
+        assert len(merges) == 3
+        for orig_out, cloned_merge in zip(merge_outputs, merges):
+            assert cloned_merge.result.uuid != orig_out.uuid
 
 
-class TestPhiOpsSubstitution:
-    """Tests that ValueSubstitutor substitutes phi_ops inside IfOperation."""
+class TestIfOperationMergeSubstitution:
+    """Tests that ValueSubstitutor substitutes merge slots inside IfOperation."""
 
-    def test_phi_ops_operands_are_substituted(self) -> None:
-        """ValueSubstitutor should substitute values inside phi_ops."""
+    def test_merge_operands_are_substituted(self) -> None:
+        """ValueSubstitutor should substitute values inside merge slots."""
         cond = _make_value("cond", BitType)
         old_q = _make_value("q_old", QubitType)
         new_q = _make_value("q_new", QubitType)
         false_q = _make_value("q_false", QubitType)
-        phi_output = _make_value("q_phi", QubitType)
-
-        phi = PhiOp(
-            operands=[cond, old_q, false_q],
-            results=[phi_output],
-        )
+        merge_output = _make_value("q_phi", QubitType)
 
         if_op = IfOperation(
             operands=[cond],
-            results=[phi_output],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(old_q, false_q, merge_output)
 
         sub = ValueSubstitutor({old_q.uuid: new_q})
         result = sub.substitute_operation(if_op)
 
         assert isinstance(result, IfOperation)
-        assert len(result.phi_ops) == 1
-        subst_phi = result.phi_ops[0]
-        # The true_val operand (index 1) should be substituted
-        assert subst_phi.operands[1].uuid == new_q.uuid
+        merges = list(result.iter_merges())
+        assert len(merges) == 1
+        # The true-branch value should be substituted
+        assert merges[0].true_value.uuid == new_q.uuid

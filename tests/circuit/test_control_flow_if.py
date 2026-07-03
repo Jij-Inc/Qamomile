@@ -18,8 +18,11 @@ from qamomile.circuit.frontend.handle import (
 from qamomile.circuit.frontend.handle.primitives import Float
 from qamomile.circuit.frontend.operation.control_flow import _create_phi_for_values
 from qamomile.circuit.frontend.qkernel import qkernel
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-from qamomile.circuit.ir.operation.control_flow import IfOperation, WhileOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    IfMerge,
+    IfOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     MeasureOperation,
@@ -104,10 +107,12 @@ class TestIfElseScalarQubit:
         # phi; cond is read-only and elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 1
-        assert isinstance(if_ops[0].phi_ops[0], PhiOp)
-        assert len(if_ops[0].phi_ops[0].operands) == 3
-        assert len(if_ops[0].phi_ops[0].results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        assert isinstance(merges[0], IfMerge)
+        assert isinstance(merges[0].true_value, Value)
+        assert isinstance(merges[0].false_value, Value)
+        assert merges[0].result is if_ops[0].results[0]
 
     def test_if_else_multiple_qubits_in_branches(self):
         """Multiple qubits operated on in both branches should work."""
@@ -137,11 +142,13 @@ class TestIfElseScalarQubit:
         results = if_ops[0].results
         assert results[0].type == QubitType()
         assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 2
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_else_asymmetric_branch_ops(self):
         """If-else with different number of operations in each branch."""
@@ -167,8 +174,9 @@ class TestIfElseScalarQubit:
         # Phi-minimization: q1 reassigned in both branches; cond elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 1
-        assert isinstance(if_ops[0].phi_ops[0], PhiOp)
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        assert isinstance(merges[0], IfMerge)
 
     def test_if_only_no_else(self):
         """If without else should work. The false branch is empty (returns vars as-is),
@@ -193,13 +201,13 @@ class TestIfElseScalarQubit:
         # read-only and elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 1
+        assert len(list(if_ops[0].iter_merges())) == 1
 
     def test_if_else_classical_only_in_one_branch(self):
         """One branch with no qubit operations should work.
 
         The false branch only returns the qubit unchanged, producing
-        a PhiOp that merges the gate-applied and identity paths.
+        a merge slot that joins the gate-applied and identity paths.
         """
 
         @qkernel
@@ -220,7 +228,7 @@ class TestIfElseScalarQubit:
         # Phi-minimization: q1 reassigned in true branch only; cond elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 1
+        assert len(list(if_ops[0].iter_merges())) == 1
 
     def test_nested_if_else(self):
         """Nested if-else inside a branch should build successfully."""
@@ -254,11 +262,13 @@ class TestIfElseScalarQubit:
         # elided.
         assert len(outer_if.results) == 2
         assert all(r.type == QubitType() for r in outer_if.results)
-        assert len(outer_if.phi_ops) == 2
-        for phi in outer_if.phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(outer_if.iter_merges())
+        assert len(merges) == 2
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is outer_if.results[merge.index]
 
         # Outer true branch should contain an inner IfOperation
         inner_if_ops = [
@@ -273,8 +283,9 @@ class TestIfElseScalarQubit:
         # Phi-minimization: only q1 reassigned in both inner branches.
         assert len(inner_if.results) == 1
         assert inner_if.results[0].type == QubitType()
-        assert len(inner_if.phi_ops) == 1
-        assert isinstance(inner_if.phi_ops[0], PhiOp)
+        inner_merges = list(inner_if.iter_merges())
+        assert len(inner_merges) == 1
+        assert isinstance(inner_merges[0], IfMerge)
 
 
 class TestIfElseErrorHandling:
@@ -394,8 +405,9 @@ class TestIfElseWithSymbolicVector:
         # outer ArrayValue identity, so phi creation is conservative).
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 1
-        assert isinstance(if_ops[0].phi_ops[0], PhiOp)
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        assert isinstance(merges[0], IfMerge)
 
     def test_if_else_symbolic_vector_different_elements(self):
         """Different elements of a parameter Vector in each branch."""
@@ -423,11 +435,13 @@ class TestIfElseWithSymbolicVector:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_only_symbolic_vector_passthrough(self):
         """Parameter Vector with ops only in true branch, pass-through in else."""
@@ -452,11 +466,13 @@ class TestIfElseWithSymbolicVector:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_else_symbolic_vector_and_qubit_mixed(self):
         """Mixed parameter Vector and individual Qubit in if-else."""
@@ -491,11 +507,13 @@ class TestIfElseWithSymbolicVector:
         assert results[0].type == QubitType()
         assert results[1].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 2
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_else_symbolic_vector_index_after_merge(self):
         """Indexing a parameter Vector after if-else merge must work."""
@@ -525,11 +543,13 @@ class TestIfElseWithSymbolicVector:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
 
 class TestIfElseWithQubitArray:
@@ -565,11 +585,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     @pytest.mark.parametrize("n", [2, 3, 100])
     def test_if_else_dynamic_qubit_array_different_elements(self, n):
@@ -599,11 +621,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     @pytest.mark.parametrize("n", [1, 3, 100])
     def test_if_only_dynamic_qubit_array(self, n):
@@ -630,11 +654,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     @pytest.mark.parametrize("n", [2, 3, 100])
     def test_if_else_dynamic_qubit_array_mixed_with_qubit(self, n):
@@ -669,11 +695,13 @@ class TestIfElseWithQubitArray:
         assert results[0].type == QubitType()
         assert results[1].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 2
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     # --- Fixed-size qubit_array (element operations) ---
 
@@ -704,11 +732,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_else_vector_different_elements_per_branch(self):
         """Different elements operated on in each branch (tests _borrowed_indices reset)."""
@@ -737,11 +767,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_else_mixed_vector_and_qubit(self):
         """Mixed Vector[Qubit] and individual Qubit in if-else."""
@@ -775,11 +807,13 @@ class TestIfElseWithQubitArray:
         assert results[0].type == QubitType()
         assert results[1].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 2
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_else_vector_index_after_merge(self):
         """Indexing Vector after if-else merge must work (directly tests phi merge type)."""
@@ -810,11 +844,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_only_vector_passthrough(self):
         """Vector with ops in true branch only, pass-through in else."""
@@ -840,11 +876,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     # --- Vector measurement as condition ---
 
@@ -873,11 +911,13 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].phi_ops) >= 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) >= 2
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_measure_vector_condition_another_vector_op(self):
         """Measure one Vector, use bit as condition, operate on a second Vector."""
@@ -904,10 +944,11 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        for merge in if_ops[0].iter_merges():
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     # --- Whole vector operations ---
 
@@ -944,11 +985,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_qubit_condition_partial_vector_elements(self):
         """Different number of element operations per branch."""
@@ -979,11 +1022,13 @@ class TestIfElseWithQubitArray:
         results = if_ops[0].results
         assert results[0].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 1
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 1
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
     def test_qubit_condition_vector_and_scalar_mixed(self):
         """Operate on all vector elements AND a separate qubit in both branches."""
@@ -1021,11 +1066,13 @@ class TestIfElseWithQubitArray:
         assert results[0].type == QubitType()
         assert results[1].type == QubitType()
 
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) == 2
+        for merge in merges:
+            assert isinstance(merge, IfMerge)
+            assert isinstance(merge.true_value, Value)
+            assert isinstance(merge.false_value, Value)
+            assert merge.result is if_ops[0].results[merge.index]
 
 
 class TestIfElseOneSidedReturnErrors:
@@ -1235,8 +1282,8 @@ class TestIfBranchVariableMerge:
         assert graph is not None
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        # 'a' should be in the phi_ops (new local merged from both branches)
-        assert any(isinstance(p, PhiOp) for p in if_ops[0].phi_ops)
+        # 'a' should be in the merge slots (new local merged from both branches)
+        assert len(list(if_ops[0].iter_merges())) >= 1
 
     def test_if_both_branch_new_local_definition_transpile_no_nameerror(self):
         """Both branches define a new local; transpile should not raise NameError."""
@@ -1276,14 +1323,14 @@ class TestIfBranchVariableMerge:
         block = circuit.block
         if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        # The if should have phi_ops for the reassigned variable b
-        bit_phis = [
-            p
-            for p in if_ops[0].phi_ops
-            if isinstance(p, PhiOp) and isinstance(p.results[0].type, BitType)
+        # The if should have merge slots for the reassigned variable b
+        bit_merges = [
+            merge
+            for merge in if_ops[0].iter_merges()
+            if isinstance(merge.result.type, BitType)
         ]
-        # At least one phi for 'b' (BitType) beyond the condition phi
-        assert len(bit_phis) >= 1
+        # At least one merge for 'b' (BitType) beyond the condition merge
+        assert len(bit_merges) >= 1
 
     def test_if_only_store_only_reassignment_affects_following_if(self):
         """If-only (no else) store-only reassignment should produce a phi merge."""
@@ -1300,8 +1347,8 @@ class TestIfBranchVariableMerge:
         block = circuit.block
         if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        phi_ops = if_ops[0].phi_ops
-        assert len(phi_ops) > 0
+        merges = list(if_ops[0].iter_merges())
+        assert len(merges) > 0
 
     def test_if_one_sided_new_local_definition_raises_syntax_error(self):
         """New local defined in only one branch and read after should raise SyntaxError."""
@@ -1384,7 +1431,7 @@ class TestIfNestedInLoop:
 
 
 class TestIfElseDeadPhiFiltering:
-    """Dead variables (not loaded after if) must not generate PhiOps."""
+    """Dead variables (not loaded after if) must not generate merge slots."""
 
     def test_if_dead_shared_new_local_not_merged(self):
         """Both branches define b_new via measure, but it is dead after if."""
@@ -1423,12 +1470,12 @@ class TestIfElseDeadPhiFiltering:
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        qubit_phis = [
-            p
-            for p in if_ops[0].phi_ops
-            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        qubit_merges = [
+            merge
+            for merge in if_ops[0].iter_merges()
+            if isinstance(merge.result.type, QubitType)
         ]
-        assert len(qubit_phis) == 0
+        assert len(qubit_merges) == 0
 
     def test_if_live_reassigned_existing_is_merged(self):
         """Outer qubit reassigned and read after if -> phi must exist (regression)."""
@@ -1446,12 +1493,12 @@ class TestIfElseDeadPhiFiltering:
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        qubit_phis = [
-            p
-            for p in if_ops[0].phi_ops
-            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        qubit_merges = [
+            merge
+            for merge in if_ops[0].iter_merges()
+            if isinstance(merge.result.type, QubitType)
         ]
-        assert len(qubit_phis) >= 1
+        assert len(qubit_merges) >= 1
 
     def test_if_only_dead_reassigned_existing_not_merged(self):
         """If-only (no else): outer qubit reassigned but dead -> no qubit phi."""
@@ -1468,12 +1515,12 @@ class TestIfElseDeadPhiFiltering:
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        qubit_phis = [
-            p
-            for p in if_ops[0].phi_ops
-            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        qubit_merges = [
+            merge
+            for merge in if_ops[0].iter_merges()
+            if isinstance(merge.result.type, QubitType)
         ]
-        assert len(qubit_phis) == 0
+        assert len(qubit_merges) == 0
 
     def test_if_one_sided_new_local_followed_by_store_only_is_allowed(self):
         """One-sided new local, only stored (not loaded) after -> allowed."""
@@ -1510,12 +1557,12 @@ class TestIfElseDeadPhiFiltering:
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        qubit_phis = [
-            p
-            for p in if_ops[0].phi_ops
-            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        qubit_merges = [
+            merge
+            for merge in if_ops[0].iter_merges()
+            if isinstance(merge.result.type, QubitType)
         ]
-        assert len(qubit_phis) >= 1
+        assert len(qubit_merges) >= 1
 
     def test_if_shared_new_local_used_only_by_augassign_is_merged(self):
         """Both branches assign angle from parameter, afterward angle += 1.0 -> float phi must exist."""
@@ -1534,12 +1581,12 @@ class TestIfElseDeadPhiFiltering:
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
         # angle (= theta + x) becomes a float_tmp in IR; check FloatType phi exists
-        float_phis = [
-            p
-            for p in if_ops[0].phi_ops
-            if isinstance(p, PhiOp) and isinstance(p.results[0].type, FloatType)
+        float_merges = [
+            merge
+            for merge in if_ops[0].iter_merges()
+            if isinstance(merge.result.type, FloatType)
         ]
-        assert len(float_phis) >= 1
+        assert len(float_merges) >= 1
 
     def test_if_one_sided_new_local_used_only_by_augassign_raises_syntax_error(self):
         """One-sided new local, afterward angle += 1.0 -> must raise SyntaxError."""
@@ -1711,7 +1758,7 @@ class TestIfSharedNewLocalLiveness:
         """Shared new local dead after if should build without error.
 
         Previously, the dead q2 variable was unconditionally included in
-        emit_if outputs, generating a quantum PhiOp that failed at transpile
+        emit_if outputs, generating a quantum merge slot that failed at transpile
         time.  With the kill-based liveness fix, dead shared new locals are
         excluded from the output variable set.
         """

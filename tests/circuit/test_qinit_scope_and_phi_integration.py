@@ -1,18 +1,18 @@
-"""Integration tests for QInit scope (Bug #5) and phi_ops (Bug #6).
+"""Integration tests for QInit scope (Bug #5) and if-else merge slots (Bug #6).
 
 Bug #5: Sub-kernel QInit scope — ArrayValue.shape was not cloned/substituted
     during inlining, so QInitOperation failed to resolve array size at emit
     time.  Fixed in value_mapping.py (clone_value / substitute_value).
 
-Bug #6: IfOperation phi_ops — phi outputs were never allocated or emitted,
+Bug #6: IfOperation merge slots — phi outputs were never allocated or emitted,
     causing phi output UUIDs to be missing from qubit_map.  Fixed in
     emit_support/resource_allocator.py (ResourceAllocator), standard_emit.py (_register_phi_outputs,
-    _emit_measure), and control_flow_visitor.py (visit/transform phi_ops).
+    _emit_measure), and control_flow_visitor.py (visit/transform merge slots).
 
 Unit tests for the individual passes live in ``tests/transpiler/``:
-    - ``test_value_mapping.py``  (shape cloning/substitution, phi_ops cloning)
+    - ``test_value_mapping.py``  (shape cloning/substitution, merge-slot cloning)
     - ``test_emit_support.py``   (phi output allocation)
-    - ``test_control_flow_visitor.py`` (phi_ops visitor/transformer traversal)
+    - ``test_control_flow_visitor.py`` (merge-slot visitor/transformer traversal)
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
 The @qkernel AST transformer relies on resolved type annotations to identify
@@ -88,7 +88,7 @@ class TestFQAOAStateIntegration:
 
 
 # ===========================================================================
-# Bug #6: IfOperation phi_ops integration test
+# Bug #6: IfOperation merge-slot integration test
 # ===========================================================================
 
 

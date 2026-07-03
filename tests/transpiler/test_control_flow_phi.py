@@ -1,6 +1,6 @@
 """Regression tests for emit-time classical phi-output binding.
 
-The frontend's ``emit_if`` builder creates a ``PhiOp`` for **every**
+The frontend's ``emit_if`` builder creates a merge slot for **every**
 captured variable in an if-branch — including read-only ones. For
 classical phi outputs (UInt loop indices, Float angles, Bit flags) that
 end up identifying the SAME IR Value on both branches, the phi is a

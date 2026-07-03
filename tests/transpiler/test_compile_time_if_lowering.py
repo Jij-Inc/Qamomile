@@ -15,7 +15,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     CondOpKind,
     NotOp,
-    PhiOp,
 )
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
@@ -83,7 +82,7 @@ def _run_pass(block, bindings=None):
 
 
 def _make_if_with_x_gate(condition_val, qubit_in):
-    """Build IfOperation(condition, [X gate], []) with PhiOp for qubit."""
+    """Build IfOperation(condition, [X gate], []) with a merge slot for the qubit."""
     q_true = qubit_in.next_version()
     x_gate = GateOperation(
         operands=[qubit_in],
@@ -92,17 +91,12 @@ def _make_if_with_x_gate(condition_val, qubit_in):
     )
     q_false = qubit_in
     phi_out = qubit_in.next_version()
-    phi = PhiOp(
-        operands=[condition_val, q_true, q_false],
-        results=[phi_out],
-    )
     if_op = IfOperation(
         operands=[condition_val],
-        results=[phi_out],
         true_operations=[x_gate],
         false_operations=[],
-        phi_ops=[phi],
     )
+    if_op.add_merge(q_true, q_false, phi_out)
     return if_op, phi_out
 
 
@@ -692,7 +686,7 @@ class TestBinOpFedCondition:
 
 
 class TestParentArraySubstitution:
-    """PhiOp merging ArrayValues propagates selected parent_array."""
+    """Merge slot merging ArrayValues propagates selected parent_array."""
 
     def test_parent_array_substituted_true_branch(self):
         """True branch ArrayValue becomes parent_array after lowering."""
@@ -701,19 +695,14 @@ class TestParentArraySubstitution:
 
         flag = _uint_val("flag", const=1)
 
-        # PhiOp merges two array values
+        # Merge slot merges two array values
         phi_out_arr = ArrayValue(type=QubitType(), name="q_phi")
-        phi = PhiOp(
-            operands=[flag, arr_true, arr_false],
-            results=[phi_out_arr],
-        )
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_out_arr],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(arr_true, arr_false, phi_out_arr)
 
         # Downstream value references the phi_out as parent_array
         idx = _uint_val("idx", const=0)
@@ -756,7 +745,7 @@ class TestParentArraySubstitution:
 
 
 class TestElementIndicesSubstitution:
-    """PhiOp merging index Values propagates selected index in element_indices."""
+    """Merge slot merging index Values propagates selected index in element_indices."""
 
     def test_element_index_substituted_true_branch(self):
         """True branch index Value replaces phi index after lowering."""
@@ -766,17 +755,12 @@ class TestElementIndicesSubstitution:
         flag = _uint_val("flag", const=1)
 
         phi_idx = _uint_val("idx_phi")
-        phi = PhiOp(
-            operands=[flag, idx_true, idx_false],
-            results=[phi_idx],
-        )
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_idx],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(idx_true, idx_false, phi_idx)
 
         # Downstream value uses phi_idx as element_indices
         arr = ArrayValue(type=QubitType(), name="q")
@@ -818,17 +802,12 @@ class TestElementIndicesSubstitution:
         flag = _uint_val("flag", const=0)
 
         phi_idx = _uint_val("idx_phi")
-        phi = PhiOp(
-            operands=[flag, idx_true, idx_false],
-            results=[phi_idx],
-        )
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_idx],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(idx_true, idx_false, phi_idx)
 
         arr = ArrayValue(type=QubitType(), name="q")
         elem = Value(
@@ -877,27 +856,23 @@ class TestNestedScalarPhiChain:
         q_b = _qubit_val("q_b")
         flag1 = _uint_val("flag1", const=1)
         phi_inner = _qubit_val("q_phi_inner")
-        phi1 = PhiOp(operands=[flag1, q_a, q_b], results=[phi_inner])
         if1 = IfOperation(
             operands=[flag1],
-            results=[phi_inner],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi1],
         )
+        if1.add_merge(q_a, q_b, phi_inner)
 
         # Inner if: flag2=1 selects phi_inner (which should transitively be q_a)
         q_c = _qubit_val("q_c")
         flag2 = _uint_val("flag2", const=1)
         phi_outer = _qubit_val("q_phi_outer")
-        phi2 = PhiOp(operands=[flag2, phi_inner, q_c], results=[phi_outer])
         if2 = IfOperation(
             operands=[flag2],
-            results=[phi_outer],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi2],
         )
+        if2.add_merge(phi_inner, q_c, phi_outer)
 
         # Downstream gate uses phi_outer
         gate = GateOperation(
@@ -928,7 +903,7 @@ class TestNestedScalarPhiChain:
 
 
 class TestCombinedArrayAndIndexSubstitution:
-    """PhiOp on both parent_array and element_indices must both resolve."""
+    """Merge slots on both parent_array and element_indices must both resolve."""
 
     def test_both_parent_and_index_substituted(self):
         """After lowering, both parent_array and element_indices[0] are replaced."""
@@ -938,21 +913,19 @@ class TestCombinedArrayAndIndexSubstitution:
         idx_false = _uint_val("idx_false", const=1)
         flag = _uint_val("flag", const=1)
 
-        # PhiOp for array
+        # Merge slot for array
         phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
-        phi_arr_op = PhiOp(operands=[flag, arr_true, arr_false], results=[phi_arr])
 
-        # PhiOp for index
+        # Merge slot for index
         phi_idx = _uint_val("idx_phi")
-        phi_idx_op = PhiOp(operands=[flag, idx_true, idx_false], results=[phi_idx])
 
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_arr, phi_idx],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi_arr_op, phi_idx_op],
         )
+        if_op.add_merge(arr_true, arr_false, phi_arr)
+        if_op.add_merge(idx_true, idx_false, phi_idx)
 
         # Downstream element uses both phi array and phi index
         elem = Value(
@@ -1036,22 +1009,19 @@ class TestSymbolicControlledUFieldSubstitution:
         power_false = _uint_val("power_false", const=1)
         ci_false = _uint_val("ci_false", const=3)
 
-        # Phis
+        # Merge outputs
         nc_phi = _uint_val("nc_phi")
         power_phi = _uint_val("power_phi")
         ci_phi = _uint_val("ci_phi")
 
-        phi_nc = PhiOp(operands=[flag, nc_true, nc_false], results=[nc_phi])
-        phi_power = PhiOp(operands=[flag, power_true, power_false], results=[power_phi])
-        phi_ci = PhiOp(operands=[flag, ci_true, ci_false], results=[ci_phi])
-
         if_op = IfOperation(
             operands=[flag],
-            results=[nc_phi, power_phi, ci_phi],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi_nc, phi_power, phi_ci],
         )
+        if_op.add_merge(nc_true, nc_false, nc_phi)
+        if_op.add_merge(power_true, power_false, power_phi)
+        if_op.add_merge(ci_true, ci_false, ci_phi)
 
         # SymbolicControlledU: operands = [pool ArrayValue, target Value]
         unitary_block = Block(name="U")
@@ -1109,14 +1079,12 @@ class TestForItemsOperationBodySubstitution:
         flag = _uint_val("flag", const=1)
 
         phi_q = _qubit_val("q_phi")
-        phi = PhiOp(operands=[flag, q_true, q_false], results=[phi_q])
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_q],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(q_true, q_false, phi_q)
 
         # ForItemsOperation body uses phi_q
         body_gate = GateOperation(
@@ -1173,14 +1141,12 @@ class TestCastSourceProvenanceSync:
         flag = _uint_val("flag", const=1)
 
         phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
-        phi = PhiOp(operands=[flag, arr_true, arr_false], results=[phi_arr])
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_arr],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(arr_true, arr_false, phi_arr)
 
         # CastOperation with stale provenance from phi
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
@@ -1258,14 +1224,12 @@ class TestCastSourceProvenanceSync:
         flag = _uint_val("flag", const=1)
 
         phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
-        phi = PhiOp(operands=[flag, view_true, arr_false], results=[phi_arr])
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_arr],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(view_true, arr_false, phi_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
@@ -1358,14 +1322,12 @@ class TestCastSourceProvenanceSync:
         flag = _uint_val("flag", const=0)
 
         phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
-        phi = PhiOp(operands=[flag, view_true, view_false], results=[phi_arr])
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_arr],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(view_true, view_false, phi_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         # Trace-time metadata: source points at the phi output, carriers
@@ -1455,14 +1417,12 @@ class TestCastSourceProvenanceSync:
         flag = _uint_val("flag", const=0)
 
         phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
-        phi = PhiOp(operands=[flag, view_true, view_false], results=[phi_arr])
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_arr],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(view_true, view_false, phi_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
@@ -1552,14 +1512,12 @@ class TestCastSourceProvenanceSync:
         flag = _uint_val("flag", const=1)
 
         phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
-        phi = PhiOp(operands=[flag, view, arr_false], results=[phi_arr])
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_arr],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(view, arr_false, phi_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
@@ -1616,14 +1574,12 @@ class TestCastProvenanceThroughSeparate:
         flag = _uint_val("flag", const=1)
 
         phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
-        phi = PhiOp(operands=[flag, arr_true, arr_false], results=[phi_arr])
         if_op = IfOperation(
             operands=[flag],
-            results=[phi_arr],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(arr_true, arr_false, phi_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (

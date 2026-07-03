@@ -3066,8 +3066,8 @@ class TestControlFlowWhileStructure:
     def test_while_loop_with_if_only_no_else(self):
         """While loop with if-only (no else): clbit count must not leak.
 
-        When the while body contains an if without else, the PhiOp's
-        false_val is the pre-if while-condition value.  map_phi_outputs
+        When the while body contains an if without else, the merge slot's
+        false_value is the pre-if while-condition value.  map_phi_outputs
         redirects this UUID, which used to corrupt the while-condition's
         canonical clbit and cause an extra orphaned clbit to appear.
 
@@ -8445,7 +8445,7 @@ class TestWhileIfSharedLocalPhi:
                     bit = qmc.measure(q2)
             return bit
 
-        # Previously raised EmitError due to dead q2 generating quantum PhiOp
+        # Previously raised EmitError due to dead q2 generating a quantum merge slot
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc.num_clbits >= 1
 
