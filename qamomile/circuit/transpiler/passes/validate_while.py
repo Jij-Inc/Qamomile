@@ -46,7 +46,9 @@ def build_producer_map(
 
     Args:
         operations (list[Operation]): Operations to walk, recursing into
-            all ``HasNestedOps`` bodies and ``IfOperation.phi_ops``.
+            all ``HasNestedOps`` bodies — for ``IfOperation`` that
+            includes ``phi_ops`` (the third nested list), so phi results
+            map to their ``PhiOp`` producers.
         producer_map (dict[str, Operation]): Mutable map from result UUID
             to the producing operation; updated in place.
     """
@@ -55,14 +57,9 @@ def build_producer_map(
             if isinstance(result, Value):
                 producer_map[result.uuid] = op
 
-        # Recurse into control flow bodies
+        # Recurse into control flow bodies (IfOperation.nested_op_lists
+        # includes phi_ops, so PhiOp results are registered by this walk).
         if isinstance(op, HasNestedOps):
-            # IfOperation phi_ops results need their own producer entries
-            if isinstance(op, IfOperation):
-                for phi in op.phi_ops:
-                    for result in phi.results:
-                        if isinstance(result, Value):
-                            producer_map[result.uuid] = phi
             for op_list in op.nested_op_lists():
                 build_producer_map(op_list, producer_map)
 
