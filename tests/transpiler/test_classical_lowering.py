@@ -31,16 +31,23 @@ from __future__ import annotations
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
     CondOp,
     NotOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
-from qamomile.circuit.ir.value import TupleValue
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.value import TupleValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+from qamomile.circuit.transpiler.passes.inline import InlinePass
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
 
 
@@ -1354,6 +1361,79 @@ class TestMeasurementDerivedOutput:
             transpiler.executor(), shots=5, bindings={"pair": (2, 3)}
         ).result().results == [(5, 5)]
         assert exe.run(transpiler.executor(), bindings={"pair": (2, 3)}).result() == 5
+
+    def test_repeated_subqkernel_tuple_outputs_keep_distinct_elements(self):
+        """Repeated structural call outputs keep caller-side element UUIDs."""
+        uint_type = UIntType()
+        formal_a = Value(type=uint_type, name="pair_0")
+        formal_b = Value(type=uint_type, name="pair_1")
+        formal_pair = TupleValue(name="pair", elements=(formal_a, formal_b))
+        sum_value = Value(type=uint_type, name="sum")
+        tuple_output = TupleValue(name="pair_expr_out", elements=(sum_value, formal_a))
+        callee = Block(
+            name="pair_expr",
+            label_args=["pair"],
+            input_values=[formal_pair],
+            output_values=[tuple_output],
+            operations=[
+                BinOp(
+                    operands=[formal_a, formal_b],
+                    results=[sum_value],
+                    kind=BinOpKind.ADD,
+                ),
+                ReturnOperation(operands=[tuple_output]),
+            ],
+            kind=BlockKind.HIERARCHICAL,
+        )
+
+        left_a = Value(type=uint_type, name="left_0")
+        left_b = Value(type=uint_type, name="left_1")
+        right_a = Value(type=uint_type, name="right_0")
+        right_b = Value(type=uint_type, name="right_1")
+        left_pair = TupleValue(name="left_pair", elements=(left_a, left_b))
+        right_pair = TupleValue(name="right_pair", elements=(right_a, right_b))
+
+        left_call = callee.call(pair=left_pair)
+        right_call = callee.call(pair=right_pair)
+        left_result = left_call.results[0]
+        right_result = right_call.results[0]
+        assert isinstance(left_result, TupleValue)
+        assert isinstance(right_result, TupleValue)
+        assert left_result.uuid != right_result.uuid
+        assert {element.uuid for element in left_result.elements}.isdisjoint(
+            {element.uuid for element in right_result.elements}
+        )
+
+        outer_sum = Value(type=uint_type, name="outer_sum")
+        caller = Block(
+            name="caller",
+            label_args=["left_pair", "right_pair"],
+            input_values=[left_pair, right_pair],
+            output_values=[outer_sum],
+            operations=[
+                left_call,
+                right_call,
+                BinOp(
+                    operands=[left_result.elements[0], right_result.elements[1]],
+                    results=[outer_sum],
+                    kind=BinOpKind.ADD,
+                ),
+                ReturnOperation(operands=[outer_sum]),
+            ],
+            kind=BlockKind.HIERARCHICAL,
+        )
+
+        inlined = InlinePass().run(caller)
+        assert not any(isinstance(op, CallBlockOperation) for op in inlined.operations)
+        outer_ops = [
+            op
+            for op in inlined.operations
+            if isinstance(op, BinOp) and op.results[0].uuid == outer_sum.uuid
+        ]
+        assert len(outer_ops) == 1
+        outer_op = outer_ops[0]
+        assert outer_op.operands[0].uuid != left_result.elements[0].uuid
+        assert outer_op.operands[1].uuid == right_a.uuid
 
     def test_tuple_input_element_alias_does_not_override_public_input(self, transpiler):
         """Tuple element aliases must not overwrite a same-named public

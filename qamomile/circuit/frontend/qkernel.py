@@ -806,6 +806,17 @@ class QKernel(Generic[P, R]):
                         f"signature so the quantum register is both "
                         f"input and output, or remove the self-recursion."
                     )
+                if is_tuple_type(out_type) or is_dict_type(out_type):
+                    kind = "tuple" if is_tuple_type(out_type) else "dict"
+                    raise FrontendTransformError(
+                        f"Self-recursive @qkernel '{self.name}' has a "
+                        f"{kind} output at position {i} with no matching "
+                        f"{kind} input of the same type. Forward-ref "
+                        f"emission cannot synthesize a structural output "
+                        f"without a matching input; restructure the "
+                        f"signature so the structural value is both "
+                        f"input and output, or remove the self-recursion."
+                    )
                 results.append(Value(type=ir_type, name=f"{self.name}_result_{i}"))
 
         op = CallBlockOperation(

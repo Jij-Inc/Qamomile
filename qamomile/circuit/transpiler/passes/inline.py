@@ -19,7 +19,14 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueLike,
+)
 from qamomile.circuit.transpiler.errors import InliningError, QubitConsumedError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.value_mapping import (
@@ -414,7 +421,7 @@ class InlinePass(Pass[Block, Block]):
                         operation_name=f"inline[{block.name}]",
                     )
                 seen_quantum_args[resolved_arg.uuid] = label
-            local_map[block_input.uuid] = resolved_arg
+            self._map_value_structure(block_input, resolved_arg, local_map)
 
             # If both are ArrayValues, also map shape dimensions
             # This ensures symbolic dimensions (e.g., qubits_dim0) are resolved
@@ -493,13 +500,13 @@ class InlinePass(Pass[Block, Block]):
             if remapped_uuid in remapped_local_map:
                 # The return value was mapped during inlining (modified input)
                 resolved = remapped_local_map[remapped_uuid]
-                value_map[call_result.uuid] = resolved
             else:
                 # The return value is a newly created value (not a modified input).
                 # Substitute to resolve shape dims, parent_array, etc.
                 substituted = sub.substitute_value(block_return)
-                value_map[call_result.uuid] = substituted
                 resolved = substituted
+
+            self._map_value_structure(call_result, resolved, value_map)
 
             # Propagate the call_result's shape dim UUIDs to the outer
             # value_map. The frontend creates a fresh ``ArrayValue`` for
@@ -521,6 +528,43 @@ class InlinePass(Pass[Block, Block]):
                         value_map[cr_dim.uuid] = resolved_dim
 
         return inlined
+
+    def _map_value_structure(
+        self,
+        source: ValueLike,
+        resolved: ValueBase,
+        value_map: dict[str, ValueBase],
+    ) -> None:
+        """Map a possibly structural source value to a resolved value.
+
+        Args:
+            source (ValueLike): Source value whose UUIDs need replacements.
+            resolved (ValueBase): Replacement value.
+            value_map (dict[str, ValueBase]): UUID substitution map to update.
+        """
+        value_map[source.uuid] = resolved
+
+        if isinstance(source, TupleValue) and isinstance(resolved, TupleValue):
+            for source_element, resolved_element in zip(
+                source.elements,
+                resolved.elements,
+            ):
+                self._map_value_structure(source_element, resolved_element, value_map)
+            return
+
+        if isinstance(source, DictValue) and isinstance(resolved, DictValue):
+            for (source_key, source_value), (resolved_key, resolved_value) in zip(
+                source.entries,
+                resolved.entries,
+            ):
+                self._map_value_structure(source_key, resolved_key, value_map)
+                self._map_value_structure(source_value, resolved_value, value_map)
+            return
+
+        if isinstance(source, ArrayValue) and isinstance(resolved, ArrayValue):
+            for source_dim, resolved_dim in zip(source.shape, resolved.shape):
+                if source_dim.uuid != resolved_dim.uuid:
+                    value_map[source_dim.uuid] = resolved_dim
 
     def _inline_nested_block(
         self,
