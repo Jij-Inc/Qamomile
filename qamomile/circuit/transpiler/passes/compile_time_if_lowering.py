@@ -40,6 +40,91 @@ from .eval_utils import FoldPolicy, fold_classical_op
 from .value_mapping import ValueSubstitutor
 
 
+def resolve_compile_time_condition(
+    condition: Any,
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+) -> bool | None:
+    """Resolve an ``IfOperation`` condition to a compile-time bool.
+
+    Single source of truth for classifying an if-condition as
+    compile-time taken / dead / runtime.  Used by
+    :class:`CompileTimeIfLoweringPass` to decide which branches to lower
+    and by ``reject_self_referential_loop_stores`` to prune the same
+    branches from its scan — both callers must agree on the
+    classification, so they share this function.
+
+    Tries ``resolve_if_condition`` first (plain Python values, constant
+    Values, direct UUID / name bindings), then falls back to the
+    accumulated ``concrete_values`` map for expression-derived
+    conditions (``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp`` chains
+    evaluated by :func:`evaluate_classical_op_concrete`).
+
+    Args:
+        condition (Any): The condition operand.  May be a plain Python
+            value or a ``Value``.
+        concrete_values (dict[str, Any]): UUID-keyed map of concrete
+            classical-op results accumulated in program order.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+
+    Returns:
+        bool | None: The condition's compile-time truth value, or
+            ``None`` when it is not compile-time resolvable (a runtime
+            condition).
+    """
+    resolved = resolve_if_condition(condition, bindings)
+    if resolved is not None:
+        return resolved
+    if hasattr(condition, "uuid") and condition.uuid in concrete_values:
+        return bool(concrete_values[condition.uuid])
+    return None
+
+
+def evaluate_classical_op_concrete(
+    op: Operation,
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+) -> None:
+    """Try to evaluate a classical op and record its concrete result.
+
+    Supported operation types:
+
+    - ``CompOp``  — comparison (==, !=, <, <=, >, >=)
+    - ``CondOp``  — logical connective (and, or)
+    - ``NotOp``   — logical negation
+    - ``BinOp``   — arithmetic (+, -, *, /, //, %)
+
+    Delegates the actual fold to ``fold_classical_op`` under the
+    ``COMPILE_TIME`` policy, which bypasses the runtime-parameter
+    guard: everything in ``bindings`` is treated as a real
+    compile-time value.  Other operation types are silently ignored.
+    If evaluation fails, nothing is recorded and downstream
+    ``IfOperation``s referencing the result remain unresolved.
+
+    Args:
+        op (Operation): The operation to evaluate.
+        concrete_values (dict[str, Any]): UUID-keyed map of concrete
+            results; the op's result is recorded here on success.
+            Updated in place.
+        bindings (dict[str, Any]): Compile-time parameter bindings used
+            to resolve operands.
+    """
+    if not isinstance(op, (CompOp, CondOp, NotOp, BinOp)):
+        return
+    if not op.results:
+        return
+    result = fold_classical_op(
+        op,
+        lambda v: UnifiedValueResolver(
+            context=concrete_values, bindings=bindings
+        ).resolve(v),
+        parameters=set(),
+        policy=FoldPolicy.COMPILE_TIME,
+    )
+    if result is not None:
+        concrete_values[op.results[0].uuid] = result
+
+
 def _array_carrier_keys(
     source: ValueBase,
     num_bits: int,
@@ -100,12 +185,34 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         return "compile_time_if_lowering"
 
     def run(self, input: Block) -> Block:
-        """Run the compile-time if lowering pass."""
-        # HIERARCHICAL is accepted during the self-recursion unroll loop;
-        # surviving CallBlockOperations are passed through untouched.
-        if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
+        """Lower every compile-time resolvable IfOperation in the block.
+
+        Args:
+            input (Block): Block to lower. Must be ``TRACED``, ``AFFINE``, or
+                ``HIERARCHICAL``. ``TRACED`` is accepted so the circuit drawer
+                can resolve bound/constant ``if`` conditions on a freshly
+                traced block before the transpiler pipeline runs; ``HIERARCHICAL``
+                is accepted during the self-recursion unroll loop. Surviving
+                ``CallBlockOperation``s are passed through untouched in both cases.
+
+        Returns:
+            Block: New block with compile-time ``if``s replaced by their
+                selected-branch operations and phi outputs substituted. The
+                input's ``BlockKind`` is preserved.
+
+        Raises:
+            ValidationError: If ``input.kind`` is ``ANALYZED`` (the pass must
+                run before dependency analysis commits to a representation), or
+                if a compile-time branch selects a symbolic-bound slice-view
+                cast source whose root index space is not resolvable.
+        """
+        if input.kind not in (
+            BlockKind.TRACED,
+            BlockKind.AFFINE,
+            BlockKind.HIERARCHICAL,
+        ):
             raise ValidationError(
-                f"CompileTimeIfLoweringPass expects AFFINE or "
+                f"CompileTimeIfLoweringPass expects TRACED, AFFINE, or "
                 f"HIERARCHICAL block, got {input.kind}",
             )
 
@@ -150,21 +257,23 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     ) -> bool | None:
         """Resolve an IfOperation condition to a compile-time bool.
 
-        Tries ``resolve_if_condition`` first (handles plain Python values,
-        constants, direct bindings).  Then falls back to expression-aware
-        evaluation using the accumulated ``concrete_values`` map.
+        Thin wrapper for the module-level
+        :func:`resolve_compile_time_condition` bound to this pass's
+        bindings, so external callers (the self-referential loop-store
+        check) classify conditions exactly the way this pass does.
+
+        Args:
+            condition (Any): The condition operand to resolve.
+            concrete_values (dict[str, Any]): Accumulated concrete
+                classical-op results, keyed by UUID.
+
+        Returns:
+            bool | None: The compile-time truth value, or ``None`` when
+                the condition is runtime.
         """
-        # Fast path: direct resolution.
-        resolved = resolve_if_condition(condition, self._bindings)
-        if resolved is not None:
-            return resolved
-
-        # Expression-aware path: check if the condition's UUID is in
-        # concrete_values (produced by a prior CompOp/CondOp/NotOp).
-        if hasattr(condition, "uuid") and condition.uuid in concrete_values:
-            return bool(concrete_values[condition.uuid])
-
-        return None
+        return resolve_compile_time_condition(
+            condition, concrete_values, self._bindings
+        )
 
     def _try_evaluate_classical_op(
         self,
@@ -173,46 +282,18 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     ) -> None:
         """Try to evaluate a classical op and record its result.
 
-        Supported operation types:
-
-        - ``CompOp``  — comparison (==, !=, <, <=, >, >=)
-        - ``CondOp``  — logical connective (and, or)
-        - ``NotOp``   — logical negation
-        - ``BinOp``   — arithmetic (+, -, *, /, //, %)
-
-        Delegates the actual fold to ``fold_classical_op`` under the
-        ``COMPILE_TIME`` policy, which bypasses the runtime-parameter
-        guard. At this stage there are no runtime parameters in the
+        Thin wrapper for the module-level
+        :func:`evaluate_classical_op_concrete` bound to this pass's
+        bindings.  At this stage there are no runtime parameters in the
         concrete values map; everything in ``self._bindings`` is treated
         as a real compile-time value.
 
-        Other operation types are silently ignored. If all operands of a
-        supported op are concrete but evaluation still fails, the result
-        is not recorded and downstream IfOperations referencing it will
-        remain unresolved (emitted as runtime branches).
+        Args:
+            op (Operation): The operation to evaluate.
+            concrete_values (dict[str, Any]): UUID-keyed concrete-result
+                map, updated in place on success.
         """
-        if not isinstance(op, (CompOp, CondOp, NotOp, BinOp)):
-            return
-        if not op.results:
-            return
-        result = fold_classical_op(
-            op,
-            lambda v: self._resolve_operand(v, concrete_values),
-            parameters=set(),
-            policy=FoldPolicy.COMPILE_TIME,
-        )
-        if result is not None:
-            concrete_values[op.results[0].uuid] = result
-
-    def _resolve_operand(
-        self,
-        value: Any,
-        concrete_values: dict[str, Any],
-    ) -> Any:
-        """Resolve an operand to a concrete value, or None."""
-        return UnifiedValueResolver(
-            context=concrete_values, bindings=self._bindings
-        ).resolve(value)
+        evaluate_classical_op_concrete(op, concrete_values, self._bindings)
 
     # ------------------------------------------------------------------
     # Operation lowering

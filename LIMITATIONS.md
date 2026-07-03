@@ -2,6 +2,16 @@
 
 This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, and the slice/control-flow work tracked by recent controlled-view fixes.
 
+## Container-valued operands outgrow the current `Operation.operands` type annotation
+
+Some IR operations legitimately carry container-valued operands even though the base `Operation.operands` field is still annotated as `list[Value]`. In particular, `ForItemsOperation` stores the iterated `DictValue` as its first operand, and `InverseBlockOperation` can keep `DictValue` / `TupleValue` parameters from the inverted qkernel as non-quantum parameter operands. The serialization decoder now restores those shapes explicitly, but it has to use a local `cast(list[Value], ...)` because the static base type has not been widened yet.
+
+**When it bites**: this is primarily a maintainer-facing typing gap. Runtime behavior is supported for the known container-carrying operations, and the decoder keeps ordinary gate / measure / arithmetic operands strict. The rough edge appears when adding a new operation that wants to carry `DictValue` / `TupleValue` in `operands`, or when making type-checker-driven refactors around `Operation.operands`: the current annotation suggests every operand is a scalar / array `Value`, while two operation families intentionally carry broader `ValueBase` instances.
+
+**Why this trade-off was chosen**: widening `Operation.operands` globally to `list[ValueBase]` or a `ValueLike` alias would touch many passes and emitters whose local logic genuinely assumes scalar / array `Value` operands. Splitting container operands into dedicated fields would be cleaner for those operations but requires an IR-contract migration and encoder / decoder schema cleanup. The current fix keeps the behavioral repair local to the block-I/O and container-carrying-operation decoder paths, without weakening `_materialize_as_value`, which still guards positions where containers are invalid.
+
+**Future fix**: make the container operand contract explicit. Either widen `Operation.operands` to a shared `ValueLike` / `ValueBase` type and audit all passes for places that require scalar / array `Value`, or move container parameters onto operation-specific fields for `ForItemsOperation` and `InverseBlockOperation` so the base operand list stays strictly scalar / array. Once that contract is explicit, the decoder-side casts can be removed.
+
 ## Re-trace cost is uncached
 
 Every nested call site that resolves new compile-time information about the callee triggers a fresh re-trace of the callee body via `_build_specialized` in `qamomile/circuit/frontend/qkernel.py`. There is no per-signature cache; deeply nested or repeatedly-called sub-kernels with identical arguments are re-traced from scratch on every call site.
