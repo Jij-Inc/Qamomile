@@ -117,7 +117,17 @@ def _make_if_with_merge(
     false_value: Value,
     result: Value,
 ) -> IfOperation:
-    """Build a minimal IfOperation carrying a single branch merge."""
+    """Build a minimal IfOperation carrying a single branch merge.
+
+    Args:
+        cond (Value): Condition operand (Bit).
+        true_value (Value): Value selected when the condition is true.
+        false_value (Value): Value selected when the condition is false.
+        result (Value): Merged output value.
+
+    Returns:
+        IfOperation: If-else with empty branches and one merge slot.
+    """
     if_op = IfOperation(operands=[cond])
     if_op.add_merge(true_value, false_value, result)
     return if_op

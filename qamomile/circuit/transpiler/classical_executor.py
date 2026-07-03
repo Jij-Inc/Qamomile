@@ -515,7 +515,19 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> None:
-        """Execute a classical if/else."""
+        """Execute a classical if/else.
+
+        Runs the taken branch's operations, then resolves every merged
+        output to its selected branch source.
+
+        Args:
+            op (IfOperation): The if-else to execute.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map; merged outputs
+                are recorded under their result UUIDs.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+        """
         condition = bool(self._get_value(op.condition, context, results, scoped_locals))
         branch_scope = scoped_locals.copy()
         branch_ops = op.true_operations if condition else op.false_operations

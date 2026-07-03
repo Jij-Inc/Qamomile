@@ -855,6 +855,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         class SegmentIOCollector(ControlFlowVisitor):
             def visit_operation(self, op: Operation) -> None:
+                """Record one operation's reads and definitions.
+
+                Args:
+                    op (Operation): The visited operation.
+                """
                 # Operands not defined in this segment are inputs
                 for operand in op.operands:
                     self._record_read(operand)
@@ -864,6 +869,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                     self._record_definition(result)
 
             def _visit_control_flow(self, op: Operation) -> None:
+                """Recurse into control flow, handling if-merges explicitly.
+
+                Args:
+                    op (Operation): The operation whose nested bodies are
+                        visited.
+                """
                 if isinstance(op, IfOperation):
                     # Explicit merge handling via iter_merges — the
                     # collector must not rely on merge storage being

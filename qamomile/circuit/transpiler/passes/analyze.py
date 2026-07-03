@@ -69,6 +69,11 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
             self.graph: dict[str, set[str]] = {}
 
         def visit_operation(self, op: Operation) -> None:
+            """Record one operation's result-to-operand dependency edges.
+
+            Args:
+                op (Operation): The visited operation.
+            """
             operand_uuids = {v.uuid for v in op.operands if isinstance(v, ValueBase)}
             for result in op.results:
                 if result.uuid not in self.graph:
@@ -629,13 +634,13 @@ def _check_loop_carried_rebinds(
         value_table.setdefault(source.uuid, source)
 
     def canonical(uuid: str) -> str:
-        """Follow collapsed-phi links to the underlying source uuid.
+        """Follow dead-branch merge aliases to the underlying source uuid.
 
         Args:
             uuid (str): Starting value uuid.
 
         Returns:
-            str: The uuid after following single-operand phi links.
+            str: The uuid after following pruned-merge alias links.
         """
         seen: set[str] = set()
         while uuid in collapsed and uuid not in seen:
