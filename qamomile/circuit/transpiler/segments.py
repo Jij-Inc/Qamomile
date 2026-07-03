@@ -122,7 +122,7 @@ class MultipleQuantumSegmentsError(Exception):
 
     The error fires when segmentation finds more than one quantum segment
     (classical work that must execute between two quantum regions, e.g.
-    quantum operations resuming after an ``qmc.expval``), or when a
+    quantum operations resuming after a ``qmc.expval``), or when a
     classical value feeding a quantum gate is also consumed by classical
     work and therefore cannot be absorbed into the quantum segment.
 
