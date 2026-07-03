@@ -356,10 +356,19 @@ class CircuitLayoutEngine:
         """Place a VUnfoldedSequence node (unfolded For/ForItems/If)."""
         affected_qubits = node.affected_qubits
         is_if = node.kind == VUnfoldedKind.IF
-        # Horizontal room the ``if <cond>:`` header needs; the else branch is
-        # pushed right by at least this much so the header neither overlaps the
-        # else box nor is clipped by the figure edge.
+        # Horizontal room each branch header needs; branch starts and trailing
+        # gates are pushed right so header boxes neither overlap nor get
+        # clipped by the figure edge.
         label_width = node.condition_label_width if is_if else 0.0
+        branch_min_widths: list[float] = []
+        if is_if:
+            for i in range(len(node.iterations)):
+                width = (
+                    node.branch_label_widths[i]
+                    if i < len(node.branch_label_widths)
+                    else 0.0
+                )
+                branch_min_widths.append(max(width, self.style.gate_width))
 
         # x where the if construct begins, used to anchor label-room reservation.
         condition_measure_box_left: float | None = None
@@ -394,9 +403,9 @@ class CircuitLayoutEngine:
                 )
                 max_edge = max(max_edge, if_start)
                 # Branches after the first start past the previous branch's
-                # header label, not merely past its gates.
+                # header boxes, not merely past their gates.
                 if i > 0:
-                    max_edge = max(max_edge, if_start + label_width)
+                    max_edge = max(max_edge, if_start + sum(branch_min_widths[:i]))
                 for q in affected_qubits:
                     state.qubit_right_edges[q] = max_edge
                     state.qubit_columns[q] = max_edge + self.style.gate_gap
@@ -406,18 +415,25 @@ class CircuitLayoutEngine:
         # Reserve header room past the last branch too, so a single-branch
         # (no else) header and the trailing else header are not clipped.
         if is_if and affected_qubits:
-            branch_min_width = max(label_width, self.style.gate_width)
-            min_end = if_start + branch_min_width
+            first_branch_min_width = (
+                branch_min_widths[0]
+                if branch_min_widths
+                else max(label_width, self.style.gate_width)
+            )
+            total_branch_min_width = sum(branch_min_widths) or first_branch_min_width
+            min_end = if_start + total_branch_min_width
             if condition_measure_box_left is not None:
-                min_end = max(min_end, condition_measure_box_left + branch_min_width)
+                min_end = max(
+                    min_end, condition_measure_box_left + total_branch_min_width
+                )
             for q in affected_qubits:
                 if state.qubit_right_edges.get(q, 0.0) < min_end:
                     state.qubit_right_edges[q] = min_end
                     state.qubit_columns[q] = min_end + self.style.gate_gap
             state.column = max(state.column, min_end + 1)
             state.actual_width = max(state.actual_width, min_end + 0.5)
-            state.positions[node.node_key] = if_start + branch_min_width / 2
-            state.block_widths[node.node_key] = branch_min_width
+            state.positions[node.node_key] = if_start + first_branch_min_width / 2
+            state.block_widths[node.node_key] = first_branch_min_width
 
             # Reserve vertical clearance for the ``if <cond>:`` / ``else:``
             # headers, which are drawn above the topmost branch wire. Without
