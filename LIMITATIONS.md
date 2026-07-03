@@ -1,6 +1,6 @@
 # Known Limitations
 
-This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, structured dictionary lookup, and the slice/control-flow work tracked by recent controlled-view fixes.
+This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, dict subscript lookup for container values, and the slice/control-flow work tracked by recent controlled-view fixes.
 
 ## Container-valued operands outgrow the current `Operation.operands` type annotation
 
