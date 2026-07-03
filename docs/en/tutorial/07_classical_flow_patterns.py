@@ -25,6 +25,7 @@
 #
 # - `qmc.range()` for loops
 # - `qmc.items()` for iterating over dictionaries
+# - `d[key]` subscript lookup on dictionaries
 # - `if` and `while` on measurement results for mid-circuit branching
 
 # %%
@@ -72,7 +73,7 @@ hadamard_chain.draw(n=5, fold_loops=False)
 # %% [markdown]
 # ## `qmc.items` for Sparse Interaction Data
 #
-# Many quantum algorithms (QAOA, VQE) apply gates only on specific pairs of qubits, determined by a graph or interaction map. Rather than looping over all pairs, you can pass a **dictionary** of interactions and iterate with `qmc.items()`.
+# Many variational algorithms apply gates only on specific pairs of qubits, determined by a graph or interaction map. Rather than looping over all pairs, you can pass a **dictionary** of interactions and iterate with `qmc.items()`.
 #
 # The dictionary type uses Qamomile's symbolic types: `qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]` — keys are qubit index pairs, values are interaction weights.
 
@@ -108,6 +109,56 @@ def sparse_coupling(
 # The **value** target must be a single variable. Tuple unpacking in the value position
 # (e.g. `for _, (i, j) in qmc.items(d)`) is **not** supported and will raise a `SyntaxError`.
 # Similarly, single-target patterns like `for pair in qmc.items(d)` are not supported.
+# :::
+
+# %% [markdown]
+# ## Dict Subscript Lookup (`d[key]`)
+#
+# Besides iterating with `qmc.items()`, a `qmc.Dict` can be indexed directly with `d[key]`. The most useful pattern is indexing **one dict with the iteration keys of another**: iterate over sparse interaction terms in one dict while looking up per-edge scale factors in a second dict.
+
+
+# %%
+@qmc.qkernel
+def per_edge_angles(
+    n: qmc.UInt,
+    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gammas: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+
+    # Each edge gets its own angle, looked up by the same (i, j) key
+    for (i, j), weight in qmc.items(edges):
+        q[i], q[j] = qmc.rzz(q[i], q[j], weight * gammas[(i, j)])
+
+    return qmc.measure(q)
+
+
+# %%
+edge_data = {(0, 1): 1.0, (1, 2): -0.7}
+gamma_data = {(0, 1): 0.3, (1, 2): 0.5}
+
+circuit = transpiler.to_circuit(
+    per_edge_angles,
+    bindings={"n": 3, "edges": edge_data, "gammas": gamma_data},
+)
+_rzz_angles = sorted(
+    float(_instr.operation.params[0])
+    for _instr in circuit.data
+    if _instr.operation.name == "rzz"
+)
+# Each RZZ angle is weight * gamma for its own edge.
+assert _rzz_angles == sorted([1.0 * 0.3, -0.7 * 0.5])
+
+# %% [markdown]
+# :::{note}
+# What `d[key]` supports:
+#
+# - **Keys**: a loop variable of an items loop (`gammas[i]`, `gammas[(i, j)]`), an `int` constant, or a mix of both (`gammas[(0, i)]`). When every key component is a compile-time constant and the dict data is bound, any hashable Python key (e.g. a `str`) also works — the lookup folds to a constant at trace time. Symbolic key components must be `UInt`.
+# - **Value types**: scalar values (`qmc.Float`, `qmc.UInt`, `qmc.Bit`). Container values (`qmc.Tuple` / `qmc.Vector`) are not yet supported and raise `NotImplementedError`.
+# - A missing key raises `KeyError` at build time, just like a Python dict.
 # :::
 
 # %% [markdown]
@@ -258,6 +309,8 @@ assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 #
 # - `qmc.range(n)` for looping over symbolic ranges.
 # - `qmc.items(dict)` for iterating over sparse key-value data (edges, weights).
+# - `d[key]` for looking up one dict by the iteration keys of another
+#   (per-edge coefficients or calibration scales).
 # - `if bit:` and `while bit:` for branching on **measurement results**.
 #   Both branches must handle the same qubit handles (affine rule).
 # - These control flow patterns transpile to native quantum SDK instructions

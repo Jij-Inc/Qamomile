@@ -134,3 +134,58 @@ class StoreArrayElementOperation(Operation):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.CLASSICAL
+
+
+@dataclasses.dataclass
+class DictGetItemOperation(Operation):
+    """Look up one entry of a Dict by a (possibly symbolic) key.
+
+    This is the IR form of ``d[key]`` on a ``Dict`` handle.  The key
+    components may be symbolic (e.g. loop variables of a for-items
+    loop); the lookup is resolved at emit time when the key values and
+    the dict's bound data are both concrete.
+
+    Attributes:
+        key_arity: Number of key components (1 for scalar keys, N for
+            tuple keys like ``d[(i, j)]``).
+
+    operands: [DictValue, *key_component_values]
+    results: [looked-up scalar value]
+    """
+
+    key_arity: int = 1
+
+    @property
+    def dict_value(self) -> Value:
+        """Value: The DictValue being indexed (``operands[0]``).
+
+        Returns:
+            Value: ``operands[0]`` (a ``DictValue`` stored as operand).
+        """
+        return self.operands[0]
+
+    @property
+    def key_values(self) -> tuple[Value, ...]:
+        """tuple[Value, ...]: The key component values.
+
+        Returns:
+            tuple[Value, ...]: ``operands[1:]``.
+        """
+        return tuple(self.operands[1:])
+
+    @property
+    def signature(self) -> Signature:
+        return Signature(
+            operands=[
+                ParamHint(name="dict", type=self.operands[0].type),
+                *[
+                    ParamHint(name=f"key_{i}", type=kv.type)
+                    for i, kv in enumerate(self.operands[1:])
+                ],
+            ],
+            results=[ParamHint(name="value", type=self.results[0].type)],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.CLASSICAL

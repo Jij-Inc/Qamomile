@@ -312,6 +312,21 @@ def _for_items_classical_kernel(
 
 
 @qmc.qkernel
+def _dict_getitem_kernel(
+    n_qubits: qmc.UInt,
+    ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gammas: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    biases: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Kernel that exercises DictGetItemOperation with 1- and 2-ary keys."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for (i, j), jij in qmc.items(ising):
+        q[i] = qmc.rz(q[i], angle=biases[i])
+        q[i], q[j] = qmc.rzz(q[i], q[j], jij * gammas[(i, j)])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def _inverse_dict_param_layer(
     q: qmc.Qubit,
     angles: qmc.Dict[qmc.UInt, qmc.Float],
@@ -649,6 +664,36 @@ class TestRoundTripIRFeatures:
                 op for op in restored.operations if isinstance(op, ForItemsOperation)
             ]
             assert restored_ops and restored_ops[0].key_is_vector
+
+    def test_dict_getitem_round_trip(self):
+        """DictGetItemOperation survives both wire formats with key_arity."""
+        from qamomile.circuit.ir.operation.classical_ops import (
+            DictGetItemOperation,
+        )
+
+        block = _to_affine(_dict_getitem_kernel)
+
+        def collect_arities(blk: Block) -> list[int]:
+            arities: list[int] = []
+            for op in blk.operations:
+                if isinstance(op, ForItemsOperation):
+                    arities.extend(
+                        nested.key_arity
+                        for nested in op.operations
+                        if isinstance(nested, DictGetItemOperation)
+                    )
+            return sorted(arities)
+
+        assert collect_arities(block) == [1, 2]
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            assert collect_arities(restored) == [1, 2]
+            assert content_hash(restored) == content_hash(block)
 
     def test_bound_dict_metadata_round_trip(self):
         """Bound-dict tuple keys survive decode as real tuples.
