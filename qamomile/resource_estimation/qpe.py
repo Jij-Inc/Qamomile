@@ -24,6 +24,12 @@ def estimate_qpe(
     1. Trotter-based: Approximate e^(iHt) using Trotter formulas
     2. Qubitization: Use block-encoding with quantum walk operator
 
+    This is a coarse textbook-level bound parameterized by precision bits.
+    For qubitized-QPE workloads with explicit walk costs, Hamiltonian
+    representations, and error budgets, use
+    ``estimate_qubitized_qpe_resources`` or ``HamiltonianQPEWorkload`` from
+    ``qamomile.resource_estimation``.
+
     Args:
         n_system: Number of system qubits (qubits in the state being analyzed)
         precision: Number of bits of precision in phase estimate (ε = 2^(-precision))

@@ -70,37 +70,48 @@ collection and FTQC lifting automatically.
 `_SympyLike` aliases are defined once in `qamomile/resource_estimation/_common.py`.
 Do not copy them into new modules.
 
+## Resolved design decisions
+
+- **Declarative workload core** (`workload.py`). Workloads subclass
+  `HamiltonianWorkloadMixin`: they declare fields, list validation kinds in
+  the class-level tuples, and implement `_own_resource_values()`; the mixin
+  supplies validation, precision-budget accounting, resource-value
+  composition, and generic `to_dict`. A new algorithm costs ~30–50 lines of
+  declarations (see the toy workload in
+  `tests/circuit/estimator/test_workload_mixin.py`).
+- **One home for formula-based estimators.** The former
+  `qamomile/circuit/estimator/algorithmic/` package (estimate_trotter,
+  estimate_qsvt, estimate_qdrift, estimate_qpe, estimate_eigenvalue_filtering,
+  estimate_qaoa, estimate_qaoa_ising) has been consolidated into this
+  package (`hamiltonian_simulation.py`, `qpe.py`, `qaoa.py`) and is exported
+  from the `qamomile.resource_estimation` facade. `qamomile.circuit.estimator`
+  now owns only circuit-derived counting. The overlapping Trotter/QPE
+  estimators carry explicit scope cross-references: `estimate_trotter`
+  prices one time evolution at fixed time/error, while
+  `estimate_trotter_qpe_resources` prices a QPE workload driven by a
+  normalization/precision budget (similarly `estimate_qpe` vs
+  `estimate_qubitized_qpe_resources`).
+
 ## Known debt / roadmap
 
 Recorded here so follow-up iterations have an explicit target. Ordered by
 priority:
 
-1. **Declarative workload core.** `HamiltonianQPEWorkload` (~315 lines) and
-   `TrotterQPEWorkload` (~310 lines) hand-roll the same machinery: per-field
-   sympify validation, `to_dict`, `resource_values`, precision-budget
-   accounting, and `from_*` constructors — with byte-identical method pairs
-   between them. Before a third workload is added, extract a base where an
-   algorithm declares `(input fields + validators, derived expressions)` and
-   inherits the rest; a new algorithm should cost ~30–50 lines of formulas,
-   not ~300 lines of ceremony.
-2. **One home for formula-based estimators.**
-   `qamomile/circuit/estimator/algorithmic/` (estimate_trotter, estimate_qsvt,
-   estimate_qdrift, estimate_qaoa, estimate_qpe) predates this package and
-   overlaps it — Trotter QPE currently has two implementations with
-   different formulas and no cross-reference. Formula-based estimators
-   should consolidate here (`resource_estimation`), leaving
-   `circuit/estimator` to circuit-derived counting; until then, new
-   estimators go in this package, not in `circuit/estimator/algorithmic`.
-3. **Pluggable representation models.** `_default_logical_qubits` matches on
+1. **Pluggable representation models.** `_default_logical_qubits` matches on
    the closed `HamiltonianRepresentation` enum, so adding a Hamiltonian
    representation means editing this package. Replace with a protocol
    (representation → logical-qubit scaling and validation) with the enum as
    the built-in lookup.
-4. **FTQC estimate deduplication.** `FTQCPhysicalResourceEstimate` and
+2. **FTQC estimate deduplication.** `FTQCPhysicalResourceEstimate` and
    `FTQCActiveVolumeResourceEstimate` are near-clones (substitute/to_dict/
    resource_values differ only in field names), and their per-access
    `sp.simplify` properties recompute on every call. Share the substitution
    machinery and cache derived expressions.
+3. **Docstring modernization of the consolidated estimators.**
+   `hamiltonian_simulation.py`, `qpe.py`, and `qaoa.py` predate the
+   project's Google-style docstring mandate (Args entries without types,
+   missing Raises sections). Bring them up to the standard used by the rest
+   of this package.
 
 ## Review checklist for new estimators
 

@@ -494,6 +494,10 @@ def estimate_qubitized_qpe_resources(
 ) -> ResourceEstimate:
     """Estimate logical qubitized-QPE resources for a Hamiltonian.
 
+    This models the walk-based QPE workload with explicit walk costs and
+    Hamiltonian representations. For a coarse textbook-level QPE bound
+    parameterized by precision bits, see ``estimate_qpe`` in this package.
+
     Args:
         n_qubits (sp.Expr | int): Number of encoded Hamiltonian qubits.
         lambda_norm (sp.Expr | int | float): LCU block-encoding
@@ -709,6 +713,10 @@ def estimate_trotter_qpe_resources(
     across all QPE iterations, matching the total-count semantics of the
     other ``GateCount`` fields, so ``t_gates == rotation_gates *
     rotation_synthesis_t_gates`` always holds.
+
+    This prices a QPE workload driven by a normalization/precision budget.
+    To price a single approximate time evolution e^(iHt) at fixed time and
+    error instead, use ``estimate_trotter`` from this package.
 
     Args:
         n_qubits (sp.Expr | int): Number of encoded Hamiltonian qubits.

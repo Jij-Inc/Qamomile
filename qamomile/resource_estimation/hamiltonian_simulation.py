@@ -30,6 +30,12 @@ def estimate_trotter(
     a sum of L terms and using the formula:
         e^(iHt) ≈ (e^(iH_1 Δt) ... e^(iH_L Δt))^r
 
+    This prices a single approximate time evolution at a fixed time and
+    error. For a full phase-estimation workload driven by a
+    normalization/precision budget — with per-sample step counts and
+    rotation-synthesis costs — use ``estimate_trotter_qpe_resources`` or
+    ``TrotterQPEWorkload`` from ``qamomile.resource_estimation``.
+
     Args:
         n: Number of qubits
         L: Number of terms in Hamiltonian decomposition
