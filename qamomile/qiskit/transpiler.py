@@ -19,6 +19,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     CondOpKind,
     NotOp,
+    PhiOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
@@ -27,7 +28,8 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.types.primitives import BitType
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -151,6 +153,129 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             self._emit_operations(
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
+
+        self._register_runtime_bit_phi_exprs(circuit, op, clbit_map, bindings)
+
+    def _register_runtime_bit_phi_exprs(
+        self,
+        circuit: "QuantumCircuit",
+        op: IfOperation,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Register scalar Bit Phi outputs as Qiskit runtime expressions.
+
+        Dynamic scalar Bit Phi outputs cannot always be represented by a
+        single physical clbit alias: the true/false sources may be distinct
+        measurements that are still observable under their own UUIDs.  Qiskit
+        can express the selected value directly as
+        ``(condition and true) or ((not condition) and false)``.
+
+        Args:
+            circuit (QuantumCircuit): The Qiskit circuit being emitted.
+            op (IfOperation): The runtime if operation whose Phi outputs
+                should be registered.
+            clbit_map (ClbitMap): Mapping from IR bit addresses to physical
+                clbit indices.
+            bindings (dict[str, Any]): Active emit bindings; mutated with
+                runtime expressions keyed by Phi output UUID.
+
+        Returns:
+            None: Mutates ``bindings`` in place.
+
+        Raises:
+            EmitError: If a scalar Bit Phi that remains in the quantum segment
+                cannot be resolved to Qiskit runtime-expression operands.
+        """
+        from qiskit.circuit.classical import expr
+
+        condition_expr = self._resolve_runtime_bit_operand(
+            circuit, op.condition, clbit_map, bindings
+        )
+        if condition_expr is None:
+            raise EmitError(
+                "Cannot build runtime Bit Phi expression because the "
+                "IfOperation condition is not backed by a clbit or runtime expr.",
+                operation="PhiOp",
+            )
+
+        for phi in op.phi_ops:
+            if not isinstance(phi, PhiOp):
+                continue
+            output = phi.output
+            if isinstance(output, ArrayValue) or not isinstance(output.type, BitType):
+                continue
+            if QubitAddress(output.uuid) in clbit_map:
+                continue
+
+            true_expr = self._resolve_runtime_bit_operand(
+                circuit, phi.true_value, clbit_map, bindings
+            )
+            false_expr = self._resolve_runtime_bit_operand(
+                circuit, phi.false_value, clbit_map, bindings
+            )
+            if true_expr is None or false_expr is None:
+                raise EmitError(
+                    "Cannot build runtime Bit Phi expression because one of "
+                    "the branch values is not backed by a clbit or runtime expr.",
+                    operation="PhiOp",
+                )
+
+            phi_expr = expr.logic_or(
+                expr.logic_and(condition_expr, true_expr),
+                expr.logic_and(expr.logic_not(condition_expr), false_expr),
+            )
+            set_runtime_expr = getattr(bindings, "set_runtime_expr", None)
+            if callable(set_runtime_expr):
+                set_runtime_expr(output.uuid, phi_expr)
+            else:
+                bindings[output.uuid] = phi_expr
+
+    def _resolve_runtime_bit_operand(
+        self,
+        circuit: "QuantumCircuit",
+        value: Any,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> Any:
+        """Resolve a Bit-like operand to a Qiskit expr operand.
+
+        Args:
+            circuit (QuantumCircuit): The Qiskit circuit being emitted.
+            value (Any): IR Value, Python boolean, or integer boolean-like
+                operand to resolve.
+            clbit_map (ClbitMap): Mapping from IR bit addresses to physical
+                clbit indices.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Returns:
+            Any: Qiskit ``Clbit`` / ``expr.Expr`` / Python bool operand, or
+                ``None`` when the value cannot be resolved.
+        """
+        if not hasattr(value, "uuid"):
+            return bool(value) if isinstance(value, (bool, int)) else None
+
+        get_runtime_expr = getattr(bindings, "get_runtime_expr", None)
+        if callable(get_runtime_expr):
+            stored = get_runtime_expr(value.uuid)
+        else:
+            stored = bindings.get(value.uuid) if hasattr(bindings, "get") else None
+        if stored is not None and not isinstance(stored, (bool, int, float)):
+            return stored
+
+        if hasattr(value, "is_constant") and value.is_constant():
+            return bool(value.get_const())
+
+        if isinstance(value, Value):
+            addr = resolve_condition_address(value, bindings, self._resolver)
+        else:
+            addr = QubitAddress(value.uuid)
+        if addr in clbit_map:
+            return circuit.clbits[clbit_map[addr]]
+
+        if isinstance(stored, (bool, int)):
+            return bool(stored)
+        return None
 
     def _emit_while(
         self,

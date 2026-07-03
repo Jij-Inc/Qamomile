@@ -561,7 +561,30 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 pending_post = []
 
             if isinstance(op, IfOperation) and op_kind == OperationKind.QUANTUM:
-                pending_post.extend(self._build_post_shadow_if_ops(op))
+                shadow_ops = self._build_post_shadow_if_ops(op)
+                if shadow_ops:
+                    pending_post.extend(shadow_ops)
+                    shadow_if = shadow_ops[-1]
+                    if isinstance(shadow_if, IfOperation):
+                        host_phi_output_ids = {
+                            result.uuid
+                            for result in shadow_if.results
+                            if result.uuid not in self._quantum_needed
+                        }
+                        if host_phi_output_ids:
+                            op = dataclasses.replace(
+                                op,
+                                results=[
+                                    result
+                                    for result in op.results
+                                    if result.uuid not in host_phi_output_ids
+                                ],
+                                phi_ops=[
+                                    phi
+                                    for phi in op.phi_ops
+                                    if phi.output.uuid not in host_phi_output_ids
+                                ],
+                            )
 
             current_ops.append(op)
 

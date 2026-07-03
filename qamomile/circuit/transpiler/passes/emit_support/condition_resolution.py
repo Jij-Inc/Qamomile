@@ -7,6 +7,7 @@ from typing import Any
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError
 
 from .physical_index_map import (
     array_element_mapping,
@@ -219,8 +220,6 @@ def map_phi_outputs(
                             or false_idx is None
                             or true_idx != false_idx
                         ):
-                            from qamomile.circuit.transpiler.errors import EmitError
-
                             raise EmitError(
                                 "Quantum PhiOp merge requires identical physical "
                                 "resources across branches",
@@ -246,8 +245,6 @@ def map_phi_outputs(
 
                 if true_phys is not None and false_phys is not None:
                     if true_phys != false_phys:
-                        from qamomile.circuit.transpiler.errors import EmitError
-
                         raise EmitError(
                             "Quantum PhiOp merge requires identical physical "
                             "resources across branches",
@@ -255,8 +252,6 @@ def map_phi_outputs(
                         )
                     qubit_map[QubitAddress(output.uuid)] = true_phys
                 elif true_phys is not None or false_phys is not None:
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Quantum PhiOp merge requires identical physical "
                         "resources across branches",

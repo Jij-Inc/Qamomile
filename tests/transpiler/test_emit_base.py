@@ -8,7 +8,8 @@ Section 1: ResourceAllocator phi_ops allocation (Bug #6).
       the branch source value.
     - Copies composite element keys ``{source_uuid}_{i}`` →
       ``{output_uuid}_{i}`` for ArrayValue phi outputs.
-    - Maps scalar BitType phi outputs to the same classical bit index.
+    - Maps scalar BitType phi outputs only when both branches already share the
+      same classical bit index.
 
 Section 2: LoopAnalyzer BinOp dependency detection.
     LoopAnalyzer.should_unroll correctly identifies ForOperation loops
@@ -328,8 +329,8 @@ class TestPhiOpsAllocation:
             == qubit_map[QubitAddress(q_init_out.uuid)]
         )
 
-    def test_phi_output_bit_is_allocated(self) -> None:
-        """Phi output for a bit type should be registered in clbit_map."""
+    def test_phi_output_bit_with_distinct_clbits_is_deferred(self) -> None:
+        """Phi output for distinct branch clbits is left to runtime handling."""
         # Setup: condition bit
         cond = _make_value("cond", BitType)
 
@@ -341,7 +342,7 @@ class TestPhiOpsAllocation:
         # Measure to get condition
         measure_op = MeasureOperation(operands=[q_out], results=[cond])
 
-        # Bit phi: both branches produce the same bit
+        # Bit phi: branches produce distinct measured bits.
         true_bit = _make_value("true_bit", BitType)
         false_bit = _make_value("false_bit", BitType)
         true_measure = MeasureOperation(
@@ -370,8 +371,72 @@ class TestPhiOpsAllocation:
         allocator = ResourceAllocator()
         _, clbit_map = allocator.allocate(operations, bindings={})
 
-        # phi_bit should be in clbit_map
-        assert QubitAddress(phi_bit.uuid) in clbit_map
+        assert (
+            clbit_map[QubitAddress(true_bit.uuid)]
+            != clbit_map[QubitAddress(false_bit.uuid)]
+        )
+        assert QubitAddress(phi_bit.uuid) not in clbit_map
+
+    def test_scalar_bit_phi_different_resources_are_not_aliased(self) -> None:
+        """Scalar bit phi with different clbits leaves source mappings intact."""
+        cond = _make_value("cond", BitType)
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        phi_bit = _make_value("phi_bit", BitType)
+        phi = PhiOp(operands=[cond, true_bit, false_bit], results=[phi_bit])
+        clbit_map = {
+            QubitAddress(true_bit.uuid): 0,
+            QubitAddress(false_bit.uuid): 1,
+        }
+
+        map_phi_outputs([phi], {}, clbit_map)
+
+        assert clbit_map[QubitAddress(true_bit.uuid)] == 0
+        assert clbit_map[QubitAddress(false_bit.uuid)] == 1
+        assert QubitAddress(phi_bit.uuid) not in clbit_map
+
+    def test_scalar_bit_phi_incomplete_resources_are_deferred(self) -> None:
+        """Scalar bit phi with one missing clbit remains unmapped."""
+        cond = _make_value("cond", BitType)
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        phi_bit = _make_value("phi_bit", BitType)
+        phi = PhiOp(operands=[cond, true_bit, false_bit], results=[phi_bit])
+        clbit_map = {QubitAddress(true_bit.uuid): 0}
+
+        map_phi_outputs([phi], {}, clbit_map)
+
+        assert clbit_map[QubitAddress(true_bit.uuid)] == 0
+        assert QubitAddress(phi_bit.uuid) not in clbit_map
+
+    def test_scalar_bit_phi_same_resource_is_allowed(self) -> None:
+        """Scalar bit phi with identical clbits maps the output."""
+        cond = _make_value("cond", BitType)
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        phi_bit = _make_value("phi_bit", BitType)
+        phi = PhiOp(operands=[cond, true_bit, false_bit], results=[phi_bit])
+        clbit_map = {
+            QubitAddress(true_bit.uuid): 0,
+            QubitAddress(false_bit.uuid): 0,
+        }
+
+        map_phi_outputs([phi], {}, clbit_map)
+
+        assert clbit_map[QubitAddress(phi_bit.uuid)] == 0
+
+    def test_scalar_bit_phi_unmapped_branches_are_deferred(self) -> None:
+        """Scalar bit phi with no clbits remains unmapped."""
+        cond = _make_value("cond", BitType)
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        phi_bit = _make_value("phi_bit", BitType)
+        phi = PhiOp(operands=[cond, true_bit, false_bit], results=[phi_bit])
+        clbit_map = {}
+
+        map_phi_outputs([phi], {}, clbit_map)
+
+        assert QubitAddress(phi_bit.uuid) not in clbit_map
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
     def test_phi_output_array_composite_keys_are_allocated(
@@ -533,13 +598,8 @@ class TestPhiOpsAllocation:
             == qubit_map[QubitAddress(q1_out.uuid)]
         )
 
-    def test_phi_bit_consolidates_both_branches(self) -> None:
-        """Both branches' clbits must be consolidated to the same physical clbit.
-
-        Under Qiskit's ``if_test``, only one branch executes, so both
-        branches must measure into the same physical clbit. Otherwise
-        the phi output always reads the true branch's result.
-        """
+    def test_phi_bit_keeps_distinct_branch_measurements(self) -> None:
+        """Distinct scalar Bit branch measurements must not be aliased."""
         q = _make_value("q", QubitType)
         q_out = q.next_version()
         qinit_op = QInitOperation(operands=[], results=[q_out])
@@ -573,15 +633,11 @@ class TestPhiOpsAllocation:
         allocator = ResourceAllocator()
         _, clbit_map = allocator.allocate(operations, bindings={})
 
-        # All three — true_bit, false_bit, phi_bit — must share the same physical clbit
         assert (
             clbit_map[QubitAddress(true_bit.uuid)]
-            == clbit_map[QubitAddress(false_bit.uuid)]
+            != clbit_map[QubitAddress(false_bit.uuid)]
         )
-        assert (
-            clbit_map[QubitAddress(phi_bit.uuid)]
-            == clbit_map[QubitAddress(true_bit.uuid)]
-        )
+        assert QubitAddress(phi_bit.uuid) not in clbit_map
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
     def test_phi_bit_array_consolidates_both_branches(self, array_size: int) -> None:
@@ -1132,6 +1188,32 @@ def frontend_target_vars_leak_example() -> qmc.Bit:
 
 
 @qmc.qkernel
+def runtime_bit_phi_selects_external_source_example() -> qmc.Bit:
+    """Runtime Bit Phi should select between pre-existing measured bits."""
+    q = qmc.qubit_array(4, "q")
+    q[2] = qmc.x(q[2])
+
+    selector = qmc.measure(q[0])  # 0
+    a = qmc.measure(q[1])  # 0
+    b = qmc.measure(q[2])  # 1
+
+    out = a
+    if selector:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = a
+    else:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = b
+
+    if out:
+        q[3] = qmc.x(q[3])
+
+    return qmc.measure(q[3])
+
+
+@qmc.qkernel
 def binop_floordiv_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
     q = qmc.qubit_array(4, "q")
@@ -1287,6 +1369,19 @@ class TestPhiMergeAliasRegression:
         assert bitstring == 1, (
             f"Expected 1 but got {bitstring}; before the fix this was 0 due to stale b"
         )
+        assert count == 200
+
+    def test_runtime_bit_phi_selects_external_source(self) -> None:
+        """Runtime Bit Phi must select between existing measured bits."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(runtime_bit_phi_selects_external_source_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # selector = 0 chooses b = 1, so q[3] is flipped.
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == 1
         assert count == 200
 
 
