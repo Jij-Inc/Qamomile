@@ -61,7 +61,10 @@ from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind  # noqa: E402
-from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.errors import (  # noqa: E402
+    EmitError,
+    QamomileCompileError,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
 from qamomile.circuit.transpiler.segments import (  # noqa: E402
     ClassicalStep,
@@ -6971,7 +6974,7 @@ class TestUnresolvedStructuralSize:
     """Unresolved structural UInt must raise, not produce zero-size artifact."""
 
     def test_qubit_array_with_unresolved_size_raises(self):
-        """qubit_array(n) with parameters=["n"] must raise EmitError."""
+        """qubit_array(n) with parameters=["n"] must raise compile error."""
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
@@ -6981,8 +6984,9 @@ class TestUnresolvedStructuralSize:
             return qmc.measure(q)
 
         transpiler = QuriPartsTranspiler()
-        with pytest.raises((EmitError, ValueError)):
+        with pytest.raises(QamomileCompileError) as exc_info:
             transpiler.transpile(circuit, parameters=["n"])
+        assert "depends on runtime parameter 'n'" in str(exc_info.value)
 
 
 # ============================================================================
