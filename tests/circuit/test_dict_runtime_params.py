@@ -73,6 +73,30 @@ def ising_chain_layer_expval(
 
 
 @qmc.qkernel
+def rx_over_dict_len(
+    n: qmc.UInt,
+    angles: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Drive the rotation loop with the dict's own entry count."""
+    q = qmc.qubit_array(n, name="q")
+    for i in qmc.range(len(angles)):
+        q[i] = qmc.rx(q[i], angle=angles[i])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def rx_over_dict_size(
+    n: qmc.UInt,
+    angles: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Drive the rotation loop with the dict's .size handle."""
+    q = qmc.qubit_array(n, name="q")
+    for i in qmc.range(angles.size):
+        q[i] = qmc.rx(q[i], angle=angles[i])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def inner_rx_from_dict(
     q: qmc.Qubit,
     coeffs: qmc.Dict[qmc.UInt, qmc.Float],
@@ -230,6 +254,33 @@ class TestDictParameterValidation:
 
         with pytest.raises(NotImplementedError, match="non-int constant keys"):
             str_key.build(parameters=["coeffs"])
+
+    def test_len_of_runtime_dict_rejected(self):
+        """len() on a runtime-parameter dict fails at trace time.
+
+        The cardinality is part of the key structure; silently returning 0
+        would make qmc.range(len(d)) a zero-trip loop that emits neither
+        gates nor parameters.
+        """
+        with pytest.raises(TypeError, match="cardinality"):
+            rx_over_dict_len.build(parameters=["angles"], n=2)
+
+    def test_size_of_runtime_dict_rejected(self):
+        """.size on a runtime-parameter dict fails at trace time."""
+        with pytest.raises(TypeError, match="cardinality"):
+            rx_over_dict_size.build(parameters=["angles"], n=2)
+
+    def test_builtin_float_value_type_accepted(self):
+        """Dict[K, float] (Python builtin alias) works as a runtime parameter."""
+
+        @qmc.qkernel
+        def builtin_float(coeffs: qmc.Dict[qmc.UInt, float]) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            q[0] = qmc.rx(q[0], angle=coeffs[0])
+            return qmc.measure(q)
+
+        block = builtin_float.build(parameters=["coeffs"])
+        assert any(isinstance(op, DictGetItemOperation) for op in block.operations)
 
     def test_overlap_with_bindings_rejected(self, qiskit_transpiler):
         """A Dict name in both bindings and parameters hits the disjointness check."""
@@ -480,3 +531,58 @@ class TestDictParameterExecution:
                 shots=16,
                 bindings={"angles": {}},
             ).result()
+
+    def test_string_key_does_not_collide_with_int_key(self, qiskit_transpiler):
+        """A str key "1" must not bind the int key 1's parameter.
+
+        Both would string-format as angles[1]; the decomposition must
+        leave the str key out so the genuinely missing int key errors
+        loudly instead of silently receiving the str key's value.
+        """
+        exe = qiskit_transpiler.transpile(
+            rx_by_dict, bindings={"n": 2}, parameters=["angles"]
+        )
+        with pytest.raises(ValueError, match=r"angles\[1\]"):
+            exe.sample(
+                qiskit_transpiler.executor(),
+                shots=16,
+                bindings={"angles": {0: 0.0, "1": np.pi}},
+            ).result()
+
+    def test_string_tuple_key_does_not_collide(self, qiskit_transpiler):
+        """A str key "(0, 1)" must not bind the tuple key (0, 1)'s parameter."""
+        exe = qiskit_transpiler.transpile(
+            ising_chain_layer, bindings={"n": 2}, parameters=["quad", "linear"]
+        )
+        with pytest.raises(ValueError, match=r"quad\[\(0, 1\)\]"):
+            exe.sample(
+                qiskit_transpiler.executor(),
+                shots=16,
+                bindings={
+                    "quad": {"(0, 1)": 0.7},
+                    "linear": {0: 0.1, 1: 0.2},
+                },
+            ).result()
+
+    def test_len_of_bound_dict_drives_loop(self, qiskit_transpiler):
+        """len() of a compile-time-bound dict reports the bound entry count.
+
+        The handle used to count only traced _entries (always empty for
+        bound dicts), so qmc.range(len(d)) silently emitted nothing. With
+        two bound pi rotations, both qubits must flip.
+        """
+        exe = qiskit_transpiler.transpile(
+            rx_over_dict_len,
+            bindings={"n": 2, "angles": {0: np.pi, 1: np.pi}},
+        )
+        result = exe.sample(qiskit_transpiler.executor(), shots=64).result()
+        assert result.results == [((1, 1), 64)]
+
+    def test_size_of_bound_dict_drives_loop(self, qiskit_transpiler):
+        """.size of a compile-time-bound dict reports the bound entry count."""
+        exe = qiskit_transpiler.transpile(
+            rx_over_dict_size,
+            bindings={"n": 2, "angles": {0: np.pi, 1: np.pi}},
+        )
+        result = exe.sample(qiskit_transpiler.executor(), shots=64).result()
+        assert result.results == [((1, 1), 64)]

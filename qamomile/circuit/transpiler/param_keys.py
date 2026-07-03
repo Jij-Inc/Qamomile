@@ -38,10 +38,11 @@ def normalize_dict_binding_key(key: typing.Any) -> typing.Any:
     ``{"coeffs": {np.int64(3): 0.5}}`` produces the same parameter name the
     emit pass created from the IR-resolved ``int`` key. Tuples/lists are
     normalized component-wise into a tuple. Non-integer-valued keys (``str``,
-    ``1.5``, ``float("inf")``, ``float("nan")``, ...) are returned unchanged —
-    they can never match an emitted parameter name (emit only produces
-    int-component keys), so they simply stay unused instead of colliding via
-    lossy coercion.
+    ``1.5``, ``float("inf")``, ``float("nan")``, ...) are returned unchanged;
+    callers must then filter them out via
+    :func:`is_decomposable_dict_binding_key` — string-formatting them into a
+    parameter name would collide with genuine int keys (``"1"`` and ``1``
+    both format as ``d[1]``).
 
     Args:
         key (Any): A key of the user-supplied binding dict.
@@ -63,3 +64,30 @@ def normalize_dict_binding_key(key: typing.Any) -> typing.Any:
     if as_int == key:
         return as_int
     return key
+
+
+def is_decomposable_dict_binding_key(key: typing.Any) -> bool:
+    """Report whether a normalized key can name an emitted parameter.
+
+    The emit pass creates per-key parameters only from IR-resolved integer
+    keys (``int`` or tuples of ``int``), so only those keys can ever match
+    an emitted parameter name. Any other key must NOT be string-formatted
+    into a name: the str key ``"1"`` would format identically to the int
+    key ``1`` (both ``d[1]``) and silently bind the wrong parameter, and
+    ``"(0, 1)"`` would collide with the tuple key ``(0, 1)``.
+
+    Args:
+        key (Any): A key already passed through
+            :func:`normalize_dict_binding_key`.
+
+    Returns:
+        bool: True when the key is an ``int`` or a tuple of ``int``s
+            (numpy integers count once normalized; anything else,
+            including nested tuples, is not decomposable).
+    """
+    if isinstance(key, tuple):
+        return all(
+            isinstance(component, int) and not isinstance(component, bool)
+            for component in key
+        )
+    return isinstance(key, int) and not isinstance(key, bool)

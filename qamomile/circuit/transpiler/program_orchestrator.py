@@ -18,6 +18,7 @@ from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.job import ExpvalJob, RunJob, SampleJob
 from qamomile.circuit.transpiler.param_keys import (
     dict_param_key,
+    is_decomposable_dict_binding_key,
     normalize_dict_binding_key,
 )
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
@@ -177,6 +178,14 @@ class ProgramOrchestrator(Generic[T]):
             elif isinstance(value, dict):
                 for k, v in value.items():
                     normalized = normalize_dict_binding_key(k)
+                    # Keys that can never match an emitted parameter name
+                    # (str, non-integer floats, ...) must not be string-
+                    # formatted: "1" would collide with the int key 1
+                    # (both format as name[1]) and bind the wrong
+                    # parameter. Leaving them out means a genuinely
+                    # missing integer key still errors loudly downstream.
+                    if not is_decomposable_dict_binding_key(normalized):
+                        continue
                     result[dict_param_key(key, normalized)] = v
             else:
                 result[key] = value
