@@ -51,6 +51,7 @@ from qamomile.resource_estimation.quantities import (
     register_resource_quantity,
     resource_values_from_estimate,
 )
+from qamomile.resource_estimation.workload import HamiltonianWorkloadMixin
 
 __all__ = [
     "FTQCCostModel",
@@ -61,6 +62,7 @@ __all__ = [
     "BlockEncodingResource",
     "HamiltonianQPEWorkload",
     "HamiltonianRepresentation",
+    "HamiltonianWorkloadMixin",
     "PauliHamiltonianResource",
     "ResourceCategory",
     "ResourceComparisonRow",
