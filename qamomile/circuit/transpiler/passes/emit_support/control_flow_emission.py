@@ -393,9 +393,16 @@ def resolve_dict_entries(
     Returns:
         List of (key, value) tuples, or None if cannot be resolved
     """
-    bound_items = dict_value.get_bound_data_items()
-    if bound_items:
-        return list(bound_items)
+    # A dict carrying dict_runtime metadata is compile-time-bound and
+    # authoritative even when its data is empty: presence of the metadata
+    # (not non-emptiness of the data) is what marks it bound, mirroring
+    # Dict.__getitem__ / __len__. Returning its (possibly empty) items lets
+    # an empty bound dict — e.g. a Python signature default of ``{}`` —
+    # unroll to a zero-iteration loop instead of falling through to the
+    # "entries could not be resolved" error path below.
+    metadata = getattr(dict_value, "metadata", None)
+    if getattr(metadata, "dict_runtime", None) is not None:
+        return list(dict_value.get_bound_data_items())
 
     # Check if dict_value is a parameter that should be bound
     if hasattr(dict_value, "is_parameter") and dict_value.is_parameter():
