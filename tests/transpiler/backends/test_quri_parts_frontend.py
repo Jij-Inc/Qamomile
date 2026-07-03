@@ -3654,20 +3654,20 @@ class TestControlledGate:
         controlled_x10 = qmc.control(x_gate, num_controls=10)
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
             ctrl = qmc.qubit_array(10, "ctrl")
             t = qmc.qubit("t")
             for i in qmc.range(10):
                 ctrl[i] = qmc.x(ctrl[i])
             ctrl, t = controlled_x10(ctrl, t)
-            return qmc.measure(ctrl)
+            return qmc.measure(ctrl), qmc.measure(t)
 
         transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit)
         # 10 controls need 9 cascade ancillas on top of the 11 data qubits.
         assert exe.compiled_quantum[0].circuit.qubit_count == 20
         job = exe.sample(transpiler.executor(), bindings={}, shots=100)
-        expected = tuple(1 for _ in range(10))
+        expected = (tuple(1 for _ in range(10)), 1)
         for value, count in job.result().results:
             assert value == expected
             assert count == 100
