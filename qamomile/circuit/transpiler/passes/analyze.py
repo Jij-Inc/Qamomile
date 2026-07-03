@@ -1420,13 +1420,19 @@ class AnalyzePass(Pass[Block, Block]):
     ) -> None:
         """Reject runtime-branch quantum rebinds that discard quantum state.
 
-        Thin wrapper for the module-level
-        :func:`reject_branch_internal_quantum_discard` so
-        ``PartialEvaluationPass`` can reuse the same check without
-        instantiating ``AnalyzePass``. Called without bindings: by this
-        stage ``CompileTimeIfLoweringPass`` has already eliminated
-        compile-time ifs, so any surviving ``IfOperation`` classifies as
-        runtime.
+        Thin wrapper around the module-level
+        :func:`reject_branch_internal_quantum_discard`, run by this pass
+        as a safety net (the same module-level function also runs earlier
+        and directly from ``PartialEvaluationPass``, pre-fold, with
+        bindings). Invoked here without bindings, so only already-constant
+        conditions resolve as compile-time and every other ``IfOperation``
+        is treated as runtime; of those, only the ones whose condition is
+        measurement-derived are actually checked. In the normal pipeline
+        ``CompileTimeIfLoweringPass`` has already folded away the
+        compile-time ifs before ``analyze`` runs, so this bindings-free
+        call is exact; when ``AnalyzePass`` runs standalone (no
+        ``partial_eval``) an unfolded compile-time if with a
+        non-measurement condition simply is not checked, which is safe.
 
         Args:
             operations (list[Operation]): Operations to scan recursively.

@@ -46,8 +46,10 @@ class PartialEvaluationPass(Pass[Block, Block]):
                 checks fires (a classical element store inside a loop
                 reads an element of the array it writes, a loop body
                 rebinds a classical scalar whose pre-loop value it still
-                reads, or a runtime if branch pairs a fresh quantum
-                allocation with a never-consumed pre-branch value).
+                reads, or a runtime if branch rebinds a quantum variable
+                to a different quantum value — a fresh allocation or
+                another existing register — while the pre-branch state
+                is neither consumed on that path nor owned elsewhere).
         """
         # HIERARCHICAL is accepted so that the self-recursion unroll loop
         # can interleave inline (which leaves one CallBlockOperation per
