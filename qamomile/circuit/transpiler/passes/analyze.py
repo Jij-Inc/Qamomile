@@ -933,9 +933,11 @@ def _check_branch_quantum_discard(
         concrete_values (dict[str, Any]): UUID-keyed concrete classical-op
             results accumulated up to this operation.
         bindings (dict[str, Any]): Compile-time parameter bindings.
-        reads_outside (set[str]): UUIDs referenced by operations outside
-            this if's subtree (rebind records excluded, array ancestry
-            included).
+        reads_outside (set[str]): Pre-branch record UUIDs that are read by
+            at least one operation outside this if's subtree (rebind
+            records excluded, array ancestry included) — the values still
+            owned outside the if. Precomputed by the caller via block-wide
+            vs in-subtree read-count comparison.
 
     Raises:
         ValidationError: If a rebinding branch drops the pre-branch
@@ -1005,6 +1007,7 @@ def _scan_branch_quantum_discards(
     bindings: dict[str, Any],
     measurement_tainted: set[str],
     op_reads: dict[int, set[str]],
+    all_read_counts: dict[str, int],
 ) -> None:
     """Walk operations like the if-lowering pass, checking each runtime if.
 
@@ -1018,6 +1021,17 @@ def _scan_branch_quantum_discards(
     ``prune_compile_time_ifs`` alone does not descend into runtime-if
     bodies.
 
+    For each runtime if that actually carries quantum rebind records, the
+    "referenced outside this if" evidence for the (few) record pre-branch
+    values is derived by comparing a UUID's block-wide read count against
+    its in-subtree read count: a value read strictly more times overall
+    than inside the subtree is read somewhere outside it. Counting (rather
+    than the naive ``all_reads - subtree_reads`` set subtraction) is
+    required for correctness — a value read both inside the subtree and
+    outside it must still count as owned outside, which plain subtraction
+    would drop. The per-if cost is therefore O(subtree size) instead of
+    O(total ops).
+
     Args:
         ops (list[Operation]): Operations to scan, in program order.
         concrete_values (dict[str, Any]): UUID-keyed concrete classical-op
@@ -1030,8 +1044,10 @@ def _scan_branch_quantum_discards(
             condition is in this set is runtime control flow.
         op_reads (dict[int, set[str]]): Per-operation read sets (rebind
             records excluded, array ancestry included), keyed by ``id()``
-            of every operation reachable from the scanned block. Used to
-            assemble each runtime if's outside-ownership evidence.
+            of every operation reachable from the scanned block.
+        all_read_counts (dict[str, int]): For each UUID, the number of
+            operations in the whole block that read it (each op counted
+            once per distinct UUID). Precomputed once from ``op_reads``.
 
     Raises:
         ValidationError: If a runtime if branch rebinds a quantum
@@ -1046,21 +1062,38 @@ def _scan_branch_quantum_discards(
             if taken is not None:
                 branch = op.true_operations if taken else op.false_operations
                 _scan_branch_quantum_discards(
-                    branch, concrete_values, bindings, measurement_tainted, op_reads
+                    branch,
+                    concrete_values,
+                    bindings,
+                    measurement_tainted,
+                    op_reads,
+                    all_read_counts,
                 )
                 continue
-            # Only a runtime if carrying quantum rebind records can discard;
-            # skip the O(total_ops) outside-reads build for the common case
-            # (gate rebinds / measurement-conditioned gates leave no records).
+            # Only a runtime if carrying quantum rebind records can discard.
+            # Records are attached solely when a branch rebinds a variable
+            # to a *different* quantum value whose pre-branch binding would
+            # otherwise vanish from the IfOperation (fresh allocation, or
+            # substitution of another register); ordinary gate self-updates
+            # (``q = qmc.x(q)``) and measurement-conditioned gates on other
+            # qubits leave no record, so the common case skips the scan.
             if (
                 op.branch_rebinds
                 and getattr(op.condition, "uuid", None) in measurement_tainted
             ):
-                subtree_ids = {id(sub_op) for sub_op in flatten_ops([op])}
-                reads_outside: set[str] = set()
-                for op_id, read_uuids in op_reads.items():
-                    if op_id not in subtree_ids:
-                        reads_outside |= read_uuids
+                subtree_read_counts: dict[str, int] = {}
+                for sub_op in flatten_ops([op]):
+                    for read_uuid in op_reads.get(id(sub_op), ()):
+                        subtree_read_counts[read_uuid] = (
+                            subtree_read_counts.get(read_uuid, 0) + 1
+                        )
+                reads_outside = {
+                    record.before.uuid
+                    for record in op.branch_rebinds
+                    if isinstance(record.before, Value)
+                    and all_read_counts.get(record.before.uuid, 0)
+                    > subtree_read_counts.get(record.before.uuid, 0)
+                }
                 _check_branch_quantum_discard(
                     op, concrete_values, bindings, reads_outside
                 )
@@ -1070,6 +1103,7 @@ def _scan_branch_quantum_discards(
                 bindings,
                 measurement_tainted,
                 op_reads,
+                all_read_counts,
             )
             _scan_branch_quantum_discards(
                 op.false_operations,
@@ -1077,12 +1111,18 @@ def _scan_branch_quantum_discards(
                 bindings,
                 measurement_tainted,
                 op_reads,
+                all_read_counts,
             )
             continue
         if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 _scan_branch_quantum_discards(
-                    body, dict(concrete_values), bindings, measurement_tainted, op_reads
+                    body,
+                    dict(concrete_values),
+                    bindings,
+                    measurement_tainted,
+                    op_reads,
+                    all_read_counts,
                 )
         # Other operations carry no nested control flow to scan.
 
@@ -1175,8 +1215,17 @@ def reject_branch_internal_quantum_discard(
     op_reads = {
         id(op): _op_referenced_uuids_with_ancestry(op) for op in flatten_ops(operations)
     }
+    all_read_counts: dict[str, int] = {}
+    for read_uuids in op_reads.values():
+        for read_uuid in read_uuids:
+            all_read_counts[read_uuid] = all_read_counts.get(read_uuid, 0) + 1
     _scan_branch_quantum_discards(
-        operations, {}, resolved_bindings, measurement_tainted, op_reads
+        operations,
+        {},
+        resolved_bindings,
+        measurement_tainted,
+        op_reads,
+        all_read_counts,
     )
 
 
