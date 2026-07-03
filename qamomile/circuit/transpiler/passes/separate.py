@@ -163,6 +163,20 @@ def collect_value_like_uuids(value: ValueLike) -> set[str]:
     return uuids
 
 
+def _is_public_runtime_input(value: ValueLike) -> bool:
+    """Return whether a block input belongs in ``ProgramABI.public_inputs``.
+
+    Args:
+        value (ValueLike): Block input or parameter value to classify.
+
+    Returns:
+        bool: ``True`` for classical or classical structural values that can
+            be bound by users at runtime; ``False`` for quantum values, which
+            are allocated and consumed by the quantum segment.
+    """
+    return not value.type.is_quantum()
+
+
 # =========================================================================
 # Segmentation strategy and pass
 # =========================================================================
@@ -217,9 +231,14 @@ class NisqSegmentationStrategy(SegmentationStrategy):
             elif isinstance(segment, ExpvalSegment):
                 steps.append(ExpvalStep(segment=segment, quantum_step_index=0))
 
-        public_inputs = dict(zip(block.label_args, block.input_values, strict=True))
+        public_inputs = {
+            name: value
+            for name, value in zip(block.label_args, block.input_values, strict=True)
+            if _is_public_runtime_input(value)
+        }
         for name, value in block.parameters.items():
-            public_inputs.setdefault(name, value)
+            if _is_public_runtime_input(value):
+                public_inputs.setdefault(name, value)
 
         abi = ProgramABI(
             public_inputs=public_inputs,

@@ -1224,6 +1224,42 @@ class TestMeasurementDerivedOutput:
         ).result().results == [(1, 3)]
         assert exe.run(_CountsExecutor({"010": 1}), bindings={"lo": 1}).result() == 1
 
+    def test_abi_public_inputs_excludes_quantum_arguments(self):
+        """Program ABI exposes runtime-bindable classical inputs only."""
+        from qamomile.circuit.ir.block import Block, BlockKind
+        from qamomile.circuit.ir.operation.gate import MeasureOperation
+        from qamomile.circuit.ir.types.primitives import (
+            BitType,
+            FloatType,
+            QubitType,
+            UIntType,
+        )
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.passes.separate import SegmentationPass
+
+        q = Value(type=QubitType(), name="q")
+        theta = Value(type=FloatType(), name="theta")
+        pair = TupleValue(
+            name="pair",
+            elements=(Value(type=UIntType(), name="pair_0"),),
+        )
+        bit = Value(type=BitType(), name="bit")
+        measure = MeasureOperation(operands=[q], results=[bit])
+        block = Block(
+            name="abi_inputs",
+            label_args=["q", "theta", "pair"],
+            input_values=[q, theta, pair],
+            operations=[measure],
+            output_values=[bit],
+            kind=BlockKind.AFFINE,
+        )
+
+        plan = SegmentationPass().run(block)
+
+        assert "q" not in plan.abi.public_inputs
+        assert plan.abi.public_inputs["theta"].uuid == theta.uuid
+        assert plan.abi.public_inputs["pair"].uuid == pair.uuid
+
     def test_expr_output_reads_sliced_element_in_classical_executor(self, transpiler):
         """Host-side runtime expressions can read elements of measured vector
         slice views."""
