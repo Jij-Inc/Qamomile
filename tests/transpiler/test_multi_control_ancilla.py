@@ -17,6 +17,7 @@ from qamomile.circuit.ir.types.primitives import (
 )
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.passes.emit_support.multi_control_ancilla import (
+    _MAX_PRECISE_FOR_LOOP_ITERATIONS,
     MultiControlAncillaPool,
     estimate_multi_control_ancilla_demand,
 )
@@ -188,6 +189,39 @@ def test_estimate_loop_variable_dependent_num_controls() -> None:
     )
     # k runs over 1..4; the widest iteration is a 4-control X.
     assert _estimate([loop]) == 3
+
+
+def test_estimate_large_loop_falls_back_to_symbolic_body_walk() -> None:
+    """Large loops avoid per-iteration estimation and use operand width."""
+    loop_var = Value(type=UIntType(), name="k")
+    width = _MAX_PRECISE_FOR_LOOP_ITERATIONS + 1
+    controls = ArrayValue(
+        type=QubitType(),
+        name="controls",
+        shape=(Value(type=UIntType(), name="n").with_const(width),),
+    )
+    target = _qubit("t")
+    operands = [controls, target]
+    mcx = SymbolicControlledU(
+        operands=operands,
+        results=[v.next_version() for v in operands],
+        num_controls=loop_var,
+        num_control_args=1,
+        block=Block(operations=[_fixed_gate(GateOperationType.X, 1)]),
+    )
+    loop = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(width),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        results=[],
+        loop_var="k",
+        loop_var_value=loop_var,
+        operations=[mcx],
+    )
+    # The symbolic walk falls back to the vector control width.
+    assert _estimate([loop]) == width - 1
 
 
 def test_estimate_symbolic_num_controls_falls_back_to_operand_width() -> None:

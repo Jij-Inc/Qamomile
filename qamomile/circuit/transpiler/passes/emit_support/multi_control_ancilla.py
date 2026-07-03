@@ -51,6 +51,8 @@ if TYPE_CHECKING:
         ValueResolver,
     )
 
+_MAX_PRECISE_FOR_LOOP_ITERATIONS = 1024
+
 
 class MultiControlAncillaPool:
     """A reserved block of clean ancilla qubits for multi-control lowering.
@@ -500,12 +502,13 @@ def _for_operation_demand(
     A ``SymbolicControlledU`` inside a loop body may derive its control
     count from the loop variable (e.g. ``qmc.control(qmc.x,
     num_controls=k)`` inside ``qmc.range(...)``), which only resolves
-    with the loop variable bound. Mirroring the emit-time unrolling,
-    each iteration is walked with the loop variable bound to its value
-    and the per-iteration maximum is returned. When the bounds cannot be
-    resolved, the body is walked once without the loop variable so
-    loop-independent demand is still counted (loop-variable-dependent
-    counts then fall back to their control-operand width).
+    with the loop variable bound. Small resolved loops are walked per
+    iteration, mirroring emit-time unrolling. Large resolved loops are
+    walked once without the loop variable to keep estimation bounded;
+    loop-variable-dependent counts then fall back to their
+    control-operand width, which is a conservative upper bound for
+    valid controlled calls. When the bounds cannot be resolved, the same
+    single symbolic body walk still counts loop-independent demand.
 
     Args:
         op (ForOperation): Loop operation whose body is inspected.
@@ -533,8 +536,16 @@ def _for_operation_demand(
         return _demand_in_operations(
             op.operations, inherited_controls, resolver, bindings
         )
+    indexset = range(start, stop, step)
+    if len(indexset) == 0:
+        return 0
+    if len(indexset) > _MAX_PRECISE_FOR_LOOP_ITERATIONS:
+        return _demand_in_operations(
+            op.operations, inherited_controls, resolver, bindings
+        )
+
     demand = 0
-    for i in range(start, stop, step):
+    for i in indexset:
         loop_bindings = bindings.copy()
         _bind_loop_var(loop_bindings, op, i)
         demand = max(
