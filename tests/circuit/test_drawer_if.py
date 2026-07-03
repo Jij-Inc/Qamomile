@@ -210,6 +210,39 @@ def symbolic_empty_single_branch_if(q0: Qubit, flag: UInt) -> Qubit:
 
 
 @qmc.qkernel
+def compile_time_if_callee(q0: Qubit, flag: UInt) -> Qubit:
+    """Build a callee with a compile-time resolvable if.
+
+    Args:
+        q0 (Qubit): Qubit transformed by the selected branch.
+        flag (UInt): Compile-time flag forwarded by the caller.
+
+    Returns:
+        Qubit: Updated ``q0``.
+    """
+    if flag == 1:
+        q0 = qmc.x(q0)
+    else:
+        q0 = qmc.h(q0)
+    return q0
+
+
+@qmc.qkernel
+def inline_compile_time_if(flag: UInt) -> Qubit:
+    """Call a callee whose IF resolves only after inline argument binding.
+
+    Args:
+        flag (UInt): Compile-time flag passed into the callee.
+
+    Returns:
+        Qubit: Updated qubit from the selected callee branch.
+    """
+    q0 = qmc.qubit("q0")
+    q0 = compile_time_if_callee(q0, flag)
+    return q0
+
+
+@qmc.qkernel
 def nested_if(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
     """Build a two-level nested if example.
 
@@ -252,12 +285,18 @@ def _walk(nodes: Iterable[VisualNode]) -> Iterator[VisualNode]:
 
 
 def _visual_circuit(
-    kernel: Any, *, fold_loops: bool = True, fold_ifs: bool = False, **bindings: Any
+    kernel: Any,
+    *,
+    inline: bool = False,
+    fold_loops: bool = True,
+    fold_ifs: bool = False,
+    **bindings: Any,
 ) -> VisualCircuit:
     """Trace ``kernel`` and run the visualization analyzer in isolation.
 
     Args:
         kernel (Any): QKernel-like object to trace.
+        inline (bool): Whether CallBlockOperation contents should be inlined.
         fold_loops (bool): Whether loop operations should be folded.
         fold_ifs (bool): Whether if operations should be folded.
         **bindings (Any): Concrete draw-time bindings for kernel parameters.
@@ -271,7 +310,7 @@ def _visual_circuit(
     analyzer = CircuitAnalyzer(
         block,
         DEFAULT_STYLE,
-        inline=False,
+        inline=inline,
         fold_loops=fold_loops,
         fold_ifs=fold_ifs,
         expand_composite=False,
@@ -663,6 +702,18 @@ class TestCompileTimeResolution:
             if isinstance(n, VGate) and n.gate_type is not None
         ]
         assert gates == [GateOperationType.H]
+
+    def test_inline_bound_callee_if_draws_only_selected_branch(self):
+        """Inline callee IFs collapse after actual argument binding."""
+        vc = _visual_circuit(inline_compile_time_if, inline=True, flag=1)
+        assert not _folded_ifs(vc)
+        assert not _unfolded_ifs(vc)
+        gates = [
+            n.gate_type
+            for n in _walk(vc.children)
+            if isinstance(n, VGate) and n.gate_type is not None
+        ]
+        assert gates == [GateOperationType.X]
 
 
 class TestNestedIf:
