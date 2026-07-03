@@ -133,9 +133,10 @@ class ExecutableProgram(Generic[T]):
         """Execute with multiple shots and return counts.
 
         Args:
-            executor: Backend-specific quantum executor.
-            shots: Number of shots to run.
-            bindings: Parameter bindings. Supports three formats:
+            executor (QuantumExecutor[T]): Backend-specific quantum executor.
+            shots (int): Number of shots to run.
+            bindings (dict[str, Any] | None): Parameter bindings. Supports
+                three formats:
                 - Vector: {"gammas": [0.1, 0.2], "betas": [0.3, 0.4]}
                 - Dict parameter: {"coeffs": {0: 0.1, (0, 1): 0.2}},
                   decomposed per key onto the emitted parameters
@@ -167,8 +168,9 @@ class ExecutableProgram(Generic[T]):
         """Execute once and return single result.
 
         Args:
-            executor: Backend-specific quantum executor.
-            bindings: Parameter bindings. Supports three formats:
+            executor (QuantumExecutor[T]): Backend-specific quantum executor.
+            bindings (dict[str, Any] | None): Parameter bindings. Supports
+                three formats:
                 - Vector: {"gammas": [0.1, 0.2], "betas": [0.3, 0.4]}
                 - Dict parameter: {"coeffs": {0: 0.1, (0, 1): 0.2}},
                   decomposed per key onto the emitted parameters

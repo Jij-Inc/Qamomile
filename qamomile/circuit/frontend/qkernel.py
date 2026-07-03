@@ -1862,7 +1862,8 @@ class QKernel(Generic[P, R]):
         """Build a traced Block by tracing this kernel.
 
         Args:
-            parameters: List of argument names to keep as unbound parameters.
+            parameters (list[str] | None): List of argument names to keep as
+                unbound parameters.
                        - None (default): Auto-detect parameters (non-Qubit args without value/default)
                        - []: No parameters (all non-Qubit args must have value/default)
                        - ["name"]: Explicit parameter list
@@ -1871,8 +1872,10 @@ class QKernel(Generic[P, R]):
                        it must be listed explicitly, and only constant-key
                        subscript lookups (``d[key]``) are supported on a
                        runtime-parameter dict (items() iteration needs the
-                       key structure at compile time).
-            **kwargs: Concrete values for non-parameter arguments.
+                       key structure at compile time). A runtime-parameter
+                       Dict is not recorded in ``Block.param_slots``
+                       (structural containers stay out of the slot manifest).
+            **kwargs (Any): Concrete values for non-parameter arguments.
 
         Returns:
             Block: The traced block ready for transpilation, estimation,

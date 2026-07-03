@@ -868,6 +868,13 @@ def for_items(
     Yields:
         Tuple of (key_handles, value_handle) for use in loop body
 
+    Raises:
+        TypeError: If ``d`` is a runtime-parameter Dict (declared via
+            ``parameters=[...]`` without bound data). Its key structure
+            is unknown at compile time, so an items() loop cannot be
+            unrolled; only constant-key subscript lookups (``d[key]``)
+            are supported for runtime-parameter dicts.
+
     Example:
         ```python
         @qkernel
@@ -880,13 +887,6 @@ def for_items(
                 q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij)
             return q
         ```
-
-    Raises:
-        TypeError: If ``d`` is a runtime-parameter Dict (declared via
-            ``parameters=[...]`` without bound data). Its key structure
-            is unknown at compile time, so an items() loop cannot be
-            unrolled; only constant-key subscript lookups (``d[key]``)
-            are supported for runtime-parameter dicts.
     """
     # Runtime-parameter dicts carry no bound data, so the loop would
     # silently unroll over an unknown key set at emit time. Fail at

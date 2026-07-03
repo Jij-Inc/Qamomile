@@ -38,9 +38,10 @@ def normalize_dict_binding_key(key: typing.Any) -> typing.Any:
     ``{"coeffs": {np.int64(3): 0.5}}`` produces the same parameter name the
     emit pass created from the IR-resolved ``int`` key. Tuples/lists are
     normalized component-wise into a tuple. Non-integer-valued keys (``str``,
-    ``1.5``, ...) are returned unchanged — they can never match an emitted
-    parameter name (emit only produces int-component keys), so they simply
-    stay unused instead of colliding via lossy coercion.
+    ``1.5``, ``float("inf")``, ``float("nan")``, ...) are returned unchanged —
+    they can never match an emitted parameter name (emit only produces
+    int-component keys), so they simply stay unused instead of colliding via
+    lossy coercion.
 
     Args:
         key (Any): A key of the user-supplied binding dict.
@@ -53,7 +54,8 @@ def normalize_dict_binding_key(key: typing.Any) -> typing.Any:
         return tuple(normalize_dict_binding_key(component) for component in key)
     try:
         as_int = int(key)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int(float("inf")); ValueError covers nan.
         return key
     # Only adopt the int form when it is exactly equal to the original
     # (guards against silently mapping 1.5 -> 1). Plain bool is int-equal

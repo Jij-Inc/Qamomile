@@ -2,11 +2,13 @@
 
 Covers declaring ``Dict[K, Float]`` in ``transpile(parameters=[...])``:
 per-key backend parameter creation from constant-key subscript lookups
-(``d[key]``, including tuple keys and ``qmc.range`` loop variables that
-unrolling makes constant), execution-time decomposition of
+(``d[key]``, including tuple keys, ``qmc.range`` loop variables that
+unrolling makes constant, and lookups inside sub-kernels the dict is
+forwarded to), execution-time decomposition of
 ``bindings={"coeffs": {...}}`` onto those parameters, re-binding the
 same executable with different dict values, and the rejection paths
-(non-Float value types, items() iteration, auto-detection).
+(non-Float value types, items() iteration at trace time and at emit
+time via a sub-kernel, auto-detection).
 """
 
 from __future__ import annotations
@@ -17,8 +19,8 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
-
-from .conftest import run_statevector
+from qamomile.circuit.transpiler.errors import EmitError
+from tests.circuit.conftest import run_statevector
 
 # ---------------------------------------------------------------------------
 # Kernels under test
@@ -68,6 +70,49 @@ def ising_chain_layer_expval(
     for i in qmc.range(n - 1):
         q[i], q[i + 1] = qmc.rzz(q[i], q[i + 1], angle=2.0 * quad[(i, i + 1)])
     return qmc.expval(q, hamiltonian)
+
+
+@qmc.qkernel
+def inner_rx_from_dict(
+    q: qmc.Qubit,
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Qubit:
+    """Sub-kernel applying an RX with a dict-looked-up angle."""
+    q = qmc.rx(q, angle=coeffs[0])
+    return q
+
+
+@qmc.qkernel
+def outer_calls_inner_lookup(
+    n: qmc.UInt,
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Entry kernel forwarding a dict to a sub-kernel that subscripts it."""
+    q = qmc.qubit_array(n, name="q")
+    q[0] = inner_rx_from_dict(q[0], coeffs)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def inner_items_loop(
+    q: qmc.Vector[qmc.Qubit],
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Sub-kernel iterating a dict with items()."""
+    for i, c in coeffs.items():
+        q[i] = qmc.rx(q[i], angle=c)
+    return q
+
+
+@qmc.qkernel
+def outer_calls_inner_items(
+    n: qmc.UInt,
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Entry kernel forwarding a dict into a sub-kernel items() loop."""
+    q = qmc.qubit_array(n, name="q")
+    q = inner_items_loop(q, coeffs)
+    return qmc.measure(q)
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +248,33 @@ class TestDictParameterValidation:
             )
 
 
+class TestDictBindingKeyNormalization:
+    """Unit behavior of the shared execution-time binding-key normalizer."""
+
+    def test_integer_valued_keys_canonicalize_to_int(self):
+        """np.int64 and int-equal float keys normalize to plain int."""
+        from qamomile.circuit.transpiler.param_keys import (
+            normalize_dict_binding_key,
+        )
+
+        normalized = normalize_dict_binding_key(np.int64(3))
+        assert normalized == 3 and type(normalized) is int
+        assert normalize_dict_binding_key(1.0) == 1
+        assert normalize_dict_binding_key((np.int64(0), 1)) == (0, 1)
+
+    def test_non_integer_keys_pass_through(self):
+        """str / 1.5 / inf / nan keys are returned unchanged, never coerced."""
+        from qamomile.circuit.transpiler.param_keys import (
+            normalize_dict_binding_key,
+        )
+
+        assert normalize_dict_binding_key("alpha") == "alpha"
+        assert normalize_dict_binding_key(1.5) == 1.5
+        assert normalize_dict_binding_key(float("inf")) == float("inf")
+        nan_key = float("nan")
+        assert normalize_dict_binding_key(nan_key) is nan_key
+
+
 # ---------------------------------------------------------------------------
 # Emit-level behavior (Qiskit structural checks)
 # ---------------------------------------------------------------------------
@@ -238,6 +310,37 @@ class TestDictParameterEmit:
 
         exe = qiskit_transpiler.transpile(repeated, parameters=["coeffs"])
         assert exe.parameter_names == ["coeffs[0]"]
+
+    def test_subkernel_lookup_creates_parameter(self, qiskit_transpiler):
+        """A dict forwarded to a sub-kernel still emits per-key parameters.
+
+        InlinePass substitutes the outer (runtime-parameter) DictValue into
+        the inner kernel's DictGetItemOperation operand, so the emit-time
+        parameter creation must see the outer dict's name.
+        """
+        exe = qiskit_transpiler.transpile(
+            outer_calls_inner_lookup, bindings={"n": 1}, parameters=["coeffs"]
+        )
+        assert exe.parameter_names == ["coeffs[0]"]
+
+        result = exe.sample(
+            qiskit_transpiler.executor(),
+            shots=64,
+            bindings={"coeffs": {0: np.pi}},
+        ).result()
+        assert result.results == [((1,), 64)]
+
+    def test_subkernel_items_iteration_raises_at_emit(self, qiskit_transpiler):
+        """items() over a runtime-parameter dict in a sub-kernel fails at transpile.
+
+        The trace-time Handle flag cannot see sub-kernel usage (the inner
+        kernel traces against a dummy dict input), so this route must be
+        caught by the emit-time check in emit_for_items.
+        """
+        with pytest.raises(EmitError, match="runtime parameter"):
+            qiskit_transpiler.transpile(
+                outer_calls_inner_items, bindings={"n": 2}, parameters=["coeffs"]
+            )
 
     @pytest.mark.parametrize("seed", [0, 1, 42])
     def test_bound_circuit_matches_compile_time_bound(self, qiskit_transpiler, seed):
@@ -364,4 +467,16 @@ class TestDictParameterExecution:
                 qiskit_transpiler.executor(),
                 shots=16,
                 bindings={"angles": {0: np.pi}},
+            ).result()
+
+    def test_empty_dict_binding_raises(self, qiskit_transpiler):
+        """An empty execution-time dict surfaces as missing per-key bindings."""
+        exe = qiskit_transpiler.transpile(
+            rx_by_dict, bindings={"n": 2}, parameters=["angles"]
+        )
+        with pytest.raises(ValueError, match=r"angles\[0\]"):
+            exe.sample(
+                qiskit_transpiler.executor(),
+                shots=16,
+                bindings={"angles": {}},
             ).result()
