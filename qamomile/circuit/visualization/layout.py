@@ -362,6 +362,7 @@ class CircuitLayoutEngine:
         label_width = node.condition_label_width if is_if else 0.0
 
         # x where the if construct begins, used to anchor label-room reservation.
+        condition_measure_box_left: float | None = None
         if is_if and affected_qubits:
             if_start = max(state.qubit_right_edges.get(q, 0.0) for q in affected_qubits)
             condition_measure_right = self._condition_measure_right_edge(
@@ -370,6 +371,9 @@ class CircuitLayoutEngine:
             if condition_measure_right is not None:
                 branch_box_pad = compute_border_padding(self.style, depth=0)
                 if_start = max(if_start, condition_measure_right + branch_box_pad)
+                condition_measure_box_left = (
+                    condition_measure_right + self.style.gate_gap
+                )
         else:
             if_start = 0.0
 
@@ -403,6 +407,8 @@ class CircuitLayoutEngine:
         # (no else) header and the trailing else header are not clipped.
         if is_if and affected_qubits:
             min_end = if_start + label_width
+            if condition_measure_box_left is not None:
+                min_end = max(min_end, condition_measure_box_left + label_width)
             for q in affected_qubits:
                 if state.qubit_right_edges.get(q, 0.0) < min_end:
                     state.qubit_right_edges[q] = min_end

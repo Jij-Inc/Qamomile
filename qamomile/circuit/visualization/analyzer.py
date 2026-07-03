@@ -1869,6 +1869,9 @@ class CircuitAnalyzer:
             condition_measure_node_key, condition_measure_qubit_indices = (
                 condition_measure_info
             )
+        if not affected_qubits and condition_measure_qubit_indices:
+            affected_qubits = list(dict.fromkeys(condition_measure_qubit_indices))
+            affected_qubits_precise = True
 
         if self.fold_ifs:
             body_lines = self._format_folded_body_lines(

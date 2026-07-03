@@ -658,8 +658,11 @@ class TestDrawEndToEnd:
 
     def test_empty_single_branch_draws_if_label(self):
         """The renderer keeps an empty single-branch IF visible."""
-        fig = empty_single_branch_if.draw(fold_loops=False)
-        ax = fig._qm_ax  # type: ignore[attr-defined]
-        labels = [text.get_text() for text in ax.texts]
-        assert any(label.startswith("if ") for label in labels)
-        assert len(_if_connector_lines(fig)) == 1
+        for fig in (
+            empty_single_branch_if.draw(fold_loops=False),
+            empty_single_branch_if.draw(fold_loops=False, fold_ifs=True),
+        ):
+            ax = fig._qm_ax  # type: ignore[attr-defined]
+            labels = [text.get_text() for text in ax.texts]
+            assert any(label.startswith("if ") for label in labels)
+            assert len(_if_connector_lines(fig)) == 1

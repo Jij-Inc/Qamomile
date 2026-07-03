@@ -543,6 +543,10 @@ class MatplotlibRenderer:
                 empty_span = self._empty_branch_x_span(
                     i, spans, prev_right, pad, label_width
                 )
+                if empty_span is None and i == 0:
+                    empty_span = self._condition_measure_empty_branch_x_span(
+                        node, positions, gate_widths, label_width
+                    )
                 if empty_span is None:
                     continue
                 box_left, box_right = empty_span
@@ -637,6 +641,35 @@ class MatplotlibRenderer:
                 zorder=PORDER_LINE,
             )
         )
+
+    def _condition_measure_empty_branch_x_span(
+        self,
+        node: VUnfoldedSequence,
+        positions: dict[tuple, float],
+        gate_widths: dict[tuple, float],
+        label_width: float,
+    ) -> tuple[float, float] | None:
+        """Anchor an empty first IF branch to its condition measurement.
+
+        Args:
+            node (VUnfoldedSequence): IF node carrying condition-measurement
+                metadata.
+            positions (dict[tuple, float]): Node-key to center-x mapping.
+            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
+            label_width (float): Reserved width for the branch header label.
+
+        Returns:
+            tuple[float, float] | None: ``(left, right)`` extent for the empty
+                branch box, or None when no condition measurement is positioned.
+        """
+        measure_key = node.condition_measure_node_key
+        if measure_key is None or measure_key not in positions:
+            return None
+        measure_width = gate_widths.get(measure_key, self.style.gate_width)
+        measure_right = positions[measure_key] + measure_width / 2
+        box_left = measure_right + self.style.gate_gap
+        min_width = max(label_width, self.style.gate_width)
+        return box_left, box_left + min_width
 
     def _empty_branch_x_span(
         self,
