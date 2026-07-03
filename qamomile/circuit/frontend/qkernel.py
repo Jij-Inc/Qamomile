@@ -1929,6 +1929,7 @@ class QKernel(Generic[P, R]):
         fold_loops: bool = True,
         expand_composite: bool = False,
         inline_depth: int | None = None,
+        fold_ifs: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Visualize the circuit using Matplotlib.
@@ -1938,23 +1939,32 @@ class QKernel(Generic[P, R]):
         are shown as symbolic parameters.
 
         Args:
-            inline: If True, expand CallBlockOperation contents (inlining).
-                   If False (default), show CallBlockOperation as boxes.
-            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
-                       If False, expand loops and show all iterations.
-            expand_composite: If True, expand CompositeGateOperation (QFT, IQFT, etc.).
-                            If False (default), show as boxes. Independent of inline.
-            inline_depth: Maximum nesting depth for inline expansion. None means
-                         unlimited (default). 0 means no inlining, 1 means top-level
-                         only, etc. Only affects CallBlock/ControlledU, not CompositeGate.
-            **kwargs: Concrete values for arguments. Arguments not provided here
-                     (and without defaults) will be shown as symbolic parameters.
+            inline (bool): If True, expand CallBlockOperation contents
+                (inlining). If False (default), show CallBlockOperation as
+                boxes.
+            fold_loops (bool): If True (default), display ForOperation as
+                blocks instead of unrolling. If False, expand loops and show
+                all iterations.
+            expand_composite (bool): If True, expand CompositeGateOperation
+                nodes. If False (default), show them as boxes.
+            inline_depth (int | None): Maximum nesting depth for inline
+                expansion. None means unlimited. Only affects CallBlock and
+                ControlledU nodes, not CompositeGate.
+            fold_ifs (bool): If True, display IfOperation as folded summary
+                blocks. If False (default), show if/else branches side by side.
+            **kwargs (Any): Concrete values for arguments. Arguments not
+                provided here and without defaults will be shown as symbolic
+                parameters.
 
         Returns:
-            matplotlib.figure.Figure object.
+            Any: Matplotlib figure object.
 
         Raises:
             ImportError: If matplotlib is not installed.
+            ValueError: If a ``Vector[Qubit]`` parameter requires a concrete
+                size for visualization and no size is provided.
+            ValidationError: If visualization-time compile-time if lowering
+                rejects the traced graph.
 
         Example:
             ```python
@@ -1986,6 +1996,9 @@ class QKernel(Generic[P, R]):
             # Draw with loops folded (shown as blocks)
             fig = circuit.draw(fold_loops=True)
 
+            # Draw with if/else folded into a summary box
+            fig = circuit.draw(fold_ifs=True)
+
             # Draw with composite gates expanded
             fig = circuit.draw(expand_composite=True)
             ```
@@ -1996,6 +2009,7 @@ class QKernel(Generic[P, R]):
             self,
             inline=inline,
             fold_loops=fold_loops,
+            fold_ifs=fold_ifs,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
             **kwargs,
