@@ -73,7 +73,7 @@ hadamard_chain.draw(n=5, fold_loops=False)
 # %% [markdown]
 # ## `qmc.items` for Sparse Interaction Data
 #
-# Many quantum algorithms (QAOA, VQE) apply gates only on specific pairs of qubits, determined by a graph or interaction map. Rather than looping over all pairs, you can pass a **dictionary** of interactions and iterate with `qmc.items()`.
+# Many variational algorithms apply gates only on specific pairs of qubits, determined by a graph or interaction map. Rather than looping over all pairs, you can pass a **dictionary** of interactions and iterate with `qmc.items()`.
 #
 # The dictionary type uses Qamomile's symbolic types: `qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]` — keys are qubit index pairs, values are interaction weights.
 
@@ -114,7 +114,7 @@ def sparse_coupling(
 # %% [markdown]
 # ## Dict Subscript Lookup (`d[key]`)
 #
-# Besides iterating with `qmc.items()`, a `qmc.Dict` can be indexed directly with `d[key]`. The most useful pattern is indexing **one dict with the iteration keys of another**: iterate over the cost terms of one dict while looking up a per-term coefficient in a second dict. Multi-angle QAOA, where every cost term carries its own angle, is the canonical example.
+# Besides iterating with `qmc.items()`, a `qmc.Dict` can be indexed directly with `d[key]`. The most useful pattern is indexing **one dict with the iteration keys of another**: iterate over sparse interaction terms in one dict while looking up per-edge scale factors in a second dict.
 
 
 # %%
@@ -310,7 +310,7 @@ assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 # - `qmc.range(n)` for looping over symbolic ranges.
 # - `qmc.items(dict)` for iterating over sparse key-value data (edges, weights).
 # - `d[key]` for looking up one dict by the iteration keys of another
-#   (per-term coefficients, multi-angle QAOA).
+#   (per-edge coefficients or calibration scales).
 # - `if bit:` and `while bit:` for branching on **measurement results**.
 #   Both branches must handle the same qubit handles (affine rule).
 # - These control flow patterns transpile to native quantum SDK instructions

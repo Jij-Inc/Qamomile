@@ -5,8 +5,8 @@ Covers the frontend ``Dict.__getitem__`` tracing (symbolic
 emit-time key resolution against bound dict data, value-type wiring
 (``Dict[K, Float]`` / ``Dict[K, UInt]``), the forced unrolling of
 ``qmc.range`` loops whose body looks up a dict with the loop variable,
-and cross-backend execution equivalence for a multi-angle QAOA-style
-kernel that indexes one dict with the iteration keys of another.
+and cross-backend execution equivalence for a sparse weighted layer that
+indexes one dict with the iteration keys of another.
 """
 
 from __future__ import annotations
@@ -25,28 +25,28 @@ from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
 
 
 @qmc.qkernel
-def ma_qaoa_subscript(
+def sparse_weighted_layer(
     n: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     linear: qmc.Dict[qmc.UInt, qmc.Float],
-    quad_gamma: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear_gamma: qmc.Dict[qmc.UInt, qmc.Float],
+    quad_scale: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear_scale: qmc.Dict[qmc.UInt, qmc.Float],
     beta: qmc.Float,
 ) -> qmc.Vector[qmc.Bit]:
-    """Multi-angle QAOA layer indexing per-term angle dicts by loop keys."""
+    """Sparse coupling layer indexing per-term scale dicts by loop keys."""
     q = qmc.qubit_array(n, name="q")
     q = qmc.h(q)
     for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=hi * linear_gamma[i])
+        q[i] = qmc.rz(q[i], angle=hi * linear_scale[i])
     for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * quad_gamma[(i, j)])
+        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * quad_scale[(i, j)])
     for i in qmc.range(n):
         q[i] = qmc.rx(q[i], angle=2.0 * beta)
     return qmc.measure(q)
 
 
 @qmc.qkernel
-def ma_qaoa_reference(
+def preweighted_sparse_layer(
     n: qmc.UInt,
     quad_angle: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     linear_angle: qmc.Dict[qmc.UInt, qmc.Float],
@@ -65,36 +65,36 @@ def ma_qaoa_reference(
 
 
 @qmc.qkernel
-def ma_qaoa_subscript_expval(
+def sparse_weighted_layer_expval(
     n: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     linear: qmc.Dict[qmc.UInt, qmc.Float],
-    quad_gamma: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear_gamma: qmc.Dict[qmc.UInt, qmc.Float],
+    quad_scale: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear_scale: qmc.Dict[qmc.UInt, qmc.Float],
     beta: qmc.Float,
     hamiltonian: qmc.Observable,
 ) -> qmc.Float:
-    """Expval variant of :func:`ma_qaoa_subscript`."""
+    """Expval variant of :func:`sparse_weighted_layer`."""
     q = qmc.qubit_array(n, name="q")
     q = qmc.h(q)
     for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=hi * linear_gamma[i])
+        q[i] = qmc.rz(q[i], angle=hi * linear_scale[i])
     for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * quad_gamma[(i, j)])
+        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * quad_scale[(i, j)])
     for i in qmc.range(n):
         q[i] = qmc.rx(q[i], angle=2.0 * beta)
     return qmc.expval(q, hamiltonian)
 
 
 @qmc.qkernel
-def ma_qaoa_reference_expval(
+def preweighted_sparse_layer_expval(
     n: qmc.UInt,
     quad_angle: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     linear_angle: qmc.Dict[qmc.UInt, qmc.Float],
     beta: qmc.Float,
     hamiltonian: qmc.Observable,
 ) -> qmc.Float:
-    """Expval variant of :func:`ma_qaoa_reference`."""
+    """Expval variant of :func:`preweighted_sparse_layer`."""
     q = qmc.qubit_array(n, name="q")
     q = qmc.h(q)
     for i, ai in linear_angle.items():
@@ -112,47 +112,47 @@ def ma_qaoa_reference_expval(
 
 
 def _random_problem(rng: np.random.Generator, n: int) -> dict:
-    """Draw a random ring-coupled Ising instance with per-term gammas.
+    """Draw a random ring-coupled Ising instance with per-term scales.
 
     Args:
         rng (np.random.Generator): Seeded generator.
         n (int): Number of qubits (ring of n couplings for n >= 2).
 
     Returns:
-        dict: Bindings for :func:`ma_qaoa_subscript` (without
+        dict: Bindings for :func:`sparse_weighted_layer` (without
             ``hamiltonian``).
     """
     pairs = [(i, (i + 1) % n) for i in range(n)] if n >= 3 else [(0, 1)]
     quad = {p: float(rng.uniform(-1, 1)) for p in pairs}
     linear = {i: float(rng.uniform(-1, 1)) for i in range(n)}
-    quad_gamma = {p: float(rng.uniform(0, 2 * np.pi)) for p in pairs}
-    linear_gamma = {i: float(rng.uniform(0, 2 * np.pi)) for i in range(n)}
+    quad_scale = {p: float(rng.uniform(0, 2 * np.pi)) for p in pairs}
+    linear_scale = {i: float(rng.uniform(0, 2 * np.pi)) for i in range(n)}
     return dict(
         n=n,
         quad=quad,
         linear=linear,
-        quad_gamma=quad_gamma,
-        linear_gamma=linear_gamma,
+        quad_scale=quad_scale,
+        linear_scale=linear_scale,
         beta=float(rng.uniform(0, np.pi)),
     )
 
 
 def _reference_bindings(bindings: dict) -> dict:
-    """Fold coeff * gamma host-side into the reference kernel's bindings.
+    """Fold coeff * scale host-side into the reference kernel's bindings.
 
     Args:
         bindings (dict): Bindings produced by :func:`_random_problem`.
 
     Returns:
-        dict: Bindings for :func:`ma_qaoa_reference`.
+        dict: Bindings for :func:`preweighted_sparse_layer`.
     """
     return dict(
         n=bindings["n"],
         quad_angle={
-            k: bindings["quad"][k] * bindings["quad_gamma"][k] for k in bindings["quad"]
+            k: bindings["quad"][k] * bindings["quad_scale"][k] for k in bindings["quad"]
         },
         linear_angle={
-            k: bindings["linear"][k] * bindings["linear_gamma"][k]
+            k: bindings["linear"][k] * bindings["linear_scale"][k]
             for k in bindings["linear"]
         },
         beta=bindings["beta"],
@@ -186,7 +186,9 @@ class TestDictGetItemTrace:
 
     def test_symbolic_key_traces_dict_getitem_op(self):
         """A loop-variable key lookup traces a DictGetItemOperation."""
-        block = ma_qaoa_subscript.build(**_random_problem(np.random.default_rng(0), 3))
+        block = sparse_weighted_layer.build(
+            **_random_problem(np.random.default_rng(0), 3)
+        )
         for_items_ops = [
             op for op in block.operations if isinstance(op, ForItemsOperation)
         ]
@@ -305,9 +307,9 @@ class TestDictGetItemEmit:
 
         rng = np.random.default_rng(42)
         bindings = _random_problem(rng, 3)
-        exe = qiskit_transpiler.transpile(ma_qaoa_subscript, bindings=bindings)
+        exe = qiskit_transpiler.transpile(sparse_weighted_layer, bindings=bindings)
         exe_ref = qiskit_transpiler.transpile(
-            ma_qaoa_reference, bindings=_reference_bindings(bindings)
+            preweighted_sparse_layer, bindings=_reference_bindings(bindings)
         )
 
         def statevector(circuit):
@@ -408,13 +410,13 @@ class TestDictGetItemCrossBackend:
         hamiltonian = _ising_hamiltonian(bindings)
 
         exe = transpiler.transpile(
-            ma_qaoa_subscript_expval,
+            sparse_weighted_layer_expval,
             bindings=dict(bindings, hamiltonian=hamiltonian),
         )
         expval = exe.run(transpiler.executor(), bindings={}).result()
 
         exe_ref = transpiler.transpile(
-            ma_qaoa_reference_expval,
+            preweighted_sparse_layer_expval,
             bindings=dict(_reference_bindings(bindings), hamiltonian=hamiltonian),
         )
         expval_ref = exe_ref.run(transpiler.executor(), bindings={}).result()
@@ -427,7 +429,7 @@ class TestDictGetItemCrossBackend:
         transpiler = sdk_transpiler.transpiler
         n = 3
         bindings = _random_problem(np.random.default_rng(seed), n)
-        exe = transpiler.transpile(ma_qaoa_subscript, bindings=bindings)
+        exe = transpiler.transpile(sparse_weighted_layer, bindings=bindings)
         result = exe.sample(transpiler.executor(), shots=256).result()
 
         assert sum(count for _, count in result.results) == 256
