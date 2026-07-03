@@ -130,7 +130,14 @@ rejected today; a future PR may add a migration table.
 
 from __future__ import annotations
 
-# The current schema version. Bump on every breaking change.
+# The current schema version.
+#
+# Project policy (2026-07): the wire format is NOT yet stable and no
+# cross-version compatibility is promised. Format changes — including
+# breaking ones that drop or reshape fields — land under version 1
+# without a bump; producers and consumers are expected to run the same
+# qamomile revision. Version negotiation / migration is deferred until
+# the format is declared stable.
 #
 # Note: ``SymbolicControlledU`` gained an optional
 # ``control_index_refs`` slot during the controlled-API redesign,
@@ -150,20 +157,9 @@ from __future__ import annotations
 # ``$hamiltonian`` payload wrapper (with its ``$complex`` coefficient
 # sub-wrapper) is additive too: pre-existing payloads contain no such
 # wrapper (encoding a Hamiltonian used to raise ``TypeError``), so v1
-# readers that know the tag can still read every older payload.
-#
-# v2: loop operations carry ``loop_carried_rebinds`` records
-# (``LoopCarriedRebind`` on ``ForOperation`` / ``WhileOperation`` /
-# ``ForItemsOperation``).  Unlike the additive fields above, these
-# records are load-bearing for SAFETY: the transpiler's
-# ``reject_loop_carried_classical_rebinds`` check reads them to refuse
-# kernels that would otherwise silently miscompile (a loop body is
-# traced once, so ``total = total + i`` reads a stale pre-loop value).
-# A v1 reader receiving a record-carrying payload would drop the
-# records via ``d.get(...)`` defaults and re-open the silent-miscompile
-# hole, so the version is bumped: v1 readers now reject v2 payloads
-# loudly at the envelope check instead of silently weakening the
-# validation.  No v1→v2 migration is provided (records cannot be
-# reconstructed from a record-less payload; re-trace the kernel with
-# the current frontend to obtain them).
-SCHEMA_VERSION: int = 2
+# readers that know the tag can still read every older payload.  The
+# ``loop_carried_rebinds`` records on loop operations follow the same
+# additive encoding (safety caveat: a reader that predates them drops
+# the records and with them the loop-carried rebind rejection — accepted
+# under the same-revision policy above).
+SCHEMA_VERSION: int = 1
