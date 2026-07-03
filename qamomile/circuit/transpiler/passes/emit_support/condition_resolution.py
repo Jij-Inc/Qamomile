@@ -260,9 +260,9 @@ def map_phi_outputs(
                             from qamomile.circuit.transpiler.errors import EmitError
 
                             raise EmitError(
-                                "Quantum PhiOp merge requires identical physical "
+                                "Quantum if-merge requires identical physical "
                                 "resources across branches",
-                                operation="PhiOp",
+                                operation="IfOperation",
                             )
                         output_mapping[idx] = true_idx
                     map_array_element_aliases(output.uuid, output_mapping, qubit_map)
@@ -287,18 +287,18 @@ def map_phi_outputs(
                         from qamomile.circuit.transpiler.errors import EmitError
 
                         raise EmitError(
-                            "Quantum PhiOp merge requires identical physical "
+                            "Quantum if-merge requires identical physical "
                             "resources across branches",
-                            operation="PhiOp",
+                            operation="IfOperation",
                         )
                     qubit_map[QubitAddress(output.uuid)] = true_phys
                 elif true_phys is not None or false_phys is not None:
                     from qamomile.circuit.transpiler.errors import EmitError
 
                     raise EmitError(
-                        "Quantum PhiOp merge requires identical physical "
+                        "Quantum if-merge requires identical physical "
                         "resources across branches",
-                        operation="PhiOp",
+                        operation="IfOperation",
                     )
 
         elif isinstance(output.type, BitType):

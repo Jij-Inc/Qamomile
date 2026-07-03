@@ -20,7 +20,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
 from qamomile.circuit.ir.value import (
@@ -355,17 +354,30 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 lowered_false, subst_false, dead_false = self._lower_operations(
                     op.false_operations, dict(concrete_values)
                 )
-                # Apply nested substitutions to phi_ops.
+                # Apply nested substitutions to the branch-merge yields:
+                # a yield may reference the merged output of a
+                # compile-time if that was just lowered inside a branch.
                 nested_subst_if = {**subst_true, **subst_false}
-                new_phi_ops = cast(
-                    list[PhiOp],
-                    [self._apply_substitution(p, nested_subst_if) for p in op.phi_ops],
-                )
+                new_true_yields = op.true_yields
+                new_false_yields = op.false_yields
+                if nested_subst_if:
+                    nested_substitutor = ValueSubstitutor(
+                        nested_subst_if, transitive=True
+                    )
+                    new_true_yields = [
+                        cast(Value, nested_substitutor.substitute_value(v))
+                        for v in op.true_yields
+                    ]
+                    new_false_yields = [
+                        cast(Value, nested_substitutor.substitute_value(v))
+                        for v in op.false_yields
+                    ]
                 op = dataclasses.replace(
                     op,
                     true_operations=lowered_true,
                     false_operations=lowered_false,
-                    phi_ops=new_phi_ops,
+                    true_yields=new_true_yields,
+                    false_yields=new_false_yields,
                 )
                 dead_uuids.update(dead_true)
                 dead_uuids.update(dead_false)
@@ -457,17 +469,23 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             new_false = [
                 self._apply_substitution(o, subst) for o in op.false_operations
             ]
-            new_phi = cast(
-                list[PhiOp],
-                [self._apply_substitution(p, subst) for p in op.phi_ops],
-            )
+            # Branch-merge yields may reference outputs of previously
+            # lowered ifs; rewrite them through the same substitutor as
+            # the operands.
+            new_true_yields = [
+                cast(Value, substitutor.substitute_value(v)) for v in op.true_yields
+            ]
+            new_false_yields = [
+                cast(Value, substitutor.substitute_value(v)) for v in op.false_yields
+            ]
             return dataclasses.replace(
                 op,
                 operands=new_operands,
                 results=new_results,
                 true_operations=new_true,
                 false_operations=new_false,
-                phi_ops=new_phi,
+                true_yields=new_true_yields,
+                false_yields=new_false_yields,
             )
 
         from qamomile.circuit.ir.operation.gate import (

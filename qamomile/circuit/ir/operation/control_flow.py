@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 import typing
-from typing import cast
 
 from qamomile.circuit.ir.types.primitives import BitType, BlockType, UIntType
 from qamomile.circuit.ir.value import Value, ValueBase
 
 from .operation import Operation, OperationKind, ParamHint, Signature
-
-if typing.TYPE_CHECKING:
-    from .arithmetic_operations import PhiOp
 
 
 class IfMerge(typing.NamedTuple):
@@ -19,8 +15,9 @@ class IfMerge(typing.NamedTuple):
     An ``IfOperation`` merges each variable touched by its branches back
     into a single SSA value. ``IfMerge`` is the read-side view of one such
     merge slot, decoupling every consumer from how the merge is stored in
-    the IR (today a ``PhiOp`` in ``IfOperation.phi_ops``; the storage may
-    change without touching consumers).
+    the IR (today the parallel ``IfOperation.true_yields`` /
+    ``false_yields`` lists; the storage may change without touching
+    consumers).
 
     Attributes:
         index (int): Position of this merge among the if's results.
@@ -169,6 +166,32 @@ def _replace_rebind_values(
             changed = True
         new_rebinds.append(rebind)
     return tuple(new_rebinds) if changed else None
+
+
+def _replace_yield_values(
+    values: list[Value],
+    mapping: dict[str, ValueBase],
+) -> list[Value] | None:
+    """Substitute branch-yield values through a UUID mapping.
+
+    Args:
+        values (list[Value]): Yield values to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        list[Value] | None: Rewritten list, or ``None`` when nothing
+            changed.
+    """
+    new_values: list[Value] = []
+    changed = False
+    for value in values:
+        mapped = mapping.get(value.uuid)
+        if isinstance(mapped, Value) and mapped is not value:
+            new_values.append(mapped)
+            changed = True
+        else:
+            new_values.append(value)
+    return new_values if changed else None
 
 
 @dataclasses.dataclass
@@ -451,29 +474,72 @@ class IfOperation(HasNestedOps, Operation):
     Attributes:
         true_operations: List of operations in the true branch
         false_operations: List of operations in the false branch (may be empty)
-        phi_ops: List of PhiOp instances merging values from both branches
+        true_yields: Values the true branch yields into the merges,
+            index-aligned with ``results`` (``true_yields[i]`` merges
+            into ``results[i]``)
+        false_yields: Values the false branch yields into the merges,
+            index-aligned with ``results``
         operands[0]: condition (Bit type from measurement or comparison)
-        results: Phi-merged output values from both branches
+        results: Merged output values, one per yield pair
+
+    Note:
+        Yields are deliberately NOT operands: the affine-type walk counts
+        quantum operands as consumes, and an identity merge legitimately
+        carries the same quantum Value on both sides, which would
+        double-count as a second consume. Generic passes reach the yields
+        through the ``all_input_values`` / ``replace_values`` overrides
+        instead.
     """
 
     true_operations: list[Operation] = dataclasses.field(default_factory=list)
     false_operations: list[Operation] = dataclasses.field(default_factory=list)
-    phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
+    true_yields: list[Value] = dataclasses.field(default_factory=list)
+    false_yields: list[Value] = dataclasses.field(default_factory=list)
 
     def nested_op_lists(self) -> list[list[Operation]]:
-        return [
-            self.true_operations,
-            self.false_operations,
-            cast(list[Operation], self.phi_ops),
-        ]
+        return [self.true_operations, self.false_operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(
             self,
             true_operations=new_lists[0],
             false_operations=new_lists[1],
-            phi_ops=cast("list[PhiOp]", new_lists[2]),
         )
+
+    def all_input_values(self) -> list[ValueBase]:
+        """Include the branch-yield values for cloning/substitution.
+
+        The yields are subclass-specific Value fields (not operands —
+        see the class docstring), so generic passes reach them through
+        this override, mirroring ``ForItemsOperation.key_var_values``.
+
+        Returns:
+            list[ValueBase]: Base input values plus the true/false
+                yields.
+        """
+        values = super().all_input_values()
+        values.extend(self.true_yields)
+        values.extend(self.false_yields)
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        """Substitute operand, result, and branch-yield values.
+
+        Args:
+            mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+        Returns:
+            Operation: The rewritten operation.
+        """
+        result = super().replace_values(mapping)
+        assert isinstance(result, IfOperation)
+        new_true = _replace_yield_values(result.true_yields, mapping)
+        if new_true is not None:
+            result = dataclasses.replace(result, true_yields=new_true)
+        new_false = _replace_yield_values(result.false_yields, mapping)
+        if new_false is not None:
+            result = dataclasses.replace(result, false_yields=new_false)
+        return result
 
     @property
     def condition(self) -> Value:
@@ -482,55 +548,44 @@ class IfOperation(HasNestedOps, Operation):
     def iter_merges(self) -> typing.Iterator[IfMerge]:
         """Iterate the branch-merge slots of this if-else.
 
-        This is the single read API for phi semantics: passes must consume
-        merges through it (never through ``phi_ops`` internals) so the
-        underlying storage can change without touching consumers.
+        This is the single read API for merge semantics: passes must
+        consume merges through it (never through the yield lists
+        directly) so the underlying storage can change without touching
+        consumers.
 
         Yields:
             IfMerge: One entry per merged output, in result order.
 
         Raises:
             RuntimeError: If the stored merge data is internally
-                inconsistent (merge count differs from result count, a
-                merge does not have exactly condition/true/false operands
-                and one result, or a merge result does not match the
-                if-operation result at the same position). Any of these
-                indicates IR corruption, not a user error.
+                inconsistent (the yield-list lengths differ from the
+                result count). This indicates IR corruption, not a user
+                error.
         """
-        if len(self.phi_ops) != len(self.results):
+        if not (len(self.true_yields) == len(self.false_yields) == len(self.results)):
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                f"{len(self.phi_ops)} phi_ops for {len(self.results)} "
-                "results. Merges must be created through add_merge()."
+                f"{len(self.true_yields)} true_yields / "
+                f"{len(self.false_yields)} false_yields for "
+                f"{len(self.results)} results. Merges must be created "
+                "through add_merge()."
             )
-        for i, phi in enumerate(self.phi_ops):
-            if len(phi.operands) != 3 or len(phi.results) != 1:
-                raise RuntimeError(
-                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                    f"phi_ops[{i}] has {len(phi.operands)} operands and "
-                    f"{len(phi.results)} results; expected "
-                    "[condition, true_value, false_value] -> [output]."
-                )
-            if phi.results[0].uuid != self.results[i].uuid:
-                raise RuntimeError(
-                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                    f"phi_ops[{i}] output '{phi.results[0].uuid}' does not "
-                    f"match results[{i}] '{self.results[i].uuid}'."
-                )
+        for i, (true_value, false_value, result) in enumerate(
+            zip(self.true_yields, self.false_yields, self.results, strict=True)
+        ):
             yield IfMerge(
                 index=i,
-                true_value=phi.operands[1],
-                false_value=phi.operands[2],
-                result=self.results[i],
+                true_value=true_value,
+                false_value=false_value,
+                result=result,
             )
 
     def add_merge(self, true_value: Value, false_value: Value, result: Value) -> None:
         """Append a branch-merge slot to this if-else.
 
         The only sanctioned construction path for merges: it keeps the
-        merge storage (currently a ``PhiOp`` plus the mirrored entry in
-        ``results``) consistent so ``iter_merges`` can rely on the
-        invariants it checks.
+        yield lists and ``results`` index-aligned so ``iter_merges`` can
+        rely on the invariants it checks.
 
         Args:
             true_value (Value): Value selected when the condition is true.
@@ -543,21 +598,13 @@ class IfOperation(HasNestedOps, Operation):
                 this operation yet (``operands[0]`` must exist before
                 merges are added).
         """
-        # Runtime import mirrors the TYPE_CHECKING guard above: PhiOp lives
-        # in a sibling module that also imports from .operation.
-        from .arithmetic_operations import PhiOp
-
         if not self.operands:
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation.add_merge requires the "
                 "condition operand to be attached first."
             )
-        self.phi_ops.append(
-            PhiOp(
-                operands=[self.condition, true_value, false_value],
-                results=[result],
-            )
-        )
+        self.true_yields.append(true_value)
+        self.false_yields.append(false_value)
         self.results.append(result)
 
     @property

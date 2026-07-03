@@ -10,7 +10,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
 )
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
@@ -78,8 +77,6 @@ class ClassicalExecutor:
             self._execute_notop(op, context, results, scoped_locals)
         elif isinstance(op, CondOp):
             self._execute_condop(op, context, results, scoped_locals)
-        elif isinstance(op, PhiOp):
-            self._execute_phi(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
         elif isinstance(op, DictGetItemOperation):
@@ -186,19 +183,6 @@ class ClassicalExecutor:
             raise ExecutionError(f"CondOp evaluation failed: kind={op.kind}")
         if op.results:
             results[op.results[0].uuid] = result_value
-
-    def _execute_phi(
-        self,
-        op: PhiOp,
-        context: ExecutionContext,
-        results: dict[str, Any],
-        scoped_locals: dict[str, Any],
-    ) -> None:
-        """Execute SSA phi merge after a conditional branch."""
-        condition = bool(self._get_value(op.condition, context, results, scoped_locals))
-        selected = op.true_value if condition else op.false_value
-        merged = self._get_value(selected, context, results, scoped_locals)
-        results[op.output.uuid] = merged
 
     def _execute_decode_qfixed(
         self,

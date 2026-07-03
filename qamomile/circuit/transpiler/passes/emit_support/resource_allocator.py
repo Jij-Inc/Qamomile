@@ -263,7 +263,7 @@ class ResourceAllocator:
                     self._allocate_recursive(
                         op.false_operations, qubit_map, clbit_map, bindings
                     )
-                    self._allocate_phi_ops(op, qubit_map, clbit_map)
+                    self._allocate_if_merges(op, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
                 # WhileOperation operands:
@@ -290,9 +290,10 @@ class ResourceAllocator:
 
                     # Save the canonical clbit for the initial condition
                     # BEFORE body allocation.  An if-only (no else) inside
-                    # the loop body produces a PhiOp whose false_val is the
-                    # pre-if while-condition value.  map_phi_outputs will
-                    # redirect that false_val UUID to the true-branch clbit,
+                    # the loop body produces a merge whose false_value is
+                    # the pre-if while-condition value.  map_phi_outputs
+                    # will redirect that false-source UUID to the
+                    # true-branch clbit,
                     # overwriting clbit_map[init_addr] and making the
                     # post-body mismatch detection ineffective.
                     saved_init_clbit = clbit_map.get(init_addr)
@@ -319,8 +320,8 @@ class ResourceAllocator:
                     # Alias the loop-carried condition to the initial
                     # while-condition clbit.  After body allocation the
                     # loop-carried UUID may point to a different clbit
-                    # (e.g. a phi-merged measurement from an if-else).
-                    # We recursively trace IfOperation phi_ops and map all
+                    # (e.g. a merged measurement from an if-else).
+                    # We recursively trace IfOperation merges and map all
                     # upstream branch-measurement UUIDs to the canonical clbit.
                     if (
                         saved_init_clbit is not None
@@ -400,10 +401,10 @@ class ResourceAllocator:
         canonical_clbit: int,
         clbit_map: ClbitMap,
     ) -> None:
-        """Recursively trace PhiOp sources and alias them to *canonical_clbit*.
+        """Recursively trace if-merge sources and alias them to *canonical_clbit*.
 
         When a while loop body contains an if-else with measurements in
-        both branches, the phi-merged result (the loop-carried condition)
+        both branches, the merged result (the loop-carried condition)
         and all its upstream branch-measurement UUIDs must write to the
         same classical bit as the initial while condition.
         """
@@ -433,13 +434,13 @@ class ResourceAllocator:
                     op.false_operations, false_addr, canonical_clbit, clbit_map
                 )
 
-    def _allocate_phi_ops(
+    def _allocate_if_merges(
         self,
         op: IfOperation,
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
     ) -> None:
-        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
+        """Register merge output UUIDs via the shared ``map_phi_outputs`` utility.
 
         Args:
             op (IfOperation): The runtime if-else whose merged outputs need

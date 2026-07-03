@@ -1217,8 +1217,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         # Filter dead-and-modified variables from output.  A variable that is
         # stored (modified) in a branch but never loaded after the if would
-        # generate an unnecessary PhiOp whose physical resources may differ
-        # across branches, causing EmitError at emit time.
+        # generate an unnecessary merge slot whose physical resources may
+        # differ across branches, causing EmitError at emit time.
         # Variables that are dead but NOT stored in any branch pass through
         # unchanged (their phi has identical resources) and are harmless.
         stored_in_branches = collector_body.store_vars | collector_orelse.store_vars

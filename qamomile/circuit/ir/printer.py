@@ -39,12 +39,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
+    IfMerge,
     IfOperation,
     WhileOperation,
 )
@@ -181,9 +181,9 @@ class _BlockPrinter:
             self.lines.append(f"{pad}}} else {{")
             self._emit_ops(op.false_operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
-        # Phi merges live at the same indent as the if-operation.
-        for phi in op.phi_ops:
-            self.lines.append(pad + _format_flat_op(phi))
+        # Branch merges live at the same indent as the if-operation.
+        for merge in op.iter_merges():
+            self.lines.append(pad + _format_merge(op, merge))
 
     def _emit_while(self, op: WhileOperation, *, indent: int, pad: str) -> None:
         cond = _format_value(op.operands[0]) if op.operands else "<cond>"
@@ -245,8 +245,6 @@ def _format_flat_op(op: Operation) -> str:
         return _format_pauli_evolve(op)
     if isinstance(op, ExpvalOp):
         return _format_simple(op, "expval")
-    if isinstance(op, PhiOp):
-        return _format_phi(op)
     if isinstance(op, BinOp):
         return _format_binary(op, _BINOP_SYMBOLS)
     if isinstance(op, CompOp):
@@ -354,11 +352,24 @@ def _format_pauli_evolve(op: PauliEvolveOp) -> str:
     return f"{_format_results(op.results)} = pauli_evolve({', '.join(parts)})"
 
 
-def _format_phi(op: PhiOp) -> str:
-    cond = _format_value(op.condition) if op.operands else "<cond>"
-    tv = _format_value(op.true_value) if len(op.operands) > 1 else "<tv>"
-    fv = _format_value(op.false_value) if len(op.operands) > 2 else "<fv>"
-    return f"{_format_results(op.results)} = phi({cond} ? {tv} : {fv})"
+def _format_merge(op: IfOperation, merge: IfMerge) -> str:
+    """Format one branch-merge slot as a select expression line.
+
+    Args:
+        op (IfOperation): The if-else the merge belongs to (supplies the
+            condition operand).
+        merge (IfMerge): The merge slot to format.
+
+    Returns:
+        str: A ``result = select(cond ? true : false)`` line.
+    """
+    cond = _format_value(op.operands[0]) if op.operands else "<cond>"
+    true_value = _format_value(merge.true_value)
+    false_value = _format_value(merge.false_value)
+    return (
+        f"{_format_results([merge.result])} = "
+        f"select({cond} ? {true_value} : {false_value})"
+    )
 
 
 def _format_binary(op: Operation, table: dict[Any, str]) -> str:
