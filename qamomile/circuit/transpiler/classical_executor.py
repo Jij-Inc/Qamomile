@@ -18,7 +18,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    StoreArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -26,7 +29,13 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    resolve_root_array_index,
+)
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.segments import ClassicalSegment
@@ -149,6 +158,8 @@ class ClassicalExecutor:
             self._execute_phi(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
+        elif isinstance(op, StoreArrayElementOperation):
+            self._execute_store_array_element(op, context, results, scoped_locals)
         elif isinstance(op, ForOperation):
             self._execute_for(op, context, results, scoped_locals)
         elif isinstance(op, ForItemsOperation):
@@ -401,6 +412,197 @@ class ClassicalExecutor:
         if op.results:
             results[op.results[0].uuid] = value
 
+    def _execute_store_array_element(
+        self,
+        op: StoreArrayElementOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Execute a classical array element store.
+
+        Reads the current contents of the source array, replaces the
+        addressed element with the stored value, and records the updated
+        container under the result value's UUID.
+
+        Inside a loop body each store op executes once per iteration
+        while the IR carries a single ``source -> result`` version pair.
+        To keep iterations cumulative — including bodies with multiple
+        stores to the same logical array — the running contents are
+        shared across all stores to that array via a namespaced
+        ``results`` key derived from the array's ``logical_id`` (stable
+        across SSA versions). Each store bases its update on that shared
+        snapshot when present (falling back to the source array on the
+        very first store) and writes the updated contents back to both
+        the shared key and its own ``result.uuid``. Stores that read an
+        element of the same logical array they write (which would see
+        stale pre-loop contents in this loop-carried mode) are rejected
+        earlier, at compile time, by ``AnalyzePass``.
+
+        Args:
+            op (StoreArrayElementOperation): The store to execute.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map; the updated
+                container is recorded under ``op.results[0].uuid`` and
+                under the array's shared running-state key.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Raises:
+            ExecutionError: If the source array contents cannot be
+                resolved or the index is out of range.
+        """
+        result_value = op.results[0]
+
+        # The store's array and its result share one logical_id across SSA
+        # versions; the prefix keeps this running-state key from colliding
+        # with value-uuid / name keys in ``results``.
+        state_key = f"__store_array_state__:{result_value.logical_id}"
+
+        if state_key in results:
+            # A previous store to the same logical array (earlier in this
+            # iteration or in a previous one): continue from its contents.
+            base = results[state_key]
+        else:
+            base = self._resolve_store_base(op.array, context, results, scoped_locals)
+
+        index_values = op.index_values
+        if len(index_values) != 1:
+            raise ExecutionError(
+                f"StoreArrayElementOperation supports 1-D arrays only; "
+                f"got {len(index_values)} indices."
+            )
+        index = int(self._get_value(index_values[0], context, results, scoped_locals))
+
+        elements = list(base)
+        if not 0 <= index < len(elements):
+            raise ExecutionError(
+                f"Store index {index} is out of range for array "
+                f"'{op.array.name}' of length {len(elements)}."
+            )
+        elements[index] = self._get_value(
+            op.stored_value, context, results, scoped_locals
+        )
+        updated = tuple(elements)
+        # The shared key chains subsequent stores to the same logical array;
+        # the per-version uuid entry keeps downstream reads of this SSA
+        # version and block-output resolution via output_refs working.
+        results[state_key] = updated
+        results[result_value.uuid] = updated
+
+    def _materialize_loop_store_defaults(
+        self,
+        operations: list[Operation],
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Materialize zero-iteration defaults for loop-carried array stores.
+
+        Store operations inside a traced loop produce SSA result values
+        even when the loop executes zero times at runtime.  Python
+        semantics leave the array unchanged in that case, so each store
+        result in the loop body must resolve to the current pre-loop
+        contents until an executed iteration overwrites it.
+
+        Args:
+            operations (list[Operation]): Loop body operations to scan,
+                including nested control-flow bodies.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map seeded with
+                default store outputs.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Raises:
+            ExecutionError: If a store's source array cannot be resolved.
+        """
+        for op in operations:
+            if isinstance(op, StoreArrayElementOperation):
+                self._materialize_store_default(op, context, results, scoped_locals)
+            elif isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    self._materialize_loop_store_defaults(
+                        body, context, results, scoped_locals
+                    )
+
+    def _materialize_store_default(
+        self,
+        op: StoreArrayElementOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Record a store result as the current source-array contents.
+
+        Args:
+            op (StoreArrayElementOperation): Store whose result should
+                default to the pre-loop array state.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map updated under
+                both the store result UUID and the logical running-state key.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Raises:
+            ExecutionError: If the source array cannot be resolved.
+        """
+        result_value = op.results[0]
+        state_key = f"__store_array_state__:{result_value.logical_id}"
+        base = (
+            results[state_key]
+            if state_key in results
+            else self._resolve_store_base(op.array, context, results, scoped_locals)
+        )
+        results[state_key] = base
+        results[result_value.uuid] = base
+
+    def _resolve_store_base(
+        self,
+        array_value: ArrayValue,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> Any:
+        """Resolve the full contents of a store's source array.
+
+        Tries the whole-container lookup used for reads
+        (:meth:`_get_array_data`) first, then falls back to assembling
+        per-element composite carrier keys (``"<uuid>_<index>"``) — the
+        format under which measurement results are loaded into the
+        execution context.
+
+        Args:
+            array_value (ArrayValue): The store's source array operand.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Results map of the current segment.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Returns:
+            Any: A sequence with the array's current contents.
+
+        Raises:
+            ExecutionError: If neither a whole container nor per-element
+                keys can be resolved.
+        """
+        container = self._get_array_data(array_value, context, results, scoped_locals)
+        if container is not None:
+            return container
+
+        elements: list[Any] = []
+        i = 0
+        while context.has(f"{array_value.uuid}_{i}"):
+            elements.append(context.get(f"{array_value.uuid}_{i}"))
+            i += 1
+        if elements:
+            return tuple(elements)
+
+        raise ExecutionError(
+            f"Array contents for '{array_value.name}' could not be "
+            f"resolved for element store."
+        )
+
     def _execute_for(
         self,
         op: ForOperation,
@@ -428,6 +630,9 @@ class ClassicalExecutor:
         if step == 0:
             raise ExecutionError("ForOperation step must not be zero")
 
+        self._materialize_loop_store_defaults(
+            op.operations, context, results, scoped_locals
+        )
         for loop_value in range(start, stop, step):
             loop_scope = scoped_locals.copy()
             loop_scope[op.loop_var] = loop_value
@@ -446,6 +651,9 @@ class ClassicalExecutor:
 
         iterable = self._get_iterable(op.operands[0], context, results, scoped_locals)
 
+        self._materialize_loop_store_defaults(
+            op.operations, context, results, scoped_locals
+        )
         for key, value in iterable:
             loop_scope = scoped_locals.copy()
             self._bind_for_items_key(loop_scope, op, key)
@@ -570,6 +778,16 @@ class ClassicalExecutor:
             indexed_key = f"{parent.name}[{indices[0]}]"
             if context.has(indexed_key):
                 return context.get(indexed_key)
+            # Measurement results are loaded into the context under
+            # per-element composite carrier keys ("<root_uuid>_<index>").
+            # Compose slice views back onto the root so a view-local
+            # index addresses the right physical slot.
+            resolved = resolve_root_array_index(parent, indices[0])
+            if resolved is not None:
+                root_array, root_index = resolved
+                composite_key = f"{root_array.uuid}_{root_index}"
+                if context.has(composite_key):
+                    return context.get(composite_key)
 
         resolved_location = resolve_runtime_array_location(
             parent,

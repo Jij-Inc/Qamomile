@@ -15,7 +15,7 @@ not produced by the canonical encoder) raises ``ValueError``.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -46,7 +46,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeOpKind,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    StoreArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -89,6 +92,7 @@ from qamomile.circuit.ir.value import (
     ValueBase,
     ValueLike,
     ValueMetadata,
+    _freeze_data,
 )
 
 from .hamiltonian_io import dict_to_hamiltonian, is_hamiltonian_wrapper
@@ -244,6 +248,10 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
         raise ValueError("block dict is missing 'value_table' list")
     ctx = _DecodeContext(value_table)
 
+    # Block I/O may legitimately carry ``DictValue`` / ``TupleValue``:
+    # a ``qmc.Dict`` / ``qmc.Tuple`` kernel argument lands in
+    # ``input_values`` and a container pass-through return lands in
+    # ``output_values``. Parameters remain scalar / array ``Value``s.
     input_values = [
         _materialize_as_value_like(ctx, ref) for ref in d["input_value_refs"]
     ]
@@ -273,8 +281,11 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
 def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     """Materialize a UUID reference and assert it resolves to a ``Value``.
 
-    Used in positions like ``Block.parameters`` whose static type remains
-    restricted to ``Value``.
+    Used in positions that must hold a scalar / array ``Value`` (e.g.
+    ``Block.parameters``, operation results, ``ForOperation.loop_var_value``,
+    and slice refs). Block-level I/O goes through
+    ``_materialize_as_value_like`` instead, because it may carry ``DictValue``
+    / ``TupleValue``.
 
     Args:
         ctx (_DecodeContext): The active decode context.
@@ -527,6 +538,12 @@ def _decode_qfixed_metadata(d: Any) -> QFixedMetadata | None:
 def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
     """Decode :class:`ArrayRuntimeMetadata` (or ``None``).
 
+    ``const_array`` is re-frozen after payload decoding: the in-memory
+    canonical form is all-tuples (``with_array_runtime_metadata`` runs
+    ``_freeze_data`` at construction), but JSON / msgpack can only
+    carry lists. Without re-freezing, a decoded block would silently
+    hold lists where the original held tuples.
+
     Args:
         d (Any): The serialized form (dict or ``None``).
 
@@ -536,7 +553,7 @@ def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
     if d is None:
         return None
     return ArrayRuntimeMetadata(
-        const_array=_decode_payload(d.get("const_array")),
+        const_array=_freeze_data(_decode_payload(d.get("const_array"))),
         element_uuids=tuple(d.get("element_uuids", ())),
         element_logical_ids=tuple(d.get("element_logical_ids", ())),
         element_parent_uuids=tuple(d.get("element_parent_uuids", ())),
@@ -547,6 +564,13 @@ def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
 def _decode_dict_runtime_metadata(d: Any) -> DictRuntimeMetadata | None:
     """Decode :class:`DictRuntimeMetadata` (or ``None``).
 
+    Entries are re-frozen after payload decoding: bound dict keys are
+    tuples in the in-memory canonical form (``_freeze_data`` runs at
+    construction time), but JSON / msgpack flatten them to lists.
+    Without re-freezing, ``DictValue.get_bound_data()`` and
+    ``content_hash`` would fail on a decoded block with
+    ``TypeError: unhashable type: 'list'``.
+
     Args:
         d (Any): The serialized form (dict or ``None``).
 
@@ -556,7 +580,10 @@ def _decode_dict_runtime_metadata(d: Any) -> DictRuntimeMetadata | None:
     if d is None:
         return None
     raw_items = d.get("bound_data", [])
-    items = tuple((_decode_payload(k), _decode_payload(v)) for k, v in raw_items)
+    items = tuple(
+        (_freeze_data(_decode_payload(k)), _freeze_data(_decode_payload(v)))
+        for k, v in raw_items
+    )
     return DictRuntimeMetadata(bound_data=items)
 
 
@@ -834,6 +861,36 @@ def _operands_results(
     return operands, results
 
 
+def _container_operands_results(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> tuple[list[Value], list[Value]]:
+    """Materialize operands permitting container values, results strictly.
+
+    Some operations legitimately carry ``DictValue`` / ``TupleValue``
+    operands at trace time: ``ForItemsOperation`` iterates a ``Dict``
+    kernel argument and ``InverseBlockOperation`` keeps the container
+    parameters of the inverted kernel as operands. Their results are
+    still plain ``Value`` / ``ArrayValue`` instances, so result decoding
+    keeps the strict check.
+
+    Args:
+        d (dict[str, Any]): The operation dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[list[Value], list[Value]]: ``(operands, results)``. The
+            operand list is typed ``list[Value]`` to match
+            ``Operation.operands``, but entries may be ``DictValue`` /
+            ``TupleValue``, mirroring what the frontend stores there.
+    """
+    operands = cast(
+        list[Value],
+        [ctx.materialize(ref) for ref in d.get("operand_refs", ())],
+    )
+    results = [_materialize_as_value(ctx, ref) for ref in d.get("result_refs", ())]
+    return operands, results
+
+
 def _decode_gate_operation(d: dict[str, Any], ctx: _DecodeContext) -> GateOperation:
     """Decode :class:`GateOperation`.
 
@@ -925,6 +982,22 @@ def _decode_decode_qfixed(
         num_bits=int(d.get("num_bits", 0)),
         int_bits=int(d.get("int_bits", 0)),
     )
+
+
+def _decode_store_array_element(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> StoreArrayElementOperation:
+    """Decode :class:`StoreArrayElementOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        StoreArrayElementOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return StoreArrayElementOperation(operands=operands, results=results)
 
 
 def _decode_cast(d: dict[str, Any], ctx: _DecodeContext) -> CastOperation:
@@ -1197,7 +1270,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         ForItemsOperation: The reconstructed op, including key /
             value identity Values and the recursively-decoded body.
     """
-    operands, results = _operands_results(d, ctx)
+    operands, results = _container_operands_results(d, ctx)
     key_refs = d.get("key_var_value_refs")
     key_var_values = (
         tuple(_materialize_as_value(ctx, ref) for ref in key_refs)
@@ -1419,7 +1492,7 @@ def _decode_inverse_block(
         InverseBlockOperation: The reconstructed inverse block op with its
             source and fallback blocks.
     """
-    operands, results = _operands_results(d, ctx)
+    operands, results = _container_operands_results(d, ctx)
     source_block = (
         _decode_block(d["source_block"]) if d.get("source_block") is not None else None
     )
@@ -1474,6 +1547,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "MeasureVectorOperation": _decode_measure_vector,
     "MeasureQFixedOperation": _decode_measure_qfixed,
     "DecodeQFixedOperation": _decode_decode_qfixed,
+    "StoreArrayElementOperation": _decode_store_array_element,
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
     "CInitOperation": _decode_cinit,
