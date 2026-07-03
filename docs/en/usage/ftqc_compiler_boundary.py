@@ -157,7 +157,7 @@ for quantity in (
     qre.ResourceQuantity.NON_CLIFFORD_COUNT,
 ):
     spec = qre.describe_resource_quantity(quantity)
-    print({"quantity": spec.quantity.value, "category": spec.category.value})
+    print({"quantity": spec.quantity, "category": spec.category.value})
 
 assert values["logical_qubits"] == 6
 assert math.isclose(float(values["qpe_iterations"]), 6.0, rel_tol=0.0, abs_tol=1e-12)
