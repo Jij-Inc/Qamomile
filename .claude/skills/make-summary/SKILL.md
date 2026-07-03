@@ -5,66 +5,66 @@ model: opus 4.8
 ---
 
 # Branch Summary
-- 現在のブランチとmain差分と今までのコンテキストから本ブランチでの作業の概要をまとめるmarkdownファイルを作るスキルである．
-- 目的: このブランチの状況を理解するためのものであり，最終的には対応するgithubのPRに投稿などがされる．
-- 本スキルでは原則コードベースはいじらない．あくまでサマリーを作成するのみ．
+- This skill creates a markdown file that summarizes the work done on the current branch, based on the diff against `main` and the context accumulated so far.
+- Purpose: to help a reader understand the state of this branch. The summary is ultimately meant to be posted to the corresponding GitHub PR.
+- This skill does not touch the codebase as a rule. It only produces the summary.
 
-## i/oルール
-- 出力ファイルは現在の作業worktreeのrootに置く．他に指示があった場合は指示に従う．原則`/tmp` などには置かない．
-  - Why: `/tmp`などにおくと時間が経った後に確認しようとすると消える可能性があるため．
-- ファイル名は`<branch-name>-summary.md`とする．
-- サマリーファイルは原則コミットしない．
-  - Why: サマリーはあくまで現状のブランチの情報を理解するものであり，PRへのコメントとしてのポストはするが，ファイルとしては保持しない．
-- ファイルが存在する場合は現状に合わせて更新する．
+## I/O rules
+- Place the output file at the root of the current working worktree. Follow any other instruction the user gives instead. As a rule, do not place it in `/tmp` or similar.
+  - Why: files under `/tmp` may be gone by the time someone tries to look at them later.
+- Name the file `<branch-name>-summary.md`.
+- As a rule, do not commit the summary file.
+  - Why: the summary only exists to understand the current state of the branch. It gets posted as a PR comment, but is not kept as a file in the repository.
+- If the file already exists, update it to match the current state.
 
-## 書き方ルール
-- サマリーはこのブランチのことやコンテキストが全くない人が読んでもわかるようにする．
-- サマリーには履歴や会話の流れは書かない．
-  - Why: サマリーはこれ一つで完結してわかるものである必要があるため．
-- 読み手の対象はジュニアエンジニアを想定して，Qamomileのことを把握していない人でもわかるようにする．
-- 初めての専門用語は説明なしに使わない．必ず説明を入れる．
-- 勝手に自明だという判断などはせずに，理由や背景を省略せずに伝える．
-- コード参照はfile:line で具体的に`qamomile/circuit/frontend/qkernel.py:249-260` の形で、サマリだけで該当箇所に飛べるようにする．
+## Writing rules
+- Write the summary so that someone with no knowledge of this branch or its context can understand it.
+- Do not write the history or the flow of the conversation into the summary.
+  - Why: the summary must be self-contained and understandable on its own.
+- Assume the reader is a junior engineer, so someone unfamiliar with Qamomile can still follow it.
+- Never use a technical term for the first time without explaining it. Always add an explanation.
+- Do not decide on your own that something is "obvious" and skip it. Convey the reasons and background without omission.
+- Reference code concretely as `file:line`, in the form `qamomile/circuit/frontend/qkernel.py:249-260`, so the reader can jump to the relevant place from the summary alone.
 
-## 構造ルール
-以下のセクションテンプレートを埋める形で作成する．これ以外のセクション(検証結果 / 差分統計 / コミット履歴 / 会話のやり取り / TODO リスト等)は追加しない。
+## Structure rules
+Create the summary by filling in the section template below. Do not add any other section (verification results / diff stats / commit history / conversation exchanges / TODO lists, etc.).
 
 ```md
-## 0. 用語集 (説明の必要がなければここは省略可能)
-- 後に出てくる必要になりそうな用語の説明を簡単に行う．
+## 0. Glossary (this section may be omitted if no explanation is needed)
+- Briefly explain the terms that will be needed later.
 
-## 1. 問題の概要
-- bugfix の場合: 元々何が起きていて(再現コード)、なぜそうなるのか(原因の所在)
-- 機能追加の場合: 何ができるようになるのか、なぜ必要なのか
-- 「main の挙動」と「branch の挙動」のどちらが何かをはっきり区別する
+## 1. Problem overview
+- For a bugfix: what was originally happening (reproduction code), and why it happens (where the root cause lives).
+- For a feature addition: what becomes possible, and why it is needed.
+- Clearly distinguish which is the "behavior on main" and which is the "behavior on the branch".
 
-### 2. フロントエンド(ユーザーが書くコードレベル)での変更
-- ユーザーが書く `@qm.qkernel` の中身、ユーザーが受け取るエラーメッセージ、ユーザーが触る API の振る舞いなど、Qamomile を使う人の視点で何が変わったか。
-- コード例を必ず1つは載せる。
-- バックエンドの実装詳細はここに書かない。
+### 2. Changes at the frontend (the code level the user writes)
+- What changed from the perspective of a Qamomile user: the contents of the `@qm.qkernel` the user writes, the error messages the user receives, the behavior of the APIs the user touches, etc.
+- Always include at least one code example.
+- Do not write backend implementation details here.
 
-### 3. バックエンド(IR 等全体的)での変更
-- `qamomile/circuit/{frontend,ir,transpiler}/...` 配下の compiler / IR / passes / backends での変更。
-- 新しい IR op / dataclass / pass / 内部 helper、それらが解決する役割、関連する file:line。Qamomile 用語(`Block`, `Operation`, `affine_validate`, `CompositeGateOperation`, etc.)が初出になるので必要に応じて一行注釈を付ける。
+### 3. Changes at the backend (IR and other internals overall)
+- Changes to the compiler / IR / passes / backends under `qamomile/circuit/{frontend,ir,transpiler}/...`.
+- New IR ops / dataclasses / passes / internal helpers, the role each of them solves, and the related file:line. Qamomile terms (`Block`, `Operation`, `affine_validate`, `CompositeGateOperation`, etc.) appear here for the first time, so add a one-line annotation where needed.
 
-### 4. 採用しなかった代替案と、今回の方法を選んだ理由
-- 設計レベルで複数案があったものについて、以下を書く
-  - それぞれのtrade-off
-  - どれを採って何を捨てたか。
-- このセクションだけは会話の流れのやり取りを含めても良い．ただしそれでも「やり取りの流れ」ではなく「どんな選択肢があってどれを選んだか」という最終形で書く。「最初 A だったが B に直した」ではなく「A / B / C のうち B を採用、理由は ...」。
-  - Why: 設計判断の根拠になりうるため．
-- 該当する設計分岐が無ければこのセクションを「該当なし」と一行で書いて終わって構わない。
+### 4. Alternatives that were not adopted, and why this approach was chosen
+- For anything that had multiple design-level options, write:
+  - the trade-off of each,
+  - which one was adopted and what was given up.
+- This section alone may include exchanges from the flow of the conversation. Even so, write it as the final form of "what options existed and which was chosen", not as "the flow of the exchange". Not "it was A at first but was fixed to B", but "of A / B / C, B was adopted because ...".
+  - Why: it can serve as the rationale for a design decision.
+- If there is no relevant design branch, it is fine to write this section as a single line "None" and stop.
 
-### 5. 既知の限界
-- 本 branch を merge した後にも残るギャップを書く
-- 実コードで踏み得るもの(false negative / false positive の余地、未対応 AST 形、別 backend で挙動が違う等)を When / Why / Future fix の枠で書く。LIMITATIONS.md など別ドキュメントに登録済みのものはここでクロスリファレンスし、登録しない follow-up は理由とともに列挙する。
-- 「無い」なら一行で「該当なし」。
+### 5. Known limitations
+- Write the gaps that remain even after this branch is merged.
+- Write the ones that can actually be hit in real code (room for false negatives / false positives, unsupported AST forms, behavior differing on another backend, etc.) in a When / Why / Future fix frame. For ones already registered in a separate document such as LIMITATIONS.md, cross-reference them here; for follow-ups that are not registered, list them with their reasons.
+- If there are none, write a single line "None".
 ```
 
-## ワークフロー
-### Step 1. コンテキスト把握
-- 作業 worktree の root を確定する(以後、サマリはここに置く)
-- 差分の規模感を掴む
+## Workflow
+### Step 1. Grasp the context
+- Determine the root of the working worktree (the summary will live here from now on).
+- Get a feel for the size of the diff.
 
 ```bash
 pwd
@@ -73,44 +73,44 @@ git log origin/main..HEAD --oneline
 git diff origin/main...HEAD --stat
 ```
 
-### Step 2. 差分の読み込み
-- 各変更ファイルを `Read` で実際に読む。サマリの精度はここの読み込みの深さで決まる。
-- `diff --stat` で大きく変わったファイルは全文 / 該当範囲を読む
-- 新規追加ファイル、新規クラス / 関数 / dataclass、削除されたシンボルを把握
-- テスト追加もカウントするが、テスト一覧そのものはサマリに書かない(セクション2/3で「こういう振る舞いが期待される」という形で吸収)
-- bugfixなら元のバグを再現する最小コードをbranch上で動かして実際にエラーが出ることを確認しておくと、セクション1が書きやすい。
+### Step 2. Read the diff
+- Actually `Read` each changed file. The accuracy of the summary is determined by how deeply you read here.
+- For files that changed a lot in `diff --stat`, read the whole file / the relevant range.
+- Grasp newly added files, new classes / functions / dataclasses, and deleted symbols.
+- Count added tests too, but do not write the test list itself into the summary (absorb it into sections 2/3 as "this behavior is expected").
+- For a bugfix, running the minimal code that reproduces the original bug on the branch and confirming that the error actually appears makes section 1 easier to write.
 
-### Step 3. 5 セクションの草案を書く
-- worktree root に `<branch-name>-summary.md` を `Write` で作成し，構造ルールや書き方ルールに従って草案を記入する．
-- セクション 2 → 3 の境界を曖昧にしない。ユーザー視点(API / エラー / kernel コード) と内部視点(IR / pass / dataclass) を別の段落に分ける
-- セクション 4 は「最終形」で書く。chat / review でのやり取りそのものは混ぜない
-- すべてのセクションで初出の Qamomile 固有用語に短い注釈を付けたか確認する
+### Step 3. Write the draft of the 5 sections
+- `Write` `<branch-name>-summary.md` at the worktree root and fill in the draft following the structure rules and writing rules.
+- Do not blur the boundary between section 2 and 3. Separate the user perspective (API / errors / kernel code) and the internal perspective (IR / passes / dataclasses) into different paragraphs.
+- Write section 4 in "final form". Do not mix in the chat / review exchanges themselves.
+- Confirm that every section has a short annotation on each Qamomile-specific term that appears for the first time.
 
-### Step 4. subagent/別AIでの乖離チェック
-- サブエージェントを呼び出して、サマリと実コードを突き合わせてもらう。
-  - ただし，ユーザーから別のAIの指示がある場合はそちらに従う．
-- プロンプトには以下を含める
-  - サマリの絶対パス
-  - 主な実装ファイルの絶対パスと、それらの中でサマリが参照している主要シンボル / 行範囲
-  - 「実コードと一致しない記述があれば箇条書きで指摘、無ければ '齟齬なし' と答えて」
-- サブエージェントからの指摘がゼロになるまで以下を自動で繰り返す。
-  1. 指摘内容を実コードで再確認する
-  2. サマリ側を直す(`Edit` ツールを使う)
-  3. 行番号を直した場合、自分の編集で他の行参照が動いていないか(Codex が「+N シフト」と指摘するパターン)も確認
-  4. 直し終わったら異なるsubagentに再チェックを依頼する．
-- 1サイクルごとにユーザーへ伺いを立てる必要はない．
-  - Why: 指摘を直すだけなので
+### Step 4. Discrepancy check with a subagent / another AI
+- Call a subagent to cross-check the summary against the real code.
+  - However, if the user gives an instruction for a different AI, follow that.
+- Include the following in the prompt:
+  - the absolute path of the summary,
+  - the absolute paths of the main implementation files and the key symbols / line ranges within them that the summary references,
+  - "point out in a bulleted list any statement that does not match the real code, and answer 'no discrepancies' if there are none".
+- Repeat the following automatically until the subagent's points reach zero.
+  1. Re-confirm the point against the real code.
+  2. Fix the summary side (use the `Edit` tool).
+  3. If you fixed a line number, also confirm that your edit did not shift other line references (the "+N shift" pattern that Codex points out).
+  4. Once done fixing, ask a different subagent to re-check.
+- There is no need to ask the user for confirmation on every cycle.
+  - Why: you are only fixing the points that were raised.
 
-### Step 5. 完了報告
-- Step 4でが「齟齬なし」が返ったら、ユーザーに以下を伝えて終わる．
-  - サマリの **絶対パス**
-  - commit していないことを明示(`git status` で untracked になっていることを書く)
+### Step 5. Completion report
+- Once Step 4 returns "no discrepancies", tell the user the following and finish.
+  - the **absolute path** of the summary,
+  - an explicit note that it has not been committed (state that it is untracked in `git status`).
 
-## やってはいけないこと
-- サマリをcommitする。サマリはworktree内にuntrackedのまま置く
-- `/tmp` などに置く。必ず worktree root
-- セクションを勝手に追加する．
-- 段落内に手動 soft line break を入れる
-  - Why: githubにポストされる時に見にくいため．
-- 会話履歴を反映する(「ユーザーから ... と指摘された」など)
-- サブエージェントの指摘の処理ループの様子をユーザーに毎回中継する
+## Things you must not do
+- Commit the summary. Leave the summary untracked inside the worktree.
+- Place it in `/tmp` or similar. Always the worktree root.
+- Add sections on your own.
+- Insert manual soft line breaks within a paragraph.
+  - Why: it looks bad when posted to GitHub.
+- Reflect the conversation history (e.g., "the user pointed out that ...").
+- Relay the state of the subagent-point-processing loop to the user every time.
