@@ -223,7 +223,6 @@ class NisqSegmentationStrategy(SegmentationStrategy):
 
         abi = ProgramABI(
             public_inputs=public_inputs,
-            output_refs=[v.uuid for v in block.output_values],
             output_values=list(block.output_values),
         )
 

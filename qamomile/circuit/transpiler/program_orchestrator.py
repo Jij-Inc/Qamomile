@@ -92,7 +92,7 @@ class ProgramOrchestrator(Generic[T]):
                 self._load_measurements(shot_context, bits)
                 self._execute_post_quantum_steps(shot_context, executor, circuit)
 
-                if program.output_values or program.output_refs:
+                if program.output_values:
                     value = self._resolve_outputs(shot_context)
                 else:
                     value = bits
@@ -134,7 +134,7 @@ class ProgramOrchestrator(Generic[T]):
             self._load_measurements(run_context, bits)
             self._execute_post_quantum_steps(run_context, executor, circuit)
 
-            if program.output_values or program.output_refs:
+            if program.output_values:
                 return self._resolve_outputs(run_context)
             return bits
 
@@ -497,11 +497,7 @@ class ProgramOrchestrator(Generic[T]):
         program = self._program
 
         if program.plan is None:
-            return (
-                self._resolve_outputs(context)
-                if program.output_values or program.output_refs
-                else None
-            )
+            return self._resolve_outputs(context) if program.output_values else None
 
         classical_executor = ClassicalExecutor()
         result_value = None
@@ -554,7 +550,7 @@ class ProgramOrchestrator(Generic[T]):
                 context.set(expval_seg.result_ref, exp_val)
                 result_value = exp_val
 
-        if program.output_values or program.output_refs:
+        if program.output_values:
             return self._resolve_outputs(context)
         if result_value is not None:
             return result_value
@@ -597,20 +593,10 @@ class ProgramOrchestrator(Generic[T]):
 
     def _resolve_outputs(self, context: ExecutionContext) -> Any:
         """Read final output values from execution context."""
-        if self._program.output_values:
-            output_values = [
-                self._resolve_output_value_like(value, context)
-                for value in self._program.output_values
-            ]
-            output_tuple = tuple(output_values)
-            if len(output_tuple) == 1:
-                return output_tuple[0]
-            return output_tuple
-
-        output_values = []
-        for ref in self._program.output_refs:
-            output_values.append(self._resolve_output_ref(ref, context))
-
+        output_values = [
+            self._resolve_output_value_like(value, context)
+            for value in self._program.output_values
+        ]
         output_tuple = tuple(output_values)
         if len(output_tuple) == 1:
             return output_tuple[0]
@@ -630,8 +616,7 @@ class ProgramOrchestrator(Generic[T]):
 
         Returns:
             Any: Concrete Python value, or ``None`` when the output cannot be
-                found. The ``None`` fallback preserves the legacy output-ref
-                behavior for unresolved values.
+                found.
         """
         if isinstance(value, TupleValue):
             resolved = self._resolve_direct_output_value(value, context)
@@ -653,7 +638,7 @@ class ProgramOrchestrator(Generic[T]):
                 for key, entry_value in value.entries
             }
 
-        resolved = self._resolve_output_ref(value.uuid, context)
+        resolved = self._resolve_context_value_uuid(value.uuid, context)
         if resolved is not None:
             return resolved
         if isinstance(value, ArrayValue):
@@ -741,11 +726,15 @@ class ProgramOrchestrator(Generic[T]):
             elements.append(element)
         return tuple(elements)
 
-    def _resolve_output_ref(self, ref: str, context: ExecutionContext) -> Any | None:
-        """Resolve an output UUID from context using legacy lookup rules.
+    def _resolve_context_value_uuid(
+        self,
+        uuid: str,
+        context: ExecutionContext,
+    ) -> Any | None:
+        """Resolve a value UUID from context, including indexed carriers.
 
         Args:
-            ref (str): Output UUID.
+            uuid (str): IR value UUID.
             context (ExecutionContext): Execution context populated by
                 execution.
 
@@ -753,12 +742,12 @@ class ProgramOrchestrator(Generic[T]):
             Any | None: Concrete Python value, tuple reconstructed from indexed
                 entries, or ``None`` when no value is available.
         """
-        val = context.get(ref) if context.has(ref) else None
+        val = context.get(uuid) if context.has(uuid) else None
         if val is None:
             array_bits = []
             i = 0
-            while context.has(f"{ref}_{i}"):
-                array_bits.append(context.get(f"{ref}_{i}"))
+            while context.has(f"{uuid}_{i}"):
+                array_bits.append(context.get(f"{uuid}_{i}"))
                 i += 1
             if array_bits:
                 val = tuple(array_bits)
@@ -838,7 +827,7 @@ class ProgramOrchestrator(Generic[T]):
         Returns:
             Any: Concrete array-like container, or ``None`` when not available.
         """
-        resolved = self._resolve_output_ref(value.uuid, context)
+        resolved = self._resolve_context_value_uuid(value.uuid, context)
         if resolved is not None:
             return resolved
         return self._resolve_direct_output_value(value, context)

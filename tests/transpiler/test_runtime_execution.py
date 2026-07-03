@@ -247,7 +247,7 @@ class TestExecutableProgramRuntime:
                     ),
                     ClassicalStep(segment=classical_segment, role="post"),
                 ],
-                abi=ProgramABI(output_refs=[output.uuid]),
+                abi=ProgramABI(output_values=[output]),
             ),
             compiled_quantum=[
                 CompiledQuantumSegment(
@@ -264,7 +264,7 @@ class TestExecutableProgramRuntime:
                     result_ref=exp_result.uuid,
                 )
             ],
-            output_refs=[output.uuid],
+            output_values=[output],
         )
 
         job = executable.run(_FakeExecutor(expval=0.25))
@@ -324,7 +324,7 @@ class TestExecutableProgramRuntime:
                 ],
                 abi=ProgramABI(
                     public_inputs={"theta": theta},
-                    output_refs=[output.uuid],
+                    output_values=[output],
                 ),
             ),
             compiled_quantum=[
@@ -335,7 +335,7 @@ class TestExecutableProgramRuntime:
                 )
             ],
             compiled_classical=[CompiledClassicalSegment(segment=prep_segment)],
-            output_refs=[output.uuid],
+            output_values=[output],
         )
 
         result = executable.sample(

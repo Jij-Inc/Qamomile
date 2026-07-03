@@ -132,7 +132,6 @@ class ProgramABI:
     """Runtime-visible ABI for a segmented program."""
 
     public_inputs: dict[str, ValueLike] = dataclasses.field(default_factory=dict)
-    output_refs: list[str] = dataclasses.field(default_factory=list)
     output_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
 

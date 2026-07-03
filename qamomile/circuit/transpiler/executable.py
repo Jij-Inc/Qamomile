@@ -73,12 +73,8 @@ class ExecutableProgram(Generic[T]):
         default_factory=list
     )
 
-    # Final output references
-    output_refs: list[str] = dataclasses.field(default_factory=list)
+    # Final output values
     output_values: list[ValueLike] = dataclasses.field(default_factory=list)
-
-    # Number of output bits (for result conversion)
-    num_output_bits: int = 0
 
     # ------------------------------------------------------------------
     # Data access properties
