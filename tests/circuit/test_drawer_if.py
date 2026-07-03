@@ -28,8 +28,12 @@ from matplotlib.patches import FancyBboxPatch
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import Qubit, UInt
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.gate import GateOperationType
+from qamomile.circuit.ir.types.primitives import BitType, UIntType
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.drawer import (
     MatplotlibDrawer,
@@ -742,6 +746,38 @@ class TestCompileTimeResolution:
             node.module for node in tree.body if isinstance(node, ast.ImportFrom)
         ]
         assert module_name not in top_level_imports
+
+    def test_unfolded_if_uses_branch_local_intermediate_values(self):
+        """Branch-local BinOp results do not leak into enclosing param values."""
+        one = Value(UIntType(), "one").with_const(1)
+        two = Value(UIntType(), "two").with_const(2)
+        three = Value(UIntType(), "three").with_const(3)
+        true_result = Value(UIntType(), "true_tmp")
+        false_result = Value(UIntType(), "false_tmp")
+        if_op = IfOperation(
+            operands=[Value(BitType(), "cond")],
+            true_operations=[
+                BinOp(
+                    operands=[one, two],
+                    results=[true_result],
+                    kind=BinOpKind.ADD,
+                )
+            ],
+            false_operations=[
+                BinOp(
+                    operands=[one, three],
+                    results=[false_result],
+                    kind=BinOpKind.ADD,
+                )
+            ],
+        )
+        param_values = {"outer": 7}
+
+        analyzer = CircuitAnalyzer(Block(), DEFAULT_STYLE, fold_loops=False)
+        node = analyzer._build_vif(if_op, ("if",), {"q": 0}, {}, param_values, 0, ())
+
+        assert isinstance(node, VUnfoldedSequence)
+        assert param_values == {"outer": 7}
 
     def test_bound_condition_is_lowered_in_block(self):
         """Binding ``flag`` removes the IfOperation from the prepared block."""

@@ -1920,23 +1920,25 @@ class CircuitAnalyzer:
             )
 
         # Unfolded: build both branches
-        self._evaluate_loop_body_intermediates(op.true_operations, param_values)
+        true_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(op.true_operations, true_param_values)
         true_children = self._build_visual_nodes(
             op.true_operations,
             qubit_map,
             logical_id_remap,
-            param_values,
+            true_param_values,
             depth + 1,
             (*node_key, "true"),
         )
         true_width = self._sum_visual_widths(true_children)
 
-        self._evaluate_loop_body_intermediates(op.false_operations, param_values)
+        false_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(op.false_operations, false_param_values)
         false_children = self._build_visual_nodes(
             op.false_operations,
             qubit_map,
             logical_id_remap,
-            param_values,
+            false_param_values,
             depth + 1,
             (*node_key, "false"),
         )
