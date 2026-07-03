@@ -5,14 +5,14 @@ import sympy as sp
 
 import qamomile.circuit as qm
 from qamomile.circuit.estimator import estimate_resources
-from qamomile.circuit.estimator.algorithmic import (
+from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.resource_estimation import (
     estimate_qaoa,
     estimate_qdrift,
     estimate_qpe,
     estimate_qsvt,
     estimate_trotter,
 )
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
 
 class TestBasicCircuitEstimation:
