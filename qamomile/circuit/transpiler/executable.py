@@ -135,9 +135,11 @@ class ExecutableProgram(Generic[T]):
         Args:
             executor: Backend-specific quantum executor.
             shots: Number of shots to run.
-            bindings: Parameter bindings. Supports two formats:
+            bindings: Parameter bindings. Supports three formats:
                 - Vector: {"gammas": [0.1, 0.2], "betas": [0.3, 0.4]}
-                - Indexed: {"gammas[0]": 0.1, "gammas[1]": 0.2}
+                - Dict parameter: {"coeffs": {0: 0.1, (0, 1): 0.2}},
+                  decomposed per key onto the emitted parameters
+                - Indexed: {"gammas[0]": 0.1, "coeffs[(0, 1)]": 0.2}
 
         Returns:
             SampleJob that resolves to SampleResult with results.
@@ -166,9 +168,11 @@ class ExecutableProgram(Generic[T]):
 
         Args:
             executor: Backend-specific quantum executor.
-            bindings: Parameter bindings. Supports two formats:
+            bindings: Parameter bindings. Supports three formats:
                 - Vector: {"gammas": [0.1, 0.2], "betas": [0.3, 0.4]}
-                - Indexed: {"gammas[0]": 0.1, "gammas[1]": 0.2}
+                - Dict parameter: {"coeffs": {0: 0.1, (0, 1): 0.2}},
+                  decomposed per key onto the emitted parameters
+                - Indexed: {"gammas[0]": 0.1, "coeffs[(0, 1)]": 0.2}
 
         Returns:
             RunJob that resolves to the kernel's return type, or

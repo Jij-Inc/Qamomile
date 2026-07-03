@@ -16,6 +16,10 @@ from qamomile.circuit.transpiler.compiled_segments import (
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.job import ExpvalJob, RunJob, SampleJob
+from qamomile.circuit.transpiler.param_keys import (
+    dict_param_key,
+    normalize_dict_binding_key,
+)
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
 from qamomile.circuit.transpiler.segments import (
@@ -143,7 +147,23 @@ class ProgramOrchestrator(Generic[T]):
     def _convert_user_bindings(
         bindings: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Convert user-friendly bindings to indexed format."""
+        """Convert user-friendly bindings to indexed format.
+
+        Sequence values (array parameters) expand positionally to
+        ``name[0]``, ``name[1]``, ...; dict values (Dict runtime
+        parameters) expand per key to ``name[<key>]`` using the same
+        naming the emit pass used when creating the backend parameters.
+
+        Args:
+            bindings (dict[str, Any] | None): User-supplied bindings
+                keyed by kernel argument name. ``None`` means no
+                bindings.
+
+        Returns:
+            dict[str, Any]: Flat mapping from backend parameter names to
+                scalar values, with non-container bindings passed
+                through unchanged.
+        """
         if bindings is None:
             return {}
 
@@ -154,6 +174,10 @@ class ProgramOrchestrator(Generic[T]):
             if isinstance(value, (list, tuple, np.ndarray)):
                 for i, v in enumerate(value):
                     result[f"{key}[{i}]"] = v
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    normalized = normalize_dict_binding_key(k)
+                    result[dict_param_key(key, normalized)] = v
             else:
                 result[key] = value
         return result
@@ -271,7 +295,22 @@ class ProgramOrchestrator(Generic[T]):
         context: ExecutionContext,
         parameter_metadata: ParameterMetadata,
     ) -> dict[str, Any]:
-        """Resolve backend parameter bindings from the current execution context."""
+        """Resolve backend parameter bindings from the current execution context.
+
+        Args:
+            context (ExecutionContext): Execution context seeded with
+                user bindings (both raw and indexed forms).
+            parameter_metadata (ParameterMetadata): The emitted
+                circuit's parameter manifest.
+
+        Returns:
+            dict[str, Any]: Mapping from backend parameter name to its
+                scalar value for this execution.
+
+        Raises:
+            ValueError: If any backend parameter has no value in the
+                context.
+        """
         bindings: dict[str, Any] = {}
         missing: list[str] = []
 
@@ -286,7 +325,15 @@ class ProgramOrchestrator(Generic[T]):
             value_found = False
             for key in candidate_keys:
                 if context.has(key):
-                    bindings[param.name] = context.get(key)
+                    candidate = context.get(key)
+                    # A raw dict is the whole Dict-parameter binding (the
+                    # context holds it under the bare dict name); a scalar
+                    # backend parameter must never bind to it. Skip so a
+                    # genuinely missing per-key entry surfaces as a
+                    # missing-binding error instead of a dict-typed angle.
+                    if isinstance(candidate, dict):
+                        continue
+                    bindings[param.name] = candidate
                     value_found = True
                     break
             if not value_found:

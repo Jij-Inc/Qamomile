@@ -536,7 +536,13 @@ class Transpiler(ABC, Generic[T]):
                 Names in ``bindings`` and ``parameters`` must be disjoint —
                 a name is either compile-time bound or runtime symbolic,
                 never both.
-            parameters: Parameter names to preserve as backend parameters
+            parameters: Parameter names to preserve as backend parameters.
+                Scalars/arrays of float/int/UInt are supported, plus
+                ``Dict[K, Float]``: each constant-key subscript lookup
+                (``d[key]``) becomes one backend parameter named
+                ``"d[<key>]"``, and the execution-time binding
+                ``bindings={"d": {...}}`` is decomposed per key onto
+                those parameters.
 
         Returns:
             ExecutableProgram ready for execution

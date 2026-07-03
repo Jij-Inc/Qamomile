@@ -880,7 +880,30 @@ def for_items(
                 q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij)
             return q
         ```
+
+    Raises:
+        TypeError: If ``d`` is a runtime-parameter Dict (declared via
+            ``parameters=[...]`` without bound data). Its key structure
+            is unknown at compile time, so an items() loop cannot be
+            unrolled; only constant-key subscript lookups (``d[key]``)
+            are supported for runtime-parameter dicts.
     """
+    # Runtime-parameter dicts carry no bound data, so the loop would
+    # silently unroll over an unknown key set at emit time. Fail at
+    # trace time with an actionable message instead. The Handle-level
+    # flag (set only by ``parameters=[...]`` input creation) is what
+    # distinguishes these from visualization / inner-kernel dummy
+    # inputs, whose entries connect at inline/emit time; dicts reaching
+    # a sub-kernel indirectly are caught by the emit-time check in
+    # ``emit_for_items`` instead.
+    if getattr(d, "_runtime_parameter", False):
+        raise TypeError(
+            f"Dict '{d.value.name}' is a runtime parameter; items() "
+            f"iteration requires the key structure at compile time. "
+            f"Bind the dict via bindings={{...}} instead, or use "
+            f"constant-key subscript lookups (d[key])."
+        )
+
     parent_tracer = get_current_tracer()
     body_tracer = Tracer()
 

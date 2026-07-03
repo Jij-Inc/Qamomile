@@ -104,6 +104,11 @@ class Dict(Handle, Generic[K, V]):
     _size: UInt | None = None
     _key_type: type | None = None
     _value_type: type | None = None
+    # True only for dicts explicitly declared in ``parameters=[...]``.
+    # Distinguishes them from visualization / inner-kernel dummy inputs,
+    # which also carry a parameter-marked DictValue without bound data
+    # but MAY be iterated (their entries connect at inline/emit time).
+    _runtime_parameter: bool = False
 
     def items(self) -> DictItemsIterator[K, V]:
         """Return an iterator over (key, value) pairs."""
