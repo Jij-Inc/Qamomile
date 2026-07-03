@@ -1845,7 +1845,8 @@ class CircuitAnalyzer:
 
         Returns:
             VFoldedBlock | VUnfoldedSequence: A folded summary box when
-                ``fold_ifs`` is set, otherwise an unfolded two-branch sequence.
+                ``fold_ifs`` is set, otherwise an unfolded sequence containing
+                the true branch and, when present, the false branch.
         """
         affected_qubits, affected_qubits_precise = self._collect_if_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
