@@ -79,6 +79,9 @@ from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind  # noqa: E402
+from qamomile.circuit.ir.operation.control_flow import IfOperation  # noqa: E402
+from qamomile.circuit.ir.operation.gate import MeasureOperation  # noqa: E402
+from qamomile.circuit.ir.value import Value  # noqa: E402
 from qamomile.circuit.transpiler.errors import (  # noqa: E402
     EmitError,
     QamomileCompileError,
@@ -2442,6 +2445,87 @@ class TestControlFlowIfElse:
         for value, count in result.results:
             assert value in (0, 1)
             assert count > 0
+
+
+class TestIdentityMergeBackstop:
+    """Emit must handle non-elided identity merges first-class.
+
+    The frontend elides merge slots it can PROVE are no-ops at trace
+    time (``_can_elide_scalar_merge`` / ``_can_elide_array_merge``), but
+    that is a belt-and-braces contract: elision is an optimization only,
+    and emit keeps handling identity merges (the same Value yielded by
+    both branches) that reach the IR. This test hand-builds exactly the
+    identity merge the frontend would have skipped and pins the full
+    transpile + execute path on it, so a future emit-side change that
+    starts *relying* on frontend elision fails loudly here — with wrong
+    measurement values, not just a structural diff.
+    """
+
+    def test_hand_built_identity_merge_transpiles_and_executes(self):
+        """A hand-built identity qubit merge runs on Qiskit with correct values."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            trigger = qmc.qubit("trigger")
+            trigger = qmc.x(trigger)
+            bit = qmc.measure(trigger)  # always 1
+            target = qmc.qubit("target")
+            target = qmc.x(target)  # |1>, measured through the merge below
+            spectator = qmc.qubit("spectator")
+            if bit:
+                spectator = qmc.h(spectator)
+            return qmc.measure(target)
+
+        # build() traces a fresh Block, so the surgery below cannot leak
+        # into the kernel's cached block.
+        block = circuit.build()
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        if_op = if_ops[0]
+        merge_count_before = len(list(if_op.iter_merges()))
+
+        measure_ops = [
+            (i, op)
+            for i, op in enumerate(block.operations)
+            if isinstance(op, MeasureOperation)
+        ]
+        final_index, final_measure = measure_ops[-1]
+        target_value = final_measure.operands[0]
+        assert block.operations.index(if_op) < final_index
+
+        # Hand-build the identity merge the frontend elided: the SAME
+        # Value object is yielded by both branches, and the final
+        # measurement is rerouted through the merged output so the
+        # executed result depends on emit resolving the merge.
+        merged = Value(type=target_value.type, name="target_identity_merge")
+        if_op.add_merge(target_value, target_value, merged)
+        [merge] = list(if_op.iter_merges())[merge_count_before:]
+        assert merge.is_identity
+        block.operations[final_index] = final_measure.replace_values(
+            {target_value.uuid: merged}
+        )
+
+        transpiler = QiskitTranspiler()
+        affine = transpiler.inline(block)
+        validated = transpiler.affine_validate(affine)
+        partially_evaluated = transpiler.partial_eval(validated)
+        partially_evaluated = transpiler.slice_borrow_check(partially_evaluated)
+        partially_evaluated = transpiler.strip_slice_ops(partially_evaluated)
+        analyzed = transpiler.analyze(partially_evaluated)
+        analyzed = transpiler.classical_lowering(analyzed)
+        analyzed = transpiler.validate_symbolic_shapes(analyzed)
+        exe = transpiler.emit(transpiler.plan(analyzed))
+
+        executor = transpiler.executor()
+        result = exe.sample(executor, bindings={}, shots=100).result()
+        assert result is not None
+        assert len(result.results) > 0
+        # target sits in |1> and the identity merge must resolve to its
+        # physical qubit, so every shot reads 1.
+        for value, count in result.results:
+            assert value == 1, result.results
+            assert count > 0
+        assert sum(count for _, count in result.results) == 100
 
 
 class TestControlFlowWhileStructure:

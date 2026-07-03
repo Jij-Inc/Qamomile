@@ -626,6 +626,102 @@ def _find_original_handle_for_result(
     return None
 
 
+def _can_elide_scalar_merge(true_val: typing.Any, false_val: typing.Any) -> bool:
+    """Decide whether a scalar branch-merge slot can be omitted at trace time.
+
+    The frontend skips a merge only when the trace PROVES it would be a
+    no-op: both branches returned the *same* IR ``Value`` object and
+    neither branch consumed it. Skipping keeps the IR SSA-minimal and
+    avoids generating merge-versioned aliases (e.g. ``j_phi_4``) for
+    read-only scalar loop variables, which downstream emit-time loop
+    unrolling cannot bind.
+
+    Invariant (the belt-and-braces contract with emit): elision is an
+    optimization, never a correctness requirement. Every merge that is
+    NOT elided — including identity merges this prover cannot see, such
+    as consumed-in-branch values or metadata-divergent handles — must be
+    handled first-class by emit (an identity merge trivially resolves to
+    one physical resource). Emit must never assume the frontend elided
+    every identity merge.
+
+    Args:
+        true_val (typing.Any): Value the true branch returned for this
+            variable slot (Handle, Value, or primitive).
+        false_val (typing.Any): Value the false branch returned for the
+            same slot.
+
+    Returns:
+        bool: ``True`` when the merge slot is provably a no-op and may
+            be skipped.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if isinstance(true_val, ArrayBase) or isinstance(false_val, ArrayBase):
+        return False
+    true_v = true_val.value if hasattr(true_val, "value") else true_val
+    false_v = false_val.value if hasattr(false_val, "value") else false_val
+    return (
+        isinstance(true_v, Value)
+        and isinstance(false_v, Value)
+        and true_v is false_v
+        and not getattr(true_val, "_consumed", False)
+        and not getattr(false_val, "_consumed", False)
+    )
+
+
+def _can_elide_array_merge(
+    true_val: typing.Any,
+    false_val: typing.Any,
+    true_tracer: Tracer,
+    false_tracer: Tracer,
+) -> bool:
+    """Decide whether an array branch-merge slot can be omitted at trace time.
+
+    Array handles normally need a merge because whole-array ops can
+    return a fresh ``ArrayValue``. When both branches still point at the
+    exact same quantum ``ArrayValue``, neither branch consumed it, and
+    neither branch touched any of its elements, the array handle
+    provably did not change; the caller then reuses the original outer
+    handle so parent borrow tables (for live slice views captured
+    outside the branch) are not replaced by a merge-root with empty
+    state.
+
+    The same invariant as :func:`_can_elide_scalar_merge` applies:
+    elision is an optimization only, and emit handles every non-elided
+    merge — identity merges included — first-class.
+
+    Args:
+        true_val (typing.Any): Value the true branch returned for this
+            variable slot.
+        false_val (typing.Any): Value the false branch returned for the
+            same slot.
+        true_tracer (Tracer): Tracer holding the true branch's captured
+            operations, scanned for element-level touches.
+        false_tracer (Tracer): Tracer holding the false branch's
+            captured operations.
+
+    Returns:
+        bool: ``True`` when the merge slot is provably a no-op and may
+            be skipped.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if not (isinstance(true_val, ArrayBase) or isinstance(false_val, ArrayBase)):
+        return False
+    true_v = true_val.value if hasattr(true_val, "value") else true_val
+    false_v = false_val.value if hasattr(false_val, "value") else false_val
+    return (
+        isinstance(true_v, ArrayValue)
+        and isinstance(false_v, ArrayValue)
+        and true_v.type.is_quantum()
+        and true_v is false_v
+        and not getattr(true_val, "_consumed", False)
+        and not getattr(false_val, "_consumed", False)
+        and not _branch_touches_array_elements(true_tracer, true_v)
+        and not _branch_touches_array_elements(false_tracer, false_v)
+    )
+
+
 def emit_if(
     cond_func: typing.Callable,
     true_func: typing.Callable,
@@ -710,50 +806,13 @@ def emit_if(
                     f"but false branch returned {type(false_val).__name__}. "
                     f"Both branches of an if-else must return the same variables."
                 )
-            # Phi minimization (scalar handles only): when both branches
-            # return the *same* IR Value AND neither branch consumed it,
-            # the phi would be a no-op merge. Skipping it keeps the IR
-            # SSA-minimal and avoids generating phi-versioned aliases
-            # (e.g. ``j_phi_4``) for read-only scalar loop variables,
-            # which downstream emit-time loop unrolling cannot bind.
-            #
-            # Array handles normally need a phi because whole-array ops
-            # can return a fresh ``ArrayValue``.  When both branches
-            # still point at the exact same ``ArrayValue`` and neither
-            # branch consumed it, however, the array handle itself did
-            # not change.  Reuse the original outer handle so parent
-            # borrow tables (for live slice views captured outside the
-            # branch) are not replaced by a phi-root with empty state.
-            from qamomile.circuit.frontend.handle.array import ArrayBase
-
-            true_v = true_val.value if hasattr(true_val, "value") else true_val
-            false_v = false_val.value if hasattr(false_val, "value") else false_val
-            true_consumed = getattr(true_val, "_consumed", False)
-            false_consumed = getattr(false_val, "_consumed", False)
-            is_array_handle = isinstance(true_val, ArrayBase) or isinstance(
-                false_val, ArrayBase
-            )
-            if (
-                not is_array_handle
-                and isinstance(true_v, Value)
-                and isinstance(false_v, Value)
-                and true_v is false_v
-                and not true_consumed
-                and not false_consumed
-            ):
+            # Merge minimization: skip slots the trace proves are no-ops
+            # (see the elision predicates for the exact conditions and
+            # the belt-and-braces invariant they share with emit).
+            if _can_elide_scalar_merge(true_val, false_val):
                 merged_results.append(true_val)
                 continue
-            if (
-                is_array_handle
-                and isinstance(true_v, ArrayValue)
-                and isinstance(false_v, ArrayValue)
-                and true_v.type.is_quantum()
-                and true_v is false_v
-                and not true_consumed
-                and not false_consumed
-                and not _branch_touches_array_elements(true_tracer, true_v)
-                and not _branch_touches_array_elements(false_tracer, false_v)
-            ):
+            if _can_elide_array_merge(true_val, false_val, true_tracer, false_tracer):
                 original_val = _find_original_handle_for_result(true_val, variables)
                 merged_results.append(
                     original_val if original_val is not None else true_val
