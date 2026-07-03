@@ -9,6 +9,11 @@ import sympy as sp
 
 from qamomile.circuit.estimator.gate_counter import GateCount
 from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
+from qamomile.resource_estimation._common import (
+    _as_expr,
+    _validate_nonnegative,
+    _validate_positive,
+)
 
 
 def estimate_qaoa(
@@ -27,10 +32,12 @@ def estimate_qaoa(
     Based on standard QAOA formulation (Farhi et al. 2014).
 
     Args:
-        n (sp.Expr | int): Number of qubits (problem size).
-        p (sp.Expr | int): Number of QAOA layers.
+        n (sp.Expr | int): Number of qubits (problem size). Must be
+            positive.
+        p (sp.Expr | int): Number of QAOA layers. Must be positive.
         num_edges (sp.Expr | int): Number of edges in the problem graph
-            (quadratic terms of the cost Hamiltonian).
+            (quadratic terms of the cost Hamiltonian). Must be
+            nonnegative.
         mixer_type (str): Type of mixer. Only ``"x"`` (standard X-mixer)
             is currently supported; ``"xy"`` and ``"grover"`` are
             planned. Defaults to ``"x"``.
@@ -44,9 +51,15 @@ def estimate_qaoa(
             gates.two_qubit: p*num_edges (RZZ gates)
             gates.clifford_gates: n (initial H gates)
             gates.rotation_gates: p*(num_edges + n) (RZZ + RX gates)
+            All free symbols appearing in the resulting expressions are
+            collected into ``parameters`` for later ``substitute`` calls.
 
     Raises:
         NotImplementedError: If ``mixer_type`` is not ``"x"``.
+        TypeError: If ``n``, ``p``, or ``num_edges`` cannot be converted
+            to a SymPy expression.
+        ValueError: If SymPy can prove that ``n`` or ``p`` is not
+            positive, or that ``num_edges`` is negative.
 
     Example:
         >>> import sympy as sp
@@ -55,22 +68,28 @@ def estimate_qaoa(
         >>> # Complete graph K_n has n*(n-1)/2 edges
         >>> edges = n * (n - 1) / 2
         >>> est = estimate_qaoa(n, p, edges)
-        >>> print(est.qubits)  # n
-        >>> print(est.gates.total)  # n*(p*(n + 1) + 2)/2
+        >>> est.qubits
+        n
+        >>> est.gates.total
+        n*(p*(n + 1) + 2)/2
         >>>
         >>> # MaxCut on K_10 with p=3
         >>> concrete = est.substitute(n=10, p=3)
-        >>> print(concrete.gates.total)  # 175
+        >>> concrete.gates.total
+        175
 
     References:
         - Farhi et al. "A Quantum Approximate Optimization Algorithm"
           arXiv:1411.4028
         - Section 20 of arXiv:2310.03011v2 for variational algorithms
     """
-    # Convert to SymPy if needed
-    n_expr = sp.Integer(n) if isinstance(n, int) else n
-    p_expr = sp.Integer(p) if isinstance(p, int) else p
-    edges_expr = sp.Integer(num_edges) if isinstance(num_edges, int) else num_edges
+    # Convert to SymPy and validate
+    n_expr = _as_expr(n, "n")
+    p_expr = _as_expr(p, "p")
+    edges_expr = _as_expr(num_edges, "num_edges")
+    _validate_positive(n_expr, "n")
+    _validate_positive(p_expr, "p")
+    _validate_nonnegative(edges_expr, "num_edges")
 
     # Gate counts
     # Each layer has:
@@ -112,10 +131,7 @@ def estimate_qaoa(
             clifford_gates=clifford,
             rotation_gates=sp.simplify(p_expr * (edges_expr + n_expr)),
         ),
-        parameters={
-            str(s): s for s in [n_expr, p_expr, edges_expr] if isinstance(s, sp.Symbol)
-        },
-    )
+    ).with_collected_parameters()
 
 
 def estimate_qaoa_ising(
@@ -136,21 +152,29 @@ def estimate_qaoa_ising(
         p (sp.Expr | int): Number of QAOA layers.
         quadratic_terms (sp.Expr | int): Number of J_ij terms (edges in
             the interaction graph), each costing one RZZ gate per layer.
+            Must be nonnegative.
         linear_terms (sp.Expr | int | None): Number of h_i terms, each
-            costing one RZ gate per layer. Defaults to None, meaning n
-            linear terms (one per qubit); this default requires ``n`` to
-            be a plain int — pass ``linear_terms`` explicitly when ``n``
-            is symbolic.
+            costing one RZ gate per layer. Must be nonnegative. Defaults
+            to None, meaning n linear terms (one per qubit); this
+            default requires ``n`` to be a plain int — pass
+            ``linear_terms`` explicitly when ``n`` is symbolic.
 
     Returns:
         ResourceEstimate: The estimate_qaoa() result for ``n``, ``p``,
             and ``quadratic_terms``, with p*linear_terms RZ gates added
-            to the total, single-qubit, and rotation counts.
+            to the total, single-qubit, and rotation counts. All free
+            symbols appearing in the resulting expressions are collected
+            into ``parameters`` for later ``substitute`` calls.
 
     Raises:
         TypeError: If ``linear_terms`` is None while ``n`` is a symbolic
             expression (the default of n linear terms cannot be
-            constructed from a symbol).
+            constructed from a symbol), or if ``n``, ``p``,
+            ``quadratic_terms``, or ``linear_terms`` cannot be converted
+            to a SymPy expression.
+        ValueError: If SymPy can prove that ``n`` or ``p`` is not
+            positive, or that ``quadratic_terms`` or ``linear_terms`` is
+            negative.
 
     Example:
         >>> # 3-regular graph with n vertices: 3n/2 edges
@@ -160,20 +184,25 @@ def estimate_qaoa_ising(
         >>> est = estimate_qaoa_ising(
         ...     n, p, quadratic_terms=3 * n / 2, linear_terms=n
         ... )
-        >>> print(sp.simplify(est.gates.total))  # n*(7*p + 2)/2
+        >>> sp.simplify(est.gates.total)
+        n*(7*p + 2)/2
     """
-    linear = sp.Integer(n) if linear_terms is None else linear_terms
-
     # Ising cost layer uses:
     # - RZZ for each quadratic term
     # - RZ for each linear term (single-qubit)
 
-    # Call base QAOA estimator
+    # Call base QAOA estimator (converts and validates n, p, and
+    # quadratic_terms)
     base_est = estimate_qaoa(n, p, num_edges=quadratic_terms)
 
     # Add linear term contributions
-    linear_expr = sp.Integer(linear) if isinstance(linear, int) else linear
-    p_expr = sp.Integer(p) if isinstance(p, int) else p
+    linear_expr = (
+        sp.Integer(n)
+        if linear_terms is None
+        else _as_expr(linear_terms, "linear_terms")
+    )
+    _validate_nonnegative(linear_expr, "linear_terms")
+    p_expr = _as_expr(p, "p")
 
     # Each linear term adds one RZ gate per layer
     extra_single_qubit = p_expr * linear_expr
@@ -189,5 +218,4 @@ def estimate_qaoa_ising(
             clifford_gates=base_est.gates.clifford_gates,
             rotation_gates=base_est.gates.rotation_gates + extra_single_qubit,
         ),
-        parameters=base_est.parameters,
-    )
+    ).with_collected_parameters()

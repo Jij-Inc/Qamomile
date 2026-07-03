@@ -14,6 +14,10 @@ import sympy as sp
 
 from qamomile.circuit.estimator.gate_counter import GateCount
 from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
+from qamomile.resource_estimation._common import (
+    _as_expr,
+    _validate_positive,
+)
 
 
 def estimate_trotter(
@@ -55,8 +59,15 @@ def estimate_trotter(
     Returns:
         ResourceEstimate: Estimate with ``qubits = n`` and total gate
             count r * L * n, where r is the pth-order step count below.
-            Free symbols among the inputs are recorded in ``parameters``
-            for later ``substitute`` calls.
+            All free symbols appearing in the resulting expressions are
+            collected into ``parameters`` for later ``substitute`` calls.
+
+    Raises:
+        TypeError: If ``n``, ``L``, ``time``, ``error``, or
+            ``hamiltonian_1norm`` cannot be converted to a SymPy
+            expression.
+        ValueError: If SymPy can prove that ``n``, ``L``, ``time``,
+            ``error``, or ``hamiltonian_1norm`` is not positive.
 
     Complexity (pth-order formula, Section 11.1):
         Number of steps: r = O((||H||_1 * t)^(1+1/p) / ε^(1/p))
@@ -65,15 +76,17 @@ def estimate_trotter(
     Example:
         >>> import sympy as sp
         >>> from qamomile.resource_estimation import estimate_trotter
-        >>> n, L, t, eps = sp.symbols('n L t eps', positive=True)
         >>>
         >>> # Second-order Trotter
+        >>> n, L, t, eps = sp.symbols('n L t eps', positive=True)
         >>> est2 = estimate_trotter(n, L, t, eps, order=2)
-        >>> print(est2.gates.total)  # L**(5/2)*n*t**(3/2)/sqrt(eps)
+        >>> est2.gates.total
+        L**(5/2)*n*t**(3/2)/sqrt(eps)
         >>>
         >>> # Fourth-order Trotter (fewer steps, better scaling)
         >>> est4 = estimate_trotter(n, L, t, eps, order=4)
-        >>> print(est4.gates.total)  # L**(9/4)*n*t**(5/4)/eps**(1/4)
+        >>> est4.gates.total
+        L**(9/4)*n*t**(5/4)/eps**(1/4)
         >>>
         >>> # Concrete: 100 qubits, 1000 terms, time=10, error=0.001
         >>> concrete = est2.substitute(n=100, L=1000, t=10, eps=0.001)
@@ -82,21 +95,22 @@ def estimate_trotter(
         - Section 11.1 of arXiv:2310.03011v2
         - Childs et al. arXiv:1912.08854: Improved Trotter bounds
     """
-    # Convert to SymPy
-    n_expr = sp.Integer(n) if isinstance(n, int) else n
-    L_expr = sp.Integer(L) if isinstance(L, int) else L
-    t_expr = sp.Float(time) if isinstance(time, (int, float)) else time
-    eps_expr = sp.Float(error) if isinstance(error, (int, float)) else error
+    # Convert to SymPy and validate
+    n_expr = _as_expr(n, "n")
+    L_expr = _as_expr(L, "L")
+    t_expr = _as_expr(time, "time")
+    eps_expr = _as_expr(error, "error")
+    _validate_positive(n_expr, "n")
+    _validate_positive(L_expr, "L")
+    _validate_positive(t_expr, "time")
+    _validate_positive(eps_expr, "error")
 
     # ||H||_1 estimate
     if hamiltonian_1norm is None:
         h1norm = L_expr  # Conservative: assume unit coefficients
     else:
-        h1norm = (
-            sp.Float(hamiltonian_1norm)
-            if isinstance(hamiltonian_1norm, (int, float))
-            else hamiltonian_1norm
-        )
+        h1norm = _as_expr(hamiltonian_1norm, "hamiltonian_1norm")
+        _validate_positive(h1norm, "hamiltonian_1norm")
 
     # Number of Trotter steps for pth-order formula
     # r = O((||H||_1 * t)^(1 + 1/p) / ε^(1/p))
@@ -126,12 +140,7 @@ def estimate_trotter(
             clifford_gates=sp.Integer(0),
             rotation_gates=sp.Integer(0),
         ),
-        parameters={
-            str(s): s
-            for s in [n_expr, L_expr, t_expr, eps_expr, h1norm]
-            if isinstance(s, sp.Symbol)
-        },
-    )
+    ).with_collected_parameters()
 
 
 def estimate_qsvt(
@@ -156,44 +165,46 @@ def estimate_qsvt(
 
     Returns:
         ResourceEstimate: Estimate with ``qubits = n`` and total gate
-            count (α*t + log(1/ε)/log(log(1/ε))) * n. Free symbols among
-            the inputs are recorded in ``parameters`` for later
-            ``substitute`` calls.
+            count (α*t + log(1/ε)/log(log(1/ε))) * n. All free symbols
+            appearing in the resulting expressions are collected into
+            ``parameters`` for later ``substitute`` calls.
+
+    Raises:
+        TypeError: If ``n``, ``hamiltonian_norm``, ``time``, or ``error``
+            cannot be converted to a SymPy expression.
+        ValueError: If SymPy can prove that ``n``, ``hamiltonian_norm``,
+            ``time``, or ``error`` is not positive.
 
     Complexity (Section 11.4, arXiv:2310.03011v2):
         Calls to block-encoding: O(α*t + log(1/ε) / log(log(1/ε)))
 
     This is nearly optimal: Ω(α*t + log(1/ε)) lower bound known.
 
+    QSVT scales much better than Trotter for small error:
+    QSVT is O(αt + log 1/ε) while second-order Trotter is O(α t^1.5 / √ε).
+
     Example:
         >>> import sympy as sp
-        >>> from qamomile.resource_estimation import (
-        ...     estimate_qsvt,
-        ...     estimate_trotter,
-        ... )
+        >>> from qamomile.resource_estimation import estimate_qsvt
         >>> n, alpha, t, eps = sp.symbols('n alpha t eps', positive=True)
-        >>>
         >>> est = estimate_qsvt(n, alpha, t, eps)
-        >>> print(est.gates.total)  # O(α*t + log(1/ε)/log(log(1/ε)))
-        >>>
-        >>> # Much better than Trotter for small error!
-        >>> trotter = estimate_trotter(n, L=alpha, time=t, error=eps)
-        >>> # QSVT: O(αt + log 1/ε), Trotter: O(α t^1.5 / √ε)
+        >>> est.gates.total
+        alpha*n*t - n*log(eps)/log(-log(eps))
 
     References:
         - Section 11.4 of arXiv:2310.03011v2
         - Low & Chuang arXiv:1610.06546: QSVT framework
         - Gilyen et al. arXiv:1806.01838: QSP/QSVT
     """
-    # Convert to SymPy
-    n_expr = sp.Integer(n) if isinstance(n, int) else n
-    alpha = (
-        sp.Float(hamiltonian_norm)
-        if isinstance(hamiltonian_norm, (int, float))
-        else hamiltonian_norm
-    )
-    t_expr = sp.Float(time) if isinstance(time, (int, float)) else time
-    eps_expr = sp.Float(error) if isinstance(error, (int, float)) else error
+    # Convert to SymPy and validate
+    n_expr = _as_expr(n, "n")
+    alpha = _as_expr(hamiltonian_norm, "hamiltonian_norm")
+    t_expr = _as_expr(time, "time")
+    eps_expr = _as_expr(error, "error")
+    _validate_positive(n_expr, "n")
+    _validate_positive(alpha, "hamiltonian_norm")
+    _validate_positive(t_expr, "time")
+    _validate_positive(eps_expr, "error")
 
     # Number of block-encoding calls
     # First term: linear in time
@@ -223,12 +234,7 @@ def estimate_qsvt(
             clifford_gates=sp.Integer(0),
             rotation_gates=sp.Integer(0),
         ),
-        parameters={
-            str(s): s
-            for s in [n_expr, alpha, t_expr, eps_expr]
-            if isinstance(s, sp.Symbol)
-        },
-    )
+    ).with_collected_parameters()
 
 
 def estimate_qdrift(
@@ -244,9 +250,10 @@ def estimate_qdrift(
     requires more samples.
 
     Args:
-        L (sp.Expr | int): Number of terms in the Hamiltonian. Recorded
-            in ``parameters`` when symbolic; the sample-count formula
-            itself depends only on ||H||_1, t, and ε.
+        L (sp.Expr | int): Number of terms in the Hamiltonian. Validated
+            but not used by the sample-count formula, which depends only
+            on ||H||_1, t, and ε; a symbolic ``L`` therefore does not
+            appear in the collected ``parameters``.
         hamiltonian_1norm (sp.Expr | float): Hamiltonian 1-norm
             ||H||_1 = Σ|coefficients|. Must be positive.
         time (sp.Expr | float): Evolution time t. Must be positive.
@@ -258,37 +265,46 @@ def estimate_qdrift(
             of sampled term applications ||H||_1^2 * t^2 / ε (each term
             assumed O(1) gates). The qubit count is left as a fresh
             symbolic ``n`` because it is not determined by this formula.
+            All free symbols appearing in the resulting expressions
+            (including the fresh ``n``) are collected into
+            ``parameters`` for later ``substitute`` calls.
+
+    Raises:
+        TypeError: If ``L``, ``hamiltonian_1norm``, ``time``, or
+            ``error`` cannot be converted to a SymPy expression.
+        ValueError: If SymPy can prove that ``L``,
+            ``hamiltonian_1norm``, ``time``, or ``error`` is not
+            positive.
 
     Complexity (Section 11.2, arXiv:2310.03011v2):
         Number of samples: N = O(||H||_1^2 * t^2 / ε)
 
     Note quadratic dependence on time (bad) but linear in error (good).
     Best for small t or when simplicity is valued over gate count.
+    Compared to second-order Trotter, O((h1*t)^1.5 / √ε), qDRIFT is
+    worse for large t but better for small ε.
 
     Example:
         >>> import sympy as sp
         >>> from qamomile.resource_estimation import estimate_qdrift
         >>> L, h1, t, eps = sp.symbols('L h1 t eps', positive=True)
-        >>>
         >>> est = estimate_qdrift(L, h1, t, eps)
-        >>> print(est.gates.total)  # h1**2*t**2/eps
-        >>>
-        >>> # Compare to Trotter (order 2): O((h1*t)^1.5 / √ε)
-        >>> # qDRIFT worse for large t, better for small ε
+        >>> est.gates.total
+        h1**2*t**2/eps
 
     References:
         - Section 11.2 of arXiv:2310.03011v2
         - Campbell arXiv:1811.08017: qDRIFT algorithm
     """
-    # Convert to SymPy
-    L_expr = sp.Integer(L) if isinstance(L, int) else L
-    h1_expr = (
-        sp.Float(hamiltonian_1norm)
-        if isinstance(hamiltonian_1norm, (int, float))
-        else hamiltonian_1norm
-    )
-    t_expr = sp.Float(time) if isinstance(time, (int, float)) else time
-    eps_expr = sp.Float(error) if isinstance(error, (int, float)) else error
+    # Convert to SymPy and validate
+    L_expr = _as_expr(L, "L")
+    h1_expr = _as_expr(hamiltonian_1norm, "hamiltonian_1norm")
+    t_expr = _as_expr(time, "time")
+    eps_expr = _as_expr(error, "error")
+    _validate_positive(L_expr, "L")
+    _validate_positive(h1_expr, "hamiltonian_1norm")
+    _validate_positive(t_expr, "time")
+    _validate_positive(eps_expr, "error")
 
     # Number of random samples
     num_samples = (h1_expr**2) * (t_expr**2) / eps_expr
@@ -312,9 +328,4 @@ def estimate_qdrift(
             clifford_gates=sp.Integer(0),
             rotation_gates=sp.Integer(0),
         ),
-        parameters={
-            str(s): s
-            for s in [L_expr, h1_expr, t_expr, eps_expr]
-            if isinstance(s, sp.Symbol)
-        },
-    )
+    ).with_collected_parameters()
