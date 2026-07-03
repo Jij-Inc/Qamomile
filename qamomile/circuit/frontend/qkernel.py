@@ -1883,8 +1883,10 @@ class QKernel(Generic[P, R]):
                        subscript lookups (``d[key]``) are supported on a
                        runtime-parameter dict (items() iteration needs the
                        key structure at compile time). A runtime-parameter
-                       Dict is not recorded in ``Block.param_slots``
-                       (structural containers stay out of the slot manifest).
+                       Dict is recorded in ``Block.param_slots`` as a slot
+                       whose type is a ``DictType``; compile-time-bound
+                       Dicts and ``Tuple`` arguments stay out of the slot
+                       manifest.
             **kwargs (Any): Concrete values for non-parameter arguments.
 
         Returns:

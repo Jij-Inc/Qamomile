@@ -1695,9 +1695,17 @@ class TestDictRuntimeParameterRoundTrip:
     def _assert_dict_param_signature(self, block) -> None:
         """Assert both dict arguments kept their runtime-parameter signature.
 
+        Checks both channels that carry the runtime-parameter identity: the
+        ``DictValue`` in ``Block.parameters`` (marker plus absent
+        ``dict_runtime``) and the ``DictType``-typed ``RUNTIME_PARAMETER``
+        entry in ``Block.param_slots``.
+
         Args:
             block (Block): The deserialized block to inspect.
         """
+        from qamomile.circuit.ir.types.primitives import DictType
+
+        slots = {s.name: s for s in block.param_slots}
         for name in self._PARAMS:
             dv = block.parameters.get(name)
             assert dv is not None, f"{name} missing from Block.parameters"
@@ -1705,6 +1713,12 @@ class TestDictRuntimeParameterRoundTrip:
             assert dv.metadata.dict_runtime is None, (
                 f"{name} gained dict_runtime metadata (would be misread as a "
                 f"compile-time-bound dict on re-emit)"
+            )
+            assert name in slots, f"{name} missing from Block.param_slots"
+            assert slots[name].kind is ParamKind.RUNTIME_PARAMETER
+            assert isinstance(slots[name].type, DictType), (
+                f"{name} param slot type is {type(slots[name].type).__name__}, "
+                f"expected DictType"
             )
 
     def test_json_round_trip_preserves_runtime_dict(self):

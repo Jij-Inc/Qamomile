@@ -542,10 +542,11 @@ class Transpiler(ABC, Generic[T]):
                 subscript lookup (``d[key]``) becomes one backend
                 parameter named ``"d[<key>]"``, and the execution-time
                 binding ``bindings={"d": {...}}`` is decomposed per key
-                onto those parameters. Dict runtime parameters are not
-                recorded in ``Block.param_slots`` (structural containers
-                stay out of the slot manifest); their emitted per-key
-                parameters are visible via
+                onto those parameters. A Dict runtime parameter is
+                recorded in ``Block.param_slots`` as a slot whose type is
+                a ``DictType`` (compile-time-bound Dicts and ``Tuple``
+                arguments stay out of the slot manifest); its emitted
+                per-key parameters are visible via
                 ``ExecutableProgram.parameter_names``.
 
         Returns:
