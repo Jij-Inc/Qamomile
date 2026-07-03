@@ -70,7 +70,9 @@ class PartialEvaluationPass(Pass[Block, Block]):
         # the same reason: folding an all-constant accumulation like
         # ``total = total + 1`` collapses the in-loop BinOp to a constant,
         # erasing the dependency evidence while keeping the wrong result.
-        reject_loop_carried_classical_rebinds(input.operations, self._bindings)
+        reject_loop_carried_classical_rebinds(
+            input.operations, self._bindings, output_values=input.output_values
+        )
 
         # Keep ``SliceArrayOperation`` nodes through partial_eval so
         # the downstream ``SliceBorrowCheckPass`` can use them as
