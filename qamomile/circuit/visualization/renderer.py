@@ -1342,7 +1342,22 @@ class MatplotlibRenderer:
         positions: dict[tuple, float],
         gate_widths: dict[tuple, float],
     ) -> None:
-        """Draw a folded control-flow block from VFoldedBlock."""
+        """Draw a folded control-flow block from a ``VFoldedBlock``.
+
+        Args:
+            fig (Figure): Target matplotlib figure carrying ``_qm_ax``.
+            node (VFoldedBlock): Folded block node to render.
+            x_pos (float): Center x-coordinate for the folded block.
+            block_width (float | None): Precomputed block width, or None to use
+                the width stored on ``node``.
+            positions (dict[tuple, float]): Node-key to center-x mapping, used
+                for IF condition-measurement connectors.
+            gate_widths (dict[tuple, float]): Node-key to gate width mapping,
+                used for IF condition-measurement connectors.
+
+        Returns:
+            None
+        """
         affected_qubits = node.affected_qubits
         if not affected_qubits:
             return
