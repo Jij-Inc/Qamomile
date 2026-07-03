@@ -376,7 +376,7 @@ assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 # This rule **does not forbid dynamic quantum circuits**: `IfOperation` and
 # `WhileOperation` are `OperationKind.CONTROL`, not QUANTUM, so control flow
 # conditioned on a measurement `Bit` (`if bit: ...`, `while bit: ...`)
-# passes the check. Quantum-typed values that survive a phi merge are also
+# passes the check. Quantum-typed values that survive an if-merge are also
 # explicitly exempt. Section 5 walks through which dynamic patterns are
 # allowed and which are rejected, with code examples.
 #

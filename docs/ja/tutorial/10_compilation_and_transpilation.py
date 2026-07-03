@@ -298,7 +298,7 @@ assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 # 1. ブロックの入出力が古典であること（量子I/Oはエントリポイントではなく*サブルーチン*ブロックでのみ許可されます）。
 # 2. **`OperationKind.QUANTUM`のOperation** が、**古典型オペランド**として測定由来の古典値を受け取らないこと。より具体的には、`rx(q, theta)`の`theta`のようなゲートの古典引数が、測定結果から計算された値であってはいけません（rotation角などの古典計算をJITする必要が出るため）。
 #
-# この規則は**動的量子回路を禁止するものではありません**。`IfOperation`/`WhileOperation`は`OperationKind.CONTROL`なのでこのチェック対象外で、測定結果`Bit`を条件とする制御フロー（`if bit: ...` / `while bit: ...`）は通ります。また、Phiで合流した量子型の値も明示的に例外扱いです。動的量子回路と禁止パターンの具体的な違いは5章で扱います。
+# この規則は**動的量子回路を禁止するものではありません**。`IfOperation`/`WhileOperation`は`OperationKind.CONTROL`なのでこのチェック対象外で、測定結果`Bit`を条件とする制御フロー（`if bit: ...` / `while bit: ...`）は通ります。また、ifマージで合流した量子型の値も明示的に例外扱いです。動的量子回路と禁止パターンの具体的な違いは5章で扱います。
 #
 # 成功するとブロックは`ANALYZED`へ遷移します。
 

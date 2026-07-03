@@ -538,7 +538,16 @@ def _operation_touches_array_element(op: typing.Any, array_value: ArrayValue) ->
         bool: ``True`` if ``op`` or any nested operation reads/writes an element
         whose ``parent_array`` is ``array_value``; ``False`` otherwise.
     """
-    values = [*getattr(op, "operands", ()), *getattr(op, "results", ())]
+    # ``all_input_values`` (falling back to ``operands`` for op-like test
+    # doubles) keeps subclass-extra references — a nested if's merge
+    # yields in particular — counting as touches, matching the
+    # conservative reach this prover had when merges were stored as
+    # nested phi pseudo-operations.
+    if hasattr(op, "all_input_values"):
+        inputs = op.all_input_values()
+    else:
+        inputs = getattr(op, "operands", ())
+    values = [*inputs, *getattr(op, "results", ())]
     for value in values:
         parent_array = getattr(value, "parent_array", None)
         if (

@@ -114,6 +114,13 @@ class ValueCollector(ControlFlowVisitor):
         self.result_uuids: set[str] = set()
 
     def visit_operation(self, op: Operation) -> None:
+        """Record one operation's input and result Value UUIDs.
+
+        Args:
+            op (Operation): The visited operation. Inputs are read via
+                ``all_input_values`` so subclass-specific Value fields
+                (e.g. IfOperation yields) are covered.
+        """
         for operand in op.all_input_values():
             self.operand_uuids.add(operand.uuid)
 

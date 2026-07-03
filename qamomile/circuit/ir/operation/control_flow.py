@@ -497,9 +497,11 @@ class IfOperation(HasNestedOps, Operation):
     false_yields: list[Value] = dataclasses.field(default_factory=list)
 
     def nested_op_lists(self) -> list[list[Operation]]:
+        """Return the two branch bodies (merge yields are not operations)."""
         return [self.true_operations, self.false_operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
+        """Return a copy with the true and false branch bodies replaced."""
         return dataclasses.replace(
             self,
             true_operations=new_lists[0],

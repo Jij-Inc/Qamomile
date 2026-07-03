@@ -404,6 +404,60 @@ class TestDeadOpElimination:
             "by the lowered IfOperation"
         )
 
+    def test_runtime_if_yield_keeps_producer_alive(self):
+        """A value read only as a runtime-if merge yield survives dead-op elimination.
+
+        Lowering the compile-time if marks its condition chain dead; the
+        chain reaches ``m``, whose only remaining reader is the runtime
+        if's false yield. The yield must count as a use — otherwise the
+        BinOp producing ``m`` is deleted and the surviving runtime if is
+        left with a dangling merge source.
+        """
+        n = _uint_val("n", const=3)
+        one = _uint_val("one", const=1)
+        m = _uint_val("m")
+        add_op = BinOp(operands=[n, one], results=[m], kind=BinOpKind.ADD)
+
+        three = _uint_val("three", const=3)
+        flag = _bit_val("flag")
+        comp_op = CompOp(operands=[m, three], results=[flag], kind=CompOpKind.EQ)
+
+        # Compile-time if: (3 + 1) == 3 resolves to False, so lowering
+        # drops it and cascades dead-uuid marking through flag into m.
+        q = _qubit_val()
+        ct_if, _ = _make_if_with_x_gate(flag, q)
+
+        # Runtime if: unresolvable Bit condition; its merge reads m as
+        # the false yield — the only surviving reference to m.
+        bit = _bit_val("bit")
+        true_source = _uint_val("t")
+        merged = _uint_val("merged")
+        rt_if = IfOperation(
+            operands=[bit],
+            true_operations=[],
+            false_operations=[],
+        )
+        rt_if.add_merge(true_source, m, merged)
+
+        block = Block(
+            name="test",
+            operations=[add_op, comp_op, ct_if, rt_if],
+            output_values=[merged],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        # The dead-op cascade ran (condition producer removed) ...
+        assert not _find_ops(lowered.operations, CompOp)
+        # ... but the yield-only producer must survive.
+        assert len(_find_ops(lowered.operations, BinOp)) == 1, (
+            "BinOp producing the runtime-if merge yield must survive "
+            "dead-op elimination — the yield is its only reader"
+        )
+        [runtime_if] = _find_ops(lowered.operations, IfOperation)
+        [merge] = runtime_if.iter_merges()
+        assert merge.false_value.uuid == m.uuid
+
 
 # ---------------------------------------------------------------------------
 # Test: runtime IfOperation preservation

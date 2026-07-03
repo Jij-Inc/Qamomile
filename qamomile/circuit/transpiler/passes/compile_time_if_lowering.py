@@ -715,33 +715,27 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     @staticmethod
     def _collect_used_uuids(op: Operation, used: set[str]) -> None:
-        """Collect all UUIDs used as operands in an operation (recursive)."""
-        for operand in op.operands:
-            if hasattr(operand, "uuid"):
-                used.add(operand.uuid)
+        """Collect all UUIDs an operation reads (recursive).
+
+        Inputs are read via ``all_input_values`` so subclass-specific
+        Value fields count as uses — ``ControlledUOperation.power``,
+        ``SymbolicControlledU.num_controls`` / ``control_indices``, and
+        in particular ``IfOperation`` branch-merge yields, whose
+        producers must stay alive through dead-op elimination even when
+        the yield is the value's only reader.
+
+        Args:
+            op (Operation): Operation to inspect.
+            used (set[str]): Mutable set of used UUIDs, updated in place.
+        """
+        for operand in op.all_input_values():
+            used.add(operand.uuid)
             # Also collect element_indices and parent_array references.
             if isinstance(operand, Value):
                 if operand.parent_array is not None:
                     used.add(operand.parent_array.uuid)
                 for idx in operand.element_indices:
                     used.add(idx.uuid)
-
-        # theta is now part of operands — its UUID is collected above.
-
-        # ControlledUOperation non-operand fields (per subclass).
-        from qamomile.circuit.ir.operation.gate import (
-            ControlledUOperation,
-            SymbolicControlledU,
-        )
-
-        if isinstance(op, ControlledUOperation):
-            if isinstance(op.power, Value):
-                used.add(op.power.uuid)
-            if isinstance(op, SymbolicControlledU):
-                used.add(op.num_controls.uuid)
-                if op.control_indices is not None:
-                    for v in op.control_indices:
-                        used.add(v.uuid)
 
         # Recurse into control flow (For/ForItems/While/If).
         if isinstance(op, HasNestedOps):
