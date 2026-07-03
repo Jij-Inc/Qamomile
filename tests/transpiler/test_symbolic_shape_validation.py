@@ -270,6 +270,35 @@ class TestRuntimeParameterLoopBound:
         assert "Cannot unroll loop: bounds could not be resolved at compile time" in msg
         assert "'idxs'" in msg
 
+    def test_runtime_parameter_index_into_bound_array_raises(self):
+        """A bound using a runtime index into a bound array names the index.
+
+        ``qmc.range(idxs[start])`` with ``idxs`` bound but ``start`` left as
+        a runtime parameter must fail during validation, not later at emit.
+        """
+
+        @qmc.qkernel
+        def kernel(
+            theta: qmc.Float,
+            idxs: qmc.Vector[qmc.UInt],
+            start: qmc.UInt,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            for i in qmc.range(idxs[start]):
+                q[0] = qmc.rx(q[0], theta)
+            return qmc.measure(q)
+
+        tr = QiskitTranspiler()
+        with pytest.raises(QamomileCompileError) as exc_info:
+            tr.transpile(
+                kernel,
+                bindings={"theta": 0.5, "idxs": [1, 2]},
+                parameters=["start"],
+            )
+        msg = str(exc_info.value)
+        assert "Cannot unroll loop: bounds could not be resolved at compile time" in msg
+        assert "'start'" in msg
+
 
 class TestAcceptance:
     """Patterns that Layer 3 should leave alone."""

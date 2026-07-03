@@ -128,11 +128,13 @@ def _build_classical_dependency_graph(
     operand) are deliberately excluded: a loop bound's compile-time
     resolvability is a property of classical dataflow, and following a
     quantum edge could blame an unrelated gate parameter for a
-    measurement-derived bound. Array-element → parent-array edges (and the
-    parent's ``slice_of`` chain) are recorded for operands of every
-    operation kind — they are type-preserving and are needed when a bound
-    indexes a runtime parameter array directly (e.g. ``qmc.range(idxs[0])``
-    as a ``ForOperation`` operand).
+    measurement-derived bound. Array-element metadata edges (the element's
+    indices, parent array, and the parent's ``slice_of`` chain including
+    slice bounds) are recorded for operands of every operation kind — they
+    are type-preserving and are needed when a bound indexes a runtime
+    parameter array directly (e.g. ``qmc.range(idxs[0])`` as a
+    ``ForOperation`` operand) or uses a runtime parameter as the index into
+    a compile-time-bound array (e.g. ``qmc.range(idxs[start])``).
 
     Args:
         operations (list[Operation]): Top-level operations of the block;
@@ -168,14 +170,41 @@ def _build_classical_dependency_graph(
             for v in op.operands:
                 if not isinstance(v, ValueBase):
                     continue
-                parent = getattr(v, "parent_array", None)
-                if parent is None:
-                    continue
-                self.graph.setdefault(v.uuid, set()).add(parent.uuid)
-                cur = parent
-                while getattr(cur, "slice_of", None) is not None:
-                    self.graph.setdefault(cur.uuid, set()).add(cur.slice_of.uuid)
-                    cur = cur.slice_of
+                self._record_value_reference_edges(v)
+
+        def _record_value_reference_edges(self, value: ValueBase) -> None:
+            """Record dependency edges carried by value metadata.
+
+            Args:
+                value (ValueBase): Operand value whose metadata references are
+                    part of the classical dataflow for structural bounds.
+
+            Returns:
+                None: Mutates ``self.graph`` in place.
+            """
+            for idx in getattr(value, "element_indices", ()):
+                if isinstance(idx, ValueBase):
+                    self.graph.setdefault(value.uuid, set()).add(idx.uuid)
+
+            parent = getattr(value, "parent_array", None)
+            if parent is None:
+                return
+            self.graph.setdefault(value.uuid, set()).add(parent.uuid)
+
+            cur = parent
+            while cur is not None:
+                for bound in (
+                    getattr(cur, "slice_start", None),
+                    getattr(cur, "slice_step", None),
+                ):
+                    if isinstance(bound, ValueBase):
+                        self.graph.setdefault(cur.uuid, set()).add(bound.uuid)
+
+                next_parent = getattr(cur, "slice_of", None)
+                if next_parent is None:
+                    break
+                self.graph.setdefault(cur.uuid, set()).add(next_parent.uuid)
+                cur = next_parent
 
     builder = ClassicalDependencyGraphBuilder()
     builder.visit_operations(operations)
