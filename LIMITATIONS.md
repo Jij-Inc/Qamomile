@@ -2,6 +2,30 @@
 
 This file collects known limitations of the Qamomile compiler — gaps deliberately left open by recent fixes and trade-offs the codebase carries on purpose. Each entry documents what the limitation is, when it bites, why the simpler fix was deferred, and the future fix path. Entries here cover the call-time specialization fix for issue #392, the eager qkernel rebind-detection change, and the slice/control-flow work tracked by recent controlled-view fixes.
 
+## Loop-carried classical scalar updates are rejected, not supported
+
+A qkernel loop body is traced exactly once, so a Python-level reassignment like `total = total + i` inside a `qmc.range(...)` / `while` / `qmc.items(...)` loop produces IR whose right-hand side reads the fixed pre-loop value instead of the previous iteration's value — the IR has no loop-carried dependency representation (no MLIR-`scf.for`-style `iter_args`/`yield`). Before the rejection landed, every executor (the classical segment interpreter and emit-time unrolling) re-ran the same traced operations per iteration, so `sum(range(4))` silently compiled to `0 + 3 == 3` instead of `6`; the same shape guarded by an in-loop `if`, driving a gate angle, or nested in another loop miscompiled identically. The frontend now records candidate rebinds on the loop operations (`LoopCarriedRebind`) and `reject_loop_carried_classical_rebinds` (`qamomile/circuit/transpiler/passes/analyze.py`) raises a targeted `ValidationError` from `PartialEvaluationPass` (pre-fold, with bindings) and `AnalyzePass` (safety net).
+
+**When it bites**: any read-before-write reassignment of a pre-loop classical scalar (`UInt` / `Float` / `Bit`) inside a loop body — explicit (`total = total + i`), augmented (`total += i`), phi-mediated (`if cond: total = total + i`), all-constant (`total = total + 1`, which folds at trace time and is caught by the changed-constant rule), or tuple-swap (`a, b = b, a`). Note that builtin `range()` inside a `@qkernel` is transformed exactly like `qmc.range()` (`_is_range_call` in `qamomile/circuit/frontend/ast_transform.py`), so switching to builtin `range` is NOT a workaround.
+
+**What stays supported**: read-only outer scalars (`qmc.rzz(q[i], q[j], gamma * Jij)`), loop-invariant rebinds whose re-execution converges (`last = x + i`), quantum rebinds (`q = qmc.h(q)`), per-iteration re-measurement of a measurement-backed `Bit` (the loop-carried while-condition machinery — both the initial and updated values must be measurement-backed, in which case the resource allocator aliases them onto one physical clbit), and rebinds confined to compile-time-dead branches (classified with the same condition resolution `CompileTimeIfLoweringPass` uses).
+
+**Conservative corners**: the check fires regardless of trip count, so a loop that would execute zero or one time at runtime is still rejected; value-preserving updates whose folded constant differs from the initial value only in provenance (e.g. `total = total * 1` after other folds) may be rejected; whole-array classical rebinds (`vals = other_array` in a loop) are not yet covered by this check. `kernel.build()` never raises — records are only attached; rejection happens at transpile time.
+
+**Workaround**: compute the reduction in ordinary Python — outside the `@qkernel`, or in an undecorated helper function (undecorated helpers are never AST-transformed, so their loops run natively at trace time) — or express each iteration's value in closed form from the loop index.
+
+**Future fix**: represent loop-carried values explicitly (`iter_args`/`yield` on `ForOperation` / `WhileOperation` / `ForItemsOperation`), thread them through the classical executor and emit-time unrolling, and lift the rejection for representable cases.
+
+## Fresh qubits allocated inside a runtime loop are not reset per iteration
+
+`qmc.qubit(...)` inside a loop that is emitted as a native runtime loop (e.g. Qiskit `ForLoopOp`) allocates one physical qubit for the loop body; the qubit is NOT reset between iterations, so gates accumulate on the previous iteration's post-measurement state. `for _ in qmc.range(2): q = qmc.qubit("q"); q = qmc.x(q); bit = qmc.measure(q)` measures `1` then `0` (the second `X` acts on the collapsed `|1>`), where Python semantics promise a fresh `|0>` — and therefore `1` — every iteration.
+
+**When it bites**: any kernel that allocates and measures a fresh qubit inside a `qmc.range` loop and consumes the measurement (directly or via the loop-carried `Bit` machinery). The repeat-until-zero `while` pattern is unaffected in practice because its body re-measures after an `h` on the accumulated state, which is still a fair coin.
+
+**Why this trade-off exists**: `QInitOperation` means "allocate a fresh qubit", and the allocator maps each UUID to one physical qubit. A loop body traced once has one `QInitOperation` UUID, so all iterations share the physical qubit; nothing emits a per-iteration reset. This predates the loop-carried rebind work and is documented here as observed behavior.
+
+**Future fix**: emit a reset at each `QInitOperation` occurrence inside runtime-loop bodies (matching the fresh-`|0>` contract), or reject in-loop fresh allocation on backends whose loop primitives cannot reset.
+
 ## Container-valued operands outgrow the current `Operation.operands` type annotation
 
 Some IR operations legitimately carry container-valued operands even though the base `Operation.operands` field is still annotated as `list[Value]`. In particular, `ForItemsOperation` stores the iterated `DictValue` as its first operand, and `InverseBlockOperation` can keep `DictValue` / `TupleValue` parameters from the inverted qkernel as non-quantum parameter operands. The serialization decoder now restores those shapes explicitly, but it has to use a local `cast(list[Value], ...)` because the static base type has not been widened yet.
