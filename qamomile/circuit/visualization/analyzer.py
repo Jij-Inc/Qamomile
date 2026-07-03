@@ -1872,6 +1872,10 @@ class CircuitAnalyzer:
         if not affected_qubits and condition_measure_qubit_indices:
             affected_qubits = list(dict.fromkeys(condition_measure_qubit_indices))
             affected_qubits_precise = True
+        elif not affected_qubits and qubit_map:
+            # Empty symbolic IFs still need a display wire for their branch box.
+            affected_qubits = [min(qubit_map.values())]
+            affected_qubits_precise = False
 
         if self.fold_ifs:
             body_lines = self._format_folded_body_lines(

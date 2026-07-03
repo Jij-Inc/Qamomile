@@ -685,7 +685,10 @@ class TestDrawEndToEnd:
 
     def test_symbolic_empty_single_branch_draws_if_label(self):
         """The renderer keeps an empty symbolic single-branch IF visible."""
-        fig = symbolic_empty_single_branch_if.draw(fold_loops=False)
-        ax = fig._qm_ax  # type: ignore[attr-defined]
-        labels = [text.get_text() for text in ax.texts]
-        assert any(label.startswith("if ") for label in labels)
+        for fig in (
+            symbolic_empty_single_branch_if.draw(fold_loops=False),
+            symbolic_empty_single_branch_if.draw(fold_loops=False, fold_ifs=True),
+        ):
+            ax = fig._qm_ax  # type: ignore[attr-defined]
+            labels = [text.get_text() for text in ax.texts]
+            assert any(label.startswith("if ") for label in labels)

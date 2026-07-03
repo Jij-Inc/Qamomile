@@ -547,6 +547,10 @@ class MatplotlibRenderer:
                     empty_span = self._condition_measure_empty_branch_x_span(
                         node, positions, gate_widths, label_width
                     )
+                if empty_span is None and i == 0:
+                    empty_span = self._standalone_empty_branch_x_span(
+                        node, positions, block_widths, label_width
+                    )
                 if empty_span is None:
                     continue
                 box_left, box_right = empty_span
@@ -670,6 +674,33 @@ class MatplotlibRenderer:
         box_left = measure_right + self.style.gate_gap
         min_width = max(label_width, self.style.gate_width)
         return box_left, box_left + min_width
+
+    def _standalone_empty_branch_x_span(
+        self,
+        node: VUnfoldedSequence,
+        positions: dict[tuple, float],
+        block_widths: dict[tuple, float],
+        label_width: float,
+    ) -> tuple[float, float] | None:
+        """Return an x-span for an empty IF with no child or measurement anchor.
+
+        Args:
+            node (VUnfoldedSequence): IF node whose layout position was reserved.
+            positions (dict[tuple, float]): Node-key to center-x mapping.
+            block_widths (dict[tuple, float]): Node-key to block width mapping.
+            label_width (float): Reserved width for the branch header label.
+
+        Returns:
+            tuple[float, float] | None: ``(left, right)`` extent for the empty
+                branch box, or None when layout did not reserve the IF node.
+        """
+        if node.node_key not in positions:
+            return None
+        min_width = max(
+            block_widths.get(node.node_key, 0.0), label_width, self.style.gate_width
+        )
+        center = positions[node.node_key]
+        return center - min_width / 2, center + min_width / 2
 
     def _empty_branch_x_span(
         self,

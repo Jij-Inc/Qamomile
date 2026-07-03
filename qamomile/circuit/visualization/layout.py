@@ -406,15 +406,18 @@ class CircuitLayoutEngine:
         # Reserve header room past the last branch too, so a single-branch
         # (no else) header and the trailing else header are not clipped.
         if is_if and affected_qubits:
-            min_end = if_start + label_width
+            branch_min_width = max(label_width, self.style.gate_width)
+            min_end = if_start + branch_min_width
             if condition_measure_box_left is not None:
-                min_end = max(min_end, condition_measure_box_left + label_width)
+                min_end = max(min_end, condition_measure_box_left + branch_min_width)
             for q in affected_qubits:
                 if state.qubit_right_edges.get(q, 0.0) < min_end:
                     state.qubit_right_edges[q] = min_end
                     state.qubit_columns[q] = min_end + self.style.gate_gap
             state.column = max(state.column, min_end + 1)
             state.actual_width = max(state.actual_width, min_end + 0.5)
+            state.positions[node.node_key] = if_start + branch_min_width / 2
+            state.block_widths[node.node_key] = branch_min_width
 
             # Reserve vertical clearance for the ``if <cond>:`` / ``else:``
             # headers, which are drawn above the topmost branch wire. Without
