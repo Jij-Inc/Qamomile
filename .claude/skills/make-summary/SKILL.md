@@ -1,7 +1,7 @@
 ---
 name: make-summary
-description: Make summary markdown file for the current branch to explain the main branch. This skill uses another subagent or another ai model to validate the summary. Keep your eye on the usage limit.
-model: opus 4.8
+description: Create a summary markdown file for the current branch that explains its work relative to the main branch. This skill uses a separate subagent or AI model to validate the summary. Keep an eye on the usage limit.
+model: opus
 ---
 
 # Branch Summary
@@ -38,16 +38,16 @@ Create the summary by filling in the section template below. Do not add any othe
 - For a feature addition: what becomes possible, and why it is needed.
 - Clearly distinguish which is the "behavior on main" and which is the "behavior on the branch".
 
-### 2. Changes at the frontend (the code level the user writes)
+## 2. Changes at the frontend (the code level the user writes)
 - What changed from the perspective of a Qamomile user: the contents of the `@qm.qkernel` the user writes, the error messages the user receives, the behavior of the APIs the user touches, etc.
 - Always include at least one code example.
 - Do not write backend implementation details here.
 
-### 3. Changes at the backend (IR and other internals overall)
+## 3. Changes at the backend (IR and other internals overall)
 - Changes to the compiler / IR / passes / backends under `qamomile/circuit/{frontend,ir,transpiler}/...`.
 - New IR ops / dataclasses / passes / internal helpers, the role each of them solves, and the related file:line. Qamomile terms (`Block`, `Operation`, `affine_validate`, `CompositeGateOperation`, etc.) appear here for the first time, so add a one-line annotation where needed.
 
-### 4. Alternatives that were not adopted, and why this approach was chosen
+## 4. Alternatives that were not adopted, and why this approach was chosen
 - For anything that had multiple design-level options, write:
   - the trade-off of each,
   - which one was adopted and what was given up.
@@ -55,7 +55,7 @@ Create the summary by filling in the section template below. Do not add any othe
   - Why: it can serve as the rationale for a design decision.
 - If there is no relevant design branch, it is fine to write this section as a single line "None" and stop.
 
-### 5. Known limitations
+## 5. Known limitations
 - Write the gaps that remain even after this branch is merged.
 - Write the ones that can actually be hit in real code (room for false negatives / false positives, unsupported AST forms, behavior differing on another backend, etc.) in a When / Why / Future fix frame. For ones already registered in a separate document such as LIMITATIONS.md, cross-reference them here; for follow-ups that are not registered, list them with their reasons.
 - If there are none, write a single line "None".
@@ -80,7 +80,7 @@ git diff origin/main...HEAD --stat
 - Count added tests too, but do not write the test list itself into the summary (absorb it into sections 2/3 as "this behavior is expected").
 - For a bugfix, running the minimal code that reproduces the original bug on the branch and confirming that the error actually appears makes section 1 easier to write.
 
-### Step 3. Write the draft of the 5 sections
+### Step 3. Write the draft following the section template
 - `Write` `<branch-name>-summary.md` at the worktree root and fill in the draft following the structure rules and writing rules.
 - Do not blur the boundary between section 2 and 3. Separate the user perspective (API / errors / kernel code) and the internal perspective (IR / passes / dataclasses) into different paragraphs.
 - Write section 4 in "final form". Do not mix in the chat / review exchanges themselves.
