@@ -243,6 +243,24 @@ class TestDictGetItemTrace:
         with pytest.raises(KeyError, match="Key 0 not found"):
             missing_key.build(gammas={2: 0.6})
 
+    def test_empty_bound_dict_raises_key_error(self):
+        """A constant-key lookup in a bound empty dict raises KeyError.
+
+        A bound empty dict must behave like any other bound dict with a
+        missing key, not fall through to the symbolic-lookup path.
+        """
+
+        @qmc.qkernel
+        def empty_dict(
+            gammas: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            q[0] = qmc.rz(qmc.h(q[0]), angle=gammas[0])
+            return qmc.measure(q)
+
+        with pytest.raises(KeyError, match="Key 0 not found"):
+            empty_dict.build(gammas={})
+
     def test_container_value_type_raises_not_implemented(self):
         """Subscripting a container-valued dict reports a clear error."""
 

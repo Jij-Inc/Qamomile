@@ -25,6 +25,7 @@
 #
 # - `qmc.range()`によるループ
 # - `qmc.items()`による辞書のイテレーション
+# - `d[key]`による辞書の添字参照
 # - 測定結果に対する`if` / `while`による回路途中の分岐
 
 # %%
@@ -108,6 +109,56 @@ def sparse_coupling(
 # **value**側は単一の変数でなければなりません。value位置でのタプルアンパック
 # （例：`for _, (i, j) in qmc.items(d)`）は**サポートされておらず**、`SyntaxError`が発生します。
 # 同様に、`for pair in qmc.items(d)` のような単一ターゲットパターンもサポートされていません。
+# :::
+
+# %% [markdown]
+# ## 辞書の添字参照（`d[key]`）
+#
+# `qmc.Dict`は`qmc.items()`でのイテレーションに加えて、`d[key]`で直接参照できます。特に有用なのは、**ある辞書のイテレーションキーで別の辞書を引く**パターンです。ある辞書のコスト項をループしながら、項ごとの係数をもう一方の辞書から取り出せます。コスト項ごとに独立した角度を持つmulti-angle QAOAが代表例です。
+
+
+# %%
+@qmc.qkernel
+def per_edge_angles(
+    n: qmc.UInt,
+    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gammas: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+
+    # 各エッジに固有の角度を、同じ(i, j)キーで参照する
+    for (i, j), weight in qmc.items(edges):
+        q[i], q[j] = qmc.rzz(q[i], q[j], weight * gammas[(i, j)])
+
+    return qmc.measure(q)
+
+
+# %%
+edge_data = {(0, 1): 1.0, (1, 2): -0.7}
+gamma_data = {(0, 1): 0.3, (1, 2): 0.5}
+
+circuit = transpiler.to_circuit(
+    per_edge_angles,
+    bindings={"n": 3, "edges": edge_data, "gammas": gamma_data},
+)
+_rzz_angles = sorted(
+    float(_instr.operation.params[0])
+    for _instr in circuit.data
+    if _instr.operation.name == "rzz"
+)
+# 各RZZの角度は、そのエッジ自身のweight * gammaになる
+assert _rzz_angles == sorted([1.0 * 0.3, -0.7 * 0.5])
+
+# %% [markdown]
+# :::{note}
+# `d[key]`は以下をサポートしています：
+#
+# - **キー**：itemsループのループ変数（`gammas[i]`、`gammas[(i, j)]`）、`int`定数、両者の混在（`gammas[(0, i)]`）。キーの全要素がコンパイル時定数で辞書データがバインド済みの場合は、hashableなPythonキー（`str`など）も使えます。このとき参照はトレース時に定数へ畳み込まれます。シンボリックなキー要素は`UInt`でなければなりません。
+# - **値の型**：スカラー値（`qmc.Float`、`qmc.UInt`、`qmc.Bit`）。コンテナ値（`qmc.Tuple` / `qmc.Vector`）はまだサポートされておらず、`NotImplementedError`が発生します。
+# - 存在しないキーはPythonの辞書と同様に、ビルド時に`KeyError`が発生します。
 # :::
 
 # %% [markdown]
@@ -258,6 +309,8 @@ assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 #
 # - `qmc.range(n)`でシンボリック範囲のループ。
 # - `qmc.items(dict)`でスパースなキーバリューデータ（エッジ、重み）のイテレーション。
+# - `d[key]`で、ある辞書のイテレーションキーによる別の辞書の参照
+#   （項ごとの係数、multi-angle QAOA）。
 # - `if bit:` / `while bit:`で**測定結果**に基づく分岐。両分岐で同じ量子ビットハンドルを扱う必要があります（アフィンルール）。
 # - これらの制御フローは対象の量子SDKのネイティブな命令（例：Qiskitの`if_else`や`while_loop`）にトランスパイルされます。
 #
