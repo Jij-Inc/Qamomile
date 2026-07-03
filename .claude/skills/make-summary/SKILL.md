@@ -1,12 +1,12 @@
 ---
 name: make-summary
-description: Create a summary markdown file for the current branch that explains its work relative to the main branch. This skill uses a separate subagent or AI model to validate the summary. Keep an eye on the usage limit.
+description: Create a summary markdown file for the current branch that explains its work relative to `origin/main`. This skill uses a separate subagent or AI model to validate the summary. Keep an eye on the usage limit.
 model: opus
 ---
 
 # Branch Summary
 
-Summarize the diff between `main` and the current worktree branch after reading the code. The result must be clear enough for reviewers and junior engineers to understand the branch without seeing the conversation history.
+Summarize the diff between `origin/main` and the current worktree branch after reading the code. The result must be clear enough for reviewers and junior engineers to understand the branch without seeing the conversation history.
 
 ## When To Use
 
@@ -38,18 +38,18 @@ Summarize the diff between `main` and the current worktree branch after reading 
 Write exactly the following five sections, in this order. Do not add `0. Glossary`, verification results, TODOs, conversation history, or any other section.
 
 ```md
-1. Problem Overview
+## 1. Problem Overview
 
-2. Frontend Changes (User-Written Code Level)
+## 2. Frontend Changes (User-Written Code Level)
 
-3. Backend Changes (IR And Internals)
+## 3. Backend Changes (IR And Internals)
 
-4. Alternatives Not Adopted And Why This Approach Was Chosen
+## 4. Alternatives Not Adopted And Why This Approach Was Chosen
 
-5. Known Limitations
+## 5. Known Limitations
 ```
 
-In `1. Problem Overview`, for a bugfix, distinguish what happened on `main`, why it happened, and how the branch changes the behavior. For a feature, explain what becomes possible and why it is needed.
+In `1. Problem Overview`, for a bugfix, distinguish what happened on `origin/main`, why it happened, and how the branch changes the behavior. For a feature, explain what becomes possible and why it is needed.
 
 In `2. Frontend Changes (User-Written Code Level)`, describe the user-facing behavior: qkernels the user writes, errors the user receives, and API behavior the user touches. Include at least one code example. Do not put backend implementation details here.
 
@@ -74,7 +74,7 @@ git diff origin/main...HEAD --stat
 
 ### Step 2. Read The Diff
 
-Actually read the changed files. Understand heavily changed files, new files, new classes or functions, and deleted symbols. Read added tests too, but do not make a test list in the summary; absorb expected behavior into the relevant sections. For a bugfix, gather enough detail to explain the bug on `main` and the branch behavior with concrete examples when possible.
+Actually read the changed files. Understand heavily changed files, new files, new classes or functions, and deleted symbols. Read added tests too, but do not make a test list in the summary; absorb expected behavior into the relevant sections. For a bugfix, gather enough detail to explain the bug on `origin/main` and the branch behavior with concrete examples when possible.
 
 ### Step 3. Write The Draft
 
@@ -82,9 +82,9 @@ Create or overwrite `<branch-name>-summary.md` at the worktree root. Do not blur
 
 ### Step 4. Check Discrepancies With Another AI
 
-By default, use the `claude` skill to adversarially check the summary against the real code. Watch usage. If `claude` is unavailable or blocked on approval to send local repository content externally, ask a memory-isolated subagent or another available AI to perform the same check. If neither is available, reread the changed files and the summary yourself, perform an adversarial self-check, and fix any mismatch you find. In that case, briefly state in the completion report that no independent discrepancy check ran, but still complete the summary.
+By default, ask a memory-isolated subagent to adversarially check the summary against the real code. If a subagent is unavailable, use another available AI checker. If no independent checker is available or the check is blocked on approval to send local repository content externally, reread the changed files and the summary yourself, perform an adversarial self-check, and fix any mismatch you find. In that case, briefly state in the completion report that no independent discrepancy check ran, but still complete the summary.
 
-Include the absolute path of the summary, the absolute paths of the main implementation files, the key symbols or line ranges referenced by the summary, a request to point out any statement that does not match the real code in a bulleted list and answer `no discrepancies` if there are none, and constraints forbidding code edits, file creation or deletion, and command execution.
+Include the absolute path of the summary, the absolute paths of the primary implementation files, the key symbols or line ranges referenced by the summary, a request to point out any statement that does not match the real code in a bulleted list and answer `no discrepancies` if there are none, and constraints forbidding code edits, file creation or deletion, and command execution.
 
 If the checker reports discrepancies, re-confirm each point against the real code, fix the summary, and verify that line-number edits did not shift other references. Then ask for another check. Repeat until there are no points left. If a point requires reconsidering a design decision, do not merely edit the summary; ask the user. Do not relay every iteration of the discrepancy-check loop to the user.
 
