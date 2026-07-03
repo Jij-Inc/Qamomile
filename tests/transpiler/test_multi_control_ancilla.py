@@ -1,6 +1,7 @@
 """Tests for clean-ancilla planning of the multi-controlled decomposition."""
 
 import numpy as np
+import pytest
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.control_flow import ForOperation
@@ -16,6 +17,7 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
 )
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.multi_control_ancilla import (
     _MAX_PRECISE_FOR_LOOP_ITERATIONS,
     MultiControlAncillaPool,
@@ -259,3 +261,24 @@ def test_estimate_symbolic_num_controls_accepts_numpy_integral_shape() -> None:
     )
     # Four vector controls -> upper bound of a 4-control X.
     assert _estimate([op]) == 3
+
+
+def test_estimate_symbolic_num_controls_rejects_unresolved_vector_width() -> None:
+    """Operand-width fallback fails fast when vector width is unresolved."""
+    num_controls = Value(type=UIntType(), name="nc")
+    controls = ArrayValue(
+        type=QubitType(),
+        name="controls",
+        shape=(Value(type=UIntType(), name="n"),),
+    )
+    target = _qubit("t")
+    operands = [controls, target]
+    op = SymbolicControlledU(
+        operands=operands,
+        results=[v.next_version() for v in operands],
+        num_controls=num_controls,
+        num_control_args=1,
+        block=Block(operations=[_fixed_gate(GateOperationType.X, 1)]),
+    )
+    with pytest.raises(EmitError, match=r"Cannot resolve Vector\[Qubit\]"):
+        _estimate([op])

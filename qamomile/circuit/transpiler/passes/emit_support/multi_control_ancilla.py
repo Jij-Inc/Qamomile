@@ -45,6 +45,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError
 
 if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
@@ -214,9 +215,9 @@ def _quantum_width_upper_bound(
     """Upper-bound the flattened qubit count of quantum operand values.
 
     Scalar quantum values count as one qubit; ``Vector[Qubit]`` operands
-    count as their resolved leading dimension. An unresolvable dimension
-    contributes zero — under-estimation is acceptable here because the
-    emit-time pool check reports any shortfall explicitly.
+    count as their resolved leading dimension. Unresolvable vector
+    dimensions fail fast because emission also requires concrete quantum
+    array sizes for allocation.
 
     Args:
         values (list[Value]): Quantum operand values (controls).
@@ -226,13 +227,29 @@ def _quantum_width_upper_bound(
 
     Returns:
         int: Estimated total qubit width.
+
+    Raises:
+        EmitError: If a ``Vector[Qubit]`` operand has no statically
+            resolvable leading dimension.
     """
     total = 0
     for value in values:
         if isinstance(value, ArrayValue):
-            if value.shape:
-                size = _resolve_size_value(value.shape[0], resolver, bindings)
-                total += size if size is not None else 0
+            if not value.shape:
+                raise EmitError(
+                    f"Cannot resolve Vector[Qubit] control width for "
+                    f"{value.name!r}: missing shape metadata.",
+                    operation="multi-control ancilla estimation",
+                )
+            size = _resolve_size_value(value.shape[0], resolver, bindings)
+            if size is None:
+                raise EmitError(
+                    f"Cannot resolve Vector[Qubit] control width for "
+                    f"{value.name!r}. Structural UInt parameters must be "
+                    "bound at transpile time.",
+                    operation="multi-control ancilla estimation",
+                )
+            total += size
         else:
             total += 1
     return total
