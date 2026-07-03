@@ -48,6 +48,7 @@ from qamomile.resource_estimation.quantities import (
     compare_resource_values,
     describe_resource_quantity,
     iter_resource_quantity_specs,
+    register_resource_quantity,
     resource_values_from_estimate,
 )
 
@@ -85,6 +86,7 @@ __all__ = [
     "iter_resource_quantity_specs",
     "qubitized_qpe_workload_from_openfermion",
     "qubits_counter",
+    "register_resource_quantity",
     "resource_values_from_estimate",
     "resource_estimate_expressions",
     "summarize_openfermion_qubit_operator",

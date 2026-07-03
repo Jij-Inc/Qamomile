@@ -740,7 +740,9 @@ class FTQCPhysicalResourceEstimate:
 
         Returns:
             dict[str, sp.Expr]: Logical and physical values keyed by canonical
-            resource quantity names.
+            resource quantity names, plus every oracle-call counter from the
+            logical estimate under its own name (canonical keys win on
+            collision).
         """
         values = {
             "logical_qubits": self.logical.qubits,
@@ -762,8 +764,8 @@ class FTQCPhysicalResourceEstimate:
             ),
             **self.architecture_values,
         }
-        if "qpe_iterations" in self.logical.gates.oracle_calls:
-            values["qpe_iterations"] = self.logical.gates.oracle_calls["qpe_iterations"]
+        for name, count in self.logical.gates.oracle_calls.items():
+            values.setdefault(name, count)
         return values
 
     @property
@@ -918,7 +920,9 @@ class FTQCActiveVolumeResourceEstimate:
 
         Returns:
             dict[str, sp.Expr]: Logical and active-volume values keyed by
-            canonical resource quantity names.
+            canonical resource quantity names, plus every oracle-call counter
+            from the logical estimate under its own name (canonical keys win
+            on collision).
         """
         values = {
             "logical_qubits": self.logical.qubits,
@@ -931,8 +935,8 @@ class FTQCActiveVolumeResourceEstimate:
             "runtime_seconds": self.runtime_seconds,
             **self.architecture_values,
         }
-        if "qpe_iterations" in self.logical.gates.oracle_calls:
-            values["qpe_iterations"] = self.logical.gates.oracle_calls["qpe_iterations"]
+        for name, count in self.logical.gates.oracle_calls.items():
+            values.setdefault(name, count)
         return values
 
     @property

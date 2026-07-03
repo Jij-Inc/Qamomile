@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import sympy as sp
 
@@ -12,7 +14,9 @@ from qamomile.resource_estimation import (
     HamiltonianQPEWorkload,
     HamiltonianRepresentation,
     ResourceCategory,
+    ResourceEstimate,
     ResourceQuantity,
+    ResourceQuantitySpec,
     SupportsResourceValues,
     SurfaceCodeCostModel,
     compare_resource_values,
@@ -22,6 +26,7 @@ from qamomile.resource_estimation import (
     estimate_qubitized_qpe_resources,
     estimate_qubitized_qpe_resources_from_workload,
     iter_resource_quantity_specs,
+    register_resource_quantity,
     resource_estimate_expressions,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
@@ -101,10 +106,113 @@ def test_describe_resource_quantity_normalizes_strings():
     assert spec.unit == "energy"
 
 
-def test_describe_resource_quantity_rejects_unknown_key():
-    """Unknown quantity keys fail with a finite-set validation error."""
-    with pytest.raises(ValueError, match="Unknown resource quantity"):
+def test_describe_resource_quantity_rejects_unregistered_key():
+    """Metadata lookup fails clearly for keys with no registered spec."""
+    with pytest.raises(ValueError, match="No metadata registered"):
         describe_resource_quantity("not-a-resource")
+
+
+def test_compare_accepts_unregistered_custom_quantity():
+    """Custom string quantity keys compare without prior registration."""
+    baseline = {"grover_oracle_calls": 40, "logical_qubits": 8}
+    candidate = {"grover_oracle_calls": 10, "logical_qubits": 8}
+
+    rows = compare_resource_values(
+        baseline,
+        candidate,
+        quantities=("grover_oracle_calls",),
+    )
+
+    assert rows[0].quantity == "grover_oracle_calls"
+    assert sp.simplify(rows[0].ratio - sp.Rational(1, 4)) == 0
+    assert rows[0].label == "grover_oracle_calls"
+    assert rows[0].unit == ""
+    assert rows[0].category is None
+    assert rows[0].to_dict()["category"] == ""
+
+
+def test_default_comparison_selection_includes_unregistered_keys():
+    """Auto-selected quantities cover registered keys first, then custom keys."""
+    baseline = {"logical_qubits": 8, "my_custom_counter": 4}
+    candidate = {"logical_qubits": 8, "my_custom_counter": 2}
+
+    rows = compare_resource_values(baseline, candidate)
+    keys = [row.quantity for row in rows]
+
+    assert keys == ["logical_qubits", "my_custom_counter"]
+
+
+def test_register_resource_quantity_supplies_comparison_metadata():
+    """Registered custom specs drive labels and categories in comparisons."""
+    spec = register_resource_quantity(
+        ResourceQuantitySpec(
+            quantity="test_registered_rounds",
+            label="Test rounds",
+            unit="rounds",
+            category=ResourceCategory.ALGORITHM,
+            description="Rounds used only by this test.",
+        )
+    )
+
+    assert describe_resource_quantity("test_registered_rounds") == spec
+    assert spec in iter_resource_quantity_specs()
+
+    rows = compare_resource_values(
+        {"test_registered_rounds": 6},
+        {"test_registered_rounds": 3},
+    )
+    assert rows[0].label == "Test rounds"
+    assert rows[0].unit == "rounds"
+    assert rows[0].category == ResourceCategory.ALGORITHM
+
+    # Idempotent re-registration is allowed; conflicting metadata is not.
+    register_resource_quantity(spec)
+    with pytest.raises(ValueError, match="already registered"):
+        register_resource_quantity(
+            ResourceQuantitySpec(
+                quantity="test_registered_rounds",
+                label="Different label",
+                unit="rounds",
+                category=ResourceCategory.ALGORITHM,
+                description="Conflicting metadata.",
+            )
+        )
+
+
+def test_oracle_call_counters_pass_through_generically():
+    """Every oracle-call counter surfaces in resource values by its own name."""
+    logical = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        logical_qubits=7,
+    )
+    renamed = ResourceEstimate(
+        qubits=logical.qubits,
+        gates=replace(
+            logical.gates,
+            oracle_calls={"walk_calls": sp.Integer(4), "qpe_iterations": sp.Integer(4)},
+        ),
+    )
+
+    values = resource_values_from_estimate(renamed)
+    assert values["walk_calls"] == 4
+    assert values["qpe_iterations"] == 4
+
+    physical = estimate_physical_resources(
+        renamed,
+        FTQCCostModel(
+            physical_qubits_per_logical=100,
+            logical_cycle_time_seconds=sp.Rational(1, 100),
+            factory_qubits=20,
+            non_clifford_throughput_per_second=50,
+        ),
+    )
+    assert physical.resource_values()["walk_calls"] == 4
+
+    rows = compare_resource_values(renamed, renamed, quantities=("walk_calls",))
+    assert rows[0].ratio == 1
 
 
 def test_surface_code_model_exposes_raw_and_derived_resource_values():

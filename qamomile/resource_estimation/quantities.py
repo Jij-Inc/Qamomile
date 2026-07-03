@@ -201,10 +201,17 @@ _ResourceValuesInput = (
 
 @dataclass(frozen=True)
 class ResourceQuantitySpec:
-    """Describe one canonical resource quantity.
+    """Describe one resource quantity's presentation metadata.
+
+    Quantity keys themselves are open: any producer may expose values under
+    new string keys without registering them first. A spec only supplies the
+    reader-facing label, unit, category, and description used by comparison
+    rows and future report layers. Register specs for new quantities with
+    :func:`register_resource_quantity`.
 
     Attributes:
-        quantity (ResourceQuantity): Machine-readable quantity key.
+        quantity (str): Machine-readable quantity key. ``ResourceQuantity``
+            members are accepted and normalized to their string values.
         label (str): Reader-facing label.
         unit (str): Unit or dimension of the quantity.
         category (ResourceCategory): Modeling layer that owns the quantity.
@@ -216,11 +223,22 @@ class ResourceQuantitySpec:
         'logical qubits'
     """
 
-    quantity: ResourceQuantity
+    quantity: str
     label: str
     unit: str
     category: ResourceCategory
     description: str
+
+    def __post_init__(self) -> None:
+        """Normalize the quantity key to a plain string.
+
+        Raises:
+            ValueError: If the quantity key is empty.
+        """
+        key = str(self.quantity)
+        if not key:
+            raise ValueError("quantity key must be a non-empty string.")
+        object.__setattr__(self, "quantity", key)
 
     def to_dict(self) -> dict[str, str]:
         """Serialize the quantity specification.
@@ -229,7 +247,7 @@ class ResourceQuantitySpec:
             dict[str, str]: JSON-friendly quantity metadata.
         """
         return {
-            "quantity": self.quantity.value,
+            "quantity": str(self.quantity),
             "label": self.label,
             "unit": self.unit,
             "category": self.category.value,
@@ -242,15 +260,19 @@ class ResourceComparisonRow:
     """Compare one resource quantity between two value providers.
 
     Attributes:
-        quantity (ResourceQuantity): Compared resource quantity.
+        quantity (str): Compared resource quantity key. Built-in keys are
+            enumerated by ``ResourceQuantity``; custom producer keys appear
+            verbatim.
         baseline (sp.Expr): Baseline value.
         candidate (sp.Expr): Candidate value.
         ratio (sp.Expr): Candidate divided by baseline.
         reduction (sp.Expr): Fractional reduction, equal to
             ``1 - candidate / baseline``.
-        label (str): Reader-facing quantity label.
-        unit (str): Resource unit.
-        category (ResourceCategory): Modeling layer for the quantity.
+        label (str): Reader-facing quantity label. Falls back to the quantity
+            key when no spec is registered.
+        unit (str): Resource unit. Empty when no spec is registered.
+        category (ResourceCategory | None): Modeling layer for the quantity,
+            or None when no spec is registered.
 
     Example:
         >>> row = ResourceComparisonRow(
@@ -267,26 +289,28 @@ class ResourceComparisonRow:
         '2/5'
     """
 
-    quantity: ResourceQuantity
+    quantity: str
     baseline: sp.Expr
     candidate: sp.Expr
     ratio: sp.Expr
     reduction: sp.Expr
     label: str
     unit: str
-    category: ResourceCategory
+    category: ResourceCategory | None
 
     def to_dict(self) -> dict[str, str]:
         """Serialize the comparison row.
 
         Returns:
             dict[str, str]: JSON-friendly comparison metadata and values.
+            ``category`` serializes as an empty string for unregistered
+            quantities.
         """
         return {
-            "quantity": self.quantity.value,
+            "quantity": str(self.quantity),
             "label": self.label,
             "unit": self.unit,
-            "category": self.category.value,
+            "category": self.category.value if self.category is not None else "",
             "baseline": str(self.baseline),
             "candidate": str(self.candidate),
             "ratio": str(self.ratio),
@@ -654,23 +678,68 @@ RESOURCE_QUANTITY_SPECS: tuple[ResourceQuantitySpec, ...] = (
     ),
 )
 
-_SPECS_BY_QUANTITY = {spec.quantity: spec for spec in RESOURCE_QUANTITY_SPECS}
+_QUANTITY_REGISTRY: dict[str, ResourceQuantitySpec] = {
+    str(spec.quantity): spec for spec in RESOURCE_QUANTITY_SPECS
+}
+
+
+def register_resource_quantity(spec: ResourceQuantitySpec) -> ResourceQuantitySpec:
+    """Register presentation metadata for a resource quantity key.
+
+    Quantity keys are open — producers may expose values under new string
+    keys without registering anything. Registration only attaches the
+    reader-facing label, unit, category, and description that comparison
+    rows and report layers display. Algorithm packages should register their
+    quantities at import time.
+
+    Args:
+        spec (ResourceQuantitySpec): Metadata to register. Re-registering an
+            identical spec is a no-op.
+
+    Returns:
+        ResourceQuantitySpec: The registered specification.
+
+    Raises:
+        ValueError: If a different spec is already registered under the same
+            quantity key.
+
+    Example:
+        >>> register_resource_quantity(
+        ...     ResourceQuantitySpec(
+        ...         quantity="grover_rounds",
+        ...         label="Grover rounds",
+        ...         unit="rounds",
+        ...         category=ResourceCategory.ALGORITHM,
+        ...         description="Amplitude-amplification rounds.",
+        ...     )
+        ... ).quantity
+        'grover_rounds'
+    """
+    key = str(spec.quantity)
+    existing = _QUANTITY_REGISTRY.get(key)
+    if existing is not None and existing != spec:
+        raise ValueError(
+            f"Resource quantity {key!r} is already registered with different metadata."
+        )
+    _QUANTITY_REGISTRY[key] = spec
+    return spec
 
 
 def iter_resource_quantity_specs() -> tuple[ResourceQuantitySpec, ...]:
-    """Return the canonical resource quantity specifications.
+    """Return all registered resource quantity specifications.
 
     Returns:
-        tuple[ResourceQuantitySpec, ...]: Quantity specifications in a
-            reader-friendly order from problem inputs to physical outputs.
+        tuple[ResourceQuantitySpec, ...]: Built-in specifications in a
+            reader-friendly order from problem inputs to physical outputs,
+            followed by custom registrations in registration order.
     """
-    return RESOURCE_QUANTITY_SPECS
+    return tuple(_QUANTITY_REGISTRY.values())
 
 
 def describe_resource_quantity(
     quantity: str | ResourceQuantity,
 ) -> ResourceQuantitySpec:
-    """Return metadata for one resource quantity.
+    """Return registered metadata for one resource quantity.
 
     Args:
         quantity (str | ResourceQuantity): Quantity key or enum value.
@@ -679,10 +748,35 @@ def describe_resource_quantity(
         ResourceQuantitySpec: Metadata describing the quantity.
 
     Raises:
-        ValueError: If ``quantity`` is not a known resource quantity.
+        ValueError: If no spec is registered for ``quantity``. Unregistered
+            keys are still valid in resource-value mappings and comparisons;
+            they simply have no metadata to describe.
     """
-    normalized = _normalize_resource_quantity(quantity)
-    return _SPECS_BY_QUANTITY[normalized]
+    key = _quantity_key(quantity)
+    spec = _QUANTITY_REGISTRY.get(key)
+    if spec is None:
+        raise ValueError(
+            f"No metadata registered for resource quantity {key!r}; register "
+            "one with register_resource_quantity()."
+        )
+    return spec
+
+
+def _presentation_for(key: str) -> tuple[str, str, ResourceCategory | None]:
+    """Return the presentation fields for a quantity key.
+
+    Args:
+        key (str): Quantity key.
+
+    Returns:
+        tuple[str, str, ResourceCategory | None]: ``(label, unit, category)``
+            from the registered spec, or ``(key, "", None)`` when the key has
+            no registered metadata.
+    """
+    spec = _QUANTITY_REGISTRY.get(key)
+    if spec is None:
+        return key, "", None
+    return spec.label, spec.unit, spec.category
 
 
 def compare_resource_values(
@@ -693,15 +787,22 @@ def compare_resource_values(
 ) -> tuple[ResourceComparisonRow, ...]:
     """Compare canonical quantities between two value providers.
 
+    Quantity keys are open: any string key exposed by both inputs can be
+    compared, whether or not presentation metadata is registered for it.
+    Unregistered keys fall back to the key itself as the label with an empty
+    unit and no category.
+
     Args:
         baseline (_ResourceValuesInput): Reference resource values. Accepts an
-            object exposing ``resource_values()``, a mapping keyed by canonical
-            quantities, or a logical Qamomile ``ResourceEstimate``.
+            object exposing ``resource_values()``, a mapping keyed by quantity
+            strings (or ``ResourceQuantity`` members), or a logical Qamomile
+            ``ResourceEstimate``.
         candidate (_ResourceValuesInput): Candidate resource values. Accepts
             the same shapes as ``baseline``.
         quantities (tuple[str | ResourceQuantity, ...] | None): Quantities to
             compare. Defaults to nonzero-baseline quantities exposed by both
-            inputs, ordered by the canonical quantity catalog.
+            inputs, ordered by the quantity registry followed by any
+            unregistered keys in alphabetical order.
 
     Returns:
         tuple[ResourceComparisonRow, ...]: Comparison rows containing baseline
@@ -725,12 +826,10 @@ def compare_resource_values(
         baseline_value = sp.sympify(baseline_values[quantity])
         candidate_value = sp.sympify(candidate_values[quantity])
         if baseline_value.equals(0):
-            raise ValueError(
-                f"Cannot compare {quantity.value!r} against a zero baseline."
-            )
+            raise ValueError(f"Cannot compare {quantity!r} against a zero baseline.")
         ratio = sp.simplify(candidate_value / baseline_value)
         reduction = sp.simplify(1 - ratio)
-        spec = describe_resource_quantity(quantity)
+        label, unit, category = _presentation_for(quantity)
         rows.append(
             ResourceComparisonRow(
                 quantity=quantity,
@@ -738,9 +837,9 @@ def compare_resource_values(
                 candidate=candidate_value,
                 ratio=ratio,
                 reduction=reduction,
-                label=spec.label,
-                unit=spec.unit,
-                category=spec.category,
+                label=label,
+                unit=unit,
+                category=category,
             )
         )
     return tuple(rows)
@@ -764,7 +863,9 @@ def resource_values_from_estimate(
 
     Returns:
         dict[str, sp.Expr]: Canonical logical resource values suitable for
-            ``compare_resource_values``.
+            ``compare_resource_values``, plus every oracle-call counter from
+            the estimate under its own name (canonical keys win on
+            collision).
 
     Raises:
         TypeError: If ``estimate`` is not a ``ResourceEstimate`` or an
@@ -796,25 +897,25 @@ def resource_values_from_estimate(
         "multi_qubit_gates": estimate.gates.multi_qubit,
         "pauli_rotations": estimate.gates.rotation_gates,
     }
-    if "qpe_iterations" in estimate.gates.oracle_calls:
-        values["qpe_iterations"] = estimate.gates.oracle_calls["qpe_iterations"]
+    for name, count in estimate.gates.oracle_calls.items():
+        values.setdefault(name, count)
     return values
 
 
 def _coerce_resource_values(
     provider: _ResourceValuesInput,
-) -> dict[ResourceQuantity, sp.Expr]:
+) -> dict[str, sp.Expr]:
     """Return normalized resource values from any supported provider.
 
     Args:
         provider (_ResourceValuesInput): Provider to normalize.
 
     Returns:
-        dict[ResourceQuantity, sp.Expr]: Resource values keyed by enum.
+        dict[str, sp.Expr]: Resource values keyed by quantity string.
 
     Raises:
         TypeError: If ``provider`` has no supported resource-value shape.
-        ValueError: If any resource key is not known.
+        ValueError: If any resource key is empty.
     """
     if isinstance(provider, ResourceEstimate):
         return _normalize_resource_values(resource_values_from_estimate(provider))
@@ -831,62 +932,63 @@ def _coerce_resource_values(
 
 def _normalize_resource_values(
     values: Mapping[str | ResourceQuantity, _SympyLike],
-) -> dict[ResourceQuantity, sp.Expr]:
+) -> dict[str, sp.Expr]:
     """Normalize resource-value dictionary keys.
 
     Args:
         values (Mapping[str | ResourceQuantity, _SympyLike]): Resource values
-            keyed by canonical strings or enum values.
+            keyed by quantity strings or ``ResourceQuantity`` members.
 
     Returns:
-        dict[ResourceQuantity, sp.Expr]: Resource values keyed by enum.
+        dict[str, sp.Expr]: Resource values keyed by quantity string.
 
     Raises:
-        ValueError: If any key is not a known resource quantity.
+        ValueError: If any key is empty.
+        TypeError: If any value cannot be converted to a SymPy expression.
     """
-    normalized: dict[ResourceQuantity, sp.Expr] = {}
+    normalized: dict[str, sp.Expr] = {}
     for quantity, value in values.items():
-        normalized_quantity = _normalize_resource_quantity(quantity)
-        normalized[normalized_quantity] = _as_expr(value, normalized_quantity.value)
+        key = _quantity_key(quantity)
+        normalized[key] = _as_expr(value, key)
     return normalized
 
 
 def _normalize_comparison_quantities(
-    baseline_values: dict[ResourceQuantity, sp.Expr],
-    candidate_values: dict[ResourceQuantity, sp.Expr],
+    baseline_values: dict[str, sp.Expr],
+    candidate_values: dict[str, sp.Expr],
     quantities: tuple[str | ResourceQuantity, ...] | None,
-) -> tuple[ResourceQuantity, ...]:
+) -> tuple[str, ...]:
     """Normalize comparison quantity selection.
 
     Args:
-        baseline_values (dict[ResourceQuantity, sp.Expr]): Baseline values.
-        candidate_values (dict[ResourceQuantity, sp.Expr]): Candidate values.
+        baseline_values (dict[str, sp.Expr]): Baseline values.
+        candidate_values (dict[str, sp.Expr]): Candidate values.
         quantities (tuple[str | ResourceQuantity, ...] | None): Requested
-            quantities or None for the nonzero-baseline canonical
-            intersection.
+            quantities or None for the nonzero-baseline intersection of both
+            inputs, ordered by the quantity registry followed by any
+            unregistered keys in alphabetical order.
 
     Returns:
-        tuple[ResourceQuantity, ...]: Normalized quantities.
+        tuple[str, ...]: Normalized quantity keys.
 
     Raises:
         ValueError: If a requested quantity is absent from either value map.
     """
     if quantities is None:
-        common = set(baseline_values) & set(candidate_values)
-        return tuple(
-            spec.quantity
-            for spec in RESOURCE_QUANTITY_SPECS
-            if spec.quantity in common
-            and not baseline_values[spec.quantity].equals(sp.Integer(0))
-        )
+        common = {
+            key
+            for key in set(baseline_values) & set(candidate_values)
+            if not baseline_values[key].equals(sp.Integer(0))
+        }
+        registered = [key for key in _QUANTITY_REGISTRY if key in common]
+        unregistered = sorted(common - set(registered))
+        return tuple(registered + unregistered)
 
-    normalized = tuple(
-        _normalize_resource_quantity(quantity) for quantity in quantities
-    )
+    normalized = tuple(_quantity_key(quantity) for quantity in quantities)
     missing = [
-        quantity.value
-        for quantity in normalized
-        if quantity not in baseline_values or quantity not in candidate_values
+        key
+        for key in normalized
+        if key not in baseline_values or key not in candidate_values
     ]
     if missing:
         raise ValueError(
@@ -897,24 +999,24 @@ def _normalize_comparison_quantities(
     return normalized
 
 
-def _normalize_resource_quantity(
-    quantity: str | ResourceQuantity,
-) -> ResourceQuantity:
-    """Normalize one resource quantity key.
+def _quantity_key(quantity: str | ResourceQuantity) -> str:
+    """Normalize one resource quantity key to a plain string.
 
     Args:
         quantity (str | ResourceQuantity): Resource quantity key.
 
     Returns:
-        ResourceQuantity: Normalized quantity enum.
+        str: Normalized quantity key.
 
     Raises:
-        ValueError: If ``quantity`` is not a known resource quantity.
+        ValueError: If ``quantity`` is empty.
+        TypeError: If ``quantity`` is not a string.
     """
-    try:
-        return ResourceQuantity(quantity)
-    except ValueError as exc:
-        valid = ", ".join(item.value for item in ResourceQuantity)
-        raise ValueError(
-            f"Unknown resource quantity {quantity!r}; valid: {valid}."
-        ) from exc
+    if not isinstance(quantity, str):
+        raise TypeError(
+            f"Resource quantity keys must be strings, got {type(quantity).__name__}."
+        )
+    key = str(quantity)
+    if not key:
+        raise ValueError("Resource quantity keys must be non-empty strings.")
+    return key
