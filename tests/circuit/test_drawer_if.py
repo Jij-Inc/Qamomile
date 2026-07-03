@@ -287,6 +287,7 @@ def _walk(nodes: Iterable[VisualNode]) -> Iterator[VisualNode]:
 def _visual_circuit(
     kernel: Any,
     *,
+    style: Any = DEFAULT_STYLE,
     inline: bool = False,
     fold_loops: bool = True,
     fold_ifs: bool = False,
@@ -296,6 +297,7 @@ def _visual_circuit(
 
     Args:
         kernel (Any): QKernel-like object to trace.
+        style (Any): Visual style configuration used by the analyzer.
         inline (bool): Whether CallBlockOperation contents should be inlined.
         fold_loops (bool): Whether loop operations should be folded.
         fold_ifs (bool): Whether if operations should be folded.
@@ -309,7 +311,7 @@ def _visual_circuit(
     )
     analyzer = CircuitAnalyzer(
         block,
-        DEFAULT_STYLE,
+        style,
         inline=inline,
         fold_loops=fold_loops,
         fold_ifs=fold_ifs,
@@ -555,6 +557,64 @@ class TestUnfoldedIf:
         assert len(seq.branch_label_widths) == len(seq.iterations) == 2
         assert all(w > 0.0 for w in seq.branch_label_widths)
         assert seq.branch_label_widths[0] == seq.condition_label_width
+
+    def test_layout_reserves_all_branch_header_widths(self):
+        """Subsequent gates start after every IF branch header box."""
+        style = replace(DEFAULT_STYLE, gate_gap=0.1)
+        if_node = VUnfoldedSequence(
+            node_key=("if",),
+            iterations=[
+                [
+                    VGate(
+                        node_key=("if", "true", "x"),
+                        label="X",
+                        qubit_indices=[0],
+                        estimated_width=style.gate_width,
+                        kind=VGateKind.GATE,
+                        gate_type=GateOperationType.X,
+                    )
+                ],
+                [
+                    VGate(
+                        node_key=("if", "false", "h"),
+                        label="H",
+                        qubit_indices=[0],
+                        estimated_width=style.gate_width,
+                        kind=VGateKind.GATE,
+                        gate_type=GateOperationType.H,
+                    )
+                ],
+            ],
+            affected_qubits=[0],
+            kind=VUnfoldedKind.IF,
+            condition_label="if cond:",
+            condition_label_width=1.0,
+            branch_label_widths=[1.0, 3.0],
+        )
+        following = VGate(
+            node_key=("after",),
+            label="Z",
+            qubit_indices=[0],
+            estimated_width=style.gate_width,
+            kind=VGateKind.GATE,
+            gate_type=GateOperationType.Z,
+        )
+        vc = VisualCircuit(
+            children=[if_node, following],
+            qubit_map={"q": 0},
+            qubit_names={0: "q"},
+            num_qubits=1,
+        )
+
+        layout = CircuitLayoutEngine(style).compute_layout(vc)
+        following_left = (
+            layout.positions[following.node_key]
+            - layout.gate_widths[following.node_key] / 2
+        )
+        min_if_end = style.initial_wire_position + sum(
+            max(width, style.gate_width) for width in if_node.branch_label_widths
+        )
+        assert following_left >= min_if_end
 
     def test_fold_loops_does_not_fold_if(self):
         """Loop folding leaves if/else rendering expanded unless fold_ifs is set."""
