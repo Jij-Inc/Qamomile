@@ -150,6 +150,22 @@ def empty_true_if(q0: Qubit, q1: Qubit) -> Qubit:
 
 
 @qmc.qkernel
+def empty_single_branch_if(q0: Qubit, q1: Qubit) -> Qubit:
+    """Build a measurement-backed if whose only branch is empty.
+
+    Args:
+        q0 (Qubit): Qubit measured to decide the branch.
+        q1 (Qubit): Qubit returned unchanged.
+
+    Returns:
+        Qubit: Unchanged ``q1``.
+    """
+    if qmc.measure(q0):
+        pass
+    return q1
+
+
+@qmc.qkernel
 def nested_if(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
     """Build a two-level nested if example.
 
@@ -395,6 +411,15 @@ class TestUnfoldedIf:
         assert unfolded[0].iterations[0] == []
         assert _branch_gate_types(unfolded[0].iterations[1]) == [GateOperationType.X]
 
+    def test_empty_single_branch_uses_condition_measure_wire(self):
+        """An empty single-branch IF anchors to its condition measurement wire."""
+        vc = _visual_circuit(empty_single_branch_if)
+        unfolded = _unfolded_ifs(vc)
+        assert len(unfolded) == 1
+        assert unfolded[0].iterations == [[]]
+        assert unfolded[0].affected_qubits == [0]
+        assert unfolded[0].condition_measure_qubit_indices == [0]
+
     def test_condition_label_width_reserved_for_layout(self):
         """The IF sequence carries a positive header width for layout to reserve."""
         vc = _visual_circuit(classical_if)
@@ -630,3 +655,11 @@ class TestDrawEndToEnd:
         labels = [text.get_text() for text in ax.texts]
         assert any(label.startswith("if ") for label in labels)
         assert "else:" in labels
+
+    def test_empty_single_branch_draws_if_label(self):
+        """The renderer keeps an empty single-branch IF visible."""
+        fig = empty_single_branch_if.draw(fold_loops=False)
+        ax = fig._qm_ax  # type: ignore[attr-defined]
+        labels = [text.get_text() for text in ax.texts]
+        assert any(label.startswith("if ") for label in labels)
+        assert len(_if_connector_lines(fig)) == 1
