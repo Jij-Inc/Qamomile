@@ -28,6 +28,7 @@ and reported as a compiler bug.
 
 from __future__ import annotations
 
+import numbers
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
@@ -194,13 +195,12 @@ def _resolve_size_value(
             resolved statically.
     """
     if size.is_constant():
-        const = size.get_const()
-        if isinstance(const, bool) or not isinstance(const, int):
-            return None
-        return const if const >= 0 else None
-    resolved = resolver.resolve_classical_value(size, bindings)
-    if isinstance(resolved, bool) or not isinstance(resolved, int):
+        resolved = size.get_const()
+    else:
+        resolved = resolver.resolve_classical_value(size, bindings)
+    if isinstance(resolved, bool) or not isinstance(resolved, numbers.Integral):
         return None
+    resolved = int(resolved)
     return resolved if resolved >= 0 else None
 
 

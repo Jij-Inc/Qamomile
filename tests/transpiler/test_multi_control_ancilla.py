@@ -1,5 +1,7 @@
 """Tests for clean-ancilla planning of the multi-controlled decomposition."""
 
+import numpy as np
+
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
@@ -13,7 +15,7 @@ from qamomile.circuit.ir.types.primitives import (
     QubitType,
     UIntType,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.passes.emit_support.multi_control_ancilla import (
     MultiControlAncillaPool,
     estimate_multi_control_ancilla_demand,
@@ -201,4 +203,25 @@ def test_estimate_symbolic_num_controls_falls_back_to_operand_width() -> None:
         block=Block(operations=[_fixed_gate(GateOperationType.X, 1)]),
     )
     # Four scalar control operands -> upper bound of a 4-control X.
+    assert _estimate([op]) == 3
+
+
+def test_estimate_symbolic_num_controls_accepts_numpy_integral_shape() -> None:
+    """Operand-width fallback accepts NumPy integral shape constants."""
+    num_controls = Value(type=UIntType(), name="nc")
+    controls = ArrayValue(
+        type=QubitType(),
+        name="controls",
+        shape=(Value(type=UIntType(), name="n").with_const(np.int64(4)),),
+    )
+    target = _qubit("t")
+    operands = [controls, target]
+    op = SymbolicControlledU(
+        operands=operands,
+        results=[v.next_version() for v in operands],
+        num_controls=num_controls,
+        num_control_args=1,
+        block=Block(operations=[_fixed_gate(GateOperationType.X, 1)]),
+    )
+    # Four vector controls -> upper bound of a 4-control X.
     assert _estimate([op]) == 3
