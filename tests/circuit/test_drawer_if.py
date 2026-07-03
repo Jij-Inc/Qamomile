@@ -96,6 +96,26 @@ def vector_measure_element_if() -> Qubit:
 
 
 @qmc.qkernel
+def symbolic_vector_measure_element_if(index: UInt) -> Qubit:
+    """Build an if whose vector-measurement element index is symbolic.
+
+    Args:
+        index (UInt): Symbolic measured-bit index used as the condition.
+
+    Returns:
+        Qubit: Updated target qubit.
+    """
+    qs = qmc.qubit_array(3, "qs")
+    target = qmc.qubit("target")
+    bits = qmc.measure(qs)
+    if bits[index]:
+        target = qmc.x(target)
+    else:
+        target = qmc.h(target)
+    return target
+
+
+@qmc.qkernel
 def classical_if(q0: Qubit, flag: UInt) -> Qubit:
     """Build a symbolic classical-condition if/else example.
 
@@ -396,6 +416,19 @@ class TestUnfoldedIf:
         assert seq.condition_measure_node_key == measure.node_key
         assert seq.condition_measure_qubit_indices == [1]
 
+    def test_symbolic_vector_measurement_element_keeps_all_candidate_wires(self):
+        """``if bits[i]:`` records all candidates when ``i`` is unresolved."""
+        vc = _visual_circuit(symbolic_vector_measure_element_if)
+        measure = next(
+            n
+            for n in _walk(vc.children)
+            if isinstance(n, VGate) and n.kind == VGateKind.MEASURE_VECTOR
+        )
+        seq = _unfolded_ifs(vc)[0]
+        assert measure.qubit_indices == [0, 1, 2]
+        assert seq.condition_measure_node_key == measure.node_key
+        assert seq.condition_measure_qubit_indices == [0, 1, 2]
+
     def test_symbolic_classical_condition_has_no_measurement_connector(self):
         """A non-measurement condition does not draw as measurement-derived."""
         vc = _visual_circuit(classical_if)
@@ -649,6 +682,10 @@ class TestDrawEndToEnd:
     def test_vector_measurement_element_if_draws_connector(self):
         """A vector-measurement element condition draws one connector."""
         assert len(_if_connector_lines(vector_measure_element_if.draw())) == 1
+
+    def test_symbolic_vector_measurement_element_skips_connector(self):
+        """Ambiguous vector-measurement elements do not draw a connector."""
+        assert len(_if_connector_lines(symbolic_vector_measure_element_if.draw())) == 0
 
     def test_symbolic_classical_if_draws(self):
         """Unbound classical if draws in unfolded and folded-if modes."""
