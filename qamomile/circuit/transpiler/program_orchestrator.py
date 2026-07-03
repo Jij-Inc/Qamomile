@@ -44,6 +44,28 @@ if __builtins__:  # always True; avoids circular import at module level
 
 T = TypeVar("T")  # Backend circuit type
 _MISSING = object()
+_NUMPY_MODULE: Any | None = None
+_NUMPY_IMPORT_ATTEMPTED = False
+
+
+def _get_numpy_module() -> Any | None:
+    """Return the cached NumPy module when it is available.
+
+    Returns:
+        Any | None: Imported NumPy module, or ``None`` when NumPy is not
+            installed.
+    """
+    global _NUMPY_IMPORT_ATTEMPTED, _NUMPY_MODULE
+
+    if not _NUMPY_IMPORT_ATTEMPTED:
+        np_module: Any | None
+        try:
+            import numpy as np_module
+        except ImportError:
+            np_module = None
+        _NUMPY_MODULE = np_module
+        _NUMPY_IMPORT_ATTEMPTED = True
+    return _NUMPY_MODULE
 
 
 class ProgramOrchestrator(Generic[T]):
@@ -950,11 +972,7 @@ class ProgramOrchestrator(Generic[T]):
                 ),
             )
 
-        np_module: Any | None
-        try:
-            import numpy as np_module
-        except ImportError:
-            np_module = None
+        np_module = _get_numpy_module()
 
         if np_module is not None:
             if isinstance(value, np_module.ndarray):
