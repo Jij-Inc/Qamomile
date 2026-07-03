@@ -37,15 +37,26 @@ def estimate_trotter(
     ``TrotterQPEWorkload`` from ``qamomile.resource_estimation``.
 
     Args:
-        n: Number of qubits
-        L: Number of terms in Hamiltonian decomposition
-        time: Evolution time t
-        error: Target error ε
-        order: Trotter order (2, 4, 6, ...). Higher order = fewer steps but more complex
-        hamiltonian_1norm: ||H||_1 = Σ|coefficients| (if None, assumes ||H||_1 ~ L)
+        n (sp.Expr | int): Number of qubits in the simulated system. Also
+            used as the assumed O(n) gate cost per Hamiltonian term.
+        L (sp.Expr | int): Number of terms in the Hamiltonian
+            decomposition H = Σ H_j.
+        time (sp.Expr | float): Evolution time t. Must be positive.
+        error (sp.Expr | float): Target simulation error ε (distance to
+            the exact evolution). Must be in (0, 1).
+        order (int): Trotter/Suzuki order p (2, 4, 6, ...). Higher order
+            means fewer steps but a more complex per-step circuit.
+            Defaults to 2.
+        hamiltonian_1norm (sp.Expr | float | None): Hamiltonian 1-norm
+            ||H||_1 = Σ|coefficients|. Defaults to None, in which case
+            the conservative assumption ||H||_1 ~ L (unit coefficients)
+            is used.
 
     Returns:
-        ResourceEstimate for Trotter simulation
+        ResourceEstimate: Estimate with ``qubits = n`` and total gate
+            count r * L * n, where r is the pth-order step count below.
+            Free symbols among the inputs are recorded in ``parameters``
+            for later ``substitute`` calls.
 
     Complexity (pth-order formula, Section 11.1):
         Number of steps: r = O((||H||_1 * t)^(1+1/p) / ε^(1/p))
@@ -53,15 +64,16 @@ def estimate_trotter(
 
     Example:
         >>> import sympy as sp
+        >>> from qamomile.resource_estimation import estimate_trotter
         >>> n, L, t, eps = sp.symbols('n L t eps', positive=True)
         >>>
         >>> # Second-order Trotter
         >>> est2 = estimate_trotter(n, L, t, eps, order=2)
-        >>> print(est2.gates.total)  # O(L * (||H||_1 * t)^1.5 / eps^0.5)
+        >>> print(est2.gates.total)  # L**(5/2)*n*t**(3/2)/sqrt(eps)
         >>>
         >>> # Fourth-order Trotter (fewer steps, better scaling)
         >>> est4 = estimate_trotter(n, L, t, eps, order=4)
-        >>> print(est4.gates.total)  # O(L * (||H||_1 * t)^1.25 / eps^0.25)
+        >>> print(est4.gates.total)  # L**(9/4)*n*t**(5/4)/eps**(1/4)
         >>>
         >>> # Concrete: 100 qubits, 1000 terms, time=10, error=0.001
         >>> concrete = est2.substitute(n=100, L=1000, t=10, eps=0.001)
@@ -134,13 +146,19 @@ def estimate_qsvt(
     Hamiltonian simulation with complexity linear in time and logarithmic in error.
 
     Args:
-        n: Number of qubits
-        hamiltonian_norm: α where ||H|| ≤ α (block-encoding normalization)
-        time: Evolution time t
-        error: Target error ε
+        n (sp.Expr | int): Number of qubits. Also used as the assumed
+            O(n) gate cost per block-encoding call.
+        hamiltonian_norm (sp.Expr | float): Block-encoding normalization
+            α with ||H|| ≤ α. Must be positive.
+        time (sp.Expr | float): Evolution time t. Must be positive.
+        error (sp.Expr | float): Target simulation error ε. Must be in
+            (0, 1).
 
     Returns:
-        ResourceEstimate for QSVT simulation
+        ResourceEstimate: Estimate with ``qubits = n`` and total gate
+            count (α*t + log(1/ε)/log(log(1/ε))) * n. Free symbols among
+            the inputs are recorded in ``parameters`` for later
+            ``substitute`` calls.
 
     Complexity (Section 11.4, arXiv:2310.03011v2):
         Calls to block-encoding: O(α*t + log(1/ε) / log(log(1/ε)))
@@ -149,6 +167,10 @@ def estimate_qsvt(
 
     Example:
         >>> import sympy as sp
+        >>> from qamomile.resource_estimation import (
+        ...     estimate_qsvt,
+        ...     estimate_trotter,
+        ... )
         >>> n, alpha, t, eps = sp.symbols('n alpha t eps', positive=True)
         >>>
         >>> est = estimate_qsvt(n, alpha, t, eps)
@@ -222,13 +244,20 @@ def estimate_qdrift(
     requires more samples.
 
     Args:
-        L: Number of terms in Hamiltonian
-        hamiltonian_1norm: ||H||_1 = Σ|coefficients|
-        time: Evolution time t
-        error: Target error ε
+        L (sp.Expr | int): Number of terms in the Hamiltonian. Recorded
+            in ``parameters`` when symbolic; the sample-count formula
+            itself depends only on ||H||_1, t, and ε.
+        hamiltonian_1norm (sp.Expr | float): Hamiltonian 1-norm
+            ||H||_1 = Σ|coefficients|. Must be positive.
+        time (sp.Expr | float): Evolution time t. Must be positive.
+        error (sp.Expr | float): Target simulation error ε. Must be in
+            (0, 1).
 
     Returns:
-        ResourceEstimate for qDRIFT
+        ResourceEstimate: Estimate whose total gate count is the number
+            of sampled term applications ||H||_1^2 * t^2 / ε (each term
+            assumed O(1) gates). The qubit count is left as a fresh
+            symbolic ``n`` because it is not determined by this formula.
 
     Complexity (Section 11.2, arXiv:2310.03011v2):
         Number of samples: N = O(||H||_1^2 * t^2 / ε)
@@ -238,10 +267,11 @@ def estimate_qdrift(
 
     Example:
         >>> import sympy as sp
+        >>> from qamomile.resource_estimation import estimate_qdrift
         >>> L, h1, t, eps = sp.symbols('L h1 t eps', positive=True)
         >>>
         >>> est = estimate_qdrift(L, h1, t, eps)
-        >>> print(est.gates.total)  # O(h1^2 * t^2 / ε)
+        >>> print(est.gates.total)  # h1**2*t**2/eps
         >>>
         >>> # Compare to Trotter (order 2): O((h1*t)^1.5 / √ε)
         >>> # qDRIFT worse for large t, better for small ε

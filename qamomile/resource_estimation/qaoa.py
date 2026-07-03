@@ -27,30 +27,40 @@ def estimate_qaoa(
     Based on standard QAOA formulation (Farhi et al. 2014).
 
     Args:
-        n: Number of qubits (problem size)
-        p: Number of QAOA layers
-        num_edges: Number of edges in problem graph (for cost Hamiltonian)
-        mixer_type: Type of mixer ("x" for standard X-mixer, future: "xy", "grover")
+        n (sp.Expr | int): Number of qubits (problem size).
+        p (sp.Expr | int): Number of QAOA layers.
+        num_edges (sp.Expr | int): Number of edges in the problem graph
+            (quadratic terms of the cost Hamiltonian).
+        mixer_type (str): Type of mixer. Only ``"x"`` (standard X-mixer)
+            is currently supported; ``"xy"`` and ``"grover"`` are
+            planned. Defaults to ``"x"``.
 
     Returns:
-        ResourceEstimate with:
+        ResourceEstimate: Estimate with:
             qubits: n
-            gates.total: 2*p*n + p*num_edges (RX + RZZ gates)
-            gates.single_qubit: 2*p*n (RX gates)
+            gates.total: n + p*(num_edges + n) (initial H layer, then
+                RZZ + RX gates per layer)
+            gates.single_qubit: n + p*n (H gates + RX gates)
             gates.two_qubit: p*num_edges (RZZ gates)
+            gates.clifford_gates: n (initial H gates)
+            gates.rotation_gates: p*(num_edges + n) (RZZ + RX gates)
+
+    Raises:
+        NotImplementedError: If ``mixer_type`` is not ``"x"``.
 
     Example:
         >>> import sympy as sp
+        >>> from qamomile.resource_estimation import estimate_qaoa
         >>> n, p = sp.symbols('n p', positive=True, integer=True)
         >>> # Complete graph K_n has n*(n-1)/2 edges
         >>> edges = n * (n - 1) / 2
         >>> est = estimate_qaoa(n, p, edges)
         >>> print(est.qubits)  # n
-        >>> print(est.gates.total)  # n*p*(n + 3)/2
+        >>> print(est.gates.total)  # n*(p*(n + 1) + 2)/2
         >>>
         >>> # MaxCut on K_10 with p=3
         >>> concrete = est.substitute(n=10, p=3)
-        >>> print(concrete.gates.total)  # 195
+        >>> print(concrete.gates.total)  # 175
 
     References:
         - Farhi et al. "A Quantum Approximate Optimization Algorithm"
@@ -122,20 +132,35 @@ def estimate_qaoa_ising(
     the number of quadratic and linear terms directly.
 
     Args:
-        n: Number of qubits
-        p: Number of QAOA layers
-        quadratic_terms: Number of J_ij terms (edges in interaction graph)
-        linear_terms: Number of h_i terms (defaults to n if None)
+        n (sp.Expr | int): Number of qubits.
+        p (sp.Expr | int): Number of QAOA layers.
+        quadratic_terms (sp.Expr | int): Number of J_ij terms (edges in
+            the interaction graph), each costing one RZZ gate per layer.
+        linear_terms (sp.Expr | int | None): Number of h_i terms, each
+            costing one RZ gate per layer. Defaults to None, meaning n
+            linear terms (one per qubit); this default requires ``n`` to
+            be a plain int — pass ``linear_terms`` explicitly when ``n``
+            is symbolic.
 
     Returns:
-        ResourceEstimate for QAOA
+        ResourceEstimate: The estimate_qaoa() result for ``n``, ``p``,
+            and ``quadratic_terms``, with p*linear_terms RZ gates added
+            to the total, single-qubit, and rotation counts.
+
+    Raises:
+        TypeError: If ``linear_terms`` is None while ``n`` is a symbolic
+            expression (the default of n linear terms cannot be
+            constructed from a symbol).
 
     Example:
         >>> # 3-regular graph with n vertices: 3n/2 edges
         >>> import sympy as sp
+        >>> from qamomile.resource_estimation import estimate_qaoa_ising
         >>> n, p = sp.symbols('n p', positive=True, integer=True)
-        >>> est = estimate_qaoa_ising(n, p, quadratic_terms=3*n/2)
-        >>> print(est.gates.total)  # 2*n*p + 3*n*p/2
+        >>> est = estimate_qaoa_ising(
+        ...     n, p, quadratic_terms=3 * n / 2, linear_terms=n
+        ... )
+        >>> print(sp.simplify(est.gates.total))  # n*(7*p + 2)/2
     """
     linear = sp.Integer(n) if linear_terms is None else linear_terms
 

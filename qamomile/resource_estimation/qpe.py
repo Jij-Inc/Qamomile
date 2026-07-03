@@ -31,13 +31,28 @@ def estimate_qpe(
     ``qamomile.resource_estimation``.
 
     Args:
-        n_system: Number of system qubits (qubits in the state being analyzed)
-        precision: Number of bits of precision in phase estimate (ε = 2^(-precision))
-        hamiltonian_norm: Normalization ||H|| for block-encoding (required for qubitization)
-        method: "qubitization" (recommended) or "trotter"
+        n_system (sp.Expr | int): Number of system qubits (qubits in the
+            state being analyzed). Also used as the assumed O(n) gate
+            cost per controlled evolution / block-encoding call.
+        precision (sp.Expr | int): Number of bits of precision in the
+            phase estimate (ε = 2^(-precision)).
+        hamiltonian_norm (sp.Expr | float | None): Block-encoding
+            normalization ||H||. Required for ``method="qubitization"``;
+            ignored for ``method="trotter"``. Defaults to None.
+        method (str): Estimation method, either ``"qubitization"``
+            (recommended) or ``"trotter"``. Defaults to
+            ``"qubitization"``.
 
     Returns:
-        ResourceEstimate with qubit and gate counts
+        ResourceEstimate: Estimate with qubit and gate counts for the
+            chosen method (see the per-method breakdown below). Free
+            symbols among the inputs are recorded in ``parameters`` for
+            later ``substitute`` calls.
+
+    Raises:
+        ValueError: If ``method="qubitization"`` and ``hamiltonian_norm``
+            is None, or if ``method`` is neither ``"qubitization"`` nor
+            ``"trotter"``.
 
     For qubitization method (Section 13, arXiv:2310.03011):
         qubits: n_system + precision + O(log n_system) ancillas
@@ -50,6 +65,7 @@ def estimate_qpe(
 
     Example:
         >>> import sympy as sp
+        >>> from qamomile.resource_estimation import estimate_qpe
         >>> n = sp.Symbol('n', positive=True, integer=True)
         >>> m = sp.Symbol('m', positive=True, integer=True)  # precision bits
         >>> alpha = sp.Symbol('alpha', positive=True)  # ||H||
@@ -162,23 +178,32 @@ def estimate_eigenvalue_filtering(
     methods in arXiv:2310.03011v2.
 
     Args:
-        n_system: Number of system qubits
-        target_overlap: Desired overlap γ with target eigenstate
-        gap: Spectral gap Δ (if known, improves estimates)
+        n_system (sp.Expr | int): Number of system qubits. Also used as
+            the assumed O(n) gate cost per block-encoding call.
+        target_overlap (sp.Expr | float): Desired overlap γ with the
+            target eigenstate. Must be in (0, 1].
+        gap (sp.Expr | float | None): Spectral gap Δ. Defaults to None;
+            when provided, the tighter O(1/√(γΔ)) call count is used.
 
     Returns:
-        ResourceEstimate
+        ResourceEstimate: Estimate with ``qubits = n_system`` and total
+            gate count n_system/γ (no gap) or n_system/√(γΔ) (with gap).
+            Free symbols among ``n_system`` and ``target_overlap`` are
+            recorded in ``parameters`` for later ``substitute`` calls.
 
     Complexity: O(1/γ) calls to block-encoding if no gap known
                 O(1/√γΔ) if gap Δ is known
 
     Example:
         >>> import sympy as sp
+        >>> from qamomile.resource_estimation import (
+        ...     estimate_eigenvalue_filtering,
+        ... )
         >>> n = sp.Symbol('n', positive=True, integer=True)
         >>> gamma = sp.Symbol('gamma', positive=True)  # overlap
         >>>
         >>> est = estimate_eigenvalue_filtering(n, gamma)
-        >>> print(est.gates.total)  # O(n/gamma)
+        >>> print(est.gates.total)  # n/gamma
 
     References:
         - Lin & Tong arXiv:1910.14596: Eigenstate filtering via QSVT
