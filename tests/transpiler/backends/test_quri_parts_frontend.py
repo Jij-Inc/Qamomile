@@ -123,6 +123,29 @@ def _run_statevector(circuit, parameter_bindings=None) -> np.ndarray:
     return np.array(statevector.vector)
 
 
+def _strip_zero_ancillas(statevector: np.ndarray, num_data_qubits: int) -> np.ndarray:
+    """Project out trailing ancilla qubits that must have uncomputed to zero.
+
+    The shared multi-controlled lowering appends clean ancilla qubits
+    after the kernel's data qubits and uncomputes them before the
+    circuit ends, so every amplitude with any ancilla bit set must be
+    zero (asserted here) and the data-qubit statevector is the leading
+    ``2**num_data_qubits`` amplitudes in the little-endian convention.
+
+    Args:
+        statevector (np.ndarray): Full statevector including ancillas.
+        num_data_qubits (int): Number of leading data qubits to keep.
+
+    Returns:
+        np.ndarray: Statevector restricted to the data qubits.
+    """
+    dim = 2**num_data_qubits
+    assert np.allclose(statevector[dim:], 0.0), (
+        "multi-control ancilla qubits did not uncompute back to |0>"
+    )
+    return statevector[:dim]
+
+
 def _transpile_and_get_circuit(
     kernel, bindings=None, parameters=None, *, skip_smoke_test=False
 ):
@@ -3550,8 +3573,9 @@ class TestControlledGate:
 
     # -- Double-control (num_controls=2) tests --
     # QURI Parts has no native sub-circuit gate object; irreducible
-    # multi-controlled single-qubit gates are emitted as one bounded
-    # dense ``UnitaryMatrix`` gate over controls + target.
+    # multi-controlled single-qubit gates are lowered through the shared
+    # Toffoli cascade on clean ancilla qubits appended after the data
+    # qubits (arXiv:2307.07478, Appendix A.3).
 
     def test_controlled_h_double_control_statevector(self):
         """controlled(H, num_controls=2) on |110>: applies H to the target."""
@@ -3572,7 +3596,7 @@ class TestControlledGate:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(circ)
+        sv = _strip_zero_ancillas(_run_statevector(circ), 3)
         expected = _double_controlled_unitary(GATE_SPECS["H"].matrix_fn()) @ (
             tensor_product(
                 identity(2), GATE_SPECS["X"].matrix_fn(), GATE_SPECS["X"].matrix_fn()
@@ -3601,7 +3625,7 @@ class TestControlledGate:
 
         theta = np.pi / 3
         _, circ = _transpile_and_get_circuit(circuit, bindings={"theta": theta})
-        sv = _run_statevector(circ)
+        sv = _strip_zero_ancillas(_run_statevector(circ), 3)
         expected = _double_controlled_unitary(GATE_SPECS["RX"].matrix_fn(theta)) @ (
             tensor_product(
                 identity(2), GATE_SPECS["X"].matrix_fn(), GATE_SPECS["X"].matrix_fn()
@@ -3610,27 +3634,52 @@ class TestControlledGate:
         )
         assert statevectors_equal(sv, expected)
 
-    def test_multi_controlled_matrix_width_cap_raises(self):
-        """The dense multi-controlled matrix path rejects oversized widths."""
-        from quri_parts.circuit import QuantumCircuit as QpQuantumCircuit
+    def test_multi_controlled_x_beyond_former_matrix_cap(self):
+        """A 10-control X samples correctly despite its 11-local-qubit width.
 
-        from qamomile.quri_parts.transpiler import (
-            _MAX_MC_MATRIX_QUBITS,
-            _emit_quri_multi_controlled_unitary_matrix,
-        )
+        The dense-unitary lowering this construction previously used was
+        capped at 10 local qubits (controls + target, a 1024x1024
+        matrix), so a 10-control X was rejected. The Toffoli-cascade
+        lowering scales linearly in the control count, so the same gate
+        now emits and runs. All controls are prepared in |1>, so the
+        target flips deterministically; the nine cascade ancillas
+        uncompute and never appear in the measured register.
+        """
 
-        circuit = QpQuantumCircuit(_MAX_MC_MATRIX_QUBITS + 1)
-        controls = list(range(_MAX_MC_MATRIX_QUBITS))
-        with pytest.raises(EmitError, match="dense-unitary cap"):
-            _emit_quri_multi_controlled_unitary_matrix(
-                circuit,
-                controls,
-                _MAX_MC_MATRIX_QUBITS,
-                np.array([[0.0, 1.0], [1.0, 0.0]]),
-            )
+        @qmc.qkernel
+        def x_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.x(q)
+            return q
 
-    def test_controlled_rx_double_control_runtime_parameter_raises(self):
-        """controlled(RX, num_controls=2) with a runtime angle raises EmitError."""
+        controlled_x10 = qmc.control(x_gate, num_controls=10)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            ctrl = qmc.qubit_array(10, "ctrl")
+            t = qmc.qubit("t")
+            for i in qmc.range(10):
+                ctrl[i] = qmc.x(ctrl[i])
+            ctrl, t = controlled_x10(ctrl, t)
+            return qmc.measure(ctrl)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        # 10 controls need 9 cascade ancillas on top of the 11 data qubits.
+        assert exe.compiled_quantum[0].circuit.qubit_count == 20
+        job = exe.sample(transpiler.executor(), bindings={}, shots=100)
+        expected = tuple(1 for _ in range(10))
+        for value, count in job.result().results:
+            assert value == expected
+            assert count == 100
+
+    def test_controlled_rx_double_control_runtime_parameter_statevector(self):
+        """controlled(RX, num_controls=2) keeps a runtime angle symbolic.
+
+        The Toffoli cascade reduces the doubly-controlled RX to a
+        singly-controlled RX on the AND ancilla, so a runtime ``theta``
+        survives into the emitted parametric circuit. (The dense-matrix
+        lowering this replaced had to reject runtime-parametric angles.)
+        """
 
         @qmc.qkernel
         def rx_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
@@ -3647,8 +3696,16 @@ class TestControlledGate:
             q[0], q[1], q[2] = controlled_rx2(q[0], q[1], q[2], theta=theta)
             return qmc.measure(q)
 
-        with pytest.raises(EmitError, match="runtime-parametric angle"):
-            QuriPartsTranspiler().transpile(circuit, parameters=["theta"])
+        theta = np.pi / 3
+        _, circ = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        sv = _strip_zero_ancillas(_run_statevector(circ, parameter_bindings=[theta]), 3)
+        expected = _double_controlled_unitary(GATE_SPECS["RX"].matrix_fn(theta)) @ (
+            tensor_product(
+                identity(2), GATE_SPECS["X"].matrix_fn(), GATE_SPECS["X"].matrix_fn()
+            )
+            @ all_zeros_state(3)
+        )
+        assert statevectors_equal(sv, expected)
 
 
 class TestCustomCompositeGate:
@@ -6155,7 +6212,7 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(circ)
+        sv = _strip_zero_ancillas(_run_statevector(circ), 3)
         hx = GATE_SPECS["X"].matrix_fn() @ GATE_SPECS["H"].matrix_fn()
         expected = _double_controlled_unitary(hx) @ (
             tensor_product(

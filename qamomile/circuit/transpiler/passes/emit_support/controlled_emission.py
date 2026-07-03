@@ -53,6 +53,9 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
 )
 
 if TYPE_CHECKING:
+    from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+        ValueResolver,
+    )
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 
 
@@ -623,7 +626,7 @@ def resolve_controlled_u_call(
         op.block, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, op.block, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver, op.block, target_qubit_operands, bindings, local_bindings
     )
 
     return ResolvedControlledU(
@@ -751,13 +754,95 @@ def emit_controlled_gate(
     target_indices: list[int],
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a controlled version of a gate."""
+    """Emit a controlled version of a gate.
+
+    Resolves the rotation angle for rotation-like gates and dispatches
+    single-target gate kinds through
+    :func:`emit_single_controlled_primitive`; ``SWAP`` is lowered here
+    via its Fredkin conjugation because it needs two targets.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (GateOperation): Gate operation to control.
+        control_idx (int): Physical control qubit.
+        target_indices (list[int]): Physical qubits for the gate's own
+            operands, in operand order. An empty list is a no-op.
+        bindings (dict[str, Any]): Bindings used to resolve rotation
+            angles.
+
+    Raises:
+        EmitError: If the gate type is unsupported in controlled
+            decomposition, or a controlled SWAP has fewer than two
+            targets.
+    """
     if not target_indices:
         return
 
-    target_idx = target_indices[0]
+    if op.gate_type == GateOperationType.SWAP:
+        if len(target_indices) < 2:
+            raise EmitError(
+                "Controlled-SWAP requires at least 2 target qubits.",
+                operation="ControlledGate",
+            )
+        tgt_a = target_indices[0]
+        tgt_b = target_indices[1]
+        # Fredkin gate decomposition:
+        #   CNOT(tgt_b, tgt_a)
+        #   Toffoli(ctrl, tgt_a, tgt_b)
+        #   CNOT(tgt_b, tgt_a)
+        emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
+        emit_pass._emitter.emit_toffoli(circuit, control_idx, tgt_a, tgt_b)
+        emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
+        return
 
-    match op.gate_type:
+    angle: Any = None
+    if op.gate_type in (
+        GateOperationType.P,
+        GateOperationType.RX,
+        GateOperationType.RY,
+        GateOperationType.RZ,
+    ):
+        angle = emit_pass._resolve_angle(op, bindings)
+    emit_single_controlled_primitive(
+        emit_pass, circuit, op.gate_type, control_idx, target_indices[0], angle
+    )
+
+
+def emit_single_controlled_primitive(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    gate_type: GateOperationType | None,
+    control_idx: int,
+    target_idx: int,
+    angle: Any,
+) -> None:
+    """Emit one singly-controlled single-qubit gate from a resolved angle.
+
+    This is the single-control dispatch shared by
+    :func:`emit_controlled_gate` (which resolves the angle from the IR
+    operation first) and the Toffoli-cascade lowering of irreducible
+    multi-controlled gates (which arrives with the angle already
+    resolved). Fixed phase-family gates (``S`` / ``T`` and daggers) are
+    emitted as controlled phases.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        gate_type (GateOperationType | None): Single-qubit gate kind.
+            None (a gate operation without a type) is rejected like any
+            other unsupported kind.
+        control_idx (int): Physical control qubit.
+        target_idx (int): Physical target qubit.
+        angle (Any): Resolved rotation angle (concrete number or backend
+            parameter expression) for ``P`` / ``RX`` / ``RY`` / ``RZ``;
+            ignored for fixed gates.
+
+    Raises:
+        EmitError: If ``gate_type`` is not a single-qubit gate kind
+            supported in controlled decomposition.
+    """
+    match gate_type:
         case GateOperationType.H:
             emit_pass._emitter.emit_ch(circuit, control_idx, target_idx)
         case GateOperationType.X:
@@ -767,16 +852,12 @@ def emit_controlled_gate(
         case GateOperationType.Z:
             emit_pass._emitter.emit_cz(circuit, control_idx, target_idx)
         case GateOperationType.P:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, angle)
         case GateOperationType.RX:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_crx(circuit, control_idx, target_idx, angle)
         case GateOperationType.RY:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_cry(circuit, control_idx, target_idx, angle)
         case GateOperationType.RZ:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_crz(circuit, control_idx, target_idx, angle)
         case GateOperationType.S:
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 2)
@@ -786,27 +867,93 @@ def emit_controlled_gate(
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 2)
         case GateOperationType.TDG:
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 4)
-        case GateOperationType.SWAP:
-            if len(target_indices) < 2:
-                raise EmitError(
-                    "Controlled-SWAP requires at least 2 target qubits.",
-                    operation="ControlledGate",
-                )
-            tgt_a = target_indices[0]
-            tgt_b = target_indices[1]
-            # Fredkin gate decomposition:
-            #   CNOT(tgt_b, tgt_a)
-            #   Toffoli(ctrl, tgt_a, tgt_b)
-            #   CNOT(tgt_b, tgt_a)
-            emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
-            emit_pass._emitter.emit_toffoli(circuit, control_idx, tgt_a, tgt_b)
-            emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
         case _:
             raise EmitError(
-                f"Unsupported gate type {op.gate_type!r} in controlled "
+                f"Unsupported gate type {gate_type!r} in controlled "
                 f"block decomposition.",
                 operation="ControlledGate",
             )
+
+
+def emit_multi_controlled_on_clean_ancillas(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    gate_type: GateOperationType,
+    control_indices: list[int],
+    target_idx: int,
+    angle: Any,
+    ancilla_indices: list[int],
+) -> None:
+    """Lower an irreducible multi-controlled gate via a Toffoli cascade.
+
+    Implements the standard clean-ancilla construction (arXiv:2307.07478,
+    Appendix A.3): the logical AND of the ``n`` controls is accumulated
+    onto ``n - 1`` clean ancillas with a cascade of Toffoli gates, the
+    gate is applied once under a single control (the last ancilla)
+    through :func:`emit_single_controlled_primitive`, and the cascade is
+    uncomputed in reverse order. The cost is ``2 * (n - 1)`` Toffoli
+    gates plus one singly-controlled gate, and every ancilla returns to
+    ``|0>``, so the same pool may be reused by subsequent gates.
+
+    Unlike a dense ``2**(n+1)`` unitary-matrix lowering, this scales
+    linearly in the control count and keeps rotation angles symbolic,
+    so runtime-parametric multi-controlled rotations are supported.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        gate_type (GateOperationType): Single-qubit gate kind to apply
+            under the controls.
+        control_indices (list[int]): Physical control qubits; at least
+            two.
+        target_idx (int): Physical target qubit.
+        angle (Any): Resolved rotation angle (concrete number or backend
+            parameter expression) for rotation-like gates, or ``None``
+            for fixed gates.
+        ancilla_indices (list[int]): Clean (``|0>``) ancilla qubits;
+            at least ``len(control_indices) - 1`` entries.
+
+    Raises:
+        EmitError: If fewer than two controls or too few ancillas are
+            supplied (both indicate a caller bug), or the gate type is
+            unsupported by the single-control dispatch.
+    """
+    num_controls = len(control_indices)
+    if num_controls < 2:
+        raise EmitError(
+            "Toffoli-cascade lowering requires at least two controls; "
+            f"got {num_controls}.",
+            operation="ControlledGate",
+        )
+    if len(ancilla_indices) < num_controls - 1:
+        raise EmitError(
+            f"Toffoli-cascade lowering of a {num_controls}-controlled "
+            f"{gate_type.name} needs {num_controls - 1} clean ancilla "
+            f"qubit(s) but only {len(ancilla_indices)} were supplied.",
+            operation="ControlledGate",
+        )
+
+    emitter = emit_pass._emitter
+    cascade: list[tuple[int, int, int]] = [
+        (control_indices[0], control_indices[1], ancilla_indices[0])
+    ]
+    for i in range(2, num_controls):
+        cascade.append(
+            (control_indices[i], ancilla_indices[i - 2], ancilla_indices[i - 1])
+        )
+
+    for ctrl_a, ctrl_b, target in cascade:
+        emitter.emit_toffoli(circuit, ctrl_a, ctrl_b, target)
+    emit_single_controlled_primitive(
+        emit_pass,
+        circuit,
+        gate_type,
+        ancilla_indices[num_controls - 2],
+        target_idx,
+        angle,
+    )
+    for ctrl_a, ctrl_b, target in reversed(cascade):
+        emitter.emit_toffoli(circuit, ctrl_a, ctrl_b, target)
 
 
 def emit_multi_controlled_gate(
@@ -1181,7 +1328,7 @@ def emit_controlled_pauli_evolve(
     ``U_dagger * C[RZ] * U`` with ``U`` / ``U_dagger`` applied
     unconditionally: when every control is ``0`` the central ``RZ``
     becomes the identity and ``U_dagger * I * U = I``. Only the central
-    ``RZ`` therefore carries the controls, which keeps the dense
+    ``RZ`` therefore carries the controls, which keeps the
     multi-controlled cost to a single rotation per Hamiltonian term
     instead of controlling every basis-change and ladder gate.
 
@@ -1197,7 +1344,7 @@ def emit_controlled_pauli_evolve(
     an *observable* relative phase on the all-controls-on subspace, so it
     MUST be emitted here. It is realized as a ``P(-gamma * c)`` on one
     control conditioned on the remaining controls (``emit_p`` for a single
-    control, a controlled / dense ``P`` for more), matching Qiskit's
+    control, a multi-controlled ``P`` for more), matching Qiskit's
     native ``PauliEvolutionGate`` whose ``SparsePauliOp`` carries the
     constant.
 
@@ -1221,10 +1368,10 @@ def emit_controlled_pauli_evolve(
             not resolve to a Hamiltonian, gamma cannot be resolved, the
             Hamiltonian is non-Hermitian (a term or the constant has a
             non-real coefficient), the Hamiltonian is larger than the
-            register, a term qubit cannot be resolved, or (for two or
-            more controls, or a nonzero constant term) the angle is
-            runtime-parametric and the backend's dense multi-controlled
-            path requires a compile-time-numeric angle.
+            register, a term qubit cannot be resolved, or gamma is
+            runtime-parametric and the backend's runtime parameter type
+            does not support the required angle scaling (e.g. QURI
+            Parts' ``Parameter``).
     """
     import qamomile.observable as qm_o
     from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
@@ -1280,9 +1427,7 @@ def emit_controlled_pauli_evolve(
                 ``Parameter``), so the scaling cannot be expressed. The raw
                 ``TypeError`` is converted into a clear compile-time error
                 pointing at binding ``gamma`` to a concrete value. (A
-                concrete ``float`` gamma never raises; two-or-more controls
-                additionally need a numeric angle because the dense
-                multi-controlled matrix bakes the angle in.)
+                concrete ``float`` gamma never raises.)
         """
         try:
             return factor * gamma
@@ -1611,7 +1756,11 @@ def emit_controlled_u_with_symbolic_indices(
         block_value, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver,
+        block_value,
+        target_qubit_operands,
+        bindings,
+        local_bindings,
     )
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
@@ -1765,7 +1914,11 @@ def emit_controlled_u_multi_arg(
         block_value, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver,
+        block_value,
+        target_qubit_operands,
+        bindings,
+        local_bindings,
     )
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
@@ -1915,7 +2068,11 @@ def emit_controlled_u(
         block_value, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver,
+        block_value,
+        target_qubit_operands,
+        bindings,
+        local_bindings,
     )
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
@@ -2473,7 +2630,7 @@ def _bind_and_populate_block_inputs(
     )
     quantum_operands = _quantum_input_operands(block_value, input_operands)
     _bind_quantum_input_shapes(
-        emit_pass,
+        emit_pass._resolver,
         block_value,
         quantum_operands,
         bindings,
@@ -3068,7 +3225,7 @@ def _expand_quantum_operands_to_phys(
 
 
 def _bind_quantum_input_shapes(
-    emit_pass: "StandardEmitPass",
+    resolver: "ValueResolver",
     block_value: Any,
     actual_target_operands: list[Any],
     bindings: dict[str, Any],
@@ -3089,8 +3246,8 @@ def _bind_quantum_input_shapes(
     "Cannot resolve ForOperation bounds in controlled block".
 
     Args:
-        emit_pass (StandardEmitPass): Driving emit pass; consulted for
-            its ``_resolver`` to resolve actual operand sizes.
+        resolver (ValueResolver): Emit value resolver used to resolve
+            actual operand sizes.
         block_value (Any): The inner block whose ``input_values`` we
             walk to find the quantum formal parameters.  Objects with
             no ``input_values`` attribute are silently skipped.
@@ -3118,7 +3275,7 @@ def _bind_quantum_input_shapes(
             continue
         if not (actual.shape and formal.shape):
             continue
-        actual_size = emit_pass._resolver.resolve_int_value(actual.shape[0], bindings)
+        actual_size = resolver.resolve_int_value(actual.shape[0], bindings)
         if actual_size is None:
             continue
         formal_dim = formal.shape[0]

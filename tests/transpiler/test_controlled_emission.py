@@ -25,6 +25,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     emit_controlled_operations,
     emit_multi_controlled_gate,
 )
+from qamomile.circuit.transpiler.passes.emit_support.multi_control_ancilla import (
+    MultiControlAncillaPool,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
 )
@@ -216,6 +219,11 @@ class _RecordingEmitter:
         del circuit
         self.calls.append(("crz", control, target, angle))
 
+    def emit_cry(self, circuit: Any, control: int, target: int, angle: Any) -> None:
+        """Record a CRY emission."""
+        del circuit
+        self.calls.append(("cry", control, target, angle))
+
     def emit_cp(self, circuit: Any, control: int, target: int, angle: Any) -> None:
         """Record a CP emission."""
         del circuit
@@ -225,18 +233,27 @@ class _RecordingEmitter:
 class _MultiControlEmitPass:
     """Emit-pass stand-in for multi-controlled reduction tests."""
 
-    def __init__(self, record_hook: bool = False) -> None:
+    def __init__(
+        self,
+        record_hook: bool = False,
+        ancilla_pool: MultiControlAncillaPool | None = None,
+    ) -> None:
         """Initialize with a recording emitter and optional hook.
 
         Args:
             record_hook (bool): When True, provide the irreducible
                 multi-controlled gate hook and record its invocations
                 instead of raising.
+            ancilla_pool (MultiControlAncillaPool | None): Clean-ancilla
+                pool visible to the base irreducible hook, enabling the
+                shared Toffoli-cascade lowering. Defaults to None (no
+                pool — the base hook raises).
         """
         self._emitter = _RecordingEmitter()
         self._resolver = ValueResolver()
         self.hook_calls: list[tuple[Any, ...]] = []
         self._record_hook = record_hook
+        self._mc_ancilla_pool = ancilla_pool
 
     def _resolve_angle(self, op: Any, bindings: dict[str, Any]) -> Any:
         """Resolve a rotation angle from the gate's theta constant."""
@@ -355,7 +372,7 @@ def test_multi_controlled_rotation_routes_to_hook_with_angle() -> None:
 
 
 def test_multi_controlled_irreducible_without_hook_raises() -> None:
-    """Three-controlled X on a hookless backend raises EmitError."""
+    """Three-controlled X on a backend without an ancilla pool raises EmitError."""
     import pytest
 
     from qamomile.circuit.transpiler.errors import EmitError
@@ -363,6 +380,55 @@ def test_multi_controlled_irreducible_without_hook_raises() -> None:
     emit_pass = _MultiControlEmitPass()
     op = _fixed_gate(GateOperationType.X, 1)
     with pytest.raises(EmitError, match="3-controlled X"):
+        emit_multi_controlled_gate(emit_pass, object(), op, [4, 5, 6], [9], {})
+
+
+def test_multi_controlled_x_three_controls_cascades_on_clean_ancillas() -> None:
+    """Three-controlled X lowers to a Toffoli cascade on pool ancillas.
+
+    Verifies the arXiv:2307.07478 App. A.3 shape: the control AND is
+    computed onto the ancillas, a single CX fires from the last
+    ancilla, and the cascade is uncomputed in reverse order.
+    """
+    emit_pass = _MultiControlEmitPass(
+        ancilla_pool=MultiControlAncillaPool(first_index=10, count=2)
+    )
+    op = _fixed_gate(GateOperationType.X, 1)
+    emit_multi_controlled_gate(emit_pass, object(), op, [4, 5, 6], [9], {})
+    assert emit_pass._emitter.calls == [
+        ("toffoli", 4, 5, 10),
+        ("toffoli", 6, 10, 11),
+        ("cx", 11, 9),
+        ("toffoli", 6, 10, 11),
+        ("toffoli", 4, 5, 10),
+    ]
+
+
+def test_multi_controlled_ry_two_controls_cascades_with_angle() -> None:
+    """Two-controlled RY forwards its angle to a CRY on the AND ancilla."""
+    emit_pass = _MultiControlEmitPass(
+        ancilla_pool=MultiControlAncillaPool(first_index=10, count=1)
+    )
+    op = _rotation_gate(GateOperationType.RY, 1.25)
+    emit_multi_controlled_gate(emit_pass, object(), op, [4, 5], [9], {})
+    assert emit_pass._emitter.calls == [
+        ("toffoli", 4, 5, 10),
+        ("cry", 10, 9, 1.25),
+        ("toffoli", 4, 5, 10),
+    ]
+
+
+def test_multi_controlled_pool_shortfall_raises_estimation_bug() -> None:
+    """A pool smaller than n-1 ancillas raises the estimation-bug error."""
+    import pytest
+
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    emit_pass = _MultiControlEmitPass(
+        ancilla_pool=MultiControlAncillaPool(first_index=10, count=1)
+    )
+    op = _fixed_gate(GateOperationType.X, 1)
+    with pytest.raises(EmitError, match="under-estimated"):
         emit_multi_controlled_gate(emit_pass, object(), op, [4, 5, 6], [9], {})
 
 

@@ -56,8 +56,10 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
     CompositeDecomposer,
     LoopAnalyzer,
+    MultiControlAncillaPool,
     QubitMap,
     ResourceAllocator,
+    estimate_multi_control_ancilla_demand,
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
@@ -136,6 +138,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # where emit_measure is a no-op (e.g., QURI Parts).
         self._measurement_qubit_map: dict[int, int] = {}
 
+        # Clean ancilla qubits reserved for the shared Toffoli-cascade
+        # lowering of irreducible multi-controlled gates. Populated per
+        # quantum segment when ``_reserves_multi_control_ancillas()``
+        # is True; None on backends with native multi-control support.
+        self._mc_ancilla_pool: MultiControlAncillaPool | None = None
+
     # ------------------------------------------------------------------
     # Core orchestration (stays on this class)
     # ------------------------------------------------------------------
@@ -186,6 +194,17 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+
+        self._mc_ancilla_pool = None
+        if self._reserves_multi_control_ancillas():
+            ancilla_demand = estimate_multi_control_ancilla_demand(
+                operations, self._resolver, bindings
+            )
+            if ancilla_demand > 0:
+                self._mc_ancilla_pool = MultiControlAncillaPool(
+                    qubit_count, ancilla_demand
+                )
+                qubit_count += ancilla_demand
 
         circuit = self._emitter.create_circuit(qubit_count, clbit_count)
         self._measurement_qubit_map.clear()
@@ -475,6 +494,29 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bindings,
         )
 
+    def _reserves_multi_control_ancillas(self) -> bool:
+        """Backend hook: opt in to the shared multi-controlled lowering.
+
+        When True, ``_emit_quantum_segment`` statically estimates the
+        clean-ancilla demand of the segment's multi-controlled gates,
+        appends that many extra qubits to the circuit, and the base
+        ``_emit_irreducible_multi_controlled_gate`` lowers irreducible
+        multi-controlled gates through the shared Toffoli-cascade
+        decomposition (arXiv:2307.07478, Appendix A.3) on those
+        ancillas.
+
+        Backends with a native multi-controlled primitive (e.g. Qiskit's
+        ``gate.control(k)``, CUDA-Q's ``ctrl`` variants) keep the
+        default False so their circuits carry no unused ancilla qubits.
+        A new backend without native multi-control support should
+        override this to return True instead of implementing its own
+        ``_emit_irreducible_multi_controlled_gate``.
+
+        Returns:
+            bool: False in the base implementation.
+        """
+        return False
+
     def _emit_irreducible_multi_controlled_gate(
         self,
         circuit: T,
@@ -483,14 +525,18 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         target_idx: int,
         angle: Any,
     ) -> None:
-        """Backend hook: emit one irreducible multi-controlled gate.
+        """Emit one irreducible multi-controlled gate.
 
         The shared controlled fallback reduces multi-qubit gate types
         structurally and covers up to two controls on X / Z via
         Toffoli. Single-qubit gates that still carry two or more
-        controls after those reductions land here. Backends that can
-        realize an arbitrary multi-controlled single-qubit gate (e.g.
-        QURI Parts via a dense local unitary) override this method.
+        controls after those reductions land here.
+
+        When the backend reserved a clean-ancilla pool (see
+        ``_reserves_multi_control_ancillas``), the gate is lowered
+        through the shared Toffoli-cascade decomposition. Otherwise the
+        backend is expected to have native multi-control support and
+        never reach this hook; reaching it raises a descriptive error.
 
         Args:
             circuit (T): Backend circuit being built.
@@ -502,18 +548,45 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 gates, or ``None`` for fixed gates.
 
         Raises:
-            EmitError: Always, in the base implementation.
+            EmitError: If no ancilla pool was reserved for this segment,
+                or the pool is smaller than ``len(control_indices) - 1``
+                (an estimation bug in
+                ``estimate_multi_control_ancilla_demand``).
         """
         from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            emit_multi_controlled_on_clean_ancillas,
+        )
 
-        raise EmitError(
-            f"Cannot emit {len(control_indices)}-controlled {gate_type.name}: "
-            f"the shared fallback reduces to Toffoli for up to two "
-            f"controls only, and backend {type(self).__name__!r} does "
-            f"not override ``_emit_irreducible_multi_controlled_gate``. "
-            f"Run this kernel on a backend with native multi-control "
-            f"support, or add the hook to the backend's emit pass.",
-            operation="ControlledGate",
+        if self._mc_ancilla_pool is None:
+            raise EmitError(
+                f"Cannot emit {len(control_indices)}-controlled "
+                f"{gate_type.name}: the shared fallback reduces to Toffoli "
+                f"for up to two controls only, and backend "
+                f"{type(self).__name__!r} neither reserves ancillas for the "
+                f"shared Toffoli-cascade decomposition "
+                f"(``_reserves_multi_control_ancillas``) nor overrides "
+                f"``_emit_irreducible_multi_controlled_gate``. Run this "
+                f"kernel on a backend with native multi-control support, or "
+                f"enable the shared decomposition in the backend's emit "
+                f"pass.",
+                operation="ControlledGate",
+            )
+
+        ancillas = self._mc_ancilla_pool.take(len(control_indices) - 1)
+        if ancillas is None:
+            raise EmitError(
+                f"Multi-controlled {gate_type.name} over "
+                f"{len(control_indices)} controls needs "
+                f"{len(control_indices) - 1} clean ancilla qubit(s), but "
+                f"only {self._mc_ancilla_pool.count} were reserved for this "
+                f"segment. This means "
+                f"``estimate_multi_control_ancilla_demand`` under-estimated "
+                f"the segment's demand — a compiler bug; please report it.",
+                operation="ControlledGate",
+            )
+        emit_multi_controlled_on_clean_ancillas(
+            self, circuit, gate_type, control_indices, target_idx, angle, ancillas
         )
 
     def _blockvalue_to_gate(
