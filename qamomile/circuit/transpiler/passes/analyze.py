@@ -23,7 +23,11 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
 from qamomile.circuit.ir.value import Value, ValueBase
-from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
+from qamomile.circuit.transpiler.errors import (
+    DependencyError,
+    QubitRebindError,
+    ValidationError,
+)
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     evaluate_classical_op_concrete,
@@ -738,18 +742,26 @@ def reject_loop_carried_classical_rebinds(
 def _branch_quantum_discard_error(
     var_name: str,
     branch_label: str,
-) -> ValidationError:
+) -> QubitRebindError:
     """Build the targeted branch-internal quantum discard rejection error.
+
+    Raises the same ``QubitRebindError`` (an ``AffineTypeError``) that the
+    decoration-time analyzer raises for a top-level rebind from a
+    different quantum source: this check is the runtime, branch-internal
+    manifestation of exactly that affine violation (a quantum value
+    silently discarded rather than consumed once), so it shares the class
+    rather than raising a generic ``ValidationError``.
 
     Args:
         var_name (str): Display name of the rebound quantum variable.
         branch_label (str): Human-readable branch side ("true" / "false").
 
     Returns:
-        ValidationError: The error to raise.
+        QubitRebindError: The error to raise, with ``handle_name`` set to
+            the rebound variable's display name.
     """
     display_name = var_name or "<anonymous>"
-    return ValidationError(
+    return QubitRebindError(
         f"Branch-internal quantum rebind of '{display_name}' in the "
         f"{branch_label} branch of a runtime if conditionally discards its "
         f"pre-branch quantum state: when the branch is taken, "
@@ -758,7 +770,8 @@ def _branch_quantum_discard_error(
         f"out of it, so it would be silently dropped at runtime. Consume "
         f"the original state before branching or inside the branch (e.g. "
         f"qmc.measure(...)), or rebind the variable through gates on the "
-        f"same qubit(s) instead of substituting a different quantum value."
+        f"same qubit(s) instead of substituting a different quantum value.",
+        handle_name=display_name,
     )
 
 
@@ -940,7 +953,7 @@ def _check_branch_quantum_discard(
             vs in-subtree read-count comparison.
 
     Raises:
-        ValidationError: If a rebinding branch drops the pre-branch
+        QubitRebindError: If a rebinding branch drops the pre-branch
             quantum value with no consumer, no carrying phi, and no
             outside owner.
     """
@@ -1050,7 +1063,7 @@ def _scan_branch_quantum_discards(
             once per distinct UUID). Precomputed once from ``op_reads``.
 
     Raises:
-        ValidationError: If a runtime if branch rebinds a quantum
+        QubitRebindError: If a runtime if branch rebinds a quantum
             variable whose pre-branch value has no owner on that path.
     """
     for op in ops:
@@ -1144,8 +1157,11 @@ def reject_branch_internal_quantum_discard(
     every branch-internal quantum binding change on the ``IfOperation``
     (``BranchRebind``, preserving the pre-branch value even when it no
     longer appears in any phi); this check verifies each record against
-    each runtime execution path and raises a targeted error when the
-    pre-branch value has no owner on a rebinding path: not consumed
+    each runtime execution path and raises ``QubitRebindError`` — the
+    same ``AffineTypeError`` the decoration-time analyzer raises for a
+    top-level rebind from a different quantum source, since this is that
+    exact affine violation surfacing at runtime inside a branch — when
+    the pre-branch value has no owner on a rebinding path: not consumed
     inside the taken branch, not carried out through any phi merge of
     that side, and not referenced by any operation outside the if.
     Scalar ``Qubit`` and whole-register ``Vector[Qubit]`` rebinds are
@@ -1203,7 +1219,7 @@ def reject_branch_internal_quantum_discard(
             None (no bindings).
 
     Raises:
-        ValidationError: If a runtime if branch rebinds a quantum variable
+        QubitRebindError: If a runtime if branch rebinds a quantum variable
             whose pre-branch value has no consumer in that branch, no phi
             carrying it out of that side, and no reference outside the if.
     """
@@ -1438,7 +1454,7 @@ class AnalyzePass(Pass[Block, Block]):
             operations (list[Operation]): Operations to scan recursively.
 
         Raises:
-            ValidationError: If a runtime if branch rebinds a quantum
+            QubitRebindError: If a runtime if branch rebinds a quantum
                 variable whose pre-branch value has no owner on that
                 path (no in-branch consumer, no carrying phi, and no
                 reference outside the if).

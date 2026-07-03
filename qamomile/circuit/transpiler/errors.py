@@ -387,9 +387,11 @@ class QubitRebindError(AffineTypeError):
     ``reject_branch_internal_quantum_discard`` (in
     ``qamomile.circuit.transpiler.passes.analyze``) classifies branch
     conditions the same way the compile-time-if lowering pass does and
-    raises a targeted ``ValidationError`` for a runtime
+    raises **this same** ``QubitRebindError`` for a runtime
     ``if cond: q = qm.qubit("fresh")`` that discards the pre-branch
-    state, while leaving compile-time branch rebinds legal. That IR
+    state, while leaving compile-time branch rebinds legal — so a caller
+    catching ``QubitRebindError`` (or ``AffineTypeError``) sees the
+    decoration-time and IR-time forms of the violation uniformly. That IR
     check covers conditions that transitively derive from a measurement
     (including expression forms like ``~bit``); a condition that is
     neither compile-time-resolvable nor measurement-derived cannot

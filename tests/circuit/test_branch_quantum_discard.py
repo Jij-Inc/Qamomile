@@ -14,8 +14,10 @@ quantum binding change on the ``IfOperation`` (``BranchRebind``), and
 ``reject_branch_internal_quantum_discard`` rejects a record whose
 pre-branch value has no owner on a rebinding path (no in-branch consumer,
 no phi carrying it out of that side, no reference outside the if) with a
-targeted ``ValidationError``, from both ``PartialEvaluationPass``
-(pre-fold, with bindings) and ``AnalyzePass`` (safety net).
+``QubitRebindError`` (the same ``AffineTypeError`` the decoration-time
+analyzer raises for a top-level rebind from a different quantum source),
+from both ``PartialEvaluationPass`` (pre-fold, with bindings) and
+``AnalyzePass`` (safety net).
 
 Covered here: the LIMITATIONS.md motivating example (adapted to entrypoint
 constraints — qubits are allocated in-kernel and the condition is
@@ -37,9 +39,10 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.transpiler.errors import (
+    AffineTypeError,
     EmitError,
     QamomileCompileError,
-    ValidationError,
+    QubitRebindError,
 )
 from qamomile.circuit.transpiler.passes.analyze import (
     reject_branch_internal_quantum_discard,
@@ -157,7 +160,7 @@ class TestRejectedDiscards:
                 q = qmc.qubit("fresh")
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_else_branch_fresh_rejected(self):
@@ -176,7 +179,7 @@ class TestRejectedDiscards:
             qmc.measure(r)
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match="false branch"):
+        with pytest.raises(QubitRebindError, match="false branch"):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_fresh_lineage_through_gates_rejected(self):
@@ -192,7 +195,7 @@ class TestRejectedDiscards:
                 q = qmc.h(q)
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_gate_rebind_in_other_branch_rejected(self):
@@ -214,7 +217,7 @@ class TestRejectedDiscards:
                 q = qmc.qubit("fresh")
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_rebind_to_external_value_in_one_branch_rejected(self):
@@ -236,7 +239,7 @@ class TestRejectedDiscards:
                 q = fresh
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_rebind_to_external_value_in_both_branches_rejected(self):
@@ -262,7 +265,7 @@ class TestRejectedDiscards:
                 q = fresh
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_gated_external_rebind_in_both_branches_rejected(self):
@@ -290,7 +293,7 @@ class TestRejectedDiscards:
                 q = fresh
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_both_branches_fresh_rejected(self):
@@ -311,7 +314,7 @@ class TestRejectedDiscards:
                 q = qmc.qubit("fresh_b")
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_not_condition_fresh_rejected(self):
@@ -332,7 +335,7 @@ class TestRejectedDiscards:
                 q = qmc.qubit("fresh")
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_compound_condition_fresh_rejected(self):
@@ -349,7 +352,7 @@ class TestRejectedDiscards:
                 q = qmc.qubit("fresh")
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_vector_qubit_fresh_rejected(self):
@@ -366,7 +369,7 @@ class TestRejectedDiscards:
             bits = qmc.measure(q)
             return bits[0]
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_compile_time_taken_branch_nested_in_runtime_rejected(self):
@@ -383,7 +386,7 @@ class TestRejectedDiscards:
                     q = qmc.qubit("fresh")
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"flag": 1})
 
     def test_discard_error_preempts_emit_error(self):
@@ -392,7 +395,10 @@ class TestRejectedDiscards:
         Before this check the same kernel failed only at emit with the
         unhelpful "Quantum PhiOp merge requires identical physical
         resources across branches" ``EmitError``; the targeted
-        ``ValidationError`` must now fire first.
+        ``QubitRebindError`` must now fire first. It is an
+        ``AffineTypeError`` — the same affine-violation family as the
+        decoration-time top-level rebind check — not a generic
+        ``ValidationError`` or an ``EmitError``.
         """
 
         @qmc.qkernel
@@ -406,7 +412,8 @@ class TestRejectedDiscards:
 
         with pytest.raises(QamomileCompileError) as excinfo:
             _transpile(kernel, bindings={"dummy": 0})
-        assert isinstance(excinfo.value, ValidationError)
+        assert isinstance(excinfo.value, QubitRebindError)
+        assert isinstance(excinfo.value, AffineTypeError)
         assert not isinstance(excinfo.value, EmitError)
         assert DISCARD in str(excinfo.value)
 
@@ -423,7 +430,7 @@ class TestRejectedDiscards:
             return qmc.measure(q)
 
         operations = _inlined_block(kernel, bindings={"dummy": 0}).operations
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             reject_branch_internal_quantum_discard(operations, {"dummy": 0})
 
     def test_analyze_pass_safety_net_rejects_without_partial_eval(self):
@@ -445,7 +452,7 @@ class TestRejectedDiscards:
 
         transpiler = QiskitTranspiler()
         block = _inlined_block(kernel, bindings={"dummy": 0})
-        with pytest.raises(ValidationError, match=DISCARD):
+        with pytest.raises(QubitRebindError, match=DISCARD):
             transpiler.analyze(block)
 
 

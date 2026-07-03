@@ -42,14 +42,15 @@ class PartialEvaluationPass(Pass[Block, Block]):
 
         Raises:
             ValidationError: If the block kind is not ``AFFINE`` /
-                ``HIERARCHICAL``, or if one of the pre-fold rejection
-                checks fires (a classical element store inside a loop
-                reads an element of the array it writes, a loop body
-                rebinds a classical scalar whose pre-loop value it still
-                reads, or a runtime if branch rebinds a quantum variable
-                to a different quantum value — a fresh allocation or
-                another existing register — while the pre-branch state
-                is neither consumed on that path nor owned elsewhere).
+                ``HIERARCHICAL``, or if one of the classical pre-fold
+                rejection checks fires (a classical element store inside a
+                loop reads an element of the array it writes, or a loop
+                body rebinds a classical scalar whose pre-loop value it
+                still reads).
+            QubitRebindError: If a runtime if branch rebinds a quantum
+                variable to a different quantum value — a fresh allocation
+                or another existing register — while the pre-branch state
+                is neither consumed on that path nor owned elsewhere.
         """
         # HIERARCHICAL is accepted so that the self-recursion unroll loop
         # can interleave inline (which leaves one CallBlockOperation per
