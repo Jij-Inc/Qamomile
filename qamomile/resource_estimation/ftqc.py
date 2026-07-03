@@ -11,6 +11,7 @@ import sympy as sp
 from qamomile.circuit.estimator import ResourceEstimate
 from qamomile.resource_estimation._common import (
     _as_expr,
+    _convert_fields,
     _SympyLike,
     _validate_nonnegative,
     _validate_positive,
@@ -52,29 +53,42 @@ class FTQCCostModel:
         30000
     """
 
-    physical_qubits_per_logical: _SympyLike
-    logical_cycle_time_seconds: _SympyLike
-    factory_qubits: _SympyLike = 0
-    non_clifford_throughput_per_second: _SympyLike = 1
+    physical_qubits_per_logical: sp.Expr
+    logical_cycle_time_seconds: sp.Expr
+    factory_qubits: sp.Expr = sp.Integer(0)
+    non_clifford_throughput_per_second: sp.Expr = sp.Integer(1)
 
     def __post_init__(self) -> None:
-        """Validate cost-model fields after dataclass construction.
+        """Convert and validate cost-model fields after construction.
+
+        Numeric fields are sympified once here, so later accesses see
+        ``sp.Expr`` values without per-access conversion.
 
         Raises:
+            TypeError: If a field cannot be converted to a SymPy expression.
             ValueError: If any positive-valued field is non-positive or if
                 ``factory_qubits`` is negative.
         """
+        _convert_fields(
+            self,
+            (
+                "physical_qubits_per_logical",
+                "logical_cycle_time_seconds",
+                "factory_qubits",
+                "non_clifford_throughput_per_second",
+            ),
+        )
         _validate_positive(
-            self._physical_qubits_per_logical,
+            self.physical_qubits_per_logical,
             "physical_qubits_per_logical",
         )
         _validate_positive(
-            self._logical_cycle_time_seconds,
+            self.logical_cycle_time_seconds,
             "logical_cycle_time_seconds",
         )
-        _validate_nonnegative(self._factory_qubits, "factory_qubits")
+        _validate_nonnegative(self.factory_qubits, "factory_qubits")
         _validate_positive(
-            self._non_clifford_throughput_per_second,
+            self.non_clifford_throughput_per_second,
             "non_clifford_throughput_per_second",
         )
 
@@ -94,7 +108,7 @@ class FTQCCostModel:
         logical_expr = _as_expr(logical_qubits, "logical_qubits")
         _validate_positive(logical_expr, "logical_qubits")
         return sp.simplify(
-            logical_expr * self._physical_qubits_per_logical + self._factory_qubits
+            logical_expr * self.physical_qubits_per_logical + self.factory_qubits
         )
 
     def runtime_seconds_for(
@@ -141,7 +155,7 @@ class FTQCCostModel:
         """
         depth_expr = _as_expr(logical_depth, "logical_depth")
         _validate_nonnegative(depth_expr, "logical_depth")
-        return sp.simplify(depth_expr * self._logical_cycle_time_seconds)
+        return sp.simplify(depth_expr * self.logical_cycle_time_seconds)
 
     def non_clifford_limited_runtime_seconds_for(
         self,
@@ -161,7 +175,7 @@ class FTQCCostModel:
         """
         non_clifford_expr = _as_expr(non_clifford_count, "non_clifford_count")
         _validate_nonnegative(non_clifford_expr, "non_clifford_count")
-        return sp.simplify(non_clifford_expr / self._non_clifford_throughput_per_second)
+        return sp.simplify(non_clifford_expr / self.non_clifford_throughput_per_second)
 
     def resource_values(self) -> dict[str, sp.Expr]:
         """Return architecture inputs as named symbolic values.
@@ -170,55 +184,13 @@ class FTQCCostModel:
             dict[str, sp.Expr]: Architecture values keyed by stable names.
         """
         return {
-            "physical_qubits_per_logical": self._physical_qubits_per_logical,
-            "logical_cycle_time_seconds": self._logical_cycle_time_seconds,
-            "factory_qubits": self._factory_qubits,
+            "physical_qubits_per_logical": self.physical_qubits_per_logical,
+            "logical_cycle_time_seconds": self.logical_cycle_time_seconds,
+            "factory_qubits": self.factory_qubits,
             "non_clifford_throughput_per_second": (
-                self._non_clifford_throughput_per_second
+                self.non_clifford_throughput_per_second
             ),
         }
-
-    @property
-    def _physical_qubits_per_logical(self) -> sp.Expr:
-        """Return physical overhead as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted physical qubit overhead.
-        """
-        return _as_expr(
-            self.physical_qubits_per_logical,
-            "physical_qubits_per_logical",
-        )
-
-    @property
-    def _logical_cycle_time_seconds(self) -> sp.Expr:
-        """Return logical cycle time as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted logical cycle time.
-        """
-        return _as_expr(self.logical_cycle_time_seconds, "logical_cycle_time_seconds")
-
-    @property
-    def _factory_qubits(self) -> sp.Expr:
-        """Return factory qubits as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted factory qubit count.
-        """
-        return _as_expr(self.factory_qubits, "factory_qubits")
-
-    @property
-    def _non_clifford_throughput_per_second(self) -> sp.Expr:
-        """Return non-Clifford throughput as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted throughput.
-        """
-        return _as_expr(
-            self.non_clifford_throughput_per_second,
-            "non_clifford_throughput_per_second",
-        )
 
 
 @dataclass(frozen=True)
@@ -263,21 +235,37 @@ class SurfaceCodeCostModel:
         98
     """
 
-    code_distance: _SympyLike
-    physical_cycle_time_seconds: _SympyLike
-    physical_qubits_per_logical_factor: _SympyLike = 2
-    logical_cycle_factor: _SympyLike = 1
-    factory_count: _SympyLike = 1
-    physical_qubits_per_factory: _SympyLike = 0
-    factory_cycles_per_non_clifford: _SympyLike = 1
+    code_distance: sp.Expr
+    physical_cycle_time_seconds: sp.Expr
+    physical_qubits_per_logical_factor: sp.Expr = sp.Integer(2)
+    logical_cycle_factor: sp.Expr = sp.Integer(1)
+    factory_count: sp.Expr = sp.Integer(1)
+    physical_qubits_per_factory: sp.Expr = sp.Integer(0)
+    factory_cycles_per_non_clifford: sp.Expr = sp.Integer(1)
 
     def __post_init__(self) -> None:
-        """Validate surface-code fields after dataclass construction.
+        """Convert and validate surface-code fields after construction.
+
+        Numeric fields are sympified once here, so later accesses see
+        ``sp.Expr`` values without per-access conversion.
 
         Raises:
+            TypeError: If a field cannot be converted to a SymPy expression.
             ValueError: If a positive-valued quantity is non-positive or if
                 ``physical_qubits_per_factory`` is negative.
         """
+        _convert_fields(
+            self,
+            (
+                "code_distance",
+                "physical_cycle_time_seconds",
+                "physical_qubits_per_logical_factor",
+                "logical_cycle_factor",
+                "factory_count",
+                "physical_qubits_per_factory",
+                "factory_cycles_per_non_clifford",
+            ),
+        )
         for name, value in {
             key: value
             for key, value in self.resource_inputs().items()
@@ -285,11 +273,11 @@ class SurfaceCodeCostModel:
         }.items():
             _validate_positive(value, name)
         _validate_nonnegative(
-            self._physical_qubits_per_factory,
+            self.physical_qubits_per_factory,
             "physical_qubits_per_factory",
         )
 
-    @property
+    @cached_property
     def physical_qubits_per_logical(self) -> sp.Expr:
         """Return physical qubits used by one logical patch.
 
@@ -297,10 +285,10 @@ class SurfaceCodeCostModel:
             sp.Expr: ``physical_qubits_per_logical_factor * code_distance**2``.
         """
         return sp.simplify(
-            self._physical_qubits_per_logical_factor * self._code_distance**2
+            self.physical_qubits_per_logical_factor * self.code_distance**2
         )
 
-    @property
+    @cached_property
     def logical_cycle_time_seconds(self) -> sp.Expr:
         """Return logical cycle time in seconds.
 
@@ -308,21 +296,21 @@ class SurfaceCodeCostModel:
             sp.Expr: Logical cycle time derived from physical cycles.
         """
         return sp.simplify(
-            self._logical_cycle_factor
-            * self._code_distance
-            * self._physical_cycle_time_seconds
+            self.logical_cycle_factor
+            * self.code_distance
+            * self.physical_cycle_time_seconds
         )
 
-    @property
+    @cached_property
     def factory_qubits(self) -> sp.Expr:
         """Return physical qubits reserved for factories.
 
         Returns:
             sp.Expr: Total factory qubit count.
         """
-        return sp.simplify(self._factory_count * self._physical_qubits_per_factory)
+        return sp.simplify(self.factory_count * self.physical_qubits_per_factory)
 
-    @property
+    @cached_property
     def non_clifford_throughput_per_second(self) -> sp.Expr:
         """Return sustainable non-Clifford throughput.
 
@@ -331,8 +319,8 @@ class SurfaceCodeCostModel:
             model.
         """
         return sp.simplify(
-            self._factory_count
-            / (self._factory_cycles_per_non_clifford * self.logical_cycle_time_seconds)
+            self.factory_count
+            / (self.factory_cycles_per_non_clifford * self.logical_cycle_time_seconds)
         )
 
     def to_cost_model(self) -> FTQCCostModel:
@@ -358,15 +346,15 @@ class SurfaceCodeCostModel:
             dict[str, sp.Expr]: Surface-code inputs keyed by stable names.
         """
         return {
-            "code_distance": self._code_distance,
-            "physical_cycle_time_seconds": self._physical_cycle_time_seconds,
+            "code_distance": self.code_distance,
+            "physical_cycle_time_seconds": self.physical_cycle_time_seconds,
             "physical_qubits_per_logical_factor": (
-                self._physical_qubits_per_logical_factor
+                self.physical_qubits_per_logical_factor
             ),
-            "logical_cycle_factor": self._logical_cycle_factor,
-            "factory_count": self._factory_count,
-            "physical_qubits_per_factory": self._physical_qubits_per_factory,
-            "factory_cycles_per_non_clifford": (self._factory_cycles_per_non_clifford),
+            "logical_cycle_factor": self.logical_cycle_factor,
+            "factory_count": self.factory_count,
+            "physical_qubits_per_factory": self.physical_qubits_per_factory,
+            "factory_cycles_per_non_clifford": (self.factory_cycles_per_non_clifford),
         }
 
     def resource_values(self) -> dict[str, sp.Expr]:
@@ -379,81 +367,6 @@ class SurfaceCodeCostModel:
         values = self.resource_inputs()
         values.update(self.to_cost_model().resource_values())
         return values
-
-    @property
-    def _code_distance(self) -> sp.Expr:
-        """Return code distance as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted code distance.
-        """
-        return _as_expr(self.code_distance, "code_distance")
-
-    @property
-    def _physical_cycle_time_seconds(self) -> sp.Expr:
-        """Return physical cycle time as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted physical cycle time.
-        """
-        return _as_expr(
-            self.physical_cycle_time_seconds,
-            "physical_cycle_time_seconds",
-        )
-
-    @property
-    def _physical_qubits_per_logical_factor(self) -> sp.Expr:
-        """Return logical patch qubit factor as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted patch qubit factor.
-        """
-        return _as_expr(
-            self.physical_qubits_per_logical_factor,
-            "physical_qubits_per_logical_factor",
-        )
-
-    @property
-    def _logical_cycle_factor(self) -> sp.Expr:
-        """Return logical cycle factor as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted logical cycle factor.
-        """
-        return _as_expr(self.logical_cycle_factor, "logical_cycle_factor")
-
-    @property
-    def _factory_count(self) -> sp.Expr:
-        """Return factory count as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted factory count.
-        """
-        return _as_expr(self.factory_count, "factory_count")
-
-    @property
-    def _physical_qubits_per_factory(self) -> sp.Expr:
-        """Return factory size as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted factory size.
-        """
-        return _as_expr(
-            self.physical_qubits_per_factory,
-            "physical_qubits_per_factory",
-        )
-
-    @property
-    def _factory_cycles_per_non_clifford(self) -> sp.Expr:
-        """Return factory cycles per non-Clifford output.
-
-        Returns:
-            sp.Expr: Converted factory latency.
-        """
-        return _as_expr(
-            self.factory_cycles_per_non_clifford,
-            "factory_cycles_per_non_clifford",
-        )
 
 
 @dataclass(frozen=True)
@@ -488,27 +401,39 @@ class ActiveVolumeCostModel:
         19
     """
 
-    active_volume_per_logical_gate: _SympyLike
-    active_volume_per_non_clifford: _SympyLike = 0
-    active_volume_throughput_per_second: _SympyLike = 1
+    active_volume_per_logical_gate: sp.Expr
+    active_volume_per_non_clifford: sp.Expr = sp.Integer(0)
+    active_volume_throughput_per_second: sp.Expr = sp.Integer(1)
 
     def __post_init__(self) -> None:
-        """Validate active-volume fields after dataclass construction.
+        """Convert and validate active-volume fields after construction.
+
+        Numeric fields are sympified once here, so later accesses see
+        ``sp.Expr`` values without per-access conversion.
 
         Raises:
+            TypeError: If a field cannot be converted to a SymPy expression.
             ValueError: If a positive-valued quantity is non-positive or if
                 ``active_volume_per_non_clifford`` is negative.
         """
+        _convert_fields(
+            self,
+            (
+                "active_volume_per_logical_gate",
+                "active_volume_per_non_clifford",
+                "active_volume_throughput_per_second",
+            ),
+        )
         _validate_positive(
-            self._active_volume_per_logical_gate,
+            self.active_volume_per_logical_gate,
             "active_volume_per_logical_gate",
         )
         _validate_nonnegative(
-            self._active_volume_per_non_clifford,
+            self.active_volume_per_non_clifford,
             "active_volume_per_non_clifford",
         )
         _validate_positive(
-            self._active_volume_throughput_per_second,
+            self.active_volume_throughput_per_second,
             "active_volume_throughput_per_second",
         )
 
@@ -536,8 +461,8 @@ class ActiveVolumeCostModel:
         _validate_nonnegative(logical_expr, "logical_gate_count")
         _validate_nonnegative(non_clifford_expr, "non_clifford_count")
         return sp.simplify(
-            logical_expr * self._active_volume_per_logical_gate
-            + non_clifford_expr * self._active_volume_per_non_clifford
+            logical_expr * self.active_volume_per_logical_gate
+            + non_clifford_expr * self.active_volume_per_non_clifford
         )
 
     def runtime_seconds_for(self, active_volume: _SympyLike) -> sp.Expr:
@@ -556,7 +481,7 @@ class ActiveVolumeCostModel:
         active_volume_expr = _as_expr(active_volume, "active_volume")
         _validate_nonnegative(active_volume_expr, "active_volume")
         return sp.simplify(
-            active_volume_expr / self._active_volume_throughput_per_second
+            active_volume_expr / self.active_volume_throughput_per_second
         )
 
     def resource_values(self) -> dict[str, sp.Expr]:
@@ -567,48 +492,12 @@ class ActiveVolumeCostModel:
             names.
         """
         return {
-            "active_volume_per_logical_gate": self._active_volume_per_logical_gate,
-            "active_volume_per_non_clifford": self._active_volume_per_non_clifford,
+            "active_volume_per_logical_gate": self.active_volume_per_logical_gate,
+            "active_volume_per_non_clifford": self.active_volume_per_non_clifford,
             "active_volume_throughput_per_second": (
-                self._active_volume_throughput_per_second
+                self.active_volume_throughput_per_second
             ),
         }
-
-    @property
-    def _active_volume_per_logical_gate(self) -> sp.Expr:
-        """Return per-logical-gate active volume as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted active-volume cost.
-        """
-        return _as_expr(
-            self.active_volume_per_logical_gate,
-            "active_volume_per_logical_gate",
-        )
-
-    @property
-    def _active_volume_per_non_clifford(self) -> sp.Expr:
-        """Return per-non-Clifford active volume as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted active-volume cost.
-        """
-        return _as_expr(
-            self.active_volume_per_non_clifford,
-            "active_volume_per_non_clifford",
-        )
-
-    @property
-    def _active_volume_throughput_per_second(self) -> sp.Expr:
-        """Return active-volume throughput as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted active-volume throughput.
-        """
-        return _as_expr(
-            self.active_volume_throughput_per_second,
-            "active_volume_throughput_per_second",
-        )
 
 
 @dataclass(frozen=True)

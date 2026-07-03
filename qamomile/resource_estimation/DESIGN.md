@@ -102,6 +102,13 @@ Do not copy them into new modules.
   through `_substitute_expressions`, and their derived runtime components
   are `functools.cached_property` values (safe on frozen dataclasses), so
   repeated `to_dict`/`resource_values` calls do not re-run `sp.simplify`.
+- **Fields convert once at construction.** Cost models and
+  `BlockEncodingResource` sympify their numeric fields in `__post_init__`
+  via `_common._convert_fields` (the `PauliHamiltonianResource` pattern)
+  and cache derived expressions with `cached_property`; the former per-access
+  `_x` shadow-property wrappers are gone. Field annotations state the
+  post-conversion type (`sp.Expr`); numeric inputs are still accepted and
+  converted.
 
 ## Known debt / roadmap
 
@@ -113,12 +120,6 @@ priority:
    project's Google-style docstring mandate (Args entries without types,
    missing Raises sections). Bring them up to the standard used by the rest
    of this package.
-2. **Cost-model conversion caching.** The `_x` property wrappers on the
-   cost models re-run `sp.sympify` on every access, and
-   `estimate_physical_resources` re-derives `SurfaceCodeCostModel`'s
-   derived values via both `resource_values()` and `to_cost_model()`.
-   Convert once in `__post_init__` (the `PauliHamiltonianResource`
-   pattern) or cache the derived properties.
 
 ## Review checklist for new estimators
 

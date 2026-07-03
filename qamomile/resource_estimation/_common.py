@@ -33,6 +33,24 @@ def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
         raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
 
 
+def _convert_fields(instance: object, names: tuple[str, ...]) -> None:
+    """Sympify the named dataclass fields in place on a frozen instance.
+
+    Call from ``__post_init__`` so numeric user inputs are converted to
+    SymPy expressions exactly once at construction instead of on every
+    property access.
+
+    Args:
+        instance (object): Frozen dataclass instance under construction.
+        names (tuple[str, ...]): Field names to convert.
+
+    Raises:
+        TypeError: If a named field cannot be sympified.
+    """
+    for name in names:
+        object.__setattr__(instance, name, _as_expr(getattr(instance, name), name))
+
+
 def _validate_positive(expr: sp.Expr, name: str) -> None:
     """Validate that an expression is positive when decidable.
 
