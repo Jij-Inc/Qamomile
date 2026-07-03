@@ -1,70 +1,69 @@
 ---
 name: make-summary
-description: Create a summary markdown file for the current branch that explains its work relative to the main branch. This skill uses a separate subagent or AI model to validate the summary. Keep an eye on the usage limit.
+description: Create a summary markdown file for the current branch that explains its work relative to `origin/main`. This skill uses a separate subagent or AI model to validate the summary. Keep an eye on the usage limit.
 model: opus
 ---
 
 # Branch Summary
-- This skill creates a markdown file that summarizes the work done on the current branch, based on the diff against `main` and the context accumulated so far.
-- Purpose: to help a reader understand the state of this branch. The summary is ultimately meant to be posted to the corresponding GitHub PR.
-- This skill does not touch the codebase as a rule. It only produces the summary.
 
-## I/O rules
-- Place the output file at the root of the current working worktree. Follow any other instruction the user gives instead. As a rule, do not place it in `/tmp` or similar.
-  - Why: files under `/tmp` may be gone by the time someone tries to look at them later.
-- Name the file `<branch-name>-summary.md`.
-- As a rule, do not commit the summary file.
-  - Why: the summary only exists to understand the current state of the branch. It gets posted as a PR comment, but is not kept as a file in the repository.
-- If the file already exists, update it to match the current state.
+Summarize the diff between `origin/main` and the current worktree branch after reading the code. The result must be clear enough for reviewers and junior engineers to understand the branch without seeing the conversation history.
 
-## Writing rules
-- Write the summary so that someone with no knowledge of this branch or its context can understand it.
-- Do not write the history or the flow of the conversation into the summary.
-  - Why: the summary must be self-contained and understandable on its own.
-- Assume the reader is a junior engineer, so someone unfamiliar with Qamomile can still follow it.
-- Never use a technical term for the first time without explaining it. Always add an explanation.
-- Do not decide on your own that something is "obvious" and skip it. Convey the reasons and background without omission.
-- Reference code concretely as `file:line`, in the form `qamomile/circuit/frontend/qkernel.py:249-260`, so the reader can jump to the relevant place from the summary alone.
+## When To Use
 
-## Structure rules
-Create the summary by filling in the section template below. Do not add any other section (verification results / diff stats / commit history / conversation exchanges / TODO lists, etc.).
+- Use after a coherent unit of branch work is complete.
+- Use before writing a PR or asking for review.
+- Use when the user asks for a branch summary, summary file, `branch-summary`, or `make-summary`.
+
+## Output Rules
+
+- Write the output file at the current worktree root unless the user explicitly chooses another location.
+- Name the file `<branch-name>-summary.md`. Sanitize the branch name if needed so it is safe as a filename.
+- If the file already exists, overwrite it without asking.
+- Do not commit the summary file. Leave it untracked.
+- Do not choose `/tmp` or another ephemeral directory as the output location yourself. If the current worktree root itself is under a temporary directory, prefer the worktree root.
+- On completion, report only the absolute path and the fact that the file was not committed. If an independent discrepancy check could not run, also mention that briefly.
+
+## Writing Rules
+
+- Do not make the summary bullet-list driven. Write each section as explanatory prose paragraphs.
+- Do not insert manual soft line breaks within a paragraph. Use one physical line per paragraph, and separate paragraphs with blank lines.
+- Do not write the conversation, review history, or work log. Limit the summary to the current branch diff.
+- Briefly explain each Qamomile-specific term or technical term before relying on it.
+- Write as if explaining the branch orally to a junior engineer. Do not skip why the problem matters or why the fix is needed.
+- Reference code concretely as `path/to/file.py:123` or `path/to/file.py:123-145`.
+- Do not create standalone sections for test lists, diff stats, commit history, validation logs, or work chronology. Absorb only the relevant facts into the appropriate section.
+
+## Summary Structure
+
+Write exactly the following five sections, in this order. Do not add `0. Glossary`, verification results, TODOs, conversation history, or any other section.
 
 ```md
-## 0. Glossary (this section may be omitted if no explanation is needed)
-- Briefly explain the terms that will be needed later.
+## 1. Problem Overview
 
-## 1. Problem overview
-- For a bugfix: what was originally happening (reproduction code), and why it happens (where the root cause lives).
-- For a feature addition: what becomes possible, and why it is needed.
-- Clearly distinguish which is the "behavior on main" and which is the "behavior on the branch".
+## 2. Frontend Changes (User-Written Code Level)
 
-## 2. Changes at the frontend (the code level the user writes)
-- What changed from the perspective of a Qamomile user: the contents of the `@qm.qkernel` the user writes, the error messages the user receives, the behavior of the APIs the user touches, etc.
-- Always include at least one code example.
-- Do not write backend implementation details here.
+## 3. Backend Changes (IR And Internals)
 
-## 3. Changes at the backend (IR and other internals overall)
-- Changes to the compiler / IR / passes / backends under `qamomile/circuit/{frontend,ir,transpiler}/...`.
-- New IR ops / dataclasses / passes / internal helpers, the role each of them solves, and the related file:line. Qamomile terms (`Block`, `Operation`, `affine_validate`, `CompositeGateOperation`, etc.) appear here for the first time, so add a one-line annotation where needed.
+## 4. Alternatives Not Adopted And Why This Approach Was Chosen
 
-## 4. Alternatives that were not adopted, and why this approach was chosen
-- For anything that had multiple design-level options, write:
-  - the trade-off of each,
-  - which one was adopted and what was given up.
-- This section alone may include exchanges from the flow of the conversation. Even so, write it as the final form of "what options existed and which was chosen", not as "the flow of the exchange". Not "it was A at first but was fixed to B", but "of A / B / C, B was adopted because ...".
-  - Why: it can serve as the rationale for a design decision.
-- If there is no relevant design branch, it is fine to write this section as a single line "None" and stop.
-
-## 5. Known limitations
-- Write the gaps that remain even after this branch is merged.
-- Write the ones that can actually be hit in real code (room for false negatives / false positives, unsupported AST forms, behavior differing on another backend, etc.) in a When / Why / Future fix frame. For ones already registered in a separate document such as LIMITATIONS.md, cross-reference them here; for follow-ups that are not registered, list them with their reasons.
-- If there are none, write a single line "None".
+## 5. Known Limitations
 ```
 
+In `1. Problem Overview`, for a bugfix, distinguish what happened on `origin/main`, why it happened, and how the branch changes the behavior. For a feature, explain what becomes possible and why it is needed.
+
+In `2. Frontend Changes (User-Written Code Level)`, describe the user-facing behavior: qkernels the user writes, errors the user receives, and API behavior the user touches. Include at least one code example. Do not put backend implementation details here.
+
+In `3. Backend Changes (IR And Internals)`, describe compiler, IR, transpiler, and backend-side changes. If there is a new IR operation, dataclass, pass, or helper, state its role and cite `file:line`. Briefly explain Qamomile terms the first time they appear.
+
+In `4. Alternatives Not Adopted And Why This Approach Was Chosen`, describe design-level alternatives, trade-offs, and adoption or rejection reasons. If none apply, write `None`. This section may include alternatives raised in external review or conversation, but only as final design rationale, not as a narrative of the work history.
+
+In `5. Known Limitations`, describe gaps that remain after merge. Cover real cases a user can hit, such as false negatives, false positives, unsupported AST forms, or backend differences, using the `When:` / `Why:` / `Future fix:` frame. If there are multiple limitations, use separate prose paragraphs rather than bullets. If none apply, write `None`.
+
 ## Workflow
-### Step 1. Grasp the context
-- Determine the root of the working worktree (the summary will live here from now on).
-- Get a feel for the size of the diff.
+
+### Step 1. Grasp The Context
+
+Determine the worktree root and get a rough sense of the diff size.
 
 ```bash
 pwd
@@ -73,44 +72,32 @@ git log origin/main..HEAD --oneline
 git diff origin/main...HEAD --stat
 ```
 
-### Step 2. Read the diff
-- Actually `Read` each changed file. The accuracy of the summary is determined by how deeply you read here.
-- For files that changed a lot in `diff --stat`, read the whole file / the relevant range.
-- Grasp newly added files, new classes / functions / dataclasses, and deleted symbols.
-- Count added tests too, but do not write the test list itself into the summary (absorb it into sections 2/3 as "this behavior is expected").
-- For a bugfix, running the minimal code that reproduces the original bug on the branch and confirming that the error actually appears makes section 1 easier to write.
+### Step 2. Read The Diff
 
-### Step 3. Write the draft following the section template
-- `Write` `<branch-name>-summary.md` at the worktree root and fill in the draft following the structure rules and writing rules.
-- Do not blur the boundary between section 2 and 3. Separate the user perspective (API / errors / kernel code) and the internal perspective (IR / passes / dataclasses) into different paragraphs.
-- Write section 4 in "final form". Do not mix in the chat / review exchanges themselves.
-- Confirm that every section has a short annotation on each Qamomile-specific term that appears for the first time.
+Actually read the changed files. Understand heavily changed files, new files, new classes or functions, and deleted symbols. Read added tests too, but do not make a test list in the summary; absorb expected behavior into the relevant sections. For a bugfix, gather enough detail to explain the bug on `origin/main` and the branch behavior with concrete examples when possible.
 
-### Step 4. Discrepancy check with a subagent / another AI
-- Call a subagent to cross-check the summary against the real code.
-  - However, if the user gives an instruction for a different AI, follow that.
-- Include the following in the prompt:
-  - the absolute path of the summary,
-  - the absolute paths of the main implementation files and the key symbols / line ranges within them that the summary references,
-  - "point out in a bulleted list any statement that does not match the real code, and answer 'no discrepancies' if there are none".
-- Repeat the following automatically until the subagent's points reach zero.
-  1. Re-confirm the point against the real code.
-  2. Fix the summary side (use the `Edit` tool).
-  3. If you fixed a line number, also confirm that your edit did not shift other line references (the "+N shift" pattern that Codex points out).
-  4. Once done fixing, ask a different subagent to re-check.
-- There is no need to ask the user for confirmation on every cycle.
-  - Why: you are only fixing the points that were raised.
+### Step 3. Write The Draft
 
-### Step 5. Completion report
-- Once Step 4 returns "no discrepancies", tell the user the following and finish.
-  - the **absolute path** of the summary,
-  - an explicit note that it has not been committed (state that it is untracked in `git status`).
+Create or overwrite `<branch-name>-summary.md` at the worktree root. Do not blur sections 2 and 3. Write section 4 as final design rationale, not work chronology. Write section 5 as concrete remaining conditions and future fixes, not abstract TODOs.
 
-## Things you must not do
-- Commit the summary. Leave the summary untracked inside the worktree.
-- Place it in `/tmp` or similar. Always the worktree root.
-- Add sections on your own.
-- Insert manual soft line breaks within a paragraph.
-  - Why: it looks bad when posted to GitHub.
-- Reflect the conversation history (e.g., "the user pointed out that ...").
-- Relay the state of the subagent-point-processing loop to the user every time.
+### Step 4. Check Discrepancies With Another AI
+
+By default, ask a memory-isolated subagent to adversarially check the summary against the real code. If a subagent is unavailable, use another available AI checker. If no independent checker is available or the check is blocked on approval to send local repository content externally, reread the changed files and the summary yourself, perform an adversarial self-check, and fix any mismatch you find. In that case, briefly state in the completion report that no independent discrepancy check ran, but still complete the summary.
+
+Include the absolute path of the summary, the absolute paths of the primary implementation files, the key symbols or line ranges referenced by the summary, a request to point out any statement that does not match the real code in a bulleted list and answer `no discrepancies` if there are none, and constraints forbidding code edits, file creation or deletion, and command execution.
+
+If the checker reports discrepancies, re-confirm each point against the real code, fix the summary, and verify that line-number edits did not shift other references. Then ask for another check. Repeat until there are no points left. If a point requires reconsidering a design decision, do not merely edit the summary; ask the user. Do not relay every iteration of the discrepancy-check loop to the user.
+
+### Step 5. Report Completion
+
+After Step 4 returns `no discrepancies`, or after self-checking because no independent checker was available, report the summary's absolute path and that it was not committed. If self-checking replaced an independent check, briefly mention that no independent discrepancy check ran.
+
+## Do Not
+
+- Do not commit the summary.
+- Do not place it in `/tmp` unless the current worktree root itself is there.
+- Do not add sections beyond the five specified sections.
+- Do not insert manual soft line breaks within a paragraph.
+- Do not write conversation history or a story of the work.
+- Do not discuss alternatives outside section 4.
+- Do not relay every discrepancy-check iteration to the user.

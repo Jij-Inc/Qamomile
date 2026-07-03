@@ -270,6 +270,52 @@ class TestRejectedRebinds:
         with pytest.raises(ValidationError, match=LOOP_CARRIED):
             _transpile(kernel, bindings={"n": 4})
 
+    def test_while_condition_snapshot_saved_in_body_rejected(self):
+        """Saving the while condition's entry value in the body is rejected.
+
+        The allocator aliases the whole condition series onto one clbit,
+        so the post-loop read of the saved snapshot would observe the
+        final in-loop measurement (measured divergence: Python semantics
+        1, emitted circuit 0).
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            out = bit
+            while bit:
+                out = bit
+                q2 = qmc.qubit("f")
+                bit = qmc.measure(q2)
+            return out
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_while_condition_snapshot_saved_pre_loop_rejected(self):
+        """A pre-loop snapshot of the while condition is rejected too.
+
+        This variant carries no rebind record for the snapshot variable
+        (it is never stored in the body), so the rejection comes from the
+        stale-condition-read scan over the block outputs.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            out = bit
+            while bit:
+                q2 = qmc.qubit("f")
+                bit = qmc.measure(q2)
+            return out
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"dummy": 0})
+
     def test_swap_rotation_rejected(self):
         """`a, b = b, a` in a loop leaves stale one-shot swaps and is rejected."""
 
