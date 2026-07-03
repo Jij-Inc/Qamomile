@@ -355,6 +355,127 @@ class TestRejectedDiscards:
         with pytest.raises(QubitRebindError, match=DISCARD):
             _transpile(kernel, bindings={"dummy": 0})
 
+    def test_composite_hidden_fresh_rejected(self):
+        """Routing the fresh register through a composite gate does not hide it.
+
+        The carried-exemption traces lineage through unknown producers by
+        over-approximating with their quantum inputs, so a fresh register
+        passed through ``qmc.qft`` before the merge is still provably not
+        carrying the pre-branch register.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit_array(2, "q")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = qmc.qubit_array(2, "fresh")
+                q = qmc.qft(q)
+            bits = qmc.measure(q)
+            return bits[0]
+
+        with pytest.raises(QubitRebindError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_sibling_branch_ownership_rejected(self):
+        """Ownership on the sibling branch of an enclosing if does not exempt.
+
+        The outer else branch consumes ``q``, but that branch never
+        executes together with the inner rebinding branch; the
+        path-sensitive outside-ownership evidence excludes it, so the
+        inner discard is rejected.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            a = qmc.qubit("a")
+            b = qmc.qubit("b")
+            outer = qmc.measure(a)
+            inner = qmc.measure(b)
+            if outer:
+                if inner:
+                    q = qmc.qubit("fresh")
+            else:
+                qmc.measure(q)
+                q = qmc.qubit("q2")
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_dead_after_fresh_rebind_rejected(self):
+        """A rebind whose variable is never read after the if still rejects.
+
+        The variable is dead-store-eliminated from the phi merge, so only
+        the recorded pre-branch binding (probed from the branch bodies)
+        exposes the rebind — matching the decoration-time policy, which
+        rejects a top-level rebind regardless of later use.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            r = qmc.qubit("r")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = qmc.qubit("fresh")
+            r = qmc.x(r)
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_dead_after_external_rebind_rejected(self):
+        """A dead-after rebind to another register leaves no IR op at all;
+        only the record exposes it."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            other = qmc.qubit("other")
+            r = qmc.qubit("r")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = other
+            r = qmc.x(r)
+            qmc.measure(other)
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_dead_rebind_in_nested_taken_branch_rejected(self):
+        """A dead rebind inside a compile-time-TAKEN nested if is promoted.
+
+        The nested if is not runtime control flow itself, but its taken
+        side executes whenever the enclosing runtime branch runs, so its
+        record is checked against the enclosing if. The pre-branch handle
+        is resolved through the enclosing emit_if captures because the
+        variable never enters the generated branch scopes.
+        """
+
+        @qmc.qkernel
+        def kernel(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            r = qmc.qubit("r")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                r = qmc.x(r)
+                if flag > 0:
+                    q = qmc.qubit("fresh")  # noqa: F841 — rebind under test
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=DISCARD):
+            _transpile(kernel, bindings={"flag": 1})
+
     def test_vector_qubit_fresh_rejected(self):
         """Whole-register ``Vector[Qubit]`` rebinds merge through a single phi
         and are rejected exactly like scalar ``Qubit`` rebinds."""
@@ -738,6 +859,110 @@ class TestAllowedPatterns:
             return qmc.measure(q)
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 1
+
+    def test_composite_carry_in_both_branches_allowed(self):
+        """Carrying the original register through composite gates is legal.
+
+        The over-approximated lineage sees the pre-branch register flow
+        into ``qmc.qft`` / ``qmc.iqft``, so it counts as carried. The
+        measured outcome is not deterministic (QFT creates superposition),
+        so this asserts compilation rather than a sampled value.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit_array(2, "q")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = qmc.qft(q)
+            else:
+                q = qmc.iqft(q)
+            bits = qmc.measure(q)
+            return bits[0]
+
+        executable = _transpile(kernel, bindings={"dummy": 0})
+        assert executable is not None
+
+    def test_same_side_preconsume_before_nested_if_passes_analysis(self):
+        """Consuming the original on the same path before the nested if is
+        ownership on that path; the analysis stage accepts it (the
+        cross-branch physical merge still stops at emit, pinned below)."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            a = qmc.qubit("a")
+            b = qmc.qubit("b")
+            outer = qmc.measure(a)
+            inner = qmc.measure(b)
+            if outer:
+                qmc.measure(q)
+                if inner:
+                    q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        analyzed = _run_through_analyze(kernel, bindings={"dummy": 0})
+        assert analyzed is not None
+
+        with pytest.raises(EmitError):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_dead_self_update_allowed_and_executes(self):
+        """A dead-after gate self-update keeps the same wire; no record.
+
+        ``q = qmc.x(q)`` changes the SSA version but not the logical wire,
+        so no rebind is recorded even though ``q`` is never read after the
+        if; the kernel compiles and the unrelated measured qubit behaves.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            r = qmc.qubit("r")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = qmc.x(q)
+            r = qmc.x(r)
+            return qmc.measure(r)
+
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 1
+
+    def test_dead_rebind_in_nested_dead_branch_allowed_and_executes(self):
+        """A dead rebind confined to a compile-time-DEAD nested branch never
+        executes on any path and stays legal."""
+
+        @qmc.qkernel
+        def kernel(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            r = qmc.qubit("r")
+            p = qmc.qubit("p")
+            p = qmc.x(p)
+            cond = qmc.measure(p)
+            if cond:
+                r = qmc.x(r)
+                if flag > 0:
+                    q = qmc.qubit("fresh")  # noqa: F841 — rebind under test
+            return qmc.measure(r)
+
+        assert _sample_single(kernel, bindings={"flag": 0}) == 1
+
+    def test_dead_rebind_with_alias_owner_allowed_and_executes(self):
+        """A dead-after rebind whose pre-branch value an alias still owns is
+        legal: the alias's read is outside-ownership on every path."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            alias = q
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = qmc.qubit("fresh")
+            return qmc.measure(alias)
+
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 0
 
     def test_module_level_check_accepts_dead_branch_with_bindings(self):
         """The module-level helper resolves compile-time conditions from

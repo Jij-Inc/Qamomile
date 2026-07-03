@@ -10,6 +10,7 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
     ForItemsOperation,
     ForOperation,
     HasNestedOps,
@@ -775,94 +776,98 @@ def _branch_quantum_discard_error(
     )
 
 
-def _trace_pre_branch_root(
+def _pre_branch_root_candidates(
     value: Value,
     branch_producers: dict[str, Operation],
     visiting: set[str] | None = None,
-) -> Value | None:
-    """Trace a phi input back to the quantum value its lineage starts at.
+) -> set[str]:
+    """Over-approximate the lineage roots a phi input may carry.
 
-    Follows positional gate operands and phi merges (nested runtime ifs,
-    or single-operand phis collapsed by dead-branch pruning) backwards
-    through the branch-local producer map. The root is either a value
-    with no in-branch producer (the state the variable held before the
-    if) or an in-branch ``QInitOperation`` result (a fresh allocation —
-    a valid lineage start that simply never equals a pre-branch value).
-    A phi merge yields a root only when both sides converge on the same
-    root.
+    Traces backwards through the branch-local producer map and returns
+    the UUIDs of every value the input's lineage *may* start at: values
+    with no in-branch producer (pre-branch state), in-branch
+    ``QInitOperation`` results (fresh allocations), or — for producers
+    the trace has no positional model for (composite gates, controlled
+    blocks, casts, ...) — the union over all of the producer's genuine
+    quantum inputs, since a quantum operation's outputs can only carry
+    wires that flow in. Phi merges contribute the union of both sides.
+
+    The result feeds the discard check's *carried* exemption, so
+    over-approximating is sound: a larger candidate set can only exempt
+    more (allow more), never reject a valid kernel. Conversely, a
+    pre-branch value absent from this over-approximation provably does
+    not flow out through the phi.
 
     Args:
         value (Value): The quantum value to trace (a phi branch input).
         branch_producers (dict[str, Operation]): Result-UUID-to-producer map
             restricted to the branch body (nested control flow included).
         visiting (set[str] | None): UUIDs on the current DFS path, used to
-            break cycles with backtracking. Defaults to None (fresh
-            traversal).
+            break cycles. Defaults to None (fresh traversal).
 
     Returns:
-        Value | None: The lineage root value, or None when the lineage
-            diverges across a phi or passes through a producer the trace
-            does not understand (composite gates, controlled blocks,
-            casts, ...).
+        set[str]: UUIDs of every possible lineage root of ``value``.
     """
     if visiting is None:
         visiting = set()
     if value.uuid in visiting:
-        return None
+        return set()
     visiting.add(value.uuid)
     try:
         producer = branch_producers.get(value.uuid)
         if producer is None:
-            return value
+            return {value.uuid}
         if isinstance(producer, QInitOperation):
-            return value
+            return {value.uuid}
         if isinstance(producer, GateOperation):
             qubit_operands = producer.qubit_operands
             for index, result in enumerate(producer.results):
                 if result.uuid == value.uuid and index < len(qubit_operands):
-                    return _trace_pre_branch_root(
+                    return _pre_branch_root_candidates(
                         qubit_operands[index], branch_producers, visiting
                     )
-            return None
-        if isinstance(producer, PhiOp):
+            # Positional mismatch cannot normally happen; fall through to
+            # the generic all-quantum-inputs over-approximation below.
+        elif isinstance(producer, PhiOp):
             if len(producer.operands) == 1:
-                return _trace_pre_branch_root(
+                return _pre_branch_root_candidates(
                     producer.operands[0], branch_producers, visiting
                 )
             if len(producer.operands) < 3:
-                return None
-            true_root = _trace_pre_branch_root(
+                return set()
+            return _pre_branch_root_candidates(
                 producer.true_value, branch_producers, visiting
-            )
-            if true_root is None:
-                return None
-            false_root = _trace_pre_branch_root(
+            ) | _pre_branch_root_candidates(
                 producer.false_value, branch_producers, visiting
             )
-            if false_root is None or false_root.uuid != true_root.uuid:
-                return None
-            return true_root
-        return None
+        # Generic producer (composite gate, controlled block, cast, ...):
+        # its outputs may carry any of its genuine quantum inputs.
+        roots: set[str] = set()
+        for input_value in op_genuine_input_values(producer):
+            if not isinstance(input_value, Value):
+                continue
+            if not input_value.type.is_quantum():
+                continue
+            roots |= _pre_branch_root_candidates(
+                input_value, branch_producers, visiting
+            )
+        return roots
     finally:
         visiting.discard(value.uuid)
 
 
-def _op_referenced_uuids_with_ancestry(op: Operation) -> set[str]:
-    """Collect the UUIDs one operation genuinely reads, with array ancestry.
+def op_genuine_input_values(op: Operation) -> list[ValueBase]:
+    """Return the input values an operation genuinely reads.
 
     Rebind-record values (loop-carried records on loop operations and
     branch records on ``IfOperation``s) ride along ``all_input_values``
     for cloning/substitution but are not reads, so they are excluded.
-    Each remaining input value contributes its own UUID plus its
-    ``parent_array`` / ``slice_of`` ancestry so an element or view read
-    of a register counts as touching the register itself.
 
     Args:
         op (Operation): Operation to inspect.
 
     Returns:
-        set[str]: UUIDs of every genuinely-read input value and its
-            array ancestry.
+        list[ValueBase]: ``all_input_values`` minus rebind-record values.
     """
     excluded: set[str] = set()
     if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
@@ -872,27 +877,45 @@ def _op_referenced_uuids_with_ancestry(op: Operation) -> set[str]:
     if isinstance(op, IfOperation):
         for branch_record in op.branch_rebinds:
             excluded.add(branch_record.before.uuid)
+    return [v for v in op.all_input_values() if v.uuid not in excluded]
 
+
+def _add_uuid_with_ancestry(value: ValueBase, collected: set[str]) -> None:
+    """Record a value's UUID together with its array ancestry.
+
+    Walks ``parent_array`` / ``slice_of`` chains so an element or view
+    read of a register counts as touching the register itself.
+
+    Args:
+        value (ValueBase): Input value read by an operation.
+        collected (set[str]): Mutable UUID set, updated in place.
+    """
+    if value.uuid in collected:
+        return
+    collected.add(value.uuid)
+    for attr in ("parent_array", "slice_of"):
+        ancestor = getattr(value, attr, None)
+        if ancestor is not None:
+            _add_uuid_with_ancestry(ancestor, collected)
+
+
+def _op_referenced_uuids_with_ancestry(op: Operation) -> set[str]:
+    """Collect the UUIDs one operation genuinely reads, with array ancestry.
+
+    Combines :func:`op_genuine_input_values` (rebind-record values
+    excluded) with :func:`_add_uuid_with_ancestry` (element / view reads
+    count as touching the register itself).
+
+    Args:
+        op (Operation): Operation to inspect.
+
+    Returns:
+        set[str]: UUIDs of every genuinely-read input value and its
+            array ancestry.
+    """
     referenced: set[str] = set()
-
-    def add_with_ancestry(value: ValueBase) -> None:
-        """Record a value's UUID together with its array ancestry.
-
-        Args:
-            value (ValueBase): Input value read by the operation.
-        """
-        if value.uuid in referenced:
-            return
-        referenced.add(value.uuid)
-        for attr in ("parent_array", "slice_of"):
-            ancestor = getattr(value, attr, None)
-            if ancestor is not None:
-                add_with_ancestry(ancestor)
-
-    for value in op.all_input_values():
-        if value.uuid in excluded:
-            continue
-        add_with_ancestry(value)
+    for value in op_genuine_input_values(op):
+        _add_uuid_with_ancestry(value, referenced)
     return referenced
 
 
@@ -919,11 +942,74 @@ def _branch_referenced_uuids(branch_ops: list[Operation]) -> set[str]:
     return referenced
 
 
+def _promoted_branch_records(
+    branch_ops: list[Operation],
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+) -> list[BranchRebind]:
+    """Collect rebind records that fire unconditionally within a branch.
+
+    A rebind recorded on a compile-time-TAKEN if nested inside a branch
+    executes whenever the enclosing branch runs, so it belongs to the
+    enclosing runtime if's check (the taken if itself is not runtime
+    control flow and is never checked directly). Walks the branch with
+    the same condition classification the lowering pass uses: a taken
+    nested if contributes its taken-side records and recurses, a dead
+    branch contributes nothing, and a runtime nested if keeps its own
+    records — it is checked at its own level. Loop bodies are walked
+    too; like the loop-carried rebind check, this is trip-count-agnostic
+    (a rebind inside a zero-trip loop is still collected).
+
+    Args:
+        branch_ops (list[Operation]): The branch body operations, raw
+            (not pruned), in program order.
+        concrete_values (dict[str, Any]): UUID-keyed concrete classical-op
+            results accumulated up to the branch entry. Updated in place
+            for this scope; nested non-if scopes receive copies.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+
+    Returns:
+        list[BranchRebind]: Records whose rebind executes unconditionally
+            when the branch runs, in program order.
+    """
+    promoted: list[BranchRebind] = []
+    for op in branch_ops:
+        evaluate_classical_op_concrete(op, concrete_values, bindings)
+        if isinstance(op, IfOperation):
+            taken = resolve_compile_time_condition(
+                op.condition, concrete_values, bindings
+            )
+            if taken is None:
+                # Runtime nested if: its records are checked at its own
+                # level by the scan.
+                continue
+            for record in op.branch_rebinds:
+                rebound = record.rebound_in_true if taken else record.rebound_in_false
+                if rebound:
+                    promoted.append(record)
+            promoted.extend(
+                _promoted_branch_records(
+                    op.true_operations if taken else op.false_operations,
+                    concrete_values,
+                    bindings,
+                )
+            )
+            continue
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                promoted.extend(
+                    _promoted_branch_records(body, dict(concrete_values), bindings)
+                )
+        # Other operations carry no nested control flow to walk.
+    return promoted
+
+
 def _check_branch_quantum_discard(
     if_op: IfOperation,
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
     reads_outside: set[str],
+    promoted: dict[bool, list[BranchRebind]],
 ) -> None:
     """Check one runtime ``IfOperation``'s rebind records for discards.
 
@@ -931,10 +1017,13 @@ def _check_branch_quantum_discard(
     verifies that the pre-branch value survives the path on which that
     branch is taken: it must be consumed inside the taken branch, carried
     out through some phi merge on that side, or referenced by an
-    operation outside the if entirely (an alias that still owns it, or a
-    consume before the if). A pre-branch value with none of these owners
-    is silently dropped exactly when the branch is taken — the discard
-    this check rejects. Branch bodies are pruned of
+    operation outside the if that executes on the paths reaching it. A
+    pre-branch value with none of these owners is silently dropped
+    exactly when the branch is taken — the discard this check rejects.
+    Besides the if's own records, records promoted from
+    compile-time-TAKEN ifs nested inside a branch (which fire
+    unconditionally on that side; see :func:`_promoted_branch_records`)
+    are checked against that side. Branch bodies are pruned of
     compile-time-decidable nested ifs first (each side with its own copy
     of ``concrete_values``, matching ``CompileTimeIfLoweringPass``
     scoping) so dead-branch rebinds and dead-branch consumes do not
@@ -946,23 +1035,31 @@ def _check_branch_quantum_discard(
         concrete_values (dict[str, Any]): UUID-keyed concrete classical-op
             results accumulated up to this operation.
         bindings (dict[str, Any]): Compile-time parameter bindings.
-        reads_outside (set[str]): Pre-branch record UUIDs that are read by
-            at least one operation outside this if's subtree (rebind
-            records excluded, array ancestry included) — the values still
-            owned outside the if. Precomputed by the caller via block-wide
-            vs in-subtree read-count comparison.
+        reads_outside (set[str]): UUIDs read by operations outside this
+            if's subtree on the paths that reach it (rebind records
+            excluded, array ancestry included) — the values still owned
+            outside the if. Assembled path-sensitively by the scan.
+        promoted (dict[bool, list[BranchRebind]]): Per-side records
+            promoted from compile-time-TAKEN nested ifs.
 
     Raises:
         QubitRebindError: If a rebinding branch drops the pre-branch
             quantum value with no consumer, no carrying phi, and no
             outside owner.
     """
-    records = [
-        record
-        for record in if_op.branch_rebinds
-        if isinstance(record.before, Value) and record.before.type.is_quantum()
-    ]
-    if not records:
+    side_checks: list[tuple[str, Value, bool]] = []
+    for record in if_op.branch_rebinds:
+        if not isinstance(record.before, Value) or not record.before.type.is_quantum():
+            continue
+        if record.rebound_in_true:
+            side_checks.append((record.var_name, record.before, True))
+        if record.rebound_in_false:
+            side_checks.append((record.var_name, record.before, False))
+    for side in (True, False):
+        for record in promoted[side]:
+            if isinstance(record.before, Value) and record.before.type.is_quantum():
+                side_checks.append((record.var_name, record.before, side))
+    if not side_checks:
         return
 
     pruned_branches = {
@@ -974,44 +1071,131 @@ def _check_branch_quantum_discard(
         ),
     }
     referenced: dict[bool, set[str]] = {}
-    carried: dict[bool, set[str] | None] = {}
+    carried: dict[bool, set[str]] = {}
     for side, branch_ops in pruned_branches.items():
         referenced[side] = _branch_referenced_uuids(branch_ops)
         side_producers: dict[str, Operation] = {}
         build_producer_map(branch_ops, side_producers)
-        carried_roots: set[str] | None = set()
+        carried_roots: set[str] = set()
         for phi in if_op.phi_ops:
             if len(phi.operands) < 3 or not phi.results:
                 continue
             side_value = phi.true_value if side else phi.false_value
             if not isinstance(side_value, Value) or not side_value.type.is_quantum():
                 continue
-            root = _trace_pre_branch_root(side_value, side_producers)
-            if root is None:
-                # An untraceable lineage may still carry the pre-branch
-                # value; skip this side entirely (errs toward allowing).
-                carried_roots = None
-                break
-            assert carried_roots is not None
-            carried_roots.add(root.uuid)
+            carried_roots |= _pre_branch_root_candidates(side_value, side_producers)
         carried[side] = carried_roots
 
-    for record in records:
-        for side, label in ((True, "true"), (False, "false")):
-            rebound = record.rebound_in_true if side else record.rebound_in_false
-            if not rebound:
-                continue
-            carried_side = carried[side]
-            if carried_side is None:
-                continue
-            before_uuid = record.before.uuid
-            if before_uuid in referenced[side]:
-                continue
-            if before_uuid in carried_side:
-                continue
-            if before_uuid in reads_outside:
-                continue
-            raise _branch_quantum_discard_error(record.var_name, label)
+    for var_name, before, side in side_checks:
+        if before.uuid in referenced[side]:
+            continue
+        if before.uuid in carried[side]:
+            continue
+        if before.uuid in reads_outside:
+            continue
+        raise _branch_quantum_discard_error(var_name, "true" if side else "false")
+
+
+def _scope_element_reads(
+    op: Operation,
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+    element_reads_cache: dict[int, set[str]],
+) -> set[str]:
+    """Reads of one scope element over its compile-time-pruned subtree.
+
+    Prunes the element with the accumulated compile-time state first, so
+    a compile-time-dead branch inside it contributes no reads while its
+    collapsed phis contribute their selected pass-through operands —
+    matching what actually executes. Runtime ifs inside the element keep
+    both branches (a non-ancestor runtime if's reads count as potential
+    ownership; see the scan docstring). Results are cached per element
+    identity; the accumulated state at the first computation may differ
+    from later call positions, which can only under-prune and therefore
+    over-approximate the reads — safe for the ownership evidence, which
+    errs toward allowing.
+
+    Args:
+        op (Operation): The scope element to collect reads from.
+        concrete_values (dict[str, Any]): Accumulated compile-time state
+            at the caller's position (copied before pruning).
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+        element_reads_cache (dict[int, set[str]]): Per-``id(op)`` cache,
+            updated in place.
+
+    Returns:
+        set[str]: UUIDs read anywhere in the element's pruned subtree
+            (rebind records excluded, array ancestry included).
+    """
+    cached = element_reads_cache.get(id(op))
+    if cached is not None:
+        return cached
+    reads: set[str] = set()
+    for sub_op in flatten_ops(
+        prune_compile_time_ifs([op], dict(concrete_values), bindings)
+    ):
+        reads |= _op_referenced_uuids_with_ancestry(sub_op)
+    element_reads_cache[id(op)] = reads
+    return reads
+
+
+def _sibling_scope_reads(
+    scope_ops: list[Operation],
+    exclude_op: Operation,
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+    element_reads_cache: dict[int, set[str]],
+) -> set[str]:
+    """Reads of every element of a scope except one.
+
+    Args:
+        scope_ops (list[Operation]): The scope's operation list.
+        exclude_op (Operation): The element whose subtree is excluded
+            (compared by identity).
+        concrete_values (dict[str, Any]): Accumulated compile-time state
+            for pruning the elements.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+        element_reads_cache (dict[int, set[str]]): Shared per-element
+            read cache, updated in place.
+
+    Returns:
+        set[str]: Union of the pruned-subtree reads of all other
+            elements.
+    """
+    reads: set[str] = set()
+    for element in scope_ops:
+        if element is exclude_op:
+            continue
+        reads |= _scope_element_reads(
+            element, concrete_values, bindings, element_reads_cache
+        )
+    return reads
+
+
+def _phi_side_operand_reads(if_op: IfOperation, side: bool) -> set[str]:
+    """Phi operands an if's join carries on one branch side.
+
+    On the path that takes ``side``, each phi merge selects — and thereby
+    keeps alive past the join — its ``side`` operand; the opposite side's
+    operands do not execute on that path and must not count as ownership
+    for values checked deeper inside the entered branch.
+
+    Args:
+        if_op (IfOperation): The if whose branch is being entered.
+        side (bool): True for the true branch, False for the false branch.
+
+    Returns:
+        set[str]: UUIDs (with array ancestry) of the entered side's phi
+            operands.
+    """
+    reads: set[str] = set()
+    for phi in if_op.phi_ops:
+        if len(phi.operands) < 3 or not phi.results:
+            continue
+        side_value = phi.true_value if side else phi.false_value
+        if isinstance(side_value, ValueBase):
+            _add_uuid_with_ancestry(side_value, reads)
+    return reads
 
 
 def _scan_branch_quantum_discards(
@@ -1019,8 +1203,8 @@ def _scan_branch_quantum_discards(
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
     measurement_tainted: set[str],
-    op_reads: dict[int, set[str]],
-    all_read_counts: dict[str, int],
+    inherited_reads: set[str],
+    element_reads_cache: dict[int, set[str]],
 ) -> None:
     """Walk operations like the if-lowering pass, checking each runtime if.
 
@@ -1034,16 +1218,18 @@ def _scan_branch_quantum_discards(
     ``prune_compile_time_ifs`` alone does not descend into runtime-if
     bodies.
 
-    For each runtime if that actually carries quantum rebind records, the
-    "referenced outside this if" evidence for the (few) record pre-branch
-    values is derived by comparing a UUID's block-wide read count against
-    its in-subtree read count: a value read strictly more times overall
-    than inside the subtree is read somewhere outside it. Counting (rather
-    than the naive ``all_reads - subtree_reads`` set subtraction) is
-    required for correctness — a value read both inside the subtree and
-    outside it must still count as owned outside, which plain subtraction
-    would drop. The per-if cost is therefore O(subtree size) instead of
-    O(total ops).
+    The "referenced outside this if" ownership evidence is assembled
+    path-sensitively while descending: ``inherited_reads`` accumulates,
+    per enclosing level, the reads of the sibling scope elements around
+    the branch being entered plus the enclosing if's phi operands of the
+    entered side only. Reads on the sibling branch of an enclosing if —
+    and the enclosing phis' opposite-side operands — do not execute on
+    the paths that reach this scope, so an ownership claim can no longer
+    rest on a branch that is never taken together with the checked one.
+    Reads inside non-ancestor runtime ifs elsewhere in a scope still
+    count as potential ownership: a value conditionally consumed
+    downstream is conditionally owned, matching how values that are
+    unused on some paths are tolerated elsewhere.
 
     Args:
         ops (list[Operation]): Operations to scan, in program order.
@@ -1055,12 +1241,12 @@ def _scan_branch_quantum_discards(
         measurement_tainted (set[str]): UUIDs of values transitively
             derived from measurement results; an unresolvable if whose
             condition is in this set is runtime control flow.
-        op_reads (dict[int, set[str]]): Per-operation read sets (rebind
-            records excluded, array ancestry included), keyed by ``id()``
-            of every operation reachable from the scanned block.
-        all_read_counts (dict[str, int]): For each UUID, the number of
-            operations in the whole block that read it (each op counted
-            once per distinct UUID). Precomputed once from ``op_reads``.
+        inherited_reads (set[str]): UUIDs read by operations outside this
+            scope that execute on every path reaching it, per the
+            path-sensitive construction above.
+        element_reads_cache (dict[int, set[str]]): Shared per-element
+            pruned-subtree read cache (see :func:`_scope_element_reads`),
+            updated in place.
 
     Raises:
         QubitRebindError: If a runtime if branch rebinds a quantum
@@ -1074,68 +1260,80 @@ def _scan_branch_quantum_discards(
             )
             if taken is not None:
                 branch = op.true_operations if taken else op.false_operations
+                child_reads = (
+                    inherited_reads
+                    | _sibling_scope_reads(
+                        ops, op, concrete_values, bindings, element_reads_cache
+                    )
+                    | _phi_side_operand_reads(op, taken)
+                )
                 _scan_branch_quantum_discards(
                     branch,
                     concrete_values,
                     bindings,
                     measurement_tainted,
-                    op_reads,
-                    all_read_counts,
+                    child_reads,
+                    element_reads_cache,
                 )
                 continue
-            # Only a runtime if carrying quantum rebind records can discard.
-            # Records are attached solely when a branch rebinds a variable
-            # to a *different* quantum value whose pre-branch binding would
-            # otherwise vanish from the IfOperation (fresh allocation, or
-            # substitution of another register); ordinary gate self-updates
-            # (``q = qmc.x(q)``) and measurement-conditioned gates on other
-            # qubits leave no record, so the common case skips the scan.
-            if (
-                op.branch_rebinds
-                and getattr(op.condition, "uuid", None) in measurement_tainted
-            ):
-                subtree_read_counts: dict[str, int] = {}
-                for sub_op in flatten_ops([op]):
-                    for read_uuid in op_reads.get(id(sub_op), ()):
-                        subtree_read_counts[read_uuid] = (
-                            subtree_read_counts.get(read_uuid, 0) + 1
-                        )
-                reads_outside = {
-                    record.before.uuid
-                    for record in op.branch_rebinds
-                    if isinstance(record.before, Value)
-                    and all_read_counts.get(record.before.uuid, 0)
-                    > subtree_read_counts.get(record.before.uuid, 0)
+            # Only a runtime (measurement-derived condition) if can
+            # discard, and only when it carries quantum rebind records —
+            # its own, or records promoted from compile-time-TAKEN ifs
+            # nested inside its branches, which fire unconditionally on
+            # that side. Records exist solely when a branch rebinds a
+            # variable to a *different* quantum value (fresh allocation,
+            # or substitution of another register); ordinary gate
+            # self-updates (``q = qmc.x(q)``) and measurement-conditioned
+            # gates on other qubits leave no record, so the common case
+            # skips the ownership-evidence assembly below.
+            if getattr(op.condition, "uuid", None) in measurement_tainted:
+                promoted = {
+                    True: _promoted_branch_records(
+                        op.true_operations, dict(concrete_values), bindings
+                    ),
+                    False: _promoted_branch_records(
+                        op.false_operations, dict(concrete_values), bindings
+                    ),
                 }
-                _check_branch_quantum_discard(
-                    op, concrete_values, bindings, reads_outside
+                if op.branch_rebinds or promoted[True] or promoted[False]:
+                    reads_outside = inherited_reads | _sibling_scope_reads(
+                        ops, op, concrete_values, bindings, element_reads_cache
+                    )
+                    _check_branch_quantum_discard(
+                        op, concrete_values, bindings, reads_outside, promoted
+                    )
+            for side, branch in (
+                (True, op.true_operations),
+                (False, op.false_operations),
+            ):
+                child_reads = (
+                    inherited_reads
+                    | _sibling_scope_reads(
+                        ops, op, concrete_values, bindings, element_reads_cache
+                    )
+                    | _phi_side_operand_reads(op, side)
                 )
-            _scan_branch_quantum_discards(
-                op.true_operations,
-                dict(concrete_values),
-                bindings,
-                measurement_tainted,
-                op_reads,
-                all_read_counts,
-            )
-            _scan_branch_quantum_discards(
-                op.false_operations,
-                dict(concrete_values),
-                bindings,
-                measurement_tainted,
-                op_reads,
-                all_read_counts,
-            )
+                _scan_branch_quantum_discards(
+                    branch,
+                    dict(concrete_values),
+                    bindings,
+                    measurement_tainted,
+                    child_reads,
+                    element_reads_cache,
+                )
             continue
         if isinstance(op, HasNestedOps):
+            child_reads = inherited_reads | _sibling_scope_reads(
+                ops, op, concrete_values, bindings, element_reads_cache
+            )
             for body in op.nested_op_lists():
                 _scan_branch_quantum_discards(
                     body,
                     dict(concrete_values),
                     bindings,
                     measurement_tainted,
-                    op_reads,
-                    all_read_counts,
+                    child_reads,
+                    element_reads_cache,
                 )
         # Other operations carry no nested control flow to scan.
 
@@ -1196,12 +1394,22 @@ def reject_branch_internal_quantum_discard(
     - handle exchanges where every pre-branch value is carried by some
       phi of the same side (``q1, q2 = q2, q1``).
 
-    The check is deliberately conservative toward allowing: phi lineage
-    is traced only through plain gates and phi merges, so a branch side
-    whose lineage passes through composite gates, controlled blocks, or
-    casts is skipped entirely, and any reference outside the if counts
-    as ownership even when it sits on a sibling branch of an enclosing
-    runtime if.
+    The check is deliberately conservative toward allowing where it
+    cannot be exact. Phi lineage is over-approximated: producers without
+    a positional qubit model (composite gates, controlled blocks, casts)
+    contribute all of their quantum inputs as possible roots, so the
+    carried exemption can only grow — a rejection requires the
+    pre-branch value to be provably absent from every phi lineage.
+    Outside-ownership evidence is path-sensitive with respect to
+    enclosing ifs (a read on the sibling branch of an enclosing runtime
+    if does not exempt), but path-insensitive for non-ancestor runtime
+    ifs elsewhere: a value conditionally consumed downstream counts as
+    owned. Rebinds inside compile-time-TAKEN ifs nested in a runtime
+    branch are promoted to the enclosing if's check trip-count- and
+    loop-agnostically; because the lowering pass erases those nested ifs
+    (and their records), the promoted rebinds are only caught by the
+    pre-fold ``PartialEvaluationPass`` hook, not by the ``AnalyzePass``
+    safety net.
 
     Exposed at module scope because it runs from two passes:
     ``PartialEvaluationPass`` calls it before folding and if-lowering
@@ -1228,20 +1436,13 @@ def reject_branch_internal_quantum_discard(
     measurement_tainted = find_measurement_derived_values(
         dependency_graph, find_measurement_results(operations)
     )
-    op_reads = {
-        id(op): _op_referenced_uuids_with_ancestry(op) for op in flatten_ops(operations)
-    }
-    all_read_counts: dict[str, int] = {}
-    for read_uuids in op_reads.values():
-        for read_uuid in read_uuids:
-            all_read_counts[read_uuid] = all_read_counts.get(read_uuid, 0) + 1
     _scan_branch_quantum_discards(
         operations,
         {},
         resolved_bindings,
         measurement_tainted,
-        op_reads,
-        all_read_counts,
+        set(),
+        {},
     )
 
 
@@ -1446,7 +1647,10 @@ class AnalyzePass(Pass[Block, Block]):
         measurement-derived are actually checked. In the normal pipeline
         ``CompileTimeIfLoweringPass`` has already folded away the
         compile-time ifs before ``analyze`` runs, so this bindings-free
-        call is exact; when ``AnalyzePass`` runs standalone (no
+        call is exact for the surviving runtime ifs' own records; records
+        that lived on compile-time-TAKEN nested ifs were erased together
+        with those ifs by the lowering and are only caught by the
+        pre-fold hook. When ``AnalyzePass`` runs standalone (no
         ``partial_eval``) an unfolded compile-time if with a
         non-measurement condition simply is not checked, which is safe.
 

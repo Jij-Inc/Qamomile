@@ -723,6 +723,46 @@ def _find_original_handle_for_result(
     return None
 
 
+# Sentinel returned by ``dead_rebind_binding`` when a probed name is not
+# bound in the branch body (the branch did not store it and it is not an
+# input parameter). Compared by identity in ``_collect_branch_rebinds``.
+_DEAD_REBIND_UNBOUND: typing.Any = object()
+
+
+def dead_rebind_binding(
+    frame_locals: dict[str, typing.Any],
+    name: str,
+) -> typing.Any:
+    """Probe a branch body's post-branch binding of a dead-after variable.
+
+    Called from AST-injected code as an extra element of a branch body's
+    return tuple. A variable reassigned in a branch but never read after
+    the if is dead-store-eliminated from the branch outputs, so its
+    post-branch binding is not otherwise observable by ``emit_if``; this
+    probe reads it from the body's ``locals()``. In the branch that does
+    not store the variable the name is unbound in the body scope, so the
+    probe returns a sentinel instead of raising ``NameError``.
+
+    Args:
+        frame_locals (dict[str, typing.Any]): The body's ``locals()`` at
+            the return point.
+        name (str): The probed variable name.
+
+    Returns:
+        typing.Any: The post-branch handle, or the unbound sentinel when
+            the body never bound the name.
+    """
+    return frame_locals.get(name, _DEAD_REBIND_UNBOUND)
+
+
+# Stack of the pre-binding maps of the emit_if calls currently tracing
+# their branches. A nested emit_if call site lives inside a generated
+# branch-body function whose scope only contains that if's inputs, so a
+# dead-after variable defined further out is not in the call site's
+# ``locals()``; the enclosing emit_if's captured pre-bindings supply it.
+_ACTIVE_REBIND_PRE_BINDINGS: list[dict[str, typing.Any]] = []
+
+
 def branch_rebind_pre_bindings(
     frame_locals: dict[str, typing.Any],
     names: tuple,
@@ -730,10 +770,14 @@ def branch_rebind_pre_bindings(
     """Capture pre-branch bindings for if-rebind records.
 
     Called from AST-injected code at the ``emit_if`` call site with the
-    caller's ``locals()``. The transformer's rebind-candidate analysis is
-    lexical, so a candidate name may not actually be bound at runtime
+    caller's ``locals()``. A name missing from the call site's locals is
+    resolved through the enclosing emit_if calls' captured pre-bindings
+    (innermost first): a dead-after variable never enters the generated
+    branch-body scopes, so for a nested if only the enclosing capture
+    still knows its pre-branch handle. The transformer's candidate
+    analysis is lexical, so a name may genuinely be unbound everywhere
     (a preceding pure-store if can be dead-store-eliminated from its
-    outputs); unbound names are silently skipped instead of raising
+    outputs); such names are silently skipped instead of raising
     ``UnboundLocalError`` at the call site.
 
     Args:
@@ -741,10 +785,47 @@ def branch_rebind_pre_bindings(
         names (tuple): Candidate variable names to capture.
 
     Returns:
-        dict[str, typing.Any]: The bound candidate names mapped to their
-            current (pre-branch) handles.
+        dict[str, typing.Any]: The resolvable candidate names mapped to
+            their pre-branch handles.
     """
-    return {name: frame_locals[name] for name in names if name in frame_locals}
+    captured: dict[str, typing.Any] = {}
+    for name in names:
+        if name in frame_locals:
+            captured[name] = frame_locals[name]
+            continue
+        for enclosing in reversed(_ACTIVE_REBIND_PRE_BINDINGS):
+            if name in enclosing:
+                captured[name] = enclosing[name]
+                break
+    return captured
+
+
+def _rebound_from(pre_value: Value, post_handle: typing.Any) -> bool:
+    """Decide whether a post-branch binding rebinds away from a pre value.
+
+    Compares ``logical_id``, not ``uuid``: a gate self-update
+    (``q = qmc.x(q)``) produces a new SSA version with a fresh uuid but
+    the SAME logical_id (same quantum wire), which is not a discard. Only
+    a substitution to a different quantum resource — a fresh allocation
+    or another existing register — changes the logical_id, and only those
+    are genuine branch rebinds worth recording.
+
+    Args:
+        pre_value (Value): The variable's IR value at branch entry.
+        post_handle (typing.Any): The variable's post-branch handle (or
+            raw value, or the unbound sentinel for dead-rebind probes of
+            a branch that never bound the name).
+
+    Returns:
+        bool: True when the branch left the variable bound to a
+            different quantum wire.
+    """
+    if post_handle is _DEAD_REBIND_UNBOUND:
+        return False
+    post_value = post_handle.value if hasattr(post_handle, "value") else post_handle
+    if not isinstance(post_value, Value):
+        return False
+    return post_value.logical_id != pre_value.logical_id
 
 
 def _collect_branch_rebinds(
@@ -752,6 +833,9 @@ def _collect_branch_rebinds(
     rebind_pre_bindings: dict | None,
     true_result: tuple,
     false_result: tuple,
+    dead_names: tuple,
+    dead_true: tuple,
+    dead_false: tuple,
 ) -> tuple[BranchRebind, ...]:
     """Record quantum variables whose binding changed in an if branch.
 
@@ -761,55 +845,62 @@ def _collect_branch_rebinds(
     *new* branch values — and a reassigned variable whose old value is
     dead is not even passed into the branches — so the pre-branch value
     can disappear from the ``IfOperation`` entirely; these records
-    preserve it for the transpiler's branch-discard check. Classical
-    variables are not recorded — classical rebinds are ordinary
-    phi-merged dataflow.
+    preserve it for the transpiler's branch-discard check. Live
+    candidates are matched positionally through ``output_names``;
+    dead-after candidates (dead-store-eliminated from the outputs) are
+    matched through the probe tails the branch bodies append after their
+    ordinary return values. Classical variables are not recorded —
+    classical rebinds are ordinary phi-merged dataflow.
 
     Args:
         output_names (tuple): Variable names positionally aligned with
-            the branch-result tuples (the AST transformer's output list).
-        rebind_pre_bindings (dict | None): Candidate variable names
-            mapped to their pre-branch handles, captured at the call
-            site. None or empty when no pre-existing variable is
+            the merged branch-result prefixes (the AST transformer's
+            output list).
+        rebind_pre_bindings (dict | None): Candidate variable names (live
+            and dead) mapped to their pre-branch handles, captured at the
+            call site. None or empty when no pre-existing variable is
             reassigned in a branch.
-        true_result (tuple): Variable values returned by the true branch,
-            positionally aligned with ``output_names``.
-        false_result (tuple): Variable values returned by the false
+        true_result (tuple): Merged-output values returned by the true
             branch, positionally aligned with ``output_names``.
+        false_result (tuple): Merged-output values returned by the false
+            branch, positionally aligned with ``output_names``.
+        dead_names (tuple): Dead-after candidate names, positionally
+            aligned with the probe tails.
+        dead_true (tuple): The true branch's probe tail (post-branch
+            handles or unbound sentinels).
+        dead_false (tuple): The false branch's probe tail.
 
     Returns:
         tuple[BranchRebind, ...]: One record per quantum variable whose
             binding changed in at least one branch. Empty when the
-            result tuples do not align with ``output_names`` (defensive —
+            result tuples do not align with the name lists (defensive —
             the AST transformer guarantees alignment).
     """
     if not rebind_pre_bindings:
         return ()
     if not (len(output_names) == len(true_result) == len(false_result)):
         return ()
+    if not (len(dead_names) == len(dead_true) == len(dead_false)):
+        return ()
     positions = {name: index for index, name in enumerate(output_names)}
+    dead_positions = {name: index for index, name in enumerate(dead_names)}
     records: list[BranchRebind] = []
     for name, pre_handle in rebind_pre_bindings.items():
-        index = positions.get(name)
-        if index is None:
-            continue
         pre_value = pre_handle.value if hasattr(pre_handle, "value") else pre_handle
         if not isinstance(pre_value, Value) or not pre_value.type.is_quantum():
             continue
-        true_val = true_result[index]
-        false_val = false_result[index]
-        true_value = true_val.value if hasattr(true_val, "value") else true_val
-        false_value = false_val.value if hasattr(false_val, "value") else false_val
-        if not isinstance(true_value, Value) or not isinstance(false_value, Value):
+        index = positions.get(name)
+        dead_index = dead_positions.get(name)
+        if index is not None:
+            post_true: typing.Any = true_result[index]
+            post_false: typing.Any = false_result[index]
+        elif dead_index is not None:
+            post_true = dead_true[dead_index]
+            post_false = dead_false[dead_index]
+        else:
             continue
-        # Compare logical_id, not uuid: a gate self-update (``q = qmc.x(q)``)
-        # produces a new SSA version with a fresh uuid but the SAME
-        # logical_id (same quantum wire), which is not a discard. Only a
-        # substitution to a different quantum resource — a fresh allocation
-        # or another existing register — changes the logical_id, and only
-        # those are genuine branch rebinds worth recording.
-        rebound_in_true = true_value.logical_id != pre_value.logical_id
-        rebound_in_false = false_value.logical_id != pre_value.logical_id
+        rebound_in_true = _rebound_from(pre_value, post_true)
+        rebound_in_false = _rebound_from(pre_value, post_false)
         if rebound_in_true or rebound_in_false:
             records.append(
                 BranchRebind(
@@ -829,6 +920,7 @@ def emit_if(
     variables: list,
     output_names: tuple = (),
     rebind_pre_bindings: dict | None = None,
+    dead_names: tuple = (),
 ) -> typing.Any:
     """Builder function for if-else conditional with Phi function merging.
 
@@ -857,6 +949,12 @@ def emit_if(
             pre-existing variable reassigned in a branch, keyed by name;
             captured at the call site by the AST transformer. None when
             there are no candidates.
+        dead_names (tuple): Names of dead-after rebind candidates whose
+            post-branch bindings the branch bodies append as a probe tail
+            after their ordinary return values (see
+            ``dead_rebind_binding``). The tail is consumed for rebind
+            records only and never merged or returned. Empty when there
+            are no dead candidates.
 
     Returns:
         Merged variable values after conditional execution (using Phi functions)
@@ -887,8 +985,15 @@ def emit_if(
     # 2. Trace both branches (fresh copies avoid consumed conflicts)
     true_vars = [_fresh_handle_copy_for_tracing(v) for v in variables]
     false_vars = [_fresh_handle_copy_for_tracing(v) for v in variables]
-    true_tracer, true_result = _trace_branch(true_func, true_vars)
-    false_tracer, false_result = _trace_branch(false_func, false_vars)
+    # Expose this call's captured pre-bindings to nested emit_if call
+    # sites while the branch bodies trace (see
+    # ``branch_rebind_pre_bindings``).
+    _ACTIVE_REBIND_PRE_BINDINGS.append(dict(rebind_pre_bindings or {}))
+    try:
+        true_tracer, true_result = _trace_branch(true_func, true_vars)
+        false_tracer, false_result = _trace_branch(false_func, false_vars)
+    finally:
+        _ACTIVE_REBIND_PRE_BINDINGS.pop()
 
     # 3. Create IfOperation
     if_op = IfOperation(
@@ -905,9 +1010,24 @@ def emit_if(
         raise ValueError(
             f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
         )
+    # Split off the dead-rebind probe tail (never merged or returned).
+    n_merged = len(true_result) - len(dead_names)
+    if n_merged < 0:
+        raise ValueError(
+            f"Branch result shorter than dead-rebind probe tail: "
+            f"len(result)={len(true_result)}, len(dead_names)={len(dead_names)}"
+        )
     if_op.branch_rebinds = _collect_branch_rebinds(
-        output_names, rebind_pre_bindings, true_result, false_result
+        output_names,
+        rebind_pre_bindings,
+        true_result[:n_merged],
+        false_result[:n_merged],
+        dead_names,
+        true_result[n_merged:],
+        false_result[n_merged:],
     )
+    true_result = true_result[:n_merged]
+    false_result = false_result[:n_merged]
     merged_results = []
     for true_val, false_val in zip(true_result, false_result, strict=True):
         if isinstance(true_val, (Handle, Value)):
