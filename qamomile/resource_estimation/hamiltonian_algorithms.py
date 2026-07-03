@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,7 @@ from qamomile.resource_estimation.hamiltonian import (
     PauliHamiltonianResource,
     summarize_openfermion_qubit_operator,
 )
+from qamomile.resource_estimation.workload import HamiltonianWorkloadMixin
 
 
 class HamiltonianRepresentation(enum.StrEnum):
@@ -46,7 +48,7 @@ class HamiltonianRepresentation(enum.StrEnum):
 
 
 @dataclass(frozen=True)
-class HamiltonianQPEWorkload:
+class HamiltonianQPEWorkload(HamiltonianWorkloadMixin):
     """Describe a Hamiltonian workload for phase-estimation resource estimates.
 
     Attributes:
@@ -102,49 +104,30 @@ class HamiltonianQPEWorkload:
     description: str = ""
     qpe_register_qubits: _SympyLike = 0
 
+    _POSITIVE_FIELDS = ("walk_cost_toffoli",)
+    _OPTIONAL_POSITIVE_FIELDS = ("sparsity", "second_factor_rank", "logical_qubits")
+    _NONNEGATIVE_FIELDS = ("representation_error", "qpe_register_qubits")
+
     def __post_init__(self) -> None:
         """Validate workload fields after dataclass construction.
 
         Raises:
             TypeError: If ``hamiltonian`` is not a
                 ``PauliHamiltonianResource``.
-            ValueError: If any positive-valued quantity is non-positive or if
-                ``representation_error`` is negative.
+            ValueError: If any positive-valued quantity is non-positive, if
+                ``representation_error`` is negative, or if
+                ``representation`` is unknown.
         """
-        if not isinstance(self.hamiltonian, PauliHamiltonianResource):
-            raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
-        _validate_positive(
-            _as_expr(self.walk_cost_toffoli, "walk_cost_toffoli"),
-            "walk_cost_toffoli",
-        )
-        if self.sparsity is not None:
-            _validate_positive(_as_expr(self.sparsity, "sparsity"), "sparsity")
-        if self.second_factor_rank is not None:
-            _validate_positive(
-                _as_expr(self.second_factor_rank, "second_factor_rank"),
-                "second_factor_rank",
-            )
-        if self.logical_qubits is not None:
-            _validate_positive(
-                _as_expr(self.logical_qubits, "logical_qubits"),
-                "logical_qubits",
-            )
-        _validate_nonnegative(
-            _as_expr(self.representation_error, "representation_error"),
-            "representation_error",
-        )
-        _validate_nonnegative(
-            _as_expr(self.qpe_register_qubits, "qpe_register_qubits"),
-            "qpe_register_qubits",
-        )
+        self._validate_workload_fields()
         _normalize_representation(self.representation)
 
     @property
-    def normalized_representation(self) -> HamiltonianRepresentation:
-        """Return the normalized Hamiltonian representation.
+    def normalized_representation(self) -> str:
+        """Return the normalized Hamiltonian representation key.
 
         Returns:
-            HamiltonianRepresentation: Normalized finite-set representation.
+            str: Registered representation key. Built-in keys compare equal
+                to their ``HamiltonianRepresentation`` members.
         """
         return _normalize_representation(self.representation)
 
@@ -162,123 +145,51 @@ class HamiltonianQPEWorkload:
             return self.hamiltonian.n_pauli_terms
         return None
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the workload to a JSON-friendly dictionary.
-
-        Returns:
-            dict[str, Any]: String-valued workload metadata.
-        """
-        return {
-            "hamiltonian": self.hamiltonian.to_dict(),
-            "representation": self.normalized_representation.value,
-            "walk_cost_toffoli": str(
-                _as_expr(self.walk_cost_toffoli, "walk_cost_toffoli")
-            ),
-            "sparsity": (
-                None
-                if self.effective_sparsity is None
-                else str(self.effective_sparsity)
-            ),
-            "second_factor_rank": (
-                None
-                if self.second_factor_rank is None
-                else str(_as_expr(self.second_factor_rank, "second_factor_rank"))
-            ),
-            "logical_qubits": (
-                None
-                if self.logical_qubits is None
-                else str(_as_expr(self.logical_qubits, "logical_qubits"))
-            ),
-            "representation_error": str(
-                _as_expr(self.representation_error, "representation_error")
-            ),
-            "qpe_register_qubits": str(
-                _as_expr(self.qpe_register_qubits, "qpe_register_qubits")
-            ),
-            "description": self.description,
-        }
-
-    def resource_values(self) -> dict[str, sp.Expr]:
-        """Return canonical resource values exposed by the workload.
+    def _own_resource_values(self) -> dict[str, sp.Expr]:
+        """Return the qubitized-QPE workload's algorithm-level values.
 
         The Hamiltonian's ``n_pauli_terms`` is always the true term count of
         the problem; the representation-level term count assumed by sparse
         methods is reported separately under the ``sparsity`` key.
 
         Returns:
-            dict[str, sp.Expr]: Hamiltonian summary values plus algorithm
-            workload parameters, including ``sparsity`` when the workload
-            carries a sparse-method term count.
+            dict[str, sp.Expr]: Walk cost, error budget, QPE register
+                qubits, and ``sparsity`` when the workload carries a
+                sparse-method term count.
         """
-        values = self.hamiltonian.resource_values()
-        values["walk_cost_toffoli"] = _as_expr(
-            self.walk_cost_toffoli,
-            "walk_cost_toffoli",
-        )
-        values["representation_error"] = _as_expr(
-            self.representation_error,
-            "representation_error",
-        )
-        values["qpe_register_qubits"] = _as_expr(
-            self.qpe_register_qubits,
-            "qpe_register_qubits",
-        )
+        values = {
+            "walk_cost_toffoli": _as_expr(
+                self.walk_cost_toffoli,
+                "walk_cost_toffoli",
+            ),
+            "representation_error": _as_expr(
+                self.representation_error,
+                "representation_error",
+            ),
+            "qpe_register_qubits": _as_expr(
+                self.qpe_register_qubits,
+                "qpe_register_qubits",
+            ),
+        }
         if self.effective_sparsity is not None:
             values["sparsity"] = self.effective_sparsity
         return values
 
-    def resource_values_for_precision(
-        self, precision: _SympyLike
-    ) -> dict[str, sp.Expr]:
-        """Return canonical resource values for one target precision.
-
-        Args:
-            precision (sp.Expr | int | float): Total target energy precision
-                budget used to derive the algorithmic precision available to
-                phase estimation.
+    def _dict_overrides(self) -> dict[str, Any]:
+        """Return serialization overrides for :meth:`to_dict`.
 
         Returns:
-            dict[str, sp.Expr]: Workload resource values plus
-                ``target_precision`` and ``algorithmic_precision``.
-
-        Raises:
-            ValueError: If ``precision`` is non-positive or if
-                ``representation_error`` leaves no positive precision for QPE.
-            TypeError: If ``precision`` cannot be converted into a SymPy
-                expression.
+            dict[str, Any]: The ``sparsity`` entry serialized from
+                ``effective_sparsity`` so the sparse-LCU fallback is visible
+                in serialized form.
         """
-        precision_expr = _as_expr(precision, "precision")
-        _validate_positive(precision_expr, "precision")
-
-        values = self.resource_values()
-        values["target_precision"] = precision_expr
-        values["algorithmic_precision"] = self.algorithmic_precision(precision_expr)
-        return values
-
-    def algorithmic_precision(self, precision: _SympyLike) -> sp.Expr:
-        """Return precision remaining after representation error.
-
-        Args:
-            precision (sp.Expr | int | float): Total target energy precision
-                budget.
-
-        Returns:
-            sp.Expr: Precision budget available to phase estimation after
-                subtracting ``representation_error``.
-
-        Raises:
-            ValueError: If ``precision`` is non-positive or if the remaining
-                algorithmic precision is provably non-positive.
-            TypeError: If ``precision`` cannot be converted into a SymPy
-                expression.
-        """
-        precision_expr = _as_expr(precision, "precision")
-        _validate_positive(precision_expr, "precision")
-        remaining = sp.simplify(
-            precision_expr - _as_expr(self.representation_error, "representation_error")
-        )
-        _validate_positive(remaining, "algorithmic_precision")
-        return remaining
+        return {
+            "sparsity": (
+                None
+                if self.effective_sparsity is None
+                else str(self.effective_sparsity)
+            ),
+        }
 
     @classmethod
     def from_block_encoding(
@@ -364,7 +275,7 @@ class HamiltonianQPEWorkload:
 
 
 @dataclass(frozen=True)
-class TrotterQPEWorkload:
+class TrotterQPEWorkload(HamiltonianWorkloadMixin):
     """Describe a product-formula QPE workload for resource reviews.
 
     The workload keeps product-formula and unitary-weight assumptions symbolic
@@ -424,34 +335,17 @@ class TrotterQPEWorkload:
     representation_error: _SympyLike = 0
     description: str = ""
 
-    def __post_init__(self) -> None:
-        """Validate workload fields after dataclass construction.
-
-        Raises:
-            TypeError: If ``hamiltonian`` is not a
-                ``PauliHamiltonianResource``.
-            ValueError: If a positive-valued quantity is non-positive or if a
-                reduction/error quantity is negative.
-        """
-        if not isinstance(self.hamiltonian, PauliHamiltonianResource):
-            raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
-        for name, value in {
-            "trotter_steps_per_sample": self.trotter_steps_per_sample,
-            "samples": self.samples,
-            "rotation_synthesis_t_gates": self.rotation_synthesis_t_gates,
-        }.items():
-            _validate_positive(_as_expr(value, name), name)
-        if self.logical_qubits is not None:
-            _validate_positive(
-                _as_expr(self.logical_qubits, "logical_qubits"),
-                "logical_qubits",
-            )
-        for name, value in {
-            "unitary_weight_factor": self.unitary_weight_factor,
-            "randomized_compilation_factor": self.randomized_compilation_factor,
-            "representation_error": self.representation_error,
-        }.items():
-            _validate_nonnegative(_as_expr(value, name), name)
+    _POSITIVE_FIELDS = (
+        "trotter_steps_per_sample",
+        "samples",
+        "rotation_synthesis_t_gates",
+    )
+    _OPTIONAL_POSITIVE_FIELDS = ("logical_qubits",)
+    _NONNEGATIVE_FIELDS = (
+        "unitary_weight_factor",
+        "randomized_compilation_factor",
+        "representation_error",
+    )
 
     @property
     def effective_lambda_norm(self) -> sp.Expr:
@@ -552,127 +446,37 @@ class TrotterQPEWorkload:
             description=description,
         )
 
-    def algorithmic_precision(self, precision: _SympyLike) -> sp.Expr:
-        """Return precision remaining after representation error.
-
-        Args:
-            precision (sp.Expr | int | float): Total target energy precision
-                budget.
+    def _own_resource_values(self) -> dict[str, sp.Expr]:
+        """Return the product-formula workload's algorithm-level values.
 
         Returns:
-            sp.Expr: Precision budget available to phase estimation.
-
-        Raises:
-            ValueError: If ``precision`` is non-positive or if the remaining
-                precision is provably non-positive.
-            TypeError: If ``precision`` cannot be converted to a SymPy
-                expression.
-        """
-        precision_expr = _as_expr(precision, "precision")
-        _validate_positive(precision_expr, "precision")
-        remaining = sp.simplify(
-            precision_expr - _as_expr(self.representation_error, "representation_error")
-        )
-        _validate_positive(remaining, "algorithmic_precision")
-        return remaining
-
-    def resource_values(self) -> dict[str, sp.Expr]:
-        """Return canonical resource values exposed by the workload.
-
-        Returns:
-            dict[str, sp.Expr]: Hamiltonian and product-formula workload
-                quantities.
-        """
-        values = self.hamiltonian.resource_values()
-        values["effective_lambda_norm"] = self.effective_lambda_norm
-        values["trotter_steps_per_sample"] = _as_expr(
-            self.trotter_steps_per_sample,
-            "trotter_steps_per_sample",
-        )
-        values["trotter_samples"] = _as_expr(self.samples, "samples")
-        values["unitary_weight_factor"] = _as_expr(
-            self.unitary_weight_factor,
-            "unitary_weight_factor",
-        )
-        values["randomized_compilation_factor"] = _as_expr(
-            self.randomized_compilation_factor,
-            "randomized_compilation_factor",
-        )
-        values["rotation_synthesis_t_gates"] = _as_expr(
-            self.rotation_synthesis_t_gates,
-            "rotation_synthesis_t_gates",
-        )
-        values["representation_error"] = _as_expr(
-            self.representation_error,
-            "representation_error",
-        )
-        return values
-
-    def resource_values_for_precision(
-        self,
-        precision: _SympyLike,
-    ) -> dict[str, sp.Expr]:
-        """Return canonical resource values for one target precision.
-
-        Args:
-            precision (sp.Expr | int | float): Total target precision budget.
-
-        Returns:
-            dict[str, sp.Expr]: Workload values plus target and algorithmic
-                precision.
-
-        Raises:
-            ValueError: If ``precision`` is non-positive or exhausted by
-                ``representation_error``.
-            TypeError: If ``precision`` cannot be converted to a SymPy
-                expression.
-        """
-        precision_expr = _as_expr(precision, "precision")
-        _validate_positive(precision_expr, "precision")
-        values = self.resource_values()
-        values["target_precision"] = precision_expr
-        values["algorithmic_precision"] = self.algorithmic_precision(precision_expr)
-        return values
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the workload to a JSON-friendly dictionary.
-
-        Returns:
-            dict[str, Any]: String-valued workload metadata.
+            dict[str, sp.Expr]: Effective normalization, sampling, weight,
+                synthesis, and error-budget quantities. ``samples`` is
+                exposed under the canonical ``trotter_samples`` key.
         """
         return {
-            "hamiltonian": self.hamiltonian.to_dict(),
-            "trotter_steps_per_sample": str(
-                _as_expr(
-                    self.trotter_steps_per_sample,
-                    "trotter_steps_per_sample",
-                )
+            "effective_lambda_norm": self.effective_lambda_norm,
+            "trotter_steps_per_sample": _as_expr(
+                self.trotter_steps_per_sample,
+                "trotter_steps_per_sample",
             ),
-            "samples": str(_as_expr(self.samples, "samples")),
-            "unitary_weight_factor": str(
-                _as_expr(self.unitary_weight_factor, "unitary_weight_factor")
+            "trotter_samples": _as_expr(self.samples, "samples"),
+            "unitary_weight_factor": _as_expr(
+                self.unitary_weight_factor,
+                "unitary_weight_factor",
             ),
-            "randomized_compilation_factor": str(
-                _as_expr(
-                    self.randomized_compilation_factor,
-                    "randomized_compilation_factor",
-                )
+            "randomized_compilation_factor": _as_expr(
+                self.randomized_compilation_factor,
+                "randomized_compilation_factor",
             ),
-            "rotation_synthesis_t_gates": str(
-                _as_expr(
-                    self.rotation_synthesis_t_gates,
-                    "rotation_synthesis_t_gates",
-                )
+            "rotation_synthesis_t_gates": _as_expr(
+                self.rotation_synthesis_t_gates,
+                "rotation_synthesis_t_gates",
             ),
-            "logical_qubits": (
-                None
-                if self.logical_qubits is None
-                else str(_as_expr(self.logical_qubits, "logical_qubits"))
+            "representation_error": _as_expr(
+                self.representation_error,
+                "representation_error",
             ),
-            "representation_error": str(
-                _as_expr(self.representation_error, "representation_error")
-            ),
-            "description": self.description,
         }
 
 
@@ -691,6 +495,10 @@ def estimate_qubitized_qpe_resources(
     qpe_register_qubits: _SympyLike = 0,
 ) -> ResourceEstimate:
     """Estimate logical qubitized-QPE resources for a Hamiltonian.
+
+    This models the walk-based QPE workload with explicit walk costs and
+    Hamiltonian representations. For a coarse textbook-level QPE bound
+    parameterized by precision bits, see ``estimate_qpe`` in this package.
 
     Args:
         n_qubits (sp.Expr | int): Number of encoded Hamiltonian qubits.
@@ -722,7 +530,7 @@ def estimate_qubitized_qpe_resources(
             non-positive.
         TypeError: If a value cannot be converted into a SymPy expression.
     """
-    representation_enum = _normalize_representation(representation)
+    representation_key = _normalize_representation(representation)
     n_expr = _as_expr(n_qubits, "n_qubits")
     lambda_expr = _as_expr(lambda_norm, "lambda_norm")
     precision_expr = _as_expr(precision, "precision")
@@ -737,7 +545,7 @@ def estimate_qubitized_qpe_resources(
 
     if logical_qubits is None:
         logical_expr = _default_logical_qubits(
-            representation_enum,
+            representation_key,
             n_expr,
             sparsity=sparsity,
             second_factor_rank=second_factor_rank,
@@ -907,6 +715,10 @@ def estimate_trotter_qpe_resources(
     across all QPE iterations, matching the total-count semantics of the
     other ``GateCount`` fields, so ``t_gates == rotation_gates *
     rotation_synthesis_t_gates`` always holds.
+
+    This prices a QPE workload driven by a normalization/precision budget.
+    To price a single approximate time evolution e^(iHt) at fixed time and
+    error instead, use ``estimate_trotter`` from this package.
 
     Args:
         n_qubits (sp.Expr | int): Number of encoded Hamiltonian qubits.
@@ -1191,8 +1003,192 @@ def trotter_qpe_workload_from_openfermion(
     )
 
 
+def _sparse_pauli_lcu_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return sparse Pauli-LCU logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Sparse-method nonzero term
+            count. Required for this representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n + sqrt(sparsity)``.
+
+    Raises:
+        ValueError: If ``sparsity`` is missing or non-positive.
+    """
+    if sparsity is None:
+        raise ValueError("sparsity is required for sparse Pauli-LCU QPE estimates.")
+    sparsity_expr = _as_expr(sparsity, "sparsity")
+    _validate_positive(sparsity_expr, "sparsity")
+    return sp.simplify(n_qubits + sp.sqrt(sparsity_expr))
+
+
+def _single_factorization_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return single-factorization logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n ** (3/2)``.
+    """
+    return sp.simplify(n_qubits ** sp.Rational(3, 2))
+
+
+def _double_factorization_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return double-factorization logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Average second
+            factorization rank. Defaults to the symbolic ``Xi`` when None.
+
+    Returns:
+        sp.Expr: ``n * sqrt(second_factor_rank)``.
+
+    Raises:
+        ValueError: If ``second_factor_rank`` is provably non-positive.
+    """
+    rank_expr = (
+        sp.Symbol("Xi", positive=True)
+        if second_factor_rank is None
+        else _as_expr(second_factor_rank, "second_factor_rank")
+    )
+    _validate_positive(rank_expr, "second_factor_rank")
+    return sp.simplify(n_qubits * sp.sqrt(rank_expr))
+
+
+def _tensor_hypercontraction_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return tensor-hypercontraction logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n``.
+    """
+    return n_qubits
+
+
+def _unitary_weight_concentration_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return unitary-weight-concentration logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n + 1`` for the data register plus one ancilla.
+    """
+    return n_qubits + 1
+
+
+_LogicalQubitsModel = Callable[..., sp.Expr]
+
+_REPRESENTATION_MODELS: dict[str, _LogicalQubitsModel] = {
+    HamiltonianRepresentation.SPARSE_PAULI_LCU.value: _sparse_pauli_lcu_qubits,
+    HamiltonianRepresentation.SINGLE_FACTORIZATION.value: (
+        _single_factorization_qubits
+    ),
+    HamiltonianRepresentation.DOUBLE_FACTORIZATION.value: (
+        _double_factorization_qubits
+    ),
+    HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF.value: (
+        _double_factorization_qubits
+    ),
+    HamiltonianRepresentation.TENSOR_HYPERCONTRACTION.value: (
+        _tensor_hypercontraction_qubits
+    ),
+    HamiltonianRepresentation.UNITARY_WEIGHT_CONCENTRATION.value: (
+        _unitary_weight_concentration_qubits
+    ),
+}
+
+
+def register_hamiltonian_representation(
+    name: str,
+    logical_qubits: _LogicalQubitsModel,
+) -> str:
+    """Register a custom Hamiltonian representation scaling model.
+
+    Hamiltonian representations are open: any registered name is accepted by
+    ``HamiltonianQPEWorkload`` and ``estimate_qubitized_qpe_resources``.
+    ``HamiltonianRepresentation`` enumerates the built-ins; this function
+    extends the set without editing the package.
+
+    Args:
+        name (str): Representation key, used as the ``representation``
+            argument of workloads and estimators.
+        logical_qubits (Callable[..., sp.Expr]): Scaling model called as
+            ``logical_qubits(n_qubits, *, sparsity=None,
+            second_factor_rank=None)`` and returning the representation's
+            logical-qubit count expression. Registration is last-wins:
+            re-registering a name replaces its model, which keeps notebook
+            re-execution and module reloads working. Overriding a built-in
+            name replaces its scaling model process-wide.
+
+    Returns:
+        str: The registered representation key.
+
+    Raises:
+        ValueError: If ``name`` is empty.
+
+    Example:
+        >>> def _flat_qubits(n_qubits, *, sparsity=None, second_factor_rank=None):
+        ...     return n_qubits + 3
+        >>> register_hamiltonian_representation("flat_encoding", _flat_qubits)
+        'flat_encoding'
+    """
+    key = str(name)
+    if not key:
+        raise ValueError("Representation names must be non-empty strings.")
+    _REPRESENTATION_MODELS[key] = logical_qubits
+    return key
+
+
 def _default_logical_qubits(
-    representation: HamiltonianRepresentation,
+    representation: str,
     n_qubits: sp.Expr,
     *,
     sparsity: sp.Expr | int | None,
@@ -1201,7 +1197,7 @@ def _default_logical_qubits(
     """Return representation-level logical-qubit scaling.
 
     Args:
-        representation (HamiltonianRepresentation): Hamiltonian representation.
+        representation (str): Normalized Hamiltonian representation key.
         n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
         sparsity (sp.Expr | int | None): Sparse-method nonzero term count.
         second_factor_rank (sp.Expr | int | None): Average rank for
@@ -1211,37 +1207,15 @@ def _default_logical_qubits(
         sp.Expr: Symbolic logical-qubit estimate.
 
     Raises:
-        ValueError: If the sparse representation lacks ``sparsity``.
+        ValueError: If the representation's model rejects its inputs, such
+            as a sparse representation without ``sparsity``.
     """
-    n = n_qubits
-    match representation:
-        case HamiltonianRepresentation.SPARSE_PAULI_LCU:
-            if sparsity is None:
-                raise ValueError(
-                    "sparsity is required for sparse Pauli-LCU QPE estimates."
-                )
-            sparsity_expr = _as_expr(sparsity, "sparsity")
-            _validate_positive(sparsity_expr, "sparsity")
-            return sp.simplify(n + sp.sqrt(sparsity_expr))
-        case HamiltonianRepresentation.SINGLE_FACTORIZATION:
-            return sp.simplify(n ** sp.Rational(3, 2))
-        case (
-            HamiltonianRepresentation.DOUBLE_FACTORIZATION
-            | HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF
-        ):
-            rank_expr = (
-                sp.Symbol("Xi", positive=True)
-                if second_factor_rank is None
-                else _as_expr(second_factor_rank, "second_factor_rank")
-            )
-            _validate_positive(rank_expr, "second_factor_rank")
-            return sp.simplify(n * sp.sqrt(rank_expr))
-        case HamiltonianRepresentation.TENSOR_HYPERCONTRACTION:
-            return n
-        case HamiltonianRepresentation.UNITARY_WEIGHT_CONCENTRATION:
-            return n + 1
-        case _:
-            raise ValueError(f"Unhandled Hamiltonian representation: {representation}")
+    model = _REPRESENTATION_MODELS[_normalize_representation(representation)]
+    return model(
+        n_qubits,
+        sparsity=sparsity,
+        second_factor_rank=second_factor_rank,
+    )
 
 
 def _build_logical_estimate(
@@ -1269,16 +1243,16 @@ def _build_logical_estimate(
         ResourceEstimate: Logical estimate with collected parameters.
     """
     estimate = ResourceEstimate(
-        qubits=sp.simplify(logical_qubits),
+        qubits=logical_qubits,
         gates=GateCount(
-            total=sp.simplify(total_gates),
+            total=total_gates,
             single_qubit=sp.Integer(0),
             two_qubit=sp.Integer(0),
-            multi_qubit=sp.simplify(multi_qubit_gates),
-            t_gates=sp.simplify(t_gates),
-            clifford_gates=sp.simplify(clifford_gates),
-            rotation_gates=sp.simplify(rotation_gates),
-            oracle_calls={"qpe_iterations": sp.simplify(qpe_iterations)},
+            multi_qubit=multi_qubit_gates,
+            t_gates=t_gates,
+            clifford_gates=clifford_gates,
+            rotation_gates=rotation_gates,
+            oracle_calls={"qpe_iterations": qpe_iterations},
             oracle_queries={},
         ),
     )
@@ -1287,23 +1261,25 @@ def _build_logical_estimate(
 
 def _normalize_representation(
     representation: str | HamiltonianRepresentation,
-) -> HamiltonianRepresentation:
-    """Normalize a public representation value.
+) -> str:
+    """Normalize a public representation value to its registered key.
 
     Args:
         representation (str | HamiltonianRepresentation): User-provided
-            representation.
+            representation. Built-in enum members and registered custom
+            keys are both accepted.
 
     Returns:
-        HamiltonianRepresentation: Normalized enum value.
+        str: Normalized representation key.
 
     Raises:
-        ValueError: If ``representation`` is not known.
+        ValueError: If ``representation`` is not a registered
+            representation.
     """
-    try:
-        return HamiltonianRepresentation(representation)
-    except ValueError as exc:
-        valid = ", ".join(item.value for item in HamiltonianRepresentation)
+    key = str(representation)
+    if key not in _REPRESENTATION_MODELS:
+        valid = ", ".join(sorted(_REPRESENTATION_MODELS))
         raise ValueError(
             f"Unknown Hamiltonian representation {representation!r}; valid: {valid}."
-        ) from exc
+        )
+    return key

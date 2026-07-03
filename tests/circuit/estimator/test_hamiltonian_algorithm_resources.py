@@ -27,6 +27,7 @@ from qamomile.resource_estimation import (
     estimate_trotter_qpe_resources_from_hamiltonian,
     estimate_trotter_qpe_resources_from_workload,
     qubitized_qpe_workload_from_openfermion,
+    register_hamiltonian_representation,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
     trotter_qpe_workload_from_openfermion,
@@ -451,6 +452,73 @@ def test_qubitized_qpe_adds_qpe_register_qubits_to_logical_footprint():
     assert estimate.gates.multi_qubit == 40
 
 
+@pytest.fixture
+def _restore_representation_registry():
+    """Snapshot and restore the process-global representation registry."""
+    from qamomile.resource_estimation.hamiltonian_algorithms import (
+        _REPRESENTATION_MODELS,
+    )
+
+    snapshot = dict(_REPRESENTATION_MODELS)
+    yield
+    _REPRESENTATION_MODELS.clear()
+    _REPRESENTATION_MODELS.update(snapshot)
+
+
+def test_register_custom_hamiltonian_representation(
+    _restore_representation_registry,
+):
+    """Custom representation models plug into workloads and estimators."""
+
+    def _flat_encoding_qubits(n_qubits, *, sparsity=None, second_factor_rank=None):
+        """Return a flat n+3 logical-qubit scaling used only by this test."""
+        return n_qubits + 3
+
+    key = register_hamiltonian_representation(
+        "test_flat_encoding",
+        _flat_encoding_qubits,
+    )
+    assert key == "test_flat_encoding"
+
+    estimate = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        representation="test_flat_encoding",
+    )
+    assert estimate.qubits == 7
+    assert estimate.gates.oracle_calls["qpe_iterations"] == 4
+
+    workload = HamiltonianQPEWorkload(
+        PauliHamiltonianResource(
+            n_qubits=4,
+            n_pauli_terms=10,
+            lambda_norm=8,
+            max_locality=2,
+        ),
+        walk_cost_toffoli=10,
+        representation="test_flat_encoding",
+    )
+    assert workload.normalized_representation == "test_flat_encoding"
+    logical = estimate_qubitized_qpe_resources_from_workload(workload, precision=2)
+    assert logical.qubits == 7
+
+    # Registration is last-wins so notebook re-execution keeps working.
+    register_hamiltonian_representation(
+        "test_flat_encoding",
+        lambda n_qubits, **kwargs: n_qubits + 5,
+    )
+    replaced = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        representation="test_flat_encoding",
+    )
+    assert replaced.qubits == 9
+
+
 def test_workload_reports_sparsity_separately_from_term_count():
     """Explicit sparsity never shadows the true Pauli term count."""
     summary = PauliHamiltonianResource(
@@ -477,6 +545,26 @@ def test_workload_reports_sparsity_separately_from_term_count():
         quantities=(ResourceQuantity.N_PAULI_TERMS,),
     )
     assert rows[0].ratio == 1
+
+
+def test_physical_substitute_matches_assumption_symbols():
+    """Substitution binds assumption-carrying symbols missing from parameters."""
+    d = sp.Symbol("d", positive=True)
+    estimate = FTQCPhysicalResourceEstimate(
+        logical=ResourceEstimate(qubits=sp.Integer(3), gates=GateCount.zero()),
+        logical_depth=sp.Integer(10),
+        non_clifford_count=sp.Integer(5),
+        physical_qubits=20 * d**2,
+        runtime_seconds=sp.Integer(1),
+        architecture_values={
+            "logical_cycle_time_seconds": sp.Rational(1, 100),
+            "non_clifford_throughput_per_second": sp.Integer(50),
+        },
+    )
+
+    concrete = estimate.substitute(d=15)
+
+    assert concrete.physical_qubits == 4500
 
 
 def test_physical_estimates_require_architecture_values():

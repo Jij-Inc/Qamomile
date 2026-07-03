@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
 
 import sympy as sp
@@ -10,6 +11,7 @@ import sympy as sp
 from qamomile.circuit.estimator import GateCount, ResourceEstimate
 from qamomile.resource_estimation._common import (
     _as_expr,
+    _convert_fields,
     _SympyLike,
     _validate_nonnegative,
     _validate_positive,
@@ -55,41 +57,56 @@ class BlockEncodingResource:
         90
     """
 
-    system_qubits: _SympyLike
-    normalization: _SympyLike
-    select_cost_toffoli: _SympyLike
-    prepare_cost_toffoli: _SympyLike = 0
-    reflection_cost_toffoli: _SympyLike = 0
-    ancilla_qubits: _SympyLike = 0
+    system_qubits: sp.Expr
+    normalization: sp.Expr
+    select_cost_toffoli: sp.Expr
+    prepare_cost_toffoli: sp.Expr = sp.Integer(0)
+    reflection_cost_toffoli: sp.Expr = sp.Integer(0)
+    ancilla_qubits: sp.Expr = sp.Integer(0)
     name: str = "block_encoding"
 
     def __post_init__(self) -> None:
-        """Validate block-encoding quantities after construction.
+        """Convert and validate block-encoding quantities after construction.
+
+        Numeric fields are sympified once here, so later accesses see
+        ``sp.Expr`` values without per-access conversion.
 
         Raises:
+            TypeError: If a field cannot be converted to a SymPy expression.
             ValueError: If a positive-valued quantity is non-positive, or if a
                 nonnegative-valued quantity is negative.
         """
-        _validate_positive(self._system_qubits, "system_qubits")
-        _validate_positive(self._normalization, "normalization")
+        _convert_fields(
+            self,
+            (
+                "system_qubits",
+                "normalization",
+                "select_cost_toffoli",
+                "prepare_cost_toffoli",
+                "reflection_cost_toffoli",
+                "ancilla_qubits",
+            ),
+        )
+        _validate_positive(self.system_qubits, "system_qubits")
+        _validate_positive(self.normalization, "normalization")
         for name, expr in [
-            ("select_cost_toffoli", self._select_cost_toffoli),
-            ("prepare_cost_toffoli", self._prepare_cost_toffoli),
-            ("reflection_cost_toffoli", self._reflection_cost_toffoli),
-            ("ancilla_qubits", self._ancilla_qubits),
+            ("select_cost_toffoli", self.select_cost_toffoli),
+            ("prepare_cost_toffoli", self.prepare_cost_toffoli),
+            ("reflection_cost_toffoli", self.reflection_cost_toffoli),
+            ("ancilla_qubits", self.ancilla_qubits),
         ]:
             _validate_nonnegative(expr, name)
 
-    @property
+    @cached_property
     def logical_qubits(self) -> sp.Expr:
         """Return block-encoding logical qubits before QPE readout.
 
         Returns:
             sp.Expr: ``system_qubits + ancilla_qubits``.
         """
-        return sp.simplify(self._system_qubits + self._ancilla_qubits)
+        return sp.simplify(self.system_qubits + self.ancilla_qubits)
 
-    @property
+    @cached_property
     def walk_cost_toffoli(self) -> sp.Expr:
         """Return the Toffoli cost of one qubitized walk.
 
@@ -98,9 +115,9 @@ class BlockEncodingResource:
             reflection_cost_toffoli``.
         """
         return sp.simplify(
-            2 * self._prepare_cost_toffoli
-            + self._select_cost_toffoli
-            + self._reflection_cost_toffoli
+            2 * self.prepare_cost_toffoli
+            + self.select_cost_toffoli
+            + self.reflection_cost_toffoli
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -111,12 +128,12 @@ class BlockEncodingResource:
         """
         return {
             "name": self.name,
-            "system_qubits": str(self._system_qubits),
-            "normalization": str(self._normalization),
-            "select_cost_toffoli": str(self._select_cost_toffoli),
-            "prepare_cost_toffoli": str(self._prepare_cost_toffoli),
-            "reflection_cost_toffoli": str(self._reflection_cost_toffoli),
-            "ancilla_qubits": str(self._ancilla_qubits),
+            "system_qubits": str(self.system_qubits),
+            "normalization": str(self.normalization),
+            "select_cost_toffoli": str(self.select_cost_toffoli),
+            "prepare_cost_toffoli": str(self.prepare_cost_toffoli),
+            "reflection_cost_toffoli": str(self.reflection_cost_toffoli),
+            "ancilla_qubits": str(self.ancilla_qubits),
             "logical_qubits": str(self.logical_qubits),
             "walk_cost_toffoli": str(self.walk_cost_toffoli),
         }
@@ -128,69 +145,15 @@ class BlockEncodingResource:
             dict[str, sp.Expr]: Resource values keyed by stable quantity names.
         """
         return {
-            "system_qubits": self._system_qubits,
-            "lambda_norm": self._normalization,
-            "select_cost_toffoli": self._select_cost_toffoli,
-            "prepare_cost_toffoli": self._prepare_cost_toffoli,
-            "reflection_cost_toffoli": self._reflection_cost_toffoli,
-            "block_encoding_ancilla_qubits": self._ancilla_qubits,
+            "system_qubits": self.system_qubits,
+            "lambda_norm": self.normalization,
+            "select_cost_toffoli": self.select_cost_toffoli,
+            "prepare_cost_toffoli": self.prepare_cost_toffoli,
+            "reflection_cost_toffoli": self.reflection_cost_toffoli,
+            "block_encoding_ancilla_qubits": self.ancilla_qubits,
             "logical_qubits": self.logical_qubits,
             "walk_cost_toffoli": self.walk_cost_toffoli,
         }
-
-    @property
-    def _system_qubits(self) -> sp.Expr:
-        """Return system qubits as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted system-qubit count.
-        """
-        return _as_expr(self.system_qubits, "system_qubits")
-
-    @property
-    def _normalization(self) -> sp.Expr:
-        """Return block-encoding normalization as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted normalization.
-        """
-        return _as_expr(self.normalization, "normalization")
-
-    @property
-    def _select_cost_toffoli(self) -> sp.Expr:
-        """Return SELECT cost as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted SELECT Toffoli cost.
-        """
-        return _as_expr(self.select_cost_toffoli, "select_cost_toffoli")
-
-    @property
-    def _prepare_cost_toffoli(self) -> sp.Expr:
-        """Return PREPARE cost as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted PREPARE Toffoli cost.
-        """
-        return _as_expr(self.prepare_cost_toffoli, "prepare_cost_toffoli")
-
-    @property
-    def _reflection_cost_toffoli(self) -> sp.Expr:
-        """Return reflection cost as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted reflection Toffoli cost.
-        """
-        return _as_expr(self.reflection_cost_toffoli, "reflection_cost_toffoli")
-
-    @property
-    def _ancilla_qubits(self) -> sp.Expr:
-        """Return block-encoding ancilla qubits as a SymPy expression.
-
-        Returns:
-            sp.Expr: Converted ancilla-qubit count.
-        """
-        return _as_expr(self.ancilla_qubits, "ancilla_qubits")
 
 
 def estimate_qubitized_qpe_resources_from_block_encoding(
@@ -226,7 +189,7 @@ def estimate_qubitized_qpe_resources_from_block_encoding(
     _validate_positive(precision_expr, "precision")
     _validate_nonnegative(qpe_qubits, "qpe_register_qubits")
 
-    qpe_iterations = sp.simplify(block_encoding._normalization / precision_expr)
+    qpe_iterations = sp.simplify(block_encoding.normalization / precision_expr)
     toffoli_gates = sp.simplify(qpe_iterations * block_encoding.walk_cost_toffoli)
     logical_qubits = sp.simplify(block_encoding.logical_qubits + qpe_qubits)
 
