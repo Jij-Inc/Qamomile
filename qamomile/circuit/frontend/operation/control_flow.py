@@ -16,7 +16,6 @@ from qamomile.circuit.frontend.handle.primitives import (
     UInt,
 )
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -470,21 +469,27 @@ def record_loop_rebinds(
 
 
 def _create_phi_for_values(
-    condition_value: Value,
     true_val: typing.Any,
     false_val: typing.Any,
     if_operation: IfOperation,
 ) -> typing.Tuple[Value, Handle]:
-    """Create a Phi operation for merging branch values.
+    """Create a branch-merge slot for a pair of branch values.
 
     Args:
-        condition_value: The condition Value (from if statement)
-        true_val: Value from true branch (Handle, Value, or primitive)
-        false_val: Value from false branch (Handle, Value, or primitive)
-        if_operation: The IfOperation to add Phi result to
+        true_val (typing.Any): Value from the true branch (Handle, Value,
+            or primitive).
+        false_val (typing.Any): Value from the false branch (Handle,
+            Value, or primitive).
+        if_operation (IfOperation): The if-else the merge is added to via
+            ``add_merge``. Its condition operand must already be attached.
 
     Returns:
-        Tuple of (phi_output_value, merged_handle)
+        typing.Tuple[Value, Handle]: The merged IR output value and the
+            frontend handle wrapping it.
+
+    Raises:
+        TypeError: If the branch value types differ, or the branch handle
+            family does not support phi merging.
     """
     # Convert both values to IR Values
     true_v = _value_to_ir_value(true_val, "true_const")
@@ -512,10 +517,8 @@ def _create_phi_for_values(
         phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi_{phi_index}")
         phi_output = _copy_qfixed_phi_metadata(phi_output, true_v, false_v)
 
-    # Create PhiOp and store in IfOperation
-    _phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
-    if_operation.phi_ops.append(_phi_op)
-    if_operation.results.append(phi_output)
+    # Store the merge in the IfOperation through its official accessor
+    if_operation.add_merge(true_v, false_v, phi_output)
 
     # Create appropriate Handle type for the merged value
     merged_handle = _create_handle_from_value(phi_output, true_val)
@@ -856,7 +859,7 @@ def emit_if(
                 )
                 continue
             phi_output, merged_handle = _create_phi_for_values(
-                condition_value, true_val, false_val, if_op
+                true_val, false_val, if_op
             )
             merged_results.append(merged_handle)
         elif isinstance(false_val, (Handle, Value)):

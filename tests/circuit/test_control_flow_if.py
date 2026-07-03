@@ -282,18 +282,18 @@ class TestIfElseErrorHandling:
 
     def test_phi_type_mismatch_raises_type_error(self):
         """_create_phi_for_values should raise TypeError when branch types differ."""
-        if_op = IfOperation()
         condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
         true_val = Qubit(value=Value(type=QubitType(), name="q_true"))
         false_val = Float(value=Value(type=FloatType(), name="f_false"))
 
         with pytest.raises(TypeError, match="Type mismatch in if-else branches"):
-            _create_phi_for_values(condition, true_val, false_val, if_op)
+            _create_phi_for_values(true_val, false_val, if_op)
 
     def test_phi_merge_preserves_qfixed_handle_type_and_metadata(self):
         """QFixed phi merge should keep the QFixed handle and carrier metadata."""
-        if_op = IfOperation()
         condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
         qfixed_type = QFixedType(integer_bits=1, fractional_bits=2)
         carriers = ("q0", "q1", "q2")
         true_val = QFixed(
@@ -311,9 +311,7 @@ class TestIfElseErrorHandling:
             )
         )
 
-        phi_output, merged = _create_phi_for_values(
-            condition, true_val, false_val, if_op
-        )
+        phi_output, merged = _create_phi_for_values(true_val, false_val, if_op)
 
         assert isinstance(merged, QFixed)
         assert phi_output.get_qfixed_qubit_uuids() == carriers
@@ -322,8 +320,8 @@ class TestIfElseErrorHandling:
 
     def test_phi_merge_rejects_qfixed_with_different_carriers(self):
         """QFixed phi merge should reject condition-dependent carrier layouts."""
-        if_op = IfOperation()
         condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
         qfixed_type = QFixedType(integer_bits=0, fractional_bits=2)
         true_val = QFixed(
             value=Value(type=qfixed_type, name="qf_true").with_qfixed_metadata(
@@ -341,16 +339,16 @@ class TestIfElseErrorHandling:
         )
 
         with pytest.raises(TypeError, match="identical carrier qubits"):
-            _create_phi_for_values(condition, true_val, false_val, if_op)
+            _create_phi_for_values(true_val, false_val, if_op)
 
     def test_phi_merge_preserves_observable_handle_type(self):
         """Observable phi merge should keep the Observable frontend handle."""
-        if_op = IfOperation()
         condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
         true_val = Observable(value=Value(type=ObservableType(), name="obs_true"))
         false_val = Observable(value=Value(type=ObservableType(), name="obs_false"))
 
-        _, merged = _create_phi_for_values(condition, true_val, false_val, if_op)
+        _, merged = _create_phi_for_values(true_val, false_val, if_op)
 
         assert isinstance(merged, Observable)
 
@@ -360,13 +358,13 @@ class TestIfElseErrorHandling:
         class CustomHandle(Handle):
             pass
 
-        if_op = IfOperation()
         condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
         true_val = CustomHandle(value=Value(type=FloatType(), name="custom_true"))
         false_val = CustomHandle(value=Value(type=FloatType(), name="custom_false"))
 
         with pytest.raises(TypeError, match="Unsupported Handle type.*CustomHandle"):
-            _create_phi_for_values(condition, true_val, false_val, if_op)
+            _create_phi_for_values(true_val, false_val, if_op)
 
 
 class TestIfElseWithSymbolicVector:

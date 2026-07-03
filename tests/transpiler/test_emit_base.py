@@ -111,6 +111,18 @@ def _make_array_element(
     )
 
 
+def _make_if_with_merge(
+    cond: Value,
+    true_value: Value,
+    false_value: Value,
+    result: Value,
+) -> IfOperation:
+    """Build a minimal IfOperation carrying a single branch merge."""
+    if_op = IfOperation(operands=[cond])
+    if_op.add_merge(true_value, false_value, result)
+    return if_op
+
+
 # ---------------------------------------------------------------------------
 # Helpers — LoopAnalyzer tests
 # ---------------------------------------------------------------------------
@@ -240,10 +252,10 @@ class TestPhiOpsAllocation:
         root_element = _make_array_element(q_array, 1, "q[1]")
         view_element = _make_array_element(view, 0, "q_view[0]")
         phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, root_element, view_element], results=[phi_output])
+        if_op = _make_if_with_merge(cond, root_element, view_element, phi_output)
         qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
 
-        map_phi_outputs([phi], qubit_map, {})
+        map_phi_outputs(if_op, qubit_map, {})
 
         assert qubit_map[QubitAddress(phi_output.uuid)] == 1
         assert QubitAddress(view.uuid, 0) not in qubit_map
@@ -262,10 +274,10 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
         view_element = _make_array_element(view, 0, "q_view[0]")
         phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, view_element, view_element], results=[phi_output])
+        if_op = _make_if_with_merge(cond, view_element, view_element, phi_output)
         qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
 
-        map_phi_outputs([phi], qubit_map, {})
+        map_phi_outputs(if_op, qubit_map, {})
 
         assert QubitAddress(phi_output.uuid) not in qubit_map
         assert QubitAddress(view.uuid, 0) not in qubit_map
@@ -488,7 +500,7 @@ class TestPhiOpsAllocation:
         qubit_map[QubitAddress(phi_output.uuid)] = sentinel_idx
 
         # Re-running allocation should not overwrite it
-        allocator._allocate_phi_ops(if_op.phi_ops, qubit_map, clbit_map)
+        allocator._allocate_phi_ops(if_op, qubit_map, clbit_map)
         assert qubit_map[QubitAddress(phi_output.uuid)] == sentinel_idx
 
     def test_multiple_phi_ops_all_allocated(self) -> None:
@@ -634,7 +646,7 @@ class TestPhiOpsAllocation:
             clbit_map[QubitAddress(true_bits.uuid, i)] = i + 1
             clbit_map[QubitAddress(false_bits.uuid, i)] = array_size + i + 1
 
-        map_phi_outputs(if_op.phi_ops, {}, clbit_map)
+        map_phi_outputs(if_op, {}, clbit_map)
 
         # Phi output elements should exist AND both branches consolidated
         for i in range(array_size):
@@ -658,11 +670,11 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
 
         phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
+        if_op = _make_if_with_merge(cond, q0_out, q1_out, phi_output)
 
         qubit_map = {QubitAddress(q0_out.uuid): 0, QubitAddress(q1_out.uuid): 1}
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+            map_phi_outputs(if_op, qubit_map, {})
 
     def test_quantum_phi_array_different_resources_raises_emit_error(self) -> None:
         """Array qubit phi with different physical resources must raise EmitError."""
@@ -672,7 +684,7 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
 
         phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
+        if_op = _make_if_with_merge(cond, arr_a, arr_b, phi_output)
 
         qubit_map = {
             QubitAddress(arr_a.uuid, 0): 0,
@@ -681,7 +693,7 @@ class TestPhiOpsAllocation:
             QubitAddress(arr_b.uuid, 1): 3,
         }
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+            map_phi_outputs(if_op, qubit_map, {})
 
     def test_quantum_phi_scalar_unresolved_branch_raises_emit_error(self) -> None:
         """Scalar qubit phi with one unresolved branch must raise EmitError."""
@@ -692,12 +704,12 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
 
         phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
+        if_op = _make_if_with_merge(cond, q0_out, q1_out, phi_output)
 
         # Only q0_out is in qubit_map; q1_out is unresolved
         qubit_map = {QubitAddress(q0_out.uuid): 0}
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+            map_phi_outputs(if_op, qubit_map, {})
 
     def test_quantum_phi_array_unresolved_suffix_raises_emit_error(self) -> None:
         """Array qubit phi with missing suffix in one branch must raise EmitError."""
@@ -707,7 +719,7 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
 
         phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
+        if_op = _make_if_with_merge(cond, arr_a, arr_b, phi_output)
 
         # arr_a has both elements, arr_b only has element 0
         qubit_map = {
@@ -716,7 +728,7 @@ class TestPhiOpsAllocation:
             QubitAddress(arr_b.uuid, 0): 0,
         }
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+            map_phi_outputs(if_op, qubit_map, {})
 
     def test_quantum_phi_scalar_identity_still_allowed(self) -> None:
         """Identity scalar phi (same physical resource) must succeed."""
@@ -725,10 +737,10 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
 
         phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, q_out, q_out], results=[phi_output])
+        if_op = _make_if_with_merge(cond, q_out, q_out, phi_output)
 
         qubit_map = {QubitAddress(q_out.uuid): 0}
-        map_phi_outputs([phi], qubit_map, {})
+        map_phi_outputs(if_op, qubit_map, {})
         assert QubitAddress(phi_output.uuid) in qubit_map
         assert qubit_map[QubitAddress(phi_output.uuid)] == 0
 
@@ -739,14 +751,14 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
 
         phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        phi = PhiOp(operands=[cond, arr, arr], results=[phi_output])
+        if_op = _make_if_with_merge(cond, arr, arr, phi_output)
 
         qubit_map = {
             QubitAddress(arr.uuid, 0): 0,
             QubitAddress(arr.uuid, 1): 1,
             QubitAddress(arr.uuid, 2): 2,
         }
-        map_phi_outputs([phi], qubit_map, {})
+        map_phi_outputs(if_op, qubit_map, {})
         for i in range(3):
             assert qubit_map[QubitAddress(phi_output.uuid, i)] == i
 

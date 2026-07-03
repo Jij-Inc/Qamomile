@@ -7,7 +7,6 @@ from typing import Any
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -45,12 +44,15 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
     """Build a map from each value UUID to the UUIDs it depends on.
 
     Walks operations recursively (through ``HasNestedOps``) and records,
-    for each result UUID, the set of operand UUIDs that produced it. Also
-    seeds an edge from each ``ArrayValue`` element (``Value`` carrying
-    ``parent_array``) to its parent array UUID, and walks the parent's
-    ``slice_of`` chain so that a sliced view (e.g. ``s[0:4:2][i]`` for
-    ``s = qmc.measure(register)``) inherits taint from the root measured
-    array. ``StripSliceArrayOpsPass`` removes the explicit
+    for each result UUID, the set of operand UUIDs that produced it.
+    ``IfOperation`` merge outputs get explicit edges to the condition and
+    both branch sources via ``iter_merges`` — the builder does not rely
+    on merge storage being reachable through the generic nested-list
+    walk. Also seeds an edge from each ``ArrayValue`` element (``Value``
+    carrying ``parent_array``) to its parent array UUID, and walks the
+    parent's ``slice_of`` chain so that a sliced view (e.g. ``s[0:4:2][i]``
+    for ``s = qmc.measure(register)``) inherits taint from the root
+    measured array. ``StripSliceArrayOpsPass`` removes the explicit
     ``SliceArrayOperation`` boundary before this pass runs, so the
     ``slice_of`` link is the only remaining connection between a view and
     its root in the IR. Used downstream by measurement-taint analysis.
@@ -73,16 +75,35 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
                     self.graph[result.uuid] = set()
                 self.graph[result.uuid].update(operand_uuids)
             for v in op.operands:
-                if not isinstance(v, ValueBase):
-                    continue
-                parent = getattr(v, "parent_array", None)
-                if parent is None:
-                    continue
-                self.graph.setdefault(v.uuid, set()).add(parent.uuid)
-                cur = parent
-                while getattr(cur, "slice_of", None) is not None:
-                    self.graph.setdefault(cur.uuid, set()).add(cur.slice_of.uuid)
-                    cur = cur.slice_of
+                self._seed_structural_edges(v)
+            if isinstance(op, IfOperation):
+                # Explicit merge edges: each merged output depends on the
+                # condition and both branch sources.
+                for merge in op.iter_merges():
+                    deps = self.graph.setdefault(merge.result.uuid, set())
+                    deps.add(op.condition.uuid)
+                    deps.add(merge.true_value.uuid)
+                    deps.add(merge.false_value.uuid)
+                    self._seed_structural_edges(merge.true_value)
+                    self._seed_structural_edges(merge.false_value)
+
+        def _seed_structural_edges(self, value: object) -> None:
+            """Seed element-to-parent and slice-chain edges for one value.
+
+            Args:
+                value (object): Candidate operand / merge source; ignored
+                    unless it is a ``ValueBase`` carrying ``parent_array``.
+            """
+            if not isinstance(value, ValueBase):
+                return
+            parent = getattr(value, "parent_array", None)
+            if parent is None:
+                return
+            self.graph.setdefault(value.uuid, set()).add(parent.uuid)
+            cur = parent
+            while getattr(cur, "slice_of", None) is not None:
+                self.graph.setdefault(cur.uuid, set()).add(cur.slice_of.uuid)
+                cur = cur.slice_of
 
     builder = DependencyGraphBuilder()
     builder.visit_operations(operations)
@@ -162,11 +183,56 @@ def find_measurement_derived_values(
     return derived
 
 
+@dataclasses.dataclass(frozen=True)
+class PrunedIfView:
+    """Pruned view of an operation list plus its dead-branch phi aliases.
+
+    Produced by :func:`prune_compile_time_ifs`. A compile-time-resolved
+    ``IfOperation`` disappears from ``operations`` (only its taken branch
+    survives, inlined); each of its merge outputs is recorded here as a
+    ``(result, selected_source)`` alias pair so phi-mediated dataflow out
+    of the pruned branch stays visible to dependency scans without any
+    synthetic operation in the list.
+
+    Attributes:
+        operations (list[Operation]): The pruned view of the input
+            operations, in program order.
+        phi_aliases (tuple[tuple[Value, Value], ...]): Every
+            ``(result, selected_source)`` pair recorded anywhere in the
+            walk, in pruning order.
+        _loop_aliases (dict[int, tuple[tuple[Value, Value], ...]]): Alias
+            pairs recorded inside each rebuilt loop operation's subtree,
+            keyed by ``id()`` of the rebuilt loop op. The keyed objects
+            are kept alive by ``operations``, so the ids are stable for
+            this view's lifetime.
+    """
+
+    operations: list[Operation]
+    phi_aliases: tuple[tuple[Value, Value], ...]
+    _loop_aliases: dict[int, tuple[tuple[Value, Value], ...]]
+
+    def aliases_for_loop(self, loop_op: Operation) -> tuple[tuple[Value, Value], ...]:
+        """Return the alias pairs recorded inside one pruned loop's body.
+
+        Args:
+            loop_op (Operation): A loop operation taken from
+                ``operations`` (or a body nested within it). Loop ops that
+                were never walked — e.g. inside a kept runtime-if branch —
+                have no recorded aliases.
+
+        Returns:
+            tuple[tuple[Value, Value], ...]: ``(result, selected_source)``
+                pairs from compile-time ifs pruned anywhere inside the
+                loop's body, or an empty tuple.
+        """
+        return self._loop_aliases.get(id(loop_op), ())
+
+
 def prune_compile_time_ifs(
     ops: list[Operation],
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
-) -> list[Operation]:
+) -> PrunedIfView:
     """Replace compile-time-decidable ``IfOperation``s by their taken branch.
 
     Mirrors ``CompileTimeIfLoweringPass``: conditions are resolved with
@@ -174,10 +240,11 @@ def prune_compile_time_ifs(
     ``evaluate_classical_op_concrete`` helpers so the taken / dead /
     runtime classification here cannot disagree with the branch the
     lowering pass will actually keep. For a resolved condition the taken
-    branch's operations are inlined (recursively pruned) and each
-    ``PhiOp`` is reduced to its selected source operand, so phi-mediated
-    dataflow out of the branch stays visible to dependency scans without
-    dead-branch edges. Runtime ``IfOperation``s are kept intact.
+    branch's operations are inlined (recursively pruned) and each merge
+    output is recorded as a ``(result, selected_source)`` alias pair, so
+    phi-mediated dataflow out of the branch stays visible to dependency
+    scans without dead-branch edges. Runtime ``IfOperation``s are kept
+    intact (their branches are not walked).
 
     Shared by ``reject_self_referential_loop_stores`` and
     ``reject_loop_carried_classical_rebinds`` — both checks must classify
@@ -193,34 +260,74 @@ def prune_compile_time_ifs(
             to resolve conditions.
 
     Returns:
-        list[Operation]: The pruned view of ``ops``.
+        PrunedIfView: The pruned operations together with the recorded
+            dead-branch phi alias pairs (global and per pruned loop op).
     """
-    pruned: list[Operation] = []
-    for op in ops:
-        evaluate_classical_op_concrete(op, concrete_values, bindings)
-        if isinstance(op, IfOperation):
-            taken = resolve_compile_time_condition(
-                op.condition, concrete_values, bindings
-            )
-            if taken is None:
-                pruned.append(op)
+    global_aliases: list[tuple[Value, Value]] = []
+    loop_aliases: dict[int, tuple[tuple[Value, Value], ...]] = {}
+
+    def walk(
+        ops: list[Operation],
+        concrete_values: dict[str, Any],
+        sink: list[tuple[Value, Value]],
+    ) -> list[Operation]:
+        """Prune one operation list, recording aliases into ``sink``.
+
+        Args:
+            ops (list[Operation]): Operations to prune.
+            concrete_values (dict[str, Any]): Concrete-result map for
+                this scope; updated in place.
+            sink (list[tuple[Value, Value]]): Alias accumulator of the
+                nearest enclosing loop (or the global one).
+
+        Returns:
+            list[Operation]: The pruned view of ``ops``.
+        """
+        pruned: list[Operation] = []
+        for op in ops:
+            evaluate_classical_op_concrete(op, concrete_values, bindings)
+            if isinstance(op, IfOperation):
+                taken = resolve_compile_time_condition(
+                    op.condition, concrete_values, bindings
+                )
+                if taken is None:
+                    pruned.append(op)
+                    continue
+                branch = op.true_operations if taken else op.false_operations
+                pruned.extend(walk(branch, concrete_values, sink))
+                for merge in op.iter_merges():
+                    sink.append((merge.result, merge.select(taken)))
                 continue
-            branch = op.true_operations if taken else op.false_operations
-            pruned.extend(prune_compile_time_ifs(branch, concrete_values, bindings))
-            for phi in op.phi_ops:
-                if isinstance(phi, PhiOp):
-                    selected = phi.true_value if taken else phi.false_value
-                    pruned.append(dataclasses.replace(phi, operands=[selected]))
-            continue
-        if isinstance(op, HasNestedOps):
-            op = op.rebuild_nested(
-                [
-                    prune_compile_time_ifs(body, dict(concrete_values), bindings)
-                    for body in op.nested_op_lists()
-                ]
-            )
-        pruned.append(op)
-    return pruned
+            if isinstance(op, HasNestedOps):
+                if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+                    # Collect the loop subtree's aliases separately so the
+                    # loop-scoped checks see exactly the pairs from ifs
+                    # inside this body — pre-loop pairs must not leak in.
+                    subtree: list[tuple[Value, Value]] = []
+                    op = op.rebuild_nested(
+                        [
+                            walk(body, dict(concrete_values), subtree)
+                            for body in op.nested_op_lists()
+                        ]
+                    )
+                    loop_aliases[id(op)] = tuple(subtree)
+                    sink.extend(subtree)
+                else:
+                    op = op.rebuild_nested(
+                        [
+                            walk(body, dict(concrete_values), sink)
+                            for body in op.nested_op_lists()
+                        ]
+                    )
+            pruned.append(op)
+        return pruned
+
+    pruned_ops = walk(ops, concrete_values, global_aliases)
+    return PrunedIfView(
+        operations=pruned_ops,
+        phi_aliases=tuple(global_aliases),
+        _loop_aliases=loop_aliases,
+    )
 
 
 def flatten_ops(
@@ -349,22 +456,31 @@ def reject_self_referential_loop_stores(
             chain = getattr(chain, "slice_of", None)
         return False
 
-    def check_loop_body(body_ops: list[Operation]) -> None:
+    def check_loop_body(
+        body_ops: list[Operation],
+        phi_aliases: tuple[tuple[Value, Value], ...],
+    ) -> None:
         """Reject self-referential stores inside one (pruned) loop body.
 
         Builds a dependency graph restricted to the loop body (reads
         performed before the loop are loop-invariant and fold correctly,
         so they must not trigger a rejection) and BFS-walks it from each
         store's value and index operands.  The graph and value table
-        cover the full body — including surviving runtime-if internals,
-        so a store after an if still sees phi-mediated reads — while the
-        store scan itself skips if branches (those stores are rejected
-        by ``AnalyzePass._reject_stores_in_if_branches``).
+        cover the full body — including surviving runtime-if internals
+        and the alias pairs of pruned compile-time ifs, so a store after
+        an if still sees phi-mediated reads — while the store scan itself
+        skips if branches (those stores are rejected by
+        ``AnalyzePass._reject_stores_in_if_branches``).
 
         Args:
             body_ops (list[Operation]): The loop's top-level body
                 operations, already pruned of compile-time-decidable
                 if branches.
+            phi_aliases (tuple[tuple[Value, Value], ...]):
+                ``(result, selected_source)`` pairs of the compile-time
+                ifs pruned inside this loop's body; each contributes a
+                dataflow edge from the merge output to its surviving
+                source.
 
         Raises:
             ValidationError: If a scanned store's value or index
@@ -372,12 +488,17 @@ def reject_self_referential_loop_stores(
                 writes.
         """
         dependency_graph = build_dependency_graph(body_ops)
+        for result, source in phi_aliases:
+            dependency_graph.setdefault(result.uuid, set()).add(source.uuid)
         flat_ops = flatten_ops(body_ops)
 
         value_table: dict[str, ValueBase] = {}
         for op in flat_ops:
             for value in (*op.all_input_values(), *op.results):
                 register_value(value, value_table)
+        for result, source in phi_aliases:
+            register_value(result, value_table)
+            register_value(source, value_table)
 
         for op in flatten_ops(body_ops, into_if_branches=False):
             if not isinstance(op, StoreArrayElementOperation):
@@ -414,11 +535,12 @@ def reject_self_referential_loop_stores(
                         worklist.append(parent.uuid)
                 worklist.extend(dependency_graph.get(current, ()))
 
-    pruned_operations = prune_compile_time_ifs(operations, {}, resolved_bindings)
-    for op in flatten_ops(pruned_operations, into_if_branches=False):
+    pruned = prune_compile_time_ifs(operations, {}, resolved_bindings)
+    for op in flatten_ops(pruned.operations, into_if_branches=False):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             check_loop_body(
-                [body_op for body in op.nested_op_lists() for body_op in body]
+                [body_op for body in op.nested_op_lists() for body_op in body],
+                pruned.aliases_for_loop(op),
             )
 
 
@@ -457,6 +579,8 @@ def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError
 def _check_loop_carried_rebinds(
     loop_op: ForOperation | ForItemsOperation | WhileOperation,
     producer_map: dict[str, Operation],
+    body_phi_aliases: tuple[tuple[Value, Value], ...],
+    global_phi_aliases: dict[str, Value],
 ) -> None:
     """Reject the loop-carried rebind records of one (pruned) loop op.
 
@@ -467,6 +591,15 @@ def _check_loop_carried_rebinds(
         producer_map (dict[str, Operation]): Block-wide map from result
             UUID to producing operation, used to classify
             measurement-backed values (pre-loop producers included).
+        body_phi_aliases (tuple[tuple[Value, Value], ...]):
+            ``(result, selected_source)`` pairs of the compile-time ifs
+            pruned inside this loop's body. Body-local by design: the
+            canonical chain below must stop at the pre-loop value, so
+            pre-loop merge aliases must not leak in.
+        global_phi_aliases (dict[str, Value]): Block-wide merge-output
+            aliases (result UUID -> selected source) used to trace
+            measurement-backed values across pruned ifs anywhere in the
+            block, matching the block-wide ``producer_map``.
 
     Raises:
         ValidationError: If a recorded rebind survives dead-branch
@@ -482,15 +615,18 @@ def _check_loop_carried_rebinds(
     body_ops = [o for body in loop_op.nested_op_lists() for o in body]
     flat_body = flatten_ops(body_ops)
 
-    # Map collapsed (single-operand) PhiOps left by dead-branch pruning:
+    # Dead-branch merge aliases recorded by pruning:
     # result uuid -> selected source uuid.
-    collapsed: dict[str, str] = {}
+    collapsed: dict[str, str] = {
+        result.uuid: source.uuid for result, source in body_phi_aliases
+    }
     value_table: dict[str, ValueBase] = {}
     for op in flat_body:
-        if isinstance(op, PhiOp) and len(op.operands) == 1 and op.results:
-            collapsed[op.results[0].uuid] = op.operands[0].uuid
         for v in (*op.all_input_values(), *op.results):
             value_table.setdefault(v.uuid, v)
+    for result, source in body_phi_aliases:
+        value_table.setdefault(result.uuid, result)
+        value_table.setdefault(source.uuid, source)
 
     def canonical(uuid: str) -> str:
         """Follow collapsed-phi links to the underlying source uuid.
@@ -537,6 +673,10 @@ def _check_loop_carried_rebinds(
     body_read_uuids: set[str] = set()
     for op in flat_body:
         body_read_uuids |= op_read_uuids(op)
+    # A pruned merge reads its selected source exactly like the collapsed
+    # phi it replaces (e.g. a dead-branch ``y = x`` emits no operation but
+    # still reads the stale pre-loop ``x`` through the merge).
+    body_read_uuids.update(source.uuid for _, source in body_phi_aliases)
 
     before_uuids = {r.before.uuid for r in records}
 
@@ -559,8 +699,10 @@ def _check_loop_carried_rebinds(
         # pre-loop value to be measurement-backed too — a constant
         # initial Bit would resolve branch conditions at compile time
         # and diverge from Python semantics.
-        if is_measurement_backed(record.after, producer_map) and is_measurement_backed(
-            record.before, producer_map
+        if is_measurement_backed(
+            record.after, producer_map, phi_aliases=global_phi_aliases
+        ) and is_measurement_backed(
+            record.before, producer_map, phi_aliases=global_phi_aliases
         ):
             continue
 
@@ -652,12 +794,18 @@ def reject_loop_carried_classical_rebinds(
             embedded constant from a plain-Python initialization).
     """
     resolved_bindings = bindings or {}
-    pruned_operations = prune_compile_time_ifs(operations, {}, resolved_bindings)
+    pruned = prune_compile_time_ifs(operations, {}, resolved_bindings)
     producer_map: dict[str, Operation] = {}
-    build_producer_map(pruned_operations, producer_map)
-    for op in flatten_ops(pruned_operations):
+    build_producer_map(pruned.operations, producer_map)
+    global_phi_aliases = {result.uuid: source for result, source in pruned.phi_aliases}
+    for op in flatten_ops(pruned.operations):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-            _check_loop_carried_rebinds(op, producer_map)
+            _check_loop_carried_rebinds(
+                op,
+                producer_map,
+                pruned.aliases_for_loop(op),
+                global_phi_aliases,
+            )
 
 
 class AnalyzePass(Pass[Block, Block]):

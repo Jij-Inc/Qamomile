@@ -521,8 +521,11 @@ class ClassicalExecutor:
         branch_ops = op.true_operations if condition else op.false_operations
         self._execute_operations(branch_ops, context, results, branch_scope)
 
-        for phi_op in op.phi_ops:
-            self._execute_phi(phi_op, context, results, branch_scope)
+        for merge in op.iter_merges():
+            selected = merge.select(condition)
+            results[merge.result.uuid] = self._get_value(
+                selected, context, results, branch_scope
+            )
 
     def _execute_while(
         self,

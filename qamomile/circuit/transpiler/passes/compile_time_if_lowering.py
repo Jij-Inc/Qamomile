@@ -308,11 +308,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                         dead_uuids.add(op.condition.uuid)
 
                     # Build phi substitution map.
-                    for phi in op.phi_ops:
-                        if not isinstance(phi, PhiOp):
-                            continue
-                        selected_val = phi.true_value if resolved else phi.false_value
-                        phi_subst[phi.output.uuid] = selected_val
+                    for merge in op.iter_merges():
+                        phi_subst[merge.result.uuid] = merge.select(resolved)
 
                     # Inline selected branch operations.
                     selected_ops = (
