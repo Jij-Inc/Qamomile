@@ -174,7 +174,33 @@ class ArrayBase(Handle, Generic[T]):
     ] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Post-initialization to set up the array."""
+        """Validate the wrapped value and emit its init operation.
+
+        Emits a ``QInitOperation`` for quantum element types and a
+        ``CInitOperation`` for classical ones, then resolves the element
+        handle type used for element access.
+
+        Raises:
+            NotImplementedError: If the wrapped ``ArrayValue`` is a
+                quantum register with more than one dimension. The
+                quantum addressing path is rank-1, so a higher-rank
+                register would silently alias distinct elements onto
+                the same physical qubit. The check keys off
+                ``value.shape`` (not ``_shape``) so a rank>1 quantum
+                value cannot be smuggled in through a ``Vector``
+                wrapper either.
+        """
+
+        if self.value.type == QubitType() and len(self.value.shape) > 1:
+            raise NotImplementedError(
+                f"Rank-{len(self.value.shape)} quantum registers are not "
+                f"supported (register {self.value.name!r}): the quantum "
+                f"addressing path is rank-1, so a higher-rank register "
+                f"would silently alias distinct elements onto the same "
+                f"physical qubit. Allocate a 1-D Vector[Qubit] of the "
+                f"total size and compute flat indices explicitly "
+                f"(e.g. q[i * ncols + j])."
+            )
 
         if self.value.type == QubitType():
             qinit_op = QInitOperation(operands=[], results=[self.value])
@@ -1769,19 +1795,24 @@ class Vector(ArrayBase[T]):
 
 @dataclasses.dataclass
 class Matrix(ArrayBase[T]):
-    """2-dimensional array type.
+    """2-dimensional array type for classical element types.
+
+    Quantum element types are rejected: constructing a
+    ``Matrix[Qubit]`` raises ``NotImplementedError`` (see
+    ``ArrayBase.__post_init__``) because the quantum addressing path is
+    rank-1. Use a 1-D ``Vector[Qubit]`` with explicit index arithmetic
+    instead.
 
     Example:
         ```python
         import qamomile as qm
 
-        # Create a 3x4 matrix of qubits
-        matrix: qm.Matrix[qm.Qubit] = qm.Matrix(shape=(3, 4))
+        # Create a 3x4 matrix of floats
+        matrix: qm.Matrix[qm.Float] = qm.Matrix(shape=(3, 4))
 
         # Access elements (always requires 2 indices)
-        q = matrix[0, 1]
-        q = qm.h(q)
-        matrix[0, 1] = q
+        x = matrix[0, 1]
+        matrix[0, 1] = x
         ```
     """
 
@@ -1825,19 +1856,24 @@ class Matrix(ArrayBase[T]):
 
 @dataclasses.dataclass
 class Tensor(ArrayBase[T]):
-    """N-dimensional array type (3 or more dimensions).
+    """N-dimensional array type (3 or more dimensions) for classical element types.
+
+    Quantum element types are rejected: constructing a
+    ``Tensor[Qubit]`` raises ``NotImplementedError`` (see
+    ``ArrayBase.__post_init__``) because the quantum addressing path is
+    rank-1. Use a 1-D ``Vector[Qubit]`` with explicit index arithmetic
+    instead.
 
     Example:
         ```python
         import qamomile as qm
 
-        # Create a 2x3x4 tensor of qubits
-        tensor: qm.Tensor[qm.Qubit] = qm.Tensor(shape=(2, 3, 4))
+        # Create a 2x3x4 tensor of floats
+        tensor: qm.Tensor[qm.Float] = qm.Tensor(shape=(2, 3, 4))
 
         # Access elements (requires all indices)
-        q = tensor[0, 1, 2]
-        q = qm.h(q)
-        tensor[0, 1, 2] = q
+        x = tensor[0, 1, 2]
+        tensor[0, 1, 2] = x
         ```
     """
 

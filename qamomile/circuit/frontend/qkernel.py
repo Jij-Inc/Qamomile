@@ -24,6 +24,7 @@ from qamomile.circuit.frontend.ast_transform import (
 )
 from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
+    _get_ndim,
     build_param_slots,
     create_dummy_input,
     func_to_block,
@@ -1456,25 +1457,13 @@ class QKernel(Generic[P, R]):
                     bindings[name] = const_array
                 continue
 
-            # Quantum array. ``Vector[Qubit]`` is the fully supported
-            # case: we extract the first-axis size via ``get_size`` and
-            # carry it in ``qubit_sizes`` so the callee re-traces with
-            # a concrete shape. ``Matrix[Qubit]`` / ``Tensor[Qubit]``
-            # are higher-rank registers; we do not yet extract their
-            # multi-dim shape nor have the ``create_dummy_input
-            # (shape=...)`` plumbing for them, so we treat them like
-            # ``Dict`` / ``Tuple`` — leave the argument out of all
-            # three buckets and ``continue``. ``_create_traced_block``
-            # falls through to ``create_dummy_input`` for that
-            # position (matching the cached block), and the rest of
-            # the call still benefits from specialization. The
-            # trade-off: if the callee applies shape-dependent stdlib
-            # to the higher-rank register, that op continues to
-            # silently no-op — same as the pre-#392 baseline for
-            # that specific case. Raising here instead would forbid
-            # any nested call that takes a ``Matrix[Qubit]`` /
-            # ``Tensor[Qubit]``, even kernels that never touch
-            # shape-dependent stdlib on it.
+            # Quantum array. ``Vector[Qubit]`` is the only reachable
+            # case — rank>1 quantum registers are rejected at
+            # construction / trace time (see ``qubit_array`` and
+            # ``create_dummy_input``), so the non-``Vector`` ``continue``
+            # below is defensive only. Extract the first-axis size via
+            # ``get_size`` and carry it in ``qubit_sizes`` so the callee
+            # re-traces with a concrete shape.
             if (
                 is_array_type(param_type)
                 and _get_array_element_type(param_type) is Qubit
@@ -1889,7 +1878,40 @@ class QKernel(Generic[P, R]):
         Separates integer-valued kwargs for Qubit array parameters (used as
         array sizes via ``qubit_array()``) from other kwargs, then traces the
         kernel to produce a Block.
+
+        Args:
+            kwargs (dict[str, Any]): Concrete values for kernel arguments.
+                Integer values for ``Vector[Qubit]`` parameters are
+                interpreted as register sizes.
+
+        Returns:
+            Block: The traced block with quantum-array parameters realized
+                as concrete 1-D registers.
+
+        Raises:
+            NotImplementedError: If the kernel declares a rank>1 quantum
+                array parameter (``Matrix[Qubit]`` / ``Tensor[Qubit]``).
+                This path realizes quantum-array parameters via
+                ``qubit_array(size)``, which would otherwise collapse a
+                higher-rank register into a 1-D one.
+            ValueError: If a ``Vector[Qubit]`` parameter is missing its
+                integer size in ``kwargs``.
         """
+        for name, param in self.signature.parameters.items():
+            pt = self.input_types.get(name, param.annotation)
+            if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
+                ndim = _get_ndim(pt)
+                if ndim > 1:
+                    raise NotImplementedError(
+                        f"Parameter {name!r} is a rank-{ndim} quantum "
+                        f"register: the quantum addressing path is rank-1, "
+                        f"so a higher-rank register would silently alias "
+                        f"distinct elements onto the same physical qubit. "
+                        f"Declare a 1-D Vector[Qubit] parameter and compute "
+                        f"flat indices explicitly instead "
+                        f"(e.g. q[i * ncols + j])."
+                    )
+
         qubit_sizes: dict[str, int] = {}
         build_kwargs: dict[str, Any] = {}
         for key, val in kwargs.items():
