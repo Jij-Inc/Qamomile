@@ -12,6 +12,8 @@ from qamomile.circuit.frontend.operation.control_flow import (
     emit_if,
     for_items,
     for_loop,
+    loop_rebind_snapshot,
+    record_loop_rebinds,
     should_trace_for_loop,
     while_loop,
 )
@@ -586,11 +588,108 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 return next_live
             live = next_live
 
+    def _loop_rebind_candidates(
+        self, body: list[ast.stmt], bound_names: set[str]
+    ) -> list[str]:
+        """Compute loop-body variables that may carry a loop-carried rebind.
+
+        A candidate is a variable that the (pre-transform) loop body both
+        reads before writing and assigns — the ``total = total + i``
+        shape — excluding the loop's own binding variables (whose
+        per-iteration rebinding is handled by the emit-time loop-variable
+        binding) and any name not already defined in the enclosing scope
+        (referencing it would ``NameError`` during tracing anyway).
+
+        Args:
+            body (list[ast.stmt]): The ORIGINAL (untransformed) loop body
+                statements.
+            bound_names (set[str]): Names bound by the loop statement
+                itself (``for`` target names, ``items`` key/value names).
+
+        Returns:
+            list[str]: Sorted candidate variable names; empty when the
+                body has no read-before-write reassignment.
+        """
+        collector = VariableCollector(global_names=self._global_names)
+        for stmt in body:
+            collector.visit(stmt)
+        candidates = (
+            (collector.store_vars & collector.incoming_vars) - bound_names
+        ) & set(self._outer_defined_vars)
+        return sorted(candidates)
+
+    def _wrap_body_with_rebind_probes(
+        self,
+        flattened_body: list[ast.stmt],
+        candidates: list[str],
+        lineno: int,
+    ) -> list[ast.stmt]:
+        """Wrap a transformed loop body with rebind snapshot/record probes.
+
+        Prepends ``_qm_rebind_snap_N = loop_rebind_snapshot({...})`` and
+        appends ``record_loop_rebinds(_qm_rebind_snap_N, {...})`` so the
+        tracer can compare pre/post handle identities for each candidate.
+        Both probes live inside the loop's ``with`` body, so the
+        zero-trip trace guard skips them together with the body.
+
+        Args:
+            flattened_body (list[ast.stmt]): The already-transformed loop
+                body statements.
+            candidates (list[str]): Candidate variable names from
+                :meth:`_loop_rebind_candidates`.
+            lineno (int): Source line of the loop statement, used for the
+                generated nodes.
+
+        Returns:
+            list[ast.stmt]: The wrapped body; ``flattened_body`` itself
+                when ``candidates`` is empty.
+        """
+        if not candidates:
+            return flattened_body
+
+        def _named_handles_dict() -> ast.Dict:
+            """Build ``{"name": name, ...}`` over the candidate variables.
+
+            Returns:
+                ast.Dict: A fresh dict literal node (nodes must not be
+                    shared between the two probe calls).
+            """
+            return ast.Dict(
+                keys=[ast.Constant(value=name) for name in candidates],
+                values=[ast.Name(id=name, ctx=ast.Load()) for name in candidates],
+            )
+
+        snap_name = self._get_unique_name("_qm_rebind_snap")
+        snap_stmt = ast.Assign(
+            targets=[ast.Name(id=snap_name, ctx=ast.Store())],
+            value=ast.Call(
+                func=ast.Name(id="loop_rebind_snapshot", ctx=ast.Load()),
+                args=[_named_handles_dict()],
+                keywords=[],
+            ),
+            lineno=lineno,
+        )
+        record_stmt = ast.Expr(
+            value=ast.Call(
+                func=ast.Name(id="record_loop_rebinds", ctx=ast.Load()),
+                args=[
+                    ast.Name(id=snap_name, ctx=ast.Load()),
+                    _named_handles_dict(),
+                ],
+                keywords=[],
+            ),
+            lineno=lineno,
+        )
+        return [snap_stmt, *flattened_body, record_stmt]
+
     def visit_While(self, node: ast.While) -> Any:
         if node.orelse:
             raise SyntaxError("while ... else is not supported in @qkernel")
         # Check for quantum operations in while condition
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
+        # Compute rebind-probe candidates on the ORIGINAL body, before
+        # nested transforms rewrite assignments into emit_if calls.
+        rebind_candidates = self._loop_rebind_candidates(node.body, set())
         # Transform nested control flow first (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
@@ -616,6 +715,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
+
+        flattened_body = self._wrap_body_with_rebind_probes(
+            flattened_body, rebind_candidates, node.lineno
+        )
 
         # Build ``lambda: <condition>``
         lambda_node = ast.Lambda(
@@ -883,6 +986,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # by QKernel.__init__'s fallback.
         all_binding_names = self._validate_for_loop(node)
 
+        # Compute rebind-probe candidates on the ORIGINAL body, before
+        # nested transforms rewrite assignments into emit_if calls.
+        rebind_candidates = self._loop_rebind_candidates(
+            node.body, set(all_binding_names)
+        )
+
         # Transform nested control flow first (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
@@ -901,6 +1010,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
+
+        flattened_body = self._wrap_body_with_rebind_probes(
+            flattened_body, rebind_candidates, node.lineno
+        )
 
         # Dispatch to the appropriate transform.
         # Sequence iteration is already rejected by _validate_for_loop.
@@ -1323,6 +1436,8 @@ def transform_control_flow(func: Callable):
             "should_trace_for_loop": should_trace_for_loop,
             "for_items": for_items,
             "emit_if": emit_if,
+            "loop_rebind_snapshot": loop_rebind_snapshot,
+            "record_loop_rebinds": record_loop_rebinds,
             "Any": Any,  # For type annotations in generated code
         }
     )

@@ -8,6 +8,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
+    reject_loop_carried_classical_rebinds,
     reject_self_referential_loop_stores,
 )
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
@@ -64,6 +65,14 @@ class PartialEvaluationPass(Pass[Block, Block]):
         # to be eliminated), while a compile-time-taken branch's store is
         # still caught here, pre-fold.
         reject_self_referential_loop_stores(input.operations, self._bindings)
+
+        # Reject loop-carried classical scalar rebinds BEFORE folding for
+        # the same reason: folding an all-constant accumulation like
+        # ``total = total + 1`` collapses the in-loop BinOp to a constant,
+        # erasing the dependency evidence while keeping the wrong result.
+        reject_loop_carried_classical_rebinds(
+            input.operations, self._bindings, output_values=input.output_values
+        )
 
         # Keep ``SliceArrayOperation`` nodes through partial_eval so
         # the downstream ``SliceBorrowCheckPass`` can use them as

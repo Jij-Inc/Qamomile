@@ -55,6 +55,7 @@ from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
+    LoopCarriedRebind,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
@@ -1231,6 +1232,32 @@ def _decode_phi(d: dict[str, Any], ctx: _DecodeContext) -> PhiOp:
     return PhiOp(operands=operands, results=results)
 
 
+def _decode_loop_carried_rebinds(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> tuple[LoopCarriedRebind, ...]:
+    """Decode loop-carried rebind records from a loop op dict.
+
+    Args:
+        d (dict[str, Any]): The loop op dict, possibly carrying a
+            ``loop_carried_rebinds`` list.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[LoopCarriedRebind, ...]: The reconstructed records; empty
+            when the key is absent.
+    """
+    return tuple(
+        LoopCarriedRebind(
+            var_name=str(r.get("var_name", "")),
+            before=_materialize_as_value(ctx, r["before_ref"]),
+            after=_materialize_as_value(ctx, r["after_ref"]),
+            before_synthesized=bool(r.get("before_synthesized", False)),
+        )
+        for r in d.get("loop_carried_rebinds", ())
+    )
+
+
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
     """Decode :class:`ForOperation`.
 
@@ -1253,6 +1280,7 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         loop_var=d.get("loop_var", ""),
         loop_var_value=loop_var_value,
         operations=body,
+        loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
     )
 
 
@@ -1286,6 +1314,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         key_var_values=key_var_values,
         value_var_value=value_var_value,
         operations=body,
+        loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
     )
 
 
@@ -1307,6 +1336,7 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         results=results,
         operations=body,
         max_iterations=d.get("max_iterations"),
+        loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
     )
 
 
