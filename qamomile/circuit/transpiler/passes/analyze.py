@@ -26,6 +26,10 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     resolve_compile_time_condition,
 )
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
+from qamomile.circuit.transpiler.passes.validate_while import (
+    build_producer_map,
+    is_measurement_backed,
+)
 
 # ---------------------------------------------------------------------------
 # Public dataflow utilities
@@ -158,6 +162,97 @@ def find_measurement_derived_values(
     return derived
 
 
+def prune_compile_time_ifs(
+    ops: list[Operation],
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+) -> list[Operation]:
+    """Replace compile-time-decidable ``IfOperation``s by their taken branch.
+
+    Mirrors ``CompileTimeIfLoweringPass``: conditions are resolved with
+    the shared ``resolve_compile_time_condition`` /
+    ``evaluate_classical_op_concrete`` helpers so the taken / dead /
+    runtime classification here cannot disagree with the branch the
+    lowering pass will actually keep. For a resolved condition the taken
+    branch's operations are inlined (recursively pruned) and each
+    ``PhiOp`` is reduced to its selected source operand, so phi-mediated
+    dataflow out of the branch stays visible to dependency scans without
+    dead-branch edges. Runtime ``IfOperation``s are kept intact.
+
+    Shared by ``reject_self_referential_loop_stores`` and
+    ``reject_loop_carried_classical_rebinds`` — both checks must classify
+    conditions exactly the way the lowering pass does.
+
+    Args:
+        ops (list[Operation]): Operations to prune, in program order.
+        concrete_values (dict[str, Any]): UUID-keyed concrete
+            classical-op results accumulated along the walk.
+            Updated in place (nested non-if bodies get a copy,
+            matching the lowering pass's scoping).
+        bindings (dict[str, Any]): Compile-time parameter bindings used
+            to resolve conditions.
+
+    Returns:
+        list[Operation]: The pruned view of ``ops``.
+    """
+    pruned: list[Operation] = []
+    for op in ops:
+        evaluate_classical_op_concrete(op, concrete_values, bindings)
+        if isinstance(op, IfOperation):
+            taken = resolve_compile_time_condition(
+                op.condition, concrete_values, bindings
+            )
+            if taken is None:
+                pruned.append(op)
+                continue
+            branch = op.true_operations if taken else op.false_operations
+            pruned.extend(prune_compile_time_ifs(branch, concrete_values, bindings))
+            for phi in op.phi_ops:
+                if isinstance(phi, PhiOp):
+                    selected = phi.true_value if taken else phi.false_value
+                    pruned.append(dataclasses.replace(phi, operands=[selected]))
+            continue
+        if isinstance(op, HasNestedOps):
+            op = op.rebuild_nested(
+                [
+                    prune_compile_time_ifs(body, dict(concrete_values), bindings)
+                    for body in op.nested_op_lists()
+                ]
+            )
+        pruned.append(op)
+    return pruned
+
+
+def flatten_ops(
+    ops: list[Operation],
+    *,
+    into_if_branches: bool = True,
+) -> list[Operation]:
+    """Flatten operations recursively through nested control flow.
+
+    Args:
+        ops (list[Operation]): Operations to flatten.
+        into_if_branches (bool): When ``True`` (default), recurse
+            into ``IfOperation`` bodies too.  ``False`` skips them —
+            used by the self-referential store check, since stores
+            inside a (runtime) if branch are rejected by
+            ``AnalyzePass._reject_stores_in_if_branches`` instead.
+
+    Returns:
+        list[Operation]: All reachable operations, including the
+            control flow ops themselves.
+    """
+    flat: list[Operation] = []
+    for op in ops:
+        flat.append(op)
+        if not into_if_branches and isinstance(op, IfOperation):
+            continue
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                flat.extend(flatten_ops(body, into_if_branches=into_if_branches))
+    return flat
+
+
 def reject_self_referential_loop_stores(
     operations: list[Operation],
     bindings: dict[str, Any] | None = None,
@@ -208,91 +303,6 @@ def reject_self_referential_loop_stores(
             element of the same logical array it writes.
     """
     resolved_bindings = bindings or {}
-
-    def prune_compile_time_ifs(
-        ops: list[Operation],
-        concrete_values: dict[str, Any],
-    ) -> list[Operation]:
-        """Replace compile-time-decidable ``IfOperation``s by their taken branch.
-
-        Mirrors ``CompileTimeIfLoweringPass``: conditions are resolved
-        with the shared ``resolve_compile_time_condition`` /
-        ``evaluate_classical_op_concrete`` helpers so the taken / dead /
-        runtime classification here cannot disagree with the branch the
-        lowering pass will actually keep.  For a resolved condition the
-        taken branch's operations are inlined (recursively pruned) and
-        each ``PhiOp`` is reduced to its selected source operand, so
-        phi-mediated dataflow out of the branch stays visible to the
-        dependency scan without dead-branch edges.  Runtime
-        ``IfOperation``s are kept intact: their branch stores are
-        excluded from the store scan below, while their dataflow keeps
-        feeding the dependency graph exactly as before.
-
-        Args:
-            ops (list[Operation]): Operations to prune, in program order.
-            concrete_values (dict[str, Any]): UUID-keyed concrete
-                classical-op results accumulated along the walk.
-                Updated in place (nested non-if bodies get a copy,
-                matching the lowering pass's scoping).
-
-        Returns:
-            list[Operation]: The pruned view of ``ops``.
-        """
-        pruned: list[Operation] = []
-        for op in ops:
-            evaluate_classical_op_concrete(op, concrete_values, resolved_bindings)
-            if isinstance(op, IfOperation):
-                taken = resolve_compile_time_condition(
-                    op.condition, concrete_values, resolved_bindings
-                )
-                if taken is None:
-                    pruned.append(op)
-                    continue
-                branch = op.true_operations if taken else op.false_operations
-                pruned.extend(prune_compile_time_ifs(branch, concrete_values))
-                for phi in op.phi_ops:
-                    if isinstance(phi, PhiOp):
-                        selected = phi.true_value if taken else phi.false_value
-                        pruned.append(dataclasses.replace(phi, operands=[selected]))
-                continue
-            if isinstance(op, HasNestedOps):
-                op = op.rebuild_nested(
-                    [
-                        prune_compile_time_ifs(body, dict(concrete_values))
-                        for body in op.nested_op_lists()
-                    ]
-                )
-            pruned.append(op)
-        return pruned
-
-    def flatten_ops(
-        ops: list[Operation],
-        *,
-        into_if_branches: bool = True,
-    ) -> list[Operation]:
-        """Flatten operations recursively through nested control flow.
-
-        Args:
-            ops (list[Operation]): Operations to flatten.
-            into_if_branches (bool): When ``True`` (default), recurse
-                into ``IfOperation`` bodies too.  ``False`` skips them —
-                used to collect the loops and stores this check scans,
-                since stores inside a (runtime) if branch are rejected
-                by ``AnalyzePass._reject_stores_in_if_branches`` instead.
-
-        Returns:
-            list[Operation]: All reachable operations, including the
-                control flow ops themselves.
-        """
-        flat: list[Operation] = []
-        for op in ops:
-            flat.append(op)
-            if not into_if_branches and isinstance(op, IfOperation):
-                continue
-            if isinstance(op, HasNestedOps):
-                for body in op.nested_op_lists():
-                    flat.extend(flatten_ops(body, into_if_branches=into_if_branches))
-        return flat
 
     def register_value(value: ValueBase, table: dict[str, ValueBase]) -> None:
         """Record a value and its structural references in ``table``.
@@ -404,12 +414,250 @@ def reject_self_referential_loop_stores(
                         worklist.append(parent.uuid)
                 worklist.extend(dependency_graph.get(current, ()))
 
-    pruned_operations = prune_compile_time_ifs(operations, {})
+    pruned_operations = prune_compile_time_ifs(operations, {}, resolved_bindings)
     for op in flatten_ops(pruned_operations, into_if_branches=False):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             check_loop_body(
                 [body_op for body in op.nested_op_lists() for body_op in body]
             )
+
+
+_LOOP_KIND_NAMES: dict[type, str] = {
+    ForOperation: "for",
+    ForItemsOperation: "for-items",
+    WhileOperation: "while",
+}
+
+
+def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError:
+    """Build the targeted loop-carried rebind rejection error.
+
+    Args:
+        var_name (str): Display name of the rebound variable.
+        loop_kind (str): Human-readable loop kind ("for" / "while" /
+            "for-items").
+
+    Returns:
+        ValidationError: The error to raise.
+    """
+    return ValidationError(
+        f"Loop-carried update of classical variable '{var_name}' inside a "
+        f"@qkernel {loop_kind} loop is not supported: the loop body is "
+        f"traced once, so '{var_name}' on the right-hand side is fixed to "
+        f"its pre-loop value instead of the previous iteration's value, "
+        f"and the compiled program would silently diverge from Python "
+        f"semantics. Compute the reduction in ordinary Python instead — "
+        f"outside the @qkernel or in an undecorated helper function — or "
+        f"express each iteration's value directly from the loop index. "
+        f"Note: builtin range() inside @qkernel is traced exactly like "
+        f"qmc.range()."
+    )
+
+
+def _check_loop_carried_rebinds(
+    loop_op: ForOperation | ForItemsOperation | WhileOperation,
+    producer_map: dict[str, Operation],
+) -> None:
+    """Reject the loop-carried rebind records of one (pruned) loop op.
+
+    Args:
+        loop_op (ForOperation | ForItemsOperation | WhileOperation): Loop
+            operation whose body has already been pruned of
+            compile-time-decidable if branches.
+        producer_map (dict[str, Operation]): Block-wide map from result
+            UUID to producing operation, used to classify
+            measurement-backed values (pre-loop producers included).
+
+    Raises:
+        ValidationError: If a recorded rebind survives dead-branch
+            canonicalization and either reads its pre-loop value in the
+            body, was initialized from a plain Python number, or swaps
+            with another rebound variable.
+    """
+    records = loop_op.loop_carried_rebinds
+    if not records:
+        return
+
+    loop_kind = _LOOP_KIND_NAMES.get(type(loop_op), "for")
+    body_ops = [o for body in loop_op.nested_op_lists() for o in body]
+    flat_body = flatten_ops(body_ops)
+
+    # Map collapsed (single-operand) PhiOps left by dead-branch pruning:
+    # result uuid -> selected source uuid.
+    collapsed: dict[str, str] = {}
+    value_table: dict[str, ValueBase] = {}
+    for op in flat_body:
+        if isinstance(op, PhiOp) and len(op.operands) == 1 and op.results:
+            collapsed[op.results[0].uuid] = op.operands[0].uuid
+        for v in (*op.all_input_values(), *op.results):
+            value_table.setdefault(v.uuid, v)
+
+    def canonical(uuid: str) -> str:
+        """Follow collapsed-phi links to the underlying source uuid.
+
+        Args:
+            uuid (str): Starting value uuid.
+
+        Returns:
+            str: The uuid after following single-operand phi links.
+        """
+        seen: set[str] = set()
+        while uuid in collapsed and uuid not in seen:
+            seen.add(uuid)
+            uuid = collapsed[uuid]
+        return uuid
+
+    def op_read_uuids(op: Operation) -> set[str]:
+        """Collect the uuids an operation genuinely reads.
+
+        Nested loop operations expose their own rebind records through
+        ``all_input_values`` (for cloning); those record values are not
+        body reads and must not trigger the outer loop's check, so they
+        are subtracted before the operands are re-added.
+
+        Args:
+            op (Operation): Operation to inspect.
+
+        Returns:
+            set[str]: UUIDs of values the operation reads.
+        """
+        excluded: set[str] = set()
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            for r in op.loop_carried_rebinds:
+                excluded.add(r.before.uuid)
+                excluded.add(r.after.uuid)
+        uuids = {v.uuid for v in op.all_input_values()}
+        uuids -= excluded
+        for v in op.operands:
+            operand_uuid = getattr(v, "uuid", None)
+            if operand_uuid is not None:
+                uuids.add(operand_uuid)
+        return uuids
+
+    body_read_uuids: set[str] = set()
+    for op in flat_body:
+        body_read_uuids |= op_read_uuids(op)
+
+    before_uuids = {r.before.uuid for r in records}
+
+    for record in records:
+        # Legal while-loop loop-carried condition: the (initial, updated)
+        # condition pair is aliased onto one clbit by the allocator.
+        if (
+            isinstance(loop_op, WhileOperation)
+            and len(loop_op.operands) >= 2
+            and record.before.uuid == loop_op.operands[0].uuid
+            and record.after.uuid == loop_op.operands[1].uuid
+        ):
+            continue
+
+        # Legal measurement-backed Bit rebind: a per-iteration
+        # re-measurement (``state = qmc.measure(...)``, possibly merged
+        # through an if) lives on a physical clbit that the resource
+        # allocator aliases across iterations, so reads of the pre-loop
+        # value observe the updated bit at runtime. This requires the
+        # pre-loop value to be measurement-backed too — a constant
+        # initial Bit would resolve branch conditions at compile time
+        # and diverge from Python semantics.
+        if is_measurement_backed(record.after, producer_map) and is_measurement_backed(
+            record.before, producer_map
+        ):
+            continue
+
+        canon_uuid = canonical(record.after.uuid)
+
+        # Dead-branch no-op: the surviving branch passes the pre-loop
+        # value straight through.
+        if canon_uuid == record.before.uuid:
+            continue
+
+        canon_value = value_table.get(canon_uuid)
+        if canon_value is None and canon_uuid == record.after.uuid:
+            canon_value = record.after
+        before_const = record.before.get_const()
+        canon_const = (
+            canon_value.get_const() if isinstance(canon_value, Value) else None
+        )
+        if before_const is not None and canon_const is not None:
+            # Dead-branch constant pass-through: the surviving branch
+            # selects a constant equal to the initial value.
+            if canon_const == before_const:
+                continue
+            # Trace-time-folded accumulation: an all-constant update like
+            # ``total = total + 1.0`` folds during tracing, so the body
+            # carries no BinOp reading the pre-loop value — the changed
+            # constant is the only remaining evidence. One folded
+            # application can never represent N iterations.
+            raise _loop_carried_rebind_error(record.var_name, loop_kind)
+
+        # Swap / rotation staleness: this variable's new value is another
+        # rebound variable's pre-loop value.
+        if canon_uuid != record.before.uuid and canon_uuid in before_uuids:
+            raise _loop_carried_rebind_error(record.var_name, loop_kind)
+
+        # Direct read of the pre-loop value anywhere in the body.
+        if record.before.uuid in body_read_uuids:
+            raise _loop_carried_rebind_error(record.var_name, loop_kind)
+
+        # Plain-Python-number initialization: the stale read is an
+        # embedded constant with no uuid, so the AST-certified
+        # read-before-write is the evidence.
+        if record.before_synthesized:
+            raise _loop_carried_rebind_error(record.var_name, loop_kind)
+
+
+def reject_loop_carried_classical_rebinds(
+    operations: list[Operation],
+    bindings: dict[str, Any] | None = None,
+) -> None:
+    """Reject in-loop classical scalar rebinds that cannot compile correctly.
+
+    A loop body is traced once, so a Python-level reassignment like
+    ``total = total + i`` inside a ``qmc.range`` / ``while`` /
+    ``qmc.items`` loop reads a fixed pre-loop value instead of the
+    previous iteration's value. Every executor (the classical segment
+    interpreter and emit-time unrolling) re-runs the same traced
+    operations per iteration, so the program silently diverges from
+    Python semantics (e.g. ``total`` ends as ``0 + i_last`` instead of
+    the sum). The frontend records candidate rebinds on the loop
+    operations (``LoopCarriedRebind``); this check rejects the ones that
+    survive dead-branch pruning.
+
+    ``IfOperation``s are classified with the same condition resolution
+    ``CompileTimeIfLoweringPass`` uses (via ``bindings``): a rebind whose
+    only path is a compile-time-dead branch canonicalizes back to the
+    pre-loop value and is allowed. Unlike the array-store check, loops
+    nested inside *runtime* if branches are scanned too — a loop-carried
+    scalar rebind there miscompiles all the same.
+
+    Exposed at module scope because it must run from two passes:
+    ``PartialEvaluationPass`` calls it before constant folding (folding
+    an all-constant accumulation like ``total = total + 1`` erases the
+    dependency evidence while keeping the wrong result), and
+    ``AnalyzePass`` calls it again as a safety net for pipelines that
+    skip ``partial_eval``.
+
+    Args:
+        operations (list[Operation]): Operations to scan. Recurses
+            through all control flow.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings
+            used to resolve ``IfOperation`` conditions, matching what
+            ``CompileTimeIfLoweringPass`` will later resolve. Defaults to
+            None (no bindings).
+
+    Raises:
+        ValidationError: If a loop body rebinds a classical scalar whose
+            pre-loop value the body still reads (directly, through
+            classical arithmetic, through a surviving phi, or as an
+            embedded constant from a plain-Python initialization).
+    """
+    resolved_bindings = bindings or {}
+    pruned_operations = prune_compile_time_ifs(operations, {}, resolved_bindings)
+    producer_map: dict[str, Operation] = {}
+    build_producer_map(pruned_operations, producer_map)
+    for op in flatten_ops(pruned_operations):
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            _check_loop_carried_rebinds(op, producer_map)
 
 
 class AnalyzePass(Pass[Block, Block]):
@@ -441,6 +689,9 @@ class AnalyzePass(Pass[Block, Block]):
 
         # Reject in-loop classical element stores that read the same array
         self._reject_self_referential_loop_stores(input.operations)
+
+        # Reject in-loop classical scalar rebinds (loop-carried updates)
+        self._reject_loop_carried_classical_rebinds(input.operations)
 
         # Build dependency graph
         dependency_graph = self._build_dependency_graph(input.operations)
@@ -559,6 +810,29 @@ class AnalyzePass(Pass[Block, Block]):
                 an element of the same logical array it writes.
         """
         reject_self_referential_loop_stores(operations)
+
+    def _reject_loop_carried_classical_rebinds(
+        self,
+        operations: list[Operation],
+    ) -> None:
+        """Reject in-loop classical scalar rebinds (loop-carried updates).
+
+        Thin wrapper for the module-level
+        :func:`reject_loop_carried_classical_rebinds` so
+        ``PartialEvaluationPass`` can reuse the same check without
+        instantiating ``AnalyzePass``. Called without bindings: by this
+        stage ``CompileTimeIfLoweringPass`` has already eliminated
+        compile-time ifs, so any surviving ``IfOperation`` classifies as
+        runtime.
+
+        Args:
+            operations (list[Operation]): Operations to scan recursively.
+
+        Raises:
+            ValidationError: If a loop body rebinds a classical scalar
+                whose pre-loop value the body still reads.
+        """
+        reject_loop_carried_classical_rebinds(operations)
 
     def _build_dependency_graph(
         self,

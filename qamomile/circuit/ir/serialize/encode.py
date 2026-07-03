@@ -49,6 +49,7 @@ from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
+    LoopCarriedRebind,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
@@ -1029,6 +1030,33 @@ def _encode_phi(op: PhiOp, ctx: _EncodeContext) -> dict[str, Any]:
     return _base_op_dict("PhiOp", op)
 
 
+def _encode_loop_carried_rebinds(
+    rebinds: tuple[LoopCarriedRebind, ...],
+) -> list[dict[str, Any]]:
+    """Encode loop-carried rebind records as value references.
+
+    Args:
+        rebinds (tuple[LoopCarriedRebind, ...]): Records attached to a
+            loop operation. Their ``before`` / ``after`` values are
+            already registered in the value table via
+            ``all_input_values``.
+
+    Returns:
+        list[dict[str, Any]]: One dict per record with ``var_name``,
+            ``before_ref`` / ``after_ref`` UUIDs, and
+            ``before_synthesized``.
+    """
+    return [
+        {
+            "var_name": r.var_name,
+            "before_ref": r.before.uuid,
+            "after_ref": r.after.uuid,
+            "before_synthesized": r.before_synthesized,
+        }
+        for r in rebinds
+    ]
+
+
 def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`ForOperation`.
 
@@ -1038,13 +1066,15 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: Base op dict plus ``loop_var`` display name,
-            ``loop_var_value_ref`` (or ``None``), and ``body`` op list.
+            ``loop_var_value_ref`` (or ``None``), the
+            ``loop_carried_rebinds`` record list, and ``body`` op list.
     """
     d = _base_op_dict("ForOperation", op)
     d["loop_var"] = op.loop_var
     d["loop_var_value_ref"] = (
         op.loop_var_value.uuid if op.loop_var_value is not None else None
     )
+    d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1071,6 +1101,7 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
     d["value_var_value_ref"] = (
         op.value_var_value.uuid if op.value_var_value is not None else None
     )
+    d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1088,6 +1119,7 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """
     d = _base_op_dict("WhileOperation", op)
     d["max_iterations"] = op.max_iterations
+    d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 

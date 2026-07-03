@@ -33,6 +33,90 @@ class HasNestedOps:
         raise NotImplementedError
 
 
+@dataclasses.dataclass(frozen=True)
+class LoopCarriedRebind:
+    """Trace-time record of a classical scalar rebound inside a loop body.
+
+    The frontend traces a loop body exactly once, so a Python-level
+    reassignment like ``total = total + i`` produces IR whose right-hand
+    side reads the fixed pre-loop value instead of the previous
+    iteration's value — a loop-carried dependency the IR cannot
+    represent. The AST transformer records every such rebind on the loop
+    operation so the transpiler can reject it with a targeted error
+    instead of silently miscompiling.
+
+    Attributes:
+        var_name (str): Display name of the rebound Python variable.
+            Used only for error messages.
+        before (Value): The variable's IR value before the loop body ran
+            (the stale value the traced body reads).
+        after (Value): The variable's IR value after the loop body ran
+            (typically a ``BinOp`` result or an ``IfOperation`` phi
+            output).
+        before_synthesized (bool): True when the pre-loop value was a
+            plain Python number with no IR identity (e.g. ``total = 0``),
+            in which case ``before`` is a synthesized constant ``Value``
+            that does not appear in the body's dataflow.
+    """
+
+    var_name: str
+    before: Value
+    after: Value
+    before_synthesized: bool = False
+
+
+def _rebind_input_values(
+    rebinds: tuple[LoopCarriedRebind, ...],
+) -> list[ValueBase]:
+    """Collect the Value fields of loop-carried rebind records.
+
+    Args:
+        rebinds (tuple[LoopCarriedRebind, ...]): Records attached to a
+            loop operation.
+
+    Returns:
+        list[ValueBase]: ``before`` and ``after`` values of every record,
+            in order.
+    """
+    values: list[ValueBase] = []
+    for rebind in rebinds:
+        values.append(rebind.before)
+        values.append(rebind.after)
+    return values
+
+
+def _replace_rebind_values(
+    rebinds: tuple[LoopCarriedRebind, ...],
+    mapping: dict[str, ValueBase],
+) -> tuple[LoopCarriedRebind, ...] | None:
+    """Substitute rebind record values through a UUID mapping.
+
+    Args:
+        rebinds (tuple[LoopCarriedRebind, ...]): Records to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        tuple[LoopCarriedRebind, ...] | None: Rewritten records, or
+            ``None`` when nothing changed.
+    """
+    new_rebinds: list[LoopCarriedRebind] = []
+    changed = False
+    for rebind in rebinds:
+        before = rebind.before
+        after = rebind.after
+        mapped_before = mapping.get(before.uuid)
+        if isinstance(mapped_before, Value):
+            before = mapped_before
+        mapped_after = mapping.get(after.uuid)
+        if isinstance(mapped_after, Value):
+            after = mapped_after
+        if before is not rebind.before or after is not rebind.after:
+            rebind = dataclasses.replace(rebind, before=before, after=after)
+            changed = True
+        new_rebinds.append(rebind)
+    return tuple(new_rebinds) if changed else None
+
+
 @dataclasses.dataclass
 class WhileOperation(HasNestedOps, Operation):
     """Represents a while loop operation.
@@ -65,12 +149,43 @@ class WhileOperation(HasNestedOps, Operation):
 
     operations: list[Operation] = dataclasses.field(default_factory=list)
     max_iterations: int | None = None
+    loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(self, operations=new_lists[0])
+
+    def all_input_values(self) -> list[ValueBase]:
+        """Include loop-carried rebind records for cloning/substitution.
+
+        Same rationale as ``ForOperation.all_input_values``: rebind
+        records reference body/pre-loop values by identity, so inline
+        cloning must remap them in lockstep with body operands.
+
+        Returns:
+            list[ValueBase]: Base input values plus rebind-record values.
+        """
+        values = super().all_input_values()
+        values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        """Substitute operand and rebind-record values.
+
+        Args:
+            mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+        Returns:
+            Operation: The rewritten operation.
+        """
+        result = super().replace_values(mapping)
+        assert isinstance(result, WhileOperation)
+        new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        return result
 
     @property
     def signature(self) -> Signature:
@@ -117,6 +232,7 @@ class ForOperation(HasNestedOps, Operation):
     loop_var: str = ""
     loop_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
+    loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -131,10 +247,12 @@ class ForOperation(HasNestedOps, Operation):
         reference to the loop variable to a fresh UUID, but leave
         ``loop_var_value`` pointing at the un-cloned original — emit-time
         UUID-keyed lookups for the loop variable would then miss.
+        Loop-carried rebind records are included for the same reason.
         """
         values = super().all_input_values()
         if self.loop_var_value is not None:
             values.append(self.loop_var_value)
+        values.extend(_rebind_input_values(self.loop_carried_rebinds))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -144,6 +262,9 @@ class ForOperation(HasNestedOps, Operation):
             mapped = mapping[result.loop_var_value.uuid]
             if isinstance(mapped, Value):
                 result = dataclasses.replace(result, loop_var_value=mapped)
+        new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
         return result
 
     @property
@@ -196,6 +317,7 @@ class ForItemsOperation(HasNestedOps, Operation):
     key_var_values: tuple[Value, ...] | None = None
     value_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
+    loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -208,13 +330,15 @@ class ForItemsOperation(HasNestedOps, Operation):
 
         Same rationale as ``ForOperation.all_input_values``: keep the IR
         identity fields in lockstep with body references so UUID-keyed
-        lookups stay valid after inline cloning.
+        lookups stay valid after inline cloning. Loop-carried rebind
+        records are included for the same reason.
         """
         values = super().all_input_values()
         if self.key_var_values is not None:
             values.extend(self.key_var_values)
         if self.value_var_value is not None:
             values.append(self.value_var_value)
+        values.extend(_rebind_input_values(self.loop_carried_rebinds))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -242,6 +366,9 @@ class ForItemsOperation(HasNestedOps, Operation):
             mapped = mapping[result.value_var_value.uuid]
             if isinstance(mapped, Value):
                 result = dataclasses.replace(result, value_var_value=mapped)
+        new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
         return result
 
     @property

@@ -34,6 +34,126 @@ from qamomile.circuit.transpiler.errors import ValidationError
 from . import Pass
 
 
+def build_producer_map(
+    operations: list[Operation],
+    producer_map: dict[str, Operation],
+) -> None:
+    """Walk operations recursively, mapping result UUIDs to producer instances.
+
+    Exposed at module scope so measurement-backing checks outside this
+    pass (e.g. the loop-carried rebind check in ``analyze``) can build
+    the same map.
+
+    Args:
+        operations (list[Operation]): Operations to walk, recursing into
+            all ``HasNestedOps`` bodies and ``IfOperation.phi_ops``.
+        producer_map (dict[str, Operation]): Mutable map from result UUID
+            to the producing operation; updated in place.
+    """
+    for op in operations:
+        for result in op.results:
+            if isinstance(result, Value):
+                producer_map[result.uuid] = op
+
+        # Recurse into control flow bodies
+        if isinstance(op, HasNestedOps):
+            # IfOperation phi_ops results need their own producer entries
+            if isinstance(op, IfOperation):
+                for phi in op.phi_ops:
+                    for result in phi.results:
+                        if isinstance(result, Value):
+                            producer_map[result.uuid] = phi
+            for op_list in op.nested_op_lists():
+                build_producer_map(op_list, producer_map)
+
+
+def is_measurement_backed(
+    value: Value,
+    producer_map: dict[str, Operation],
+    visiting: set[str] | None = None,
+) -> bool:
+    """Recursively check whether a value traces back to measurement operations.
+
+    Returns ``True`` if the value is produced by ``MeasureOperation`` /
+    ``MeasureVectorOperation`` directly, if it is an element access of a
+    measured ``Vector[Bit]`` (its ``parent_array`` — possibly through a
+    ``slice_of`` view chain — is measurement-backed), or if it is produced
+    by ``IfOperation`` / ``PhiOp`` where every reachable leaf source is
+    itself measurement-backed.
+
+    Uses backtracking on ``visiting`` so that the same value can be
+    reached from multiple independent phi branches without false negatives.
+
+    Args:
+        value (Value): The IR value to trace.
+        producer_map (dict[str, Operation]): Map from result UUID to the
+            operation that produced it.
+        visiting (set[str] | None): UUIDs on the current DFS path, used to
+            break cycles. Defaults to None (fresh traversal).
+
+    Returns:
+        bool: True if the value is measurement-backed.
+    """
+    if visiting is None:
+        visiting = set()
+    if value.uuid in visiting:
+        return False
+    visiting.add(value.uuid)
+
+    producer = producer_map.get(value.uuid)
+
+    if isinstance(producer, (MeasureOperation, MeasureVectorOperation)):
+        visiting.discard(value.uuid)
+        return True
+
+    # Element access of a measured Vector[Bit]: ``s[i]`` where
+    # ``s = qmc.measure(register)``. The element carries its own UUID
+    # (not produced by any op) and points to the measured array via
+    # ``parent_array``; a sliced view (``s[a:b:c][i]``) reaches the root
+    # measured array through the parent's ``slice_of`` chain.
+    parent = getattr(value, "parent_array", None)
+    if parent is not None:
+        cur: Value | None = parent
+        while cur is not None:
+            if is_measurement_backed(cur, producer_map, visiting):
+                visiting.discard(value.uuid)
+                return True
+            cur = getattr(cur, "slice_of", None)
+
+    if producer is None:
+        visiting.discard(value.uuid)
+        return False
+
+    if isinstance(producer, IfOperation):
+        # Find the PhiOp whose output matches this value
+        for phi in producer.phi_ops:
+            if phi.results and phi.results[0].uuid == value.uuid:
+                result = is_measurement_backed(
+                    phi.true_value, producer_map, visiting
+                ) and is_measurement_backed(phi.false_value, producer_map, visiting)
+                visiting.discard(value.uuid)
+                return result
+        visiting.discard(value.uuid)
+        return False
+
+    if isinstance(producer, PhiOp):
+        # A collapsed phi (single operand) is left by dead-branch pruning
+        # in ``analyze.prune_compile_time_ifs``: only the selected source
+        # remains.
+        if len(producer.operands) == 1:
+            result = is_measurement_backed(producer.operands[0], producer_map, visiting)
+            visiting.discard(value.uuid)
+            return result
+        result = is_measurement_backed(
+            producer.true_value, producer_map, visiting
+        ) and is_measurement_backed(producer.false_value, producer_map, visiting)
+        visiting.discard(value.uuid)
+        return result
+
+    visiting.discard(value.uuid)
+    return False
+
+
 class ValidateWhileContractPass(Pass[Block, Block]):
     """Validates that all WhileOperation conditions are measurement-backed.
 
@@ -67,22 +187,16 @@ class ValidateWhileContractPass(Pass[Block, Block]):
         operations: list[Operation],
         producer_map: dict[str, Operation],
     ) -> None:
-        """Walk operations recursively, mapping result UUIDs to producer instances."""
-        for op in operations:
-            for result in op.results:
-                if isinstance(result, Value):
-                    producer_map[result.uuid] = op
+        """Walk operations recursively, mapping result UUIDs to producer instances.
 
-            # Recurse into control flow bodies
-            if isinstance(op, HasNestedOps):
-                # IfOperation phi_ops results need their own producer entries
-                if isinstance(op, IfOperation):
-                    for phi in op.phi_ops:
-                        for result in phi.results:
-                            if isinstance(result, Value):
-                                producer_map[result.uuid] = phi
-                for op_list in op.nested_op_lists():
-                    self._build_producer_map(op_list, producer_map)
+        Thin wrapper for the module-level :func:`build_producer_map`.
+
+        Args:
+            operations (list[Operation]): Operations to walk recursively.
+            producer_map (dict[str, Operation]): Mutable UUID-to-producer
+                map, updated in place.
+        """
+        build_producer_map(operations, producer_map)
 
     def _validate_whiles(
         self,
@@ -133,15 +247,7 @@ class ValidateWhileContractPass(Pass[Block, Block]):
     ) -> bool:
         """Recursively check whether a value traces back to measurement operations.
 
-        Returns ``True`` if the value is produced by ``MeasureOperation`` /
-        ``MeasureVectorOperation`` directly, if it is an element access of a
-        measured ``Vector[Bit]`` (its ``parent_array`` — possibly through a
-        ``slice_of`` view chain — is measurement-backed), or if it is produced
-        by ``IfOperation`` / ``PhiOp`` where every reachable leaf source is
-        itself measurement-backed.
-
-        Uses backtracking on ``visiting`` so that the same value can be
-        reached from multiple independent phi branches without false negatives.
+        Thin wrapper for the module-level :func:`is_measurement_backed`.
 
         Args:
             value (Value): The IR value to trace.
@@ -153,61 +259,7 @@ class ValidateWhileContractPass(Pass[Block, Block]):
         Returns:
             bool: True if the value is measurement-backed.
         """
-        if visiting is None:
-            visiting = set()
-        if value.uuid in visiting:
-            return False
-        visiting.add(value.uuid)
-
-        producer = producer_map.get(value.uuid)
-
-        if isinstance(producer, (MeasureOperation, MeasureVectorOperation)):
-            visiting.discard(value.uuid)
-            return True
-
-        # Element access of a measured Vector[Bit]: ``s[i]`` where
-        # ``s = qmc.measure(register)``. The element carries its own UUID
-        # (not produced by any op) and points to the measured array via
-        # ``parent_array``; a sliced view (``s[a:b:c][i]``) reaches the root
-        # measured array through the parent's ``slice_of`` chain.
-        parent = getattr(value, "parent_array", None)
-        if parent is not None:
-            cur: Value | None = parent
-            while cur is not None:
-                if self._is_measurement_backed(cur, producer_map, visiting):
-                    visiting.discard(value.uuid)
-                    return True
-                cur = getattr(cur, "slice_of", None)
-
-        if producer is None:
-            visiting.discard(value.uuid)
-            return False
-
-        if isinstance(producer, IfOperation):
-            # Find the PhiOp whose output matches this value
-            for phi in producer.phi_ops:
-                if phi.results and phi.results[0].uuid == value.uuid:
-                    result = self._is_measurement_backed(
-                        phi.true_value, producer_map, visiting
-                    ) and self._is_measurement_backed(
-                        phi.false_value, producer_map, visiting
-                    )
-                    visiting.discard(value.uuid)
-                    return result
-            visiting.discard(value.uuid)
-            return False
-
-        if isinstance(producer, PhiOp):
-            result = self._is_measurement_backed(
-                producer.true_value, producer_map, visiting
-            ) and self._is_measurement_backed(
-                producer.false_value, producer_map, visiting
-            )
-            visiting.discard(value.uuid)
-            return result
-
-        visiting.discard(value.uuid)
-        return False
+        return is_measurement_backed(value, producer_map, visiting)
 
     def _check_operand(
         self,

@@ -21,6 +21,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    LoopCarriedRebind,
     WhileOperation,
 )
 from qamomile.circuit.ir.types import QFixedType
@@ -95,7 +96,10 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     condition_after_value = _value_to_ir_value(condition_after, "while_cond")
 
     # 7. Create WhileOperation with captured body operations
-    while_op = WhileOperation(operations=body_tracer.operations)
+    while_op = WhileOperation(
+        operations=body_tracer.operations,
+        loop_carried_rebinds=body_tracer.loop_carried_rebinds,
+    )
     # operands[0]: initial condition (checked at loop entry)
     while_op.operands.append(condition_value)
     # operands[1]: loop-carried condition (updated inside body)
@@ -158,6 +162,7 @@ def for_loop(
         loop_var=var_name,
         loop_var_value=loop_var_value,
         operations=body_tracer.operations,
+        loop_carried_rebinds=body_tracer.loop_carried_rebinds,
     )
     for_op.operands.append(_value_to_ir_value(start, "start"))
     for_op.operands.append(_value_to_ir_value(stop, "stop"))
@@ -385,6 +390,83 @@ def should_trace_for_loop(
         return bool(builtins.range(start_int, stop_int, step_int))
     except ValueError:
         return True
+
+
+def loop_rebind_snapshot(named_handles: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """Snapshot pre-loop variable handles for rebind detection.
+
+    Called from AST-injected probe code as the first statement of a traced
+    loop body. The snapshot records which handle each candidate variable
+    name pointed at before the body ran, so ``record_loop_rebinds`` can
+    detect rebinds by comparing IR value identity afterwards.
+
+    Args:
+        named_handles (dict[str, typing.Any]): Candidate variable names
+            mapped to their current handles (or plain Python values).
+
+    Returns:
+        dict[str, typing.Any]: A shallow copy of ``named_handles``.
+    """
+    return dict(named_handles)
+
+
+def record_loop_rebinds(
+    snapshot: dict[str, typing.Any],
+    named_handles: dict[str, typing.Any],
+) -> None:
+    """Record classical scalar rebinds on the current loop-body tracer.
+
+    Called from AST-injected probe code as the last statement of a traced
+    loop body. For each candidate variable whose handle now carries a
+    different IR value than the pre-loop snapshot, and whose post-body
+    value is a classical scalar (``UInt`` / ``Float`` / ``Bit``), a
+    :class:`LoopCarriedRebind` record is stashed on the active body
+    tracer. The loop builders copy the records onto the loop operation,
+    where the transpiler's rejection pass reads them.
+
+    No IR operations are emitted; this only annotates the tracer.
+
+    Args:
+        snapshot (dict[str, typing.Any]): Pre-loop handles from
+            ``loop_rebind_snapshot``.
+        named_handles (dict[str, typing.Any]): The same variable names
+            mapped to their post-body handles.
+    """
+    records: list[LoopCarriedRebind] = []
+    for name, after in named_handles.items():
+        if name not in snapshot:
+            continue
+        before = snapshot[name]
+        if before is after:
+            continue
+        after_value = _ir_value_from_handle_like(after)
+        if after_value is None or isinstance(after_value, ArrayValue):
+            continue
+        if after_value.type.is_quantum():
+            continue
+        before_synthesized = False
+        before_value = _ir_value_from_handle_like(before)
+        if before_value is None:
+            if isinstance(before, (bool, int, float)):
+                before_value = _value_to_ir_value(before, name)
+                before_synthesized = True
+            else:
+                continue
+        if isinstance(before_value, ArrayValue) or before_value.type.is_quantum():
+            continue
+        if before_value.uuid == after_value.uuid:
+            continue
+        records.append(
+            LoopCarriedRebind(
+                var_name=name,
+                before=before_value,
+                after=after_value,
+                before_synthesized=before_synthesized,
+            )
+        )
+    if records:
+        tracer = get_current_tracer()
+        tracer.loop_carried_rebinds = tracer.loop_carried_rebinds + tuple(records)
 
 
 def _create_phi_for_values(
@@ -952,6 +1034,7 @@ def for_items(
         key_var_values=tuple(key_var_values),
         value_var_value=value_var_value,
         operations=body_tracer.operations,
+        loop_carried_rebinds=body_tracer.loop_carried_rebinds,
     )
     for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand
 
