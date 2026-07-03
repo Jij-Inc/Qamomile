@@ -844,13 +844,13 @@ def emit_if(
         true_func: Function executing true branch, returns updated variables
         false_func: Function executing false branch, returns updated variables
         variables: List of variables used in the branches
-        output_names: Variable names positionally aligned with the branch
-            return tuples, used for branch-rebind records. Empty when the
-            transformer found no rebind candidates.
-        rebind_pre_bindings: Pre-branch handles of every pre-existing
-            variable reassigned in a branch, keyed by name; captured at
-            the call site by the AST transformer. None when there are no
-            candidates.
+        output_names (tuple): Variable names positionally aligned with the
+            branch return tuples, used for branch-rebind records. Empty
+            when the transformer found no rebind candidates.
+        rebind_pre_bindings (dict | None): Pre-branch handles of every
+            pre-existing variable reassigned in a branch, keyed by name;
+            captured at the call site by the AST transformer. None when
+            there are no candidates.
 
     Returns:
         Merged variable values after conditional execution (using Phi functions)

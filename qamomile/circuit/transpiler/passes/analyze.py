@@ -1049,7 +1049,13 @@ def _scan_branch_quantum_discards(
                     branch, concrete_values, bindings, measurement_tainted, op_reads
                 )
                 continue
-            if getattr(op.condition, "uuid", None) in measurement_tainted:
+            # Only a runtime if carrying quantum rebind records can discard;
+            # skip the O(total_ops) outside-reads build for the common case
+            # (gate rebinds / measurement-conditioned gates leave no records).
+            if (
+                op.branch_rebinds
+                and getattr(op.condition, "uuid", None) in measurement_tainted
+            ):
                 subtree_ids = {id(sub_op) for sub_op in flatten_ops([op])}
                 reads_outside: set[str] = set()
                 for op_id, read_uuids in op_reads.items():
