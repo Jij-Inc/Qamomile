@@ -39,6 +39,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.value import TupleValue
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
 
@@ -1488,6 +1489,116 @@ class TestMeasurementDerivedOutput:
 
         result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
         assert result.result().results == [(1, 20)]
+
+    def test_dynamic_if_phi_nested_under_for_uses_post_value(self, transpiler):
+        """A host-needed Bit Phi inside a qmc.range loop is shadowed
+        host-side instead of resolving to ``None``."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            qb = qmc.qubit("qb")
+            selq = qmc.qubit("sel")
+            target = qmc.qubit("target")
+            qb = qmc.x(qb)
+            a = qmc.measure(qa)
+            b = qmc.measure(qb)
+            sel = qmc.measure(selq)
+            out = a
+            for _ in qmc.range(1):
+                if sel:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = a
+                else:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = b
+            return out
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+        assert result.result().results == [(1, 20)]
+
+    def test_nested_shadow_if_uses_outer_runtime_condition_expr(self, transpiler):
+        """A loop-nested shadow if recomputes an outer runtime condition."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            qb = qmc.qubit("qb")
+            qc = qmc.qubit("qc")
+            target = qmc.qubit("target")
+            qb = qmc.x(qb)
+            a = qmc.measure(qa)
+            b = qmc.measure(qb)
+            c = qmc.measure(qc)
+            sel = a | c
+            out = a
+            for _ in qmc.range(1):
+                if sel:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = a
+                else:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = b
+            return out
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+        assert result.result().results == [(1, 20)]
+
+    def test_dynamic_if_phi_nested_under_for_items_uses_post_value(self, transpiler):
+        """A host-needed Bit Phi inside qmc.items is shadowed host-side."""
+
+        @qmc.qkernel
+        def kernel(spec: qmc.Dict[qmc.UInt, qmc.UInt]) -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            qb = qmc.qubit("qb")
+            selq = qmc.qubit("sel")
+            target = qmc.qubit("target")
+            qb = qmc.x(qb)
+            a = qmc.measure(qa)
+            b = qmc.measure(qb)
+            sel = qmc.measure(selq)
+            out = a
+            for _key, _value in qmc.items(spec):
+                if sel:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = a
+                else:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = b
+            return out
+
+        exe = transpiler.transpile(kernel, bindings={"spec": {0: 1}})
+        assert exe.sample(transpiler.executor(), shots=20).result().results == [(1, 20)]
+
+    def test_while_loop_carried_external_measurement_is_rejected(self, transpiler):
+        """A while condition cannot be updated from measurements taken before
+        the loop body."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q = qmc.qubit_array(5, "q")
+            q[0] = qmc.x(q[0])
+            q[2] = qmc.x(q[2])
+            bit = qmc.measure(q[0])
+            sel = qmc.measure(q[1])
+            a = qmc.measure(q[3])
+            b = qmc.measure(q[2])
+            while bit:
+                q[4] = qmc.x(q[4])
+                if sel:
+                    bit = b
+                else:
+                    bit = a
+            return qmc.measure(q[4])
+
+        with pytest.raises(EmitError, match="updated by measurements produced"):
+            transpiler.transpile(kernel)
 
     def test_condop_or_output_sample(self, transpiler):
         """``return a | b`` with ``a=1``, ``b=0`` samples ``1``."""

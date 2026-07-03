@@ -560,31 +560,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 current_ops.extend(pending_post)
                 pending_post = []
 
-            if isinstance(op, IfOperation) and op_kind == OperationKind.QUANTUM:
-                shadow_ops = self._build_post_shadow_if_ops(op)
+            if op_kind == OperationKind.QUANTUM:
+                op, shadow_ops = self._rewrite_post_shadow_control_flow(
+                    op,
+                    self._current_block_operations,
+                )
                 if shadow_ops:
                     pending_post.extend(shadow_ops)
-                    shadow_if = shadow_ops[-1]
-                    if isinstance(shadow_if, IfOperation):
-                        host_phi_output_ids = {
-                            result.uuid
-                            for result in shadow_if.results
-                            if result.uuid not in self._quantum_needed
-                        }
-                        if host_phi_output_ids:
-                            op = dataclasses.replace(
-                                op,
-                                results=[
-                                    result
-                                    for result in op.results
-                                    if result.uuid not in host_phi_output_ids
-                                ],
-                                phi_ops=[
-                                    phi
-                                    for phi in op.phi_ops
-                                    if phi.output.uuid not in host_phi_output_ids
-                                ],
-                            )
 
             current_ops.append(op)
 
@@ -639,6 +621,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 hybrid operation.
         """
 
+        segmentation = self
+
         class QuantumInputCollector(ControlFlowVisitor):
             """Collect input-value UUIDs of every quantum / hybrid operation."""
 
@@ -655,9 +639,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 Returns:
                     None: Mutates ``self.inputs`` in place.
                 """
-                if op.operation_kind in (
-                    OperationKind.QUANTUM,
-                    OperationKind.HYBRID,
+                if (
+                    op.operation_kind
+                    in (
+                        OperationKind.QUANTUM,
+                        OperationKind.HYBRID,
+                    )
+                    or segmentation._effective_kind(op) == OperationKind.QUANTUM
                 ):
                     for v in op.all_input_values():
                         if isinstance(v, ValueBase):
@@ -890,12 +878,166 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         collector.visit_operations(operations)
         return collector.producers
 
-    def _build_post_shadow_if_ops(self, op: IfOperation) -> list[Operation]:
+    def _rewrite_post_shadow_control_flow(
+        self,
+        op: Operation,
+        scope_operations: list[Operation],
+    ) -> tuple[Operation, list[Operation]]:
+        """Rewrite quantum control flow and build host-side shadow ops.
+
+        Args:
+            op (Operation): Quantum-segment operation to inspect.
+            scope_operations (list[Operation]): Operations in the lexical
+                scope that contains ``op``. Used to collect pure-classical
+                producers for runtime conditions.
+
+        Returns:
+            tuple[Operation, list[Operation]]: The operation with host-only
+                Phi outputs removed from nested quantum ``IfOperation`` nodes,
+                plus classical shadow operations that recompute those Phi
+                outputs after the quantum segment.
+        """
+        if isinstance(op, IfOperation):
+            true_operations, true_shadows = self._rewrite_post_shadow_body(
+                op.true_operations
+            )
+            false_operations, false_shadows = self._rewrite_post_shadow_body(
+                op.false_operations
+            )
+            rewritten: IfOperation = dataclasses.replace(
+                op,
+                true_operations=true_operations,
+                false_operations=false_operations,
+            )
+
+            shadow_ops: list[Operation] = []
+            if true_shadows or false_shadows:
+                condition_prelude = self._collect_classical_dependency_ops(
+                    [op.condition],
+                    self._shadow_condition_scope(scope_operations),
+                )
+                if condition_prelude is None:
+                    condition_prelude = []
+                shadow_ops.extend(condition_prelude)
+                shadow_ops.append(
+                    dataclasses.replace(
+                        op,
+                        true_operations=true_shadows,
+                        false_operations=false_shadows,
+                        phi_ops=[],
+                        results=[],
+                    )
+                )
+
+            if self._effective_kind(rewritten) == OperationKind.QUANTUM:
+                local_shadow_ops = self._build_post_shadow_if_ops(
+                    rewritten,
+                    scope_operations,
+                )
+                if local_shadow_ops:
+                    shadow_ops.extend(local_shadow_ops)
+                    rewritten = self._drop_host_only_phi_outputs(
+                        rewritten,
+                        local_shadow_ops,
+                    )
+            return rewritten, shadow_ops
+
+        if isinstance(op, HasNestedOps):
+            shadow_lists: list[list[Operation]] = []
+            rewritten_lists: list[list[Operation]] = []
+            has_shadow = False
+            changed = False
+            for body in op.nested_op_lists():
+                rewritten_body, body_shadows = self._rewrite_post_shadow_body(body)
+                rewritten_lists.append(rewritten_body)
+                shadow_lists.append(body_shadows)
+                has_shadow = has_shadow or bool(body_shadows)
+                changed = changed or any(
+                    new is not old for new, old in zip(rewritten_body, body)
+                )
+            rewritten_op = op.rebuild_nested(rewritten_lists) if changed else op
+            if not has_shadow:
+                return rewritten_op, []
+            return rewritten_op, [op.rebuild_nested(shadow_lists)]
+
+        return op, []
+
+    def _rewrite_post_shadow_body(
+        self,
+        operations: list[Operation],
+    ) -> tuple[list[Operation], list[Operation]]:
+        """Rewrite a control-flow body and collect its shadow operations.
+
+        Args:
+            operations (list[Operation]): Operations in one lexical body.
+
+        Returns:
+            tuple[list[Operation], list[Operation]]: Rewritten body for the
+                quantum segment and classical-only shadow body for the
+                post-quantum segment.
+        """
+        rewritten_body: list[Operation] = []
+        shadow_body: list[Operation] = []
+        for body_op in operations:
+            rewritten_op, shadow_ops = self._rewrite_post_shadow_control_flow(
+                body_op,
+                operations,
+            )
+            rewritten_body.append(rewritten_op)
+            shadow_body.extend(shadow_ops)
+        return rewritten_body, shadow_body
+
+    def _drop_host_only_phi_outputs(
+        self,
+        op: IfOperation,
+        shadow_ops: list[Operation],
+    ) -> IfOperation:
+        """Remove host-only Phi outputs from a quantum ``IfOperation``.
+
+        Args:
+            op (IfOperation): Rewritten ``IfOperation`` candidate.
+            shadow_ops (list[Operation]): Shadow operations returned by
+                :meth:`_build_post_shadow_if_ops`.
+
+        Returns:
+            IfOperation: ``op`` with host-only Phi outputs removed when
+                applicable.
+        """
+        shadow_if = shadow_ops[-1]
+        if not isinstance(shadow_if, IfOperation):
+            return op
+        host_phi_output_ids = {
+            result.uuid
+            for result in shadow_if.results
+            if result.uuid not in self._quantum_needed
+        }
+        if not host_phi_output_ids:
+            return op
+        return dataclasses.replace(
+            op,
+            results=[
+                result
+                for result in op.results
+                if result.uuid not in host_phi_output_ids
+            ],
+            phi_ops=[
+                phi for phi in op.phi_ops if phi.output.uuid not in host_phi_output_ids
+            ],
+        )
+
+    def _build_post_shadow_if_ops(
+        self,
+        op: IfOperation,
+        condition_scope: list[Operation] | None = None,
+    ) -> list[Operation]:
         """Build host-side operations that recompute selected Phi outputs.
 
         Args:
             op (IfOperation): Quantum-effective ``IfOperation`` whose Phi
                 outputs may be needed after the quantum segment.
+            condition_scope (list[Operation] | None): Lexical scope used to
+                collect pure-classical producers for the condition. Defaults
+                to the whole block for top-level compatibility.
 
         Returns:
             list[Operation]: Pure-classical operations to append to the
@@ -931,7 +1073,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         condition_prelude = self._collect_classical_dependency_ops(
             [op.condition],
-            self._current_block_operations,
+            self._shadow_condition_scope(condition_scope)
+            if condition_scope is not None
+            else self._current_block_operations,
         )
         if condition_prelude is None:
             condition_prelude = []
@@ -955,6 +1099,30 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             results=[phi.output for phi in target_phis],
         )
         return [*condition_prelude, shadow_if]
+
+    def _shadow_condition_scope(
+        self,
+        scope_operations: list[Operation],
+    ) -> list[Operation]:
+        """Return operations visible to a nested shadow condition.
+
+        Args:
+            scope_operations (list[Operation]): Operations from the immediate
+                lexical body that contains the shadowed ``IfOperation``.
+
+        Returns:
+            list[Operation]: Top-level block operations followed by immediate
+                scope operations, deduplicated by object identity.
+        """
+        combined: list[Operation] = []
+        seen: set[int] = set()
+        for candidate in [*self._current_block_operations, *scope_operations]:
+            candidate_id = id(candidate)
+            if candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            combined.append(candidate)
+        return combined
 
     def _phi_needs_host_value(self, phi: PhiOp) -> bool:
         """Return whether a Phi output must be available host-side.
