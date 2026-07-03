@@ -47,9 +47,6 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
-from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
-    CompileTimeIfLoweringPass,
-)
 
 from .geometry import compute_border_padding
 from .style import CircuitStyle
@@ -1610,6 +1607,10 @@ class CircuitAnalyzer:
         )
         # Inline expansion sees actual arguments, so callee-local compile-time IFs
         # can be lowered before building child visual nodes.
+        from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
+            CompileTimeIfLoweringPass,
+        )
+
         block_value = CompileTimeIfLoweringPass(bindings=child_param_values).run(
             block_value
         )

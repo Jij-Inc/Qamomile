@@ -14,9 +14,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import ast
 import math
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 from matplotlib import colors as mcolors
@@ -724,6 +726,22 @@ class TestBranchMeasurementWire:
 
 class TestCompileTimeResolution:
     """Bound or constant conditions are lowered away before drawing."""
+
+    def test_analyzer_keeps_compile_time_lowering_import_local(self):
+        """Analyzer keeps compile-time lowering imports local to inline expansion."""
+        module_name = "qamomile.circuit.transpiler.passes.compile_time_if_lowering"
+        analyzer_path = (
+            Path(__file__).parents[2]
+            / "qamomile"
+            / "circuit"
+            / "visualization"
+            / "analyzer.py"
+        )
+        tree = ast.parse(analyzer_path.read_text())
+        top_level_imports = [
+            node.module for node in tree.body if isinstance(node, ast.ImportFrom)
+        ]
+        assert module_name not in top_level_imports
 
     def test_bound_condition_is_lowered_in_block(self):
         """Binding ``flag`` removes the IfOperation from the prepared block."""
