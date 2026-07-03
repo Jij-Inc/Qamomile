@@ -16,8 +16,12 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.gate import MeasureOperation, MeasureVectorOperation
-from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.operation.gate import (
+    GateOperation,
+    MeasureOperation,
+    MeasureVectorOperation,
+)
+from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
 from qamomile.circuit.ir.value import Value, ValueBase
 from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
 from qamomile.circuit.transpiler.passes import Pass
@@ -660,6 +664,415 @@ def reject_loop_carried_classical_rebinds(
             _check_loop_carried_rebinds(op, producer_map)
 
 
+def _branch_quantum_discard_error(
+    fresh_value: Value,
+    original_value: Value,
+    branch_label: str,
+) -> ValidationError:
+    """Build the targeted branch-internal quantum discard rejection error.
+
+    Args:
+        fresh_value (Value): The freshly allocated quantum value the phi
+            selects when the rebinding branch is taken.
+        original_value (Value): The pre-branch quantum value whose state
+            the taken branch would silently drop.
+        branch_label (str): Human-readable branch side ("true" / "false").
+
+    Returns:
+        ValidationError: The error to raise.
+    """
+    fresh_name = fresh_value.name or "<anonymous>"
+    original_name = original_value.name or "<anonymous>"
+    return ValidationError(
+        f"Branch-internal fresh allocation '{fresh_name}' in the "
+        f"{branch_label} branch of a runtime if conditionally discards the "
+        f"quantum state of '{original_name}': when the branch is taken, the "
+        f"freshly allocated qubit replaces '{original_name}' without the "
+        f"branch ever consuming the original state, so that state would be "
+        f"silently dropped at runtime. Consume the original state before "
+        f"branching or inside the branch (e.g. qmc.measure(...)), or apply "
+        f"gates to the same qubit in both branches instead of allocating a "
+        f"new one."
+    )
+
+
+def _is_branch_fresh_allocation(
+    value: Value,
+    branch_producers: dict[str, Operation],
+    visiting: set[str] | None = None,
+) -> bool:
+    """Check whether a quantum value originates from an in-branch allocation.
+
+    Traces the value's qubit lineage backwards through the branch-local
+    producer map: plain gates map each result to the qubit operand at the
+    same position, and phi merges (nested runtime ifs, or single-operand
+    phis collapsed by dead-branch pruning) count as fresh only when every
+    reachable leaf is fresh. The trace is deliberately conservative: any
+    producer it does not understand (composite gates, controlled blocks,
+    casts, ...) makes the value count as not-fresh, so the discard check
+    errs toward allowing.
+
+    Args:
+        value (Value): The quantum value to trace (a phi branch input).
+        branch_producers (dict[str, Operation]): Result-UUID-to-producer map
+            restricted to the branch body (nested control flow included).
+            A value with no producer here comes from outside the branch.
+        visiting (set[str] | None): UUIDs on the current DFS path, used to
+            break cycles with backtracking (the same value may be reached
+            from both sides of a nested phi). Defaults to None (fresh
+            traversal).
+
+    Returns:
+        bool: True if the value provably originates from a
+            ``QInitOperation`` inside the branch.
+    """
+    if visiting is None:
+        visiting = set()
+    if value.uuid in visiting:
+        return False
+    visiting.add(value.uuid)
+    try:
+        producer = branch_producers.get(value.uuid)
+        if producer is None:
+            return False
+        if isinstance(producer, QInitOperation):
+            return True
+        if isinstance(producer, GateOperation):
+            qubit_operands = producer.qubit_operands
+            for index, result in enumerate(producer.results):
+                if result.uuid == value.uuid and index < len(qubit_operands):
+                    return _is_branch_fresh_allocation(
+                        qubit_operands[index], branch_producers, visiting
+                    )
+            return False
+        if isinstance(producer, PhiOp):
+            if len(producer.operands) == 1:
+                return _is_branch_fresh_allocation(
+                    producer.operands[0], branch_producers, visiting
+                )
+            if len(producer.operands) < 3:
+                return False
+            return _is_branch_fresh_allocation(
+                producer.true_value, branch_producers, visiting
+            ) and _is_branch_fresh_allocation(
+                producer.false_value, branch_producers, visiting
+            )
+        return False
+    finally:
+        visiting.discard(value.uuid)
+
+
+def _trace_pre_branch_root(
+    value: Value,
+    branch_producers: dict[str, Operation],
+    visiting: set[str] | None = None,
+) -> Value | None:
+    """Trace a phi input back to the pre-branch value it descends from.
+
+    Follows the same qubit lineage steps as
+    :func:`_is_branch_fresh_allocation` (positional gate operands, phi
+    merges) through the branch-local producer map until it reaches a value
+    with no in-branch producer — the state the variable held before the
+    if. A phi merge yields a root only when both sides converge on the
+    same pre-branch value.
+
+    Args:
+        value (Value): The quantum value to trace (a phi branch input).
+        branch_producers (dict[str, Operation]): Result-UUID-to-producer map
+            restricted to the branch body (nested control flow included).
+        visiting (set[str] | None): UUIDs on the current DFS path, used to
+            break cycles with backtracking. Defaults to None (fresh
+            traversal).
+
+    Returns:
+        Value | None: The pre-branch root value, or None when the lineage
+            allocates fresh in-branch (``QInitOperation``), diverges, or
+            passes through a producer the trace does not understand.
+    """
+    if visiting is None:
+        visiting = set()
+    if value.uuid in visiting:
+        return None
+    visiting.add(value.uuid)
+    try:
+        producer = branch_producers.get(value.uuid)
+        if producer is None:
+            return value
+        if isinstance(producer, GateOperation):
+            qubit_operands = producer.qubit_operands
+            for index, result in enumerate(producer.results):
+                if result.uuid == value.uuid and index < len(qubit_operands):
+                    return _trace_pre_branch_root(
+                        qubit_operands[index], branch_producers, visiting
+                    )
+            return None
+        if isinstance(producer, PhiOp):
+            if len(producer.operands) == 1:
+                return _trace_pre_branch_root(
+                    producer.operands[0], branch_producers, visiting
+                )
+            if len(producer.operands) < 3:
+                return None
+            true_root = _trace_pre_branch_root(
+                producer.true_value, branch_producers, visiting
+            )
+            if true_root is None:
+                return None
+            false_root = _trace_pre_branch_root(
+                producer.false_value, branch_producers, visiting
+            )
+            if false_root is None or false_root.uuid != true_root.uuid:
+                return None
+            return true_root
+        return None
+    finally:
+        visiting.discard(value.uuid)
+
+
+def _branch_referenced_uuids(branch_ops: list[Operation]) -> set[str]:
+    """Collect every value UUID a branch body references as an input.
+
+    Covers all nested operations (via ``flatten_ops``), and for each input
+    value also records its ``parent_array`` / ``slice_of`` ancestry so an
+    element or view read of a register counts as touching the register
+    itself. Used as the "did this branch consume the original state"
+    evidence — any reference is enough to disqualify the discard error,
+    which errs toward allowing.
+
+    Args:
+        branch_ops (list[Operation]): The branch body operations, already
+            pruned of compile-time-decidable ifs.
+
+    Returns:
+        set[str]: UUIDs of every referenced input value and its array
+            ancestry.
+    """
+    referenced: set[str] = set()
+
+    def add_with_ancestry(value: ValueBase) -> None:
+        """Record a value's UUID together with its array ancestry.
+
+        Args:
+            value (ValueBase): Input value read by a branch operation.
+        """
+        if value.uuid in referenced:
+            return
+        referenced.add(value.uuid)
+        for attr in ("parent_array", "slice_of"):
+            ancestor = getattr(value, attr, None)
+            if ancestor is not None:
+                add_with_ancestry(ancestor)
+
+    for op in flatten_ops(branch_ops):
+        for value in op.all_input_values():
+            add_with_ancestry(value)
+    return referenced
+
+
+def _check_branch_quantum_discard(
+    if_op: IfOperation,
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+) -> None:
+    """Check one runtime ``IfOperation``'s phi merges for conditional discards.
+
+    For each phi merge and each branch side, flags the pairing of an
+    in-branch fresh allocation with a pre-branch quantum value that the
+    allocating branch never references: taking that branch would replace
+    the variable with the fresh qubit and silently drop the original
+    state. Branch bodies are pruned of compile-time-decidable nested ifs
+    first (each side with its own copy of ``concrete_values``, matching
+    ``CompileTimeIfLoweringPass`` scoping) so dead-branch allocations and
+    dead-branch consumes do not distort the analysis.
+
+    Args:
+        if_op (IfOperation): Runtime if whose condition did not resolve at
+            compile time.
+        concrete_values (dict[str, Any]): UUID-keyed concrete classical-op
+            results accumulated up to this operation.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+
+    Raises:
+        ValidationError: If a phi merge pairs an in-branch fresh allocation
+            with a pre-branch quantum value the allocating branch never
+            consumes.
+    """
+    pruned_branches = {
+        True: prune_compile_time_ifs(
+            if_op.true_operations, dict(concrete_values), bindings
+        ),
+        False: prune_compile_time_ifs(
+            if_op.false_operations, dict(concrete_values), bindings
+        ),
+    }
+    producers: dict[bool, dict[str, Operation]] = {}
+    referenced: dict[bool, set[str]] = {}
+    for side, branch_ops in pruned_branches.items():
+        side_producers: dict[str, Operation] = {}
+        build_producer_map(branch_ops, side_producers)
+        producers[side] = side_producers
+        referenced[side] = _branch_referenced_uuids(branch_ops)
+
+    for phi in if_op.phi_ops:
+        if len(phi.operands) < 3 or not phi.results:
+            continue
+        for side, label in ((True, "true"), (False, "false")):
+            fresh_candidate = phi.true_value if side else phi.false_value
+            other_side_value = phi.false_value if side else phi.true_value
+            if not isinstance(fresh_candidate, Value) or not isinstance(
+                other_side_value, Value
+            ):
+                continue
+            if not fresh_candidate.type.is_quantum():
+                continue
+            if not _is_branch_fresh_allocation(fresh_candidate, producers[side]):
+                continue
+            original = _trace_pre_branch_root(other_side_value, producers[not side])
+            if original is None or not original.type.is_quantum():
+                continue
+            # Defensive: the pre-branch root must not be produced inside
+            # either branch (branches are traced from the same pre-if
+            # state, so this cannot normally happen).
+            if original.uuid in producers[True] or original.uuid in producers[False]:
+                continue
+            if original.uuid in referenced[side]:
+                continue
+            raise _branch_quantum_discard_error(fresh_candidate, original, label)
+
+
+def _scan_branch_quantum_discards(
+    ops: list[Operation],
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+    producer_map: dict[str, Operation],
+) -> None:
+    """Walk operations like the if-lowering pass, checking each runtime if.
+
+    Mirrors ``CompileTimeIfLoweringPass``'s classification walk:
+    classical-op results are accumulated in program order, a
+    compile-time-resolvable ``IfOperation`` contributes only its taken
+    branch to the scan, and a runtime ``IfOperation`` has both branches
+    scanned with their own copy of the accumulated state. This per-position
+    classification is what lets a fresh allocation inside a compile-time
+    branch *nested within* a runtime branch stay legal —
+    ``prune_compile_time_ifs`` alone does not descend into runtime-if
+    bodies.
+
+    Args:
+        ops (list[Operation]): Operations to scan, in program order.
+        concrete_values (dict[str, Any]): UUID-keyed concrete classical-op
+            results accumulated along the walk. Updated in place for the
+            current scope; nested scopes receive copies.
+        bindings (dict[str, Any]): Compile-time parameter bindings used to
+            resolve ``IfOperation`` conditions.
+        producer_map (dict[str, Operation]): Block-wide result-UUID-to-
+            producer map used to classify measurement-backed conditions.
+
+    Raises:
+        ValidationError: If a runtime if branch pairs a fresh allocation
+            with a never-consumed pre-branch quantum value.
+    """
+    for op in ops:
+        evaluate_classical_op_concrete(op, concrete_values, bindings)
+        if isinstance(op, IfOperation):
+            taken = resolve_compile_time_condition(
+                op.condition, concrete_values, bindings
+            )
+            if taken is not None:
+                branch = op.true_operations if taken else op.false_operations
+                _scan_branch_quantum_discards(
+                    branch, concrete_values, bindings, producer_map
+                )
+                continue
+            if is_measurement_backed(op.condition, producer_map):
+                _check_branch_quantum_discard(op, concrete_values, bindings)
+            _scan_branch_quantum_discards(
+                op.true_operations, dict(concrete_values), bindings, producer_map
+            )
+            _scan_branch_quantum_discards(
+                op.false_operations, dict(concrete_values), bindings, producer_map
+            )
+            continue
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                _scan_branch_quantum_discards(
+                    body, dict(concrete_values), bindings, producer_map
+                )
+        # Other operations carry no nested control flow to scan.
+
+
+def reject_branch_internal_quantum_discard(
+    operations: list[Operation],
+    bindings: dict[str, Any] | None = None,
+) -> None:
+    """Reject runtime-branch fresh allocations that discard quantum state.
+
+    The decoration-time rebind analyzer intentionally suppresses
+    branch-internal violations (its snapshot-restore scope truncates them)
+    so that compile-time-if dead-branch rebinds stay legal. That leaves a
+    runtime hole: ``if cond: q = qmc.qubit("fresh")`` with a
+    measurement-backed ``cond`` silently drops the original state of ``q``
+    exactly when the branch is taken. The IR makes the hazard visible as a
+    phi merge pairing an in-branch ``QInitOperation``-rooted value with a
+    pre-branch quantum value the allocating branch never consumes; this
+    check rejects that shape with a targeted error instead of letting it
+    surface as an emit-time physical-resource mismatch (or pass silently
+    on paths without that guard). Scalar ``Qubit`` and whole-register
+    ``Vector[Qubit]`` rebinds are covered alike — both merge through a
+    single phi.
+
+    ``IfOperation``s are classified with the same condition resolution
+    ``CompileTimeIfLoweringPass`` uses (via ``bindings``), including for
+    ifs nested inside runtime branches: a fresh allocation confined to a
+    compile-time branch — dead or taken — stays legal, because rebinding
+    to an alternative register under a compile-time flag is the documented
+    branch-selection idiom. Only ifs whose condition is measurement-backed
+    are checked; a non-measurement, non-compile-time condition cannot
+    drive runtime branching and is rejected at emit by the shared
+    condition resolution (though for this discard shape the emit-side phi
+    physical-resource check can fire first with its generic message).
+
+    What stays allowed:
+
+    - consuming the original inside the branch before re-allocating
+      (``if cond: qmc.measure(q); q = qmc.qubit(...)``) — any reference to
+      the original, including element or view reads of a register, counts;
+    - ordinary quantum rebinds through gates (``q = qmc.h(q)``);
+    - fresh allocations under compile-time-resolvable conditions;
+    - both branches allocating fresh values (the pre-branch value is then
+      not part of the phi merge, so it is outside this check's evidence).
+
+    The check is deliberately conservative toward allowing: qubit lineage
+    is traced only through plain gates and phi merges, so a fresh value
+    routed through composite gates, controlled blocks, or casts is not
+    flagged.
+
+    Exposed at module scope because it runs from two passes:
+    ``PartialEvaluationPass`` calls it before folding and if-lowering
+    (with ``bindings``, so compile-time branches are classified exactly as
+    the lowering pass will lower them), and ``AnalyzePass`` calls it again
+    as a safety net for pipelines that skip ``partial_eval``.
+
+    Args:
+        operations (list[Operation]): Operations to scan. Recurses through
+            all control flow; every runtime if at any nesting depth is
+            checked.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings
+            used to resolve ``IfOperation`` conditions, matching what
+            ``CompileTimeIfLoweringPass`` will later resolve. Defaults to
+            None (no bindings).
+
+    Raises:
+        ValidationError: If a runtime if branch rebinds a quantum variable
+            to an in-branch fresh allocation while the branch never
+            consumes the pre-branch value.
+    """
+    resolved_bindings = bindings or {}
+    producer_map: dict[str, Operation] = {}
+    build_producer_map(operations, producer_map)
+    _scan_branch_quantum_discards(operations, {}, resolved_bindings, producer_map)
+
+
 class AnalyzePass(Pass[Block, Block]):
     """Analyze and validate an affine block.
 
@@ -692,6 +1105,10 @@ class AnalyzePass(Pass[Block, Block]):
 
         # Reject in-loop classical scalar rebinds (loop-carried updates)
         self._reject_loop_carried_classical_rebinds(input.operations)
+
+        # Reject branch-internal fresh allocations that conditionally
+        # discard quantum state
+        self._reject_branch_internal_quantum_discard(input.operations)
 
         # Build dependency graph
         dependency_graph = self._build_dependency_graph(input.operations)
@@ -833,6 +1250,30 @@ class AnalyzePass(Pass[Block, Block]):
                 whose pre-loop value the body still reads.
         """
         reject_loop_carried_classical_rebinds(operations)
+
+    def _reject_branch_internal_quantum_discard(
+        self,
+        operations: list[Operation],
+    ) -> None:
+        """Reject runtime-branch fresh allocations that discard quantum state.
+
+        Thin wrapper for the module-level
+        :func:`reject_branch_internal_quantum_discard` so
+        ``PartialEvaluationPass`` can reuse the same check without
+        instantiating ``AnalyzePass``. Called without bindings: by this
+        stage ``CompileTimeIfLoweringPass`` has already eliminated
+        compile-time ifs, so any surviving ``IfOperation`` classifies as
+        runtime.
+
+        Args:
+            operations (list[Operation]): Operations to scan recursively.
+
+        Raises:
+            ValidationError: If a runtime if branch rebinds a quantum
+                variable to an in-branch fresh allocation while the branch
+                never consumes the pre-branch value.
+        """
+        reject_branch_internal_quantum_discard(operations)
 
     def _build_dependency_graph(
         self,

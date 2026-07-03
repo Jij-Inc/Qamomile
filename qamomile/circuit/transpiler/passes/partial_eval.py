@@ -8,6 +8,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
+    reject_branch_internal_quantum_discard,
     reject_loop_carried_classical_rebinds,
     reject_self_referential_loop_stores,
 )
@@ -41,8 +42,12 @@ class PartialEvaluationPass(Pass[Block, Block]):
 
         Raises:
             ValidationError: If the block kind is not ``AFFINE`` /
-                ``HIERARCHICAL``, or if a classical element store inside a
-                loop reads an element of the array it writes.
+                ``HIERARCHICAL``, or if one of the pre-fold rejection
+                checks fires (a classical element store inside a loop
+                reads an element of the array it writes, a loop body
+                rebinds a classical scalar whose pre-loop value it still
+                reads, or a runtime if branch pairs a fresh quantum
+                allocation with a never-consumed pre-branch value).
         """
         # HIERARCHICAL is accepted so that the self-recursion unroll loop
         # can interleave inline (which leaves one CallBlockOperation per
@@ -71,6 +76,14 @@ class PartialEvaluationPass(Pass[Block, Block]):
         # ``total = total + 1`` collapses the in-loop BinOp to a constant,
         # erasing the dependency evidence while keeping the wrong result.
         reject_loop_carried_classical_rebinds(input.operations, self._bindings)
+
+        # Reject branch-internal quantum discards BEFORE if-lowering, with
+        # bindings, so compile-time branches (dead or taken) are classified
+        # exactly the way CompileTimeIfLoweringPass will lower them and only
+        # genuine runtime (measurement-backed) branches are checked. Running
+        # here also makes the targeted error fire at the earliest pass that
+        # sees the pattern.
+        reject_branch_internal_quantum_discard(input.operations, self._bindings)
 
         # Keep ``SliceArrayOperation`` nodes through partial_eval so
         # the downstream ``SliceBorrowCheckPass`` can use them as

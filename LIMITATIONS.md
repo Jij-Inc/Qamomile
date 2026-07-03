@@ -76,25 +76,17 @@ The stdlib helpers `qft` / `iqft` silently return the input register unchanged w
 
 **Future fix**: deferred-shape composite IR — change `qmc.qft` / `qmc.iqft` to always emit a `CompositeGateOperation` even when the input shape is symbolic, with `num_target_qubits` typed as `int | Value`. Lower it at `resolve_parameter_shapes` once bindings are applied. `qpe` needs the parallel change in `_emit_iqft_and_cast_to_qfixed`: drop the `_get_concrete_size` fallback to `init_value`, emit the inner `CompositeGateOperation(IQFT)` and the `Cast`-to-`QFixed` with a symbolic size carried in metadata, and lower both at the same `resolve_parameter_shapes` stage. This is the codex-recommended medium-term refactor and obviates both the standalone no-op above and the recursive-layer limitation. The design surface is non-trivial: `CompositeGateOperation` itself, `CastOperation` (or `QFixedMetadata`), serialization, canonicalization, resource estimation, backend emitters, and the decomposition strategies under `qamomile/circuit/stdlib/` all need to handle the symbolic-shape case.
 
-## Rebind analysis silently allows branch-internal silent discard
+## Branch-internal quantum discard detection is deliberately conservative
 
-The qkernel rebind analyzer (`QuantumRebindAnalyzer` in `qamomile/circuit/frontend/ast_transform.py`) walks `if` / `for` / `while` bodies inside a snapshot-restore scope (`_visit_branch_scope`) that not only restores `quantum_vars` but also **truncates any violations recorded inside the branch back to the pre-branch length**. This is what lets compile-time-`if` dead-branch rebinds like `if flag: ... ; else: alt = qubit_array(...); q = alt` decorate successfully — the compile-time-if lowering pass selects one branch and discards the other, so flagging the dead-branch rebind at decoration time would reject legitimate code.
+The decoration-time rebind analyzer still suppresses branch-internal violations (its snapshot-restore scope cannot tell compile-time from runtime branches), but the runtime hole that suppression used to leave — `if cond: q = qmc.qubit("fresh")` with a measurement-backed `cond` silently dropping the pre-branch state of `q` exactly when the branch is taken — is now closed at the IR layer. `reject_branch_internal_quantum_discard` (`qamomile/circuit/transpiler/passes/analyze.py`) classifies `IfOperation` conditions exactly the way `CompileTimeIfLoweringPass` does (including ifs nested inside runtime branches) and raises a targeted `ValidationError` from `PartialEvaluationPass` (pre-fold, with bindings) and `AnalyzePass` (safety net) when a runtime-if phi pairs an in-branch fresh allocation with a pre-branch quantum value the allocating branch never consumes. Scalar `Qubit` and whole-register `Vector[Qubit]` rebinds are both covered — each merges through a single phi. Compile-time branch rebinds (dead **or** taken) stay legal: rebinding to an alternative register under a compile-time flag is the documented branch-selection idiom.
 
-**When it bites**: a *runtime* conditional that silently discards a parameter via a fresh allocation:
+**Conservative corners** (all err toward allowing, never toward rejecting valid kernels):
 
-```python
-@qm.qkernel
-def k(q: qm.Qubit, cond: qm.Bit) -> qm.Bit:
-    if cond:
-        q = qm.qubit("fresh")   # discards q only when cond is true
-    return qm.measure(q)
-```
-
-The decoration-time analyzer suppresses this `FRESH_ALLOCATION` violation because the assignment is inside an `if` body. The IR-level safety net does NOT close the gap either: `AffineValidationPass` in `qamomile/circuit/transpiler/passes/affine_validate.py` only enforces "consumed at most once" and explicitly does **not** detect "never consumed" / silent-discard patterns, despite the docstring's "Quantum values are not silently discarded" line.
-
-**Why this trade-off was chosen**: the AST analyzer is flow-insensitive and cannot tell compile-time-if from runtime-if. Distinguishing them would require either pulling the constant-folding logic into the frontend or moving the check to the IR layer after `CompileTimeIfLoweringPass`. Both are larger refactors than the eager-raise PR's scope. Top-level (non-branch-internal) bypasses continue to raise at decoration time, and silent-discard inside branches is at least no worse than it was before the eager-raise change.
-
-**Future fix**: either (a) a dedicated IR-level silent-discard pass that runs after `inline` and `partial_eval` (where compile-time `if`s have been folded away and only genuine runtime branches remain), or (b) a flow-sensitive frontend extension that propagates a per-branch consume set and reports inputs that no branch consumed. (a) is more in line with Qamomile's "delegate concretization to IR / emit" principle and would also retroactively cover any other silent-discard pattern the AST analyzer cannot see.
+- Only ifs whose condition is measurement-backed are checked. A classical condition that is neither compile-time-resolvable nor measurement-backed cannot drive runtime branching and keeps its later emit-time diagnosis — which, for this discard shape specifically, can be the generic phi physical-resource error rather than the targeted "conditions must come from measurement results or be bound" message.
+- Fresh-allocation lineage is traced only through plain gates and phi merges. A fresh value routed through a composite gate, controlled block, or cast inside the branch is not flagged.
+- Any in-branch reference to the original value counts as consumption, including a single element or view read of a register — so a whole-register discard that touches just one element of the original is not flagged.
+- Both branches allocating fresh values is outside this check's evidence: the pre-branch value then no longer appears in the phi merge at all.
+- The check diagnoses the discard shape early; it does not make cross-branch physical-resource merges compile. A branch that consumes the original and then re-allocates (`if cond: qmc.measure(q); q = qmc.qubit(...)`) passes this check but still fails at emit on backends that require phi merges to reference identical physical qubits across branches.
 
 ## Rebind analyzer is blind to alias-imported `measure` / `expval` / quantum constructors
 

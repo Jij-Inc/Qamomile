@@ -1596,9 +1596,11 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
     truncates any violations recorded inside the branch back to the
     pre-branch length. Top-level (non-branch-internal) rebinds are
     flagged as usual; branch-internal rebinds are deliberately not
-    reported at decoration time. The companion gap on the IR side
-    (``AffineValidationPass`` does not detect silent-discard
-    patterns) is tracked in ``LIMITATIONS.md``.
+    reported at decoration time. Runtime-branch discards are instead
+    rejected at the IR layer by
+    ``reject_branch_internal_quantum_discard`` (in
+    ``qamomile.circuit.transpiler.passes.analyze``), which can tell
+    compile-time branches from runtime ones.
     """
 
     def __init__(self, quantum_param_names: set[str]) -> None:
@@ -1679,18 +1681,19 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             allows branch-internal rebinds to keep the user's
             compile-time-if usage working.
 
-        **Known limitation.** Suppressing branch-internal violations
+        **Division of labor.** Suppressing branch-internal violations
         means a kernel that genuinely discards an outer quantum binding
         inside a runtime ``if`` / ``for`` / ``while`` branch (e.g. a
         runtime ``if cond: q = qm.qubit("fresh")``) is NOT reported by
-        ``collect_quantum_rebind_violations``. The IR-level
-        ``AffineValidationPass`` does NOT close this gap either — it
-        only enforces "consumed at most once" and does not detect
-        "never consumed" / "silent discard" patterns. A dedicated
-        IR-level silent-discard pass (or a flow-sensitive frontend
-        analyzer) would be needed to catch these; this is tracked as a
-        follow-up. Top-level (non-branch-internal) bypasses continue
-        to be caught at decoration time.
+        ``collect_quantum_rebind_violations``. That runtime case is
+        instead rejected at the IR layer by
+        ``reject_branch_internal_quantum_discard`` (in
+        ``qamomile.circuit.transpiler.passes.analyze``), which resolves
+        branch conditions the same way ``CompileTimeIfLoweringPass``
+        does and therefore can tell a runtime branch from a
+        compile-time one — exactly the distinction this single-pass
+        AST analyzer cannot make. Top-level (non-branch-internal)
+        bypasses continue to be caught at decoration time.
 
         Args:
             node (ast.If | ast.For | ast.While): The control-flow node.
