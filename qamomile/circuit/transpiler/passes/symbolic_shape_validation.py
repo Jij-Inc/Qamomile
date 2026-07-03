@@ -172,19 +172,32 @@ def _build_classical_dependency_graph(
                     continue
                 self._record_value_reference_edges(v)
 
-        def _record_value_reference_edges(self, value: ValueBase) -> None:
+        def _record_value_reference_edges(
+            self,
+            value: ValueBase,
+            seen: set[str] | None = None,
+        ) -> None:
             """Record dependency edges carried by value metadata.
 
             Args:
                 value (ValueBase): Operand value whose metadata references are
                     part of the classical dataflow for structural bounds.
+                seen (set[str] | None): UUIDs already expanded during the
+                    current metadata walk.
 
             Returns:
                 None: Mutates ``self.graph`` in place.
             """
+            if seen is None:
+                seen = set()
+            if value.uuid in seen:
+                return
+            seen.add(value.uuid)
+
             for idx in getattr(value, "element_indices", ()):
                 if isinstance(idx, ValueBase):
                     self.graph.setdefault(value.uuid, set()).add(idx.uuid)
+                    self._record_value_reference_edges(idx, seen)
 
             parent = getattr(value, "parent_array", None)
             if parent is None:
@@ -199,6 +212,7 @@ def _build_classical_dependency_graph(
                 ):
                     if isinstance(bound, ValueBase):
                         self.graph.setdefault(cur.uuid, set()).add(bound.uuid)
+                        self._record_value_reference_edges(bound, seen)
 
                 next_parent = getattr(cur, "slice_of", None)
                 if next_parent is None:
