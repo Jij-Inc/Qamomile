@@ -63,6 +63,10 @@ class MatplotlibDrawer:
             graph (Block): Computation graph to visualize.
             style (CircuitStyle | None): Visual style configuration. Uses
                 DEFAULT_STYLE if None.
+
+        Raises:
+            ValidationError: If compile-time if lowering rejects ``graph``.
+            ValueError: If ``graph`` has an unknown ``BlockKind``.
         """
         self.graph = _prepare_graph_for_visualization(graph)
         self.style = style or DEFAULT_STYLE

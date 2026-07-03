@@ -1826,6 +1826,10 @@ class QKernel(Generic[P, R]):
 
         Raises:
             ImportError: If matplotlib is not installed.
+            ValueError: If a ``Vector[Qubit]`` parameter requires a concrete
+                size for visualization and no size is provided.
+            ValidationError: If visualization-time compile-time if lowering
+                rejects the traced graph.
 
         Example:
             ```python
