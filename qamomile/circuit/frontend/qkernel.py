@@ -24,6 +24,7 @@ from qamomile.circuit.frontend.ast_transform import (
 )
 from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
+    _get_ndim,
     build_param_slots,
     create_dummy_input,
     func_to_block,
@@ -1302,6 +1303,8 @@ class QKernel(Generic[P, R]):
             dict_handle = Dict(value=dict_value, _entries=[])
             if hasattr(param_type, "__args__") and param_type.__args__:
                 dict_handle._key_type = param_type.__args__[0]
+                if len(param_type.__args__) >= 2:
+                    dict_handle._value_type = param_type.__args__[1]
             return dict_handle
 
         raise TypeError(f"Cannot create bound value for type {param_type}")
@@ -1454,25 +1457,13 @@ class QKernel(Generic[P, R]):
                     bindings[name] = const_array
                 continue
 
-            # Quantum array. ``Vector[Qubit]`` is the fully supported
-            # case: we extract the first-axis size via ``get_size`` and
-            # carry it in ``qubit_sizes`` so the callee re-traces with
-            # a concrete shape. ``Matrix[Qubit]`` / ``Tensor[Qubit]``
-            # are higher-rank registers; we do not yet extract their
-            # multi-dim shape nor have the ``create_dummy_input
-            # (shape=...)`` plumbing for them, so we treat them like
-            # ``Dict`` / ``Tuple`` — leave the argument out of all
-            # three buckets and ``continue``. ``_create_traced_block``
-            # falls through to ``create_dummy_input`` for that
-            # position (matching the cached block), and the rest of
-            # the call still benefits from specialization. The
-            # trade-off: if the callee applies shape-dependent stdlib
-            # to the higher-rank register, that op continues to
-            # silently no-op — same as the pre-#392 baseline for
-            # that specific case. Raising here instead would forbid
-            # any nested call that takes a ``Matrix[Qubit]`` /
-            # ``Tensor[Qubit]``, even kernels that never touch
-            # shape-dependent stdlib on it.
+            # Quantum array. ``Vector[Qubit]`` is the only reachable
+            # case — rank>1 quantum registers are rejected at
+            # construction / trace time (see ``qubit_array`` and
+            # ``create_dummy_input``), so the non-``Vector`` ``continue``
+            # below is defensive only. Extract the first-axis size via
+            # ``get_size`` and carry it in ``qubit_sizes`` so the callee
+            # re-traces with a concrete shape.
             if (
                 is_array_type(param_type)
                 and _get_array_element_type(param_type) is Qubit
@@ -1887,7 +1878,40 @@ class QKernel(Generic[P, R]):
         Separates integer-valued kwargs for Qubit array parameters (used as
         array sizes via ``qubit_array()``) from other kwargs, then traces the
         kernel to produce a Block.
+
+        Args:
+            kwargs (dict[str, Any]): Concrete values for kernel arguments.
+                Integer values for ``Vector[Qubit]`` parameters are
+                interpreted as register sizes.
+
+        Returns:
+            Block: The traced block with quantum-array parameters realized
+                as concrete 1-D registers.
+
+        Raises:
+            NotImplementedError: If the kernel declares a rank>1 quantum
+                array parameter (``Matrix[Qubit]`` / ``Tensor[Qubit]``).
+                This path realizes quantum-array parameters via
+                ``qubit_array(size)``, which would otherwise collapse a
+                higher-rank register into a 1-D one.
+            ValueError: If a ``Vector[Qubit]`` parameter is missing its
+                integer size in ``kwargs``.
         """
+        for name, param in self.signature.parameters.items():
+            pt = self.input_types.get(name, param.annotation)
+            if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
+                ndim = _get_ndim(pt)
+                if ndim > 1:
+                    raise NotImplementedError(
+                        f"Parameter {name!r} is a rank-{ndim} quantum "
+                        f"register: the quantum addressing path is rank-1, "
+                        f"so a higher-rank register would silently alias "
+                        f"distinct elements onto the same physical qubit. "
+                        f"Declare a 1-D Vector[Qubit] parameter and compute "
+                        f"flat indices explicitly instead "
+                        f"(e.g. q[i * ncols + j])."
+                    )
+
         qubit_sizes: dict[str, int] = {}
         build_kwargs: dict[str, Any] = {}
         for key, val in kwargs.items():
@@ -1929,6 +1953,7 @@ class QKernel(Generic[P, R]):
         fold_loops: bool = True,
         expand_composite: bool = False,
         inline_depth: int | None = None,
+        fold_ifs: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Visualize the circuit using Matplotlib.
@@ -1938,23 +1963,32 @@ class QKernel(Generic[P, R]):
         are shown as symbolic parameters.
 
         Args:
-            inline: If True, expand CallBlockOperation contents (inlining).
-                   If False (default), show CallBlockOperation as boxes.
-            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
-                       If False, expand loops and show all iterations.
-            expand_composite: If True, expand CompositeGateOperation (QFT, IQFT, etc.).
-                            If False (default), show as boxes. Independent of inline.
-            inline_depth: Maximum nesting depth for inline expansion. None means
-                         unlimited (default). 0 means no inlining, 1 means top-level
-                         only, etc. Only affects CallBlock/ControlledU, not CompositeGate.
-            **kwargs: Concrete values for arguments. Arguments not provided here
-                     (and without defaults) will be shown as symbolic parameters.
+            inline (bool): If True, expand CallBlockOperation contents
+                (inlining). If False (default), show CallBlockOperation as
+                boxes.
+            fold_loops (bool): If True (default), display ForOperation as
+                blocks instead of unrolling. If False, expand loops and show
+                all iterations.
+            expand_composite (bool): If True, expand CompositeGateOperation
+                nodes. If False (default), show them as boxes.
+            inline_depth (int | None): Maximum nesting depth for inline
+                expansion. None means unlimited. Only affects CallBlock and
+                ControlledU nodes, not CompositeGate.
+            fold_ifs (bool): If True, display IfOperation as folded summary
+                blocks. If False (default), show if/else branches side by side.
+            **kwargs (Any): Concrete values for arguments. Arguments not
+                provided here and without defaults will be shown as symbolic
+                parameters.
 
         Returns:
-            matplotlib.figure.Figure object.
+            Any: Matplotlib figure object.
 
         Raises:
             ImportError: If matplotlib is not installed.
+            ValueError: If a ``Vector[Qubit]`` parameter requires a concrete
+                size for visualization and no size is provided.
+            ValidationError: If visualization-time compile-time if lowering
+                rejects the traced graph.
 
         Example:
             ```python
@@ -1986,6 +2020,9 @@ class QKernel(Generic[P, R]):
             # Draw with loops folded (shown as blocks)
             fig = circuit.draw(fold_loops=True)
 
+            # Draw with if/else folded into a summary box
+            fig = circuit.draw(fold_ifs=True)
+
             # Draw with composite gates expanded
             fig = circuit.draw(expand_composite=True)
             ```
@@ -1996,6 +2033,7 @@ class QKernel(Generic[P, R]):
             self,
             inline=inline,
             fold_loops=fold_loops,
+            fold_ifs=fold_ifs,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
             **kwargs,

@@ -343,13 +343,17 @@ class TestAllowedPatterns:
 
         _transpile(kernel, bindings={"n": 2})
 
-    def test_measurement_backed_loop_carried_bit_allowed(self):
-        """A measured Bit read and re-measured per iteration stays supported.
+    def test_for_loop_measurement_backed_bit_rejected(self):
+        """A measured Bit read and re-measured inside a for loop is rejected.
 
-        The resource allocator aliases every version of the bit onto one
-        physical clbit, so reads observe the updated value at runtime —
-        this is the loop-backedge liveness pattern pinned by the Qiskit
-        frontend suite.
+        Only ``WhileOperation.operands[1]`` gets loop-carried clbit
+        aliasing from the resource allocator; a for-loop has no such
+        machinery, so the ``if state:`` condition keeps addressing the
+        pre-loop clbit while the branch measurements write elsewhere
+        (measured divergence: with fresh-per-iteration Python semantics
+        ``n=2`` yields ``out == 1``, but the emitted ForLoopOp circuit
+        returns ``0``). Rejecting is the honest behavior until real
+        aliasing lands.
         """
 
         @qmc.qkernel
@@ -368,7 +372,8 @@ class TestAllowedPatterns:
                     state = qmc.measure(q_one)
             return out
 
-        _transpile(kernel, bindings={"n": 2})
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"n": 2})
 
     def test_repeat_until_zero_while_allowed(self):
         """The documented repeat-until-zero while pattern keeps compiling."""

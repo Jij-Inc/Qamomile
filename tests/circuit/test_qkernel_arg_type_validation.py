@@ -259,44 +259,15 @@ def _ok_control_broadcast_view() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-@qmc.qkernel
-def _matrix_target(m: qmc.Matrix[qmc.Qubit]) -> qmc.Matrix[qmc.Qubit]:
-    """Declare a higher-rank ``Matrix[Qubit]`` parameter."""
-    m[0, 0] = qmc.x(m[0, 0])
-    return m
-
-
-@qmc.qkernel
-def _err_normal_matrix_into_vec() -> qmc.Bit:
-    """Rank mismatch (plain): a ``Matrix[Qubit]`` passed to ``Vector[Qubit]``."""
-    m = qmc.qubit_array((2, 2), "m")
-    out = _vec_target(m)
-    return qmc.measure(out[0])
-
-
-@qmc.qkernel
-def _err_normal_vec_into_matrix() -> qmc.Bit:
-    """Rank mismatch (plain): a ``Vector[Qubit]`` passed to ``Matrix[Qubit]``."""
-    qs = qmc.qubit_array(4, "qs")
-    out = _matrix_target(qs)
-    return qmc.measure(out[0, 0])
-
-
-@qmc.qkernel
-def _err_control_matrix_broadcast() -> qmc.Bit:
-    """Rank mismatch (control): a ``Matrix[Qubit]`` is not a valid 1-D broadcast."""
-    c = qmc.qubit("c")
-    m = qmc.qubit_array((2, 2), "m")
-    c, m = _c_scalar(c, m)
-    return qmc.measure(c)
-
-
-@qmc.qkernel
-def _ok_normal_matrix() -> qmc.Bit:
-    """Plain call: a ``Matrix[Qubit]`` into a matching ``Matrix[Qubit]`` parameter."""
-    m = qmc.qubit_array((2, 2), "m")
-    m = _matrix_target(m)
-    return qmc.measure(m[0, 0])
+# Higher-rank quantum registers (``Matrix[Qubit]`` / ``Tensor[Qubit]``) are
+# rejected at construction time: ``qubit_array((2, 2), ...)`` and a
+# ``Matrix[Qubit]`` kernel parameter both raise ``NotImplementedError``
+# because the qubit addressing path is rank-1 and a higher-rank register
+# would silently alias distinct elements onto the same physical qubit. They
+# therefore cannot serve as rank-mismatch vehicles for the call-site
+# argument-type validation exercised here -- the rejection fires before the
+# call is ever reached. That rejection is covered end-to-end in
+# ``tests/circuit/test_multidim_quantum_rejection.py``.
 
 
 # ``qmc.inverse`` binds caller handles to the wrapped kernel's declared
@@ -313,14 +284,6 @@ def _err_inverse_qubit_into_float() -> qmc.Bit:
     qb = qmc.qubit("qb")
     qa = _inv_rx(qa, qb)
     return qmc.measure(qa)
-
-
-@qmc.qkernel
-def _err_inverse_matrix_into_vec() -> qmc.Bit:
-    """Rank mismatch (inverse): a ``Matrix`` into a ``Vector[Qubit]`` inverse target."""
-    m = qmc.qubit_array((2, 2), "m")
-    out = _inv_vec(m)
-    return qmc.measure(out[0])
 
 
 @qmc.qkernel
@@ -344,11 +307,7 @@ _ERROR_CASES = [
     ("control_scalar_into_vec", _err_control_scalar_into_vec),
     ("control_qubit_into_float", _err_control_qubit_into_float),
     ("control_float_into_qubit", _err_control_float_into_qubit),
-    ("normal_matrix_into_vec", _err_normal_matrix_into_vec),
-    ("normal_vec_into_matrix", _err_normal_vec_into_matrix),
-    ("control_matrix_broadcast", _err_control_matrix_broadcast),
     ("inverse_qubit_into_float", _err_inverse_qubit_into_float),
-    ("inverse_matrix_into_vec", _err_inverse_matrix_into_vec),
 ]
 
 _OK_CASES = [
@@ -360,7 +319,6 @@ _OK_CASES = [
     ("control_vec", _ok_control_vec),
     ("control_broadcast_wholevec", _ok_control_broadcast_wholevec),
     ("control_broadcast_view", _ok_control_broadcast_view),
-    ("normal_matrix", _ok_normal_matrix),
     ("inverse_vec", _ok_inverse_vec),
 ]
 

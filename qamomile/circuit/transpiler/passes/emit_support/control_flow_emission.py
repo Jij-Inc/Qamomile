@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 
+from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -26,6 +27,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 
+from .cast_binop_emission import _set_emit_value
 from .condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
@@ -403,6 +405,64 @@ def resolve_dict_entries(
             return resolved_entries
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Dict getitem (symbolic key lookup)
+# ---------------------------------------------------------------------------
+
+
+def evaluate_dict_getitem(
+    emit_pass: "StandardEmitPass",
+    op: DictGetItemOperation,
+    bindings: dict[str, Any],
+) -> None:
+    """Evaluate a DictGetItemOperation and store the result in bindings.
+
+    Resolves each key component (typically a for-items loop variable
+    bound by UUID in ``bindings``), looks the key up in the dict's
+    resolved entries, and writes the value into ``bindings`` under the
+    result UUID so downstream ops (BinOps feeding gate angles) can
+    consume it.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (DictGetItemOperation): The lookup op being evaluated.
+        bindings (dict[str, Any]): Current emit-time bindings.
+
+    Raises:
+        EmitError: If a key component or the dict entries cannot be
+            resolved, or the key is not present in the dict.
+    """
+    dict_value = op.operands[0]
+    resolved_key: list[int] = []
+    for key_value in op.operands[1:]:
+        resolved = emit_pass._resolver.resolve_classical_value(key_value, bindings)
+        if resolved is None:
+            raise EmitError(
+                f"Dict lookup key '{key_value.name}' could not be resolved "
+                f"at emit time (dict '{getattr(dict_value, 'name', '?')}')"
+            )
+        resolved_key.append(int(resolved))
+
+    entries = resolve_dict_entries(emit_pass, dict_value, bindings)
+    if entries is None:
+        raise EmitError(
+            f"Dict '{getattr(dict_value, 'name', '?')}' entries could not "
+            f"be resolved for subscript lookup"
+        )
+
+    lookup_key: Any = tuple(resolved_key) if op.key_arity > 1 else resolved_key[0]
+    for entry_key, entry_value in entries:
+        if isinstance(entry_key, (tuple, list)):
+            entry_key = tuple(entry_key)
+        if entry_key == lookup_key:
+            _set_emit_value(bindings, op.results[0].uuid, entry_value)
+            return
+    raise EmitError(
+        f"Key {lookup_key!r} not found in dict "
+        f"'{getattr(dict_value, 'name', '?')}' during emit"
+    )
 
 
 # ---------------------------------------------------------------------------
