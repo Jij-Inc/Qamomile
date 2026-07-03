@@ -3,27 +3,34 @@
 The decoration-time rebind analyzer deliberately suppresses violations
 recorded inside ``if`` / ``for`` / ``while`` bodies so that compile-time-if
 dead-branch rebinds keep decorating. That used to leave a runtime hole:
-``if cond: q = qmc.qubit("fresh")`` with a measurement-backed ``cond``
-silently dropped the original state of ``q`` exactly when the branch was
-taken, surfacing (at best) as the unhelpful emit-time "Quantum PhiOp merge
-requires identical physical resources across branches" error.
-``reject_branch_internal_quantum_discard`` now rejects the pattern at the
-IR layer with a targeted ``ValidationError``, from both
-``PartialEvaluationPass`` (pre-fold, with bindings) and ``AnalyzePass``
-(safety net).
+rebinding a quantum variable inside a runtime branch — to a fresh
+allocation or to another quantum value, in one branch or both — silently
+dropped the variable's pre-branch state exactly when a rebinding branch
+was taken, surfacing (at best) as the unhelpful emit-time "Quantum PhiOp
+merge requires identical physical resources across branches" error, or
+(for both-branch external rebinds) executing and silently returning the
+wrong register's state. The frontend now records every branch-internal
+quantum binding change on the ``IfOperation`` (``BranchRebind``), and
+``reject_branch_internal_quantum_discard`` rejects a record whose
+pre-branch value has no owner on a rebinding path (no in-branch consumer,
+no phi carrying it out of that side, no reference outside the if) with a
+targeted ``ValidationError``, from both ``PartialEvaluationPass``
+(pre-fold, with bindings) and ``AnalyzePass`` (safety net).
 
 Covered here: the LIMITATIONS.md motivating example (adapted to entrypoint
 constraints — qubits are allocated in-kernel and the condition is
 measurement-backed), the symmetric else-branch case, fresh lineage through
-gates, whole-register ``Vector[Qubit]`` rebinds (same phi shape as scalar
-``Qubit``, covered by the same check), compile-time conditions (dead and
-taken branches stay legal, including nested inside runtime branches), the
-consume-then-reallocate pattern, and the conservative corners documented in
-LIMITATIONS.md. Allowed patterns that are emittable are executed on Qiskit
-(AerSimulator) with deterministic state preparation and their measured
-values asserted — transpile-only success would not catch a miscompile;
-allowed patterns stopped by the emit-level physical-resource guard pin that
-emit failure so a future silent-pass regression is caught.
+gates, rebinds to external values (one branch, both branches, and gated —
+the review counterexamples), expression-derived runtime conditions
+(``~bit``, ``a & b``), whole-register ``Vector[Qubit]`` rebinds, compile-time
+conditions (dead and taken branches stay legal, including nested inside
+runtime branches), the consume-then-reallocate pattern, and the
+conservative corners documented in LIMITATIONS.md. Allowed patterns that
+are emittable are executed on Qiskit (AerSimulator) with deterministic
+state preparation and their measured values asserted — transpile-only
+success would not catch a miscompile; allowed patterns stopped by the
+emit-level physical-resource guard pin that emit failure so a future
+silent-pass regression is caught.
 """
 
 import pytest
@@ -42,7 +49,7 @@ pytest.importorskip("qiskit")
 
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
-DISCARD = "Branch-internal fresh allocation"
+DISCARD = "Branch-internal quantum rebind"
 
 
 def _transpile(kernel, bindings=None):
@@ -127,12 +134,12 @@ def _inlined_block(kernel, bindings=None):
 
 
 # ---------------------------------------------------------------------------
-# Rejected: runtime-branch fresh allocations that discard quantum state
+# Rejected: runtime-branch quantum rebinds that discard quantum state
 # ---------------------------------------------------------------------------
 
 
 class TestRejectedDiscards:
-    """Runtime-branch fresh allocations fail with the targeted error."""
+    """Runtime-branch quantum rebinds that discard fail with the targeted error."""
 
     def test_limitations_example_rejected(self):
         """The LIMITATIONS.md motivating example is rejected at transpile.
@@ -204,6 +211,141 @@ class TestRejectedDiscards:
             if cond:
                 q = qmc.x(q)
             else:
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(ValidationError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_rebind_to_external_value_in_one_branch_rejected(self):
+        """Rebinding to a pre-existing external qubit discards like fresh.
+
+        The replacement value comes from outside the if rather than an
+        in-branch allocation; the pre-branch state of ``q`` is dropped
+        all the same when the branch is taken.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            fresh = qmc.qubit("fresh")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = fresh
+            return qmc.measure(q)
+
+        with pytest.raises(ValidationError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_rebind_to_external_value_in_both_branches_rejected(self):
+        """Rebinding to the same external qubit in both branches is caught.
+
+        The pre-branch value of ``q`` then appears in no phi at all (the
+        frontend even elides the no-op merge), so only the recorded
+        pre-branch binding exposes the discard; before the records this
+        shape transpiled, sampled, and silently returned the external
+        register's state instead of ``q``'s.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            fresh = qmc.qubit("fresh")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = fresh
+            else:
+                q = fresh
+            return qmc.measure(q)
+
+        with pytest.raises(ValidationError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_gated_external_rebind_in_both_branches_rejected(self):
+        """The review counterexample: both branches gate and swap in the
+        same external register.
+
+        ``q``'s pre-branch |1> state is unconditionally dropped while both
+        phi sides carry the external register's lineage; before the
+        records this transpiled and measured the external register (0)
+        despite ``q`` being prepared to 1.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            fresh = qmc.qubit("fresh")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                fresh = qmc.x(fresh)
+                q = fresh
+            else:
+                fresh = qmc.z(fresh)
+                q = fresh
+            return qmc.measure(q)
+
+        with pytest.raises(ValidationError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_both_branches_fresh_rejected(self):
+        """Fresh allocations in BOTH branches drop the original either way.
+
+        The pre-branch value appears in no phi, so only the recorded
+        pre-branch binding exposes the discard.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = qmc.qubit("fresh_a")
+            else:
+                q = qmc.qubit("fresh_b")
+            return qmc.measure(q)
+
+        with pytest.raises(ValidationError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_not_condition_fresh_rejected(self):
+        """A ``~bit`` condition is runtime control flow and is checked.
+
+        ``is_measurement_backed`` does not follow classical expressions,
+        so condition classification uses measurement-taint analysis;
+        expression-derived runtime conditions must not slip to the
+        generic emit error.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if ~cond:
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(ValidationError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_compound_condition_fresh_rejected(self):
+        """An ``a & b`` condition is runtime control flow and is checked."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            pa = qmc.qubit("pa")
+            pb = qmc.qubit("pb")
+            a = qmc.measure(pa)
+            b = qmc.measure(pb)
+            if a & b:
                 q = qmc.qubit("fresh")
             return qmc.measure(q)
 
@@ -517,14 +659,66 @@ class TestAllowedPatterns:
         with pytest.raises(EmitError):
             _transpile(kernel, bindings={"dummy": 0})
 
-    def test_both_branches_fresh_not_flagged_by_this_check(self):
-        """Both branches allocating fresh is outside this check's evidence.
+    def test_preconsumed_original_rebound_in_both_branches_allowed(self):
+        """Rebinding a variable whose value was consumed pre-if is legal.
 
-        The pre-branch value then no longer appears in the phi merge, so
-        the discard check has nothing to pair (documented conservative
-        corner in LIMITATIONS.md); the kernel passes the analysis stage.
-        The cross-branch physical merge is still stopped at emit (pinned
-        below), so no silent path exists today.
+        The pre-branch value is measured before the if, so it is owned
+        outside the if and the both-branch rebind to an external register
+        is just variable reuse — the analysis stage accepts it. The
+        surviving runtime if has empty branches, which hits the
+        pre-existing segmentation limitation before emit, so this is
+        asserted at the analysis stage only.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            fresh = qmc.qubit("fresh")
+            qmc.measure(q)
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q = fresh
+            else:
+                q = fresh
+            return qmc.measure(q)
+
+        analyzed = _run_through_analyze(kernel, bindings={"dummy": 0})
+        assert analyzed is not None
+
+    def test_handle_swap_in_branch_passes_analysis(self):
+        """A pure handle exchange carries both pre-branch values through.
+
+        ``q1, q2 = q2, q1`` rebinds both variables, but each pre-branch
+        value is carried out by the other variable's phi on the same
+        side, so nothing is discarded and the analysis stage accepts it.
+        (The conditional physical relabeling is not emittable — the
+        surviving empty-branch runtime if hits the pre-existing
+        segmentation limitation — so this is asserted at the analysis
+        stage only.)
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                q1, q2 = q2, q1
+            qmc.measure(q2)
+            return qmc.measure(q1)
+
+        analyzed = _run_through_analyze(kernel, bindings={"dummy": 0})
+        assert analyzed is not None
+
+    def test_expression_condition_gate_rebind_executes(self):
+        """A gate rebind under an expression-derived condition executes.
+
+        ``~cond`` with ``cond`` deterministically 0 takes the branch, so
+        the X runs on the original qubit and 1 is measured — the
+        measurement-taint condition classification must not disturb the
+        supported runtime path.
         """
 
         @qmc.qkernel
@@ -532,17 +726,11 @@ class TestAllowedPatterns:
             q = qmc.qubit("q")
             p = qmc.qubit("p")
             cond = qmc.measure(p)
-            if cond:
-                q = qmc.qubit("fresh_a")
-            else:
-                q = qmc.qubit("fresh_b")
+            if ~cond:
+                q = qmc.x(q)
             return qmc.measure(q)
 
-        analyzed = _run_through_analyze(kernel, bindings={"dummy": 0})
-        assert analyzed is not None
-
-        with pytest.raises(EmitError, match="identical physical resources"):
-            _transpile(kernel, bindings={"dummy": 0})
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 1
 
     def test_module_level_check_accepts_dead_branch_with_bindings(self):
         """The module-level helper resolves compile-time conditions from

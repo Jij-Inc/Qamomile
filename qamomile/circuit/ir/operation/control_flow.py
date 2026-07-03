@@ -384,6 +384,81 @@ class ForItemsOperation(HasNestedOps, Operation):
         return OperationKind.CONTROL
 
 
+@dataclasses.dataclass(frozen=True)
+class BranchRebind:
+    """Trace-time record of a quantum variable rebound inside an if branch.
+
+    The frontend's branch tracing merges only the *new* branch values
+    through phi operations; when both branches rebind a variable, the
+    value the variable held before the branch no longer appears anywhere
+    in the ``IfOperation``. These records preserve that pre-branch
+    binding so the transpiler's branch-discard check
+    (``reject_branch_internal_quantum_discard`` in
+    ``qamomile.circuit.transpiler.passes.analyze``) can verify that the
+    pre-branch quantum state is consumed or carried on every runtime
+    execution path instead of being silently dropped.
+
+    Attributes:
+        var_name (str): Display name of the rebound Python variable.
+            Used only for error messages.
+        before (Value): The variable's IR value at branch entry (the
+            state that is dropped on a rebinding path unless that branch
+            consumes it or merges it out through a phi).
+        rebound_in_true (bool): True when the true branch left the
+            variable bound to a different IR value.
+        rebound_in_false (bool): True when the false branch left the
+            variable bound to a different IR value.
+    """
+
+    var_name: str
+    before: Value
+    rebound_in_true: bool
+    rebound_in_false: bool
+
+
+def _branch_rebind_input_values(
+    rebinds: tuple[BranchRebind, ...],
+) -> list[ValueBase]:
+    """Collect the Value fields of branch rebind records.
+
+    Args:
+        rebinds (tuple[BranchRebind, ...]): Records attached to an
+            ``IfOperation``.
+
+    Returns:
+        list[ValueBase]: The ``before`` value of every record, in order.
+    """
+    return [rebind.before for rebind in rebinds]
+
+
+def _replace_branch_rebind_values(
+    rebinds: tuple[BranchRebind, ...],
+    mapping: dict[str, ValueBase],
+) -> tuple[BranchRebind, ...] | None:
+    """Substitute branch rebind record values through a UUID mapping.
+
+    Args:
+        rebinds (tuple[BranchRebind, ...]): Records to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        tuple[BranchRebind, ...] | None: Rewritten records, or ``None``
+            when nothing changed.
+    """
+    new_rebinds: list[BranchRebind] = []
+    changed = False
+    for rebind in rebinds:
+        mapped_before = mapping.get(rebind.before.uuid)
+        if isinstance(mapped_before, Value):
+            new_rebinds.append(dataclasses.replace(rebind, before=mapped_before))
+            changed = True
+        else:
+            new_rebinds.append(rebind)
+    if not changed:
+        return None
+    return tuple(new_rebinds)
+
+
 @dataclasses.dataclass
 class IfOperation(HasNestedOps, Operation):
     """Represents an if-else conditional operation.
@@ -398,6 +473,9 @@ class IfOperation(HasNestedOps, Operation):
         true_operations: List of operations in the true branch
         false_operations: List of operations in the false branch (may be empty)
         phi_ops: List of PhiOp instances merging values from both branches
+        branch_rebinds: Trace-time records of quantum variables whose
+            binding changed in a branch (see ``BranchRebind``); consumed
+            by the transpiler's branch-discard check
         operands[0]: condition (Bit type from measurement or comparison)
         results: Phi-merged output values from both branches
     """
@@ -405,6 +483,7 @@ class IfOperation(HasNestedOps, Operation):
     true_operations: list[Operation] = dataclasses.field(default_factory=list)
     false_operations: list[Operation] = dataclasses.field(default_factory=list)
     phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
+    branch_rebinds: tuple[BranchRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [
@@ -420,6 +499,38 @@ class IfOperation(HasNestedOps, Operation):
             false_operations=new_lists[1],
             phi_ops=cast("list[PhiOp]", new_lists[2]),
         )
+
+    def all_input_values(self) -> list[ValueBase]:
+        """Include branch rebind records for cloning/substitution.
+
+        Same rationale as the loop operations' rebind records: the
+        recorded pre-branch values reference program values by identity,
+        so inline cloning must remap them in lockstep with operands.
+        Read-based checks must not treat them as reads (see
+        ``_op_read_uuids`` in the analyze pass module).
+
+        Returns:
+            list[ValueBase]: Base input values plus rebind-record values.
+        """
+        values = super().all_input_values()
+        values.extend(_branch_rebind_input_values(self.branch_rebinds))
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        """Substitute operand and rebind-record values.
+
+        Args:
+            mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+        Returns:
+            Operation: The rewritten operation.
+        """
+        result = super().replace_values(mapping)
+        assert isinstance(result, IfOperation)
+        new_rebinds = _replace_branch_rebind_values(result.branch_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, branch_rebinds=new_rebinds)
+        return result
 
     @property
     def condition(self) -> Value:

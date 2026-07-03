@@ -82,9 +82,9 @@ class PartialEvaluationPass(Pass[Block, Block]):
         # Reject branch-internal quantum discards BEFORE if-lowering, with
         # bindings, so compile-time branches (dead or taken) are classified
         # exactly the way CompileTimeIfLoweringPass will lower them and only
-        # genuine runtime (measurement-backed) branches are checked. Running
-        # here also makes the targeted error fire at the earliest pass that
-        # sees the pattern.
+        # genuine runtime (measurement-derived-condition) branches are
+        # checked. Running here also makes the targeted error fire at the
+        # earliest pass that sees the pattern.
         reject_branch_internal_quantum_discard(input.operations, self._bindings)
 
         # Keep ``SliceArrayOperation`` nodes through partial_eval so

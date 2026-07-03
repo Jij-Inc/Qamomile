@@ -18,6 +18,7 @@ from qamomile.circuit.frontend.handle.primitives import (
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
     ForItemsOperation,
     ForOperation,
     IfOperation,
@@ -722,11 +723,106 @@ def _find_original_handle_for_result(
     return None
 
 
+def branch_rebind_pre_bindings(
+    frame_locals: dict[str, typing.Any],
+    names: tuple,
+) -> dict[str, typing.Any]:
+    """Capture pre-branch bindings for if-rebind records.
+
+    Called from AST-injected code at the ``emit_if`` call site with the
+    caller's ``locals()``. The transformer's rebind-candidate analysis is
+    lexical, so a candidate name may not actually be bound at runtime
+    (a preceding pure-store if can be dead-store-eliminated from its
+    outputs); unbound names are silently skipped instead of raising
+    ``UnboundLocalError`` at the call site.
+
+    Args:
+        frame_locals (dict[str, typing.Any]): The caller's ``locals()``.
+        names (tuple): Candidate variable names to capture.
+
+    Returns:
+        dict[str, typing.Any]: The bound candidate names mapped to their
+            current (pre-branch) handles.
+    """
+    return {name: frame_locals[name] for name in names if name in frame_locals}
+
+
+def _collect_branch_rebinds(
+    output_names: tuple,
+    rebind_pre_bindings: dict | None,
+    true_result: tuple,
+    false_result: tuple,
+) -> tuple[BranchRebind, ...]:
+    """Record quantum variables whose binding changed in an if branch.
+
+    Compares each candidate variable's pre-branch IR value (captured at
+    the ``emit_if`` call site by the AST transformer) with the value the
+    variable holds after each branch. The phi merge only carries the
+    *new* branch values — and a reassigned variable whose old value is
+    dead is not even passed into the branches — so the pre-branch value
+    can disappear from the ``IfOperation`` entirely; these records
+    preserve it for the transpiler's branch-discard check. Classical
+    variables are not recorded — classical rebinds are ordinary
+    phi-merged dataflow.
+
+    Args:
+        output_names (tuple): Variable names positionally aligned with
+            the branch-result tuples (the AST transformer's output list).
+        rebind_pre_bindings (dict | None): Candidate variable names
+            mapped to their pre-branch handles, captured at the call
+            site. None or empty when no pre-existing variable is
+            reassigned in a branch.
+        true_result (tuple): Variable values returned by the true branch,
+            positionally aligned with ``output_names``.
+        false_result (tuple): Variable values returned by the false
+            branch, positionally aligned with ``output_names``.
+
+    Returns:
+        tuple[BranchRebind, ...]: One record per quantum variable whose
+            binding changed in at least one branch. Empty when the
+            result tuples do not align with ``output_names`` (defensive —
+            the AST transformer guarantees alignment).
+    """
+    if not rebind_pre_bindings:
+        return ()
+    if not (len(output_names) == len(true_result) == len(false_result)):
+        return ()
+    positions = {name: index for index, name in enumerate(output_names)}
+    records: list[BranchRebind] = []
+    for name, pre_handle in rebind_pre_bindings.items():
+        index = positions.get(name)
+        if index is None:
+            continue
+        pre_value = pre_handle.value if hasattr(pre_handle, "value") else pre_handle
+        if not isinstance(pre_value, Value) or not pre_value.type.is_quantum():
+            continue
+        true_val = true_result[index]
+        false_val = false_result[index]
+        true_value = true_val.value if hasattr(true_val, "value") else true_val
+        false_value = false_val.value if hasattr(false_val, "value") else false_val
+        if not isinstance(true_value, Value) or not isinstance(false_value, Value):
+            continue
+        rebound_in_true = true_value.uuid != pre_value.uuid
+        rebound_in_false = false_value.uuid != pre_value.uuid
+        if rebound_in_true or rebound_in_false:
+            records.append(
+                BranchRebind(
+                    var_name=name,
+                    before=pre_value,
+                    rebound_in_true=rebound_in_true,
+                    rebound_in_false=rebound_in_false,
+                )
+            )
+    return tuple(records)
+
+
 def emit_if(
     cond_func: typing.Callable,
     true_func: typing.Callable,
     false_func: typing.Callable,
     variables: list,
+    output_names: tuple = (),
+    rebind_pre_bindings: dict | None = None,
 ) -> typing.Any:
     """Builder function for if-else conditional with Phi function merging.
 
@@ -748,6 +844,13 @@ def emit_if(
         true_func: Function executing true branch, returns updated variables
         false_func: Function executing false branch, returns updated variables
         variables: List of variables used in the branches
+        output_names: Variable names positionally aligned with the branch
+            return tuples, used for branch-rebind records. Empty when the
+            transformer found no rebind candidates.
+        rebind_pre_bindings: Pre-branch handles of every pre-existing
+            variable reassigned in a branch, keyed by name; captured at
+            the call site by the AST transformer. None when there are no
+            candidates.
 
     Returns:
         Merged variable values after conditional execution (using Phi functions)
@@ -796,6 +899,9 @@ def emit_if(
         raise ValueError(
             f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
         )
+    if_op.branch_rebinds = _collect_branch_rebinds(
+        output_names, rebind_pre_bindings, true_result, false_result
+    )
     merged_results = []
     for true_val, false_val in zip(true_result, false_result, strict=True):
         if isinstance(true_val, (Handle, Value)):

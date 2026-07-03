@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
 
 from qamomile.circuit.frontend.operation.control_flow import (
+    branch_rebind_pre_bindings,
     emit_if,
     for_items,
     for_loop,
@@ -1336,6 +1337,51 @@ class ControlFlowTransformer(ast.NodeTransformer):
             ctx=ast.Load(),
         )
 
+        # Rebind-record probe arguments: pre-branch bindings of every
+        # pre-existing variable reassigned in a branch. A reassigned
+        # variable whose old value is dead is deliberately NOT in
+        # ``input_vars`` (its old value must not force a phi input), so
+        # ``emit_if`` cannot see its pre-branch binding through
+        # ``var_list``; ``branch_rebind_pre_bindings(locals(), ...)``
+        # captures it at the call site instead. The candidate analysis
+        # is lexical (``reassigned_existing`` uses the outer-defined
+        # set), so the helper skips names a preceding pure-store if left
+        # unbound at runtime rather than referencing them directly.
+        # ``output_names`` gives ``emit_if`` the positional mapping of
+        # the branch-result tuples.
+        record_candidates = sorted(reassigned_existing & set(output_vars))
+        call_keywords: list[ast.keyword] = []
+        if record_candidates:
+            call_keywords.append(
+                ast.keyword(
+                    arg="output_names",
+                    value=ast.Tuple(
+                        elts=[ast.Constant(value=v) for v in output_vars],
+                        ctx=ast.Load(),
+                    ),
+                )
+            )
+            call_keywords.append(
+                ast.keyword(
+                    arg="rebind_pre_bindings",
+                    value=ast.Call(
+                        func=ast.Name(id="branch_rebind_pre_bindings", ctx=ast.Load()),
+                        args=[
+                            ast.Call(
+                                func=ast.Name(id="locals", ctx=ast.Load()),
+                                args=[],
+                                keywords=[],
+                            ),
+                            ast.Tuple(
+                                elts=[ast.Constant(value=v) for v in record_candidates],
+                                ctx=ast.Load(),
+                            ),
+                        ],
+                        keywords=[],
+                    ),
+                )
+            )
+
         call_expr = ast.Call(
             func=ast.Name(id=self.if_func_name, ctx=ast.Load()),
             args=[
@@ -1344,7 +1390,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ast.Name(id=false_name, ctx=ast.Load()),
                 var_list,
             ],
-            keywords=[],
+            keywords=call_keywords,
         )
 
         # Assignment: output_vars = emit_if(...)
@@ -1436,6 +1482,7 @@ def transform_control_flow(func: Callable):
             "should_trace_for_loop": should_trace_for_loop,
             "for_items": for_items,
             "emit_if": emit_if,
+            "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
             "loop_rebind_snapshot": loop_rebind_snapshot,
             "record_loop_rebinds": record_loop_rebinds,
             "Any": Any,  # For type annotations in generated code
