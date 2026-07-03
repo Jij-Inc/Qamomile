@@ -13,7 +13,15 @@ from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+    CompOpKind,
+    CondOp,
+    CondOpKind,
+    NotOp,
+)
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
@@ -61,6 +69,15 @@ if TYPE_CHECKING:
 
 
 _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
+
+
+# String markers appended to a node's scope path for the true / false branch of
+# an ``IfOperation`` (see ``_build_vif`` and the layout engine's unfolded-if
+# placement). They are the only non-integer scope-path elements any node key
+# carries, so their presence uniquely identifies a node nested inside an
+# if/else branch — used to keep mid-circuit measurements from terminating a
+# wire that the other branch never measured.
+_IF_BRANCH_SCOPE_KEYS: frozenset[str] = frozenset({"true", "false"})
 
 
 # Single source of truth for the TeX rendering of every built-in
@@ -142,6 +159,35 @@ _BUILTIN_TEX_LABELS: dict[str, str] = {
 _CTRL_PARAM_PREFIX: str = "ctrl_param_"
 
 
+# Infix symbols for spelling out an ``IfOperation`` condition (see
+# ``CircuitAnalyzer._format_condition_expr``).  A symbolic ``if`` whose
+# condition is not compile-time resolved is drawn with its predicate
+# rendered as source, e.g. ``if flag == 1:`` rather than ``if cond:``.
+# ``BinOpKind.MIN`` is intentionally absent — it has no infix form and
+# falls back to the anonymous-condition label.
+_COMP_OP_SYMBOLS: dict[CompOpKind, str] = {
+    CompOpKind.EQ: "==",
+    CompOpKind.NEQ: "!=",
+    CompOpKind.LT: "<",
+    CompOpKind.LE: "<=",
+    CompOpKind.GT: ">",
+    CompOpKind.GE: ">=",
+}
+_COND_OP_SYMBOLS: dict[CondOpKind, str] = {
+    CondOpKind.AND: "and",
+    CondOpKind.OR: "or",
+}
+_BIN_OP_SYMBOLS: dict[BinOpKind, str] = {
+    BinOpKind.ADD: "+",
+    BinOpKind.SUB: "-",
+    BinOpKind.MUL: "*",
+    BinOpKind.DIV: "/",
+    BinOpKind.FLOORDIV: "//",
+    BinOpKind.MOD: "%",
+    BinOpKind.POW: "**",
+}
+
+
 class CircuitAnalyzer:
     """Analyzes IR blocks for circuit visualization.
 
@@ -175,13 +221,29 @@ class CircuitAnalyzer:
         fold_loops: bool = True,
         expand_composite: bool = False,
         inline_depth: int | None = None,
+        fold_ifs: bool = False,
     ):
+        """Initialize the visualization analyzer.
+
+        Args:
+            graph (Block): Computation graph to analyze for rendering.
+            style (CircuitStyle): Visual style configuration.
+            inline (bool): Whether to inline CallBlockOperation contents.
+            fold_loops (bool): Whether to render loop operations as folded
+                summary blocks instead of materialized iterations.
+            expand_composite (bool): Whether to expand composite gates.
+            inline_depth (int | None): Maximum nesting depth for inline
+                expansion, or None for unlimited depth.
+            fold_ifs (bool): Whether to render IfOperation nodes as folded
+                summary blocks instead of side-by-side branches.
+        """
         self.graph = graph
         self.style = style
         self.inline = inline
         self.fold_loops = fold_loops
         self.expand_composite = expand_composite
         self.inline_depth = inline_depth
+        self.fold_ifs = fold_ifs
 
     def _should_inline_at_depth(self, depth: int) -> bool:
         """Whether to inline CallBlock/ControlledU at this nesting depth."""
@@ -958,10 +1020,18 @@ class CircuitAnalyzer:
                 )
 
             if isinstance(op, IfOperation):
-                raise NotImplementedError(
-                    "Circuit visualization does not yet support IfOperation. "
-                    "This feature will be added in a future release."
+                node = self._build_vif(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                    body_operations=ops,
                 )
+                result.append(node)
+                continue
 
             if isinstance(op, ForItemsOperation):
                 node = self._build_vfor_items(
@@ -1074,6 +1144,27 @@ class CircuitAnalyzer:
 
         return result
 
+    @staticmethod
+    def _node_key_in_if_branch(node_key: tuple) -> bool:
+        """Whether a node sits inside an if/else branch scope.
+
+        If-branch scopes are tagged with the ``"true"`` / ``"false"`` string
+        markers in the node key (see ``_build_vif`` and the layout engine's
+        unfolded-if placement). No other scope kind uses string markers, so
+        their presence uniquely identifies an if-branch nesting.
+
+        Args:
+            node_key (tuple): The node's scope key, of the form
+                ``(*scope_path, id(op))``.
+
+        Returns:
+            bool: True if any element of ``node_key`` is an if-branch marker,
+                meaning the node is nested inside a true/false branch.
+        """
+        return any(
+            isinstance(part, str) and part in _IF_BRANCH_SCOPE_KEYS for part in node_key
+        )
+
     def _build_vgate(
         self,
         op: Operation,
@@ -1118,6 +1209,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
                 kind=VGateKind.MEASURE,
+                terminates_wire=not self._node_key_in_if_branch(node_key),
             )
 
         if isinstance(op, MeasureVectorOperation):
@@ -1135,6 +1227,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
+                terminates_wire=not self._node_key_in_if_branch(node_key),
             )
 
         if isinstance(op, MeasureQFixedOperation):
@@ -1165,6 +1258,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=self.style.gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
+                terminates_wire=not self._node_key_in_if_branch(node_key),
             )
 
         if isinstance(op, CallBlockOperation):
@@ -1511,6 +1605,15 @@ class CircuitAnalyzer:
             param_values,
             qubit_map=qubit_map,
         )
+        # Inline expansion sees actual arguments, so callee-local compile-time IFs
+        # can be lowered before building child visual nodes.
+        from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
+            CompileTimeIfLoweringPass,
+        )
+
+        block_value = CompileTimeIfLoweringPass(bindings=child_param_values).run(
+            block_value
+        )
 
         self._evaluate_loop_body_intermediates(
             block_value.operations, child_param_values
@@ -1722,39 +1825,83 @@ class CircuitAnalyzer:
         param_values: dict,
         depth: int,
         scope_path: tuple,
+        body_operations: list[Operation] | None = None,
     ) -> VFoldedBlock | VUnfoldedSequence:
         """Build a Visual IR node for an IfOperation.
 
-        Note: This method is implemented for future use but currently not called,
-        because ``_build_visual_nodes`` raises ``NotImplementedError`` for
-        ``IfOperation``.  It will be connected once If-operation visualization
-        is fully enabled.
+        Compile-time resolvable ``if``s are already lowered away by
+        ``CompileTimeIfLoweringPass`` before visual analysis runs, so this method
+        only handles conditions that survive — measurement-backed runtime
+        ``if`` and symbolic (unbound) classical ``if``. When ``fold_ifs`` is
+        enabled it returns a single ``VFoldedBlock`` summarizing the true branch
+        and, when present, the else branch; otherwise it returns a
+        ``VUnfoldedSequence`` carrying the surviving branch alternatives for
+        side-by-side rendering.
+
+        Args:
+            op (IfOperation): The if/else operation to visualize.
+            node_key (tuple): Stable identity key for layout/render lookup.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+            depth (int): Current nesting depth for child expansion.
+            scope_path (tuple): Path of enclosing scope keys for child node keys.
+            body_operations (list[Operation] | None): Operations of the scope
+                enclosing ``op``, used to spell the condition predicate (e.g.
+                ``flag == 1``). Defaults to None, which falls back to the
+                anonymous ``if cond:`` label.
+
+        Returns:
+            VFoldedBlock | VUnfoldedSequence: A folded summary box when
+                ``fold_ifs`` is set, otherwise an unfolded sequence containing
+                the true branch and, when present, the false branch.
         """
         affected_qubits, affected_qubits_precise = self._collect_if_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
 
-        cond = op.condition
-        cond_name = getattr(cond, "name", None)
-        if cond_name is None or self._is_internal_temp_name(cond_name):
-            cond_name = "cond"
-        condition_label = f"if {cond_name}:"
-
-        if self.fold_loops:
-            local_param_values = dict(param_values)
-            self._evaluate_loop_body_intermediates(
-                op.true_operations, local_param_values
+        condition_expr = self._format_condition_expr(
+            op.condition, body_operations, param_values
+        )
+        condition_label = f"if {condition_expr}:" if condition_expr else "if cond:"
+        condition_measure_info = self._condition_measure_info(
+            op.condition,
+            body_operations,
+            qubit_map,
+            logical_id_remap,
+            param_values,
+            scope_path,
+        )
+        condition_measure_node_key: tuple | None = None
+        condition_measure_qubit_indices: list[int] = []
+        if condition_measure_info is not None:
+            condition_measure_node_key, condition_measure_qubit_indices = (
+                condition_measure_info
             )
-            body_lines: list[str] = []
-            for body_op in op.true_operations:
-                expr = self._format_operation_as_expression(
-                    body_op,
-                    set(),
-                    body_operations=op.true_operations,
-                    param_values=local_param_values,
+        if not affected_qubits and condition_measure_qubit_indices:
+            affected_qubits = list(dict.fromkeys(condition_measure_qubit_indices))
+            affected_qubits_precise = True
+        elif not affected_qubits and qubit_map:
+            # Empty symbolic IFs still need a display wire for their branch box.
+            affected_qubits = [min(qubit_map.values())]
+            affected_qubits_precise = False
+
+        if self.fold_ifs:
+            body_lines = self._format_folded_body_lines(
+                op.true_operations, param_values
+            )
+            if op.false_operations:
+                if not body_lines:
+                    body_lines.append("pass")
+                false_lines = self._format_folded_body_lines(
+                    op.false_operations, param_values
                 )
-                if expr:
-                    body_lines.extend(expr.split("\n"))
+                if false_lines:
+                    body_lines.append(f"else: {false_lines[0].lstrip()}")
+                    body_lines.extend(false_lines[1:])
+                else:
+                    body_lines.append("else: pass")
             if len(body_lines) > 3:
                 body_lines = body_lines[:3] + ["..."]
 
@@ -1768,26 +1915,30 @@ class CircuitAnalyzer:
                 folded_width=folded_width,
                 kind=VFoldedKind.IF,
                 affected_qubits_precise=affected_qubits_precise,
+                condition_measure_node_key=condition_measure_node_key,
+                condition_measure_qubit_indices=condition_measure_qubit_indices,
             )
 
         # Unfolded: build both branches
-        self._evaluate_loop_body_intermediates(op.true_operations, param_values)
+        true_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(op.true_operations, true_param_values)
         true_children = self._build_visual_nodes(
             op.true_operations,
             qubit_map,
             logical_id_remap,
-            param_values,
+            true_param_values,
             depth + 1,
             (*node_key, "true"),
         )
         true_width = self._sum_visual_widths(true_children)
 
-        self._evaluate_loop_body_intermediates(op.false_operations, param_values)
+        false_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(op.false_operations, false_param_values)
         false_children = self._build_visual_nodes(
             op.false_operations,
             qubit_map,
             logical_id_remap,
-            param_values,
+            false_param_values,
             depth + 1,
             (*node_key, "false"),
         )
@@ -1795,9 +1946,15 @@ class CircuitAnalyzer:
 
         iterations = [true_children]
         iteration_widths = [true_width]
+        branch_labels = [condition_label]
         if false_children:
             iterations.append(false_children)
             iteration_widths.append(false_width)
+            branch_labels.append("else:")
+
+        branch_label_widths = [
+            self._estimate_label_box_width(label) for label in branch_labels
+        ]
 
         return VUnfoldedSequence(
             node_key=node_key,
@@ -1807,7 +1964,401 @@ class CircuitAnalyzer:
             iteration_widths=iteration_widths,
             condition_label=condition_label,
             affected_qubits_precise=affected_qubits_precise,
+            condition_label_width=branch_label_widths[0],
+            branch_label_widths=branch_label_widths,
+            condition_measure_node_key=condition_measure_node_key,
+            condition_measure_qubit_indices=condition_measure_qubit_indices,
         )
+
+    def _condition_measure_info(
+        self,
+        value: ValueBase | None,
+        body_operations: list[Operation] | None,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        scope_path: tuple,
+    ) -> tuple[tuple, list[int]] | None:
+        """Return the direct measurement node that produced an IF condition.
+
+        Only a condition value produced directly by a measurement operation is
+        treated as measurement-derived. Compound predicates such as
+        ``not bit`` or ``bit and flag`` are produced by classical operations and
+        intentionally return None.
+
+        Args:
+            value (ValueBase | None): The IF condition value to inspect.
+            body_operations (list[Operation] | None): Operations in the scope
+                enclosing the IF operation.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+            scope_path (tuple): Path of enclosing scope keys.
+
+        Returns:
+            tuple[tuple, list[int]] | None: The producer node key and measured
+                qubit indices, or None when the condition is not produced
+                directly by a measurement operation.
+        """
+        if value is None or not body_operations:
+            return None
+
+        producer = self._find_direct_measure_producer_op(value, body_operations)
+        if producer is None:
+            return None
+
+        qubit_indices = self._measure_condition_qubit_indices(
+            value, producer, qubit_map, logical_id_remap, param_values
+        )
+        return (*scope_path, id(producer)), qubit_indices
+
+    def _find_direct_measure_producer_op(
+        self,
+        value: ValueBase,
+        body_operations: list[Operation],
+    ) -> MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation | None:
+        """Find a measurement operation that directly produced ``value``.
+
+        Args:
+            value (ValueBase): The condition value to match against
+                measurement results.
+            body_operations (list[Operation]): Operations in the enclosing
+                scope.
+
+        Returns:
+            MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation | None:
+                The direct measurement producer, or None if ``value`` is
+                produced by another operation.
+        """
+        target_uuid = getattr(value, "uuid", None)
+        parent_array = getattr(value, "parent_array", None)
+        parent_uuid = getattr(parent_array, "uuid", None)
+        for candidate in body_operations:
+            if not isinstance(
+                candidate,
+                (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation),
+            ):
+                continue
+            for result in candidate.results:
+                result_uuid = getattr(result, "uuid", None)
+                if target_uuid is not None and result_uuid == target_uuid:
+                    return candidate
+                if parent_uuid is not None and result_uuid == parent_uuid:
+                    return candidate
+        return None
+
+    def _measure_condition_qubit_indices(
+        self,
+        value: ValueBase,
+        op: MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> list[int]:
+        """Resolve the measurement wires used by an IF condition value.
+
+        Args:
+            value (ValueBase): IF condition value produced by ``op``.
+            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation):
+                Measurement operation that directly produced ``value``.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            list[int]: Wire indices relevant to the condition. For a vector
+                measurement element such as ``bits[1]``, this narrows to the
+                corresponding measured qubit when the element index resolves.
+        """
+        if isinstance(op, MeasureVectorOperation):
+            wire = self._measure_vector_condition_wire(
+                value, op, qubit_map, logical_id_remap, param_values
+            )
+            if wire is not None:
+                return [wire]
+        return self._measure_qubit_indices(
+            op, qubit_map, logical_id_remap, param_values
+        )
+
+    def _measure_vector_condition_wire(
+        self,
+        value: ValueBase,
+        op: MeasureVectorOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> int | None:
+        """Resolve ``measure(qs)[i]`` to the measured ``qs[i]`` wire.
+
+        Args:
+            value (ValueBase): IF condition value, possibly an element of the
+                vector measurement result.
+            op (MeasureVectorOperation): Vector measurement producer.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            int | None: The corresponding measured qubit wire, or None when
+                the condition is not a resolvable vector element.
+        """
+        if not op.operands:
+            return None
+        index = self._condition_array_element_index(value, param_values)
+        if index is None:
+            return None
+        return self._resolve_array_operand_index_to_qubit(
+            op.operands[0], index, qubit_map, logical_id_remap, param_values
+        )
+
+    def _condition_array_element_index(
+        self,
+        value: ValueBase,
+        param_values: dict,
+    ) -> int | None:
+        """Resolve the first array-element index of a condition value.
+
+        Args:
+            value (ValueBase): Condition value to inspect.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            int | None: The concrete element index, or None when ``value`` is
+                not a resolvable array element.
+        """
+        if not isinstance(value, Value):
+            return None
+        if not (hasattr(value, "parent_array") and value.parent_array is not None):
+            return None
+        if not (hasattr(value, "element_indices") and value.element_indices):
+            return None
+
+        index_value = value.element_indices[0]
+        if index_value.is_constant():
+            index = index_value.get_const()
+        else:
+            index = self._evaluate_value(index_value, param_values)
+        if index is None:
+            return None
+        return int(index)
+
+    def _resolve_array_operand_index_to_qubit(
+        self,
+        operand: Value,
+        index: int,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> int | None:
+        """Resolve one element of a measured qubit array operand.
+
+        Args:
+            operand (Value): Quantum array operand of ``MeasureVectorOperation``.
+            index (int): Concrete element index selected from the measurement
+                result.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            int | None: The qubit wire corresponding to ``operand[index]``, or
+                None when the array operand cannot be resolved.
+        """
+        if not isinstance(operand, ArrayValue):
+            return None
+        resolved_lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
+        if getattr(operand, "slice_of", None) is not None:
+            chain = self._resolve_view_chain_to_root(operand, param_values)
+            if chain is None:
+                return None
+            root_av, start, step = chain
+            root_lid = logical_id_remap.get(root_av.logical_id, root_av.logical_id)
+            root_index = start + step * index
+            root_element_key = f"{root_lid}_[{root_index}]"
+            if root_element_key in qubit_map:
+                return qubit_map[root_element_key]
+            if root_lid in qubit_map:
+                return qubit_map[root_lid] + root_index
+            return None
+
+        element_key = f"{resolved_lid}_[{index}]"
+        if element_key in qubit_map:
+            return qubit_map[element_key]
+        if resolved_lid in qubit_map:
+            return qubit_map[resolved_lid] + index
+        return None
+
+    def _measure_qubit_indices(
+        self,
+        op: MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> list[int]:
+        """Resolve the qubit wires touched by a measurement operation.
+
+        Args:
+            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation):
+                Measurement operation whose quantum operand should be resolved.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            list[int]: Wire indices touched by ``op``. Empty when the operand
+                cannot be resolved.
+        """
+        if not op.operands:
+            return []
+        if isinstance(op, MeasureQFixedOperation):
+            return self._resolve_qfixed_carrier_indices(
+                op.operands[0], qubit_map, logical_id_remap
+            )
+        indices = self._resolve_operand_to_qubit_indices(
+            op.operands[0], qubit_map, logical_id_remap, param_values
+        )
+        return indices or []
+
+    def _format_folded_body_lines(
+        self,
+        operations: list[Operation],
+        param_values: dict,
+    ) -> list[str]:
+        """Format operations for a folded control-flow summary body.
+
+        Args:
+            operations (list[Operation]): Branch or loop body operations to
+                summarize.
+            param_values (dict): Resolved loop/parameter values in scope.
+
+        Returns:
+            list[str]: Human-readable operation expressions in order.
+        """
+        local_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(operations, local_param_values)
+        body_lines: list[str] = []
+        for body_op in operations:
+            expr = self._format_operation_as_expression(
+                body_op,
+                set(),
+                body_operations=operations,
+                param_values=local_param_values,
+            )
+            if expr:
+                body_lines.extend(expr.split("\n"))
+        return body_lines
+
+    def _format_condition_expr(
+        self,
+        value: ValueBase | None,
+        body_operations: list[Operation] | None,
+        param_values: dict | None,
+        depth: int = 0,
+    ) -> str | None:
+        """Spell an IfOperation condition as source-like text.
+
+        Walks the classical producer chain (CompOp / CondOp / NotOp / BinOp)
+        that computes ``value`` so a symbolic ``if`` renders as, e.g.,
+        ``flag == 1`` instead of an anonymous placeholder. A value with a
+        meaningful name (a measurement bit such as ``q0_measured``, or a bound
+        parameter) short-circuits to that name; a constant to its literal.
+
+        Args:
+            value (ValueBase | None): The condition value
+                (``IfOperation.condition``) or a sub-operand reached during
+                recursion. None yields None.
+            body_operations (list[Operation] | None): Operations of the scope
+                enclosing the ``if``, searched to find the producer of
+                ``value``. None disables producer lookup (name/const only).
+            param_values (dict | None): Resolved loop/parameter values used to
+                fold a symbolic operand to a constant when possible.
+            depth (int): Current recursion depth; guards against runaway or
+                cyclic producer chains. Defaults to 0.
+
+        Returns:
+            str | None: A human-readable predicate (e.g. ``"flag == 1"``,
+                ``"not done"``, ``"i < n"``), or None when ``value`` cannot be
+                described from name, constant, or a recognized producer.
+        """
+        if value is None:
+            return None
+
+        # A meaningful name (measurement bit, bound parameter) wins.
+        name = getattr(value, "name", None)
+        if name and not self._is_internal_temp_name(name):
+            return name
+
+        # Constant literal, possibly via param_values resolution.
+        if isinstance(value, Value):
+            const = self._evaluate_value(value, param_values or {})
+            if const is not None:
+                return str(const)
+
+        if depth >= 4 or not body_operations:
+            return None
+
+        producer = self._find_producer_op(value, body_operations)
+        if producer is None:
+            return None
+
+        def sub(operand: ValueBase | None) -> str:
+            """Format a binary operand.
+
+            Args:
+                operand (ValueBase | None): Operand to format recursively.
+
+            Returns:
+                str: Formatted operand, or ``?`` when unknown.
+            """
+            return (
+                self._format_condition_expr(
+                    operand, body_operations, param_values, depth + 1
+                )
+                or "?"
+            )
+
+        if isinstance(producer, CompOp) and producer.kind in _COMP_OP_SYMBOLS:
+            symbol = _COMP_OP_SYMBOLS[producer.kind]
+            return f"{sub(producer.operands[0])} {symbol} {sub(producer.operands[1])}"
+        if isinstance(producer, CondOp) and producer.kind in _COND_OP_SYMBOLS:
+            symbol = _COND_OP_SYMBOLS[producer.kind]
+            return f"{sub(producer.operands[0])} {symbol} {sub(producer.operands[1])}"
+        if isinstance(producer, NotOp):
+            return f"not {sub(producer.operands[0])}"
+        if isinstance(producer, BinOp) and producer.kind in _BIN_OP_SYMBOLS:
+            symbol = _BIN_OP_SYMBOLS[producer.kind]
+            return f"{sub(producer.operands[0])} {symbol} {sub(producer.operands[1])}"
+        return None
+
+    def _find_producer_op(
+        self,
+        value: ValueBase,
+        body_operations: list[Operation],
+    ) -> Operation | None:
+        """Find the operation in scope whose result is ``value``.
+
+        Args:
+            value (ValueBase): The value whose producing operation is sought.
+            body_operations (list[Operation]): Operations of the scope to scan.
+
+        Returns:
+            Operation | None: The first operation whose results include a value
+                with the same UUID as ``value``, or None if no producer is in
+                ``body_operations`` (e.g. ``value`` is a block input).
+        """
+        target = getattr(value, "uuid", None)
+        if target is None:
+            return None
+        for candidate in body_operations:
+            for result in candidate.results:
+                if getattr(result, "uuid", None) == target:
+                    return candidate
+        return None
 
     def _build_vfor_items(
         self,

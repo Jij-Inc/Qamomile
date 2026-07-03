@@ -22,6 +22,7 @@ import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.transpiler.errors import (
     EmitError,
+    QamomileCompileError,
     ValidationError,
 )
 
@@ -349,23 +350,24 @@ def test_loop_two_stores_same_array():
     transpiler = QiskitTranspiler()
     exe = transpiler.transpile(
         loop_two_store_kernel,
-        bindings={"dst": [0, 0, 0], "src": [5, 6, 7]},
-        parameters=["n"],
+        bindings={"dst": [0, 0, 0], "src": [5, 6, 7], "n": 3},
     )
-    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": 3}).result()
+    out_vals, _ = exe.run(transpiler.executor()).result()
     assert tuple(int(v) for v in out_vals) == (99, 6, 7)
 
 
-def test_loop_store_zero_iterations_returns_original_array():
-    """A zero-iteration loop preserves the pre-loop array contents."""
+def test_runtime_loop_store_bound_rejected_before_classical_execution():
+    """Runtime loop bounds are rejected before loop-store execution."""
     transpiler = QiskitTranspiler()
-    exe = transpiler.transpile(
-        loop_two_store_kernel,
-        bindings={"dst": [4, 5, 6], "src": [7, 8, 9]},
-        parameters=["n"],
-    )
-    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": 0}).result()
-    assert tuple(int(v) for v in out_vals) == (4, 5, 6)
+    with pytest.raises(
+        QamomileCompileError,
+        match="loop over 'i' depends on runtime parameter 'n'",
+    ):
+        transpiler.transpile(
+            loop_two_store_kernel,
+            bindings={"dst": [4, 5, 6], "src": [7, 8, 9]},
+            parameters=["n"],
+        )
 
 
 @pytest.mark.parametrize("seed, length", [(0, 2), (1, 3), (42, 5)])
@@ -376,10 +378,9 @@ def test_loop_two_stores_random_src(seed, length):
     transpiler = QiskitTranspiler()
     exe = transpiler.transpile(
         loop_two_store_kernel,
-        bindings={"dst": [0] * length, "src": src},
-        parameters=["n"],
+        bindings={"dst": [0] * length, "src": src, "n": length},
     )
-    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": length}).result()
+    out_vals, _ = exe.run(transpiler.executor()).result()
     assert tuple(int(v) for v in out_vals) == (99, *src[1:])
 
 
@@ -405,9 +406,9 @@ def test_loop_pair_fill_same_array(pairs, expected):
     """
     transpiler = QiskitTranspiler()
     exe = transpiler.transpile(
-        loop_pair_fill_kernel, bindings={"dst": [0, 0, 0, 0]}, parameters=["n"]
+        loop_pair_fill_kernel, bindings={"dst": [0, 0, 0, 0], "n": pairs}
     )
-    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": pairs}).result()
+    out_vals, _ = exe.run(transpiler.executor()).result()
     assert tuple(int(v) for v in out_vals) == expected
 
 
@@ -491,10 +492,9 @@ def test_loop_self_ref_in_dead_branch_allowed():
     transpiler = QiskitTranspiler()
     exe = transpiler.transpile(
         loop_conditional_self_referential_kernel,
-        bindings={"dst": [0, 0, 0], "src": [7, 8, 9], "flag": 0},
-        parameters=["n"],
+        bindings={"dst": [0, 0, 0], "src": [7, 8, 9], "flag": 0, "n": 3},
     )
-    out_vals, _ = exe.run(transpiler.executor(), bindings={"n": 3}).result()
+    out_vals, _ = exe.run(transpiler.executor()).result()
     assert tuple(int(v) for v in out_vals) == (7, 8, 9)
 
 

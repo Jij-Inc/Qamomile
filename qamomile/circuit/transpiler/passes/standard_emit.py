@@ -27,7 +27,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DictGetItemOperation,
+    StoreArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
 )
@@ -72,6 +75,7 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
     emit_for_items,
     emit_if,
     emit_while,
+    evaluate_dict_getitem,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     blockvalue_to_gate,
@@ -271,6 +275,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 handle_cast(self, op, qubit_map)
             elif isinstance(op, BinOp):
                 evaluate_binop(self, op, bindings)
+            elif isinstance(op, DictGetItemOperation):
+                evaluate_dict_getitem(self, op, bindings)
             elif isinstance(op, RuntimeClassicalExpr):
                 # Pre-emit ``ClassicalLoweringPass`` already identified this
                 # op as runtime-only. Hand off to the backend hook directly;

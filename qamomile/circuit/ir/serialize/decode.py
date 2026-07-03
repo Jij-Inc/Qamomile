@@ -48,6 +48,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DictGetItemOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
@@ -977,6 +978,26 @@ def _decode_store_array_element(
     return StoreArrayElementOperation(operands=operands, results=results)
 
 
+def _decode_dict_getitem(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> DictGetItemOperation:
+    """Decode :class:`DictGetItemOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        DictGetItemOperation: The reconstructed op.
+    """
+    operands, results = _container_operands_results(d, ctx)
+    return DictGetItemOperation(
+        operands=operands,
+        results=results,
+        key_arity=int(d.get("key_arity", 1)),
+    )
+
+
 def _decode_cast(d: dict[str, Any], ctx: _DecodeContext) -> CastOperation:
     """Decode :class:`CastOperation`.
 
@@ -1553,6 +1574,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "MeasureVectorOperation": _decode_measure_vector,
     "MeasureQFixedOperation": _decode_measure_qfixed,
     "DecodeQFixedOperation": _decode_decode_qfixed,
+    "DictGetItemOperation": _decode_dict_getitem,
     "StoreArrayElementOperation": _decode_store_array_element,
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
