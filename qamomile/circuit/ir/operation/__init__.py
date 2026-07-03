@@ -1,5 +1,5 @@
 from .cast import CastOperation
-from .classical_ops import DecodeQFixedOperation
+from .classical_ops import DecodeQFixedOperation, StoreArrayElementOperation
 from .composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -38,6 +38,7 @@ __all__ = [
     "ConcreteControlledU",
     "SymbolicControlledU",
     "DecodeQFixedOperation",
+    "StoreArrayElementOperation",
     "CastOperation",
     # Control flow operations
     "ForItemsOperation",

@@ -65,8 +65,13 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     parent_tracer = get_current_tracer()
 
     # 2. Evaluate the condition lambda to get the condition expression
-    # The lambda returns a Handle (e.g., result of i < n comparison)
+    # The lambda returns a Handle (e.g., result of i < n comparison).
+    # Normalize to an IR Value: WhileOperation operands must never hold
+    # frontend handles (the serializer reads operand UUIDs) or raw
+    # Python primitives (``while True:`` becomes a const Bit Value that
+    # ValidateWhileContractPass rejects with a typed error).
     condition_result = cond()
+    condition_value = _value_to_ir_value(condition_result, "while_cond")
 
     # 3. Create a new tracer for capturing body operations
     body_tracer = Tracer()
@@ -87,15 +92,16 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     temp_tracer = Tracer()
     with trace(temp_tracer):
         condition_after = cond()
+    condition_after_value = _value_to_ir_value(condition_after, "while_cond")
 
     # 7. Create WhileOperation with captured body operations
     while_op = WhileOperation(operations=body_tracer.operations)
     # operands[0]: initial condition (checked at loop entry)
-    while_op.operands.append(condition_result)
+    while_op.operands.append(condition_value)
     # operands[1]: loop-carried condition (updated inside body)
     # Only append if the body actually produced a different handle.
     if condition_after is not condition_result:
-        while_op.operands.append(condition_after)
+        while_op.operands.append(condition_after_value)
 
     # 8. Add the WhileOperation to the PARENT tracer (not a local one)
     parent_tracer.add_operation(while_op)

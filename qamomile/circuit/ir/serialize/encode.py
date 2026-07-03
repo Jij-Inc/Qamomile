@@ -41,7 +41,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    StoreArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -804,6 +807,21 @@ def _encode_decode_qfixed(
     return d
 
 
+def _encode_store_array_element(
+    op: StoreArrayElementOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`StoreArrayElementOperation`.
+
+    Args:
+        op (StoreArrayElementOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict (the op carries no extra fields).
+    """
+    return _base_op_dict("StoreArrayElementOperation", op)
+
+
 def _encode_cast(op: CastOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`CastOperation`.
 
@@ -1274,6 +1292,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     MeasureVectorOperation: _encode_measure_vector,
     MeasureQFixedOperation: _encode_measure_qfixed,
     DecodeQFixedOperation: _encode_decode_qfixed,
+    StoreArrayElementOperation: _encode_store_array_element,
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,
