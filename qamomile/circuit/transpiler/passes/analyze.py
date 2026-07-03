@@ -25,10 +25,6 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     resolve_compile_time_condition,
 )
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
-from qamomile.circuit.transpiler.passes.validate_while import (
-    build_producer_map,
-    is_measurement_backed,
-)
 
 # ---------------------------------------------------------------------------
 # Public dataflow utilities
@@ -583,9 +579,7 @@ def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError
 
 def _check_loop_carried_rebinds(
     loop_op: ForOperation | ForItemsOperation | WhileOperation,
-    producer_map: dict[str, Operation],
     body_phi_aliases: tuple[tuple[Value, Value], ...],
-    global_phi_aliases: dict[str, Value],
 ) -> None:
     """Reject the loop-carried rebind records of one (pruned) loop op.
 
@@ -593,18 +587,11 @@ def _check_loop_carried_rebinds(
         loop_op (ForOperation | ForItemsOperation | WhileOperation): Loop
             operation whose body has already been pruned of
             compile-time-decidable if branches.
-        producer_map (dict[str, Operation]): Block-wide map from result
-            UUID to producing operation, used to classify
-            measurement-backed values (pre-loop producers included).
         body_phi_aliases (tuple[tuple[Value, Value], ...]):
             ``(result, selected_source)`` pairs of the compile-time ifs
             pruned inside this loop's body. Body-local by design: the
             canonical chain below must stop at the pre-loop value, so
             pre-loop merge aliases must not leak in.
-        global_phi_aliases (dict[str, Value]): Block-wide merge-output
-            aliases (result UUID -> selected source) used to trace
-            measurement-backed values across pruned ifs anywhere in the
-            block, matching the block-wide ``producer_map``.
 
     Raises:
         ValidationError: If a recorded rebind survives dead-branch
@@ -687,27 +674,21 @@ def _check_loop_carried_rebinds(
 
     for record in records:
         # Legal while-loop loop-carried condition: the (initial, updated)
-        # condition pair is aliased onto one clbit by the allocator.
+        # condition pair is the ONLY measurement-backed rebind the
+        # allocator aliases onto one clbit
+        # (``ResourceAllocator._alias_loop_carried_clbits`` fires solely
+        # for ``WhileOperation.operands[1]``). Any other measurement-
+        # backed Bit rebind — in a ``for`` / ``for-items`` body, or a
+        # non-condition variable in a ``while`` body — has no aliasing
+        # machinery: reads of the variable keep addressing the pre-loop
+        # clbit while the branch measurements write elsewhere, so the
+        # compiled program silently diverges from Python semantics.
+        # Those rebinds fall through to the rejection rules below.
         if (
             isinstance(loop_op, WhileOperation)
             and len(loop_op.operands) >= 2
             and record.before.uuid == loop_op.operands[0].uuid
             and record.after.uuid == loop_op.operands[1].uuid
-        ):
-            continue
-
-        # Legal measurement-backed Bit rebind: a per-iteration
-        # re-measurement (``state = qmc.measure(...)``, possibly merged
-        # through an if) lives on a physical clbit that the resource
-        # allocator aliases across iterations, so reads of the pre-loop
-        # value observe the updated bit at runtime. This requires the
-        # pre-loop value to be measurement-backed too — a constant
-        # initial Bit would resolve branch conditions at compile time
-        # and diverge from Python semantics.
-        if is_measurement_backed(
-            record.after, producer_map, phi_aliases=global_phi_aliases
-        ) and is_measurement_backed(
-            record.before, producer_map, phi_aliases=global_phi_aliases
         ):
             continue
 
@@ -800,17 +781,9 @@ def reject_loop_carried_classical_rebinds(
     """
     resolved_bindings = bindings or {}
     pruned = prune_compile_time_ifs(operations, {}, resolved_bindings)
-    producer_map: dict[str, Operation] = {}
-    build_producer_map(pruned.operations, producer_map)
-    global_phi_aliases = {result.uuid: source for result, source in pruned.phi_aliases}
     for op in flatten_ops(pruned.operations):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-            _check_loop_carried_rebinds(
-                op,
-                producer_map,
-                pruned.aliases_for_loop(op),
-                global_phi_aliases,
-            )
+            _check_loop_carried_rebinds(op, pruned.aliases_for_loop(op))
 
 
 class AnalyzePass(Pass[Block, Block]):

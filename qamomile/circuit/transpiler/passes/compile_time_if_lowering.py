@@ -185,12 +185,34 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         return "compile_time_if_lowering"
 
     def run(self, input: Block) -> Block:
-        """Run the compile-time if lowering pass."""
-        # HIERARCHICAL is accepted during the self-recursion unroll loop;
-        # surviving CallBlockOperations are passed through untouched.
-        if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
+        """Lower every compile-time resolvable IfOperation in the block.
+
+        Args:
+            input (Block): Block to lower. Must be ``TRACED``, ``AFFINE``, or
+                ``HIERARCHICAL``. ``TRACED`` is accepted so the circuit drawer
+                can resolve bound/constant ``if`` conditions on a freshly
+                traced block before the transpiler pipeline runs; ``HIERARCHICAL``
+                is accepted during the self-recursion unroll loop. Surviving
+                ``CallBlockOperation``s are passed through untouched in both cases.
+
+        Returns:
+            Block: New block with compile-time ``if``s replaced by their
+                selected-branch operations and phi outputs substituted. The
+                input's ``BlockKind`` is preserved.
+
+        Raises:
+            ValidationError: If ``input.kind`` is ``ANALYZED`` (the pass must
+                run before dependency analysis commits to a representation), or
+                if a compile-time branch selects a symbolic-bound slice-view
+                cast source whose root index space is not resolvable.
+        """
+        if input.kind not in (
+            BlockKind.TRACED,
+            BlockKind.AFFINE,
+            BlockKind.HIERARCHICAL,
+        ):
             raise ValidationError(
-                f"CompileTimeIfLoweringPass expects AFFINE or "
+                f"CompileTimeIfLoweringPass expects TRACED, AFFINE, or "
                 f"HIERARCHICAL block, got {input.kind}",
             )
 

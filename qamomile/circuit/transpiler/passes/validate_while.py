@@ -68,7 +68,6 @@ def is_measurement_backed(
     value: Value,
     producer_map: dict[str, Operation],
     visiting: set[str] | None = None,
-    phi_aliases: dict[str, Value] | None = None,
 ) -> bool:
     """Recursively check whether a value traces back to measurement operations.
 
@@ -88,12 +87,6 @@ def is_measurement_backed(
             operation that produced it.
         visiting (set[str] | None): UUIDs on the current DFS path, used to
             break cycles. Defaults to None (fresh traversal).
-        phi_aliases (dict[str, Value] | None): Phi-output aliases from
-            ``analyze.prune_compile_time_ifs`` (result UUID -> selected
-            source), used when tracing a pruned view of the IR: a
-            compile-time-resolved if's merge output has no producer in the
-            pruned operations, so it is followed to its selected source
-            here. Defaults to None (unpruned IR, no aliases).
 
     Returns:
         bool: True if the value is measurement-backed.
@@ -103,17 +96,6 @@ def is_measurement_backed(
     if value.uuid in visiting:
         return False
     visiting.add(value.uuid)
-
-    # Dead-branch phi alias (pruned view only): the merge output stands
-    # for its compile-time-selected source.
-    if phi_aliases is not None:
-        alias_source = phi_aliases.get(value.uuid)
-        if alias_source is not None:
-            result = is_measurement_backed(
-                alias_source, producer_map, visiting, phi_aliases
-            )
-            visiting.discard(value.uuid)
-            return result
 
     producer = producer_map.get(value.uuid)
 
@@ -130,7 +112,7 @@ def is_measurement_backed(
     if parent is not None:
         cur: Value | None = parent
         while cur is not None:
-            if is_measurement_backed(cur, producer_map, visiting, phi_aliases):
+            if is_measurement_backed(cur, producer_map, visiting):
                 visiting.discard(value.uuid)
                 return True
             cur = getattr(cur, "slice_of", None)
@@ -144,10 +126,8 @@ def is_measurement_backed(
         for merge in producer.iter_merges():
             if merge.result.uuid == value.uuid:
                 result = is_measurement_backed(
-                    merge.true_value, producer_map, visiting, phi_aliases
-                ) and is_measurement_backed(
-                    merge.false_value, producer_map, visiting, phi_aliases
-                )
+                    merge.true_value, producer_map, visiting
+                ) and is_measurement_backed(merge.false_value, producer_map, visiting)
                 visiting.discard(value.uuid)
                 return result
         visiting.discard(value.uuid)
@@ -155,10 +135,8 @@ def is_measurement_backed(
 
     if isinstance(producer, PhiOp):
         result = is_measurement_backed(
-            producer.true_value, producer_map, visiting, phi_aliases
-        ) and is_measurement_backed(
-            producer.false_value, producer_map, visiting, phi_aliases
-        )
+            producer.true_value, producer_map, visiting
+        ) and is_measurement_backed(producer.false_value, producer_map, visiting)
         visiting.discard(value.uuid)
         return result
 

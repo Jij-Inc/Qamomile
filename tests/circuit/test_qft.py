@@ -734,22 +734,16 @@ class TestNestedShapeDependentStdlib:
         )
         assert iqft_ops[0].num_target_qubits == n
 
-    def test_matrix_qubit_sub_kernel_compiles_without_specialization(self):
-        """A nested call with a ``Matrix[Qubit]`` arg still compiles.
+    def test_matrix_qubit_sub_kernel_is_rejected(self):
+        """A nested call allocating a ``Matrix[Qubit]`` raises loudly.
 
-        Higher-rank quantum-array specialization is not yet
-        implemented in ``_extract_calltime_specialization`` — the
-        extractor leaves ``Matrix[Qubit]`` / ``Tensor[Qubit]``
-        arguments out of all three buckets and ``continue``s, the
-        same way it handles ``Dict`` / ``Tuple``. The cached
-        symbolic block is used for the callee's behaviour on that
-        argument position, so kernels that simply *take* a
-        ``Matrix[Qubit]`` without applying shape-dependent stdlib to
-        it must still compose normally. (Trade-off documented in the
-        ``Matrix[Qubit]`` / ``Tensor[Qubit]`` entry of
-        ``LIMITATIONS.md``: a callee that applies ``qft`` / ``iqft``
-        to a ``Matrix[Qubit]`` argument continues to silently no-op
-        on those qubits.)
+        Rank>1 quantum registers are explicitly rejected (see the
+        "Rank>1 quantum registers are explicitly rejected" entry of
+        ``LIMITATIONS.md``): the quantum addressing path is rank-1,
+        so a ``(2, 3)`` register would silently alias distinct
+        elements onto the same physical qubit. The ``qubit_array``
+        guard fires while the outer kernel's body is traced, before
+        the nested call is reached.
         """
 
         @qkernel
@@ -762,14 +756,8 @@ class TestNestedShapeDependentStdlib:
             qs = inner(qs)
             return qs
 
-        # The kernel must build without error; the inner ``Matrix``
-        # argument is left symbolic at the specialization extractor
-        # and inline substitution wires it up to the caller's
-        # allocated register. (``.transpile`` is not exercised here
-        # because ``Matrix[Qubit]`` is not a valid classical-I/O
-        # entrypoint — the build path is what the regression guards.)
-        block = outer.build()
-        assert block is not None
+        with pytest.raises(NotImplementedError, match="rank-2"):
+            outer.build()
 
     @pytest.mark.parametrize("seed", [0, 1, 7])
     @pytest.mark.parametrize("n", [1, 2, 3])

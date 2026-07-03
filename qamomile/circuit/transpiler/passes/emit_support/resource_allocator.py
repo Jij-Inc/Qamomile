@@ -28,6 +28,7 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     map_phi_outputs,
     remap_static_phi_outputs,
@@ -151,11 +152,45 @@ class ResourceAllocator:
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
-        """Recursively allocate resources from operations."""
+        """Recursively allocate resources from operations.
+
+        Args:
+            operations (list[Operation]): Operations to walk, including
+                nested control-flow bodies.
+            qubit_map (QubitMap): Qubit address mapping mutated in place.
+            clbit_map (ClbitMap): Clbit address mapping mutated in place.
+            bindings (dict[str, Any]): Parameter bindings used to resolve
+                symbolic array sizes.
+
+        Raises:
+            EmitError: If a quantum array's size cannot be resolved from
+                ``bindings``, or if a ``QInitOperation`` allocates a
+                rank>1 quantum register — the ``QubitAddress`` keys
+                registered here carry a single flat index, so a
+                higher-rank register would silently alias distinct
+                elements onto the same physical qubit. The frontend
+                rejects such registers at construction time; this guard
+                covers hand-built or deserialized IR.
+        """
         for op in operations:
             if isinstance(op, QInitOperation):
                 result = op.results[0]
                 if isinstance(result, ArrayValue):
+                    # ``len()`` is read into a variable so zuban does not
+                    # narrow the variadic shape tuple to fixed-length
+                    # forms that make ``result.shape[0]`` look out of
+                    # range below.
+                    rank = len(result.shape)
+                    if rank > 1:
+                        raise EmitError(
+                            f"Cannot allocate qubits for rank-{rank} "
+                            f"quantum register {result.name!r}: the qubit "
+                            f"addressing path is rank-1, so a higher-rank "
+                            f"register would silently alias distinct "
+                            f"elements onto the same physical qubit. Use a "
+                            f"1-D Vector[Qubit] with explicit index "
+                            f"arithmetic instead."
+                        )
                     # Allocate physical qubits for array elements using
                     # QubitAddress(array_uuid, i) keys.  At this stage only
                     # these composite keys are registered; the individual
@@ -166,8 +201,6 @@ class ResourceAllocator:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
                         if size is None:
-                            from qamomile.circuit.transpiler.errors import EmitError
-
                             raise EmitError(
                                 "Cannot resolve array size for qubit allocation. "
                                 "Structural UInt parameters must be bound at transpile time."

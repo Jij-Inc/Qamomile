@@ -2047,3 +2047,50 @@ class TestNoNameCollisionInTmpWrites:
         evaluate_classical_predicate(_StubEmitPass(), op, bindings)
         assert bindings[out.uuid] is False
         assert out.name not in bindings
+
+
+# ---------------------------------------------------------------------------
+# Block-kind acceptance (TRACED is accepted for the circuit drawer)
+# ---------------------------------------------------------------------------
+
+
+class TestBlockKindAcceptance:
+    """The pass accepts TRACED/AFFINE/HIERARCHICAL and rejects ANALYZED."""
+
+    def test_traced_block_is_lowered(self):
+        """A TRACED block (the drawer's input kind) lowers and keeps its kind."""
+        q = _qubit_val()
+        flag = _uint_val("flag", const=1)
+        if_op, phi_out = _make_if_with_x_gate(flag, q)
+        block = Block(
+            name="traced",
+            operations=[if_op],
+            output_values=[phi_out],
+            kind=BlockKind.TRACED,
+        )
+
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        assert _find_gates(lowered.operations, GateOperationType.X)
+        # Kind is a normalization-neutral attribute: it must survive lowering.
+        assert lowered.kind == BlockKind.TRACED
+
+    def test_analyzed_block_is_rejected(self):
+        """ANALYZED is rejected: the pass must run before dependency analysis."""
+        import pytest
+
+        from qamomile.circuit.transpiler.errors import ValidationError
+
+        q = _qubit_val()
+        flag = _uint_val("flag", const=1)
+        if_op, phi_out = _make_if_with_x_gate(flag, q)
+        block = Block(
+            name="analyzed",
+            operations=[if_op],
+            output_values=[phi_out],
+            kind=BlockKind.ANALYZED,
+        )
+
+        with pytest.raises(ValidationError, match="TRACED, AFFINE, or"):
+            _run_pass(block)
