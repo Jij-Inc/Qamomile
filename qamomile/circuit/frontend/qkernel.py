@@ -1043,8 +1043,9 @@ class QKernel(Generic[P, R]):
             TypeError: If the named argument's type cannot be kept as a
                 runtime parameter. Scalars/arrays of float/int/UInt and
                 ``Dict[K, Float]`` (values decomposed into per-key
-                backend parameters) are allowed; ``Dict`` with a
-                non-``Float`` value type is not.
+                backend parameters) are allowed; a ``Dict`` without
+                explicit key/value type arguments, or with a
+                non-``Float`` value type, is not.
         """
         for name in parameters:
             if name not in self.input_types:
@@ -1056,12 +1057,21 @@ class QKernel(Generic[P, R]):
             # auto-detected): each constant-key subscript lookup becomes
             # one backend parameter, so the value type must be Float —
             # UInt/Bit dict values feed structural decisions (loop
-            # bounds, branch predicates) that cannot stay symbolic.
+            # bounds, branch predicates) that cannot stay symbolic. The
+            # annotation must carry explicit key/value types, mirroring
+            # the bound-input path (``create_dummy_input`` rejects a bare
+            # ``Dict`` the same way).
             if is_dict_type(param_type):
-                value_type = None
-                if hasattr(param_type, "__args__") and len(param_type.__args__) >= 2:
-                    value_type = param_type.__args__[1]
-                if value_type not in (None, float, Float):
+                args = getattr(param_type, "__args__", None)
+                if not args or len(args) < 2:
+                    raise TypeError(
+                        f"Parameter '{name}' must be annotated as "
+                        f"Dict[K, Float] with explicit key and value "
+                        f"types to be kept as a runtime parameter; got "
+                        f"{param_type}"
+                    )
+                value_type = args[1]
+                if value_type not in (float, Float):
                     raise TypeError(
                         f"Parameter '{name}' is a Dict with value type "
                         f"{value_type}; only Dict[K, Float] can be kept "

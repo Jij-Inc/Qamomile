@@ -549,7 +549,9 @@ class Transpiler(ABC, Generic[T]):
                 ``ExecutableProgram.parameter_names``.
 
         Returns:
-            ExecutableProgram ready for execution
+            ExecutableProgram[T]: Executable wrapping the backend circuit
+                and the parameter metadata needed to re-bind runtime
+                parameters, ready for execution.
 
         Raises:
             ValueError: If a name appears in both ``bindings`` and

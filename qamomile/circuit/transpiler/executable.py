@@ -143,7 +143,8 @@ class ExecutableProgram(Generic[T]):
                 - Indexed: {"gammas[0]": 0.1, "coeffs[(0, 1)]": 0.2}
 
         Returns:
-            SampleJob that resolves to SampleResult with results.
+            SampleJob[Any]: A job that resolves to a SampleResult with the
+                per-bitstring counts.
 
         Raises:
             ExecutionError: If no quantum circuit to execute
@@ -177,8 +178,9 @@ class ExecutableProgram(Generic[T]):
                 - Indexed: {"gammas[0]": 0.1, "coeffs[(0, 1)]": 0.2}
 
         Returns:
-            RunJob that resolves to the kernel's return type, or
-            ExpvalJob if the program contains expectation value computation.
+            RunJob[Any] | ExpvalJob: A RunJob that resolves to the kernel's
+                return type, or an ExpvalJob when the program contains an
+                expectation-value computation.
 
         Raises:
             ExecutionError: If no quantum circuit to execute

@@ -360,6 +360,24 @@ class TestDictParameterValidation:
         block = builtin_float.build(parameters=["coeffs"])
         assert any(isinstance(op, DictGetItemOperation) for op in block.operations)
 
+    def test_bare_dict_without_type_args_rejected(self):
+        """A Dict annotation missing key/value types cannot be a runtime parameter.
+
+        The value type is what selects the per-key parameter's handle type,
+        so a bare ``Dict`` (no ``[K, V]``) is rejected up front rather than
+        silently defaulting to Float — matching how the bound-input path
+        rejects an unparameterized dict annotation.
+        """
+
+        @qmc.qkernel
+        def bare_dict(coeffs: qmc.Dict) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, name="q")
+            q[0] = qmc.rx(q[0], angle=coeffs[0])
+            return qmc.measure(q)
+
+        with pytest.raises(TypeError, match="explicit key and value"):
+            bare_dict.build(parameters=["coeffs"])
+
     def test_overlap_with_bindings_rejected(self, qiskit_transpiler):
         """A Dict name in both bindings and parameters hits the disjointness check."""
 

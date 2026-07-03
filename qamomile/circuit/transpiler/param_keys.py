@@ -17,6 +17,14 @@ import typing
 def dict_param_key(dict_name: str, key: typing.Any) -> str:
     """Format the backend-parameter name for one entry of a Dict parameter.
 
+    The key is formatted with ``repr`` rather than ``str`` so the helper is
+    collision-proof on its own: ``str("0")`` and ``str(0)`` both yield
+    ``"coeffs[0]"``, but ``repr`` keeps the string key distinct
+    (``"coeffs['0']"``). Callers pass keys already normalized to plain
+    ``int`` / tuple-of-``int`` (see :func:`normalize_dict_binding_key`), for
+    which ``repr`` and ``str`` produce identical text (``repr(3) == '3'``,
+    ``repr((0, 1)) == '(0, 1)'``), so the emitted names are unchanged.
+
     Args:
         dict_name (str): The kernel argument name of the Dict parameter.
         key (Any): The looked-up key, already normalized (a plain ``int``
@@ -27,7 +35,7 @@ def dict_param_key(dict_name: str, key: typing.Any) -> str:
         str: The backend parameter name, e.g. ``"coeffs[3]"`` for an int
             key or ``"coeffs[(0, 1)]"`` for a tuple key.
     """
-    return f"{dict_name}[{key}]"
+    return f"{dict_name}[{key!r}]"
 
 
 def normalize_dict_binding_key(key: typing.Any) -> typing.Any:
