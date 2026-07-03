@@ -15,17 +15,25 @@ import matplotlib
 matplotlib.use("Agg")
 
 from collections.abc import Iterable, Iterator
+from dataclasses import replace
+import math
 from typing import Any
 
+from matplotlib import colors as mcolors
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from matplotlib.patches import FancyBboxPatch
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import Qubit, UInt
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
-from qamomile.circuit.visualization.drawer import _prepare_graph_for_visualization
+from qamomile.circuit.visualization.drawer import (
+    MatplotlibDrawer,
+    _prepare_graph_for_visualization,
+)
+from qamomile.circuit.visualization.geometry import compute_border_padding
 from qamomile.circuit.visualization.layout import CircuitLayoutEngine
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import (
@@ -336,6 +344,27 @@ def _if_connector_lines(fig: Figure) -> list[Line2D]:
         for line in ax.lines
         if line.get_color() == DEFAULT_STYLE.if_edge_color
         and line.get_linestyle() == "-"
+    ]
+
+
+def _if_branch_boxes(fig: Figure) -> list[FancyBboxPatch]:
+    """Collect IF branch boxes from a rendered figure.
+
+    Args:
+        fig (Figure): Rendered circuit figure.
+
+    Returns:
+        list[FancyBboxPatch]: IF-colored branch boxes.
+    """
+    ax = fig._qm_ax  # type: ignore[attr-defined]
+    if_edge = mcolors.to_rgba(DEFAULT_STYLE.if_edge_color)
+    return [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, FancyBboxPatch)
+        and patch.get_edgecolor() == if_edge
+        and patch.get_facecolor()[3] == 0
+        and patch.get_linestyle() == "-."
     ]
 
 
@@ -719,6 +748,18 @@ class TestDrawEndToEnd:
             labels = [text.get_text() for text in ax.texts]
             assert any(label.startswith("if ") for label in labels)
             assert len(_if_connector_lines(fig)) == 1
+
+    def test_empty_single_branch_uses_layout_reserved_span(self):
+        """Empty IF branch boxes prefer the layout-reserved x-span."""
+        style = replace(DEFAULT_STYLE, gate_gap=0.1)
+        fig = MatplotlibDrawer(
+            empty_single_branch_if._build_graph_for_visualization(), style
+        ).draw(fold_loops=False)
+        connector = _if_connector_lines(fig)[0]
+        measure_right = connector.get_xdata()[0]
+        expected_left = measure_right + compute_border_padding(style, depth=0)
+        branch_box = _if_branch_boxes(fig)[0]
+        assert math.isclose(branch_box.get_x(), expected_left)
 
     def test_symbolic_empty_single_branch_draws_if_label(self):
         """The renderer keeps an empty symbolic single-branch IF visible."""
