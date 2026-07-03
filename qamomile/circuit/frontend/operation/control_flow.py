@@ -802,8 +802,14 @@ def _collect_branch_rebinds(
         false_value = false_val.value if hasattr(false_val, "value") else false_val
         if not isinstance(true_value, Value) or not isinstance(false_value, Value):
             continue
-        rebound_in_true = true_value.uuid != pre_value.uuid
-        rebound_in_false = false_value.uuid != pre_value.uuid
+        # Compare logical_id, not uuid: a gate self-update (``q = qmc.x(q)``)
+        # produces a new SSA version with a fresh uuid but the SAME
+        # logical_id (same quantum wire), which is not a discard. Only a
+        # substitution to a different quantum resource — a fresh allocation
+        # or another existing register — changes the logical_id, and only
+        # those are genuine branch rebinds worth recording.
+        rebound_in_true = true_value.logical_id != pre_value.logical_id
+        rebound_in_false = false_value.logical_id != pre_value.logical_id
         if rebound_in_true or rebound_in_false:
             records.append(
                 BranchRebind(
