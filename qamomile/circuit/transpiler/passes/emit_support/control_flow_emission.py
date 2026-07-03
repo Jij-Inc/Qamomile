@@ -453,13 +453,16 @@ def evaluate_dict_getitem(
         )
 
     lookup_key: Any = tuple(resolved_key) if op.key_arity > 1 else resolved_key[0]
-    table = {(tuple(k) if isinstance(k, (tuple, list)) else k): v for k, v in entries}
-    if lookup_key not in table:
-        raise EmitError(
-            f"Key {lookup_key!r} not found in dict "
-            f"'{getattr(dict_value, 'name', '?')}' during emit"
-        )
-    _set_emit_value(bindings, op.results[0].uuid, table[lookup_key])
+    for entry_key, entry_value in entries:
+        if isinstance(entry_key, (tuple, list)):
+            entry_key = tuple(entry_key)
+        if entry_key == lookup_key:
+            _set_emit_value(bindings, op.results[0].uuid, entry_value)
+            return
+    raise EmitError(
+        f"Key {lookup_key!r} not found in dict "
+        f"'{getattr(dict_value, 'name', '?')}' during emit"
+    )
 
 
 # ---------------------------------------------------------------------------

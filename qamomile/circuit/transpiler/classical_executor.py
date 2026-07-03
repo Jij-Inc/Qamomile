@@ -574,15 +574,16 @@ class ClassicalExecutor:
         ]
         entries = self._get_iterable(op.operands[0], context, results, scoped_locals)
         lookup_key: Any = tuple(resolved_key) if op.key_arity > 1 else resolved_key[0]
-        table = {
-            (tuple(k) if isinstance(k, (tuple, list)) else k): v for k, v in entries
-        }
-        if lookup_key not in table:
-            raise ExecutionError(
-                f"Key {lookup_key!r} not found in dict "
-                f"'{getattr(op.operands[0], 'name', '?')}'"
-            )
-        results[op.results[0].uuid] = table[lookup_key]
+        for entry_key, entry_value in entries:
+            if isinstance(entry_key, (tuple, list)):
+                entry_key = tuple(entry_key)
+            if entry_key == lookup_key:
+                results[op.results[0].uuid] = entry_value
+                return
+        raise ExecutionError(
+            f"Key {lookup_key!r} not found in dict "
+            f"'{getattr(op.operands[0], 'name', '?')}'"
+        )
 
     def _get_value(
         self,

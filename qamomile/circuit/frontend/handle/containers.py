@@ -214,24 +214,21 @@ class Dict(Handle, Generic[K, V]):
         # decides whether the dict is bound, so a bound empty dict
         # raises KeyError instead of silently tracing a symbolic lookup.
         if all_const and self.value.metadata.dict_runtime is not None:
-            bound_items = self.value.get_bound_data_items()
             lookup_key = (
                 tuple(const_components)
                 if len(const_components) > 1
                 else const_components[0]
             )
-            table = {
-                (tuple(k) if isinstance(k, list) else k): v for k, v in bound_items
-            }
-            if lookup_key not in table:
-                raise KeyError(
-                    f"Key {lookup_key!r} not found in dict '{self.value.name}'"
-                )
-            folded = coerce(table[lookup_key])
-            return handle_class(  # type: ignore[return-value]
-                value=result_value.with_const(folded),
-                init_value=folded,
-            )
+            for entry_key, entry_value in self.value.get_bound_data_items():
+                if isinstance(entry_key, list):
+                    entry_key = tuple(entry_key)
+                if entry_key == lookup_key:
+                    folded = coerce(entry_value)
+                    return handle_class(  # type: ignore[return-value]
+                        value=result_value.with_const(folded),
+                        init_value=folded,
+                    )
+            raise KeyError(f"Key {lookup_key!r} not found in dict '{self.value.name}'")
 
         # Symbolic path: every component needs an IR Value. UInt
         # handles carry their own Value; int constants are lifted to
