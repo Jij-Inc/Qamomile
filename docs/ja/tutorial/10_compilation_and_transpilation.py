@@ -384,12 +384,12 @@ print(executable.quantum_circuit)
 # |-----------|------------|----------|--------|
 # | `ForOperation` | `operations`（本体） | `operands = [start, stop, step]`（いずれも`UInt`） | `loop_var`名を持つ |
 # | `ForItemsOperation` | `operations`（本体） | `operands[0]`が`DictValue` | 常にコンパイル時アンロール |
-# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]`が`Bit` | `phi_ops`で分岐後の値マージ |
+# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]`が`Bit` | `true_yields`/`false_yields`で分岐後の値マージ |
 # | `WhileOperation` | `operations`（本体） | `operands[0]`（初期条件）, `operands[1]`（ループキャリー条件） | 測定結果`Bit`必須、`max_iterations`ヒント可 |
 #
 # 4つとも`HasNestedOps`を実装しているので、パスは`nested_op_lists()` / `rebuild_nested()`経由で本体へ再帰的に入れます。`isinstance`のチェーンは書かないのが流儀です。
 #
-# `IfOperation`には値をマージする**Phiノード** (`PhiOp`) が付きます。両分岐で同じ論理量子ビット・古典変数を異なるバージョンで更新した場合、分岐後に使う側はPhi経由でどちらのバージョンなのかを参照します。
+# `IfOperation`は並列リスト**`true_yields`/`false_yields`**で値をマージします。`true_yields[i]`と`false_yields[i]`が`results[i]`にマージされる分岐値です。両分岐で同じ論理量子ビット・古典変数を異なるバージョンで更新した場合、分岐後に使う側はマージ結果を通じてどちらのバージョンなのかを参照します。パスがマージを読むときはyieldリストを直接触らず`IfOperation.iter_merges()`を使います。
 #
 # ### 5.3 パスごとの挙動
 #
@@ -399,7 +399,7 @@ print(executable.quantum_circuit)
 # |------|-------------|---------------|-----------------|
 # | `inline` | 両分岐の本体へ再帰 | 本体へ再帰 | 本体へ再帰 |
 # | `partial_eval` | 条件が定数なら**選ばれた分岐で置換**（`CompileTimeIfLoweringPass`）。測定結果条件なら保持 | 境界の`BinOp`は畳み込まれる。**アンロールはしない** | 何もしない（ここでは変形対象外） |
-# | `analyze` | Phiが依存グラフに反映される | `loop_var`が本体の依存に入る | 測定結果条件を量子オペランドと同様に扱う |
+# | `analyze` | マージが依存グラフに反映される | `loop_var`が本体の依存に入る | 測定結果条件を量子オペランドと同様に扱う |
 # | `validate_symbolic_shapes` | — | 未解決の`Vector`shape次元が境界にあると拒否 | — |
 # | `plan` | `OperationKind.CONTROL`としてセグメント境界を作る | 同左 | 同左 |
 # | `emit` | 実行時`if`として出力（バックエンドが対応していれば） | `LoopAnalyzer.should_unroll()`で判定し、必要ならアンロール | 実行時`while`として出力 |
@@ -600,7 +600,7 @@ except ModuleNotFoundError:
 # 3. ユーザーが`executor()`を呼べるように`QuantumExecutor[T]`のサブクラスを実装します。
 # 4. オプション: emitされた回路で高レベル構造を保つため、QFT/QPEなどの`CompositeGateEmitter`を追加します。
 #
-# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`CallBlockOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのPhiが漏れたかが読み取りやすくなります。
+# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`CallBlockOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのマージが漏れたかが読み取りやすくなります。
 
 # %% [markdown]
 # ## 9. まとめ
