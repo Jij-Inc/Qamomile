@@ -1,4 +1,41 @@
-"""Public resource-estimation APIs for Qamomile programs."""
+"""Public resource-estimation APIs for Qamomile programs.
+
+Every estimate flows through five layers, and every value at every layer is
+a SymPy expression so estimates stay symbolic until the caller substitutes
+concrete parameters:
+
+1. Problem summary — ``PauliHamiltonianResource`` (from Qamomile or
+   OpenFermion-style inputs).
+2. Algorithm workload — ``HamiltonianQPEWorkload``, ``TrotterQPEWorkload``,
+   ``BlockEncodingResource``.
+3. Logical estimate — the architecture-independent
+   ``qamomile.circuit.estimator.ResourceEstimate``.
+4. Architecture lift — ``FTQCCostModel``, ``SurfaceCodeCostModel``,
+   ``ActiveVolumeCostModel``.
+5. Comparison — canonical quantity keys and ``compare_resource_values``.
+
+The package is extension-first; adding an algorithm does not require
+editing it:
+
+- Resource values are exchanged as ``dict[str, sp.Expr]`` keyed by plain
+  strings. ``ResourceQuantity`` catalogs the built-ins and is not a
+  whitelist; attach display metadata for new keys with
+  ``register_resource_quantity()`` (registries are last-wins so notebook
+  re-execution keeps working).
+- New workloads subclass ``HamiltonianWorkloadMixin`` and declare fields,
+  validation tuples, and ``_own_resource_values()``; validation,
+  precision-budget accounting, and serialization are inherited.
+- Custom Hamiltonian representations register a logical-qubit scaling model
+  via ``register_hamiltonian_representation()``.
+- ``GateCount.oracle_calls`` counters pass through ``resource_values()``
+  generically under their own names.
+
+Formula-based algorithm estimators live here (``estimate_trotter``,
+``estimate_qpe``, ``estimate_qaoa``, and the workload estimators);
+``qamomile.circuit.estimator`` owns circuit-derived counting only, and the
+dependency direction is ``resource_estimation -> qamomile.circuit``, never
+the reverse.
+"""
 
 from qamomile.circuit.estimator import (
     GateCount,
