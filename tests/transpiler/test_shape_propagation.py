@@ -10,7 +10,110 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import CInitOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+
+def _scalar_returning_block(name: str) -> tuple[Block, Value]:
+    """Build a callee block that returns one scalar value."""
+    output = Value(type=UIntType(), name=f"{name}_out")
+    block = Block(
+        name=name,
+        output_values=[output],
+        operations=[
+            CInitOperation(results=[output]),
+            ReturnOperation(operands=[output]),
+        ],
+        kind=BlockKind.HIERARCHICAL,
+    )
+    return block, output
+
+
+def _block_with_structural_output_call(name: str) -> tuple[Block, Value, Value]:
+    """Build a block whose tuple output contains a call result placeholder."""
+    callee, _ = _scalar_returning_block(f"{name}_callee")
+    call_result = Value(type=UIntType(), name=f"{name}_call_result")
+    sibling = Value(type=UIntType(), name=f"{name}_sibling")
+    call = CallBlockOperation(block=callee, results=[call_result])
+    output = TupleValue(name=f"{name}_tuple", elements=(call_result, sibling))
+    block = Block(
+        name=name,
+        output_values=[output],
+        operations=[call],
+        kind=BlockKind.HIERARCHICAL,
+    )
+    return block, call_result, sibling
+
+
+class TestInlineStructuralOutputSubstitution:
+    """Test structural block outputs updated by InlinePass substitutions."""
+
+    def test_top_level_tuple_output_rewrites_inlined_call_result(self):
+        """InlinePass rewrites call result placeholders inside TupleValue
+        block outputs."""
+        block, call_result, sibling = _block_with_structural_output_call("top")
+
+        inlined = InlinePass().run(block)
+
+        output = inlined.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid != call_result.uuid
+        assert output.elements[0].name == "top_callee_out"
+        assert output.elements[1] == sibling
+
+    def test_nested_block_tuple_output_rewrites_inlined_call_result(self):
+        """Nested blocks owned by operations rewrite structural output
+        elements after inlining."""
+        nested, call_result, sibling = _block_with_structural_output_call("nested")
+        outer = Block(
+            name="outer",
+            operations=[InverseBlockOperation(source_block=nested)],
+            kind=BlockKind.HIERARCHICAL,
+        )
+
+        inlined = InlinePass().run(outer)
+
+        inverse_op = inlined.operations[0]
+        assert isinstance(inverse_op, InverseBlockOperation)
+        assert inverse_op.source_block is not None
+        output = inverse_op.source_block.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid != call_result.uuid
+        assert output.elements[0].name == "nested_callee_out"
+        assert output.elements[1] == sibling
+
+    def test_dict_output_tuple_key_rewrites_inlined_call_result(self):
+        """InlinePass rewrites call results nested inside DictValue keys."""
+        callee, _ = _scalar_returning_block("dict_callee")
+        call_result = Value(type=UIntType(), name="dict_call_result")
+        sibling = Value(type=UIntType(), name="dict_sibling")
+        value = Value(type=UIntType(), name="dict_value")
+        call = CallBlockOperation(block=callee, results=[call_result])
+        key = TupleValue(name="dict_key", elements=(call_result, sibling))
+        output = DictValue(name="dict_output", entries=((key, value),))
+        block = Block(
+            name="dict_outer",
+            output_values=[output],
+            operations=[call],
+            kind=BlockKind.HIERARCHICAL,
+        )
+
+        inlined = InlinePass().run(block)
+
+        dict_output = inlined.output_values[0]
+        assert isinstance(dict_output, DictValue)
+        key_output, value_output = dict_output.entries[0]
+        assert isinstance(key_output, TupleValue)
+        assert key_output.elements[0].uuid != call_result.uuid
+        assert key_output.elements[0].name == "dict_callee_out"
+        assert key_output.elements[1] == sibling
+        assert value_output == value
 
 
 class TestXMixerShapePropagation:

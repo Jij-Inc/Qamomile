@@ -19,7 +19,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
 from qamomile.circuit.transpiler.errors import InliningError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.value_mapping import (
@@ -183,7 +183,7 @@ class InlinePass(Pass[Block, Block]):
             return input
 
         # Build value substitution map for inlining
-        value_map: dict[str, Value] = {}
+        value_map: dict[str, ValueBase] = {}
 
         serialized_ops = self._serialize_operations(
             input.operations,
@@ -191,8 +191,7 @@ class InlinePass(Pass[Block, Block]):
             visiting_blocks=set(),
         )
 
-        # Map output values through the value_map
-        output_values = [value_map.get(v.uuid, v) for v in input.output_values]
+        output_values = self._substitute_output_values(input.output_values, value_map)
 
         out_kind = (
             BlockKind.HIERARCHICAL
@@ -214,7 +213,7 @@ class InlinePass(Pass[Block, Block]):
     def _serialize_operations(
         self,
         operations: list[Operation],
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
         visiting_blocks: set[int],
     ) -> list[Operation]:
         """Recursively serialize a list of operations."""
@@ -328,7 +327,7 @@ class InlinePass(Pass[Block, Block]):
     def _inline_call(
         self,
         call_op: CallBlockOperation,
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
         visiting_blocks: set[int],
     ) -> list[Operation]:
         """Inline a CallBlockOperation.
@@ -363,7 +362,7 @@ class InlinePass(Pass[Block, Block]):
         arg_substitutor = ValueSubstitutor(local_map, transitive=True)
         for block_input, call_arg in zip(block.input_values, call_args):
             substituted_arg = arg_substitutor.substitute_value(call_arg)
-            resolved_arg = cast(Value, substituted_arg)
+            resolved_arg = substituted_arg
             local_map[block_input.uuid] = resolved_arg
 
             # If both are ArrayValues, also map shape dimensions
@@ -404,7 +403,7 @@ class InlinePass(Pass[Block, Block]):
         uuid_remap = remapper.uuid_remap
 
         # Build remapped_local_map with cloned UUIDs
-        remapped_local_map: dict[str, Value] = {}
+        remapped_local_map: dict[str, ValueBase] = {}
         for old_uuid, value in local_map.items():
             new_uuid = uuid_remap.get(old_uuid, old_uuid)
             remapped_local_map[new_uuid] = value
@@ -436,6 +435,7 @@ class InlinePass(Pass[Block, Block]):
             {
                 k: v for k, v in remapped_local_map.items()
             },  # copy as dict[str, ValueBase]
+            transitive=True,
         )
         for block_return, call_result in zip(return_values, call_op.results):
             remapped_uuid = uuid_remap.get(block_return.uuid, block_return.uuid)
@@ -447,12 +447,8 @@ class InlinePass(Pass[Block, Block]):
                 # The return value is a newly created value (not a modified input).
                 # Substitute to resolve shape dims, parent_array, etc.
                 substituted = sub.substitute_value(block_return)
-                if isinstance(substituted, Value):
-                    value_map[call_result.uuid] = substituted
-                    resolved = substituted
-                else:
-                    value_map[call_result.uuid] = call_result
-                    resolved = call_result
+                value_map[call_result.uuid] = substituted
+                resolved = substituted
 
             # Propagate the call_result's shape dim UUIDs to the outer
             # value_map. The frontend creates a fresh ``ArrayValue`` for
@@ -495,13 +491,13 @@ class InlinePass(Pass[Block, Block]):
         if block is None:
             return None
 
-        value_map: dict[str, Value] = {}
+        value_map: dict[str, ValueBase] = {}
         serialized_ops = self._serialize_operations(
             block.operations,
             value_map,
             visiting_blocks | {id(block)},
         )
-        output_values = [value_map.get(v.uuid, v) for v in block.output_values]
+        output_values = self._substitute_output_values(block.output_values, value_map)
         out_kind = (
             BlockKind.HIERARCHICAL
             if _has_any_call_block(serialized_ops)
@@ -517,13 +513,35 @@ class InlinePass(Pass[Block, Block]):
     def _substitute_values(
         self,
         op: Operation,
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
     ) -> Operation:
         """Substitute values in an operation using the value map."""
         substitutor = ValueSubstitutor(
             {k: v for k, v in value_map.items()},  # copy as dict[str, ValueBase]
         )
         return substitutor.substitute_operation(op)
+
+    def _substitute_output_values(
+        self,
+        output_values: list[ValueLike],
+        value_map: dict[str, ValueBase],
+    ) -> list[ValueLike]:
+        """Substitute block outputs, including structural value internals.
+
+        Args:
+            output_values (list[ValueLike]): Block output metadata to rewrite.
+            value_map (dict[str, ValueBase]): UUID-keyed replacements produced
+                while inlining calls inside the block.
+
+        Returns:
+            list[ValueLike]: Output values with scalar and structural
+                references updated through ``value_map``.
+        """
+        substitutor = ValueSubstitutor(value_map, transitive=True)
+        return [
+            cast(ValueLike, substitutor.substitute_value(value))
+            for value in output_values
+        ]
 
     def _should_inline_composite(self, op: CompositeGateOperation) -> bool:
         """Determine if a composite gate should be inlined.
@@ -549,7 +567,7 @@ class InlinePass(Pass[Block, Block]):
     def _inline_composite(
         self,
         op: CompositeGateOperation,
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
         visiting_blocks: set[int] | None = None,
     ) -> list[Operation]:
         """Inline a CompositeGateOperation's implementation.
@@ -574,7 +592,7 @@ class InlinePass(Pass[Block, Block]):
 
         # Map block's input values to operation's qubit arguments
         # Since uuid is now unique per Value, we can use simple uuid mapping
-        local_map: dict[str, Value] = {}
+        local_map: dict[str, ValueBase] = {}
         arg_substitutor = ValueSubstitutor(value_map, transitive=True)
 
         for block_input, qubit_arg in zip(impl.input_values, qubit_args):
@@ -615,8 +633,6 @@ class InlinePass(Pass[Block, Block]):
                 value_map[op_result.uuid] = local_map[block_return.uuid]
             else:
                 substituted = sub.substitute_value(block_return)
-                value_map[op_result.uuid] = (
-                    substituted if isinstance(substituted, Value) else op_result
-                )
+                value_map[op_result.uuid] = substituted
 
         return inlined

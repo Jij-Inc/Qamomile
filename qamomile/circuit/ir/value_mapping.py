@@ -635,13 +635,11 @@ class ValueSubstitutor:
         new_elements = []
         changed = False
         for elem in value.elements:
-            if elem.uuid in self._value_map:
-                substituted = self._chase_transitive(elem)
-                if isinstance(substituted, Value):
-                    new_elements.append(substituted)
+            substituted = self.substitute_value(elem)
+            if isinstance(substituted, Value):
+                new_elements.append(substituted)
+                if substituted is not elem:
                     changed = True
-                else:
-                    new_elements.append(elem)
             else:
                 new_elements.append(elem)
         if changed:
@@ -663,15 +661,15 @@ class ValueSubstitutor:
         for key, entry_value in value.entries:
             new_key = key
             new_value = entry_value
-            if isinstance(key, (TupleValue, Value)) and key.uuid in self._value_map:
-                sub_key = self._chase_transitive(key)
-                if isinstance(sub_key, (TupleValue, Value)):
-                    new_key = sub_key
+            sub_key = self.substitute_value(key)
+            if isinstance(sub_key, (TupleValue, Value)):
+                new_key = sub_key
+                if sub_key is not key:
                     changed = True
-            if entry_value.uuid in self._value_map:
-                sub_value = self._chase_transitive(entry_value)
-                if isinstance(sub_value, Value):
-                    new_value = sub_value
+            sub_value = self.substitute_value(entry_value)
+            if isinstance(sub_value, Value):
+                new_value = sub_value
+                if sub_value is not entry_value:
                     changed = True
             new_entries.append((new_key, new_value))
         if changed:
