@@ -620,7 +620,8 @@ class MatplotlibRenderer:
         measure_key = node.condition_measure_node_key
         if measure_key is None or measure_key not in positions:
             return
-        if not node.condition_measure_qubit_indices:
+        # Ambiguous vector-measurement elements cannot identify one source wire.
+        if len(node.condition_measure_qubit_indices) != 1:
             return
 
         measure_qubit = node.condition_measure_qubit_indices[0]
