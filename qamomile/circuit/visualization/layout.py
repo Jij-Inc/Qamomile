@@ -521,21 +521,23 @@ class CircuitLayoutEngine:
         the topmost qubit.
 
         Args:
-            num_qubits: Total number of qubits.
-            block_ranges: List of block range dicts from layout phase, each
+            num_qubits (int): Total number of qubits.
+            block_ranges (list[dict]): Block range dicts from layout phase, each
                 containing 'qubit_indices', 'depth', 'start_x', 'end_x'.
-            label_extents: Header labels drawn above a wire that have no
-                block_ranges entry (unfolded if/else branch boxes). Each is
-                ``{"top_qubit": int, "num_lines": int}`` and only widens the
-                clearance above its top qubit. Defaults to None (treated as
-                empty).
-            folded_block_extents: Folded summary boxes keyed by node key. Each
-                value contains ``affected_qubits`` and ``num_text_lines`` so the
-                vertical spacing can reserve the same text height rendered by
-                ``MatplotlibRenderer``. Defaults to None (treated as empty).
+            label_extents (list[dict] | None): Header labels drawn above a wire
+                that have no block_ranges entry (unfolded if/else branch boxes).
+                Each is ``{"top_qubit": int, "num_lines": int}`` and only
+                widens the clearance above its top qubit. Defaults to None
+                (treated as empty).
+            folded_block_extents (dict[tuple, dict] | None): Folded summary
+                boxes keyed by node key. Each value contains ``affected_qubits``
+                and ``num_text_lines`` so the vertical spacing can reserve the
+                same text height rendered by ``MatplotlibRenderer``. Defaults to
+                None (treated as empty).
 
         Returns:
-            Tuple of (y_positions, max_above, max_below).
+            tuple[list[float], dict[int, float], dict[int, float]]: Tuple of
+                ``(y_positions, max_above, max_below)``.
         """
         label_extents = label_extents or []
         folded_block_extents = folded_block_extents or {}

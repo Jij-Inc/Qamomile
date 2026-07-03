@@ -67,6 +67,7 @@ class VGate:
     - estimated_width: pre-computed width for layout
     - kind: determines rendering strategy
     - gate_type: for CX/SWAP/TOFFOLI special drawing
+    - terminates_wire: whether a measurement node ends its measured wires
     """
 
     node_key: tuple
