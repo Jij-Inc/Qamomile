@@ -452,7 +452,22 @@ def test_qubitized_qpe_adds_qpe_register_qubits_to_logical_footprint():
     assert estimate.gates.multi_qubit == 40
 
 
-def test_register_custom_hamiltonian_representation():
+@pytest.fixture
+def _restore_representation_registry():
+    """Snapshot and restore the process-global representation registry."""
+    from qamomile.resource_estimation.hamiltonian_algorithms import (
+        _REPRESENTATION_MODELS,
+    )
+
+    snapshot = dict(_REPRESENTATION_MODELS)
+    yield
+    _REPRESENTATION_MODELS.clear()
+    _REPRESENTATION_MODELS.update(snapshot)
+
+
+def test_register_custom_hamiltonian_representation(
+    _restore_representation_registry,
+):
     """Custom representation models plug into workloads and estimators."""
 
     def _flat_encoding_qubits(n_qubits, *, sparsity=None, second_factor_rank=None):
@@ -489,16 +504,19 @@ def test_register_custom_hamiltonian_representation():
     logical = estimate_qubitized_qpe_resources_from_workload(workload, precision=2)
     assert logical.qubits == 7
 
-    # Idempotent re-registration is allowed; conflicting models are not.
+    # Registration is last-wins so notebook re-execution keeps working.
     register_hamiltonian_representation(
         "test_flat_encoding",
-        _flat_encoding_qubits,
+        lambda n_qubits, **kwargs: n_qubits + 5,
     )
-    with pytest.raises(ValueError, match="already registered"):
-        register_hamiltonian_representation(
-            "test_flat_encoding",
-            lambda n_qubits, **kwargs: n_qubits,
-        )
+    replaced = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        representation="test_flat_encoding",
+    )
+    assert replaced.qubits == 9
 
 
 def test_workload_reports_sparsity_separately_from_term_count():
@@ -527,6 +545,26 @@ def test_workload_reports_sparsity_separately_from_term_count():
         quantities=(ResourceQuantity.N_PAULI_TERMS,),
     )
     assert rows[0].ratio == 1
+
+
+def test_physical_substitute_matches_assumption_symbols():
+    """Substitution binds assumption-carrying symbols missing from parameters."""
+    d = sp.Symbol("d", positive=True)
+    estimate = FTQCPhysicalResourceEstimate(
+        logical=ResourceEstimate(qubits=sp.Integer(3), gates=GateCount.zero()),
+        logical_depth=sp.Integer(10),
+        non_clifford_count=sp.Integer(5),
+        physical_qubits=20 * d**2,
+        runtime_seconds=sp.Integer(1),
+        architecture_values={
+            "logical_cycle_time_seconds": sp.Rational(1, 100),
+            "non_clifford_throughput_per_second": sp.Integer(50),
+        },
+    )
+
+    concrete = estimate.substitute(d=15)
+
+    assert concrete.physical_qubits == 4500
 
 
 def test_physical_estimates_require_architecture_values():

@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import sympy as sp
 
-_SympyLike = sp.Expr | int | float
-_CoefficientLike = _SympyLike | complex
+SympyLike = sp.Expr | int | float
+_SympyLike = SympyLike
+_CoefficientLike = SympyLike | complex
 
 
-def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
+def as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
     """Convert a numeric or symbolic value to a SymPy expression.
+
+    This is the public coercion helper algorithm packages should use when
+    implementing workload hooks such as ``_own_resource_values``.
 
     Args:
         value (sp.Expr | int | float | complex): Value to convert.
@@ -31,6 +35,9 @@ def _as_expr(value: _CoefficientLike, name: str) -> sp.Expr:
         return sp.sympify(value)
     except (TypeError, sp.SympifyError) as exc:
         raise TypeError(f"{name} must be a numeric or SymPy expression.") from exc
+
+
+_as_expr = as_expr
 
 
 def _convert_fields(instance: object, names: tuple[str, ...]) -> None:

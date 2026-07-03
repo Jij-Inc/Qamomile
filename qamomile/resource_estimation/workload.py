@@ -9,17 +9,19 @@ kinds, and its derived expressions.
 
 A minimal new workload looks like::
 
+    from qamomile.resource_estimation._common import SympyLike, as_expr
+
     @dataclass(frozen=True)
     class MyWorkload(HamiltonianWorkloadMixin):
         hamiltonian: PauliHamiltonianResource
-        my_rounds: _SympyLike
-        representation_error: _SympyLike = 0
+        my_rounds: SympyLike
+        representation_error: SympyLike = 0
         description: str = ""
 
         _POSITIVE_FIELDS = ("my_rounds",)
 
         def _own_resource_values(self) -> dict[str, sp.Expr]:
-            return {"my_rounds": _as_expr(self.my_rounds, "my_rounds")}
+            return {"my_rounds": as_expr(self.my_rounds, "my_rounds")}
 
 Everything else (``__post_init__`` validation via
 ``_validate_workload_fields``, ``algorithmic_precision``,
@@ -103,8 +105,16 @@ class HamiltonianWorkloadMixin:
             ValueError: If a declared positive field is provably non-positive
                 or a declared nonnegative field is provably negative.
         """
-        if not isinstance(self.hamiltonian, PauliHamiltonianResource):
+        if not hasattr(self, "hamiltonian") or not isinstance(
+            self.hamiltonian, PauliHamiltonianResource
+        ):
             raise TypeError("hamiltonian must be a PauliHamiltonianResource.")
+        if not hasattr(self, "representation_error"):
+            raise TypeError(
+                f"{type(self).__name__} must declare a representation_error "
+                "field (use a default of 0 when the algorithm has no "
+                "representation-error budget)."
+            )
         for name in self._POSITIVE_FIELDS:
             _validate_positive(_as_expr(getattr(self, name), name), name)
         for name in self._OPTIONAL_POSITIVE_FIELDS:

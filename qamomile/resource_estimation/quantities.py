@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -175,6 +176,29 @@ class ResourceQuantity(enum.StrEnum):
     ACTIVE_VOLUME_THROUGHPUT_PER_SECOND = "active_volume_throughput_per_second"
 
 
+def _quantity_key(quantity: str | ResourceQuantity) -> str:
+    """Normalize one resource quantity key to a plain string.
+
+    Args:
+        quantity (str | ResourceQuantity): Resource quantity key.
+
+    Returns:
+        str: Normalized quantity key.
+
+    Raises:
+        ValueError: If ``quantity`` is empty.
+        TypeError: If ``quantity`` is not a string.
+    """
+    if not isinstance(quantity, str):
+        raise TypeError(
+            f"Resource quantity keys must be strings, got {type(quantity).__name__}."
+        )
+    key = str(quantity)
+    if not key:
+        raise ValueError("Resource quantity keys must be non-empty strings.")
+    return key
+
+
 class SupportsResourceValues(Protocol):
     """Represent objects that expose canonical resource values.
 
@@ -233,12 +257,11 @@ class ResourceQuantitySpec:
         """Normalize the quantity key to a plain string.
 
         Raises:
+            TypeError: If the quantity key is not a string
+                (``ResourceQuantity`` members are strings and are accepted).
             ValueError: If the quantity key is empty.
         """
-        key = str(self.quantity)
-        if not key:
-            raise ValueError("quantity key must be a non-empty string.")
-        object.__setattr__(self, "quantity", key)
+        object.__setattr__(self, "quantity", _quantity_key(self.quantity))
 
     def to_dict(self) -> dict[str, str]:
         """Serialize the quantity specification.
@@ -692,16 +715,16 @@ def register_resource_quantity(spec: ResourceQuantitySpec) -> ResourceQuantitySp
     rows and report layers display. Algorithm packages should register their
     quantities at import time.
 
+    Registration is last-wins: re-registering a key replaces its metadata,
+    which keeps interactive workflows (re-running a notebook cell, module
+    reloads) working. Overriding a built-in key replaces its display
+    metadata process-wide.
+
     Args:
-        spec (ResourceQuantitySpec): Metadata to register. Re-registering an
-            identical spec is a no-op.
+        spec (ResourceQuantitySpec): Metadata to register.
 
     Returns:
         ResourceQuantitySpec: The registered specification.
-
-    Raises:
-        ValueError: If a different spec is already registered under the same
-            quantity key.
 
     Example:
         >>> register_resource_quantity(
@@ -715,13 +738,7 @@ def register_resource_quantity(spec: ResourceQuantitySpec) -> ResourceQuantitySp
         ... ).quantity
         'grover_rounds'
     """
-    key = str(spec.quantity)
-    existing = _QUANTITY_REGISTRY.get(key)
-    if existing is not None and existing != spec:
-        raise ValueError(
-            f"Resource quantity {key!r} is already registered with different metadata."
-        )
-    _QUANTITY_REGISTRY[key] = spec
+    _QUANTITY_REGISTRY[str(spec.quantity)] = spec
     return spec
 
 
@@ -809,8 +826,9 @@ def compare_resource_values(
             values, candidate values, ratios, and fractional reductions.
 
     Raises:
-        ValueError: If a requested quantity is missing from either input or if
-            a baseline value is exactly zero.
+        ValueError: If a requested quantity is missing from either input, if
+            a baseline value is exactly zero, or if the default selection
+            finds no common nonzero quantity between the inputs.
         TypeError: If either input cannot be interpreted as resource values.
     """
     baseline_values = _coerce_resource_values(baseline)
@@ -897,9 +915,37 @@ def resource_values_from_estimate(
         "multi_qubit_gates": estimate.gates.multi_qubit,
         "pauli_rotations": estimate.gates.rotation_gates,
     }
-    for name, count in estimate.gates.oracle_calls.items():
-        values.setdefault(name, count)
+    _merge_oracle_calls(values, estimate.gates.oracle_calls)
     return values
+
+
+def _merge_oracle_calls(
+    values: dict[str, sp.Expr],
+    oracle_calls: Mapping[str, sp.Expr],
+) -> None:
+    """Merge oracle-call counters into a resource-value dictionary.
+
+    Canonical keys win on collision; a collision that would change the
+    reported value emits a ``UserWarning`` so the dropped counter is not
+    silently mistaken for the canonical quantity.
+
+    Args:
+        values (dict[str, sp.Expr]): Resource values updated in place.
+        oracle_calls (Mapping[str, sp.Expr]): Oracle-call counters keyed by
+            oracle name.
+    """
+    for name, count in oracle_calls.items():
+        if name in values:
+            if values[name] != count:
+                warnings.warn(
+                    f"Oracle-call counter {name!r} collides with a canonical "
+                    "resource value and was dropped from resource_values(); "
+                    "rename the oracle to expose it.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            continue
+        values[name] = count
 
 
 def _coerce_resource_values(
@@ -980,6 +1026,13 @@ def _normalize_comparison_quantities(
             for key in set(baseline_values) & set(candidate_values)
             if not baseline_values[key].equals(sp.Integer(0))
         }
+        if not common:
+            raise ValueError(
+                "The inputs share no nonzero-baseline resource quantities to "
+                f"compare (baseline keys: {sorted(baseline_values)}; "
+                f"candidate keys: {sorted(candidate_values)}). Check the "
+                "quantity key spellings or pass quantities= explicitly."
+            )
         registered = [key for key in _QUANTITY_REGISTRY if key in common]
         unregistered = sorted(common - set(registered))
         return tuple(registered + unregistered)
@@ -997,26 +1050,3 @@ def _normalize_comparison_quantities(
             + "."
         )
     return normalized
-
-
-def _quantity_key(quantity: str | ResourceQuantity) -> str:
-    """Normalize one resource quantity key to a plain string.
-
-    Args:
-        quantity (str | ResourceQuantity): Resource quantity key.
-
-    Returns:
-        str: Normalized quantity key.
-
-    Raises:
-        ValueError: If ``quantity`` is empty.
-        TypeError: If ``quantity`` is not a string.
-    """
-    if not isinstance(quantity, str):
-        raise TypeError(
-            f"Resource quantity keys must be strings, got {type(quantity).__name__}."
-        )
-    key = str(quantity)
-    if not key:
-        raise ValueError("Resource quantity keys must be non-empty strings.")
-    return key

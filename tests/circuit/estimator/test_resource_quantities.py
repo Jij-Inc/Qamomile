@@ -142,8 +142,21 @@ def test_default_comparison_selection_includes_unregistered_keys():
     assert keys == ["logical_qubits", "my_custom_counter"]
 
 
-def test_register_resource_quantity_supplies_comparison_metadata():
-    """Registered custom specs drive labels and categories in comparisons."""
+@pytest.fixture
+def _restore_quantity_registry():
+    """Snapshot and restore the process-global quantity registry."""
+    from qamomile.resource_estimation.quantities import _QUANTITY_REGISTRY
+
+    snapshot = dict(_QUANTITY_REGISTRY)
+    yield
+    _QUANTITY_REGISTRY.clear()
+    _QUANTITY_REGISTRY.update(snapshot)
+
+
+def test_register_resource_quantity_supplies_comparison_metadata(
+    _restore_quantity_registry,
+):
+    """Registered custom specs drive labels; registration is last-wins."""
     spec = register_resource_quantity(
         ResourceQuantitySpec(
             quantity="test_registered_rounds",
@@ -165,18 +178,65 @@ def test_register_resource_quantity_supplies_comparison_metadata():
     assert rows[0].unit == "rounds"
     assert rows[0].category == ResourceCategory.ALGORITHM
 
-    # Idempotent re-registration is allowed; conflicting metadata is not.
-    register_resource_quantity(spec)
-    with pytest.raises(ValueError, match="already registered"):
-        register_resource_quantity(
-            ResourceQuantitySpec(
-                quantity="test_registered_rounds",
-                label="Different label",
-                unit="rounds",
-                category=ResourceCategory.ALGORITHM,
-                description="Conflicting metadata.",
-            )
+    # Registration is last-wins so notebook re-execution keeps working.
+    replacement = register_resource_quantity(
+        ResourceQuantitySpec(
+            quantity="test_registered_rounds",
+            label="Replaced label",
+            unit="rounds",
+            category=ResourceCategory.ALGORITHM,
+            description="Replacement metadata.",
         )
+    )
+    assert describe_resource_quantity("test_registered_rounds") == replacement
+
+
+def test_spec_rejects_non_string_quantity_key():
+    """Non-string quantity keys fail loudly instead of mis-keying."""
+    import enum
+
+    class _OtherEnum(enum.Enum):
+        ROUNDS = "rounds"
+
+    with pytest.raises(TypeError, match="must be strings"):
+        ResourceQuantitySpec(
+            quantity=_OtherEnum.ROUNDS,  # type: ignore[arg-type]
+            label="Rounds",
+            unit="rounds",
+            category=ResourceCategory.ALGORITHM,
+            description="Mis-keyed spec.",
+        )
+
+
+def test_default_comparison_rejects_disjoint_inputs():
+    """A typo that empties the default selection raises instead of ().."""
+    with pytest.raises(ValueError, match="share no nonzero-baseline"):
+        compare_resource_values(
+            {"logical_qubit": 8},
+            {"logical_qubits": 4},
+        )
+
+
+def test_oracle_collision_with_canonical_key_warns():
+    """Colliding oracle counters warn instead of silently vanishing."""
+    logical = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        logical_qubits=7,
+    )
+    renamed = ResourceEstimate(
+        qubits=logical.qubits,
+        gates=replace(
+            logical.gates,
+            oracle_calls={"t_gates": sp.Integer(9999)},
+        ),
+    )
+
+    with pytest.warns(UserWarning, match="collides with a canonical"):
+        values = resource_values_from_estimate(renamed)
+    assert values["t_gates"] == renamed.gates.t_gates
 
 
 def test_oracle_call_counters_pass_through_generically():

@@ -1163,15 +1163,16 @@ def register_hamiltonian_representation(
         logical_qubits (Callable[..., sp.Expr]): Scaling model called as
             ``logical_qubits(n_qubits, *, sparsity=None,
             second_factor_rank=None)`` and returning the representation's
-            logical-qubit count expression. Re-registering the identical
-            callable is a no-op.
+            logical-qubit count expression. Registration is last-wins:
+            re-registering a name replaces its model, which keeps notebook
+            re-execution and module reloads working. Overriding a built-in
+            name replaces its scaling model process-wide.
 
     Returns:
         str: The registered representation key.
 
     Raises:
-        ValueError: If ``name`` is empty or already registered with a
-            different model.
+        ValueError: If ``name`` is empty.
 
     Example:
         >>> def _flat_qubits(n_qubits, *, sparsity=None, second_factor_rank=None):
@@ -1182,12 +1183,6 @@ def register_hamiltonian_representation(
     key = str(name)
     if not key:
         raise ValueError("Representation names must be non-empty strings.")
-    existing = _REPRESENTATION_MODELS.get(key)
-    if existing is not None and existing is not logical_qubits:
-        raise ValueError(
-            f"Hamiltonian representation {key!r} is already registered with a "
-            "different model."
-        )
     _REPRESENTATION_MODELS[key] = logical_qubits
     return key
 

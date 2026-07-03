@@ -655,7 +655,7 @@ class FTQCPhysicalResourceEstimate:
             values.setdefault(name, count)
         return values
 
-    @cached_property
+    @property
     def depth_limited_runtime_seconds(self) -> sp.Expr:
         """Return the logical-depth-limited runtime component.
 
@@ -666,7 +666,7 @@ class FTQCPhysicalResourceEstimate:
             self.logical_depth * self.architecture_values["logical_cycle_time_seconds"]
         )
 
-    @cached_property
+    @property
     def non_clifford_limited_runtime_seconds(self) -> sp.Expr:
         """Return the non-Clifford-throughput-limited runtime component.
 
@@ -823,7 +823,7 @@ class FTQCActiveVolumeResourceEstimate:
             values.setdefault(name, count)
         return values
 
-    @cached_property
+    @property
     def active_volume_runtime_seconds(self) -> sp.Expr:
         """Return the active-volume-throughput-limited runtime component.
 
@@ -1026,20 +1026,31 @@ def _substitute_expressions(
 ) -> dict[str, sp.Expr]:
     """Apply named numeric substitutions to a dictionary of expressions.
 
+    Substitution matches symbols by display name over each expression's
+    own free symbols, so symbols carrying assumptions (``positive=True``
+    and similar) substitute correctly even when they are missing from
+    ``parameters``.
+
     Args:
         parameters (dict[str, sp.Symbol]): Known free symbols keyed by their
-            display names. Names absent from this mapping fall back to a
-            bare ``sp.Symbol`` so unused substitutions no-op.
+            display names. Retained for API symmetry; matching is by name
+            over each expression's free symbols.
         values (dict[str, int | float]): Substitutions keyed by symbol name.
         expressions (dict[str, sp.Expr]): Expressions to substitute into.
 
     Returns:
         dict[str, sp.Expr]: Substituted expressions under the same keys.
     """
-    substitutions: dict[Any, Any] = {
-        parameters.get(name, sp.Symbol(name)): value for name, value in values.items()
-    }
-    return {name: expr.subs(substitutions).doit() for name, expr in expressions.items()}
+    del parameters  # Matching is by name over each expression's symbols.
+    result: dict[str, sp.Expr] = {}
+    for name, expr in expressions.items():
+        substitutions: dict[Any, Any] = {
+            symbol: values[str(symbol)]
+            for symbol in expr.free_symbols
+            if str(symbol) in values
+        }
+        result[name] = expr.subs(substitutions).doit() if substitutions else expr
+    return result
 
 
 def _validate_architecture_keys(

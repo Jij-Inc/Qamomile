@@ -43,6 +43,13 @@ runtime registry seeded from `RESOURCE_QUANTITY_SPECS`; algorithm packages
 attach metadata for their own keys at import time via
 `register_resource_quantity(...)`.
 
+Both runtime registries (quantity metadata and Hamiltonian representation
+models) are **last-wins**: re-registering a key replaces the previous
+entry, which keeps notebook re-execution and module reloads working, and
+deliberately allows overriding a built-in entry process-wide. Tests that
+register entries should snapshot and restore the registry (see the
+fixtures in `tests/circuit/estimator/`).
+
 Rationale: the first iteration validated every key against the enum and
 raised on unknown keys, which meant every new algorithm required editing
 this package in three places (producer key, enum member, spec entry). An
@@ -52,10 +59,12 @@ handful of algorithms.
 ### Oracle-call counters pass through generically
 
 `GateCount.oracle_calls` entries flow into `resource_values()` under their
-own names (`values.setdefault(name, count)` — canonical keys win on
-collision). No layer may special-case a specific oracle name: the first
-iteration hard-coded `"qpe_iterations"` in three places, which silently
-dropped any other algorithm's iteration counter.
+own names. Canonical keys win on collision, and a collision that would
+change the reported value emits a `UserWarning` so the dropped counter is
+never silently mistaken for the canonical quantity. No layer may
+special-case a specific oracle name: the first iteration hard-coded
+`"qpe_iterations"` in three places, which silently dropped any other
+algorithm's iteration counter.
 
 ### GateCount owns its field enumeration
 
@@ -66,9 +75,11 @@ collection and FTQC lifting automatically.
 
 ### Shared helpers live in `_common.py`
 
-`_as_expr`, `_validate_positive`, `_validate_nonnegative` and the
-`_SympyLike` aliases are defined once in `qamomile/resource_estimation/_common.py`.
-Do not copy them into new modules.
+`as_expr`, `_validate_positive`, `_validate_nonnegative` and the
+`SympyLike` alias are defined once in
+`qamomile/resource_estimation/_common.py`. Do not copy them into new
+modules. External algorithm packages use the public names (`as_expr`,
+`SympyLike`); the underscore aliases exist for in-package call sites.
 
 ## Resolved design decisions
 
@@ -99,9 +110,12 @@ Do not copy them into new modules.
   models without editing this package. Scaling callables take
   ``(n_qubits, *, sparsity=None, second_factor_rank=None)``.
 - **FTQC substitution is shared.** Both FTQC estimate classes substitute
-  through `_substitute_expressions`, and their derived runtime components
-  are `functools.cached_property` values (safe on frozen dataclasses), so
-  repeated `to_dict`/`resource_values` calls do not re-run `sp.simplify`.
+  through `_substitute_expressions`, which matches symbols by display name
+  over each expression's own free symbols so assumption-carrying symbols
+  substitute correctly. Their derived runtime components stay plain
+  properties (not cached) because ``architecture_values`` is a mutable
+  dict a caller may edit for what-if scenarios; caching lives on the
+  immutable cost-model classes instead.
 - **Fields convert once at construction.** Cost models and
   `BlockEncodingResource` sympify their numeric fields in `__post_init__`
   via `_common._convert_fields` (the `PauliHamiltonianResource` pattern)
@@ -110,16 +124,24 @@ Do not copy them into new modules.
   post-conversion type (`sp.Expr`); numeric inputs are still accepted and
   converted.
 
+## Migration notes
+
+- `qamomile.circuit.estimator.algorithmic` was removed without a runtime
+  shim (a shim would invert the `resource_estimation → circuit` dependency
+  direction). Downstream imports move to `qamomile.resource_estimation`;
+  call this out in the release notes.
+
 ## Known debt / roadmap
 
 Recorded here so follow-up iterations have an explicit target. Ordered by
 priority:
 
-1. **Docstring modernization of the consolidated estimators.**
-   `hamiltonian_simulation.py`, `qpe.py`, and `qaoa.py` predate the
-   project's Google-style docstring mandate (Args entries without types,
-   missing Raises sections). Bring them up to the standard used by the rest
-   of this package.
+1. **Problem-summary protocol.** `HamiltonianWorkloadMixin` is scoped to
+   `PauliHamiltonianResource` problem summaries by design. When the first
+   non-Hamiltonian algorithm family arrives (amplitude estimation over
+   oracle summaries, fermionic inputs), widen the mixin to a problem-summary
+   protocol (`resource_values()` + `to_dict()`) instead of the concrete
+   class — do not fork a second mixin.
 
 ## Review checklist for new estimators
 

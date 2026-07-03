@@ -105,6 +105,28 @@ def test_toy_workload_validates_declared_fields():
         _ToyAmplitudeWorkload(object(), grover_rounds=1)  # type: ignore[arg-type]
 
 
+def test_workload_missing_representation_error_fails_at_construction():
+    """A subclass without representation_error fails fast with guidance."""
+
+    @dataclass(frozen=True)
+    class _NoBudgetWorkload(HamiltonianWorkloadMixin):
+        hamiltonian: PauliHamiltonianResource
+        rounds: _SympyLike = 1
+
+        _POSITIVE_FIELDS = ("rounds",)
+
+        def _own_resource_values(self) -> dict[str, sp.Expr]:
+            """Return the toy workload's values.
+
+            Returns:
+                dict[str, sp.Expr]: Round count.
+            """
+            return {"rounds": _as_expr(self.rounds, "rounds")}
+
+    with pytest.raises(TypeError, match="representation_error"):
+        _NoBudgetWorkload(_summary())
+
+
 def test_builtin_workloads_share_the_mixin_surface():
     """Both built-in workloads inherit the mixin's precision accounting."""
     qpe = HamiltonianQPEWorkload(
