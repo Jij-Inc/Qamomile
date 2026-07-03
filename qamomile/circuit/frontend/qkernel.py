@@ -1033,17 +1033,58 @@ class QKernel(Generic[P, R]):
         return detected
 
     def _validate_parameters(self, parameters: list[str]) -> None:
-        """Validate that parameter names exist and have valid types."""
+        """Validate that parameter names exist and have valid types.
+
+        Args:
+            parameters (list[str]): Argument names requested as runtime
+                parameters via ``parameters=[...]``.
+
+        Raises:
+            ValueError: If a name does not match any kernel argument.
+            TypeError: If the named argument's type cannot be kept as a
+                runtime parameter. Scalars/arrays of float/int/UInt and
+                ``Dict[K, Float]`` (values decomposed into per-key
+                backend parameters) are allowed; a ``Dict`` without
+                explicit key/value type arguments, or with a
+                non-``Float`` value type, is not.
+        """
         for name in parameters:
             if name not in self.input_types:
                 raise ValueError(f"Unknown parameter: '{name}'")
 
             param_type = self.input_types[name]
 
+            # Dict is allowed only as an explicit opt-in (never
+            # auto-detected): each constant-key subscript lookup becomes
+            # one backend parameter, so the value type must be Float —
+            # UInt/Bit dict values feed structural decisions (loop
+            # bounds, branch predicates) that cannot stay symbolic. The
+            # annotation must carry explicit key/value types, mirroring
+            # the bound-input path (``create_dummy_input`` rejects a bare
+            # ``Dict`` the same way).
+            if is_dict_type(param_type):
+                args = getattr(param_type, "__args__", None)
+                if not args or len(args) < 2:
+                    raise TypeError(
+                        f"Parameter '{name}' must be annotated as "
+                        f"Dict[K, Float] with explicit key and value "
+                        f"types to be kept as a runtime parameter; got "
+                        f"{param_type}"
+                    )
+                value_type = args[1]
+                if value_type not in (float, Float):
+                    raise TypeError(
+                        f"Parameter '{name}' is a Dict with value type "
+                        f"{value_type}; only Dict[K, Float] can be kept "
+                        f"as a runtime parameter"
+                    )
+                continue
+
             if not self._is_parameterizable_type(param_type):
                 raise TypeError(
                     f"Parameter '{name}' has type {param_type}, "
-                    f"but only float, int, UInt, and their arrays can be parameters"
+                    f"but only float, int, UInt, their arrays, and "
+                    f"Dict[K, Float] can be parameters"
                 )
 
     def _validate_kwargs(self, parameters: list[str], kwargs: dict[str, Any]) -> None:
@@ -1099,7 +1140,26 @@ class QKernel(Generic[P, R]):
                     )
 
     def _create_parameter_input(self, param_type: Any, name: str) -> Handle:
-        """Create a Handle for a parameter (unbound value)."""
+        """Create a Handle for a parameter (unbound value).
+
+        Args:
+            param_type (Any): The frontend type annotation of the
+                argument (``Float``, ``UInt``, ``Vector[Float]``,
+                ``Dict[K, Float]``, ...).
+            name (str): The kernel argument name; becomes the public
+                parameter name.
+
+        Returns:
+            Handle: A symbolic handle whose ``Value`` carries the
+                parameter marker (``with_parameter``) so emit-time
+                resolution creates backend parameters instead of
+                folding constants.
+
+        Raises:
+            TypeError: If ``param_type`` cannot be kept symbolic (e.g.
+                an array with a non-scalar element type, or a type with
+                no parameter representation).
+        """
         if param_type in (float, Float):
             value = Value(type=FloatType(), name=name).with_parameter(name)
             return Float(value=value)
@@ -1138,6 +1198,19 @@ class QKernel(Generic[P, R]):
             # the top level. emit_init=False because Float/UInt arrays never
             # emit QInitOperation regardless.
             return create_dummy_input(param_type, name, emit_init=False)
+
+        # Runtime-parameter Dict: same shape as the bound-input handle but
+        # WITHOUT dict_runtime metadata — the absence of bound data is what
+        # routes d[key] lookups onto the DictGetItemOperation path, where
+        # emit resolves each constant key into one backend parameter.
+        if is_dict_type(param_type):
+            dict_value = DictValue(name=name, entries=()).with_parameter(name)
+            dict_handle = Dict(value=dict_value, _entries=[], _runtime_parameter=True)
+            if hasattr(param_type, "__args__") and param_type.__args__:
+                dict_handle._key_type = param_type.__args__[0]
+                if len(param_type.__args__) >= 2:
+                    dict_handle._value_type = param_type.__args__[1]
+            return dict_handle
 
         raise TypeError(f"Cannot create parameter for type {param_type}")
 
@@ -1788,12 +1861,22 @@ class QKernel(Generic[P, R]):
         """Build a traced Block by tracing this kernel.
 
         Args:
-            parameters: List of argument names to keep as unbound parameters.
+            parameters (list[str] | None): List of argument names to keep as
+                unbound parameters.
                        - None (default): Auto-detect parameters (non-Qubit args without value/default)
                        - []: No parameters (all non-Qubit args must have value/default)
                        - ["name"]: Explicit parameter list
-                       Only float, int, UInt, and their arrays are allowed as parameters.
-            **kwargs: Concrete values for non-parameter arguments.
+                       Only float, int, UInt, their arrays, and Dict[K, Float]
+                       are allowed as parameters. Dict is never auto-detected;
+                       it must be listed explicitly, and only constant-key
+                       subscript lookups (``d[key]``) are supported on a
+                       runtime-parameter dict (items() iteration needs the
+                       key structure at compile time). A runtime-parameter
+                       Dict is recorded in ``Block.param_slots`` as a slot
+                       whose type is a ``DictType``; compile-time-bound
+                       Dicts and ``Tuple`` arguments stay out of the slot
+                       manifest.
+            **kwargs (Any): Concrete values for non-parameter arguments.
 
         Returns:
             Block: The traced block ready for transpilation, estimation,

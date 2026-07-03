@@ -279,3 +279,74 @@ class TestBlockInvariants:
                 kind=BlockKind.AFFINE,
                 param_slots=(slot_a, slot_b),
             )
+
+
+# ---------------------------------------------------------------------------
+# Dict runtime parameter slots (DictType-typed)
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _dict_param_layer(
+    n: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Layer whose coefficient dicts may be runtime parameters or bound."""
+    q = qmc.qubit_array(n, name="q")
+    q = qmc.h(q)
+    for i in qmc.range(n):
+        q[i] = qmc.rz(q[i], angle=2.0 * linear[i])
+    for i in qmc.range(n - 1):
+        q[i], q[i + 1] = qmc.rzz(q[i], q[i + 1], angle=2.0 * quad[(i, i + 1)])
+    return qmc.measure(q)
+
+
+class TestDictRuntimeParameterSlots:
+    """A runtime-parameter Dict gets a DictType-typed RUNTIME_PARAMETER slot."""
+
+    def test_runtime_dict_produces_dicttype_slot(self):
+        """A Dict in ``parameters`` gets a slot whose type is a DictType."""
+        from qamomile.circuit.ir.types.primitives import DictType
+
+        block = _dict_param_layer.build(parameters=["quad", "linear"], n=3)
+        quad_slot = _slot_by_name(block, "quad")
+        linear_slot = _slot_by_name(block, "linear")
+
+        assert quad_slot.kind is ParamKind.RUNTIME_PARAMETER
+        assert linear_slot.kind is ParamKind.RUNTIME_PARAMETER
+        assert isinstance(quad_slot.type, DictType)
+        assert isinstance(linear_slot.type, DictType)
+        # DictType captures the value type and the (possibly tuple) key type.
+        assert isinstance(quad_slot.type.value_type, FloatType)
+        assert isinstance(linear_slot.type.value_type, FloatType)
+        assert isinstance(linear_slot.type.key_type, UIntType)
+        assert quad_slot.bound_value is None
+
+    def test_bound_dict_has_no_slot(self):
+        """A compile-time-bound Dict stays out of the manifest."""
+        block = _dict_param_layer.build(
+            parameters=["quad"],
+            n=3,
+            linear={0: 0.1, 1: 0.2, 2: 0.3},
+        )
+        names = {s.name for s in block.param_slots}
+        assert "quad" in names  # runtime parameter → slot
+        assert "linear" not in names  # bound → no slot
+
+    def test_no_dict_slot_when_not_a_parameter(self):
+        """A Dict left out of ``parameters`` (dummy input) gets no slot."""
+        block = _dict_param_layer.build(n=3)
+        names = {s.name for s in block.param_slots}
+        assert "quad" not in names
+        assert "linear" not in names
+
+    def test_runtime_dict_slot_survives_inline(self):
+        """The DictType slot is preserved by the inline pass."""
+        from qamomile.circuit.ir.types.primitives import DictType
+
+        affine = InlinePass().run(
+            _dict_param_layer.build(parameters=["quad", "linear"], n=3)
+        )
+        assert isinstance(_slot_by_name(affine, "quad").type, DictType)
+        assert isinstance(_slot_by_name(affine, "linear").type, DictType)

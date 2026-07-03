@@ -369,6 +369,38 @@ class TestDictGetItemEmit:
         )
         assert angles == pytest.approx([0.3, 0.9])
 
+    @pytest.mark.parametrize("source", ["binding", "default"])
+    def test_empty_bound_dict_items_unrolls_to_zero_iterations(
+        self, qiskit_transpiler, source
+    ):
+        """An empty compile-time-bound dict iterated with items() emits no gates.
+
+        A bound dict is authoritative even when empty (its dict_runtime
+        metadata is present); the items() loop must unroll to zero
+        iterations rather than erroring. Covers both an empty dict supplied
+        via bindings and one taken from a Python signature default of ``{}``
+        — the latter is not in the emit-time bindings, so it previously
+        fell through to a "could not be resolved" error.
+        """
+
+        @qmc.qkernel
+        def default_empty(
+            n: qmc.UInt,
+            coeffs: qmc.Dict[qmc.UInt, qmc.Float] = {},
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, name="q")
+            q = qmc.h(q)
+            for i, c in coeffs.items():
+                q[i] = qmc.rz(q[i], angle=c)
+            return qmc.measure(q)
+
+        bindings = {"n": 2} if source == "default" else {"n": 2, "coeffs": {}}
+        exe = qiskit_transpiler.transpile(default_empty, bindings=bindings)
+        rz_gates = [
+            inst for inst in exe.quantum_circuit.data if inst.operation.name == "rz"
+        ]
+        assert rz_gates == []
+
     def test_mixed_constant_and_symbolic_tuple_key(self, qiskit_transpiler):
         """A tuple key mixing an int constant and a loop variable resolves."""
 
