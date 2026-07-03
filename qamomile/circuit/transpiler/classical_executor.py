@@ -20,6 +20,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DictGetItemOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -158,6 +159,8 @@ class ClassicalExecutor:
             self._execute_phi(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
+        elif isinstance(op, DictGetItemOperation):
+            self._execute_dict_getitem(op, context, results, scoped_locals)
         elif isinstance(op, StoreArrayElementOperation):
             self._execute_store_array_element(op, context, results, scoped_locals)
         elif isinstance(op, ForOperation):
@@ -694,6 +697,45 @@ class ClassicalExecutor:
             loop_scope = scoped_locals.copy()
             self._execute_operations(op.operations, context, results, loop_scope)
             condition_value = next_condition
+
+    def _execute_dict_getitem(
+        self,
+        op: DictGetItemOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Execute a dict subscript lookup (``d[key]``).
+
+        Resolves the key components to concrete values, resolves the
+        dict entries via :meth:`_get_iterable`, and stores the looked-up
+        value under the result UUID.
+
+        Args:
+            op (DictGetItemOperation): The lookup op being executed.
+            context (ExecutionContext): Execution context.
+            results (dict[str, Any]): Intermediate results by UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+
+        Raises:
+            ExecutionError: If the key is not found in the dict.
+        """
+        resolved_key = [
+            int(self._get_value(kv, context, results, scoped_locals))
+            for kv in op.operands[1:]
+        ]
+        entries = self._get_iterable(op.operands[0], context, results, scoped_locals)
+        lookup_key: Any = tuple(resolved_key) if op.key_arity > 1 else resolved_key[0]
+        for entry_key, entry_value in entries:
+            if isinstance(entry_key, (tuple, list)):
+                entry_key = tuple(entry_key)
+            if entry_key == lookup_key:
+                results[op.results[0].uuid] = entry_value
+                return
+        raise ExecutionError(
+            f"Key {lookup_key!r} not found in dict "
+            f"'{getattr(op.operands[0], 'name', '?')}'"
+        )
 
     def _get_value(
         self,

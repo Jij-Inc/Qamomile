@@ -43,6 +43,7 @@ from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DictGetItemOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
@@ -822,6 +823,23 @@ def _encode_store_array_element(
     return _base_op_dict("StoreArrayElementOperation", op)
 
 
+def _encode_dict_getitem(
+    op: DictGetItemOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`DictGetItemOperation`.
+
+    Args:
+        op (DictGetItemOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus ``key_arity``.
+    """
+    d = _base_op_dict("DictGetItemOperation", op)
+    d["key_arity"] = op.key_arity
+    return d
+
+
 def _encode_cast(op: CastOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`CastOperation`.
 
@@ -1292,6 +1310,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     MeasureVectorOperation: _encode_measure_vector,
     MeasureQFixedOperation: _encode_measure_qfixed,
     DecodeQFixedOperation: _encode_decode_qfixed,
+    DictGetItemOperation: _encode_dict_getitem,
     StoreArrayElementOperation: _encode_store_array_element,
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,

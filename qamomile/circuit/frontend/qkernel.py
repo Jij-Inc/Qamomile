@@ -1468,6 +1468,8 @@ class QKernel(Generic[P, R]):
             dict_handle = Dict(value=dict_value, _entries=[])
             if hasattr(param_type, "__args__") and param_type.__args__:
                 dict_handle._key_type = param_type.__args__[0]
+                if len(param_type.__args__) >= 2:
+                    dict_handle._value_type = param_type.__args__[1]
             return dict_handle
 
         raise TypeError(f"Cannot create bound value for type {param_type}")
