@@ -1678,16 +1678,15 @@ def _analyzed_with_params(kernel: qmc.QKernel, parameters: list[str], **bindings
 class TestDictRuntimeParameterRoundTrip:
     """A runtime-parameter Dict survives serialize -> deserialize intact.
 
-    A Dict kept as a runtime parameter is intentionally absent from
-    ``Block.param_slots`` (structural containers are excluded), so these
-    tests pin that the round-trip is nonetheless faithful: the
-    runtime-parameter identity lives in the ``DictValue`` (parameter
-    marker plus absence of ``dict_runtime`` bound data) and in
-    ``Block.parameters``, both of which serialize. In particular
-    ``dict_runtime`` must stay ``None`` across the round-trip; were it to
-    decode as an empty-but-present ``DictRuntimeMetadata``, re-emit would
-    misread the dict as compile-time-bound and drop the per-key
-    parameters.
+    The runtime-parameter identity is carried on two channels, both of
+    which serialize: the ``DictValue`` in ``Block.parameters`` (parameter
+    marker plus absence of ``dict_runtime`` bound data) and the
+    ``DictType``-typed ``RUNTIME_PARAMETER`` entry in
+    ``Block.param_slots``. These tests pin that both round-trip. In
+    particular ``dict_runtime`` must stay ``None`` across the round-trip;
+    were it to decode as an empty-but-present ``DictRuntimeMetadata``,
+    re-emit would misread the dict as compile-time-bound and drop the
+    per-key parameters.
     """
 
     _PARAMS = ["quad", "linear"]
