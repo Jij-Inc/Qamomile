@@ -266,6 +266,22 @@ class ArrayBase(Handle, Generic[T]):
             instance.element_type = type_map[value.type]  # type: ignore[assignment]
         return instance
 
+    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "ArrayBase[T]":
+        """Wrap a phi-merged array value in this handle's array type.
+
+        Args:
+            value (Value): Fresh ``ArrayValue`` produced for the merge
+                output.
+            counterpart (Value): The false-branch IR value (unused for
+                plain arrays).
+
+        Returns:
+            ArrayBase[T]: A fresh array handle of this handle's concrete
+                type wrapping ``value`` with this handle's shape.
+        """
+        assert isinstance(value, ArrayValue)
+        return type(self)._create_from_value(value=value, shape=self._shape)
+
     def _check_no_consumed_slots(self, operation_name: str) -> None:
         """Raise if any slot has been destroyed by a prior destructive view op.
 
@@ -2287,6 +2303,34 @@ class VectorView(Vector[T]):
         instance._slice_covered_indices = None
         instance._slice_outer_view = None
         return instance
+
+    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "VectorView[T]":
+        """Wrap a phi-merged slice value as a view with this view's lineage.
+
+        Args:
+            value (Value): Fresh sliced ``ArrayValue`` produced for the
+                merge output (already carrying this view's ``slice_of``
+                / ``slice_start`` / ``slice_step`` metadata).
+            counterpart (Value): The false-branch IR value (unused for
+                views).
+
+        Returns:
+            VectorView[T]: An unregistered view over the same parent and
+                affine map, inheriting this view's coverage and nesting
+                fields; borrow ownership is arranged separately by the
+                caller (``_refresh_slice_phi_owner``).
+        """
+        assert isinstance(value, ArrayValue)
+        view = VectorView._wrap_unregistered(
+            parent=self._slice_parent,
+            sliced_av=value,
+            length=self._shape[0],
+            start_uint=self._slice_start,
+            step_uint=self._slice_step,
+        )
+        view._slice_covered_indices = self._slice_covered_indices
+        view._slice_outer_view = self._slice_outer_view
+        return view
 
     def __post_init__(self) -> None:
         """Skip ``ArrayBase.__post_init__``.
