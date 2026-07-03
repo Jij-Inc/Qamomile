@@ -14,10 +14,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import math
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
-import math
-from typing import Any
+from typing import Any, cast
 
 from matplotlib import colors as mcolors
 from matplotlib.figure import Figure
@@ -363,7 +363,6 @@ def _if_branch_boxes(fig: Figure) -> list[FancyBboxPatch]:
         for patch in ax.patches
         if isinstance(patch, FancyBboxPatch)
         and patch.get_edgecolor() == if_edge
-        and patch.get_facecolor()[3] == 0
         and patch.get_linestyle() == "-."
     ]
 
@@ -756,7 +755,7 @@ class TestDrawEndToEnd:
             empty_single_branch_if._build_graph_for_visualization(), style
         ).draw(fold_loops=False)
         connector = _if_connector_lines(fig)[0]
-        measure_right = connector.get_xdata()[0]
+        measure_right = float(list(cast(Iterable[float], connector.get_xdata()))[0])
         expected_left = measure_right + compute_border_padding(style, depth=0)
         branch_box = _if_branch_boxes(fig)[0]
         assert math.isclose(branch_box.get_x(), expected_left)

@@ -544,12 +544,12 @@ class MatplotlibRenderer:
                     i, spans, prev_right, pad, label_width
                 )
                 if empty_span is None and i == 0:
-                    empty_span = self._condition_measure_empty_branch_x_span(
-                        node, positions, gate_widths, label_width
-                    )
-                if empty_span is None and i == 0:
                     empty_span = self._standalone_empty_branch_x_span(
                         node, positions, block_widths, label_width
+                    )
+                if empty_span is None and i == 0:
+                    empty_span = self._condition_measure_empty_branch_x_span(
+                        node, positions, gate_widths, label_width
                     )
                 if empty_span is None:
                     continue
