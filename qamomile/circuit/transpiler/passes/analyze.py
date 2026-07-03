@@ -577,6 +577,97 @@ def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError
     )
 
 
+def _op_read_uuids(op: Operation) -> set[str]:
+    """Collect the uuids an operation genuinely reads.
+
+    Loop operations expose their own rebind records through
+    ``all_input_values`` (for cloning); those record values are not
+    reads and must not trigger read-based checks, so they are
+    subtracted before the operands are re-added.
+
+    Args:
+        op (Operation): Operation to inspect.
+
+    Returns:
+        set[str]: UUIDs of values the operation reads.
+    """
+    excluded: set[str] = set()
+    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+        for r in op.loop_carried_rebinds:
+            excluded.add(r.before.uuid)
+            excluded.add(r.after.uuid)
+    uuids = {v.uuid for v in op.all_input_values()}
+    uuids -= excluded
+    for v in op.operands:
+        operand_uuid = getattr(v, "uuid", None)
+        if operand_uuid is not None:
+            uuids.add(operand_uuid)
+    return uuids
+
+
+def _reject_stale_while_condition_reads(
+    pruned_operations: list[Operation],
+    output_uuids: set[str],
+) -> None:
+    """Reject post-loop reads of a while condition's pre-loop value.
+
+    For a loop-carried while condition, the resource allocator aliases
+    the initial condition, every in-loop re-measurement, and the merged
+    phi outputs onto ONE physical classical bit. Reads inside the loop
+    body are correct under that aliasing (they observe the current
+    value, matching Python). A read of the *initial* condition value
+    AFTER the loop is not: Python semantics promise the pre-loop (or
+    entry-of-final-iteration) snapshot that a Python-level alias like
+    ``out = bit`` captured, but the shared clbit holds the final in-loop
+    measurement by then. Measured divergence: both the body-saved and
+    the pre-loop-saved snapshot kernels return 0 where Python gives 1.
+
+    Args:
+        pruned_operations (list[Operation]): Program operations with
+            compile-time-dead if branches already pruned.
+        output_uuids (set[str]): UUIDs of the block's output values
+            (post-loop reads through the kernel return path).
+
+    Raises:
+        ValidationError: If the initial-condition value of a
+            loop-carried while is read by any operation after the loop
+            or escapes through the block outputs.
+    """
+    flat = flatten_ops(pruned_operations)
+    for index, op in enumerate(flat):
+        if not isinstance(op, WhileOperation) or len(op.operands) < 2:
+            continue
+        initial = op.operands[0]
+        initial_uuid = getattr(initial, "uuid", None)
+        if initial_uuid is None:
+            continue
+        # Pre-order flattening lists the loop body right after the loop
+        # op; skip those entries (in-body reads are correct under the
+        # aliasing) and scan only what follows the loop.
+        body_ids = {
+            id(body_op)
+            for body in op.nested_op_lists()
+            for body_op in flatten_ops(body)
+        }
+        stale_read = any(
+            initial_uuid in _op_read_uuids(later)
+            for later in flat[index + 1 :]
+            if id(later) not in body_ids
+        )
+        if stale_read or initial_uuid in output_uuids:
+            name = getattr(initial, "name", "") or "<condition>"
+            raise ValidationError(
+                f"Loop-carried while-condition '{name}': the pre-loop "
+                f"value of the condition is read after the loop. The "
+                f"initial condition and its in-loop re-measurements are "
+                f"aliased onto one classical bit, so a post-loop read "
+                f"would observe the final measurement instead of the "
+                f"snapshot Python semantics promise. Read the updated "
+                f"condition variable itself after the loop, or restructure "
+                f"the kernel so the snapshot is not needed."
+            )
+
+
 def _check_loop_carried_rebinds(
     loop_op: ForOperation | ForItemsOperation | WhileOperation,
     body_phi_aliases: tuple[tuple[Value, Value], ...],
@@ -635,36 +726,9 @@ def _check_loop_carried_rebinds(
             uuid = collapsed[uuid]
         return uuid
 
-    def op_read_uuids(op: Operation) -> set[str]:
-        """Collect the uuids an operation genuinely reads.
-
-        Nested loop operations expose their own rebind records through
-        ``all_input_values`` (for cloning); those record values are not
-        body reads and must not trigger the outer loop's check, so they
-        are subtracted before the operands are re-added.
-
-        Args:
-            op (Operation): Operation to inspect.
-
-        Returns:
-            set[str]: UUIDs of values the operation reads.
-        """
-        excluded: set[str] = set()
-        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-            for r in op.loop_carried_rebinds:
-                excluded.add(r.before.uuid)
-                excluded.add(r.after.uuid)
-        uuids = {v.uuid for v in op.all_input_values()}
-        uuids -= excluded
-        for v in op.operands:
-            operand_uuid = getattr(v, "uuid", None)
-            if operand_uuid is not None:
-                uuids.add(operand_uuid)
-        return uuids
-
     body_read_uuids: set[str] = set()
     for op in flat_body:
-        body_read_uuids |= op_read_uuids(op)
+        body_read_uuids |= _op_read_uuids(op)
     # A pruned merge reads its selected source exactly like the collapsed
     # phi it replaces (e.g. a dead-branch ``y = x`` emits no operation but
     # still reads the stale pre-loop ``x`` through the merge).
@@ -737,6 +801,7 @@ def _check_loop_carried_rebinds(
 def reject_loop_carried_classical_rebinds(
     operations: list[Operation],
     bindings: dict[str, Any] | None = None,
+    output_values: list[Value] | None = None,
 ) -> None:
     """Reject in-loop classical scalar rebinds that cannot compile correctly.
 
@@ -758,6 +823,13 @@ def reject_loop_carried_classical_rebinds(
     nested inside *runtime* if branches are scanned too — a loop-carried
     scalar rebind there miscompiles all the same.
 
+    The one exempted rebind — the while loop-carried condition pair —
+    additionally requires that the condition's pre-loop value is not
+    read after the loop (see ``_reject_stale_while_condition_reads``):
+    the allocator aliases the whole condition series onto one classical
+    bit, so a post-loop read of the initial value would observe the
+    final in-loop measurement instead of the snapshot Python promises.
+
     Exposed at module scope because it must run from two passes:
     ``PartialEvaluationPass`` calls it before constant folding (folding
     an all-constant accumulation like ``total = total + 1`` erases the
@@ -772,15 +844,23 @@ def reject_loop_carried_classical_rebinds(
             used to resolve ``IfOperation`` conditions, matching what
             ``CompileTimeIfLoweringPass`` will later resolve. Defaults to
             None (no bindings).
+        output_values (list[Value] | None): The block's output values;
+            a while condition's pre-loop value escaping through them is
+            a post-loop read. Defaults to None (no outputs known).
 
     Raises:
         ValidationError: If a loop body rebinds a classical scalar whose
             pre-loop value the body still reads (directly, through
             classical arithmetic, through a surviving phi, or as an
-            embedded constant from a plain-Python initialization).
+            embedded constant from a plain-Python initialization), or if
+            a while condition's pre-loop value is read after the loop.
     """
     resolved_bindings = bindings or {}
     pruned = prune_compile_time_ifs(operations, {}, resolved_bindings)
+    output_uuids = {
+        v.uuid for v in (output_values or []) if getattr(v, "uuid", None) is not None
+    }
+    _reject_stale_while_condition_reads(pruned.operations, output_uuids)
     for op in flatten_ops(pruned.operations):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             _check_loop_carried_rebinds(op, pruned.aliases_for_loop(op))
@@ -817,7 +897,9 @@ class AnalyzePass(Pass[Block, Block]):
         self._reject_self_referential_loop_stores(input.operations)
 
         # Reject in-loop classical scalar rebinds (loop-carried updates)
-        self._reject_loop_carried_classical_rebinds(input.operations)
+        self._reject_loop_carried_classical_rebinds(
+            input.operations, input.output_values
+        )
 
         # Build dependency graph
         dependency_graph = self._build_dependency_graph(input.operations)
@@ -940,6 +1022,7 @@ class AnalyzePass(Pass[Block, Block]):
     def _reject_loop_carried_classical_rebinds(
         self,
         operations: list[Operation],
+        output_values: list[Value],
     ) -> None:
         """Reject in-loop classical scalar rebinds (loop-carried updates).
 
@@ -953,12 +1036,16 @@ class AnalyzePass(Pass[Block, Block]):
 
         Args:
             operations (list[Operation]): Operations to scan recursively.
+            output_values (list[Value]): Block output values, used to
+                detect a while condition's pre-loop value escaping the
+                loop through the return path.
 
         Raises:
             ValidationError: If a loop body rebinds a classical scalar
-                whose pre-loop value the body still reads.
+                whose pre-loop value the body still reads, or a while
+                condition's pre-loop value is read after the loop.
         """
-        reject_loop_carried_classical_rebinds(operations)
+        reject_loop_carried_classical_rebinds(operations, output_values=output_values)
 
     def _build_dependency_graph(
         self,
