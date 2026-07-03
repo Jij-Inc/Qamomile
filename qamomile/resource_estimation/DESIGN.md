@@ -92,26 +92,33 @@ Do not copy them into new modules.
   normalization/precision budget (similarly `estimate_qpe` vs
   `estimate_qubitized_qpe_resources`).
 
+- **Hamiltonian representations are open.** Logical-qubit scaling models
+  live in a runtime registry keyed by representation strings;
+  `HamiltonianRepresentation` enumerates the built-ins and
+  `register_hamiltonian_representation(name, logical_qubits)` adds custom
+  models without editing this package. Scaling callables take
+  ``(n_qubits, *, sparsity=None, second_factor_rank=None)``.
+- **FTQC substitution is shared.** Both FTQC estimate classes substitute
+  through `_substitute_expressions`, and their derived runtime components
+  are `functools.cached_property` values (safe on frozen dataclasses), so
+  repeated `to_dict`/`resource_values` calls do not re-run `sp.simplify`.
+
 ## Known debt / roadmap
 
 Recorded here so follow-up iterations have an explicit target. Ordered by
 priority:
 
-1. **Pluggable representation models.** `_default_logical_qubits` matches on
-   the closed `HamiltonianRepresentation` enum, so adding a Hamiltonian
-   representation means editing this package. Replace with a protocol
-   (representation → logical-qubit scaling and validation) with the enum as
-   the built-in lookup.
-2. **FTQC estimate deduplication.** `FTQCPhysicalResourceEstimate` and
-   `FTQCActiveVolumeResourceEstimate` are near-clones (substitute/to_dict/
-   resource_values differ only in field names), and their per-access
-   `sp.simplify` properties recompute on every call. Share the substitution
-   machinery and cache derived expressions.
-3. **Docstring modernization of the consolidated estimators.**
+1. **Docstring modernization of the consolidated estimators.**
    `hamiltonian_simulation.py`, `qpe.py`, and `qaoa.py` predate the
    project's Google-style docstring mandate (Args entries without types,
    missing Raises sections). Bring them up to the standard used by the rest
    of this package.
+2. **Cost-model conversion caching.** The `_x` property wrappers on the
+   cost models re-run `sp.sympify` on every access, and
+   `estimate_physical_resources` re-derives `SurfaceCodeCostModel`'s
+   derived values via both `resource_values()` and `to_cost_model()`.
+   Convert once in `__post_init__` (the `PauliHamiltonianResource`
+   pattern) or cache the derived properties.
 
 ## Review checklist for new estimators
 

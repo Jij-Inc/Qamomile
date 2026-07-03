@@ -37,6 +37,7 @@ from qamomile.resource_estimation.hamiltonian_algorithms import (
     estimate_trotter_qpe_resources_from_hamiltonian,
     estimate_trotter_qpe_resources_from_workload,
     qubitized_qpe_workload_from_openfermion,
+    register_hamiltonian_representation,
     trotter_qpe_workload_from_openfermion,
 )
 from qamomile.resource_estimation.hamiltonian_simulation import (
@@ -105,6 +106,7 @@ __all__ = [
     "iter_resource_quantity_specs",
     "qubitized_qpe_workload_from_openfermion",
     "qubits_counter",
+    "register_hamiltonian_representation",
     "register_resource_quantity",
     "resource_values_from_estimate",
     "resource_estimate_expressions",

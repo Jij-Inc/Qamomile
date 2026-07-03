@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -121,11 +122,12 @@ class HamiltonianQPEWorkload(HamiltonianWorkloadMixin):
         _normalize_representation(self.representation)
 
     @property
-    def normalized_representation(self) -> HamiltonianRepresentation:
-        """Return the normalized Hamiltonian representation.
+    def normalized_representation(self) -> str:
+        """Return the normalized Hamiltonian representation key.
 
         Returns:
-            HamiltonianRepresentation: Normalized finite-set representation.
+            str: Registered representation key. Built-in keys compare equal
+                to their ``HamiltonianRepresentation`` members.
         """
         return _normalize_representation(self.representation)
 
@@ -528,7 +530,7 @@ def estimate_qubitized_qpe_resources(
             non-positive.
         TypeError: If a value cannot be converted into a SymPy expression.
     """
-    representation_enum = _normalize_representation(representation)
+    representation_key = _normalize_representation(representation)
     n_expr = _as_expr(n_qubits, "n_qubits")
     lambda_expr = _as_expr(lambda_norm, "lambda_norm")
     precision_expr = _as_expr(precision, "precision")
@@ -543,7 +545,7 @@ def estimate_qubitized_qpe_resources(
 
     if logical_qubits is None:
         logical_expr = _default_logical_qubits(
-            representation_enum,
+            representation_key,
             n_expr,
             sparsity=sparsity,
             second_factor_rank=second_factor_rank,
@@ -1001,8 +1003,197 @@ def trotter_qpe_workload_from_openfermion(
     )
 
 
+def _sparse_pauli_lcu_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return sparse Pauli-LCU logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Sparse-method nonzero term
+            count. Required for this representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n + sqrt(sparsity)``.
+
+    Raises:
+        ValueError: If ``sparsity`` is missing or non-positive.
+    """
+    if sparsity is None:
+        raise ValueError("sparsity is required for sparse Pauli-LCU QPE estimates.")
+    sparsity_expr = _as_expr(sparsity, "sparsity")
+    _validate_positive(sparsity_expr, "sparsity")
+    return sp.simplify(n_qubits + sp.sqrt(sparsity_expr))
+
+
+def _single_factorization_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return single-factorization logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n ** (3/2)``.
+    """
+    return sp.simplify(n_qubits ** sp.Rational(3, 2))
+
+
+def _double_factorization_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return double-factorization logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Average second
+            factorization rank. Defaults to the symbolic ``Xi`` when None.
+
+    Returns:
+        sp.Expr: ``n * sqrt(second_factor_rank)``.
+
+    Raises:
+        ValueError: If ``second_factor_rank`` is provably non-positive.
+    """
+    rank_expr = (
+        sp.Symbol("Xi", positive=True)
+        if second_factor_rank is None
+        else _as_expr(second_factor_rank, "second_factor_rank")
+    )
+    _validate_positive(rank_expr, "second_factor_rank")
+    return sp.simplify(n_qubits * sp.sqrt(rank_expr))
+
+
+def _tensor_hypercontraction_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return tensor-hypercontraction logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n``.
+    """
+    return n_qubits
+
+
+def _unitary_weight_concentration_qubits(
+    n_qubits: sp.Expr,
+    *,
+    sparsity: _SympyLike | None = None,
+    second_factor_rank: _SympyLike | None = None,
+) -> sp.Expr:
+    """Return unitary-weight-concentration logical-qubit scaling.
+
+    Args:
+        n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
+        sparsity (sp.Expr | int | float | None): Unused by this
+            representation.
+        second_factor_rank (sp.Expr | int | float | None): Unused by this
+            representation.
+
+    Returns:
+        sp.Expr: ``n + 1`` for the data register plus one ancilla.
+    """
+    return n_qubits + 1
+
+
+_LogicalQubitsModel = Callable[..., sp.Expr]
+
+_REPRESENTATION_MODELS: dict[str, _LogicalQubitsModel] = {
+    HamiltonianRepresentation.SPARSE_PAULI_LCU.value: _sparse_pauli_lcu_qubits,
+    HamiltonianRepresentation.SINGLE_FACTORIZATION.value: (
+        _single_factorization_qubits
+    ),
+    HamiltonianRepresentation.DOUBLE_FACTORIZATION.value: (
+        _double_factorization_qubits
+    ),
+    HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF.value: (
+        _double_factorization_qubits
+    ),
+    HamiltonianRepresentation.TENSOR_HYPERCONTRACTION.value: (
+        _tensor_hypercontraction_qubits
+    ),
+    HamiltonianRepresentation.UNITARY_WEIGHT_CONCENTRATION.value: (
+        _unitary_weight_concentration_qubits
+    ),
+}
+
+
+def register_hamiltonian_representation(
+    name: str,
+    logical_qubits: _LogicalQubitsModel,
+) -> str:
+    """Register a custom Hamiltonian representation scaling model.
+
+    Hamiltonian representations are open: any registered name is accepted by
+    ``HamiltonianQPEWorkload`` and ``estimate_qubitized_qpe_resources``.
+    ``HamiltonianRepresentation`` enumerates the built-ins; this function
+    extends the set without editing the package.
+
+    Args:
+        name (str): Representation key, used as the ``representation``
+            argument of workloads and estimators.
+        logical_qubits (Callable[..., sp.Expr]): Scaling model called as
+            ``logical_qubits(n_qubits, *, sparsity=None,
+            second_factor_rank=None)`` and returning the representation's
+            logical-qubit count expression. Re-registering the identical
+            callable is a no-op.
+
+    Returns:
+        str: The registered representation key.
+
+    Raises:
+        ValueError: If ``name`` is empty or already registered with a
+            different model.
+
+    Example:
+        >>> def _flat_qubits(n_qubits, *, sparsity=None, second_factor_rank=None):
+        ...     return n_qubits + 3
+        >>> register_hamiltonian_representation("flat_encoding", _flat_qubits)
+        'flat_encoding'
+    """
+    key = str(name)
+    if not key:
+        raise ValueError("Representation names must be non-empty strings.")
+    existing = _REPRESENTATION_MODELS.get(key)
+    if existing is not None and existing is not logical_qubits:
+        raise ValueError(
+            f"Hamiltonian representation {key!r} is already registered with a "
+            "different model."
+        )
+    _REPRESENTATION_MODELS[key] = logical_qubits
+    return key
+
+
 def _default_logical_qubits(
-    representation: HamiltonianRepresentation,
+    representation: str,
     n_qubits: sp.Expr,
     *,
     sparsity: sp.Expr | int | None,
@@ -1011,7 +1202,7 @@ def _default_logical_qubits(
     """Return representation-level logical-qubit scaling.
 
     Args:
-        representation (HamiltonianRepresentation): Hamiltonian representation.
+        representation (str): Normalized Hamiltonian representation key.
         n_qubits (sp.Expr): Encoded Hamiltonian qubit count.
         sparsity (sp.Expr | int | None): Sparse-method nonzero term count.
         second_factor_rank (sp.Expr | int | None): Average rank for
@@ -1021,37 +1212,15 @@ def _default_logical_qubits(
         sp.Expr: Symbolic logical-qubit estimate.
 
     Raises:
-        ValueError: If the sparse representation lacks ``sparsity``.
+        ValueError: If the representation's model rejects its inputs, such
+            as a sparse representation without ``sparsity``.
     """
-    n = n_qubits
-    match representation:
-        case HamiltonianRepresentation.SPARSE_PAULI_LCU:
-            if sparsity is None:
-                raise ValueError(
-                    "sparsity is required for sparse Pauli-LCU QPE estimates."
-                )
-            sparsity_expr = _as_expr(sparsity, "sparsity")
-            _validate_positive(sparsity_expr, "sparsity")
-            return sp.simplify(n + sp.sqrt(sparsity_expr))
-        case HamiltonianRepresentation.SINGLE_FACTORIZATION:
-            return sp.simplify(n ** sp.Rational(3, 2))
-        case (
-            HamiltonianRepresentation.DOUBLE_FACTORIZATION
-            | HamiltonianRepresentation.SYMMETRY_COMPRESSED_DF
-        ):
-            rank_expr = (
-                sp.Symbol("Xi", positive=True)
-                if second_factor_rank is None
-                else _as_expr(second_factor_rank, "second_factor_rank")
-            )
-            _validate_positive(rank_expr, "second_factor_rank")
-            return sp.simplify(n * sp.sqrt(rank_expr))
-        case HamiltonianRepresentation.TENSOR_HYPERCONTRACTION:
-            return n
-        case HamiltonianRepresentation.UNITARY_WEIGHT_CONCENTRATION:
-            return n + 1
-        case _:
-            raise ValueError(f"Unhandled Hamiltonian representation: {representation}")
+    model = _REPRESENTATION_MODELS[_normalize_representation(representation)]
+    return model(
+        n_qubits,
+        sparsity=sparsity,
+        second_factor_rank=second_factor_rank,
+    )
 
 
 def _build_logical_estimate(
@@ -1079,16 +1248,16 @@ def _build_logical_estimate(
         ResourceEstimate: Logical estimate with collected parameters.
     """
     estimate = ResourceEstimate(
-        qubits=sp.simplify(logical_qubits),
+        qubits=logical_qubits,
         gates=GateCount(
-            total=sp.simplify(total_gates),
+            total=total_gates,
             single_qubit=sp.Integer(0),
             two_qubit=sp.Integer(0),
-            multi_qubit=sp.simplify(multi_qubit_gates),
-            t_gates=sp.simplify(t_gates),
-            clifford_gates=sp.simplify(clifford_gates),
-            rotation_gates=sp.simplify(rotation_gates),
-            oracle_calls={"qpe_iterations": sp.simplify(qpe_iterations)},
+            multi_qubit=multi_qubit_gates,
+            t_gates=t_gates,
+            clifford_gates=clifford_gates,
+            rotation_gates=rotation_gates,
+            oracle_calls={"qpe_iterations": qpe_iterations},
             oracle_queries={},
         ),
     )
@@ -1097,23 +1266,25 @@ def _build_logical_estimate(
 
 def _normalize_representation(
     representation: str | HamiltonianRepresentation,
-) -> HamiltonianRepresentation:
-    """Normalize a public representation value.
+) -> str:
+    """Normalize a public representation value to its registered key.
 
     Args:
         representation (str | HamiltonianRepresentation): User-provided
-            representation.
+            representation. Built-in enum members and registered custom
+            keys are both accepted.
 
     Returns:
-        HamiltonianRepresentation: Normalized enum value.
+        str: Normalized representation key.
 
     Raises:
-        ValueError: If ``representation`` is not known.
+        ValueError: If ``representation`` is not a registered
+            representation.
     """
-    try:
-        return HamiltonianRepresentation(representation)
-    except ValueError as exc:
-        valid = ", ".join(item.value for item in HamiltonianRepresentation)
+    key = str(representation)
+    if key not in _REPRESENTATION_MODELS:
+        valid = ", ".join(sorted(_REPRESENTATION_MODELS))
         raise ValueError(
             f"Unknown Hamiltonian representation {representation!r}; valid: {valid}."
-        ) from exc
+        )
+    return key

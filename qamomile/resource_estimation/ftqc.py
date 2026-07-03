@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 import sympy as sp
@@ -681,34 +682,31 @@ class FTQCPhysicalResourceEstimate:
             FTQCPhysicalResourceEstimate: Estimate with substituted symbolic
                 fields and refreshed free-symbol metadata.
         """
-        substitutions: dict[Any, Any] = {}
-        for name, value in values.items():
-            substitutions[self.parameters.get(name, sp.Symbol(name))] = value
-
         logical = self.logical.substitute(**values)
-        logical_depth = self.logical_depth.subs(substitutions).doit()
-        non_clifford_count = self.non_clifford_count.subs(substitutions).doit()
-        physical_qubits = self.physical_qubits.subs(substitutions).doit()
-        runtime_seconds = self.runtime_seconds.subs(substitutions).doit()
-        architecture_values = {
-            name: expr.subs(substitutions).doit()
-            for name, expr in self.architecture_values.items()
-        }
+        subbed = _substitute_expressions(
+            self.parameters,
+            values,
+            {
+                "logical_depth": self.logical_depth,
+                "non_clifford_count": self.non_clifford_count,
+                "physical_qubits": self.physical_qubits,
+                "runtime_seconds": self.runtime_seconds,
+            },
+        )
+        architecture_values = _substitute_expressions(
+            self.parameters,
+            values,
+            self.architecture_values,
+        )
         return FTQCPhysicalResourceEstimate(
             logical=logical,
-            logical_depth=logical_depth,
-            non_clifford_count=non_clifford_count,
-            physical_qubits=physical_qubits,
-            runtime_seconds=runtime_seconds,
             architecture_values=architecture_values,
             parameters=_collect_parameters(
                 *resource_estimate_expressions(logical),
-                logical_depth,
-                non_clifford_count,
-                physical_qubits,
-                runtime_seconds,
+                *subbed.values(),
                 *architecture_values.values(),
             ),
+            **subbed,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -768,7 +766,7 @@ class FTQCPhysicalResourceEstimate:
             values.setdefault(name, count)
         return values
 
-    @property
+    @cached_property
     def depth_limited_runtime_seconds(self) -> sp.Expr:
         """Return the logical-depth-limited runtime component.
 
@@ -779,7 +777,7 @@ class FTQCPhysicalResourceEstimate:
             self.logical_depth * self.architecture_values["logical_cycle_time_seconds"]
         )
 
-    @property
+    @cached_property
     def non_clifford_limited_runtime_seconds(self) -> sp.Expr:
         """Return the non-Clifford-throughput-limited runtime component.
 
@@ -864,34 +862,31 @@ class FTQCActiveVolumeResourceEstimate:
             FTQCActiveVolumeResourceEstimate: Estimate with substituted fields
             and refreshed free-symbol metadata.
         """
-        substitutions: dict[Any, Any] = {}
-        for name, value in values.items():
-            substitutions[self.parameters.get(name, sp.Symbol(name))] = value
-
         logical = self.logical.substitute(**values)
-        logical_gate_count = self.logical_gate_count.subs(substitutions).doit()
-        non_clifford_count = self.non_clifford_count.subs(substitutions).doit()
-        active_volume = self.active_volume.subs(substitutions).doit()
-        runtime_seconds = self.runtime_seconds.subs(substitutions).doit()
-        architecture_values = {
-            name: expr.subs(substitutions).doit()
-            for name, expr in self.architecture_values.items()
-        }
+        subbed = _substitute_expressions(
+            self.parameters,
+            values,
+            {
+                "logical_gate_count": self.logical_gate_count,
+                "non_clifford_count": self.non_clifford_count,
+                "active_volume": self.active_volume,
+                "runtime_seconds": self.runtime_seconds,
+            },
+        )
+        architecture_values = _substitute_expressions(
+            self.parameters,
+            values,
+            self.architecture_values,
+        )
         return FTQCActiveVolumeResourceEstimate(
             logical=logical,
-            logical_gate_count=logical_gate_count,
-            non_clifford_count=non_clifford_count,
-            active_volume=active_volume,
-            runtime_seconds=runtime_seconds,
             architecture_values=architecture_values,
             parameters=_collect_parameters(
                 *resource_estimate_expressions(logical),
-                logical_gate_count,
-                non_clifford_count,
-                active_volume,
-                runtime_seconds,
+                *subbed.values(),
                 *architecture_values.values(),
             ),
+            **subbed,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -939,7 +934,7 @@ class FTQCActiveVolumeResourceEstimate:
             values.setdefault(name, count)
         return values
 
-    @property
+    @cached_property
     def active_volume_runtime_seconds(self) -> sp.Expr:
         """Return the active-volume-throughput-limited runtime component.
 
@@ -1133,6 +1128,29 @@ def _collect_parameters(*expressions: sp.Expr) -> dict[str, sp.Symbol]:
             if isinstance(symbol, sp.Symbol):
                 symbols.add(symbol)
     return {str(symbol): symbol for symbol in sorted(symbols, key=str)}
+
+
+def _substitute_expressions(
+    parameters: dict[str, sp.Symbol],
+    values: dict[str, int | float],
+    expressions: dict[str, sp.Expr],
+) -> dict[str, sp.Expr]:
+    """Apply named numeric substitutions to a dictionary of expressions.
+
+    Args:
+        parameters (dict[str, sp.Symbol]): Known free symbols keyed by their
+            display names. Names absent from this mapping fall back to a
+            bare ``sp.Symbol`` so unused substitutions no-op.
+        values (dict[str, int | float]): Substitutions keyed by symbol name.
+        expressions (dict[str, sp.Expr]): Expressions to substitute into.
+
+    Returns:
+        dict[str, sp.Expr]: Substituted expressions under the same keys.
+    """
+    substitutions: dict[Any, Any] = {
+        parameters.get(name, sp.Symbol(name)): value for name, value in values.items()
+    }
+    return {name: expr.subs(substitutions).doit() for name, expr in expressions.items()}
 
 
 def _validate_architecture_keys(

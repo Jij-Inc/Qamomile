@@ -27,6 +27,7 @@ from qamomile.resource_estimation import (
     estimate_trotter_qpe_resources_from_hamiltonian,
     estimate_trotter_qpe_resources_from_workload,
     qubitized_qpe_workload_from_openfermion,
+    register_hamiltonian_representation,
     resource_values_from_estimate,
     summarize_pauli_hamiltonian,
     trotter_qpe_workload_from_openfermion,
@@ -449,6 +450,55 @@ def test_qubitized_qpe_adds_qpe_register_qubits_to_logical_footprint():
     assert estimate.qubits == 10
     assert estimate.gates.oracle_calls["qpe_iterations"] == 4
     assert estimate.gates.multi_qubit == 40
+
+
+def test_register_custom_hamiltonian_representation():
+    """Custom representation models plug into workloads and estimators."""
+
+    def _flat_encoding_qubits(n_qubits, *, sparsity=None, second_factor_rank=None):
+        """Return a flat n+3 logical-qubit scaling used only by this test."""
+        return n_qubits + 3
+
+    key = register_hamiltonian_representation(
+        "test_flat_encoding",
+        _flat_encoding_qubits,
+    )
+    assert key == "test_flat_encoding"
+
+    estimate = estimate_qubitized_qpe_resources(
+        n_qubits=4,
+        lambda_norm=8,
+        precision=2,
+        walk_cost_toffoli=10,
+        representation="test_flat_encoding",
+    )
+    assert estimate.qubits == 7
+    assert estimate.gates.oracle_calls["qpe_iterations"] == 4
+
+    workload = HamiltonianQPEWorkload(
+        PauliHamiltonianResource(
+            n_qubits=4,
+            n_pauli_terms=10,
+            lambda_norm=8,
+            max_locality=2,
+        ),
+        walk_cost_toffoli=10,
+        representation="test_flat_encoding",
+    )
+    assert workload.normalized_representation == "test_flat_encoding"
+    logical = estimate_qubitized_qpe_resources_from_workload(workload, precision=2)
+    assert logical.qubits == 7
+
+    # Idempotent re-registration is allowed; conflicting models are not.
+    register_hamiltonian_representation(
+        "test_flat_encoding",
+        _flat_encoding_qubits,
+    )
+    with pytest.raises(ValueError, match="already registered"):
+        register_hamiltonian_representation(
+            "test_flat_encoding",
+            lambda n_qubits, **kwargs: n_qubits,
+        )
 
 
 def test_workload_reports_sparsity_separately_from_term_count():
