@@ -271,13 +271,18 @@ class Dict(Handle, Generic[K, V]):
 
         Returns:
             int: The entry count. A dict bound at compile time reports the
-                number of bound (key, value) pairs; handles carrying traced
-                entries report the traced entry count.
+                number of bound (key, value) pairs; handles carrying
+                populated ``_entries`` report that count.
 
         Raises:
-            TypeError: If this dict is a runtime parameter — its key
-                structure, including cardinality, is unknown at compile
-                time, so ``len()`` would silently drive zero-trip loops.
+            TypeError: If the entry count is unknown at trace time — the
+                dict is a runtime parameter, or a symbolic input with no
+                bound data (e.g. a sub-kernel's dict argument, which
+                connects to the caller's dict only at inline time, after
+                tracing). ``len()`` is resolved to a Python int during
+                tracing and leaves no IR to lower later, so silently
+                reporting 0 here would bake zero-trip loops into the
+                circuit.
         """
         if self._runtime_parameter:
             raise TypeError(
@@ -289,7 +294,16 @@ class Dict(Handle, Generic[K, V]):
             )
         if self.value.metadata.dict_runtime is not None:
             return len(self.value.get_bound_data_items())
-        return len(self._entries)
+        if self._entries:
+            return len(self._entries)
+        raise TypeError(
+            f"Dict '{self.value.name}' carries no bound data at trace "
+            f"time, so its cardinality is unknown and len() / .size "
+            f"cannot be used. Sub-kernel dict arguments trace "
+            f"symbolically (the caller's data connects only at inline "
+            f"time); pass the entry count as an explicit UInt argument "
+            f"instead."
+        )
 
     @property
     def size(self) -> UInt:

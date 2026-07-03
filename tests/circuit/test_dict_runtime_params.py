@@ -97,6 +97,50 @@ def rx_over_dict_size(
 
 
 @qmc.qkernel
+def inner_len_loop(
+    q: qmc.Vector[qmc.Qubit],
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Sub-kernel driving its loop with the dict's entry count."""
+    for i in qmc.range(len(coeffs)):
+        q[i] = qmc.rx(q[i], angle=coeffs[i])
+    return q
+
+
+@qmc.qkernel
+def outer_calls_inner_len(
+    n: qmc.UInt,
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Entry kernel forwarding a dict into a len()-driven sub-kernel loop."""
+    q = qmc.qubit_array(n, name="q")
+    q = inner_len_loop(q, coeffs)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def inner_size_loop(
+    q: qmc.Vector[qmc.Qubit],
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Sub-kernel driving its loop with the dict's .size handle."""
+    for i in qmc.range(coeffs.size):
+        q[i] = qmc.rx(q[i], angle=coeffs[i])
+    return q
+
+
+@qmc.qkernel
+def outer_calls_inner_size(
+    n: qmc.UInt,
+    coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Entry kernel forwarding a dict into a .size-driven sub-kernel loop."""
+    q = qmc.qubit_array(n, name="q")
+    q = inner_size_loop(q, coeffs)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def inner_rx_from_dict(
     q: qmc.Qubit,
     coeffs: qmc.Dict[qmc.UInt, qmc.Float],
@@ -269,6 +313,40 @@ class TestDictParameterValidation:
         """.size on a runtime-parameter dict fails at trace time."""
         with pytest.raises(TypeError, match="cardinality"):
             rx_over_dict_size.build(parameters=["angles"], n=2)
+
+    def test_subkernel_len_rejected(self, qiskit_transpiler):
+        """len() on a dict inside a sub-kernel fails at trace time.
+
+        A sub-kernel's dict argument traces symbolically (the caller's
+        data connects only at inline time), so its cardinality is unknown
+        regardless of the outer dict; silently tracing len == 0 would
+        inline an empty loop with neither gates nor parameters.
+        """
+        with pytest.raises(TypeError, match="cardinality"):
+            qiskit_transpiler.transpile(
+                outer_calls_inner_len, bindings={"n": 2}, parameters=["coeffs"]
+            )
+
+    def test_subkernel_size_rejected(self, qiskit_transpiler):
+        """.size on a dict inside a sub-kernel fails at trace time."""
+        with pytest.raises(TypeError, match="cardinality"):
+            qiskit_transpiler.transpile(
+                outer_calls_inner_size, bindings={"n": 2}, parameters=["coeffs"]
+            )
+
+    def test_subkernel_len_works_when_bound(self, qiskit_transpiler):
+        """len() in a sub-kernel resolves for a compile-time-bound dict.
+
+        Call-time specialization re-creates the inner dict input from the
+        caller's bound data, so len() reports the bound entry count and
+        the loop unrolls fully (both pi rotations must land).
+        """
+        exe = qiskit_transpiler.transpile(
+            outer_calls_inner_len,
+            bindings={"n": 2, "coeffs": {0: np.pi, 1: np.pi}},
+        )
+        result = exe.sample(qiskit_transpiler.executor(), shots=32).result()
+        assert result.results == [((1, 1), 32)]
 
     def test_builtin_float_value_type_accepted(self):
         """Dict[K, float] (Python builtin alias) works as a runtime parameter."""
