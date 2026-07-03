@@ -6,64 +6,64 @@ model: opus
 
 # Branch Summary
 
-main と現在の作業 worktree branch の差分を、コードを読んで要約する。レビューワーやジュニアエンジニアが、この会話履歴を知らない状態で読んでも内容を理解できるレベルに仕上げる。
+Summarize the diff between `main` and the current worktree branch after reading the code. The result must be clear enough for reviewers and junior engineers to understand the branch without seeing the conversation history.
 
 ## When To Use
 
-- 作業 branch でひと段落ついたタイミング。
-- PR を書く前、レビューに出す前。
-- ユーザーが「サマリを作って」「ブランチサマリを書いて」「branch-summary」「make-summary」と依頼した時。
+- Use after a coherent unit of branch work is complete.
+- Use before writing a PR or asking for review.
+- Use when the user asks for a branch summary, summary file, `branch-summary`, or `make-summary`.
 
 ## Output Rules
 
-- 出力先は現在の作業 worktree root にする。ユーザーから別指定がある場合だけ従う。
-- ファイル名は `<branch-name>-summary.md` にする。必要なら branch 名をファイル名として安全な形に sanitize する。
-- 同名ファイルが既にあれば確認なく上書きする。
-- summary file は commit しない。untracked のまま残す。
-- `/tmp` など消えやすい場所を自分で出力先に選ばない。current worktree root 自体が一時領域にある場合は、worktree root を優先する。
-- 完了時は絶対パスと、commit していないことだけを伝える。独立した齟齬チェックを実行できなかった場合だけ、その事実も短く伝える。
+- Write the output file at the current worktree root unless the user explicitly chooses another location.
+- Name the file `<branch-name>-summary.md`. Sanitize the branch name if needed so it is safe as a filename.
+- If the file already exists, overwrite it without asking.
+- Do not commit the summary file. Leave it untracked.
+- Do not choose `/tmp` or another ephemeral directory as the output location yourself. If the current worktree root itself is under a temporary directory, prefer the worktree root.
+- On completion, report only the absolute path and the fact that the file was not committed. If an independent discrepancy check could not run, also mention that briefly.
 
 ## Writing Rules
 
-- 箇条書き中心にしない。添付例のように、各セクションを説明文の段落で書く。
-- 段落内に手動 soft line break を入れない。1 段落 = 1 行、段落区切りは blank line にする。
-- 会話・レビュー履歴を書かない。summary は branch の現在差分の説明に限定する。
-- 初出の Qamomile 固有用語や専門用語は、短く説明してから使う。
-- ジュニアエンジニアに口頭で説明するつもりで、なぜ問題なのか、なぜ対処が必要なのかを省略しない。
-- コード参照は `path/to/file.py:123` や `path/to/file.py:123-145` のように具体的に書く。
-- テスト一覧、diff stats、commit history、検証ログ、作業経緯は独立セクションにしない。必要な事実だけを該当セクションの説明に吸収する。
+- Do not make the summary bullet-list driven. Write each section as explanatory prose paragraphs.
+- Do not insert manual soft line breaks within a paragraph. Use one physical line per paragraph, and separate paragraphs with blank lines.
+- Do not write the conversation, review history, or work log. Limit the summary to the current branch diff.
+- Briefly explain each Qamomile-specific term or technical term before relying on it.
+- Write as if explaining the branch orally to a junior engineer. Do not skip why the problem matters or why the fix is needed.
+- Reference code concretely as `path/to/file.py:123` or `path/to/file.py:123-145`.
+- Do not create standalone sections for test lists, diff stats, commit history, validation logs, or work chronology. Absorb only the relevant facts into the appropriate section.
 
 ## Summary Structure
 
-次の 5 セクションだけを、この順で書く。`0. Glossary`、検証結果、TODO、会話履歴などの追加セクションは作らない。
+Write exactly the following five sections, in this order. Do not add `0. Glossary`, verification results, TODOs, conversation history, or any other section.
 
 ```md
-1. 問題の概要
+1. Problem Overview
 
-2. フロントエンド(ユーザーが書くコードレベル)での変更
+2. Frontend Changes (User-Written Code Level)
 
-3. バックエンド(IR 等全体的)での変更
+3. Backend Changes (IR And Internals)
 
-4. 採用しなかった代替案と、今回の方法を選んだ理由
+4. Alternatives Not Adopted And Why This Approach Was Chosen
 
-5. 既知の限界
+5. Known Limitations
 ```
 
-`1. 問題の概要` では、bugfix の場合は main で何が起きていたか、なぜそうなるか、branch でどう変わるかを区別して書く。機能追加の場合は、何ができるようになり、なぜ必要なのかを書く。
+In `1. Problem Overview`, for a bugfix, distinguish what happened on `main`, why it happened, and how the branch changes the behavior. For a feature, explain what becomes possible and why it is needed.
 
-`2. フロントエンド(ユーザーが書くコードレベル)での変更` では、ユーザーが書く qkernel、受け取るエラーメッセージ、触る API の振る舞いなど、利用者視点の変更を書く。コード例を 1 つ以上載せる。内部実装詳細はここに書かない。
+In `2. Frontend Changes (User-Written Code Level)`, describe the user-facing behavior: qkernels the user writes, errors the user receives, and API behavior the user touches. Include at least one code example. Do not put backend implementation details here.
 
-`3. バックエンド(IR 等全体的)での変更` では、compiler / IR / transpiler / backend 側の変更を書く。新しい IR op、dataclass、pass、helper がある場合は、役割と `file:line` を示す。Qamomile 用語が初めて出る場合は、このセクション内でも短く説明する。
+In `3. Backend Changes (IR And Internals)`, describe compiler, IR, transpiler, and backend-side changes. If there is a new IR operation, dataclass, pass, or helper, state its role and cite `file:line`. Briefly explain Qamomile terms the first time they appear.
 
-`4. 採用しなかった代替案と、今回の方法を選んだ理由` では、設計レベルで複数案があったものについて、trade-off と採用/不採用理由を書く。該当しなければ「該当なし」と書く。このセクションだけは、設計判断の根拠として外部レビューや会話で出た代替案を最終形に整理して含めてよいが、作業経緯の物語にはしない。
+In `4. Alternatives Not Adopted And Why This Approach Was Chosen`, describe design-level alternatives, trade-offs, and adoption or rejection reasons. If none apply, write `None`. This section may include alternatives raised in external review or conversation, but only as final design rationale, not as a narrative of the work history.
 
-`5. 既知の限界` では、merge 後にも残るギャップを書く。false negative / false positive、未対応 AST 形、backend 差など、実コードで踏み得るものを `When:` / `Why:` / `Future fix:` の形で説明する。複数ある場合も箇条書きにせず、限界ごとに段落を分ける。無ければ「該当なし」と書く。
+In `5. Known Limitations`, describe gaps that remain after merge. Cover real cases a user can hit, such as false negatives, false positives, unsupported AST forms, or backend differences, using the `When:` / `Why:` / `Future fix:` frame. If there are multiple limitations, use separate prose paragraphs rather than bullets. If none apply, write `None`.
 
 ## Workflow
 
 ### Step 1. Grasp The Context
 
-worktree root を確定し、差分の規模を把握する。
+Determine the worktree root and get a rough sense of the diff size.
 
 ```bash
 pwd
@@ -74,30 +74,30 @@ git diff origin/main...HEAD --stat
 
 ### Step 2. Read The Diff
 
-変更ファイルを実際に読む。大きく変わったファイル、新規ファイル、新規クラス/関数、削除されたシンボルを把握する。テスト追加も読むが、summary にテスト一覧を作らない。期待される振る舞いとして各セクションに吸収する。bugfix なら、可能な範囲で main の不具合と branch の改善を具体例で説明できるようにする。
+Actually read the changed files. Understand heavily changed files, new files, new classes or functions, and deleted symbols. Read added tests too, but do not make a test list in the summary; absorb expected behavior into the relevant sections. For a bugfix, gather enough detail to explain the bug on `main` and the branch behavior with concrete examples when possible.
 
 ### Step 3. Write The Draft
 
-worktree root に `<branch-name>-summary.md` を作成または上書きする。セクション 2 と 3 を混ぜない。セクション 4 は作業経緯ではなく最終的な設計選択として書く。セクション 5 は抽象的な TODO ではなく、残る条件と将来対応を書く。
+Create or overwrite `<branch-name>-summary.md` at the worktree root. Do not blur sections 2 and 3. Write section 4 as final design rationale, not work chronology. Write section 5 as concrete remaining conditions and future fixes, not abstract TODOs.
 
 ### Step 4. Check Discrepancies With Another AI
 
-原則として `claude` skill を使い、summary と実コードの食い違いを敵対的に確認してもらう。使用量には注意する。`claude` が利用できない場合や、外部送信の承認待ちで止まる場合は、記憶を共有しない別 subagent / another available AI に同じ確認を依頼する。どちらも使えない場合は、変更ファイルと summary を自分で読み直して敵対的にセルフチェックし、見つけた不一致を修正する。この場合は独立した齟齬チェックが未実行であることを completion report に短く書くが、summary 作成自体は完了させる。
+By default, use the `claude` skill to adversarially check the summary against the real code. Watch usage. If `claude` is unavailable or blocked on approval to send local repository content externally, ask a memory-isolated subagent or another available AI to perform the same check. If neither is available, reread the changed files and the summary yourself, perform an adversarial self-check, and fix any mismatch you find. In that case, briefly state in the completion report that no independent discrepancy check ran, but still complete the summary.
 
-プロンプトには、summary の絶対パス、主な実装ファイルの絶対パス、summary が参照している主要シンボルや行範囲、「実コードと一致しない記述があれば箇条書きで指摘し、無ければ `齟齬なし` と答えて」という依頼、コード編集・ファイル作成/削除・コマンド実行を禁止する制約を含める。
+Include the absolute path of the summary, the absolute paths of the main implementation files, the key symbols or line ranges referenced by the summary, a request to point out any statement that does not match the real code in a bulleted list and answer `no discrepancies` if there are none, and constraints forbidding code edits, file creation or deletion, and command execution.
 
-Claude の指摘が出た場合は、指摘を実コードで再確認し、summary 側を修正し、行番号修正で他の参照がずれていないか確認してから、再度 Claude に確認を依頼する。指摘がゼロになるまで反復する。ただし、指摘が設計判断の見直しを要求する内容なら、summary だけを直さずユーザーに相談する。乖離チェックの反復ログを毎回ユーザーに中継しない。
+If the checker reports discrepancies, re-confirm each point against the real code, fix the summary, and verify that line-number edits did not shift other references. Then ask for another check. Repeat until there are no points left. If a point requires reconsidering a design decision, do not merely edit the summary; ask the user. Do not relay every iteration of the discrepancy-check loop to the user.
 
 ### Step 5. Report Completion
 
-Step 4 が `齟齬なし` になるか、独立 checker が使えずセルフチェックを終えたら、summary の絶対パスと commit していないことだけを伝えて完了する。セルフチェックで代替した場合だけ、独立した齟齬チェックが未実行であることも短く添える。
+After Step 4 returns `no discrepancies`, or after self-checking because no independent checker was available, report the summary's absolute path and that it was not committed. If self-checking replaced an independent check, briefly mention that no independent discrepancy check ran.
 
 ## Do Not
 
-- summary を commit しない。
-- `/tmp` に置かない。
-- 5 セクション以外を追加しない。
-- 段落内に手動 soft line break を入れない。
-- 会話履歴や作業物語を書かない。
-- セクション 4 以外で代替案を議論しない。
-- 乖離チェックの反復ログを毎回ユーザーに中継しない。
+- Do not commit the summary.
+- Do not place it in `/tmp` unless the current worktree root itself is there.
+- Do not add sections beyond the five specified sections.
+- Do not insert manual soft line breaks within a paragraph.
+- Do not write conversation history or a story of the work.
+- Do not discuss alternatives outside section 4.
+- Do not relay every discrepancy-check iteration to the user.
