@@ -37,7 +37,18 @@ from qamomile.resource_estimation.hamiltonian_algorithms import (
     estimate_trotter_qpe_resources_from_hamiltonian,
     estimate_trotter_qpe_resources_from_workload,
     qubitized_qpe_workload_from_openfermion,
+    register_hamiltonian_representation,
     trotter_qpe_workload_from_openfermion,
+)
+from qamomile.resource_estimation.hamiltonian_simulation import (
+    estimate_qdrift,
+    estimate_qsvt,
+    estimate_trotter,
+)
+from qamomile.resource_estimation.qaoa import estimate_qaoa, estimate_qaoa_ising
+from qamomile.resource_estimation.qpe import (
+    estimate_eigenvalue_filtering,
+    estimate_qpe,
 )
 from qamomile.resource_estimation.quantities import (
     ResourceCategory,
@@ -48,8 +59,10 @@ from qamomile.resource_estimation.quantities import (
     compare_resource_values,
     describe_resource_quantity,
     iter_resource_quantity_specs,
+    register_resource_quantity,
     resource_values_from_estimate,
 )
+from qamomile.resource_estimation.workload import HamiltonianWorkloadMixin
 
 __all__ = [
     "FTQCCostModel",
@@ -60,6 +73,7 @@ __all__ = [
     "BlockEncodingResource",
     "HamiltonianQPEWorkload",
     "HamiltonianRepresentation",
+    "HamiltonianWorkloadMixin",
     "PauliHamiltonianResource",
     "ResourceCategory",
     "ResourceComparisonRow",
@@ -73,11 +87,18 @@ __all__ = [
     "count_gates",
     "describe_resource_quantity",
     "estimate_active_volume_resources",
+    "estimate_eigenvalue_filtering",
     "estimate_physical_resources",
+    "estimate_qaoa",
+    "estimate_qaoa_ising",
+    "estimate_qdrift",
+    "estimate_qpe",
+    "estimate_qsvt",
     "estimate_qubitized_qpe_resources",
     "estimate_qubitized_qpe_resources_from_block_encoding",
     "estimate_qubitized_qpe_resources_from_workload",
     "estimate_resources",
+    "estimate_trotter",
     "estimate_trotter_qpe_resources",
     "estimate_trotter_qpe_resources_from_hamiltonian",
     "estimate_trotter_qpe_resources_from_workload",
@@ -85,6 +106,8 @@ __all__ = [
     "iter_resource_quantity_specs",
     "qubitized_qpe_workload_from_openfermion",
     "qubits_counter",
+    "register_hamiltonian_representation",
+    "register_resource_quantity",
     "resource_values_from_estimate",
     "resource_estimate_expressions",
     "summarize_openfermion_qubit_operator",
