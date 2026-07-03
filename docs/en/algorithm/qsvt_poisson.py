@@ -19,7 +19,7 @@
 #
 # # Solving the Periodic Poisson Equation with QSVT in Qamomile
 #
-# This notebook implements a QSVT-based algorithm for a small periodic Poisson problem. The implementation path is: build a [shift-based LCU block encoding](https://quantum-journal.org/papers/q-2025-06-04-1764/) in Qamomile, prepare the source vector as a quantum state, apply a QSVT inverse-polynomial sequence, transpile to Qiskit at the backend boundary, and compare the simulated solution with a classical pseudoinverse reference.
+# This notebook implements a QSVT-based algorithm for a small periodic Poisson problem. The implementation path is: build a [shift-based LCU block encoding](https://arxiv.org/abs/2509.02429) in Qamomile, prepare the source vector as a quantum state, apply a QSVT inverse-polynomial sequence, transpile to Qiskit at the backend boundary, and compare the simulated solution with a classical pseudoinverse reference.
 #
 # The examples are intentionally small because the result checks use exact `Operator` and `Statevector` simulation.
 
@@ -386,7 +386,7 @@ def _check_power_of_two(n: int):
 # Open-projector phase for a signal register
 # ============================================================
 @qmc.qkernel
-def apply_controlled_minus_ZPi_on_q(
+def apply_controlled_minus_ZPi(
     q: qmc.Vector[qmc.Qubit],
     control_qubit: qmc.UInt,
     signal_start: qmc.UInt,
@@ -439,7 +439,7 @@ def apply_controlled_minus_ZPi_on_q(
 
 
 @qmc.qkernel
-def apply_CPi_NOT_on_q(
+def apply_CPi_NOT(
     q: qmc.Vector[qmc.Qubit],
     aux_qubit: qmc.UInt,
     signal_start: qmc.UInt,
@@ -452,7 +452,7 @@ def apply_CPi_NOT_on_q(
 
     q[aux_qubit] = qmc.h(q[aux_qubit])
 
-    q = apply_controlled_minus_ZPi_on_q(
+    q = apply_controlled_minus_ZPi(
         q,
         aux_qubit,
         signal_start,
@@ -465,7 +465,7 @@ def apply_CPi_NOT_on_q(
 
 
 @qmc.qkernel
-def apply_RPi_figure_13_4_on_q(
+def apply_controlled_RPi(
     q: qmc.Vector[qmc.Qubit],
     aux_qubit: qmc.UInt,
     signal_start: qmc.UInt,
@@ -484,7 +484,7 @@ def apply_RPi_figure_13_4_on_q(
     on the signal register.
     """
 
-    q = apply_CPi_NOT_on_q(
+    q = apply_CPi_NOT(
         q,
         aux_qubit,
         signal_start,
@@ -499,7 +499,7 @@ def apply_RPi_figure_13_4_on_q(
         two_phi,
     )
 
-    q = apply_CPi_NOT_on_q(
+    q = apply_CPi_NOT(
         q,
         aux_qubit,
         signal_start,
@@ -561,7 +561,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
                 odd_i = even_i + 1
 
                 # two_phi = 2 phi
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -574,7 +574,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
                     num_system,
                 )
 
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -590,7 +590,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
             tail_i = num_pairs + num_pairs
             final_i = tail_i + 1
 
-            q = apply_RPi_figure_13_4_on_q(
+            q = apply_controlled_RPi(
                 q,
                 rpi_aux,
                 num_system,
@@ -603,7 +603,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
                 num_system,
             )
 
-            q = apply_RPi_figure_13_4_on_q(
+            q = apply_controlled_RPi(
                 q,
                 rpi_aux,
                 num_system,
@@ -635,7 +635,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
                 even_i = pair + pair
                 odd_i = even_i + 1
 
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -648,7 +648,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
                     num_system,
                 )
 
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -663,7 +663,7 @@ def make_qsvt_poisson_kernel_1d(grid_n, normalized_b, num_phases):
 
             final_i = num_pairs + num_pairs
 
-            q = apply_RPi_figure_13_4_on_q(
+            q = apply_controlled_RPi(
                 q,
                 rpi_aux,
                 num_system,
@@ -1052,7 +1052,7 @@ block_encoding_kernel_2d.draw(
 # With the 2D block encoding checked, we reuse the same QSVT inverse-polynomial workflow. The Qamomile kernel is converted at the Qiskit backend boundary, and the recovered vector is compared with the classical pseudoinverse solution.
 
 # %%
-def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
+def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases):
     """Create the 2D Poisson QSVT kernel for the Kronecker-sum encoding."""
     normalized_b = normalize_state(normalized_b)
 
@@ -1072,6 +1072,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
 
     num_axis = int(np.log2(grid_n))
     num_system = int(np.log2(expected_len))
+    num_signal = 3
 
     # Extra ancilla for Figure 13.4.
     rpi_aux = num_system + num_signal
@@ -1102,7 +1103,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
                 odd_i = even_i + 1
 
                 # R_Pi(phi_even), two_phi = 2 phi
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -1117,7 +1118,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
                 )
 
                 # R_Pi(phi_odd), two_phi = 2 phi
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -1136,7 +1137,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
             tail_i = num_pairs + num_pairs
             final_i = tail_i + 1
 
-            q = apply_RPi_figure_13_4_on_q(
+            q = apply_controlled_RPi(
                 q,
                 rpi_aux,
                 num_system,
@@ -1150,7 +1151,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
                 num_system,
             )
 
-            q = apply_RPi_figure_13_4_on_q(
+            q = apply_controlled_RPi(
                 q,
                 rpi_aux,
                 num_system,
@@ -1183,7 +1184,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
                 odd_i = even_i + 1
 
                 # R_Pi(phi_even)
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -1198,7 +1199,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
                 )
 
                 # R_Pi(phi_odd)
-                q = apply_RPi_figure_13_4_on_q(
+                q = apply_controlled_RPi(
                     q,
                     rpi_aux,
                     num_system,
@@ -1215,7 +1216,7 @@ def make_qsvt_poisson_kernel_2d(grid_n, normalized_b, num_phases, num_signal=3):
             # Final phase.
             final_i = num_pairs + num_pairs
 
-            q = apply_RPi_figure_13_4_on_q(
+            q = apply_controlled_RPi(
                 q,
                 rpi_aux,
                 num_system,
@@ -1232,7 +1233,6 @@ qsvt_kernel_2d = make_qsvt_poisson_kernel_2d(
     n_2d,
     normalized_b2,
     len(phi_qsvt),
-    num_signal=3,
 )
 
 qsvt_circuit_2d = transpiler.to_circuit(
