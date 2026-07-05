@@ -18,9 +18,12 @@ class AffineValidationPass(Pass[Block, Block]):
     """Validate affine type semantics at IR level.
 
     This pass serves as a safety net to catch affine type violations
-    that may have bypassed the frontend checks. It verifies:
-    1. Each quantum value is used (consumed) at most once
-    2. Quantum values are not silently discarded
+    that may have bypassed the frontend checks. It verifies that each
+    quantum value is used (consumed) at most once. It does NOT detect
+    "never consumed" / silent-discard patterns; the branch-internal and
+    loop-body discard cases are rejected separately by
+    ``reject_control_flow_quantum_discard`` in
+    ``qamomile.circuit.transpiler.passes.analyze``.
 
     Input: Block (any kind)
     Output: Same Block (unchanged, validation only)

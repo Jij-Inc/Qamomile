@@ -34,7 +34,7 @@ from qamomile.circuit.ir.operation import (
     InverseBlockOperation,
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
     SCHEMA_VERSION,
@@ -264,6 +264,47 @@ def _while_measure_kernel() -> qmc.Bit:
         q2 = qmc.h(q2)
         bit = qmc.measure(q2)
     return bit
+
+
+@qmc.qkernel
+def _if_branch_rebind_kernel() -> qmc.Bit:
+    """Kernel whose IfOperation carries a non-empty ``branch_rebinds``.
+
+    ``q`` is measured before the if, so rebinding it to the external
+    ``fresh`` register in both branches is legal variable reuse (the
+    pre-branch value is owned outside the if) rather than a discard.
+    Because both branches rebind ``q`` to a value whose old binding is
+    dead, the pre-branch value survives only on the recorded
+    ``BranchRebind``, giving the serializer a non-empty record list to
+    round-trip.
+    """
+    q = qmc.qubit("q")
+    fresh = qmc.qubit("fresh")
+    qmc.measure(q)
+    p = qmc.qubit("p")
+    cond = qmc.measure(p)
+    if cond:
+        q = fresh
+    else:
+        q = fresh
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _loop_quantum_rebind_kernel(n: qmc.UInt) -> qmc.Bit:
+    """Kernel whose ForOperation carries a quantum ``LoopCarriedRebind``.
+
+    The body consumes the incoming register (measures it) before
+    rebinding to a fresh one — the legal reset idiom — so the record
+    survives the control-flow discard check while giving the serializer
+    a quantum-``before`` loop record to round-trip.
+    """
+    q = qmc.qubit("q")
+    b = qmc.bit(0)
+    for _ in qmc.range(n):
+        b = qmc.measure(q)
+        q = qmc.qubit("fresh")
+    return b
 
 
 @qmc.qkernel
@@ -722,6 +763,61 @@ class TestRoundTripIRFeatures:
         assert corrupted
         with pytest.raises(ValueError, match="merge data is inconsistent"):
             from_dict(payload)
+
+    def test_if_branch_rebinds_round_trip(self):
+        """IfOperation branch-rebind records survive both wire formats."""
+        block = _to_affine(_if_branch_rebind_kernel)
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert if_ops and if_ops[0].branch_rebinds, (
+            "expected a non-empty branch_rebinds to exercise the round-trip"
+        )
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_ifs = [
+                op for op in restored.operations if isinstance(op, IfOperation)
+            ]
+            assert restored_ifs
+            restored_records = restored_ifs[0].branch_rebinds
+            assert [
+                (r.var_name, r.before.uuid, r.rebound_in_true, r.rebound_in_false)
+                for r in restored_records
+            ] == [
+                (r.var_name, r.before.uuid, r.rebound_in_true, r.rebound_in_false)
+                for r in if_ops[0].branch_rebinds
+            ]
+            assert content_hash(restored) == content_hash(block)
+
+    def test_loop_quantum_rebind_records_round_trip(self):
+        """Quantum-``before`` loop rebind records survive both wire formats."""
+        block = _to_affine(_loop_quantum_rebind_kernel)
+        for_ops = [op for op in block.operations if isinstance(op, ForOperation)]
+        assert for_ops and any(
+            r.before.type.is_quantum() for r in for_ops[0].loop_carried_rebinds
+        ), "expected a quantum loop rebind record to exercise the round-trip"
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_fors = [
+                op for op in restored.operations if isinstance(op, ForOperation)
+            ]
+            assert restored_fors
+            assert [
+                (r.var_name, r.before.uuid, r.after.uuid, r.before_synthesized)
+                for r in restored_fors[0].loop_carried_rebinds
+            ] == [
+                (r.var_name, r.before.uuid, r.after.uuid, r.before_synthesized)
+                for r in for_ops[0].loop_carried_rebinds
+            ]
+            assert content_hash(restored) == content_hash(block)
 
     def test_for_items_vector_key_round_trip(self):
         """``key_is_vector=True`` ForItemsOperation survives both formats."""

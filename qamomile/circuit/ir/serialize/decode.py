@@ -52,6 +52,7 @@ from qamomile.circuit.ir.operation.classical_ops import (
 )
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
     ForOperation,
     IfOperation,
     LoopCarriedRebind,
@@ -1325,6 +1326,32 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
     )
 
 
+def _decode_branch_rebinds(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> tuple[BranchRebind, ...]:
+    """Decode branch rebind records from an if op dict.
+
+    Args:
+        d (dict[str, Any]): The if op dict, possibly carrying a
+            ``branch_rebinds`` list.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[BranchRebind, ...]: The reconstructed records; empty when
+            the key is absent.
+    """
+    return tuple(
+        BranchRebind(
+            var_name=str(r.get("var_name", "")),
+            before=_materialize_as_value(ctx, r["before_ref"]),
+            rebound_in_true=bool(r.get("rebound_in_true", False)),
+            rebound_in_false=bool(r.get("rebound_in_false", False)),
+        )
+        for r in d.get("branch_rebinds", ())
+    )
+
+
 def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
     """Decode :class:`IfOperation`.
 
@@ -1339,7 +1366,8 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
 
     Returns:
         IfOperation: The reconstructed op, including true / false
-            branches and the branch-merge slots.
+            branches, the branch-merge slots, and the branch rebind
+            records.
 
     Raises:
         ValueError: If the yield-reference lists disagree with each
@@ -1360,6 +1388,7 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
         operands=operands,
         true_operations=true_body,
         false_operations=false_body,
+        branch_rebinds=_decode_branch_rebinds(d, ctx),
     )
     for true_ref, false_ref, result in zip(true_refs, false_refs, results, strict=True):
         op.add_merge(

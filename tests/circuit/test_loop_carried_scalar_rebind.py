@@ -316,6 +316,34 @@ class TestRejectedRebinds:
         with pytest.raises(ValidationError, match=LOOP_CARRIED):
             _transpile(kernel, bindings={"dummy": 0})
 
+    def test_while_condition_snapshot_through_pre_loop_merge_rejected(self):
+        """A condition snapshot aliased through a pre-loop compile-time if
+        and returned after the loop is rejected.
+
+        The compile-time merge output selects the initial condition, so
+        it shares the condition's classical bit; returning it after the
+        loop observes the final in-loop measurement instead of the
+        snapshot Python promises. The stale-condition scan follows the
+        pruned merge's alias to catch the read.
+        """
+
+        @qmc.qkernel
+        def kernel(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            if flag == 1:
+                saved = bit
+            else:
+                saved = qmc.bit(False)
+            while bit:
+                q2 = qmc.qubit("f")
+                bit = qmc.measure(q2)
+            return saved
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"flag": 1})
+
     def test_swap_rotation_rejected(self):
         """`a, b = b, a` in a loop leaves stale one-shot swaps and is rejected."""
 
@@ -367,6 +395,33 @@ class TestAllowedPatterns:
 
         # n=3: odd number of X gates flips |0> to |1>.
         assert _sample_single(kernel, bindings={"n": 3}) == 1
+
+    def test_unobserved_post_loop_merge_of_condition_snapshot_allowed(self):
+        """A dead post-loop compile-time merge of the condition compiles.
+
+        The pruned merge selects the pre-loop condition value, but its
+        output is never read and does not escape through the outputs, so
+        no operation can observe the shared clbit's stale value — there
+        is no divergence to reject. Only the updated condition variable
+        is returned (the documented legal pattern).
+        """
+
+        @qmc.qkernel
+        def kernel(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            snapshot = bit
+            while bit:
+                q2 = qmc.qubit("f")
+                bit = qmc.measure(q2)
+            if flag == 1:
+                unused = snapshot  # noqa: F841 - dead merge is the point
+            else:
+                unused = qmc.bit(False)  # noqa: F841
+            return bit
+
+        _transpile(kernel, bindings={"flag": 1})
 
     def test_remeasured_bit_allowed(self):
         """Per-iteration `bit = qmc.measure(...)` (no stale read) compiles.
