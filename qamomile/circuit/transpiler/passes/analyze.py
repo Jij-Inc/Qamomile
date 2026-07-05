@@ -881,6 +881,16 @@ def _pre_branch_root_candidates(
     pre-branch value absent from this over-approximation provably does
     not flow out through the phi.
 
+    Caution for future precision work: refining the generic union to a
+    positional model (result ``i`` carries operand ``i``) is NOT valid
+    for composite gates. A composite whose kernel returns its inputs
+    permuted (``return b, a``) makes the frontend swap the *variable*
+    bindings via the output permutation, so a naive positional model
+    would classify the swap as a discard even though every wire
+    survives. Any positional refinement must keep result-permuting
+    composites exempt — e.g. by staying at the result-set level (all
+    input wires carried by *some* result) for composite producers.
+
     Results are memoized per UUID in ``resolved`` so a value reachable by
     many producer paths — common in wide loop-body DAGs — is computed
     once, keeping the trace linear in the producer graph rather than
@@ -1762,6 +1772,19 @@ def reject_control_flow_quantum_discard(
     (and their records), the promoted rebinds are only caught by the
     pre-fold ``PartialEvaluationPass`` hook, not by the ``AnalyzePass``
     safety net.
+
+    Scope contract: the scan recurses through control-flow nesting only
+    (``IfOperation`` branches and ``HasNestedOps`` bodies). Boxed
+    implementation blocks — ``CompositeGateOperation.implementation_block``,
+    ``InverseBlockOperation.implementation_block``,
+    ``ControlledUOperation.block`` — are NOT descended into: they stay
+    HIERARCHICAL recipe blocks outside the entrypoint pipeline, exactly
+    like every other transpile-time rebind check
+    (``reject_loop_carried_classical_rebinds``, ``AffineValidationPass``,
+    both built on the same ``HasNestedOps`` walk). A discard written
+    inside a composite's recipe kernel is therefore only covered by the
+    decoration-time top-level analyzer, with the same branch/loop
+    suppression as everywhere else pre-IR.
 
     Exposed at module scope because it runs from two passes:
     ``PartialEvaluationPass`` calls it before folding and if-lowering
