@@ -20,9 +20,9 @@ class AffineValidationPass(Pass[Block, Block]):
     This pass serves as a safety net to catch affine type violations
     that may have bypassed the frontend checks. It verifies that each
     quantum value is used (consumed) at most once. It does NOT detect
-    "never consumed" / silent-discard patterns; the branch-internal
-    discard case is rejected separately by
-    ``reject_branch_internal_quantum_discard`` in
+    "never consumed" / silent-discard patterns; the branch-internal and
+    loop-body discard cases are rejected separately by
+    ``reject_control_flow_quantum_discard`` in
     ``qamomile.circuit.transpiler.passes.analyze``.
 
     Input: Block (any kind)

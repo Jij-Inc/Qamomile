@@ -1,4 +1,4 @@
-"""Regression tests for branch-internal quantum silent-discard rejection.
+"""Regression tests for control-flow-internal quantum silent-discard rejection.
 
 The decoration-time rebind analyzer deliberately suppresses violations
 recorded inside ``if`` / ``for`` / ``while`` bodies so that compile-time-if
@@ -9,15 +9,19 @@ dropped the variable's pre-branch state exactly when a rebinding branch
 was taken, surfacing (at best) as the unhelpful emit-time "Quantum PhiOp
 merge requires identical physical resources across branches" error, or
 (for both-branch external rebinds) executing and silently returning the
-wrong register's state. The frontend now records every branch-internal
-quantum binding change on the ``IfOperation`` (``BranchRebind``), and
-``reject_branch_internal_quantum_discard`` rejects a record whose
-pre-branch value has no owner on a rebinding path (no in-branch consumer,
-no phi carrying it out of that side, no reference outside the if) with a
-``QubitRebindError`` (the same ``AffineTypeError`` the decoration-time
-analyzer raises for a top-level rebind from a different quantum source),
-from both ``PartialEvaluationPass`` (pre-fold, with bindings) and
-``AnalyzePass`` (safety net).
+wrong register's state. Loop bodies had the same hole with no error at
+all: ``for _ in qmc.range(n): q = qmc.qubit("fresh")`` compiled and
+executed, silently returning the fresh state instead of the prepared one.
+The frontend now records every branch-internal quantum binding change on
+the ``IfOperation`` (``BranchRebind``) and every loop-body quantum rebind
+on the loop operation (``LoopCarriedRebind`` with a quantum ``before``),
+and ``reject_control_flow_quantum_discard`` rejects a record whose
+incoming value has no owner on a rebinding path (no in-scope consumer,
+no phi carrying it out of that side, no reference outside the construct)
+with a ``QubitRebindError`` (the same ``AffineTypeError`` the
+decoration-time analyzer raises for a top-level rebind from a different
+quantum source), from both ``PartialEvaluationPass`` (pre-fold, with
+bindings) and ``AnalyzePass`` (safety net).
 
 Covered here: the LIMITATIONS.md motivating example (adapted to entrypoint
 constraints — qubits are allocated in-kernel and the condition is
@@ -26,13 +30,14 @@ gates, rebinds to external values (one branch, both branches, and gated —
 the review counterexamples), expression-derived runtime conditions
 (``~bit``, ``a & b``), whole-register ``Vector[Qubit]`` rebinds, compile-time
 conditions (dead and taken branches stay legal, including nested inside
-runtime branches), the consume-then-reallocate pattern, and the
-conservative corners documented in LIMITATIONS.md. Allowed patterns that
-are emittable are executed on Qiskit (AerSimulator) with deterministic
-state preparation and their measured values asserted — transpile-only
-success would not catch a miscompile; allowed patterns stopped by the
-emit-level physical-resource guard pin that emit failure so a future
-silent-pass regression is caught.
+runtime branches), the consume-then-reallocate pattern, loop-body discards
+(``for`` / ``for``-items / ``while``, at top level and nested in branches),
+and the conservative corners documented in LIMITATIONS.md. Allowed
+patterns that are emittable are executed on Qiskit (AerSimulator) with
+deterministic state preparation and their measured values asserted —
+transpile-only success would not catch a miscompile; allowed patterns
+stopped by the emit-level physical-resource guard pin that emit failure so
+a future silent-pass regression is caught.
 """
 
 import pytest
@@ -45,14 +50,16 @@ from qamomile.circuit.transpiler.errors import (
     QubitRebindError,
 )
 from qamomile.circuit.transpiler.passes.analyze import (
-    reject_branch_internal_quantum_discard,
+    reject_control_flow_quantum_discard,
 )
+from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
 pytest.importorskip("qiskit")
 
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
 DISCARD = "Branch-internal quantum rebind"
+LOOP_DISCARD = "Loop-body quantum rebind"
 
 
 def _transpile(kernel, bindings=None):
@@ -552,7 +559,7 @@ class TestRejectedDiscards:
 
         operations = _inlined_block(kernel, bindings={"dummy": 0}).operations
         with pytest.raises(QubitRebindError, match=DISCARD):
-            reject_branch_internal_quantum_discard(operations, {"dummy": 0})
+            reject_control_flow_quantum_discard(operations, {"dummy": 0})
 
     def test_analyze_pass_safety_net_rejects_without_partial_eval(self):
         """AnalyzePass rejects the pattern even when partial_eval is skipped.
@@ -976,4 +983,406 @@ class TestAllowedPatterns:
             return qmc.measure(q)
 
         operations = _inlined_block(kernel, bindings={"flag": 0}).operations
-        reject_branch_internal_quantum_discard(operations, {"flag": 0})
+        reject_control_flow_quantum_discard(operations, {"flag": 0})
+
+
+# ---------------------------------------------------------------------------
+# Rejected: loop-body quantum discards (for / for-items / while)
+# ---------------------------------------------------------------------------
+
+
+class TestRejectedLoopDiscards:
+    """Loop-body quantum rebinds that discard incoming state are rejected.
+
+    Unlike the if case, a loop-body discard needs no runtime/compile-time
+    condition classification: whenever the loop runs, every iteration
+    rebinds the variable to a different quantum value without consuming
+    the incoming state (the pre-loop value on the first iteration, the
+    previous iteration's value afterwards). The check is trip-count-
+    agnostic, matching the classical loop-carried rejection.
+    """
+
+    def test_for_fresh_rebind_rejected(self):
+        """The review repro: a for body rebinding to a fresh allocation.
+
+        Before the loop-side check, this transpiled and sampled 0 — the
+        X-prepared state was silently dropped and the fresh register
+        returned.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(QamomileCompileError) as excinfo:
+            _transpile(kernel, bindings={"n": 1})
+        assert isinstance(excinfo.value, QubitRebindError)
+        assert isinstance(excinfo.value, AffineTypeError)
+        assert not isinstance(excinfo.value, EmitError)
+        assert LOOP_DISCARD in str(excinfo.value)
+
+    def test_while_fresh_rebind_rejected(self):
+        """The review repro's while variant: a measurement-conditioned while
+        body rebinding to a fresh allocation is rejected."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            c = qmc.qubit("c")
+            b = qmc.measure(c)
+            while b:
+                q = qmc.qubit("fresh")
+                c2 = qmc.qubit("c2")
+                b = qmc.measure(c2)
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_while_rebind_read_after_loop_rejected_despite_consumption(self):
+        """A while-body rebind read after the loop is rejected even when the
+        body consumes the incoming state: the zero-trip path (a while trip
+        count is a runtime measurement outcome) must observe the pre-loop
+        state, but the emitted circuit binds the post-loop read to the
+        body's register unconditionally. Before this rule, this kernel
+        transpiled and sampled 0 where Python semantics give 1.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            c = qmc.qubit("c")
+            b = qmc.measure(c)
+            while b:
+                b = qmc.measure(q)
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match="read after the loop"):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_for_items_fresh_rebind_rejected(self):
+        """A qmc.items body rebinding an outer qubit is rejected."""
+
+        @qmc.qkernel
+        def kernel(
+            angles: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _key, _angle in qmc.items(angles):
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"angles": {0: 0.5}})
+
+    def test_for_external_rebind_rejected(self):
+        """Rebinding to another existing register in a for body discards the
+        incoming state the same way a fresh allocation does."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            other = qmc.qubit("other")
+            for _ in qmc.range(n):
+                q = other
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 1})
+
+    def test_for_dead_after_rebind_rejected(self):
+        """A loop-body rebind is a discard even when the variable is dead
+        after the loop: the incoming state is dropped by every iteration."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            r = qmc.qubit("r")
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")  # noqa: F841 — rebind under test
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 1})
+
+    def test_vector_rebind_rejected(self):
+        """Rebinding a whole Vector[Qubit] register in a for body is
+        rejected like the scalar form.
+
+        No element of ``qs`` is touched before the loop: an element
+        read/write would count as consumption of the register under the
+        documented element-granularity conservatism (LIMITATIONS.md) and
+        exempt the rebind, exactly as in the if-branch vector case.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, name="qs")
+            for _ in qmc.range(n):
+                qs = qmc.qubit_array(2, name="fresh")
+            return qmc.measure(qs)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 1})
+
+    def test_rebind_then_gate_still_rejected(self):
+        """Gating the fresh value after the rebind does not consume the
+        incoming state: the body reads only the post-rebind register."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")
+                q = qmc.h(q)
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 1})
+
+    def test_loop_inside_runtime_branch_rejected(self):
+        """A discarding loop nested in a runtime if is rejected (the branch
+        record and the loop record both witness it; either error is the
+        same QubitRebindError family)."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            p = qmc.qubit("p")
+            cond = qmc.measure(p)
+            if cond:
+                for _ in qmc.range(n):
+                    q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match="quantum rebind"):
+            _transpile(kernel, bindings={"n": 2})
+
+    def test_loop_inside_compile_time_taken_branch_rejected(self):
+        """A discarding loop inside a compile-time-TAKEN branch is rejected:
+        the loop probe resolves the pre-branch handle through the if-branch
+        pre-binding stack, so the record survives even though the branch
+        function never binds ``q`` itself."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt, flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            if flag > 0:
+                for _ in qmc.range(n):
+                    q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2, "flag": 1})
+
+    def test_module_level_check_rejects_loop_discard(self):
+        """The module-level helper rejects the loop pattern on an inlined
+        block."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        operations = _inlined_block(kernel, bindings={"n": 1}).operations
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            reject_control_flow_quantum_discard(operations, {"n": 1})
+
+    def test_analyze_pass_safety_net_rejects_loop_discard(self):
+        """AnalyzePass rejects the loop pattern even when partial_eval is
+        skipped: loop records survive on the loop operation (unlike
+        promoted if records, which the lowering erases)."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        block = _inlined_block(kernel, bindings={"n": 1})
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            transpiler.analyze(block)
+
+
+# ---------------------------------------------------------------------------
+# Allowed: loop patterns that consume, carry, or never run the rebind
+# ---------------------------------------------------------------------------
+
+
+class TestAllowedLoopPatterns:
+    """Legal loop patterns keep compiling and executing correctly.
+
+    Wherever the pattern is emittable, the test executes the circuit and
+    asserts the deterministic measured value — transpile success alone
+    would not catch a miscompile.
+    """
+
+    def test_measure_then_fresh_reset_executes(self):
+        """Consuming the incoming state before rebinding is the legal
+        reset idiom: the body measures the X-prepared register (reads it),
+        then rebinds to a fresh one. The measured value is the prepared 1."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            b = qmc.bit(0)
+            for _ in qmc.range(n):
+                b = qmc.measure(q)
+                q = qmc.qubit("fresh")
+            return b
+
+        assert _sample_single(kernel, bindings={"n": 1}) == 1
+
+    @pytest.mark.parametrize(
+        ("n", "expected"),
+        [
+            pytest.param(1, 1, id="one-flip"),
+            pytest.param(2, 0, id="two-flips-cancel"),
+        ],
+    )
+    def test_gate_chain_rebind_executes(self, n, expected):
+        """Gate self-updates keep the wire identity: no record, no
+        rejection, and the unrolled circuit applies the gate per
+        iteration."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _ in qmc.range(n):
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": n}) == expected
+
+    def test_dead_branch_wrapped_loop_allowed_and_executes(self):
+        """A discarding loop inside a compile-time-DEAD branch is pruned
+        with the branch and stays legal — the branch-selection idiom."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt, flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            if flag > 0:
+                for _ in qmc.range(n):
+                    q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": 2, "flag": 0}) == 1
+
+    def test_compile_time_dead_if_inside_loop_accepted_at_analysis(self):
+        """A compile-time-dead if inside the loop body passes the variable
+        through its collapsed phi — that pass-through read is consumption
+        evidence, so the loop record is exempt at the analysis stage."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt, flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                if flag > 0:
+                    q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        analyzed = _run_through_analyze(kernel, bindings={"n": 2, "flag": 0})
+        assert analyzed is not None
+        # Downstream, plan still splits this shape into multiple quantum
+        # segments (pre-existing on the base branch, verified via git
+        # stash); pin that so a future silent-pass regression is caught.
+        with pytest.raises(MultipleQuantumSegmentsError):
+            _transpile(kernel, bindings={"n": 2, "flag": 0})
+
+    @pytest.mark.parametrize(
+        ("n", "expected"),
+        [
+            pytest.param(1, 1, id="pi-rotation"),
+            pytest.param(2, 0, id="two-pi-identity"),
+        ],
+    )
+    def test_store_only_classical_reassignment_still_allowed(self, n, expected):
+        """Store-only classical reassignments in a loop body stay legal:
+        the widened probe candidates record quantum rebinds only, so a
+        per-iteration recomputed angle produces no classical record. The
+        rx(pi) per iteration flips the qubit deterministically."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            angle = 0.0
+            for _ in qmc.range(n):
+                angle = 3.141592653589793
+                q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": n}) == expected
+
+    def test_while_rebind_unused_after_loop_allowed_and_executes(self):
+        """The documented repeat-until-success idiom stays legal: the body
+        rebinds to a fresh register, but nothing reads the register after
+        the loop (only the measured condition escapes), and the pre-loop
+        value is owned by the pre-loop measurement. The loop exits only
+        when the measurement is 0, so the returned bit is deterministic.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 0
+
+    def test_alias_owned_loop_rebind_allowed(self):
+        """A loop rebind whose pre-loop value an alias still owns passes the
+        discard check: the alias's post-loop read is outside-ownership."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            saved = q
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")  # noqa: F841 — rebind under test
+            return qmc.measure(saved)
+
+        assert _sample_single(kernel, bindings={"n": 1}) == 1
+
+    def test_module_level_check_accepts_consumed_loop_rebind(self):
+        """The module-level helper accepts the consume-then-reallocate loop
+        body without raising."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            b = qmc.bit(0)
+            for _ in qmc.range(n):
+                b = qmc.measure(q)
+                q = qmc.qubit("fresh")
+            return b
+
+        operations = _inlined_block(kernel, bindings={"n": 1}).operations
+        reject_control_flow_quantum_discard(operations, {"n": 1})

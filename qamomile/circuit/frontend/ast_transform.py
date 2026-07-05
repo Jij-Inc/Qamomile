@@ -648,15 +648,25 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
     def _loop_rebind_candidates(
         self, body: list[ast.stmt], bound_names: set[str]
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         """Compute loop-body variables that may carry a loop-carried rebind.
 
-        A candidate is a variable that the (pre-transform) loop body both
-        reads before writing and assigns — the ``total = total + i``
-        shape — excluding the loop's own binding variables (whose
-        per-iteration rebinding is handled by the emit-time loop-variable
-        binding) and any name not already defined in the enclosing scope
-        (referencing it would ``NameError`` during tracing anyway).
+        A candidate is a variable that the (pre-transform) loop body
+        assigns and that some enclosing scope already defines — excluding
+        the loop's own binding variables (whose per-iteration rebinding is
+        handled by the emit-time loop-variable binding). Pre-existing
+        names are gated on the union of the current scope's defined set
+        and the function-wide lexical set: inside an if branch the probe
+        resolves pre-branch handles through the pre-binding stack, so
+        lexical visibility, not branch-scope definedness, is the right
+        bound. The probes resolve names tolerantly (unbound candidates
+        drop out), so over-approximating here is safe.
+
+        The classical subset — candidates the body also reads before
+        writing, the ``total = total + i`` shape — is returned separately:
+        only those may produce classical rebind records, while quantum
+        rebind records are collected for every candidate (a store-only
+        quantum reassignment is a state discard, not a recomputation).
 
         Args:
             body (list[ast.stmt]): The ORIGINAL (untransformed) loop body
@@ -665,36 +675,46 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 itself (``for`` target names, ``items`` key/value names).
 
         Returns:
-            list[str]: Sorted candidate variable names; empty when the
-                body has no read-before-write reassignment.
+            tuple[list[str], list[str]]: ``(candidates, classical_candidates)``,
+                each sorted; ``classical_candidates`` is a subset of
+                ``candidates``. Both empty when the body reassigns no
+                pre-existing variable.
         """
         collector = VariableCollector(global_names=self._global_names)
         for stmt in body:
             collector.visit(stmt)
-        candidates = (
-            (collector.store_vars & collector.incoming_vars) - bound_names
-        ) & set(self._outer_defined_vars)
-        return sorted(candidates)
+        pre_existing = set(self._outer_defined_vars) | self._lexical_defined_vars
+        candidates = (collector.store_vars - bound_names) & pre_existing
+        classical_candidates = candidates & collector.incoming_vars
+        return sorted(candidates), sorted(classical_candidates)
 
     def _wrap_body_with_rebind_probes(
         self,
         flattened_body: list[ast.stmt],
         candidates: list[str],
+        classical_candidates: list[str],
         lineno: int,
     ) -> list[ast.stmt]:
         """Wrap a transformed loop body with rebind snapshot/record probes.
 
-        Prepends ``_qm_rebind_snap_N = loop_rebind_snapshot({...})`` and
-        appends ``record_loop_rebinds(_qm_rebind_snap_N, {...})`` so the
-        tracer can compare pre/post handle identities for each candidate.
-        Both probes live inside the loop's ``with`` body, so the
-        zero-trip trace guard skips them together with the body.
+        Prepends ``_qm_rebind_snap_N = loop_rebind_snapshot(locals(), (...))``
+        and appends ``record_loop_rebinds(_qm_rebind_snap_N, locals(), (...),
+        (...))`` so the tracer can compare pre/post handle identities for
+        each candidate. Candidates are passed as name tuples and resolved
+        tolerantly through ``locals()`` plus the if-branch pre-binding
+        stack — never as direct name loads, which would ``NameError`` for
+        a store-only candidate that is unbound in the current frame (e.g.
+        inside an if branch that only stores the variable). Both probes
+        live inside the loop's ``with`` body, so the zero-trip trace
+        guard skips them together with the body.
 
         Args:
             flattened_body (list[ast.stmt]): The already-transformed loop
                 body statements.
             candidates (list[str]): Candidate variable names from
                 :meth:`_loop_rebind_candidates`.
+            classical_candidates (list[str]): The read-before-write subset
+                of ``candidates`` eligible for classical rebind records.
             lineno (int): Source line of the loop statement, used for the
                 generated nodes.
 
@@ -705,16 +725,29 @@ class ControlFlowTransformer(ast.NodeTransformer):
         if not candidates:
             return flattened_body
 
-        def _named_handles_dict() -> ast.Dict:
-            """Build ``{"name": name, ...}`` over the candidate variables.
+        def _name_tuple(names: list[str]) -> ast.Tuple:
+            """Build a ``("a", "b", ...)`` literal over candidate names.
+
+            Args:
+                names (list[str]): The names to embed.
 
             Returns:
-                ast.Dict: A fresh dict literal node (nodes must not be
+                ast.Tuple: A fresh tuple literal node (nodes must not be
                     shared between the two probe calls).
             """
-            return ast.Dict(
-                keys=[ast.Constant(value=name) for name in candidates],
-                values=[ast.Name(id=name, ctx=ast.Load()) for name in candidates],
+            return ast.Tuple(
+                elts=[ast.Constant(value=name) for name in names],
+                ctx=ast.Load(),
+            )
+
+        def _locals_call() -> ast.Call:
+            """Build a fresh ``locals()`` call node.
+
+            Returns:
+                ast.Call: A fresh call node per probe site.
+            """
+            return ast.Call(
+                func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]
             )
 
         snap_name = self._get_unique_name("_qm_rebind_snap")
@@ -722,7 +755,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             targets=[ast.Name(id=snap_name, ctx=ast.Store())],
             value=ast.Call(
                 func=ast.Name(id="loop_rebind_snapshot", ctx=ast.Load()),
-                args=[_named_handles_dict()],
+                args=[_locals_call(), _name_tuple(candidates)],
                 keywords=[],
             ),
             lineno=lineno,
@@ -732,7 +765,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 func=ast.Name(id="record_loop_rebinds", ctx=ast.Load()),
                 args=[
                     ast.Name(id=snap_name, ctx=ast.Load()),
-                    _named_handles_dict(),
+                    _locals_call(),
+                    _name_tuple(candidates),
+                    _name_tuple(classical_candidates),
                 ],
                 keywords=[],
             ),
@@ -747,7 +782,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
         # Compute rebind-probe candidates on the ORIGINAL body, before
         # nested transforms rewrite assignments into emit_if calls.
-        rebind_candidates = self._loop_rebind_candidates(node.body, set())
+        rebind_candidates, classical_rebind_candidates = self._loop_rebind_candidates(
+            node.body, set()
+        )
         # Transform nested control flow first (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
@@ -775,7 +812,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_load_vars = saved_after_load
 
         flattened_body = self._wrap_body_with_rebind_probes(
-            flattened_body, rebind_candidates, node.lineno
+            flattened_body, rebind_candidates, classical_rebind_candidates, node.lineno
         )
 
         # Build ``lambda: <condition>``
@@ -1046,7 +1083,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         # Compute rebind-probe candidates on the ORIGINAL body, before
         # nested transforms rewrite assignments into emit_if calls.
-        rebind_candidates = self._loop_rebind_candidates(
+        rebind_candidates, classical_rebind_candidates = self._loop_rebind_candidates(
             node.body, set(all_binding_names)
         )
 
@@ -1070,7 +1107,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_load_vars = saved_after_load
 
         flattened_body = self._wrap_body_with_rebind_probes(
-            flattened_body, rebind_candidates, node.lineno
+            flattened_body, rebind_candidates, classical_rebind_candidates, node.lineno
         )
 
         # Dispatch to the appropriate transform.
@@ -1762,9 +1799,9 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
     truncates any violations recorded inside the branch back to the
     pre-branch length. Top-level (non-branch-internal) rebinds are
     flagged as usual; branch-internal rebinds are deliberately not
-    reported at decoration time. Runtime-branch discards are instead
-    rejected at the IR layer by
-    ``reject_branch_internal_quantum_discard`` (in
+    reported at decoration time. Runtime-branch and loop-body discards
+    are instead rejected at the IR layer by
+    ``reject_control_flow_quantum_discard`` (in
     ``qamomile.circuit.transpiler.passes.analyze``), which can tell
     compile-time branches from runtime ones.
     """
@@ -1850,16 +1887,19 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
         **Division of labor.** Suppressing branch-internal violations
         means a kernel that genuinely discards an outer quantum binding
         inside a runtime ``if`` / ``for`` / ``while`` branch (e.g. a
-        runtime ``if cond: q = qm.qubit("fresh")``) is NOT reported by
-        ``collect_quantum_rebind_violations``. That runtime case is
+        runtime ``if cond: q = qm.qubit("fresh")``, or a loop body that
+        rebinds ``q`` without consuming it) is NOT reported by
+        ``collect_quantum_rebind_violations``. Those runtime cases are
         instead rejected at the IR layer by
-        ``reject_branch_internal_quantum_discard`` (in
-        ``qamomile.circuit.transpiler.passes.analyze``), which resolves
-        branch conditions the same way ``CompileTimeIfLoweringPass``
-        does and therefore can tell a runtime branch from a
-        compile-time one — exactly the distinction this single-pass
-        AST analyzer cannot make. Top-level (non-branch-internal)
-        bypasses continue to be caught at decoration time.
+        ``reject_control_flow_quantum_discard`` (in
+        ``qamomile.circuit.transpiler.passes.analyze``): if branches are
+        classified by resolving their conditions the same way
+        ``CompileTimeIfLoweringPass`` does — exactly the compile-time /
+        runtime distinction this single-pass AST analyzer cannot make —
+        while loop bodies are checked unconditionally on live paths,
+        since a loop-body discard fires on every iteration. Top-level
+        (non-branch-internal) bypasses continue to be caught at
+        decoration time.
 
         Args:
             node (ast.If | ast.For | ast.While): The control-flow node.

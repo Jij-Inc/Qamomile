@@ -384,21 +384,22 @@ class QubitRebindError(AffineTypeError):
     patterns working, branch-internal violations are suppressed.
 
     The runtime side of that gap is closed at the IR layer instead:
-    ``reject_branch_internal_quantum_discard`` (in
+    ``reject_control_flow_quantum_discard`` (in
     ``qamomile.circuit.transpiler.passes.analyze``) classifies branch
     conditions the same way the compile-time-if lowering pass does and
     raises **this same** ``QubitRebindError`` for a runtime
     ``if cond: q = qm.qubit("fresh")`` that discards the pre-branch
-    state, while leaving compile-time branch rebinds legal — so a caller
-    catching ``QubitRebindError`` (or ``AffineTypeError``) sees the
-    decoration-time and IR-time forms of the violation uniformly. That IR
-    check covers conditions that transitively derive from a measurement
-    (including expression forms like ``~bit``); a condition that is
-    neither compile-time-resolvable nor measurement-derived cannot
-    drive runtime branching and keeps its emit-time diagnosis.
-    (``AffineValidationPass`` itself still only enforces "consumed at
-    most once".) Top-level (non-branch-internal) bypasses continue to
-    raise at decoration time.
+    state — and for a ``for`` / ``while`` body rebind that discards the
+    incoming loop state the same way — while leaving compile-time branch
+    rebinds legal; so a caller catching ``QubitRebindError`` (or
+    ``AffineTypeError``) sees the decoration-time and IR-time forms of
+    the violation uniformly. That IR check covers if conditions that
+    transitively derive from a measurement (including expression forms
+    like ``~bit``); a condition that is neither compile-time-resolvable
+    nor measurement-derived cannot drive runtime branching and keeps its
+    emit-time diagnosis. (``AffineValidationPass`` itself still only
+    enforces "consumed at most once".) Top-level (non-branch-internal)
+    bypasses continue to raise at decoration time.
 
     Example of incorrect code:
         a = qm.h(b)  # ERROR: 'a' was quantum, now overwritten from 'b'

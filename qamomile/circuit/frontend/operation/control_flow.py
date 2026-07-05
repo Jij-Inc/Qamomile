@@ -394,7 +394,10 @@ def should_trace_for_loop(
         return True
 
 
-def loop_rebind_snapshot(named_handles: dict[str, typing.Any]) -> dict[str, typing.Any]:
+def loop_rebind_snapshot(
+    frame_locals: dict[str, typing.Any],
+    names: tuple[str, ...],
+) -> dict[str, typing.Any]:
     """Snapshot pre-loop variable handles for rebind detection.
 
     Called from AST-injected probe code as the first statement of a traced
@@ -402,52 +405,102 @@ def loop_rebind_snapshot(named_handles: dict[str, typing.Any]) -> dict[str, typi
     name pointed at before the body ran, so ``record_loop_rebinds`` can
     detect rebinds by comparing IR value identity afterwards.
 
+    Candidates are resolved through :func:`branch_rebind_pre_bindings`:
+    the caller's frame locals first, then the enclosing if-branch
+    pre-binding stack. The fallback matters inside an if branch — a
+    variable the branch only *stores* (via the loop) is not a branch
+    input parameter, so it is unbound in the branch's frame at loop
+    entry, yet its pre-branch handle is exactly the state a loop-body
+    rebind would discard. Names bound nowhere are silently omitted.
+
     Args:
-        named_handles (dict[str, typing.Any]): Candidate variable names
-            mapped to their current handles (or plain Python values).
+        frame_locals (dict[str, typing.Any]): The caller's ``locals()``
+            at loop entry.
+        names (tuple[str, ...]): Candidate variable names to snapshot.
 
     Returns:
-        dict[str, typing.Any]: A shallow copy of ``named_handles``.
+        dict[str, typing.Any]: The resolvable candidate names mapped to
+            their pre-loop-body handles (or plain Python values).
     """
-    return dict(named_handles)
+    return branch_rebind_pre_bindings(frame_locals, names)
 
 
 def record_loop_rebinds(
     snapshot: dict[str, typing.Any],
-    named_handles: dict[str, typing.Any],
+    frame_locals: dict[str, typing.Any],
+    names: tuple[str, ...],
+    classical_names: tuple[str, ...],
 ) -> None:
-    """Record classical scalar rebinds on the current loop-body tracer.
+    """Record classical and quantum rebinds on the current loop-body tracer.
 
     Called from AST-injected probe code as the last statement of a traced
-    loop body. For each candidate variable whose handle now carries a
-    different IR value than the pre-loop snapshot, and whose post-body
-    value is a classical scalar (``UInt`` / ``Float`` / ``Bit``), a
-    :class:`LoopCarriedRebind` record is stashed on the active body
-    tracer. The loop builders copy the records onto the loop operation,
-    where the transpiler's rejection pass reads them.
+    loop body. Two families of rebinds are recorded as
+    :class:`LoopCarriedRebind` entries on the active body tracer (the
+    loop builders copy them onto the loop operation, where the
+    transpiler's rejection passes read them):
+
+    - **Quantum** (any candidate name): the variable's pre-body value is
+      quantum and its post-body value carries a different ``logical_id``
+      — a substitution to a different quantum resource (fresh allocation
+      or another register) rather than a gate self-update, which keeps
+      the logical_id. These feed the transpiler's loop-body quantum
+      discard check.
+    - **Classical scalar** (only names in ``classical_names``, the
+      read-before-write candidates): the post-body value is a classical
+      scalar with a different IR identity — the ``total = total + i``
+      shape whose traced-once IR silently diverges from Python
+      semantics. Store-only classical reassignments (a value recomputed
+      from scratch each iteration) are deliberately not recorded; they
+      trace correctly.
 
     No IR operations are emitted; this only annotates the tracer.
 
     Args:
-        snapshot (dict[str, typing.Any]): Pre-loop handles from
+        snapshot (dict[str, typing.Any]): Pre-loop-body handles from
             ``loop_rebind_snapshot``.
-        named_handles (dict[str, typing.Any]): The same variable names
-            mapped to their post-body handles.
+        frame_locals (dict[str, typing.Any]): The caller's ``locals()``
+            at the end of the loop body.
+        names (tuple[str, ...]): All candidate variable names.
+        classical_names (tuple[str, ...]): The subset of ``names`` the
+            loop body reads before writing; only these may produce
+            classical records.
     """
+    post_bindings = branch_rebind_pre_bindings(frame_locals, names)
+    classical_candidates = set(classical_names)
     records: list[LoopCarriedRebind] = []
-    for name, after in named_handles.items():
-        if name not in snapshot:
+    for name in names:
+        if name not in snapshot or name not in post_bindings:
             continue
         before = snapshot[name]
+        after = post_bindings[name]
         if before is after:
             continue
+        before_value = _ir_value_from_handle_like(before)
         after_value = _ir_value_from_handle_like(after)
+        if before_value is not None and before_value.type.is_quantum():
+            # Quantum rebind: compare logical_id, not uuid — a gate
+            # self-update keeps the wire identity and is not a rebind.
+            # A post-body handle that is no IR value at all (plain
+            # Python overwrite) is not recorded, matching the if-branch
+            # records.
+            if after_value is None:
+                continue
+            if after_value.logical_id != before_value.logical_id:
+                records.append(
+                    LoopCarriedRebind(
+                        var_name=name,
+                        before=before_value,
+                        after=after_value,
+                    )
+                )
+            continue
+        if name not in classical_candidates:
+            continue
         if after_value is None or isinstance(after_value, ArrayValue):
             continue
         if after_value.type.is_quantum():
             continue
         before_synthesized = False
-        before_value = _ir_value_from_handle_like(before)
         if before_value is None:
             if isinstance(before, (bool, int, float)):
                 before_value = _value_to_ir_value(before, name)
