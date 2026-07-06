@@ -809,17 +809,15 @@ def _loop_quantum_discard_error(
     if loop_kind == "while":
         return QubitRebindError(
             f"Loop-body quantum rebind of '{display_name}' inside a "
-            f"@qkernel while loop discards or mis-wires quantum state: "
-            f"the runtime loop re-executes the body on the same "
-            f"registers, so a body read of the pre-loop value re-executes "
-            f"on a stale register, and a rebound register nothing "
-            f"consumes is dropped when the next iteration re-enters. "
-            f"Keep the body self-contained — allocate, gate, and measure "
-            f"the register within the body (the repeat-until-success "
-            f"shape), with the pre-loop value consumed before the loop — "
-            f"or rebind '{display_name}' through gates on the same "
-            f"qubit(s) instead of substituting a different quantum "
-            f"value.",
+            f"@qkernel while loop cannot compile correctly: the runtime "
+            f"loop re-executes the body on one persistent register "
+            f"without reset, so a register allocated in the body is not "
+            f"fresh on later iterations and a body read of the pre-loop "
+            f"value re-executes on a stale register. Use a body-local "
+            f"name for a register the body allocates and measures "
+            f"(instead of rebinding '{display_name}'), or rebind "
+            f"'{display_name}' through gates on the same qubit(s) "
+            f"instead of substituting a different quantum value.",
             handle_name=display_name,
         )
     return QubitRebindError(
@@ -842,14 +840,14 @@ def _while_zero_trip_rebind_error(var_name: str) -> QubitRebindError:
 
     A ``while`` loop's trip count is a runtime measurement outcome, so
     the zero-trip path is always live. A post-loop read of a variable
-    the body rebinds to a body-allocated register must observe the
-    pre-loop state on that path, but the emitted circuit binds the read
-    to the body's register unconditionally — the pre-loop state is
-    silently ignored (discarded) exactly when the body never runs. Same
-    ``QubitRebindError`` family as the unconditional discard. Static
-    ``for`` loops do not need this rule: emit-time unrolling substitutes
-    carried values per iteration, so a zero-trip static loop's post-loop
-    reads resolve to the pre-loop values correctly.
+    the body rebinds must observe the pre-loop state on that path, but
+    the emitted circuit binds the read to the rebound value
+    unconditionally — the pre-loop state is silently ignored (discarded)
+    exactly when the body never runs. Same ``QubitRebindError`` family
+    as the unconditional discard. Static ``for`` loops do not carry this
+    dedicated message: their body-produced rebinds are rejected
+    unconditionally anyway, and a zero-trip static loop's post-loop
+    reads were measured to resolve to the pre-loop values.
 
     Args:
         var_name (str): Display name of the rebound quantum variable.
@@ -873,6 +871,88 @@ def _while_zero_trip_rebind_error(var_name: str) -> QubitRebindError:
         f"condition instead).",
         handle_name=display_name,
     )
+
+
+def _zero_trip_static_loop_rebind_error(
+    var_name: str,
+    loop_kind: str,
+) -> QubitRebindError:
+    """Build the statically-zero-trip loop rebind rejection error.
+
+    A loop whose bounds resolve to zero iterations never runs, yet the
+    emitted program binds post-loop reads to the traced post-body values
+    (rebind records' ``after`` is not restored to ``before``), while
+    Python keeps the pre-loop bindings. Any quantum rebind record on
+    such a loop therefore diverges — including carried rebinds that
+    switch which wires the name denotes.
+
+    Args:
+        var_name (str): Display name of the rebound quantum variable.
+        loop_kind (str): Human-readable loop kind ("for" / "for-items").
+
+    Returns:
+        QubitRebindError: The error to raise, with ``handle_name`` set to
+            the rebound variable's display name.
+    """
+    display_name = var_name or "<anonymous>"
+    return QubitRebindError(
+        f"Loop-body quantum rebind of '{display_name}' inside a @qkernel "
+        f"{loop_kind} loop whose bounds resolve to zero iterations: the "
+        f"loop never runs, so '{display_name}' must keep its pre-loop "
+        f"binding, but the emitted program keeps the traced post-body "
+        f"binding and would silently read the wrong register. Make the "
+        f"loop bounds cover at least one iteration, or remove the "
+        f"rebind from the body.",
+        handle_name=display_name,
+    )
+
+
+def _static_loop_trip_count(
+    loop_op: "ForOperation | ForItemsOperation | WhileOperation",
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+) -> int | None:
+    """Resolve a for-loop's trip count when all bounds are static.
+
+    Args:
+        loop_op (ForOperation | ForItemsOperation | WhileOperation): The
+            loop operation. Only ``ForOperation`` bounds are resolved;
+            other kinds return None.
+        concrete_values (dict[str, Any]): UUID-keyed concrete classical
+            results accumulated along the scan.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+
+    Returns:
+        int | None: The trip count when start/stop/step all resolve to
+            integers, otherwise None (symbolic or non-For loops).
+    """
+    if not isinstance(loop_op, ForOperation) or len(loop_op.operands) < 3:
+        return None
+    resolved: list[int] = []
+    for bound in loop_op.operands[:3]:
+        value = bound.value if hasattr(bound, "value") else bound
+        const: Any = None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            const = value
+        elif isinstance(value, Value):
+            const = value.get_const()
+            if const is None and value.uuid in concrete_values:
+                const = concrete_values[value.uuid]
+            if const is None:
+                scalar = value.metadata.scalar
+                parameter_name = scalar.parameter_name if scalar else None
+                if parameter_name is not None and parameter_name in bindings:
+                    const = bindings[parameter_name]
+        if isinstance(const, bool) or not isinstance(const, int):
+            return None
+        resolved.append(const)
+    try:
+        return len(range(resolved[0], resolved[1], resolved[2]))
+    except ValueError:
+        # step == 0; leave it to the emit-time bound validation.
+        return None
 
 
 def _pre_branch_root_candidates(
@@ -1169,30 +1249,6 @@ def _wire_terminally_consumed(
     # An SSA body cannot cycle; treat the impossible back-edge as
     # consumed (allow side).
     return True
-
-
-def _loop_body_reader_map(
-    loop_op: "ForOperation | ForItemsOperation | WhileOperation",
-    concrete_values: dict[str, Any],
-    bindings: dict[str, Any],
-) -> dict[str, Operation]:
-    """Reader map over a loop op's compile-time-pruned body operations.
-
-    Args:
-        loop_op (ForOperation | ForItemsOperation | WhileOperation): The
-            loop whose body is mapped.
-        concrete_values (dict[str, Any]): Accumulated compile-time state
-            at the loop's position, used to prune the body.
-        bindings (dict[str, Any]): Compile-time parameter bindings.
-
-    Returns:
-        dict[str, Operation]: Read-UUID-to-reader map over the pruned,
-            flattened body (see :func:`_wire_reader_map`).
-    """
-    pruned: list[Operation] = []
-    for body in loop_op.nested_op_lists():
-        pruned.extend(prune_compile_time_ifs(body, dict(concrete_values), bindings))
-    return _wire_reader_map(pruned)
 
 
 def _promoted_branch_records(
@@ -1590,42 +1646,47 @@ def _check_loop_quantum_discards(
       ``StripSliceArrayOpsPass`` removes slice producers before the
       ``AnalyzePass`` safety-net run while ``slice_of`` survives on the
       value; or
-    - (``for`` / ``for``-items) the rebind is loop-invariant and the
-      first iteration is covered: the post-body value is NOT produced
-      in the body (an outer value every iteration rebinds to again,
-      discarding nothing beyond the first), the body never reads the
-      pre-loop value (nothing re-executes on a stale register), and
-      the pre-loop value is owned outside the loop (read on the path
-      around it, per the same path-sensitive ``_PathReads`` evidence
-      the branch check uses). The invariant arm also keeps the
-      ``AnalyzePass`` safety net exact for records whose ``after`` was
-      a compile-time phi that if-lowering erased and substituted away.
-      A binding that makes such a loop run zero times can only diverge
-      for programs whose Python semantics already double-consume the
-      pre-loop value, so no well-formed program is miscompiled by this
-      arm; or
-    - (``while``) the body is self-contained on its own register and
-      the first iteration is covered: the body never reads the
-      pre-loop value, the pre-loop value is owned outside the loop,
-      and the rebound register is either loop-invariant (not
-      body-produced) or terminally consumed by the body itself
-      (:func:`_wire_terminally_consumed` — allocate, gate, measure:
-      the repeat-until-success shape, where each pass consumes the
-      register before re-entry replaces it).
+    - the rebind is loop-invariant and the first iteration is covered:
+      the post-body value is NOT produced in the body (an outer value
+      every iteration rebinds to again, discarding nothing beyond the
+      first), the body never reads the pre-loop value (nothing
+      re-executes on a stale register), and the pre-loop value is owned
+      outside the loop (read on the path around it, per the same
+      path-sensitive ``_PathReads`` evidence the branch check uses).
+      The invariant arm also keeps the ``AnalyzePass`` safety net exact
+      for records whose ``after`` was a compile-time phi that
+      if-lowering erased and substituted away. A binding that makes a
+      static loop run zero times can only diverge for programs whose
+      Python semantics already double-consume the pre-loop value, so no
+      well-formed program is miscompiled by this arm.
 
-    In-body consumption of the incoming value is deliberately NOT an
-    exemption: the read re-executes against the traced register every
-    iteration, which matches Python semantics only for the first one
-    (review-measured divergence, see above).
+    Everything else is rejected. In particular, a BODY-PRODUCED rebound
+    register is never exempt — not even when the body terminally
+    consumes it (the former repeat-until-success exemption): a runtime
+    while re-executes its body on one persistent register without
+    reset, so "fresh per iteration" is not expressible, and review
+    measured an rx-gated repeat-until-success body sampling the
+    wire-reuse distribution instead of the fresh-register one. Spell
+    such bodies with a body-local register name instead (no
+    pre-existing variable rebound, so nothing is discarded and the
+    identical circuit stays out of this check's jurisdiction). In-body
+    consumption of the incoming value is likewise NOT an exemption: the
+    read re-executes against the traced register every iteration, which
+    matches Python semantics only for the first one (review-measured
+    divergence, see above).
 
-    ``while`` loops additionally reject a record whose post-body value
-    is produced inside the body, does NOT carry the incoming value
-    forward, and is read after the loop. A while loop's trip count is a
-    runtime measurement outcome, so the zero-trip path is live, and on
-    it the post-loop read must observe the pre-loop state — which the
-    emitted circuit cannot do once the read is bound to a
-    body-allocated register on different wires (see
-    :func:`_while_zero_trip_rebind_error`).
+    ``while`` loops report a dedicated error for any non-identical
+    rebound value read after the loop — checked BEFORE the carried
+    exemption, since a carried-but-not-identical rebind (re-slicing a
+    different element range of the same base) still binds the post-loop
+    read to different wires: the trip count is a runtime measurement
+    outcome, so the zero-trip path is live, and on it the post-loop
+    read must observe the pre-loop state (see
+    :func:`_while_zero_trip_rebind_error`). For static loops the same
+    zero-trip hazard is closed twice over: the frontend prunes a
+    statically-zero-trip loop at build time (no loop op, no record), and
+    :func:`_static_loop_trip_count` rejects any quantum record on a loop
+    whose bounds still resolve to zero trips at check time.
 
     Args:
         loop_op (ForOperation | ForItemsOperation | WhileOperation): The
@@ -1640,10 +1701,9 @@ def _check_loop_quantum_discards(
 
     Raises:
         QubitRebindError: If a quantum rebind record is neither carried
-            forward, a covered loop-invariant rebind, nor (for while) a
-            covered self-contained repeat-until-success body — or a
-            while body's rebound register on different wires is read
-            after the loop.
+            forward nor a covered loop-invariant rebind — with a
+            dedicated zero-trip message when a while body's non-carried
+            rebound value is read after the loop.
     """
     quantum_records = [
         r for r in loop_op.loop_carried_rebinds if r.before.type.is_quantum()
@@ -1651,6 +1711,18 @@ def _check_loop_quantum_discards(
     if not quantum_records:
         return
     loop_kind = _LOOP_KIND_NAMES.get(type(loop_op), "for")
+    if _static_loop_trip_count(loop_op, concrete_values, bindings) == 0:
+        # A statically-zero-trip loop never runs, but post-loop reads
+        # keep the traced post-body binding (emit does not restore
+        # rebind records' after values to before) while Python keeps the
+        # pre-loop binding — even a carried rebind that switches which
+        # wires the name denotes (e.g. re-slicing a different element
+        # range) diverges. With no iteration to justify any rebind,
+        # reject outright; bindings resolve for-loop bounds at the
+        # pre-fold hook, so this is exact there.
+        raise _zero_trip_static_loop_rebind_error(
+            quantum_records[0].var_name, loop_kind
+        )
     body_producers: dict[str, Operation] = {}
     for body in loop_op.nested_op_lists():
         for body_op in flatten_ops(body):
@@ -1680,35 +1752,24 @@ def _check_loop_quantum_discards(
         carried = bool(after_family & before_family)
         if (
             isinstance(loop_op, WhileOperation)
-            and not carried
-            and record.after.uuid in body_producers
+            and record.after.uuid != record.before.uuid
             and record.after.uuid in reads_outside
         ):
+            # Any rebound value read after a while loop hits the
+            # always-live zero-trip path, on which the read must observe
+            # the pre-loop state instead. This fires BEFORE the carried
+            # exemption: a carried-but-not-identical rebind (e.g.
+            # re-slicing a different element range of the same base)
+            # still binds the post-loop read to different wires. Only
+            # the strict-identity record (after IS before, left by
+            # if-lowering substituting a pass-through phi away) is
+            # exempt.
             raise _while_zero_trip_rebind_error(record.var_name)
         if carried:
             continue
         invariant_after = record.after.uuid not in body_producers
         before_read = body_reads(record.before.uuid)
         owned = record.before.uuid in reads_outside
-        if isinstance(loop_op, WhileOperation):
-            if (
-                not before_read
-                and owned
-                and (
-                    invariant_after
-                    or _wire_terminally_consumed(
-                        record.after,
-                        _loop_body_reader_map(loop_op, concrete_values, bindings),
-                    )
-                )
-            ):
-                # Self-contained runtime-loop body: the outside owner
-                # covers the first iteration's incoming state, and each
-                # pass either rebinds to the same loop-invariant value
-                # or terminally consumes the register it produced
-                # before re-entry replaces it (repeat-until-success).
-                continue
-            raise _loop_quantum_discard_error(record.var_name, loop_kind)
         if invariant_after and not before_read and owned:
             # Loop-invariant rebind: iterations beyond the first rebind
             # to the same outer value and discard nothing; the outside
@@ -1716,6 +1777,13 @@ def _check_loop_quantum_discards(
             # net exact for records whose after was a compile-time phi
             # that if-lowering erased and substituted away.
             continue
+        # Body-produced rebinds are rejected for BOTH loop kinds:
+        # unrolled loops re-instantiate the body without carrying the
+        # rebound register between iterations, and a runtime while
+        # re-executes its body on one persistent register without reset,
+        # so "fresh per iteration" is not expressible either way (review
+        # measured an rx-gated while repeat-until-success body sampling
+        # the wire-reuse distribution, not the fresh-register one).
         raise _loop_quantum_discard_error(record.var_name, loop_kind)
 
 
@@ -1903,18 +1971,19 @@ def reject_control_flow_quantum_discard(
     rebinds on ``ForOperation`` / ``ForItemsOperation`` /
     ``WhileOperation`` (``LoopCarriedRebind`` entries whose ``before`` is
     quantum), and each record is rejected unless it carries the incoming
-    value forward on the same wires, is a covered loop-invariant rebind
-    (post-body value not produced in the body, body never reads the
-    pre-loop value, pre-loop value owned outside), or — for ``while``
-    only — the body is self-contained on a register it allocates and
-    terminally consumes each pass (the repeat-until-success shape) with
-    the pre-loop value owned outside. In-body consumption of the
-    incoming value is NOT an exemption: the read re-executes against the
-    traced register every iteration and matches Python semantics only
-    for the first one. A loop-body rebind needs no runtime/compile-time
-    classification, so loops are checked wherever they appear on a live
-    (non-pruned) path, trip-count-agnostically, exactly like the
-    classical loop-carried check.
+    value forward on the same wires, or is a covered loop-invariant
+    rebind (post-body value not produced in the body, body never reads
+    the pre-loop value, pre-loop value owned outside). Body-produced
+    rebinds are never exempt — an unrolled loop does not carry the
+    rebound register between iterations and a runtime while re-executes
+    its body on one persistent register without reset — and in-body
+    consumption of the incoming value is not an exemption either: the
+    read re-executes against the traced register every iteration and
+    matches Python semantics only for the first one. A loop-body rebind
+    needs no runtime/compile-time classification, so loops are checked
+    wherever they appear on a live (non-pruned) path,
+    trip-count-agnostically, exactly like the classical loop-carried
+    check.
 
     ``IfOperation``s are classified with the same condition resolution
     ``CompileTimeIfLoweringPass`` uses (via ``bindings``), including for

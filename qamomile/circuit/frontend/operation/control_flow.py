@@ -59,10 +59,17 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
             q = qm.h(q)
             bit = qm.measure(q)
             while bit:
-                q = qm.qubit("q2")
-                q = qm.h(q)
-                bit = qm.measure(q)
+                q2 = qm.qubit("q2")
+                q2 = qm.h(q2)
+                bit = qm.measure(q2)
             return bit
+
+    The body register is a body-local name (``q2``), not a rebind of the
+    pre-loop ``q``: rebinding a pre-existing quantum variable to a
+    register allocated in the body is rejected by the transpiler's
+    control-flow discard check, because the runtime loop re-executes its
+    body on one persistent register without reset and cannot realize
+    "fresh per iteration" semantics for the rebound name.
     """
     # 1. Get the PARENT tracer (the one active before entering the while loop)
     parent_tracer = get_current_tracer()

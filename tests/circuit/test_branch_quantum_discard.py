@@ -1091,6 +1091,55 @@ class TestRejectedLoopDiscards:
         with pytest.raises(QubitRebindError, match="read after the loop"):
             _transpile(kernel, bindings={"dummy": 0})
 
+    def test_while_rebind_repeat_until_success_rejected(self):
+        """Rebinding a pre-existing register to a body-produced one in a
+        while body is rejected even when only the condition escapes: the
+        runtime loop re-executes the body on one persistent register
+        without reset, so "fresh per iteration" is not expressible —
+        review measured an rx-gated variant sampling the wire-reuse
+        distribution (P(1)=0.219 toward 0.2) instead of the
+        fresh-register one (2/7). Spell the register as a body-local
+        name instead; the emitted circuit is identical and nothing
+        pre-existing is discarded."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.rx(q, 2.0943951023931953)
+                bit = qmc.measure(q)
+            return bit
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_while_carried_slice_switch_read_after_loop_rejected(self):
+        """A carried-but-not-identical while rebind read after the loop is
+        rejected with the zero-trip diagnostic: re-slicing a different
+        element range of the same base array keeps the base reachable
+        (carried lineage), but the post-loop read binds to the new
+        element range on every path, while the always-live zero-trip
+        path must observe the pre-loop range (Codex-audit counterexample
+        class)."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, name="qs")
+            c = qmc.qubit("c")
+            b = qmc.measure(c)
+            v = qs[0:1]
+            while b:
+                v = qs[1:2]
+                c2 = qmc.qubit("c2")
+                b = qmc.measure(c2)
+            return qmc.measure(v)
+
+        with pytest.raises(QubitRebindError, match="read after the loop"):
+            _transpile(kernel, bindings={"dummy": 0})
+
     def test_for_items_fresh_rebind_rejected(self):
         """A qmc.items body rebinding an outer qubit is rejected."""
 
@@ -1443,12 +1492,13 @@ class TestAllowedLoopPatterns:
 
         assert _sample_single(kernel, bindings={"n": n}) == expected
 
-    def test_while_rebind_unused_after_loop_allowed_and_executes(self):
-        """The documented repeat-until-success idiom stays legal: the body
-        rebinds to a fresh register, but nothing reads the register after
-        the loop (only the measured condition escapes), and the pre-loop
-        value is owned by the pre-loop measurement. The loop exits only
-        when the measurement is 0, so the returned bit is deterministic.
+    def test_while_body_local_repeat_until_success_allowed_and_executes(self):
+        """The repeat-until-success idiom written with a body-local register
+        name stays legal: no pre-existing variable is rebound, so nothing
+        is discarded and no record exists. The loop exits only when the
+        measurement is 0, so the returned bit is deterministic. (The
+        rebind spelling of the same circuit is rejected — see
+        ``test_while_rebind_repeat_until_success_rejected``.)
         """
 
         @qmc.qkernel
@@ -1457,9 +1507,9 @@ class TestAllowedLoopPatterns:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 0
