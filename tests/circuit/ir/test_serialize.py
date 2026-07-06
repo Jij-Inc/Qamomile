@@ -280,10 +280,11 @@ def _if_branch_rebind_kernel() -> qmc.Bit:
 def _loop_quantum_rebind_kernel(n: qmc.UInt) -> qmc.Bit:
     """Kernel whose ForOperation carries a quantum ``LoopCarriedRebind``.
 
-    The body consumes the incoming register (measures it) before
-    rebinding to a fresh one — the legal reset idiom — so the record
-    survives the control-flow discard check while giving the serializer
-    a quantum-``before`` loop record to round-trip.
+    Gives the serializer a quantum-``before`` loop record to round-trip.
+    The kernel is only built to AFFINE here — transpiling it would be
+    rejected by the control-flow discard check (unrolled loops carry no
+    register between iterations), which is irrelevant to the wire
+    format under test.
     """
     q = qmc.qubit("q")
     b = qmc.bit(0)

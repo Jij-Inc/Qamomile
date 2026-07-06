@@ -1423,10 +1423,16 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # have function scope, so a nested branch assigning a name whose
         # definition sits outside the enclosing branch's inputs still
         # rebinds that variable (the pre-branch handle is resolved
-        # through the enclosing emit_if captures at run time).
-        rebind_record_existing = (body_assigned | orelse_assigned) & (
-            outer_defined | self._lexical_defined_vars
-        )
+        # through the enclosing emit_if captures at run time). The
+        # candidate base is ``store_vars``, not ``locally_defined_vars``:
+        # a read-before-write reassignment (``q = qmc.x(q)`` followed by
+        # ``q = qmc.qubit("fresh")``) is not "locally defined" yet still
+        # ends the branch on a different register. Extra candidates are
+        # harmless — pure gate self-updates keep their logical_id and
+        # produce no record.
+        rebind_record_existing = (
+            collector_body.store_vars | collector_orelse.store_vars
+        ) & (outer_defined | self._lexical_defined_vars)
         dead_rebind_candidates = sorted(rebind_record_existing - set(output_vars))
 
         def _dead_probe_exprs() -> list[ast.expr]:
