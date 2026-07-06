@@ -1462,10 +1462,26 @@ def _check_loop_quantum_discards(
     - the body consumes the incoming value — any read of the pre-loop
       value in the compile-time-pruned body, including element or view
       reads of a register, and including a compile-time-dead branch's
-      collapsed phi passing it through; or
-    - the pre-loop value is owned outside the loop — read on the path
-      around the loop (e.g. through an alias consumed after it), per the
-      same path-sensitive ``_PathReads`` evidence the branch check uses.
+      collapsed phi passing it through. Emit-time unrolling substitutes
+      the pre-loop value with the previous iteration's post-body value,
+      so this trace-level read witnesses consumption of *every*
+      iteration's incoming state; or
+    - the pre-loop value is owned outside the loop (read on the path
+      around it, e.g. through an alias consumed after the loop, per the
+      same path-sensitive ``_PathReads`` evidence the branch check
+      uses) AND every later iteration's incoming state is covered too.
+      Ownership alone only protects the FIRST iteration's incoming
+      state — from the second iteration on, the incoming state is the
+      previous iteration's rebound value, which no outside alias
+      reaches. The later iterations are covered when the post-body
+      value is consumed by the body itself (allocate, gate, measure —
+      the repeat-until-success shape: the measurement consumes the
+      register the next iteration replaces), or trivially when the
+      post-body value is not produced in the body at all — a
+      loop-invariant outer value that every iteration rebinds to
+      again, discarding nothing beyond the first. The invariant arm
+      also keeps the ``AnalyzePass`` safety net exact for records whose
+      ``after`` was a compile-time phi that if-lowering erased.
 
     ``while`` loops carry one additional rule that the consumed/owned
     exemptions do not lift: a record whose post-body value is produced
@@ -1494,8 +1510,9 @@ def _check_loop_quantum_discards(
     Raises:
         QubitRebindError: If a quantum rebind record's incoming value is
             neither carried forward by the post-body value, consumed in
-            the body, nor owned outside the loop — or a while body's
-            rebound register on different wires is read after the loop.
+            the body, nor covered by the owned-outside-plus-body-consumed
+            chain — or a while body's rebound register on different
+            wires is read after the loop.
     """
     quantum_records = [
         r for r in loop_op.loop_carried_rebinds if r.before.type.is_quantum()
@@ -1508,6 +1525,21 @@ def _check_loop_quantum_discards(
         for body_op in flatten_ops(body):
             for result in body_op.results:
                 body_producers[result.uuid] = body_op
+
+    def body_reads(uuid: str) -> bool:
+        """Whether any pruned body op reads the value (ancestry included).
+
+        Args:
+            uuid (str): The value UUID to probe.
+
+        Returns:
+            bool: True when some body operation's pruned subtree reads it.
+        """
+        return any(
+            _scope_read_counts(body, concrete_values, bindings, caches).get(uuid, 0) > 0
+            for body in loop_op.nested_op_lists()
+        )
+
     for record in quantum_records:
         before_family: set[str] = set()
         _add_uuid_with_ancestry(record.before, before_family)
@@ -1524,16 +1556,25 @@ def _check_loop_quantum_discards(
             raise _while_zero_trip_rebind_error(record.var_name)
         if carried:
             continue
-        consumed = any(
-            _scope_read_counts(body, concrete_values, bindings, caches).get(
-                record.before.uuid, 0
-            )
-            > 0
-            for body in loop_op.nested_op_lists()
-        )
-        if consumed:
+        if body_reads(record.before.uuid):
+            # Unrolling substitutes the pre-loop value with the previous
+            # iteration's post-body value, so this read consumes every
+            # iteration's incoming state.
             continue
-        if record.before.uuid in reads_outside:
+        if record.before.uuid in reads_outside and (
+            record.after.uuid not in body_producers or body_reads(record.after.uuid)
+        ):
+            # Owned-plus-chain: the outside alias covers the first
+            # iteration's incoming state. For later iterations the
+            # incoming state is the previous iteration's post-body
+            # value, so a body-produced register must be consumed by
+            # the body itself before the next iteration rebinds; a
+            # post-body value NOT produced in the body is loop-invariant
+            # (the same outer value every iteration), so rebinding to it
+            # again discards nothing beyond the first iteration. The
+            # invariant arm also keeps the AnalyzePass safety net exact
+            # for records whose after was a compile-time phi that
+            # if-lowering erased and substituted away.
             continue
         raise _loop_quantum_discard_error(record.var_name, loop_kind)
 
@@ -1720,7 +1761,11 @@ def reject_control_flow_quantum_discard(
     rebinds on ``ForOperation`` / ``ForItemsOperation`` /
     ``WhileOperation`` (``LoopCarriedRebind`` entries whose ``before`` is
     quantum), and each record is rejected unless the body consumes the
-    incoming value or the pre-loop value is owned outside the loop (see
+    incoming value, or the pre-loop value is owned outside the loop AND
+    the later iterations' incoming states are covered too — outside
+    ownership alone only reaches the first iteration's incoming state,
+    so a body-produced rebound register must additionally be consumed
+    by the body itself before the next iteration rebinds (see
     :func:`_check_loop_quantum_discards`). A loop-body rebind needs no
     runtime/compile-time classification — the discard fires on every
     iteration — so loops are checked wherever they appear on a live

@@ -1115,6 +1115,48 @@ class TestRejectedLoopDiscards:
         with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
             _transpile(kernel, bindings={"n": 1})
 
+    def test_alias_owned_rebind_without_body_consumption_rejected(self):
+        """An outside alias of the pre-loop value does not exempt a loop
+        rebind on its own: it only covers the first iteration's incoming
+        state. From the second iteration on, the incoming state is the
+        previous iteration's rebound register, which the body never
+        consumes here — before this rule, this kernel transpiled and
+        sampled 0 for n=2 (the body register was reused and the X gates
+        accumulated) where Python semantics give 1 for every n >= 1.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            saved = q
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")
+                q = qmc.x(q)
+            _ = qmc.measure(saved)
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2})
+
+    def test_alias_owned_bare_fresh_rebind_rejected(self):
+        """The bare alias-owned fresh rebind is rejected too: unrolled,
+        iterations 2+ are back-to-back constructor rebinds — exactly the
+        store-only rebind shape the decoration-time analyzer rejects at
+        top level — and nothing consumes the registers in between."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            saved = q
+            for _ in qmc.range(n):
+                q = qmc.qubit("fresh")  # noqa: F841 — rebind under test
+            return qmc.measure(saved)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2})
+
     def test_vector_rebind_rejected(self):
         """Rebinding a whole Vector[Qubit] register in a for body is
         rejected like the scalar form.
@@ -1356,9 +1398,12 @@ class TestAllowedLoopPatterns:
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 0
 
-    def test_alias_owned_loop_rebind_allowed(self):
-        """A loop rebind whose pre-loop value an alias still owns passes the
-        discard check: the alias's post-loop read is outside-ownership."""
+    def test_alias_owned_repeat_until_success_for_loop_allowed(self):
+        """Outside ownership plus in-body consumption of the rebound
+        register is the legal chain: the alias covers the first
+        iteration's incoming state and the body's measurement consumes
+        each register it allocates before the next iteration rebinds.
+        The alias reads the X-prepared 1 deterministically."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.Bit:
@@ -1366,10 +1411,11 @@ class TestAllowedLoopPatterns:
             q = qmc.x(q)
             saved = q
             for _ in qmc.range(n):
-                q = qmc.qubit("fresh")  # noqa: F841 — rebind under test
+                q = qmc.qubit("fresh")
+                b = qmc.measure(q)  # noqa: F841 — in-body consumption of the register
             return qmc.measure(saved)
 
-        assert _sample_single(kernel, bindings={"n": 1}) == 1
+        assert _sample_single(kernel, bindings={"n": 2}) == 1
 
     def test_module_level_check_accepts_consumed_loop_rebind(self):
         """The module-level helper accepts the consume-then-reallocate loop
