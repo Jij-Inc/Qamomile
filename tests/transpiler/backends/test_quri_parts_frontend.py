@@ -3707,6 +3707,108 @@ class TestControlledGate:
         )
         assert statevectors_equal(sv, expected)
 
+    def test_inverse_block_with_multi_control_uncomputes_ancillas(self):
+        """A backend-inverse block holding a 3-control X runs on the cascade.
+
+        QURI Parts inverts a block by emitting it into a temporary
+        sub-circuit and inverting that circuit. The sub-circuit is only as
+        wide as the block, so the segment's cascade-ancilla pool (which
+        addresses the parent circuit) must be suspended there; the shared
+        cascade then falls back to gate-by-gate emission on the parent
+        circuit, where the pool is valid. All three controls are |1>, so
+        inverse(3-control X) flips the target; the two cascade ancillas
+        must uncompute back to |0> (asserted by ``_strip_zero_ancillas``).
+        """
+
+        @qmc.qkernel
+        def mcx3(
+            ctrl: qmc.Vector[qmc.Qubit], t: qmc.Qubit
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            mcx = qmc.control(qmc.x, num_controls=3)
+            ctrl, t = mcx(ctrl, t)
+            return ctrl, t
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            for i in qmc.range(3):
+                q[i] = qmc.x(q[i])
+            q[0:3], q[3] = qmc.inverse(mcx3)(q[0:3], q[3])
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        # 4 data qubits + 2 cascade ancillas for the embedded 3-control X.
+        assert circ.qubit_count == 6
+        sv = _strip_zero_ancillas(_run_statevector(circ), 4)
+        assert statevectors_equal(sv, computational_basis_state(4, 0b1111))
+
+    def test_suspended_mc_ancilla_pool_restores_pool(self):
+        """``_suspended_mc_ancilla_pool`` clears then restores the pool."""
+        from qamomile.circuit.transpiler.passes.emit_support import (
+            MultiControlAncillaPool,
+        )
+        from qamomile.quri_parts.transpiler import QuriPartsEmitPass
+
+        emit_pass = QuriPartsEmitPass()
+        pool = MultiControlAncillaPool(first_index=5, count=2)
+        emit_pass._mc_ancilla_pool = pool
+
+        with emit_pass._suspended_mc_ancilla_pool():
+            assert emit_pass._mc_ancilla_pool is None
+        assert emit_pass._mc_ancilla_pool is pool
+
+        # The pool is restored even when the suspended body raises.
+        with pytest.raises(RuntimeError):
+            with emit_pass._suspended_mc_ancilla_pool():
+                assert emit_pass._mc_ancilla_pool is None
+                raise RuntimeError("boom")
+        assert emit_pass._mc_ancilla_pool is pool
+
+    def test_blockvalue_to_gate_suspends_ancilla_pool(self):
+        """The shared reusable-gate probe emits its sub-circuit pool-suspended.
+
+        ``blockvalue_to_gate`` builds an independent sub-circuit for the
+        reusable-gate path; the segment ancilla pool addresses the parent
+        circuit and must be suspended there. This exercises the shared
+        probe directly (QURI overrides ``_blockvalue_to_gate`` to a no-op,
+        so its own emission never reaches the shared helper) and guards
+        against the pool-suspension being dropped from the helper: the spy
+        records the pool value seen during sub-circuit emission, which must
+        be None, and the pool must be restored afterwards. QURI's
+        ``circuit_to_gate`` returns None, so the probe itself yields None.
+        """
+        from qamomile.circuit.transpiler.passes.emit_support import (
+            MultiControlAncillaPool,
+        )
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            blockvalue_to_gate,
+        )
+        from qamomile.quri_parts.transpiler import QuriPartsEmitPass
+
+        @qmc.qkernel
+        def h_leaf(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            return q
+
+        emit_pass = QuriPartsEmitPass()
+        pool = MultiControlAncillaPool(first_index=3, count=2)
+        emit_pass._mc_ancilla_pool = pool
+
+        seen_pools: list[MultiControlAncillaPool | None] = []
+        original_emit = emit_pass._emit_operations
+
+        def spy(*args, **kwargs):
+            seen_pools.append(emit_pass._mc_ancilla_pool)
+            return original_emit(*args, **kwargs)
+
+        emit_pass._emit_operations = spy  # type: ignore[method-assign]
+
+        result = blockvalue_to_gate(emit_pass, h_leaf.block, 1, {})
+
+        assert seen_pools == [None]  # pool suspended during sub-circuit emit
+        assert emit_pass._mc_ancilla_pool is pool  # restored afterwards
+        assert result is None  # QURI Parts has no reusable-gate object
+
 
 class TestCustomCompositeGate:
     """Test custom CompositeGate through the QuriParts pipeline.

@@ -11,7 +11,9 @@ subclass override points (used by QiskitEmitPass, CudaqEmitPass).
 
 from __future__ import annotations
 
+import contextlib
 import re
+from collections.abc import Iterator
 from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.ir.operation import (
@@ -516,6 +518,39 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bool: False in the base implementation.
         """
         return False
+
+    @contextlib.contextmanager
+    def _suspended_mc_ancilla_pool(self) -> Iterator[None]:
+        """Suspend the segment's multi-control ancilla pool during nested emission.
+
+        The reserved pool's indices are physical addresses in the *parent*
+        segment's circuit (they sit past that circuit's data qubits). Any
+        helper that emits a block into an independent sub-circuit — the
+        reusable-gate probe (``blockvalue_to_gate``) or a backend-native
+        inverse (``_try_emit_backend_inverse``) — MUST run its sub-circuit
+        emission inside this context so that an irreducible
+        multi-controlled gate in the block does not index the parent pool.
+        Reusing a parent index in the narrower sub-circuit would either
+        exceed its width or silently alias one of its data qubits.
+
+        With the pool suspended the base
+        ``_emit_irreducible_multi_controlled_gate`` finds no pool and
+        raises ``EmitError``; the sub-circuit helpers catch it and fall
+        back to gate-by-gate emission on the parent circuit, where the
+        pool and the composed control set are both valid. Backends that do
+        not reserve a pool (native multi-control) already hold ``None``,
+        so the suspension is a no-op for them.
+
+        Yields:
+            None: Runs the ``with`` body with ``_mc_ancilla_pool`` cleared;
+                the previous pool is restored on exit, including on error.
+        """
+        saved = self._mc_ancilla_pool
+        self._mc_ancilla_pool = None
+        try:
+            yield
+        finally:
+            self._mc_ancilla_pool = saved
 
     def _emit_irreducible_multi_controlled_gate(
         self,

@@ -960,16 +960,23 @@ class QuriPartsEmitPass(
                 return False
 
             sub_circuit = self._emitter.create_circuit(qubit_count, 0)
-            self._emit_operations(
-                sub_circuit,
-                block_value.operations,
-                local_qubit_map,
-                local_clbit_map,
-                local_bindings,
-                force_unroll=True,
-            )
+            # The segment ancilla pool addresses the parent circuit;
+            # suspend it so a multi-controlled gate inside this inverse
+            # block cannot index it against the narrower sub-circuit. If
+            # one is present, the shared cascade raises EmitError (caught
+            # below), and the caller falls back to gate-by-gate inverse
+            # emission on the parent circuit.
+            with self._suspended_mc_ancilla_pool():
+                self._emit_operations(
+                    sub_circuit,
+                    block_value.operations,
+                    local_qubit_map,
+                    local_clbit_map,
+                    local_bindings,
+                    force_unroll=True,
+                )
             inverse_circuit = self._emitter.gate_inverse(sub_circuit)
-        except (AttributeError, TypeError, ValueError, RuntimeError):
+        except (AttributeError, TypeError, ValueError, RuntimeError, EmitError):
             return False
         finally:
             emitter._current_circuit = saved_circuit

@@ -2517,18 +2517,32 @@ def blockvalue_to_gate(
         )
         sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
 
-        emit_pass._emit_operations(
-            sub_circuit,
-            block_value.operations,
-            local_qubit_map,
-            local_clbit_map,
-            local_bindings,
-            force_unroll=True,
-        )
+        # The segment ancilla pool addresses the parent circuit; suspend
+        # it so a multi-controlled gate inside this block cannot index it
+        # against the narrower sub-circuit. If one is present, the shared
+        # cascade raises EmitError (caught below) and the caller falls
+        # back to gate-by-gate emission on the parent circuit.
+        with emit_pass._suspended_mc_ancilla_pool():
+            emit_pass._emit_operations(
+                sub_circuit,
+                block_value.operations,
+                local_qubit_map,
+                local_clbit_map,
+                local_bindings,
+                force_unroll=True,
+            )
 
         return emit_pass._emitter.circuit_to_gate(sub_circuit, "U")
 
-    except (AttributeError, TypeError, ValueError, KeyError, IndexError, RuntimeError):
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        KeyError,
+        IndexError,
+        RuntimeError,
+        EmitError,
+    ):
         import logging
 
         logging.getLogger(__name__).debug(
