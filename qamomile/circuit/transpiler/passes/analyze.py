@@ -912,20 +912,36 @@ def _static_loop_trip_count(
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
 ) -> int | None:
-    """Resolve a for-loop's trip count when all bounds are static.
+    """Resolve a static loop's trip count when its cardinality is known.
+
+    ``ForOperation`` bounds resolve through constants, accumulated
+    concrete values, and parameter bindings; ``ForItemsOperation``
+    cardinality resolves through the dict operand's bound contents.
+    ``WhileOperation`` trip counts are runtime measurement outcomes and
+    always return None. The frontend's zero-trip trace guards
+    (``should_trace_for_loop`` / ``should_trace_items_loop``) normally
+    keep zero-trip loops out of the IR entirely; this resolver is the
+    check-side defense in depth for IR built without the frontend.
 
     Args:
         loop_op (ForOperation | ForItemsOperation | WhileOperation): The
-            loop operation. Only ``ForOperation`` bounds are resolved;
-            other kinds return None.
+            loop operation.
         concrete_values (dict[str, Any]): UUID-keyed concrete classical
             results accumulated along the scan.
         bindings (dict[str, Any]): Compile-time parameter bindings.
 
     Returns:
-        int | None: The trip count when start/stop/step all resolve to
-            integers, otherwise None (symbolic or non-For loops).
+        int | None: The trip count when it is statically resolvable,
+            otherwise None (symbolic bounds, unbound dicts, while loops).
     """
+    if isinstance(loop_op, ForItemsOperation):
+        for operand in loop_op.operands:
+            dict_runtime = getattr(
+                getattr(operand, "metadata", None), "dict_runtime", None
+            )
+            if dict_runtime is not None:
+                return len(dict_runtime.bound_data)
+        return None
     if not isinstance(loop_op, ForOperation) or len(loop_op.operands) < 3:
         return None
     resolved: list[int] = []

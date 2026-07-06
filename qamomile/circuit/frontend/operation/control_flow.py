@@ -401,6 +401,38 @@ def should_trace_for_loop(
         return True
 
 
+def should_trace_items_loop(mapping: typing.Any) -> bool:
+    """Decide whether a ``qmc.items`` body must be traced.
+
+    The frontend executes loop bodies once to capture a
+    ``ForItemsOperation``. When the mapping is a ``Dict`` handle whose
+    bound contents are compile-time-known and EMPTY, Python's iteration
+    would execute zero times, so tracing the body would incorrectly
+    leak bindings (and rebind records) into the enclosing scope — the
+    ``qmc.range`` zero-trip guard's exact analogue
+    (:func:`should_trace_for_loop`). Symbolic or unbound mappings stay
+    conservative and trace the body so the normal compiler validation
+    path reports any errors.
+
+    Args:
+        mapping (typing.Any): The iterated mapping — normally a ``Dict``
+            handle; anything without bound dict metadata is treated as
+            symbolic.
+
+    Returns:
+        bool: ``False`` only for a mapping with present-and-empty bound
+        dict contents; ``True`` otherwise.
+    """
+    value = getattr(mapping, "value", None)
+    if value is None:
+        return True
+    metadata = getattr(value, "metadata", None)
+    dict_runtime = getattr(metadata, "dict_runtime", None)
+    if dict_runtime is None:
+        return True
+    return len(dict_runtime.bound_data) > 0
+
+
 def loop_rebind_snapshot(
     frame_locals: dict[str, typing.Any],
     names: tuple[str, ...],

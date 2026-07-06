@@ -1514,6 +1514,39 @@ class TestAllowedLoopPatterns:
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 0
 
+    def test_empty_items_rebind_allowed_and_executes(self):
+        """A bound-EMPTY qmc.items loop never traces its body (the
+        should_trace_items_loop guard, mirroring the qmc.range zero-trip
+        guard), so a body rebind creates no record, post-loop code keeps
+        the pre-loop handles, and the prepared state is measured — the
+        Python zero-pass contract for empty dicts (review repro)."""
+
+        @qmc.qkernel
+        def kernel(angles: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _k, _theta in qmc.items(angles):
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"angles": {}}) == 1
+
+    def test_folded_zero_bound_rebind_allowed_and_executes(self):
+        """Bound arithmetic that folds to a zero trip count at trace
+        (range(n - n)) is skipped by the zero-trip trace guard: no loop
+        reaches the IR, nothing is rejected, and the pre-loop state is
+        measured."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n - n):
+                q = qmc.qubit("fresh")
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": 3}) == 1
+
     def test_invariant_rebind_with_owner_allowed_and_executes(self):
         """Rebinding to a loop-invariant outer register with the pre-loop
         value owned by an alias is legal: iterations beyond the first
