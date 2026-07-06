@@ -835,6 +835,43 @@ def _loop_quantum_discard_error(
     )
 
 
+def _loop_nonquantum_overwrite_error(
+    var_name: str,
+    loop_kind: str,
+) -> QubitRebindError:
+    """Build the loop-body non-quantum overwrite rejection error.
+
+    Covers both a post-body binding with no IR value at all (an opaque
+    classical call result, a plain constant, ``None``) and a classical
+    IR value produced by consuming the register in place
+    (``q = qmc.measure(q)`` — which additionally re-executes the
+    measurement against the traced register every iteration when
+    unrolled). Same ``QubitRebindError`` family and message prefix as
+    the quantum-rebind rejection so callers and tests match uniformly.
+
+    Args:
+        var_name (str): Display name of the overwritten quantum variable.
+        loop_kind (str): Human-readable loop kind ("for" / "while" /
+            "for-items").
+
+    Returns:
+        QubitRebindError: The error to raise, with ``handle_name`` set to
+            the overwritten variable's display name.
+    """
+    display_name = var_name or "<anonymous>"
+    return QubitRebindError(
+        f"Loop-body quantum rebind of '{display_name}' inside a @qkernel "
+        f"{loop_kind} loop overwrites the quantum variable with a "
+        f"non-quantum value: the incoming register's state is dropped "
+        f"(and a consuming overwrite like 'q = qmc.measure(q)' would "
+        f"re-execute against the traced pre-loop register on later "
+        f"iterations). Keep the classical result under a different "
+        f"name, consume the state before the loop, or rebind "
+        f"'{display_name}' through gates on the same qubit(s).",
+        handle_name=display_name,
+    )
+
+
 def _while_zero_trip_rebind_error(var_name: str) -> QubitRebindError:
     """Build the while-loop zero-trip rebind divergence rejection error.
 
@@ -1760,12 +1797,22 @@ def _check_loop_quantum_discards(
         )
 
     for record in quantum_records:
-        before_family: set[str] = set()
-        _add_uuid_with_ancestry(record.before, before_family)
-        after_family: set[str] = set()
-        _add_uuid_with_ancestry(record.after, after_family)
-        after_family |= _pre_branch_root_candidates(record.after, body_producers)
-        carried = bool(after_family & before_family)
+        # The carried exemption is only meaningful for a QUANTUM
+        # post-body value: a classical after cannot keep the wires
+        # reachable, yet its producer lineage would still reach the
+        # incoming value when the overwrite CONSUMES it — a loop body
+        # ``q = qmc.measure(q)`` re-executes the measurement against the
+        # traced register every iteration and must be rejected, not
+        # exempted through the measurement's input lineage (found by
+        # the parallel non-quantum-overwrite review).
+        carried = False
+        if record.after.type.is_quantum():
+            before_family: set[str] = set()
+            _add_uuid_with_ancestry(record.before, before_family)
+            after_family: set[str] = set()
+            _add_uuid_with_ancestry(record.after, after_family)
+            after_family |= _pre_branch_root_candidates(record.after, body_producers)
+            carried = bool(after_family & before_family)
         if (
             isinstance(loop_op, WhileOperation)
             and record.after.uuid != record.before.uuid
@@ -1776,11 +1823,20 @@ def _check_loop_quantum_discards(
             # the pre-loop state instead. This fires BEFORE the carried
             # exemption: a carried-but-not-identical rebind (e.g.
             # re-slicing a different element range of the same base)
-            # still binds the post-loop read to different wires. Only
-            # the strict-identity record (after IS before, left by
-            # if-lowering substituting a pass-through phi away) is
-            # exempt.
-            raise _while_zero_trip_rebind_error(record.var_name)
+            # still binds the post-loop read to different wires. Exempt
+            # only the provably SAME-WIRE shapes: the strict-identity
+            # record (after IS before, left by if-lowering substituting
+            # a pass-through phi away), and a quantum after whose
+            # over-approximated lineage roots are EXACTLY the incoming
+            # value — every dataflow path (gate chains, both phi sides)
+            # leads back to the same register, e.g. a gate self-update
+            # under an in-body if, so the post-loop read stays on the
+            # pre-loop wire even at zero trips.
+            same_wire = record.after.type.is_quantum() and _pre_branch_root_candidates(
+                record.after, body_producers
+            ) == {record.before.uuid}
+            if not same_wire:
+                raise _while_zero_trip_rebind_error(record.var_name)
         if carried:
             continue
         invariant_after = record.after.uuid not in body_producers
@@ -1800,6 +1856,8 @@ def _check_loop_quantum_discards(
         # so "fresh per iteration" is not expressible either way (review
         # measured an rx-gated while repeat-until-success body sampling
         # the wire-reuse distribution, not the fresh-register one).
+        if not record.after.type.is_quantum():
+            raise _loop_nonquantum_overwrite_error(record.var_name, loop_kind)
         raise _loop_quantum_discard_error(record.var_name, loop_kind)
 
 

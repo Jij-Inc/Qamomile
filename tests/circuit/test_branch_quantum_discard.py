@@ -1314,6 +1314,27 @@ class TestRejectedLoopDiscards:
         with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
             _transpile(kernel, bindings={"n": 2})
 
+    def test_loop_measure_overwrite_rejected(self):
+        """Consuming the register INTO its own name (q = qmc.measure(q))
+        inside a loop is rejected: the classical result cannot carry the
+        wires forward, and the unrolled measurement would re-execute
+        against the traced pre-loop register on later iterations. Found
+        by the parallel non-quantum-overwrite review: the measurement's
+        input lineage previously satisfied the carried exemption, which
+        is now gated on the post-body value being quantum."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                q = qmc.measure(q)  # noqa: F841 — overwrite under test
+            r = qmc.qubit("r")
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2})
+
     def test_measure_then_fresh_reset_rejected(self):
         """Consume-then-reallocate in an unrolled loop body is rejected:
         the unroll re-instantiates the body without carrying the rebound
@@ -1576,6 +1597,31 @@ class TestAllowedLoopPatterns:
 
         assert _sample_single(kernel, bindings={"n": n}) == expected
 
+    def test_while_gate_under_if_read_after_loop_allowed_and_executes(self):
+        """A gate self-update under an in-body if, read after the while,
+        stays legal: every dataflow path of the merged value leads back
+        to the same register (lineage roots == the incoming value
+        exactly), so the post-loop read stays on the pre-loop wire even
+        on the zero-trip path — the tutorial's measure-and-correct
+        shape. With the condition qubit left at 0 the loop never runs
+        and the untouched register measures 0 deterministically."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q1 = qmc.qubit("q1")
+            c = qmc.qubit("c")
+            bit = qmc.measure(c)
+            while bit:
+                if bit:
+                    q1 = qmc.x(q1)
+                else:
+                    q1 = q1
+                c2 = qmc.qubit("c2")
+                bit = qmc.measure(c2)
+            return qmc.measure(q1)
+
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 0
+
     def test_while_body_local_repeat_until_success_allowed_and_executes(self):
         """The repeat-until-success idiom written with a body-local register
         name stays legal: no pre-existing variable is rebound, so nothing
@@ -1594,6 +1640,25 @@ class TestAllowedLoopPatterns:
                 q2 = qmc.qubit("q2")
                 q2 = qmc.h(q2)
                 bit = qmc.measure(q2)
+            return bit
+
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 0
+
+    def test_branch_measure_overwrite_dead_after_allowed_and_executes(self):
+        """Measuring the register into its own name inside a branch
+        (q = qmc.measure(q), q dead after) is legal variable reuse: the
+        measurement terminally consumes the wire on the taken path, so
+        nothing is discarded. Executes and returns the untouched flag
+        measurement deterministically."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            p = qmc.qubit("p")
+            bit = qmc.measure(p)
+            if bit:
+                q = qmc.measure(q)  # noqa: F841 — reuse via terminal consume
             return bit
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 0
