@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABC, abstractmethod
+from typing import Any
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
@@ -188,6 +189,7 @@ class NisqSegmentationStrategy(SegmentationStrategy):
         abi = ProgramABI(
             public_inputs={name: value for name, value in block.parameters.items()},
             output_refs=[v.uuid for v in block.output_values],
+            output_constants=self._collect_output_constants(block.output_values),
         )
 
         return ProgramPlan(
@@ -196,6 +198,46 @@ class NisqSegmentationStrategy(SegmentationStrategy):
             boundaries=boundaries,
             parameters=block.parameters,
         )
+
+    @staticmethod
+    def _collect_output_constants(
+        output_values: list[Value],
+    ) -> dict[str, Any]:
+        """Collect compile-time-known values among a block's outputs.
+
+        A block output whose value folded to a compile-time constant —
+        a ``bindings``-bound classical argument returned directly, or a
+        classical expression fully evaluated by ``partial_eval`` (e.g.
+        ``return x * 2.0`` with ``x`` bound) — has no producing operation
+        left in the IR. It therefore never lands in the runtime execution
+        context, and resolving it by UUID alone yields ``None``. Recording
+        the constant here lets ``ProgramOrchestrator._resolve_outputs``
+        return the correct value.
+
+        Non-constant outputs (measurement results, runtime-parameter
+        expressions, arrays materialized by classical stores) are left out;
+        they resolve from the execution context at run time.
+
+        Args:
+            output_values (list[Value]): The block's return values, in
+                order, as produced by ``materialize_return``.
+
+        Returns:
+            dict[str, Any]: Map from output value UUID to its constant
+                Python value, containing only the outputs that are
+                compile-time constants.
+        """
+        constants: dict[str, Any] = {}
+        for value in output_values:
+            if not isinstance(value, ValueBase):
+                continue
+            if isinstance(value, ArrayValue):
+                const_array = value.get_const_array()
+                if const_array is not None:
+                    constants[value.uuid] = tuple(const_array)
+            elif value.is_constant():
+                constants[value.uuid] = value.get_const()
+        return constants
 
 
 class SegmentationPass(Pass[Block, ProgramPlan]):

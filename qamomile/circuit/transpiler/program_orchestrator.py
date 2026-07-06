@@ -465,7 +465,38 @@ class ProgramOrchestrator(Generic[T]):
     # ------------------------------------------------------------------
 
     def _resolve_outputs(self, context: ExecutionContext) -> Any:
-        """Read final output values from execution context."""
+        """Read final output values from the execution context.
+
+        Each output ref is resolved in order:
+
+        1. A direct context entry (the common case — a measured bit,
+           a runtime-parameter expression, or a value materialized by a
+           classical segment).
+        2. Per-element composite carrier keys ``"<ref>_<i>"`` reassembled
+           into a tuple (a measured Vector's bits).
+        3. The compile-time ``output_constants`` map from the program ABI
+           — for outputs that folded to a constant during compilation
+           (e.g. a ``bindings``-bound classical argument returned directly,
+           or ``return x * 2.0`` with ``x`` bound). These have no producing
+           operation left in the IR, so they never enter the context.
+
+        Args:
+            context (ExecutionContext): Execution context populated by the
+                quantum measurement load and any classical segments.
+
+        Returns:
+            Any: The single output value when the program returns one
+                output, or a tuple of output values otherwise.
+
+        Raises:
+            ExecutionError: If an output ref resolves to nothing through
+                any of the paths above, indicating a compiler or runtime
+                invariant was violated rather than a legitimate ``None``.
+        """
+        output_constants = (
+            self._program.plan.abi.output_constants if self._program.plan else {}
+        )
+
         output_values = []
         for ref in self._program.output_refs:
             val = context.get(ref) if context.has(ref) else None
@@ -477,6 +508,17 @@ class ProgramOrchestrator(Generic[T]):
                     i += 1
                 if array_bits:
                     val = tuple(array_bits)
+            if val is None:
+                if ref in output_constants:
+                    val = output_constants[ref]
+                else:
+                    raise ExecutionError(
+                        f"Output '{ref}' could not be resolved from the "
+                        f"execution context or compile-time constants. This "
+                        f"indicates a missing materialization step in the "
+                        f"compiler pipeline rather than a legitimate null "
+                        f"output."
+                    )
             output_values.append(val)
 
         output_tuple = tuple(output_values)

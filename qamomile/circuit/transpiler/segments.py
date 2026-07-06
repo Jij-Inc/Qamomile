@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
@@ -158,10 +158,29 @@ class MultipleQuantumSegmentsError(Exception):
 
 @dataclasses.dataclass
 class ProgramABI:
-    """Runtime-visible ABI for a segmented program."""
+    """Runtime-visible ABI for a segmented program.
+
+    Attributes:
+        public_inputs (dict[str, Value]): Runtime parameters, keyed by
+            kernel argument name.
+        output_refs (list[str]): UUIDs of the block's output values, in
+            return order. The orchestrator reads these from the execution
+            context after running the program.
+        output_constants (dict[str, Any]): Compile-time-known values for
+            output refs that resolved to constants during compilation
+            (e.g. a ``bindings``-bound classical argument returned
+            directly, or a fully folded classical expression like
+            ``return x * 2.0`` with ``x`` bound). Such values have no
+            producing operation left in the IR, so they never appear in
+            the runtime context; the orchestrator falls back to this map
+            keyed by output ref UUID. Non-constant outputs (measurement
+            results, runtime-parameter expressions) are absent here and
+            resolved from the context instead.
+    """
 
     public_inputs: dict[str, Value] = dataclasses.field(default_factory=dict)
     output_refs: list[str] = dataclasses.field(default_factory=list)
+    output_constants: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
