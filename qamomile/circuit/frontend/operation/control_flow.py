@@ -519,10 +519,25 @@ def record_loop_rebinds(
         if before_value is not None and before_value.type.is_quantum():
             # Quantum rebind: compare logical_id, not uuid — a gate
             # self-update keeps the wire identity and is not a rebind.
-            # A post-body handle that is no IR value at all (plain
-            # Python overwrite) is not recorded, matching the if-branch
-            # records.
+            # A post-body handle that is no IR value at all (a plain
+            # Python constant, ``None``, or an opaque classical call
+            # result — the shape the decoration-time analyzer forbids at
+            # top level) drops the wire just the same: synthesize a
+            # classical placeholder so the record exists for the
+            # transpiler's discard check (mirroring the if-branch
+            # records).
             if after_value is None:
+                if isinstance(after, (bool, int, float)):
+                    after_value = _value_to_ir_value(after, name)
+                else:
+                    after_value = Value(type=UIntType(), name=name)
+                records.append(
+                    LoopCarriedRebind(
+                        var_name=name,
+                        before=before_value,
+                        after=after_value,
+                    )
+                )
                 continue
             if after_value.logical_id != before_value.logical_id:
                 records.append(
@@ -904,10 +919,13 @@ def _rebound_from(pre_value: Value, post_handle: typing.Any) -> bool:
 
     Compares ``logical_id``, not ``uuid``: a gate self-update
     (``q = qmc.x(q)``) produces a new SSA version with a fresh uuid but
-    the SAME logical_id (same quantum wire), which is not a discard. Only
-    a substitution to a different quantum resource — a fresh allocation
-    or another existing register — changes the logical_id, and only those
-    are genuine branch rebinds worth recording.
+    the SAME logical_id (same quantum wire), which is not a discard. A
+    substitution to a different quantum resource — a fresh allocation or
+    another existing register — changes the logical_id, and a post-branch
+    binding that is no IR value at all (a plain Python constant, ``None``,
+    or an opaque classical call result — the shape the decoration-time
+    analyzer forbids at top level as an unknown-call overwrite) drops the
+    wire just the same; both are recorded.
 
     Args:
         pre_value (Value): The variable's IR value at branch entry.
@@ -917,13 +935,13 @@ def _rebound_from(pre_value: Value, post_handle: typing.Any) -> bool:
 
     Returns:
         bool: True when the branch left the variable bound to a
-            different quantum wire.
+            different quantum wire or to a non-IR value.
     """
     if post_handle is _DEAD_REBIND_UNBOUND:
         return False
     post_value = post_handle.value if hasattr(post_handle, "value") else post_handle
     if not isinstance(post_value, Value):
-        return False
+        return True
     return post_value.logical_id != pre_value.logical_id
 
 

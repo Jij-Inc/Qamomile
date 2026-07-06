@@ -143,6 +143,15 @@ def _inlined_block(kernel, bindings=None):
     return transpiler.inline(block)
 
 
+def _some_classical_func():
+    """Opaque classical helper (not a known quantum primitive).
+
+    Returns:
+        int: A plain Python value with no IR identity.
+    """
+    return 3
+
+
 # ---------------------------------------------------------------------------
 # Rejected: runtime-branch quantum rebinds that discard quantum state
 # ---------------------------------------------------------------------------
@@ -582,6 +591,62 @@ class TestRejectedDiscards:
         block = _inlined_block(kernel, bindings={"dummy": 0})
         with pytest.raises(QubitRebindError, match=DISCARD):
             transpiler.analyze(block)
+
+    def test_branch_opaque_overwrite_rejected(self):
+        """Overwriting a quantum variable with an opaque classical call
+        result inside a runtime branch is rejected like any rebind: the
+        post-branch binding is no IR value, so the wire is dropped. The
+        decoration-time analyzer forbids the same shape at top level
+        (UNKNOWN_CALL) but suppresses branch internals; this closes the
+        dead-after escape (review finding)."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            p = qmc.qubit("p")
+            bit = qmc.measure(p)
+            if bit:
+                q = _some_classical_func()  # noqa: F841 — overwrite under test
+            return qmc.bit(0)
+
+        with pytest.raises(QubitRebindError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_branch_none_overwrite_rejected(self):
+        """Overwriting a quantum variable with ``None`` inside a runtime
+        branch is rejected through the same non-IR-value record."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            p = qmc.qubit("p")
+            bit = qmc.measure(p)
+            if bit:
+                q = None  # noqa: F841 — overwrite under test
+            return qmc.bit(0)
+
+        with pytest.raises(QubitRebindError, match=DISCARD):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_live_opaque_overwrite_fails_loudly_at_trace(self):
+        """When the overwritten variable IS used after the if, the phi
+        merge already fails loudly at trace with a type mismatch
+        (pre-existing behavior, pinned so the record path is understood
+        to cover exactly the dead-after escape)."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            p = qmc.qubit("p")
+            bit = qmc.measure(p)
+            if bit:
+                q = _some_classical_func()
+            return qmc.measure(q)
+
+        with pytest.raises(TypeError, match="Branch value mismatch"):
+            _transpile(kernel, bindings={"dummy": 0})
 
     def test_gate_then_fresh_rebind_rejected(self):
         """Touching the original through a gate does not count as
@@ -1230,6 +1295,25 @@ class TestRejectedLoopDiscards:
         with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
             _transpile(kernel, bindings={"n": 2})
 
+    def test_loop_opaque_overwrite_rejected(self):
+        """Overwriting a quantum variable with an opaque classical call
+        result (or any non-IR value, e.g. a tuple) inside a loop body is
+        rejected: a synthesized placeholder record carries the dropped
+        wire to the discard check (review finding — the dead-after form
+        previously compiled and sampled)."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                q = _some_classical_func()  # noqa: F841 — overwrite under test
+            r = qmc.qubit("r")
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2})
+
     def test_measure_then_fresh_reset_rejected(self):
         """Consume-then-reallocate in an unrolled loop body is rejected:
         the unroll re-instantiates the body without carrying the rebound
@@ -1513,6 +1597,25 @@ class TestAllowedLoopPatterns:
             return bit
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 0
+
+    def test_consumed_then_opaque_overwrite_allowed_and_executes(self):
+        """Overwriting with an opaque value after the quantum state was
+        consumed is plain variable reuse, exactly like the top-level
+        analyzer's post-measure allowance; the measured value is the
+        prepared 1."""
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            b = qmc.measure(q)
+            p = qmc.qubit("p")
+            bit = qmc.measure(p)
+            if bit:
+                q = _some_classical_func()  # noqa: F841 — reuse after consume
+            return b
+
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 1
 
     def test_empty_items_rebind_allowed_and_executes(self):
         """A bound-EMPTY qmc.items loop never traces its body (the
