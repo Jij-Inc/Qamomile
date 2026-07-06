@@ -261,6 +261,51 @@ class ConcreteControlledU(ControlledUOperation):
     num_controls: int = 1
     control_values: tuple[int, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Validate and canonicalize the anti-control activation pattern.
+
+        Guards against malformed externally-decoded or hand-built IR: when
+        ``control_values`` is non-empty it must carry exactly one ``0`` /
+        ``1`` activation entry per control qubit. The frontend always
+        constructs a valid op (either ``()`` for all-standard controls or a
+        normalized per-control tuple), and the serializer only persists a
+        non-empty pattern, so the validation only fires on corrupt or
+        hand-built IR — catching, e.g., a decoded ``control_values=(2,)``
+        that would otherwise be silently treated as a standard ``1``-control.
+
+        After validation the all-ones pattern is collapsed to the canonical
+        empty tuple: an activation pattern that is ``1`` on every control is
+        semantically identical to "no anti-controls", and ``()`` is the
+        canonical marker for that. Collapsing here (not only in the
+        frontend's ``_normalize_control_values``) keeps a directly-built or
+        decoded ``(1, 1)`` from hashing differently under ``content_hash``
+        than the equivalent ``()`` — the activation pattern is a functional
+        field included in the canonical form, so the two spellings must
+        reduce to one.
+
+        Raises:
+            ValueError: If ``control_values`` is non-empty and its length
+                differs from ``num_controls``, or any entry is not ``0`` or
+                ``1``.
+        """
+        if not self.control_values:
+            return
+        if len(self.control_values) != self.num_controls:
+            raise ValueError(
+                f"ConcreteControlledU.control_values has length "
+                f"{len(self.control_values)} but num_controls="
+                f"{self.num_controls}; a non-empty activation pattern must "
+                f"carry exactly one 0/1 value per control qubit."
+            )
+        for value in self.control_values:
+            if value not in (0, 1):
+                raise ValueError(
+                    f"ConcreteControlledU.control_values entries must be 0 "
+                    f"or 1, got {value!r}."
+                )
+        if all(value == 1 for value in self.control_values):
+            self.control_values = ()
+
     @property
     def control_operands(self) -> list[Value]:
         return self.operands[: self.num_controls]

@@ -18,6 +18,7 @@ multi-control coverage runs Qiskit-only with exact-statevector checks.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 import pytest
@@ -80,7 +81,9 @@ def _executor(case, seed: int):
     """Return a (seeded, where supported) executor for a backend case.
 
     Args:
-        case: The ``SdkTranspilerCase`` from the ``sdk_transpiler`` fixture.
+        case (SdkTranspilerCase): The backend case from the
+            ``sdk_transpiler`` fixture (exposes ``transpiler`` and
+            ``backend_name``).
         seed (int): Simulator seed (honoured by Qiskit's BasicSimulator).
 
     Returns:
@@ -97,7 +100,17 @@ def _executor(case, seed: int):
 
 
 def _expval_atol(case) -> float:
-    """Return the expectation-value tolerance for a backend case."""
+    """Return the expectation-value tolerance for a backend case.
+
+    Args:
+        case (SdkTranspilerCase): The backend case from the
+            ``sdk_transpiler`` fixture (exposes ``backend_name``).
+
+    Returns:
+        float: The absolute tolerance to use for ``<Z>`` comparisons —
+            looser for CUDA-Q's single-precision statevector, tight for the
+            double-precision Qiskit / QURI Parts simulators.
+    """
     return 1e-6 if case.backend_name == "cudaq" else 1e-8
 
 
@@ -236,6 +249,94 @@ class TestZeroControlCrossBackend:
         counts = {bits: cnt for bits, cnt in job.result().results}
         assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: got {counts}"
 
+    @pytest.mark.parametrize("spec", [0b01, (1, 0)])
+    @pytest.mark.parametrize(
+        "c0_one,c1_one",
+        [(False, False), (True, False), (False, True), (True, True)],
+    )
+    def test_int_mask_matches_sequence(self, sdk_transpiler, spec, c0_one, c1_one):
+        """An int ``ctrl_state`` mask and the equal 0/1 sequence agree.
+
+        ``control_values=0b01`` over two controls means control 0 activates
+        on ``|1>`` (bit 0 set) and control 1 activates on ``|0>`` (bit 1
+        clear), i.e. the sequence ``(1, 0)`` — Qiskit ``ctrl_state``
+        convention where bit ``j`` is control ``j``. Both spellings must
+        fire the target exactly when ``c0`` reads ``|1>`` and ``c1`` reads
+        ``|0>``. Parametrizing over both spellings and all four control
+        preparations pins the mask interpretation and their equivalence.
+        """
+
+        def build() -> Any:
+            @qkernel
+            def circ() -> Bit:
+                c0 = qm.qubit(name="c0")
+                c1 = qm.qubit(name="c1")
+                t = qm.qubit(name="t")
+                if c0_one:
+                    c0 = qm.x(c0)
+                if c1_one:
+                    c1 = qm.x(c1)
+                c0, c1, t = qm.control(qm.x, num_controls=2, control_values=spec)(
+                    c0, c1, t
+                )
+                return qm.measure(t)
+
+            return circ
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(build())
+        job = exe.sample(_executor(sdk_transpiler, 0), shots=256)
+        counts = {bits: cnt for bits, cnt in job.result().results}
+        expect_flip = c0_one and not c1_one
+        expected = {1} if expect_flip else {0}
+        assert set(counts) == expected, (
+            f"{sdk_transpiler.backend_name}: spec={spec!r} "
+            f"c0_one={c0_one} c1_one={c1_one} got {counts}"
+        )
+
+    @pytest.mark.parametrize("outer_one", [False, True])
+    @pytest.mark.parametrize("inner_zero", [False, True])
+    def test_nested_anti_control_composes(self, sdk_transpiler, outer_one, inner_zero):
+        """Controlling an anti-controlled kernel keeps the inner anti-control.
+
+        End-to-end correctness guard for composing controls over a
+        zero-control: ``qm.control(_apply_anti_cx)`` adds an outer control
+        ``o`` over the inner anti-controlled X on ``(c, t)``, so ``t`` flips
+        iff ``o`` reads ``|1>`` (outer active) AND ``c`` reads ``|0>`` (inner
+        anti-control active). Each backend realizes this through a different
+        path (Qiskit/QuriParts bake the inner block into a reusable
+        controlled gate; CUDA-Q emits a controlled source kernel), and this
+        checks every one produces the same, correct pattern — so a
+        regression in any nested-control lowering that dropped the inner
+        anti-control would surface here.
+        """
+
+        def build() -> Any:
+            @qkernel
+            def circ() -> Bit:
+                o = qm.qubit(name="o")
+                c = qm.qubit(name="c")
+                t = qm.qubit(name="t")
+                if outer_one:
+                    o = qm.x(o)
+                if not inner_zero:
+                    c = qm.x(c)  # inner_zero=False -> c reads |1> (anti inactive)
+                o, c, t = qm.control(_apply_anti_cx)(o, c, t)
+                return qm.measure(t)
+
+            return circ
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(build())
+        job = exe.sample(_executor(sdk_transpiler, 0), shots=256)
+        counts = {bits: cnt for bits, cnt in job.result().results}
+        expect_flip = outer_one and inner_zero
+        expected = {1} if expect_flip else {0}
+        assert set(counts) == expected, (
+            f"{sdk_transpiler.backend_name}: outer_one={outer_one} "
+            f"inner_zero={inner_zero} got {counts}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # qmc.select — cross-backend.
@@ -331,6 +432,46 @@ class TestSelectCrossBackend:
             f"{sdk_transpiler.backend_name}: index={index_value} got {counts}"
         )
 
+    @pytest.mark.parametrize("index_value", [0, 1, 2, 3])
+    def test_non_power_of_two_select_out_of_range_identity(
+        self, sdk_transpiler, index_value
+    ):
+        """A 3-case select leaves the unaddressed index value 3 as identity.
+
+        Three cases need two index qubits (four basis states), so index
+        value 3 is out of range and must act as identity — no case block
+        applies. With ``cases = [_id, X, X]`` the target flips only for
+        index 1 and 2; index 0 (identity case) and index 3 (unaddressed)
+        both leave the target ``|0>``. This exercises the non-power-of-two
+        case count and the out-of-range identity semantics on every backend.
+        """
+
+        def build(value: int) -> Any:
+            idx0 = (value >> 1) & 1  # MSB
+            idx1 = value & 1
+
+            @qkernel
+            def circ() -> Bit:
+                idx = qm.qubit_array(2, name="idx")
+                if idx0:
+                    idx[0] = qm.x(idx[0])
+                if idx1:
+                    idx[1] = qm.x(idx[1])
+                t = qm.qubit(name="t")
+                idx, t = qm.select([_id_gate, _x_gate, _x_gate])(idx, t)
+                return qm.measure(t)
+
+            return circ
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(build(index_value))
+        job = exe.sample(_executor(sdk_transpiler, 0), shots=256)
+        counts = {bits: cnt for bits, cnt in job.result().results}
+        expected = 1 if index_value in (1, 2) else 0
+        assert set(counts) == {expected}, (
+            f"{sdk_transpiler.backend_name}: index={index_value} got {counts}"
+        )
+
     def test_inverse_of_select_is_identity(self, sdk_transpiler):
         """``select`` then its inverse returns the target to ``|0>``.
 
@@ -406,7 +547,17 @@ class TestSelectCrossBackend:
 
 
 def _run_statevector(transpiler, kernel, bindings=None):
-    """Transpile to Qiskit and return the pre-measurement statevector."""
+    """Transpile to Qiskit and return the pre-measurement statevector.
+
+    Args:
+        transpiler (QiskitTranspiler): The Qiskit transpiler fixture.
+        kernel (QKernel): The kernel to transpile and simulate.
+        bindings (dict | None): Compile-time bindings, or ``None`` for none.
+
+    Returns:
+        np.ndarray: The statevector amplitudes with final measurements
+            stripped, in Qiskit little-endian qubit order.
+    """
     from qiskit.quantum_info import Statevector
 
     exe = transpiler.transpile(kernel, bindings=bindings or {})
@@ -459,7 +610,7 @@ class TestSelectQiskitExact:
         expected = np.zeros(8, dtype=complex)
         for tbit in (0, 1):
             amp = target_state[tbit]
-            if amp == 0:
+            if np.isclose(amp, 0.0, atol=1e-12):
                 continue
             full_index = idx0 | (idx1 << 1) | (tbit << 2)
             expected[full_index] = amp
@@ -570,6 +721,112 @@ class TestSelectValidation:
         with pytest.raises(ValueError, match="same parameter signature"):
             qm.select([case_a, case_b])
 
+    def test_mismatched_case_output_arity_rejected(self):
+        """A case that returns extra quantum state (higher arity) is rejected.
+
+        ``_signature_key`` only checks inputs, so a case that allocates and
+        returns an extra qubit shares the input signature yet is not a
+        unitary on the target register. Building the call must fail loudly
+        rather than silently miswire against the shared result list.
+        """
+
+        @qkernel
+        def _returns_extra(q: Qubit) -> tuple[Qubit, Qubit]:
+            anc = qm.qubit(name="anc")
+            anc = qm.x(anc)
+            return q, anc
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qm.qubit(name="idx")
+            t = qm.qubit(name="t")
+            idx, t = qm.select([_x_gate, _returns_extra])(idx, t)
+            return qm.measure(t)
+
+        with pytest.raises(ValueError, match="not a unitary on the target"):
+            _ = circ.block
+
+    def test_case_dropping_target_for_fresh_qubit_rejected(self):
+        """A same-arity case that drops the target and returns a fresh qubit fails.
+
+        The footprint check must go beyond output *count*: a case with the
+        same quantum input/output arity can still drop the target register
+        and return a freshly-allocated qubit instead. Comparing quantum
+        logical-id sets (input wires vs output wires) catches this where a
+        count-only check would not.
+        """
+
+        @qkernel
+        def _drop_and_fresh(q: Qubit) -> Qubit:
+            anc = qm.qubit(name="anc")
+            anc = qm.x(anc)
+            return anc  # same arity (1) but drops the input target q
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qm.qubit(name="idx")
+            t = qm.qubit(name="t")
+            idx, t = qm.select([_x_gate, _drop_and_fresh])(idx, t)
+            return qm.measure(t)
+
+        with pytest.raises(ValueError, match="not a unitary on the target"):
+            _ = circ.block
+
+
+class TestSelectAndControlIrValidation:
+    """IR-boundary validation for hand-built / decoded select and control_values."""
+
+    def test_concrete_controlled_rejects_non_binary_control_value(self):
+        """A ``ConcreteControlledU`` with a non-0/1 activation entry raises."""
+        from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+
+        with pytest.raises(ValueError, match="must be 0 or 1"):
+            ConcreteControlledU(
+                operands=[], results=[], num_controls=1, control_values=(2,)
+            )
+
+    def test_concrete_controlled_rejects_width_mismatch(self):
+        """A ``control_values`` length that disagrees with num_controls raises."""
+        from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+
+        with pytest.raises(ValueError, match="one 0/1 value per control"):
+            ConcreteControlledU(
+                operands=[], results=[], num_controls=2, control_values=(0,)
+            )
+
+    def test_concrete_controlled_accepts_empty_and_valid(self):
+        """The empty pattern and a valid per-control tuple both construct."""
+        from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+
+        # Empty (all-standard) and a matching 0/1 tuple must not raise.
+        ConcreteControlledU(operands=[], results=[], num_controls=2)
+        ConcreteControlledU(
+            operands=[], results=[], num_controls=2, control_values=(0, 1)
+        )
+
+    def test_concrete_controlled_normalizes_all_ones(self):
+        """An all-ones ``control_values`` collapses to the canonical ``()``.
+
+        ``(1, 1)`` means every control is a standard ``1``-control, which is
+        semantically identical to ``()``. ``__post_init__`` must normalize it
+        so a hand-built or decoded all-ones pattern hashes and serializes
+        identically to the empty marker rather than as a distinct anti-control
+        pattern.
+        """
+        from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+
+        op = ConcreteControlledU(
+            operands=[], results=[], num_controls=2, control_values=(1, 1)
+        )
+        assert op.control_values == ()
+
+    def test_select_rejects_empty_case_blocks(self):
+        """A ``SelectOperation`` with no case blocks raises ``ValueError``."""
+        from qamomile.circuit.ir.operation.select import SelectOperation
+
+        with pytest.raises(ValueError, match="at least one case block"):
+            SelectOperation(operands=[], results=[], num_index_qubits=1, case_blocks=[])
+
 
 # ---------------------------------------------------------------------------
 # Pipeline-integration regressions (Qiskit): allocation, loop, inverse, est.
@@ -660,3 +917,176 @@ class TestSelectPipelineIntegration:
         assert int(gate_count.total) == 4, f"got {gate_count.total}"
         # idx (2) + target (1); ancilla-free cases add nothing.
         assert int(qubits_counter(circ.block)) == 3
+
+
+# ---------------------------------------------------------------------------
+# Serialization + content-hash (backend-independent IR properties).
+# ---------------------------------------------------------------------------
+
+
+def _affine(kernel) -> Any:
+    """Inline a kernel to an AFFINE block for serialize / content-hash tests.
+
+    Args:
+        kernel (QKernel): A ``@qkernel``-decorated function.
+
+    Returns:
+        Block: The kernel's block after ``InlinePass`` removes every
+            ``CallBlockOperation``.
+    """
+    from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+    return InlinePass().run(kernel.block)
+
+
+def _first_select(block) -> Any:
+    """Return the first ``SelectOperation`` in an inlined block.
+
+    Args:
+        block (Block): An AFFINE block containing a select.
+
+    Returns:
+        SelectOperation: The first select operation found.
+    """
+    from qamomile.circuit.ir.operation.select import SelectOperation
+
+    return next(op for op in block.operations if isinstance(op, SelectOperation))
+
+
+def _first_controlled(block) -> Any:
+    """Return the first ``ConcreteControlledU`` in an inlined block.
+
+    Args:
+        block (Block): An AFFINE block containing a controlled-U.
+
+    Returns:
+        ConcreteControlledU: The first concrete controlled-U found.
+    """
+    from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+
+    return next(op for op in block.operations if isinstance(op, ConcreteControlledU))
+
+
+class TestSelectSerializationAndHash:
+    """Round-trip and content-hash coverage for select / control_values IR."""
+
+    @pytest.mark.parametrize("encode_decode", ["json", "msgpack"])
+    def test_select_roundtrips(self, encode_decode):
+        """A SelectOperation survives JSON and msgpack round-trips intact.
+
+        Uses a non-power-of-two (3-case) select so both the case count and
+        the ``num_index_qubits`` are non-trivial after the round-trip.
+        """
+        from qamomile.circuit.ir.serialize import (
+            dump_json,
+            dump_msgpack,
+            load_json,
+            load_msgpack,
+        )
+
+        @qkernel
+        def circ() -> Vector[Bit]:
+            idx = qm.qubit_array(2, name="idx")
+            t = qm.qubit(name="t")
+            idx, t = qm.select([_id_gate, _x_gate, _id_gate])(idx, t)
+            return qm.measure(idx)
+
+        block = _affine(circ)
+        original = _first_select(block)
+        if encode_decode == "json":
+            loaded = load_json(dump_json(block))
+        else:
+            loaded = load_msgpack(dump_msgpack(block))
+        restored = _first_select(loaded)
+        assert restored.num_index_qubits == original.num_index_qubits == 2
+        assert len(restored.case_blocks) == len(original.case_blocks) == 3
+
+    @pytest.mark.parametrize("encode_decode", ["json", "msgpack"])
+    def test_control_values_roundtrips(self, encode_decode):
+        """An anti-control's ``control_values`` survives serialization."""
+        from qamomile.circuit.ir.serialize import (
+            dump_json,
+            dump_msgpack,
+            load_json,
+            load_msgpack,
+        )
+
+        @qkernel
+        def circ() -> Bit:
+            c0 = qm.qubit(name="c0")
+            c1 = qm.qubit(name="c1")
+            t = qm.qubit(name="t")
+            c0, c1, t = qm.control(qm.x, num_controls=2, control_values=(0, 1))(
+                c0, c1, t
+            )
+            return qm.measure(t)
+
+        block = _affine(circ)
+        assert _first_controlled(block).control_values == (0, 1)
+        if encode_decode == "json":
+            loaded = load_json(dump_json(block))
+        else:
+            loaded = load_msgpack(dump_msgpack(block))
+        assert _first_controlled(loaded).control_values == (0, 1)
+
+    def test_content_hash_distinguishes_case_order(self):
+        """``content_hash`` differs when only the case order differs.
+
+        Two selects over the same two distinct unitaries in swapped order
+        are different programs, so their canonical content hashes must
+        differ; the identical spelling must hash equally.
+        """
+        from qamomile.circuit.ir.canonical import content_hash
+
+        @qkernel
+        def circ_a() -> Vector[Bit]:
+            idx = qm.qubit(name="idx")
+            t = qm.qubit(name="t")
+            idx, t = qm.select([_id_gate, _x_gate])(idx, t)
+            return qm.measure(idx)
+
+        @qkernel
+        def circ_b() -> Vector[Bit]:
+            idx = qm.qubit(name="idx")
+            t = qm.qubit(name="t")
+            idx, t = qm.select([_x_gate, _id_gate])(idx, t)
+            return qm.measure(idx)
+
+        @qkernel
+        def circ_a2() -> Vector[Bit]:
+            idx = qm.qubit(name="idx")
+            t = qm.qubit(name="t")
+            idx, t = qm.select([_id_gate, _x_gate])(idx, t)
+            return qm.measure(idx)
+
+        assert content_hash(_affine(circ_a)) != content_hash(_affine(circ_b))
+        assert content_hash(_affine(circ_a)) == content_hash(_affine(circ_a2))
+
+    def test_content_hash_distinguishes_control_values(self):
+        """``content_hash`` differs when only ``control_values`` differs.
+
+        The anti-control activation pattern is functional (it changes the
+        emitted circuit), so it must participate in the canonical hash; an
+        identical pattern must hash equally.
+        """
+        from qamomile.circuit.ir.canonical import content_hash
+
+        def build(pattern) -> Any:
+            @qkernel
+            def circ() -> Bit:
+                c0 = qm.qubit(name="c0")
+                c1 = qm.qubit(name="c1")
+                t = qm.qubit(name="t")
+                c0, c1, t = qm.control(qm.x, num_controls=2, control_values=pattern)(
+                    c0, c1, t
+                )
+                return qm.measure(t)
+
+            return circ
+
+        assert content_hash(_affine(build((0, 1)))) != content_hash(
+            _affine(build((1, 0)))
+        )
+        assert content_hash(_affine(build((0, 1)))) == content_hash(
+            _affine(build((0, 1)))
+        )

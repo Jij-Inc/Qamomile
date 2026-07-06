@@ -57,25 +57,35 @@ class SelectOperation(Operation):
     case_blocks: list[Block] = dataclasses.field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Validate the index-qubit / case-count invariant.
+        """Validate the case-count and index-qubit invariants.
 
-        Guards against malformed externally-decoded payloads: the index
-        register must have enough qubits to address every case
-        (``2 ** num_index_qubits >= len(case_blocks)``). The frontend
-        always constructs a valid op, so this only fires on hand-built or
-        corrupt IR.
+        Guards against malformed externally-decoded or hand-built IR:
+
+        * there must be at least one case block (an empty SELECT is a
+          silent no-op that only maps its results — never valid IR);
+        * the index register must have enough qubits to address every
+          case (``2 ** num_index_qubits >= len(case_blocks)``).
+
+        The frontend always constructs a valid op, and value-substitution
+        passes preserve ``case_blocks`` verbatim via ``dataclasses.replace``,
+        so this only fires on hand-built or corrupt IR.
 
         Raises:
-            ValueError: If ``num_index_qubits`` is negative, or there are
-                more case blocks than ``2 ** num_index_qubits`` index
-                values can address.
+            ValueError: If ``case_blocks`` is empty, ``num_index_qubits``
+                is negative, or there are more case blocks than
+                ``2 ** num_index_qubits`` index values can address.
         """
         if self.num_index_qubits < 0:
             raise ValueError(
                 f"SelectOperation.num_index_qubits must be non-negative, "
                 f"got {self.num_index_qubits}."
             )
-        if self.case_blocks and len(self.case_blocks) > (1 << self.num_index_qubits):
+        if not self.case_blocks:
+            raise ValueError(
+                "SelectOperation requires at least one case block; an empty "
+                "case list is not a valid multiplexer."
+            )
+        if len(self.case_blocks) > (1 << self.num_index_qubits):
             raise ValueError(
                 f"SelectOperation has {len(self.case_blocks)} case blocks but "
                 f"only {1 << self.num_index_qubits} index value(s) "

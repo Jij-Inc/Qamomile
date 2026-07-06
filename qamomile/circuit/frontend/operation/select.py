@@ -84,6 +84,69 @@ def _signature_key(qkernel: "Any") -> tuple[tuple[str, Any, Any], ...]:
     )
 
 
+def _quantum_logical_ids(values: Sequence[Any]) -> set[Any]:
+    """Return the logical-id set of the quantum values in a sequence.
+
+    Args:
+        values (Sequence[Any]): ``Value`` s (a case block's inputs or
+            outputs). Each carries a ``logical_id`` identifying the logical
+            qubit wire it belongs to, stable across SSA re-versioning.
+
+    Returns:
+        set[Any]: The ``logical_id`` of every quantum ``Value`` in
+            ``values`` (scalar ``Qubit`` and whole ``Vector[Qubit]``
+            wires alike). Classical values are ignored.
+    """
+    return {value.logical_id for value in values if value.type.is_quantum()}
+
+
+def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
+    """Reject cases that do not return exactly the target register they got.
+
+    A SELECT applies each case to the same shared target register, so every
+    case must be a unitary on that register: it must return exactly the
+    quantum wires it received, neither dropping a target nor allocating and
+    returning fresh quantum state. ``_signature_key`` (checked in
+    ``__init__``) only pins the quantum *inputs*, so a case could still
+    return a different quantum footprint — e.g. allocate an ancilla and
+    return it while dropping the input target — which keeps the same output
+    *count* yet miswires against the SELECT's shared result list.
+
+    Each case is checked against ITS OWN inputs by comparing quantum
+    logical-id sets: a proper unitary threads its input wires through to the
+    output (re-versioned, same ``logical_id``), so input and output quantum
+    logical-id sets must be equal. Because ``_signature_key`` already forces
+    a common quantum input arity, this per-case invariant also guarantees a
+    common output arity across cases. Internal ancillas that are allocated
+    and uncomputed (not returned) are fine — they never appear in
+    ``output_values``.
+
+    Args:
+        case_blocks (Sequence[Any]): The specialized case blocks, in index
+            order, each exposing ``input_values`` and ``output_values``.
+
+    Returns:
+        None: This function returns nothing; it raises on mismatch.
+
+    Raises:
+        ValueError: If any case block's quantum output wires are not exactly
+            the quantum input wires it received.
+    """
+    for position, block in enumerate(case_blocks):
+        input_ids = _quantum_logical_ids(block.input_values)
+        output_ids = _quantum_logical_ids(block.output_values)
+        if input_ids != output_ids:
+            raise ValueError(
+                f"qmc.select case {position} is not a unitary on the target "
+                f"register: it returns a different set of quantum wires "
+                f"({len(output_ids)}) than the {len(input_ids)} target "
+                f"wire(s) it received. Every case must thread through exactly "
+                f"the target register it is given — a case that allocates, "
+                f"drops, or replaces target state is not a valid selectable "
+                f"unitary."
+            )
+
+
 class SelectGate:
     """Callable wrapper for a quantum multiplexer over a list of unitaries.
 
@@ -193,6 +256,16 @@ class SelectGate:
             _specialized_block_for_call(case, prep.sub_args_resolved)
             for case in self._cases
         ]
+
+        # Every case must be a unitary on the SAME target register: it must
+        # return exactly the quantum wires it received. ``_signature_key``
+        # (checked in ``__init__``) already guarantees matching quantum
+        # *inputs*, but a case that allocates and returns an ancilla — or
+        # drops a target and returns fresh state of the same count — would
+        # keep the same inputs yet return a different quantum footprint,
+        # silently miswiring against the SELECT's shared result list (built
+        # from case 0). Reject that here.
+        _validate_case_target_footprint(case_blocks)
 
         op = SelectOperation(
             operands=prep.operands,

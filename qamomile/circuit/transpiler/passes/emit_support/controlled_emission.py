@@ -716,6 +716,31 @@ def _emit_nested_controlled_u(
     block = _prepare_nested_block_for_emit(resolved.block, resolved.local_bindings)
     power = resolve_power(emit_pass, op, bindings)
 
+    # Zero-control (anti-control) bracket for this nested operation's OWN
+    # controls. ``resolve_controlled_u_call`` folds every control into
+    # ``composed_controls`` as a standard ``|1>``-control, so a nested
+    # ``ConcreteControlledU`` carrying ``control_values`` would otherwise
+    # silently lose its anti-controls on this path (the top-level
+    # ``emit_controlled_u`` path brackets them, but ``_emit_nested_controlled_u``
+    # did not). This path is the gate-by-gate fallback reached whenever the
+    # enclosing controlled block cannot be turned into a reusable gate — it
+    # is the *only* controlled-U path on CUDA-Q, whose ``circuit_to_gate``
+    # always returns ``None``. Bracket each of the nested op's own
+    # ``0``-activated physical controls with an X so the composed
+    # multi-controlled emission below fires on ``|0>`` for those qubits
+    # (``X_c (C-U) X_c == anti-C-U``). Only the nested op's own controls are
+    # bracketed here; enclosing controlled-U operations bracket their own
+    # anti-controls at their own level, and the ``unitary_gate`` sub-path
+    # gates only the inner target block (which never contains this op's
+    # controls), so there is no double bracketing. Symbolic controls never
+    # carry ``control_values`` (the frontend rejects that combination), so
+    # ``getattr`` safely yields ``()`` for ``SymbolicControlledU``.
+    zero_control_phys = _zero_control_phys(
+        getattr(op, "control_values", ()), resolved.control_phys
+    )
+    for phys in zero_control_phys:
+        emit_pass._emitter.emit_x(circuit, phys)
+
     unitary_gate = emit_pass._blockvalue_to_gate(
         block, len(resolved.target_phys), resolved.local_bindings
     )
@@ -741,6 +766,9 @@ def _emit_nested_controlled_u(
                 inner_map,
                 resolved.local_bindings,
             )
+
+    for phys in zero_control_phys:
+        emit_pass._emitter.emit_x(circuit, phys)
 
     map_nested_controlled_u_results(op, resolved, qubit_map)
 
