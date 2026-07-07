@@ -448,14 +448,14 @@ def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError
     """
     return ValidationError(
         f"Loop-carried update of classical variable '{var_name}' inside a "
-        f"@qkernel {loop_kind} loop is not supported: the loop body is "
+        f"qkernel {loop_kind} loop is not supported: the loop body is "
         f"traced once, so '{var_name}' on the right-hand side is fixed to "
         f"its pre-loop value instead of the previous iteration's value, "
         f"and the compiled program would silently diverge from Python "
         f"semantics. Compute the reduction in ordinary Python instead — "
-        f"outside the @qkernel or in an undecorated helper function — or "
+        f"outside the qkernel or in an undecorated helper function — or "
         f"express each iteration's value directly from the loop index. "
-        f"Note: builtin range() inside @qkernel is traced exactly like "
+        f"Note: builtin range() inside qkernel is traced exactly like "
         f"qmc.range()."
     )
 
@@ -809,7 +809,7 @@ def _loop_quantum_discard_error(
     if loop_kind == "while":
         return QubitRebindError(
             f"Loop-body quantum rebind of '{display_name}' inside a "
-            f"@qkernel while loop cannot compile correctly: the runtime "
+            f"qkernel while loop cannot compile correctly: the runtime "
             f"loop re-executes the body on one persistent register "
             f"without reset, so a register allocated in the body is not "
             f"fresh on later iterations and a body read of the pre-loop "
@@ -821,7 +821,7 @@ def _loop_quantum_discard_error(
             handle_name=display_name,
         )
     return QubitRebindError(
-        f"Loop-body quantum rebind of '{display_name}' inside a @qkernel "
+        f"Loop-body quantum rebind of '{display_name}' inside a qkernel "
         f"{loop_kind} loop cannot compile correctly: the body is traced "
         f"once and re-instantiated per iteration without carrying the "
         f"rebound register between iterations, so later iterations "
@@ -860,7 +860,7 @@ def _loop_nonquantum_overwrite_error(
     """
     display_name = var_name or "<anonymous>"
     return QubitRebindError(
-        f"Loop-body quantum rebind of '{display_name}' inside a @qkernel "
+        f"Loop-body quantum rebind of '{display_name}' inside a qkernel "
         f"{loop_kind} loop overwrites the quantum variable with a "
         f"non-quantum value: the incoming register's state is dropped "
         f"(and a consuming overwrite like 'q = qmc.measure(q)' would "
@@ -895,7 +895,7 @@ def _while_zero_trip_rebind_error(var_name: str) -> QubitRebindError:
     """
     display_name = var_name or "<anonymous>"
     return QubitRebindError(
-        f"Loop-body quantum rebind of '{display_name}' inside a @qkernel "
+        f"Loop-body quantum rebind of '{display_name}' inside a qkernel "
         f"while loop is read after the loop: the loop's trip count is a "
         f"runtime measurement outcome, and when the body never runs the "
         f"post-loop read must observe the pre-loop state — but "
@@ -933,7 +933,7 @@ def _zero_trip_static_loop_rebind_error(
     """
     display_name = var_name or "<anonymous>"
     return QubitRebindError(
-        f"Loop-body quantum rebind of '{display_name}' inside a @qkernel "
+        f"Loop-body quantum rebind of '{display_name}' inside a qkernel "
         f"{loop_kind} loop whose bounds resolve to zero iterations: the "
         f"loop never runs, so '{display_name}' must keep its pre-loop "
         f"binding, but the emitted program keeps the traced post-body "
