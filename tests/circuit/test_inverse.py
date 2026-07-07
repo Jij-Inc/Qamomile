@@ -1786,7 +1786,9 @@ def test_inverse_oracle_builds_opaque_inverse() -> None:
     assert inner_invokes[0].attrs["custom_name"] == "opaque_inverse_gate_inv"
     assert inner_invokes[0].body is None
     assert inner_invokes[0].definition is not None
-    assert inner_invokes[0].definition.resource_models[0].model is _OPAQUE_RESOURCE_MODEL
+    assert (
+        inner_invokes[0].definition.resource_models[0].model is _OPAQUE_RESOURCE_MODEL
+    )
 
 
 def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
@@ -3628,7 +3630,9 @@ def test_inverse_nested_invoke_keeps_vector_target_width() -> None:
 
     collect(list(block.operations))
 
-    inner = next(op for op in inverse_ops if op.custom_name == "givens_rotation_inverse")
+    inner = next(
+        op for op in inverse_ops if op.custom_name == "givens_rotation_inverse"
+    )
     assert inner.num_target_qubits == 2
     assert len(inner.target_qubits) == 1
     assert len(inner.parameters) == 3
