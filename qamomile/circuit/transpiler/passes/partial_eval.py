@@ -8,6 +8,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
+    reject_control_flow_quantum_discard,
     reject_loop_carried_classical_rebinds,
     reject_self_referential_loop_stores,
 )
@@ -41,8 +42,16 @@ class PartialEvaluationPass(Pass[Block, Block]):
 
         Raises:
             ValidationError: If the block kind is not ``AFFINE`` /
-                ``HIERARCHICAL``, or if a classical element store inside a
-                loop reads an element of the array it writes.
+                ``HIERARCHICAL``, or if one of the classical pre-fold
+                rejection checks fires (a classical element store inside a
+                loop reads an element of the array it writes, or a loop
+                body rebinds a classical scalar whose pre-loop value it
+                still reads).
+            QubitRebindError: If a runtime if branch or a loop body
+                rebinds a quantum variable to a different quantum value —
+                a fresh allocation or another existing register — in a
+                shape the control-flow discard check cannot prove safe
+                (see ``reject_control_flow_quantum_discard``).
         """
         # HIERARCHICAL is accepted so that the self-recursion unroll loop
         # can interleave inline (which leaves one CallBlockOperation per
@@ -73,6 +82,15 @@ class PartialEvaluationPass(Pass[Block, Block]):
         reject_loop_carried_classical_rebinds(
             input.operations, self._bindings, output_values=input.output_values
         )
+
+        # Reject branch-internal and loop-body quantum discards BEFORE
+        # if-lowering, with bindings, so compile-time branches (dead or
+        # taken) are classified exactly the way CompileTimeIfLoweringPass
+        # will lower them and only genuine runtime
+        # (measurement-derived-condition) branches are checked. Running
+        # here also makes the targeted error fire at the earliest pass
+        # that sees the pattern.
+        reject_control_flow_quantum_discard(input.operations, self._bindings)
 
         # Keep ``SliceArrayOperation`` nodes through partial_eval so
         # the downstream ``SliceBorrowCheckPass`` can use them as

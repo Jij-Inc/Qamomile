@@ -9,7 +9,12 @@ from .composite_gate import (
     CompositeGateType,
     ResourceMetadata,
 )
-from .control_flow import ForItemsOperation, HasNestedOps, LoopCarriedRebind
+from .control_flow import (
+    BranchRebind,
+    ForItemsOperation,
+    HasNestedOps,
+    LoopCarriedRebind,
+)
 from .expval import ExpvalOp
 from .gate import (
     ConcreteControlledU,
@@ -46,6 +51,7 @@ __all__ = [
     "StoreArrayElementOperation",
     "CastOperation",
     # Control flow operations
+    "BranchRebind",
     "ForItemsOperation",
     "HasNestedOps",
     "LoopCarriedRebind",
