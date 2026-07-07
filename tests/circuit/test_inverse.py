@@ -3603,6 +3603,37 @@ def test_inverse_stdlib_algorithm_roundtrip_cross_backend(
     assert np.isclose(expval_result, float(width), atol=1e-6)
 
 
+def test_inverse_nested_invoke_keeps_vector_target_width() -> None:
+    """Nested inverse invokes count vector target width without parameters."""
+    if QiskitTranspiler is None:
+        pytest.skip("qiskit not installed")
+
+    sample_kernel, _ = _givens_rotations_roundtrip_kernels()
+    block = QiskitTranspiler().to_block(
+        sample_kernel,
+        bindings={"givens_ij": np.array([[0, 1]]), "givens_theta": [0.37]},
+    )
+    inverse_ops: list[InverseBlockOperation] = []
+
+    def collect(operations: list[object]) -> None:
+        """Collect inverse operations recursively from nested control flow."""
+        for operation in operations:
+            if isinstance(operation, InverseBlockOperation):
+                inverse_ops.append(operation)
+                if operation.implementation_block is not None:
+                    collect(list(operation.implementation_block.operations))
+            elif hasattr(operation, "nested_op_lists"):
+                for nested in operation.nested_op_lists():
+                    collect(list(nested))
+
+    collect(list(block.operations))
+
+    inner = next(op for op in inverse_ops if op.custom_name == "givens_rotation_inverse")
+    assert inner.num_target_qubits == 2
+    assert len(inner.target_qubits) == 1
+    assert len(inner.parameters) == 3
+
+
 # ---------------------------------------------------------------------------
 # InverseBlockOperation construction validation and _static_quantum_width
 # ---------------------------------------------------------------------------

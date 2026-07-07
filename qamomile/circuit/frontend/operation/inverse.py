@@ -241,6 +241,28 @@ def _static_quantum_width(value: ValueBase) -> int | None:
     return 1
 
 
+def _inverse_invoke_target_width(
+    op: InvokeOperation,
+    current_qubits: Sequence[ValueBase],
+) -> int:
+    """Return the scalar target width for an inverse invocation.
+
+    Args:
+        op (InvokeOperation): Invocation being inverted.
+        current_qubits (Sequence[ValueBase]): Current result-side quantum
+            values at the inverse call site.
+
+    Returns:
+        int: Static scalar target width when all target values have known
+            width, otherwise the invocation's recorded target width.
+    """
+    target_values = list(current_qubits[len(op.control_qubits) :])
+    widths = [_static_quantum_width(value) for value in target_values]
+    if widths and all(width is not None for width in widths):
+        return sum(cast(int, width) for width in widths)
+    return op.num_target_qubits
+
+
 def _fresh_result_value(
     value: ValueBase,
     value_map: dict[str, ValueBase],
@@ -866,7 +888,7 @@ class _BlockInverter:
                 operands=[*current_qubits, *mapped_params],
                 results=new_results,
                 num_control_qubits=op.num_control_qubits,
-                num_target_qubits=op.num_target_qubits,
+                num_target_qubits=_inverse_invoke_target_width(op, current_qubits),
                 custom_name=str(attrs.get("custom_name", op.name)),
                 source_block=source_block,
                 implementation_block=body,
