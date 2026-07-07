@@ -103,8 +103,14 @@ class TestEmptyBoundDictForItems:
             "Empty bound Dict ForItems should collapse to a VSkip node."
         )
 
-    def test_empty_dict_under_fold_loops_true_still_folds(self):
-        """fold_loops=True keeps the canonical folded view, even when empty."""
+    def test_empty_dict_under_fold_loops_true_renders_nothing(self):
+        """fold_loops=True renders no ForItems box for an empty bound Dict.
+
+        The zero-trip trace guard (``should_trace_items_loop``, mirroring
+        ``qmc.range``'s guard) skips tracing the body of a
+        compile-time-known EMPTY dict entirely, so no ForItemsOperation
+        exists in the IR to draw — the same behavior as ``range(0)``.
+        """
         vc = _build_visual_circuit(kernel_with_dict, fold_loops=True, n=3, coeffs={})
         nodes = list(_walk_visual_nodes(vc.children))
         folded_for_items = [
@@ -112,9 +118,9 @@ class TestEmptyBoundDictForItems:
             for n in nodes
             if isinstance(n, VFoldedBlock) and n.kind == VFoldedKind.FOR_ITEMS
         ]
-        assert len(folded_for_items) == 1, (
-            "fold_loops=True should still render the ForItems loop as a "
-            f"single folded box; got {len(folded_for_items)}: {folded_for_items}"
+        assert not folded_for_items, (
+            "An empty bound Dict is skipped at trace time; no ForItems "
+            f"box should exist to fold; got: {folded_for_items}"
         )
 
     def test_non_empty_dict_unfolds_to_one_iteration_per_entry(self):

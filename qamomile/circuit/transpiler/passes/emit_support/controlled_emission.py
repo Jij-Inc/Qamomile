@@ -43,6 +43,9 @@ from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
 )
+from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
+    map_array_result_group,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
@@ -433,12 +436,7 @@ def _map_operand_result_groups(
 
     for result, group in zip(results, index_groups):
         if isinstance(result, ArrayValue):
-            for j, phys in enumerate(group):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if group:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = group[0]
+            map_array_result_group(result.uuid, group, qubit_map)
         elif group:
             qubit_map[QubitAddress(result.uuid)] = group[0]
 
@@ -1250,8 +1248,8 @@ def emit_controlled_pauli_evolve(
         EmitError: If ``control_indices`` is empty, the observable does
             not resolve to a Hamiltonian, gamma cannot be resolved, the
             Hamiltonian is non-Hermitian (a term or the constant has a
-            non-real coefficient), the register size does not match the
-            Hamiltonian, a term qubit cannot be resolved, or (for two or
+            non-real coefficient), the Hamiltonian is larger than the
+            register, a term qubit cannot be resolved, or (for two or
             more controls, or a nonzero constant term) the angle is
             runtime-parametric and the backend's dense multi-controlled
             path requires a compile-time-numeric angle.
@@ -1259,6 +1257,7 @@ def emit_controlled_pauli_evolve(
     import qamomile.observable as qm_o
     from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
         _resolve_gamma,
+        validate_hamiltonian_within_register,
     )
     from qamomile.observable.hamiltonian import (
         HERMITIAN_IMAG_ATOL,
@@ -1333,13 +1332,11 @@ def emit_controlled_pauli_evolve(
     qubit_indices = _expand_quantum_operands_to_phys(
         emit_pass, op.qubits, qubit_map, bindings, operation="PauliEvolveOp"
     )
-    if len(qubit_indices) != hamiltonian.num_qubits:
-        raise EmitError(
-            f"PauliEvolveOp qubit count mismatch: qubit register has "
-            f"{len(qubit_indices)} qubits but Hamiltonian acts on "
-            f"{hamiltonian.num_qubits} qubits.",
-            operation="PauliEvolveOp",
-        )
+    # A Hamiltonian smaller than the register is embedded by acting only
+    # on its declared qubits (the leading ``num_qubits`` entries of
+    # ``qubit_indices``); the register-wide result mapping at the end of
+    # this function keeps the untouched tail resolvable.
+    validate_hamiltonian_within_register(hamiltonian.num_qubits, len(qubit_indices))
 
     for operators, coeff in hamiltonian:
         # Validate Hermiticity of every term (including ones skipped below)
@@ -1692,12 +1689,7 @@ def emit_controlled_u_with_symbolic_indices(
             break
         indices = target_index_groups[i]
         if isinstance(result, _ArrayValue):
-            for j, phys in enumerate(indices):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if indices:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = indices[0]
+            map_array_result_group(result.uuid, indices, qubit_map)
         else:
             if indices:
                 qubit_map[QubitAddress(result.uuid)] = indices[0]
@@ -1768,10 +1760,11 @@ def emit_controlled_u_multi_arg(
     # may be a scalar Value (one physical qubit) or an ArrayValue
     # (one physical qubit per element).
     control_operands = op.operands[: op.num_control_args]
-    control_phys: list[int] = []
-    for q in control_operands:
-        indices = _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
-        control_phys.extend(indices)
+    control_index_groups = [
+        _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
+        for q in control_operands
+    ]
+    control_phys = [index for group in control_index_groups for index in group]
 
     if len(control_phys) != nc:
         raise EmitError(
@@ -1836,20 +1829,13 @@ def emit_controlled_u_multi_arg(
     # to the result so downstream ``view_out[i]`` lookups resolve.
     from qamomile.circuit.ir.value import ArrayValue as _ArrayValue
 
-    control_results = op.results[: op.num_control_args]
-    for src, dst in zip(control_operands, control_results):
-        if isinstance(src, _ArrayValue):
-            for addr, idx in list(qubit_map.items()):
-                if addr.matches_array(src.uuid):
-                    result_addr = QubitAddress(dst.uuid, addr.element_index)
-                    if result_addr not in qubit_map:
-                        qubit_map[result_addr] = idx
-        else:
-            src_addr = QubitAddress(src.uuid)
-            if src_addr in qubit_map:
-                dst_addr = QubitAddress(dst.uuid)
-                if dst_addr not in qubit_map:
-                    qubit_map[dst_addr] = qubit_map[src_addr]
+    control_results = []
+    control_result_groups = []
+    for result, group in zip(op.results[: op.num_control_args], control_index_groups):
+        if result.type.is_quantum():
+            control_results.append(result)
+            control_result_groups.append(group)
+    _map_operand_result_groups(control_results, control_result_groups, qubit_map)
 
     sub_quantum_results = [
         r for r in op.results[op.num_control_args :] if r.type.is_quantum()
@@ -1859,12 +1845,7 @@ def emit_controlled_u_multi_arg(
             break
         indices = target_index_groups[i]
         if isinstance(result, _ArrayValue):
-            for j, phys in enumerate(indices):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if indices:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = indices[0]
+            map_array_result_group(result.uuid, indices, qubit_map)
         else:
             if indices:
                 qubit_map[QubitAddress(result.uuid)] = indices[0]
@@ -2967,9 +2948,16 @@ def _populate_input_qubit_map(
             consecutive physical index starting at 0.
 
     Raises:
-        EmitError: Four failure modes are surfaced loudly rather than
+        EmitError: Five failure modes are surfaced loudly rather than
             silently mis-mapping qubits:
 
+            * A quantum input is a rank>1 register (its ``ArrayValue``
+              has more than one shape dimension). Elements are keyed as
+              ``QubitAddress(uuid, i)`` with a single flat index, so a
+              higher-rank register would silently alias distinct
+              elements onto the same physical qubit. The frontend
+              rejects such registers at construction time; this guard
+              covers hand-built or deserialized IR.
             * A resolved ``Vector[Qubit]`` length (from a constant shape
               or a binding) is negative. ``range(length)`` would be
               empty and ``qubit_idx += length`` would step the cursor
@@ -2993,6 +2981,22 @@ def _populate_input_qubit_map(
 
     scalar_count = sum(1 for iv in quantum_inputs if not isinstance(iv, ArrayValue))
     vector_inputs = [iv for iv in quantum_inputs if isinstance(iv, ArrayValue)]
+
+    # Rank guard in its own loop, before any length resolution: the
+    # element addressing below keys each element as
+    # ``QubitAddress(uuid, i)`` with a single flat index, so a rank>1
+    # register cannot be mapped without aliasing distinct elements onto
+    # the same physical qubit.
+    for iv in vector_inputs:
+        if len(iv.shape) > 1:
+            raise EmitError(
+                f"Inner block input {iv.name!r} is a rank-{len(iv.shape)} "
+                f"quantum register: the qubit addressing path is rank-1, "
+                f"so a higher-rank register would silently alias distinct "
+                f"elements onto the same physical qubit. Use a 1-D "
+                f"Vector[Qubit] with explicit index arithmetic instead.",
+                operation="ControlledUOperation",
+            )
 
     resolved_lengths: dict[str, int] = {}
     unresolved: list[ArrayValue] = []
@@ -3333,12 +3337,7 @@ def _map_controlled_u_results(
             # that subscript the result via ``result[i]`` (which
             # produces ``Value(parent_array=result, element_indices=…)``)
             # and callers that address the whole array both resolve.
-            for j, phys in enumerate(indices):
-                qubit_map[QubitAddress(result.uuid, j)] = phys
-            if indices:
-                base_addr = QubitAddress(result.uuid)
-                if base_addr not in qubit_map:
-                    qubit_map[base_addr] = indices[0]
+            map_array_result_group(result.uuid, indices, qubit_map)
         else:
             if indices:
                 qubit_map[QubitAddress(result.uuid)] = indices[0]

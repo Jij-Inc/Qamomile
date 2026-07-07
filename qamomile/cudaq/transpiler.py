@@ -78,6 +78,7 @@ from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     _resolve_gamma,
+    validate_hamiltonian_within_register,
 )
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
@@ -1238,8 +1239,10 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 
         Raises:
             EmitError: If the observable is not a Hamiltonian, gamma cannot
-                be resolved, the qubit count mismatches the Hamiltonian, or a
-                coefficient is non-real (non-Hermitian).
+                be resolved, the Hamiltonian is larger than the qubit
+                register, a term coefficient or the constant (identity)
+                term is non-real (non-Hermitian), or a register qubit
+                cannot be resolved from the qubit map.
         """
         import qamomile.observable as qm_o
         from qamomile.observable.hamiltonian import (
@@ -1267,17 +1270,14 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         input_array = op.qubits
         assert isinstance(input_array, ArrayValue)
         num_h_qubits = hamiltonian.num_qubits
+        register_qubit_count = num_h_qubits
         if input_array.shape:
             n_resolved = self._resolver.resolve_int_value(
                 input_array.shape[0], bindings
             )
-            if n_resolved is not None and n_resolved != num_h_qubits:
-                raise EmitError(
-                    f"PauliEvolveOp qubit count mismatch: "
-                    f"qubit register has {n_resolved} qubits but "
-                    f"Hamiltonian acts on {num_h_qubits} qubits.",
-                    operation="PauliEvolveOp",
-                )
+            if n_resolved is not None:
+                register_qubit_count = n_resolved
+                validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
         for operators, coeff in hamiltonian:
             if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
@@ -1296,17 +1296,18 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         root_av, slice_start, slice_step = self._resolver.resolve_slice_chain(
             input_array, bindings, operation="PauliEvolveOp"
         )
-        qubit_indices: list[int] = []
-        for i in range(num_h_qubits):
+        register_qubit_indices: list[int] = []
+        for i in range(register_qubit_count):
             addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
             if addr in qubit_map:
-                qubit_indices.append(qubit_map[addr])
+                register_qubit_indices.append(qubit_map[addr])
             else:
                 raise EmitError(
                     f"Cannot resolve qubit index {i} for PauliEvolveOp. "
                     f"Key '{addr!s}' not found in qubit_map.",
                     operation="PauliEvolveOp",
                 )
+        qubit_indices = register_qubit_indices[:num_h_qubits]
 
         emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
         for operators, coeff in hamiltonian:
@@ -1342,7 +1343,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         result_root, result_start, result_step = self._resolver.resolve_slice_chain(
             result_array, bindings, operation="PauliEvolveOp"
         )
-        for i, phys_idx in enumerate(qubit_indices):
+        for i, phys_idx in enumerate(register_qubit_indices):
             direct_addr = QubitAddress(result_array.uuid, i)
             if direct_addr not in qubit_map:
                 qubit_map[direct_addr] = phys_idx
@@ -2504,13 +2505,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             bindings,
             operation="PauliEvolveOp",
         )
-        if len(qubit_indices) != hamiltonian.num_qubits:
-            raise EmitError(
-                f"PauliEvolveOp qubit count mismatch: qubit register has "
-                f"{len(qubit_indices)} qubits but Hamiltonian acts on "
-                f"{hamiltonian.num_qubits} qubits.",
-                operation="PauliEvolveOp",
-            )
+        # A Hamiltonian smaller than the register is embedded by acting
+        # only on its declared qubits (the leading ``num_qubits`` slots).
+        validate_hamiltonian_within_register(hamiltonian.num_qubits, len(qubit_indices))
         for operators, coeff in hamiltonian:
             if abs(coeff.imag) > 1e-10:
                 raise EmitError(

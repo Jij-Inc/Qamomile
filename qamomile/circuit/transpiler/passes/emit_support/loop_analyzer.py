@@ -23,6 +23,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     RuntimeClassicalExpr,
 )
+from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
@@ -69,6 +70,46 @@ class LoopAnalyzer:
             return True
         if self._has_loop_var_condition(op.operations, loop_uuid):
             return True
+        if self._has_loop_var_dict_getitem(op.operations, loop_uuid):
+            return True
+        return False
+
+    def _has_loop_var_dict_getitem(
+        self,
+        operations: list[Operation],
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """True when a dict subscript lookup key depends on the loop var.
+
+        A ``DictGetItemOperation`` resolves its key against the dict's
+        bound data at emit time, which requires a concrete Python value
+        per iteration. A native backend loop (e.g. Qiskit ``for_loop``)
+        keeps the loop variable as a backend loop parameter, which
+        cannot index a Python dict — so the loop must be unrolled.
+
+        Args:
+            operations (list[Operation]): Loop-body operations to scan.
+            loop_var_uuid (str | None): UUID of the enclosing loop
+                variable, or None for legacy IR without
+                ``loop_var_value``.
+
+        Returns:
+            bool: True if any dict lookup key depends on the loop
+                variable.
+        """
+        for op in operations:
+            if isinstance(op, DictGetItemOperation):
+                if any(
+                    self._value_depends_on_loop_var(key_value, loop_var_uuid)
+                    for key_value in op.operands[1:]
+                ):
+                    return True
+            if isinstance(op, HasNestedOps):
+                if any(
+                    self._has_loop_var_dict_getitem(op_list, loop_var_uuid)
+                    for op_list in op.nested_op_lists()
+                ):
+                    return True
         return False
 
     def _has_loop_var_condition(

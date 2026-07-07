@@ -9,6 +9,7 @@ from typing import Generic, Iterator, TypeVar, overload
 from qamomile._utils import is_plain_int
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
@@ -173,7 +174,33 @@ class ArrayBase(Handle, Generic[T]):
     ] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Post-initialization to set up the array."""
+        """Validate the wrapped value and emit its init operation.
+
+        Emits a ``QInitOperation`` for quantum element types and a
+        ``CInitOperation`` for classical ones, then resolves the element
+        handle type used for element access.
+
+        Raises:
+            NotImplementedError: If the wrapped ``ArrayValue`` is a
+                quantum register with more than one dimension. The
+                quantum addressing path is rank-1, so a higher-rank
+                register would silently alias distinct elements onto
+                the same physical qubit. The check keys off
+                ``value.shape`` (not ``_shape``) so a rank>1 quantum
+                value cannot be smuggled in through a ``Vector``
+                wrapper either.
+        """
+
+        if self.value.type == QubitType() and len(self.value.shape) > 1:
+            raise NotImplementedError(
+                f"Rank-{len(self.value.shape)} quantum registers are not "
+                f"supported (register {self.value.name!r}): the quantum "
+                f"addressing path is rank-1, so a higher-rank register "
+                f"would silently alias distinct elements onto the same "
+                f"physical qubit. Allocate a 1-D Vector[Qubit] of the "
+                f"total size and compute flat indices explicitly "
+                f"(e.g. q[i * ncols + j])."
+            )
 
         if self.value.type == QubitType():
             qinit_op = QInitOperation(operands=[], results=[self.value])
@@ -644,9 +671,9 @@ class ArrayBase(Handle, Generic[T]):
         return self.element_type(value=element_value, parent=self, indices=indices)
 
     def _return_element(self, indices: tuple[UInt, ...], value: T) -> None:
-        """Validate, consume, and release a borrowed element.
+        """Write an element back into the array at the given indices.
 
-        Order: validate -> consume -> borrow release (fixed sequence).
+        Order: validate -> store/consume -> borrow release (fixed sequence).
 
         Three paths for quantum arrays:
 
@@ -657,14 +684,31 @@ class ArrayBase(Handle, Generic[T]):
         3. **Unborrowed index**: consumes the handle without identity check.
            Allows writing a fresh qubit to an index that was never borrowed.
 
+        For **classical arrays** (``Bit`` / ``UInt`` / ``Float`` elements)
+        the assignment is a genuine value store, not a borrow return:
+        classical values are freely copyable, so
+        :meth:`_store_classical_element` emits a
+        ``StoreArrayElementOperation`` producing a fresh SSA version of the
+        array whose contents equal the old array with the addressed element
+        replaced.  The right-hand side handle stays usable afterwards.
+
         Args:
-            indices: The indices where the element is being returned.
-            value: The handle being written back.
+            indices (tuple[UInt, ...]): The indices where the element is
+                being written.
+            value (T): The handle being written.  For classical arrays a
+                plain Python literal compatible with the element type is
+                also accepted (coerced to a constant handle).
 
         Raises:
             NotImplementedError: If any index is a negative compile-time
-                constant — Python-style negative indexing is not
-                supported (see ``_reject_negative_const_indices``).
+                constant (see ``_reject_negative_const_indices``), or —
+                for classical arrays — if the write targets a slice view
+                or a multi-dimensional array (not supported yet).
+            IndexError: For classical arrays, if a constant index is out
+                of range for a constant-length array.
+            TypeError: For classical arrays, if the right-hand side is not
+                a handle of the element type or a compatible Python
+                literal.
             QubitConsumedError: If the array was already consumed.
             AffineTypeError: If the index was borrowed **and** the value
                 was not borrowed from this array (``value.parent is not self``).
@@ -724,6 +768,13 @@ class ArrayBase(Handle, Generic[T]):
             else target_key
         )
 
+        if not self.value.type.is_quantum():
+            # Classical element assignment is a real value store: emit the
+            # IR operation and advance ``self.value`` to the new SSA
+            # version.  This must happen before the borrow-release tail so
+            # a raised store error leaves no half-updated handle state.
+            self._store_classical_element(indices, value)
+
         if self.value.type.is_quantum():
             if release_key in self._borrowed_indices:
                 # Borrow-return path: element was borrowed, validate identity
@@ -769,8 +820,159 @@ class ArrayBase(Handle, Generic[T]):
             if not _is_destroyed_slot_owner(current):
                 del self._borrowed_indices[release_key]
         else:
-            # Classical types are freely copyable — no linear enforcement needed
+            # No borrow recorded for this slot.  For quantum arrays the
+            # write was already validated above; for classical arrays the
+            # store has been emitted and borrows carry no obligations.
             pass
+
+    def _store_classical_element(self, indices: tuple[UInt, ...], value: T) -> None:
+        """Emit the IR store for a classical array element assignment.
+
+        Builds a ``StoreArrayElementOperation`` consuming the current
+        ``ArrayValue`` version, the (coerced) right-hand side scalar, and
+        the index, and producing a fresh SSA version of the array.  The
+        handle's ``value`` is rebound to the new version so subsequent
+        reads and the kernel's return trace the post-store contents.
+
+        The result value deliberately drops ``scalar`` (parameter-binding)
+        and ``array_runtime`` (``const_array`` / element-identity) metadata
+        inherited from the source version: both describe the *pre-store*
+        contents, and keeping them would let downstream compile-time
+        resolution silently read stale data.  ``ConstantFoldingPass``
+        re-attaches an updated ``const_array`` when the store folds.
+
+        Args:
+            indices (tuple[UInt, ...]): The element indices being written.
+                Negative constant indices were already rejected by the
+                caller (``_return_element``).
+            value (T): The right-hand side.  Either a handle of the
+                element type or a Python literal coercible to it.
+
+        Raises:
+            NotImplementedError: If this array is a slice view, or the
+                write is multi-dimensional (``Matrix`` / ``Tensor``) —
+                classical element stores support 1-D root arrays only for
+                now.
+            IndexError: If a constant index is out of range for a
+                constant-length array.
+            TypeError: If ``value`` cannot be coerced to the element type
+                (see :meth:`_coerce_classical_element_value`).
+        """
+        index_str = self._format_index(indices)
+        display = self.value.name or "array"
+
+        if self.value.is_slice():
+            raise NotImplementedError(
+                f"Classical array element assignment through a slice view "
+                f"('{display}[{index_str}] = ...') is not supported yet.  "
+                f"Assign through the root array instead."
+            )
+        if len(indices) != 1:
+            raise NotImplementedError(
+                f"Classical element assignment to '{display}[{index_str}]' "
+                f"is only supported for 1-D arrays (Vector) for now; "
+                f"got {len(indices)} indices."
+            )
+
+        # Reject a constant index that overflows a constant dimension,
+        # mirroring the read-side check in ``_get_element``.  Without this
+        # the store would be built into the IR and only fail at runtime
+        # with a far less local error.
+        if self._shape:
+            idx_const = _as_int_const(indices[0])
+            dim_const = _as_int_const(self._shape[0])
+            if (
+                idx_const is not None
+                and dim_const is not None
+                and idx_const >= dim_const
+            ):
+                raise IndexError(
+                    f"Index {idx_const} is out of range for "
+                    f"'{display}' of length {dim_const}."
+                )
+
+        stored = self._coerce_classical_element_value(value, index_str)
+
+        result_value = self.value.next_version()
+        result_value = dataclasses.replace(
+            result_value,
+            metadata=dataclasses.replace(
+                result_value.metadata, scalar=None, array_runtime=None
+            ),
+        )
+
+        store_op = StoreArrayElementOperation(
+            operands=[
+                self.value,
+                stored.value,
+                *(idx.value for idx in indices),
+            ],
+            results=[result_value],
+        )
+        get_current_tracer().add_operation(store_op)
+        self.value = result_value
+
+    def _coerce_classical_element_value(self, value: object, index_str: str) -> Handle:
+        """Coerce the right-hand side of a classical element write to a handle.
+
+        Accepts either a handle whose type matches this array's element
+        type, or a Python literal that can be losslessly promoted to it:
+        ``bool`` / ``0`` / ``1`` for ``Bit``, a plain non-negative ``int``
+        for ``UInt``, and ``int`` / ``float`` for ``Float``.  ``bool`` is
+        never accepted where an integer is expected (mirroring the index
+        handling in ``_make_uint_index``).
+
+        Args:
+            value (object): The right-hand side of the assignment.
+            index_str (str): Formatted index string for error messages.
+
+        Returns:
+            Handle: A handle of the element type whose ``value`` carries
+                the stored scalar (a constant ``Value`` for literals).
+
+        Raises:
+            TypeError: If ``value`` is a handle of a different type, or a
+                Python object that cannot be promoted to the element type.
+        """
+        display = self.value.name or "array"
+        if isinstance(value, Handle):
+            if not isinstance(value, self.element_type):
+                raise TypeError(
+                    f"Cannot assign {type(value).__name__} to "
+                    f"'{display}[{index_str}]' of element type "
+                    f"{self.element_type.__name__}."
+                )
+            return value
+
+        if self.element_type is Bit:
+            if isinstance(value, bool):
+                return Bit(
+                    value=Value(type=BitType(), name="").with_const(value),
+                    init_value=value,
+                )
+            if is_plain_int(value) and isinstance(value, int) and value in (0, 1):
+                return Bit(
+                    value=Value(type=BitType(), name="").with_const(bool(value)),
+                    init_value=bool(value),
+                )
+        elif self.element_type is UInt:
+            if is_plain_int(value) and isinstance(value, int) and value >= 0:
+                return UInt(
+                    value=Value(type=UIntType(), name="").with_const(int(value)),
+                    init_value=int(value),
+                )
+        elif self.element_type is Float:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return Float(
+                    value=Value(type=FloatType(), name="").with_const(float(value)),
+                    init_value=float(value),
+                )
+
+        raise TypeError(
+            f"Cannot assign {type(value).__name__} ({value!r}) to "
+            f"'{display}[{index_str}]' of element type "
+            f"{self.element_type.__name__}."
+        )
 
     def _copy_subclass_state_to(self, new_handle: Handle) -> None:
         """Copy ArrayBase-specific state to a new handle created by consume()."""
@@ -934,9 +1136,15 @@ class Vector(ArrayBase[T]):
     def __setitem__(self, index: "int | UInt | slice", value: "T | Vector[T]") -> None:
         """Set element at the given index, or return a view via slice assignment.
 
-        For an integer / ``UInt`` index this is the existing element
-        borrow-return path: the right-hand side handle is validated
-        against the borrow recorded for that index and consumed.
+        For an integer / ``UInt`` index on a **quantum** vector this is
+        the element borrow-return path: the right-hand side handle is
+        validated against the borrow recorded for that index and
+        consumed.  On a **classical** vector (``Bit`` / ``UInt`` /
+        ``Float`` elements) the same syntax is a genuine value store: a
+        ``StoreArrayElementOperation`` is emitted producing a fresh SSA
+        version of the array, and the right-hand side (a handle of the
+        element type, or a compatible Python literal) stays usable
+        afterwards.  See :meth:`ArrayBase._store_classical_element`.
 
         For a ``slice`` index, the assignment is treated as the
         **explicit borrow-return of a slice view**.  The right-hand
@@ -1587,19 +1795,24 @@ class Vector(ArrayBase[T]):
 
 @dataclasses.dataclass
 class Matrix(ArrayBase[T]):
-    """2-dimensional array type.
+    """2-dimensional array type for classical element types.
+
+    Quantum element types are rejected: constructing a
+    ``Matrix[Qubit]`` raises ``NotImplementedError`` (see
+    ``ArrayBase.__post_init__``) because the quantum addressing path is
+    rank-1. Use a 1-D ``Vector[Qubit]`` with explicit index arithmetic
+    instead.
 
     Example:
         ```python
         import qamomile as qm
 
-        # Create a 3x4 matrix of qubits
-        matrix: qm.Matrix[qm.Qubit] = qm.Matrix(shape=(3, 4))
+        # Create a 3x4 matrix of floats
+        matrix: qm.Matrix[qm.Float] = qm.Matrix(shape=(3, 4))
 
         # Access elements (always requires 2 indices)
-        q = matrix[0, 1]
-        q = qm.h(q)
-        matrix[0, 1] = q
+        x = matrix[0, 1]
+        matrix[0, 1] = x
         ```
     """
 
@@ -1620,7 +1833,19 @@ class Matrix(ArrayBase[T]):
         return self._get_element((i, j))
 
     def __setitem__(self, index: tuple[int | UInt, int | UInt], value: T) -> None:
-        """Set element at the given (row, col) index."""
+        """Set element at the given (row, col) index.
+
+        Args:
+            index (tuple[int | UInt, int | UInt]): The (row, col) element
+                position.
+            value (T): The handle being written back (the borrow-return
+                path for quantum matrices).
+
+        Raises:
+            NotImplementedError: For classical element types — multi-
+                dimensional classical element stores are not supported
+                yet (see ``ArrayBase._store_classical_element``).
+        """
         i, j = index
         if isinstance(i, int):
             i = self._make_uint_index(i)
@@ -1631,19 +1856,24 @@ class Matrix(ArrayBase[T]):
 
 @dataclasses.dataclass
 class Tensor(ArrayBase[T]):
-    """N-dimensional array type (3 or more dimensions).
+    """N-dimensional array type (3 or more dimensions) for classical element types.
+
+    Quantum element types are rejected: constructing a
+    ``Tensor[Qubit]`` raises ``NotImplementedError`` (see
+    ``ArrayBase.__post_init__``) because the quantum addressing path is
+    rank-1. Use a 1-D ``Vector[Qubit]`` with explicit index arithmetic
+    instead.
 
     Example:
         ```python
         import qamomile as qm
 
-        # Create a 2x3x4 tensor of qubits
-        tensor: qm.Tensor[qm.Qubit] = qm.Tensor(shape=(2, 3, 4))
+        # Create a 2x3x4 tensor of floats
+        tensor: qm.Tensor[qm.Float] = qm.Tensor(shape=(2, 3, 4))
 
         # Access elements (requires all indices)
-        q = tensor[0, 1, 2]
-        q = qm.h(q)
-        tensor[0, 1, 2] = q
+        x = tensor[0, 1, 2]
+        tensor[0, 1, 2] = x
         ```
     """
 
@@ -1664,7 +1894,21 @@ class Tensor(ArrayBase[T]):
         return self._get_element(converted)
 
     def __setitem__(self, index: tuple[int | UInt, ...], value: T) -> None:
-        """Set element at the given indices."""
+        """Set element at the given indices.
+
+        Args:
+            index (tuple[int | UInt, ...]): One index per tensor
+                dimension.
+            value (T): The handle being written back (the borrow-return
+                path for quantum tensors).
+
+        Raises:
+            IndexError: If the number of indices does not match the
+                tensor rank.
+            NotImplementedError: For classical element types — multi-
+                dimensional classical element stores are not supported
+                yet (see ``ArrayBase._store_classical_element``).
+        """
         if len(index) != len(self._shape):
             raise IndexError(f"Expected {len(self._shape)} indices, got {len(index)}")
         converted = tuple(

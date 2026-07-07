@@ -745,7 +745,7 @@ def _network_decomposition_controlled_z(
         ladder_qubits[0], ladder_qubits[1], ancillas[0]
     )
 
-    qs[0:n] = ladder_qubits
+    qs[0 : n - 1] = ladder_qubits
     qs[n - 1] = target_qubit
     return qs
 
@@ -1332,8 +1332,8 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         id="simple_for_loop",
         qkernel=simple_for_loop,
         description="Simply for loop with parametric m iterations applying X gate on a single qubit",
-        param_names=("n", "m"),
-        min_params={"n": 1, "m": 2},
+        param_names=("m",),
+        min_params={"m": 2},
         tags=("clifford", "parametric"),
     ),
     QKernelEntry(
