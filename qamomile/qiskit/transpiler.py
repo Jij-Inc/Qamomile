@@ -90,6 +90,8 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
     ) -> None:
         """Emit a for loop using Qiskit's native for_loop context manager."""
         from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+            _register_carry_results,
+            _resolve_carry_iter_args,
             resolve_loop_bounds,
         )
 
@@ -101,6 +103,12 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         indexset = range(start, stop, step)
         if len(indexset) == 0:
+            # Zero-trip passthrough: post-loop reads of the carried
+            # results must observe the loop-entry values (mirrors the
+            # base emit_for).
+            _register_carry_results(
+                op, _resolve_carry_iter_args(self, op, bindings), bindings
+            )
             return
 
         if force_unroll:

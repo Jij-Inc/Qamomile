@@ -310,6 +310,67 @@ class TestCarriedAccumulation:
 
         assert _sample_single(kernel, bindings={"n": 1}) == 1
 
+    def test_shared_constant_initializer_carries_split(self):
+        """Two carries sharing one CONSTANT initializer split and both work.
+
+        The per-candidate promotion wraps each variable's constant
+        binding in its own symbolic handle, so `b = a` no longer shares
+        an IR value with `a` inside the body and each carry gets its own
+        back-edge: a = 1 + n, b = 1 + 10 n.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> tuple[qmc.UInt, qmc.UInt]:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            a = qmc.uint(1)
+            b = a
+            for _i in qmc.range(n):
+                a = a + 1
+                b = b + 10
+            return a, b
+
+        assert _sample_single(kernel, bindings={"n": 3}) == (4, 31)
+
+    def test_annotated_assign_accumulation(self):
+        """`total: qmc.UInt = total + i` (AnnAssign) carries like plain Assign."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                total: qmc.UInt = total + i  # noqa: F821 - traced read-before-write
+            return total
+
+        assert _sample_single(kernel, bindings={"n": 4}) == 6
+
+    def test_emit_zero_trip_carried_loop_passthrough(self):
+        """A carried loop whose bound resolves to zero AT EMIT passes through.
+
+        The first loop leaves ``total == 0`` for ``n=2`` (the guard
+        never fires), so the second (carried, quantum-absorbed) loop
+        unrolls to zero iterations at emit; its carry result must still
+        resolve to the loop-entry value, giving rx(0.0) and a
+        deterministic 0.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                if i > 1:
+                    total = total + i
+            angle = 0.0
+            for _j in qmc.range(total):
+                angle = angle + 3.141592653589793
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": 2}) == 0
+
     def test_carry_slots_on_built_block(self):
         """build() promotes the classical rebind into a carry slot."""
 
@@ -389,6 +450,54 @@ class TestRejectedRebinds:
 
         with pytest.raises(QamomileCompileError, match="depends on runtime parameter"):
             _transpile(kernel, parameters=["n"])
+
+    def test_shared_symbolic_initializer_carries_rejected(self):
+        """Two carried variables sharing one SYMBOLIC pre-loop value are rejected.
+
+        A runtime-parameter initializer cannot be split by the constant
+        promotion, so both records point at one value; the traced body
+        holds a single read site per expression, and UUID-keyed
+        substitution cannot give each variable its own back-edge —
+        miscompiling would make one variable's update read the other's
+        previous value.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt, x: qmc.UInt) -> tuple[qmc.UInt, qmc.UInt]:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            a = x
+            b = a
+            for _i in qmc.range(n):
+                a = a + 1
+                b = b + 10
+            return a, b
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"n": 3}, parameters=["x"])
+
+    def test_quantum_loop_carry_escaping_to_output_rejected(self):
+        """A quantum-segment loop's carried result cannot be a block output.
+
+        Emit-time unrolling computes the carried value while building
+        the circuit, so it has no runtime representation the classical
+        executor could surface; returning it would silently yield None.
+        """
+        from qamomile.circuit.transpiler.segments import (
+            MultipleQuantumSegmentsError,
+        )
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> tuple[qmc.Bit, qmc.UInt]:
+            q = qmc.qubit("q")
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                q = qmc.x(q)
+                total = total + i
+            return qmc.measure(q), total
+
+        with pytest.raises(MultipleQuantumSegmentsError, match="carries classical"):
+            _transpile(kernel, bindings={"n": 3})
 
     def test_while_condition_snapshot_saved_in_body_rejected(self):
         """Saving the while condition's entry value in the body is rejected.
@@ -721,6 +830,39 @@ class TestCarrySerialization:
             assert orig.body_arg.uuid == rest.body_arg.uuid
             assert orig.body_yield.uuid == rest.body_yield.uuid
             assert orig.result.uuid == rest.result.uuid
+
+    def test_mismatched_carry_slot_types_rejected_on_load(self):
+        """A payload whose carry slots disagree in type fails to decode."""
+        from qamomile.circuit.ir.serialize import from_dict, to_dict
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                total = total + i
+            return total
+
+        block = kernel.build(parameters=["n"])
+        transpiler = QiskitTranspiler()
+        affine = transpiler.inline(block)
+        payload = to_dict(affine)
+
+        loop_dict = next(
+            op for op in payload["block"]["operations"] if op["$type"] == "ForOperation"
+        )
+        measure_dict = next(
+            op
+            for op in payload["block"]["operations"]
+            if op["$type"] == "MeasureOperation"
+        )
+        # Point the carry's iter_arg at the measurement's Bit result: a
+        # UInt carry fed by a Bit value must be rejected at load time.
+        loop_dict["iter_arg_refs"] = [measure_dict["result_refs"][0]]
+
+        with pytest.raises(ValueError, match="mismatched slot types"):
+            from_dict(payload)
 
     @pytest.mark.parametrize("fmt", ["json", "msgpack"])
     def test_records_roundtrip(self, fmt):

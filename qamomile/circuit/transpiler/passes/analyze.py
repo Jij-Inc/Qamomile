@@ -1454,18 +1454,26 @@ def op_genuine_input_values(op: Operation) -> list[ValueBase]:
     Rebind-record values (loop-carried records on loop operations and
     branch records on ``IfOperation``s) ride along ``all_input_values``
     for cloning/substitution but are not reads, so they are excluded.
+    Carry slots follow the same split as :func:`_op_read_uuids`:
+    ``body_args`` / ``body_yields`` are body-internal formals (not
+    reads), while ``iter_args`` are genuine reads of pre-loop values
+    and stay in the list.
 
     Args:
         op (Operation): Operation to inspect.
 
     Returns:
-        list[ValueBase]: ``all_input_values`` minus rebind-record values.
+        list[ValueBase]: ``all_input_values`` minus rebind-record and
+            carry-formal values.
     """
     excluded: set[str] = set()
     if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
         for loop_record in op.loop_carried_rebinds:
             excluded.add(loop_record.before.uuid)
             excluded.add(loop_record.after.uuid)
+        for carry in op.iter_carries():
+            excluded.add(carry.body_arg.uuid)
+            excluded.add(carry.body_yield.uuid)
     if isinstance(op, IfOperation):
         for branch_record in op.branch_rebinds:
             excluded.add(branch_record.before.uuid)

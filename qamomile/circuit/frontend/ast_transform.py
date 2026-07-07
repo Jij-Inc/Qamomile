@@ -85,6 +85,19 @@ class VariableCollector(ast.NodeVisitor):
         for target in node.targets:
             self.visit(target)
 
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        """Visit the RHS first, like ``visit_Assign``.
+
+        `total: qmc.UInt = total + i` reads the RHS before storing, so
+        the generic (target-first) traversal would misclassify the
+        first context as "Store" and drop the read-before-write
+        evidence the loop-carry candidate analysis needs. The
+        annotation itself is type syntax, not dataflow, and is skipped.
+        """
+        if node.value is not None:
+            self.visit(node.value)
+        self.visit(node.target)
+
     def visit_AugAssign(self, node: ast.AugAssign):
         """AugAssign (e.g. x += 1) is an implicit Read-before-Write.
 

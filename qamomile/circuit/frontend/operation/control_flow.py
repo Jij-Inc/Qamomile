@@ -761,6 +761,19 @@ def _promote_classical_carries(
             record, promoted_inits, referenced_uuids, record_after_uuids
         )
     ]
+    # Two carried variables sharing ONE pre-loop value (`a = base;
+    # b = a; for ...: a = a + 1; b = b + 10`) cannot be separated by
+    # UUID-keyed substitution: the traced body holds a single read site
+    # per expression, all pointing at the shared value, so no
+    # assignment of body formals can give each variable its own
+    # back-edge. Demote such groups — the surviving records reject with
+    # the targeted error instead of miscompiling.
+    before_counts: dict[str, int] = {}
+    for record in promotable:
+        before_counts[record.before.uuid] = before_counts.get(record.before.uuid, 0) + 1
+    promotable = [
+        record for record in promotable if before_counts[record.before.uuid] == 1
+    ]
     if not promotable:
         return
 

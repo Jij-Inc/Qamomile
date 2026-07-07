@@ -1285,11 +1285,24 @@ def _decode_loop_carries(
             f"Loop carry payload is inconsistent: {len(names)} carries "
             f"for {len(results)} results."
         )
+    iter_args = [_materialize_as_value(ctx, ref) for ref in iter_refs]
+    body_args = [_materialize_as_value(ctx, ref) for ref in body_arg_refs]
+    body_yields = [_materialize_as_value(ctx, ref) for ref in body_yield_refs]
+    for name, iter_arg, body_arg, body_yield, result in zip(
+        names, iter_args, body_args, body_yields, results, strict=True
+    ):
+        if not (iter_arg.type == body_arg.type == body_yield.type == result.type):
+            raise ValueError(
+                f"Loop carry '{name}' has mismatched slot types: "
+                f"iter_arg={iter_arg.type}, body_arg={body_arg.type}, "
+                f"body_yield={body_yield.type}, result={result.type}. "
+                "All four slots of one carry must share a type."
+            )
     return {
         "carried_names": names,
-        "iter_args": [_materialize_as_value(ctx, ref) for ref in iter_refs],
-        "body_args": [_materialize_as_value(ctx, ref) for ref in body_arg_refs],
-        "body_yields": [_materialize_as_value(ctx, ref) for ref in body_yield_refs],
+        "iter_args": iter_args,
+        "body_args": body_args,
+        "body_yields": body_yields,
     }
 
 

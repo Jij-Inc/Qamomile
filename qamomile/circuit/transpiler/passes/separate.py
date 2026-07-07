@@ -14,6 +14,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
     IfOperation,
+    WhileOperation,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -477,10 +478,111 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             segment = self._create_segment(current_kind, current_ops)
             segments.append(segment)
 
+        self._reject_quantum_segment_carry_escapes(segments)
+
         # Compute input/output refs for each segment
         self._compute_segment_io(segments, block)
 
         return segments
+
+    def _collect_carry_results(
+        self,
+        op: Operation,
+        collected: dict[str, str],
+    ) -> None:
+        """Collect loop-carry result UUIDs from an op tree.
+
+        Args:
+            op (Operation): Operation to inspect (control-flow bodies
+                are walked recursively).
+            collected (dict[str, str]): Mutable map from carry-result
+                UUID to the carried variable's display name, updated in
+                place.
+        """
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            for carry in op.iter_carries():
+                collected[carry.result.uuid] = carry.var_name
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested in body:
+                    self._collect_carry_results(nested, collected)
+
+    def _segment_read_uuids(self, operations: list[Operation]) -> set[str]:
+        """Collect every input-value UUID a segment's op tree reads.
+
+        Args:
+            operations (list[Operation]): Segment operations (control-flow
+                bodies are walked recursively).
+
+        Returns:
+            set[str]: UUIDs of all referenced input values.
+        """
+        reads: set[str] = set()
+        for op in operations:
+            for value in op.all_input_values():
+                if isinstance(value, ValueBase):
+                    reads.add(value.uuid)
+            if isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    reads |= self._segment_read_uuids(body)
+        return reads
+
+    def _reject_quantum_segment_carry_escapes(
+        self,
+        segments: list[Segment],
+    ) -> None:
+        """Reject quantum-segment carry results that escape the segment.
+
+        A loop placed in the quantum segment has its carried classical
+        values computed at EMIT time (per-iteration unrolling) — the
+        runtime executor never runs the loop, so a carry result read by
+        a classical segment or returned as a block output has no
+        runtime representation and would silently surface as ``None``.
+
+        Args:
+            segments (list[Segment]): The segments just built.
+
+        Raises:
+            MultipleQuantumSegmentsError: If a quantum-segment loop's
+                carried result is a block output or is read by a
+                non-quantum segment.
+        """
+        quantum_carry_results: dict[str, str] = {}
+        for segment in segments:
+            if not isinstance(segment, QuantumSegment):
+                continue
+            for op in segment.operations:
+                self._collect_carry_results(op, quantum_carry_results)
+        if not quantum_carry_results:
+            return
+
+        outside_reads: set[str] = set()
+        for segment in segments:
+            if isinstance(segment, QuantumSegment):
+                continue
+            outside_reads |= self._segment_read_uuids(
+                list(getattr(segment, "operations", []))
+            )
+
+        escaped_names = sorted(
+            {
+                var_name
+                for uuid, var_name in quantum_carry_results.items()
+                if uuid in self._block_output_uuids or uuid in outside_reads
+            }
+        )
+        if escaped_names:
+            raise MultipleQuantumSegmentsError(
+                "A loop inside the quantum segment carries classical "
+                f"values ({', '.join(escaped_names)}) that are read "
+                "outside it (by classical post-processing or as block "
+                "outputs). Emit-time unrolling computes carried values "
+                "while building the circuit, so they have no runtime "
+                "representation the classical executor could surface. "
+                "Compute the reduction in a classical-only loop (before "
+                "or after the quantum operations), or drop it from the "
+                "outputs."
+            )
 
     def _compute_quantum_needed(
         self,
