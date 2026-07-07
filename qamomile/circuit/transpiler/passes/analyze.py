@@ -1847,8 +1847,7 @@ def _check_loop_quantum_discards(
         # incoming value when the overwrite CONSUMES it — a loop body
         # ``q = qmc.measure(q)`` re-executes the measurement against the
         # traced register every iteration and must be rejected, not
-        # exempted through the measurement's input lineage (found by
-        # the parallel non-quantum-overwrite review).
+        # exempted through the measurement's input lineage.
         carried = False
         if record.after.type.is_quantum():
             before_family: set[str] = set()
@@ -1862,9 +1861,9 @@ def _check_loop_quantum_discards(
             # with a fresh allocation (``if bit: q = qmc.qubit(...)``)
             # produces roots {incoming, fresh}, of which only the
             # incoming root overlaps, yet some paths discard the incoming
-            # state (Copilot review). Requiring ALL roots to be same-wire
-            # rejects that while still exempting slice-view refreshes,
-            # whose single re-sliced root shares the base array.
+            # state. Requiring ALL roots to be same-wire rejects that
+            # while still exempting slice-view refreshes, whose single
+            # re-sliced root shares the base array.
             roots = _pre_branch_root_candidates(record.after, body_producers)
             carried = bool(roots) and all(
                 bool(_root_wire_family(root, value_table) & before_family)

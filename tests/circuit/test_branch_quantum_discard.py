@@ -601,7 +601,7 @@ class TestRejectedDiscards:
         post-branch binding is no IR value, so the wire is dropped. The
         decoration-time analyzer forbids the same shape at top level
         (UNKNOWN_CALL) but suppresses branch internals; this closes the
-        dead-after escape (review finding)."""
+        dead-after escape."""
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.Bit:
@@ -1117,7 +1117,7 @@ class TestStaticLoopTripCount:
     def test_numpy_bound_resolves_like_python_int(self, stop):
         """A numpy integer loop bound resolves to the same trip count as the
         equivalent Python int, keeping the zero-trip defense-in-depth
-        effective for numpy-typed bindings (Copilot review)."""
+        effective for numpy-typed bindings."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.Bit:
@@ -1366,8 +1366,8 @@ class TestRejectedLoopDiscards:
         """Overwriting a quantum variable with an opaque classical call
         result (or any non-IR value, e.g. a tuple) inside a loop body is
         rejected: a synthesized placeholder record carries the dropped
-        wire to the discard check (review finding — the dead-after form
-        previously compiled and sampled)."""
+        wire to the discard check (the dead-after form previously compiled
+        and sampled)."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.Bit:
@@ -1402,8 +1402,7 @@ class TestRejectedLoopDiscards:
     def test_loop_vector_overwrite_untouched_rejected(self):
         """A whole-register overwrite of an UNTOUCHED register in a loop is
         rejected: with no element ever accessed there is no spurious
-        outside owner, so it behaves like the scalar form (forwarded
-        review finding)."""
+        outside owner, so it behaves like the scalar form."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.Bit:
@@ -1423,7 +1422,7 @@ class TestRejectedLoopDiscards:
         incoming wire with the fresh allocation; a mere overlap of that
         union with the incoming family would wrongly mark it carried, so
         the carried exemption requires EVERY root to be same-wire
-        (Copilot review). Before the fix this reached the emit-level
+        Before the fix this reached the emit-level
         physical-resource error instead of the targeted rejection."""
 
         @qmc.qkernel
@@ -1449,7 +1448,7 @@ class TestRejectedLoopDiscards:
         inside a loop is rejected: the classical result cannot carry the
         wires forward, and the unrolled measurement would re-execute
         against the traced pre-loop register on later iterations. Found
-        by the parallel non-quantum-overwrite review: the measurement's
+        the measurement's
         input lineage previously satisfied the carried exemption, which
         is now gated on the post-body value being quantum."""
 
