@@ -35,7 +35,7 @@ pytest.importorskip("qiskit_aer")
 
 from qiskit import QuantumCircuit  # noqa: E402
 from qiskit.circuit import Barrier, Measure, ParameterExpression  # noqa: E402
-from qiskit.circuit.controlflow import ForLoopOp, IfElseOp, WhileLoopOp  # noqa: E402
+from qiskit.circuit.controlflow import IfElseOp, WhileLoopOp  # noqa: E402
 from qiskit.circuit.library import (  # noqa: E402
     CCXGate,
     CPhaseGate,
@@ -79,7 +79,11 @@ from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind  # noqa: E402
-from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.errors import (  # noqa: E402
+    EmitError,
+    QamomileCompileError,
+    ValidationError,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
 from qamomile.circuit.transpiler.segments import (  # noqa: E402
     ClassicalStep,
@@ -2460,9 +2464,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2492,9 +2496,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2525,9 +2529,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2550,9 +2554,9 @@ class TestControlFlowWhileStructure:
             q = qmc.x(q)  # |1>
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2581,9 +2585,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2623,9 +2627,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2646,9 +2650,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2669,9 +2673,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2698,9 +2702,9 @@ class TestControlFlowWhileStructure:
             q = qmc.x(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2724,9 +2728,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2764,9 +2768,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -3431,9 +3435,9 @@ class TestControlFlowWhileSampling:
             # q stays |0⟩, so bit = 0 → while condition is false
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -3463,9 +3467,9 @@ class TestControlFlowWhileSampling:
             q = qmc.x(q)  # |1⟩ → bit = 1 → enter loop
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)  # 50% chance of |0⟩ each iteration
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)  # 50% chance of |0⟩ each iteration
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -3498,9 +3502,9 @@ class TestControlFlowWhileSampling:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -3528,9 +3532,9 @@ class TestControlFlowWhileSampling:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -7646,10 +7650,22 @@ class TestQubitArrayPatterns:
 
 
 class TestLoopBackedgeIfLivenessTranspilation:
-    """Loop-carried if outputs must collapse branch measurements into one state slot."""
+    """Loop-carried Bit rebinds outside the while-condition pair are rejected.
 
-    def test_for_if_loop_carried_bit_uses_single_branch_result_clbit(self):
-        """Nested if in a for-loop should emit one shared state clbit across branches."""
+    Only ``WhileOperation.operands[1]`` receives loop-carried clbit
+    aliasing from ``ResourceAllocator._alias_loop_carried_clbits``. A
+    measurement-backed Bit that is read and re-measured inside a for-loop
+    body (or a non-condition variable inside a while body) has no such
+    machinery: reads keep addressing the pre-loop clbit while branch
+    measurements write elsewhere, so the emitted circuit silently
+    diverges from Python semantics (measured: the for-loop kernel below
+    returns 0 for n=2 where fresh-per-iteration Python semantics gives
+    1). These kernels are therefore rejected at transpile time by the
+    loop-carried rebind check.
+    """
+
+    def test_for_if_loop_carried_bit_rejected(self):
+        """A re-measured loop-carried bit in a for-loop is rejected."""
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Bit:
@@ -7667,35 +7683,18 @@ class TestLoopBackedgeIfLivenessTranspilation:
                     state = qmc.measure(q_one)
             return out
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"n": 2})
+        transpiler = QiskitTranspiler()
+        with pytest.raises(ValidationError, match="Loop-carried"):
+            transpiler.transpile(circuit, bindings={"n": 2})
 
-        for_insts = [inst for inst in qc.data if isinstance(inst.operation, ForLoopOp)]
-        assert len(for_insts) == 1
-        body = for_insts[0].operation.params[-1]
-        if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
-        assert len(if_insts) == 1
-        if_inst = if_insts[0]
+    def test_while_non_condition_loop_carried_bit_rejected(self):
+        """Non-condition loop-carried bits in a while body are rejected.
 
-        resolved_branch_clbits = []
-        if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
-        for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [
-                inst for inst in block.data if isinstance(inst.operation, Measure)
-            ]
-            assert len(measures) == 1, (
-                f"Expected 1 measurement in branch {branch_idx} but got "
-                f"{len(measures)}."
-            )
-            meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
-            resolved_branch_clbits.append(if_else_clbits[meas_clbit_in_block])
-
-        assert len(if_inst.clbits) == 2
-        assert len(set(resolved_branch_clbits)) == 1, (
-            "Loop-carried if state should use one shared branch-result clbit."
-        )
-
-    def test_while_if_loop_carried_bit_uses_single_branch_result_clbit(self):
-        """First nested if in a while-loop should emit one shared state clbit."""
+        The while condition itself (``run``) is exempt via the
+        ``WhileOperation.operands`` pair, but ``state`` and ``step`` are
+        read-and-re-measured without any clbit aliasing, so the kernel
+        is rejected instead of silently diverging.
+        """
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -7733,34 +7732,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
                     step = qmc.measure(step_next)
             return out
 
-        _, qc = _transpile_and_get_circuit(circuit)
-
-        while_insts = [
-            inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)
-        ]
-        assert len(while_insts) == 1
-        body = while_insts[0].operation.params[0]
-        if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
-        assert len(if_insts) >= 1
-        if_inst = if_insts[0]
-
-        resolved_branch_clbits = []
-        if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
-        for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [
-                inst for inst in block.data if isinstance(inst.operation, Measure)
-            ]
-            assert len(measures) == 1, (
-                f"Expected 1 measurement in branch {branch_idx} but got "
-                f"{len(measures)}."
-            )
-            meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
-            resolved_branch_clbits.append(if_else_clbits[meas_clbit_in_block])
-
-        assert len(if_inst.clbits) == 2
-        assert len(set(resolved_branch_clbits)) == 1, (
-            "Loop-carried if state should use one shared branch-result clbit."
-        )
+        transpiler = QiskitTranspiler()
+        with pytest.raises(ValidationError, match="Loop-carried"):
+            transpiler.transpile(circuit, bindings={})
 
 
 class TestDeadPhiTranspilation:
@@ -7802,9 +7776,9 @@ class TestDeadPhiTranspilation:
                 else:
                     q_t = qmc.h(q_t)
                 # q_t is dead within the while body
-                q0 = qmc.qubit("q_loop")
-                q0 = qmc.h(q0)
-                bit = qmc.measure(q0)
+                q_loop = qmc.qubit("q_loop")
+                q_loop = qmc.h(q_loop)
+                bit = qmc.measure(q_loop)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -8423,7 +8397,13 @@ class TestUnresolvedStructuralSize:
     """Unresolved structural UInt must raise, not produce zero-size artifact."""
 
     def test_qubit_array_with_unresolved_size_raises(self):
-        """qubit_array(n) with parameters=["n"] must raise EmitError."""
+        """qubit_array(n) + range(n) with parameters=["n"] raises a compile error.
+
+        The runtime loop bound is diagnosed first, by
+        ``SymbolicShapeValidationPass``, with the actionable "Cannot unroll
+        loop" message (previously this surfaced later as an emit-time
+        ``EmitError`` / ``ValueError``).
+        """
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
@@ -8433,8 +8413,10 @@ class TestUnresolvedStructuralSize:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((EmitError, ValueError)):
+        with pytest.raises(QamomileCompileError) as exc_info:
             transpiler.transpile(circuit, parameters=["n"])
+        assert "Cannot unroll loop" in str(exc_info.value)
+        assert "'n'" in str(exc_info.value)
 
 
 class TestWhileIfSharedLocalPhi:

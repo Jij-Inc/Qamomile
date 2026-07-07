@@ -3,12 +3,24 @@ import dataclasses
 import typing
 from contextlib import contextmanager
 
+from qamomile.circuit.ir.operation.control_flow import LoopCarriedRebind
 from qamomile.circuit.ir.operation.operation import Operation
 
 
 @dataclasses.dataclass
 class Tracer:
+    """Collects operations (and loop-rebind records) during tracing.
+
+    Attributes:
+        _operations (list[Operation]): Operations captured in trace order.
+        loop_carried_rebinds (tuple[LoopCarriedRebind, ...]): Classical
+            scalar rebinds recorded by ``record_loop_rebinds`` while this
+            tracer captured a loop body. The loop builder copies them onto
+            the loop operation after the body trace completes.
+    """
+
     _operations: list[Operation] = dataclasses.field(default_factory=list)
+    loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
 
     @property
     def operations(self) -> list[Operation]:

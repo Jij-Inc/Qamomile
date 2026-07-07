@@ -48,12 +48,15 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DictGetItemOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
     ForOperation,
     IfOperation,
+    LoopCarriedRebind,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
@@ -976,6 +979,26 @@ def _decode_store_array_element(
     return StoreArrayElementOperation(operands=operands, results=results)
 
 
+def _decode_dict_getitem(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> DictGetItemOperation:
+    """Decode :class:`DictGetItemOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        DictGetItemOperation: The reconstructed op.
+    """
+    operands, results = _container_operands_results(d, ctx)
+    return DictGetItemOperation(
+        operands=operands,
+        results=results,
+        key_arity=int(d.get("key_arity", 1)),
+    )
+
+
 def _decode_cast(d: dict[str, Any], ctx: _DecodeContext) -> CastOperation:
     """Decode :class:`CastOperation`.
 
@@ -1210,6 +1233,32 @@ def _decode_phi(d: dict[str, Any], ctx: _DecodeContext) -> PhiOp:
     return PhiOp(operands=operands, results=results)
 
 
+def _decode_loop_carried_rebinds(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> tuple[LoopCarriedRebind, ...]:
+    """Decode loop-carried rebind records from a loop op dict.
+
+    Args:
+        d (dict[str, Any]): The loop op dict, possibly carrying a
+            ``loop_carried_rebinds`` list.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[LoopCarriedRebind, ...]: The reconstructed records; empty
+            when the key is absent.
+    """
+    return tuple(
+        LoopCarriedRebind(
+            var_name=str(r.get("var_name", "")),
+            before=_materialize_as_value(ctx, r["before_ref"]),
+            after=_materialize_as_value(ctx, r["after_ref"]),
+            before_synthesized=bool(r.get("before_synthesized", False)),
+        )
+        for r in d.get("loop_carried_rebinds", ())
+    )
+
+
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
     """Decode :class:`ForOperation`.
 
@@ -1232,6 +1281,7 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         loop_var=d.get("loop_var", ""),
         loop_var_value=loop_var_value,
         operations=body,
+        loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
     )
 
 
@@ -1265,6 +1315,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         key_var_values=key_var_values,
         value_var_value=value_var_value,
         operations=body,
+        loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
     )
 
 
@@ -1286,6 +1337,33 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         results=results,
         operations=body,
         max_iterations=d.get("max_iterations"),
+        loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+    )
+
+
+def _decode_branch_rebinds(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> tuple[BranchRebind, ...]:
+    """Decode branch rebind records from an if op dict.
+
+    Args:
+        d (dict[str, Any]): The if op dict, possibly carrying a
+            ``branch_rebinds`` list.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[BranchRebind, ...]: The reconstructed records; empty when
+            the key is absent.
+    """
+    return tuple(
+        BranchRebind(
+            var_name=str(r.get("var_name", "")),
+            before=_materialize_as_value(ctx, r["before_ref"]),
+            rebound_in_true=bool(r.get("rebound_in_true", False)),
+            rebound_in_false=bool(r.get("rebound_in_false", False)),
+        )
+        for r in d.get("branch_rebinds", ())
     )
 
 
@@ -1298,7 +1376,7 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
 
     Returns:
         IfOperation: The reconstructed op, including true / false
-            branches and the phi-op list.
+            branches, the phi-op list, and the branch rebind records.
     """
     operands, results = _operands_results(d, ctx)
     true_body = [_decode_operation(child, ctx) for child in d.get("true_body", ())]
@@ -1317,6 +1395,7 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
         true_operations=true_body,
         false_operations=false_body,
         phi_ops=phi_ops,
+        branch_rebinds=_decode_branch_rebinds(d, ctx),
     )
 
 
@@ -1523,6 +1602,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "MeasureVectorOperation": _decode_measure_vector,
     "MeasureQFixedOperation": _decode_measure_qfixed,
     "DecodeQFixedOperation": _decode_decode_qfixed,
+    "DictGetItemOperation": _decode_dict_getitem,
     "StoreArrayElementOperation": _decode_store_array_element,
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,

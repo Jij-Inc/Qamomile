@@ -1,5 +1,7 @@
 """Tests for Tuple and Dict types in qkernel."""
 
+import pytest
+
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
@@ -261,9 +263,25 @@ class TestDictHandle:
         items_iter = dict_handle.items()
         assert list(items_iter) == []
 
-    def test_dict_len(self):
-        """Test Dict length."""
-        dv = DictValue(name="ising", entries=[])
+    def test_dict_len_without_bound_data_raises(self):
+        """len() of a handle with no bound data raises (cardinality unknown).
+
+        An empty ``_entries`` list does not mean "zero entries" — symbolic
+        inputs (sub-kernel dict arguments, visualization dummies) also
+        carry an empty list, and reporting 0 for them would silently bake
+        zero-trip loops into the circuit.
+        """
+        dv = DictValue(name="ising", entries=())
         dict_handle = Dict(value=dv, _entries=[])
 
-        assert len(dict_handle) == 0
+        with pytest.raises(TypeError, match="cardinality"):
+            len(dict_handle)
+
+    def test_dict_len_bound_counts_entries(self):
+        """len() of a compile-time-bound handle reports the bound entry count."""
+        dv = DictValue(name="ising", entries=()).with_dict_runtime_metadata(
+            {0: 1.0, 1: 2.0}
+        )
+        dict_handle = Dict(value=dv, _entries=[])
+
+        assert len(dict_handle) == 2

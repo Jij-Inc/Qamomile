@@ -249,9 +249,9 @@ class TestCudaqRuntimeControlFlow:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = CudaqTranspiler()

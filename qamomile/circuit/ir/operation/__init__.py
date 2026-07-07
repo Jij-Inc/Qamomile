@@ -1,11 +1,20 @@
 from .cast import CastOperation
-from .classical_ops import DecodeQFixedOperation, StoreArrayElementOperation
+from .classical_ops import (
+    DecodeQFixedOperation,
+    DictGetItemOperation,
+    StoreArrayElementOperation,
+)
 from .composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
     ResourceMetadata,
 )
-from .control_flow import ForItemsOperation, HasNestedOps
+from .control_flow import (
+    BranchRebind,
+    ForItemsOperation,
+    HasNestedOps,
+    LoopCarriedRebind,
+)
 from .expval import ExpvalOp
 from .gate import (
     ConcreteControlledU,
@@ -38,11 +47,14 @@ __all__ = [
     "ConcreteControlledU",
     "SymbolicControlledU",
     "DecodeQFixedOperation",
+    "DictGetItemOperation",
     "StoreArrayElementOperation",
     "CastOperation",
     # Control flow operations
+    "BranchRebind",
     "ForItemsOperation",
     "HasNestedOps",
+    "LoopCarriedRebind",
     # Expectation value operation
     "ExpvalOp",
     # Slice operation
