@@ -367,9 +367,10 @@ class CircuitAnalyzer:
 
             For QInitOperation, registers new qubits (scalar or array elements).
             For CallBlockOperation (inline=True), builds a logical_id_remap from
-            block formal parameters to actual arguments, then recurses into the
-            block body. For CastOperation, propagates the source qubit's wire
-            index to the cast result.
+            block formal parameters to actual arguments, recurses into the
+            block body, then aliases each call-site-unique result Value to
+            the wire of the callee output it mirrors. For CastOperation,
+            propagates the source qubit's wire index to the cast result.
 
             GateOperation and similar are no-ops because next_version() preserves
             logical_id.
@@ -570,6 +571,45 @@ class CircuitAnalyzer:
                             depth + 1,
                             child_param_values,
                         )
+
+                        # ``Block.call`` issues call-site-unique result
+                        # Values, so a non-pass-through result's
+                        # logical_id never appears in the callee body
+                        # walked above. Alias each result to the wire of
+                        # the callee output it mirrors so downstream
+                        # caller ops (and the fresh-return loop below)
+                        # resolve to the body's wires instead of
+                        # allocating phantom ones.
+                        for dummy_output, call_result in zip(
+                            block_value.output_values, op.results
+                        ):
+                            if not isinstance(call_result.type, QubitType):
+                                continue
+                            if call_result.logical_id in qubit_map:
+                                continue
+                            source_lid = self._resolve_array_element_lid(
+                                dummy_output,
+                                qubit_map,
+                                new_remap,
+                                child_param_values,
+                            )
+                            wire_idx = qubit_map.get(source_lid)
+                            if wire_idx is None:
+                                continue
+                            qubit_map[call_result.logical_id] = wire_idx
+                            if isinstance(dummy_output, ArrayValue) and isinstance(
+                                call_result, ArrayValue
+                            ):
+                                prefix = f"{source_lid}_["
+                                prefix_len = len(prefix)
+                                for key, idx in list(qubit_map.items()):
+                                    if key.startswith(prefix) and key.endswith("]"):
+                                        new_key = (
+                                            f"{call_result.logical_id}_"
+                                            f"[{key[prefix_len:]}"
+                                        )
+                                        if new_key not in qubit_map:
+                                            qubit_map[new_key] = idx
 
                     qubit_operands = [
                         v for v in op.operands if isinstance(v.type, QubitType)
