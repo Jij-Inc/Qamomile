@@ -17,10 +17,19 @@ class Tracer:
             scalar rebinds recorded by ``record_loop_rebinds`` while this
             tracer captured a loop body. The loop builder copies them onto
             the loop operation after the body trace completes.
+        promoted_carry_inits (dict[str, typing.Any]): Initial Python
+            values of the plain-number loop-carry candidates promoted by
+            ``promote_loop_carry`` while this tracer captured a loop
+            body, keyed by the promoted symbolic ``Value``'s UUID. The
+            loop builder reads these to synthesize the carry's
+            ``iter_arg`` constants.
     """
 
     _operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    promoted_carry_inits: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict
+    )
 
     @property
     def operations(self) -> list[Operation]:

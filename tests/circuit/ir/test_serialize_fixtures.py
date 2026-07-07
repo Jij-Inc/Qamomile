@@ -127,6 +127,23 @@ def _fix_if_merge() -> qmc.Bit:
 
 
 @qmc.qkernel
+def _fix_loop_carry(n: qmc.UInt) -> qmc.UInt:
+    """Carried accumulation — covers the ``ForOperation`` carry-slot refs.
+
+    ``total = total + i`` is promoted into a loop-carry slot, so the
+    fixture pins the ``carried_names`` / ``iter_arg_refs`` /
+    ``body_arg_refs`` / ``body_yield_refs`` wire shape (plus the carry
+    result riding the generic ``result_refs``).
+    """
+    q = qmc.qubit(name="q")
+    qmc.measure(q)
+    total = qmc.uint(0)
+    for i in qmc.range(n):
+        total = total + i
+    return total
+
+
+@qmc.qkernel
 def _fix_expval(theta: qmc.Float, H: qmc.Observable) -> qmc.Float:
     """A toy VQE-style kernel — covers ``ExpvalOp`` + ``ObservableType`` parameter.
 
@@ -210,6 +227,20 @@ FIXTURE_KERNELS: list[tuple[str, Callable[[], Block], dict[str, Any]]] = [
                 "MeasureOperation",
             ],
             "param_slot_count": 0,
+        },
+    ),
+    (
+        "loop_carry",
+        lambda: InlinePass().run(_fix_loop_carry.build(parameters=["n"])),
+        {
+            "kind": BlockKind.AFFINE,
+            "op_types": [
+                "QInitOperation",
+                "MeasureOperation",
+                "ForOperation",
+            ],
+            "param_slot_count": 1,
+            "param_slot_names": ["n"],
         },
     ),
     (

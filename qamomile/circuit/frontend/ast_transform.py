@@ -14,7 +14,9 @@ from qamomile.circuit.frontend.operation.control_flow import (
     emit_if,
     for_items,
     for_loop,
+    loop_carry_results,
     loop_rebind_snapshot,
+    promote_loop_carry,
     record_loop_rebinds,
     should_trace_for_loop,
     should_trace_items_loop,
@@ -698,16 +700,24 @@ class ControlFlowTransformer(ast.NodeTransformer):
     ) -> list[ast.stmt]:
         """Wrap a transformed loop body with rebind snapshot/record probes.
 
-        Prepends ``_qm_rebind_snap_N = loop_rebind_snapshot(locals(), (...))``
-        and appends ``record_loop_rebinds(_qm_rebind_snap_N, locals(), (...),
-        (...))`` so the tracer can compare pre/post handle identities for
-        each candidate. Candidates are passed as name tuples and resolved
-        tolerantly through ``locals()`` plus the if-branch pre-binding
-        stack — never as direct name loads, which would ``NameError`` for
-        a store-only candidate that is unbound in the current frame (e.g.
-        inside an if branch that only stores the variable). Both probes
-        live inside the loop's ``with`` body, so the zero-trip trace
-        guard skips them together with the body.
+        Prepends ``name = promote_loop_carry(name)`` for each classical
+        candidate (wrapping plain-number initializers in symbolic
+        handles so the loop builder can reconstruct the carry's initial
+        value; see ``promote_loop_carry``), then
+        ``_qm_rebind_snap_N = loop_rebind_snapshot(locals(), (...))``,
+        and appends ``record_loop_rebinds(_qm_rebind_snap_N, locals(),
+        (...), (...))`` so the tracer can compare pre/post handle
+        identities for each candidate. Snapshot/record candidates are
+        passed as name tuples and resolved tolerantly through
+        ``locals()`` plus the if-branch pre-binding stack — never as
+        direct name loads, which would ``NameError`` for a store-only
+        candidate that is unbound in the current frame (e.g. inside an
+        if branch that only stores the variable). The promotion
+        assignments DO load the name directly, which is safe for
+        classical candidates: they are read-before-write by
+        construction, so a body that traces at all has them bound. All
+        probes live inside the loop's ``with`` body, so the zero-trip
+        trace guard skips them together with the body.
 
         Args:
             flattened_body (list[ast.stmt]): The already-transformed loop
@@ -751,6 +761,18 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]
             )
 
+        promote_stmts: list[ast.stmt] = [
+            ast.Assign(
+                targets=[ast.Name(id=name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="promote_loop_carry", ctx=ast.Load()),
+                    args=[ast.Name(id=name, ctx=ast.Load())],
+                    keywords=[],
+                ),
+                lineno=lineno,
+            )
+            for name in classical_candidates
+        ]
         snap_name = self._get_unique_name("_qm_rebind_snap")
         snap_stmt = ast.Assign(
             targets=[ast.Name(id=snap_name, ctx=ast.Store())],
@@ -774,7 +796,53 @@ class ControlFlowTransformer(ast.NodeTransformer):
             ),
             lineno=lineno,
         )
-        return [snap_stmt, *flattened_body, record_stmt]
+        return [*promote_stmts, snap_stmt, *flattened_body, record_stmt]
+
+    def _loop_carry_rebind_stmt(
+        self,
+        classical_candidates: list[str],
+        lineno: int,
+    ) -> ast.stmt | None:
+        """Build the post-loop carried-variable rebinding assignment.
+
+        Generates ``(a, b) = loop_carry_results(locals(), ("a", "b"))``
+        to run immediately after a traced loop's ``with`` block, so each
+        carried variable's post-loop binding switches from the traced
+        body's last value to the loop's carry result. Placed inside the
+        zero-trip trace guard for ``for`` / ``items`` loops, so a
+        statically-zero-trip loop keeps its pre-loop bindings.
+
+        Args:
+            classical_candidates (list[str]): The read-before-write
+                rebind candidates (the only names a carry slot can
+                exist for).
+            lineno (int): Source line of the loop statement, used for
+                the generated node.
+
+        Returns:
+            ast.stmt | None: The assignment statement, or ``None`` when
+                there are no classical candidates.
+        """
+        if not classical_candidates:
+            return None
+        targets = ast.Tuple(
+            elts=[ast.Name(id=name, ctx=ast.Store()) for name in classical_candidates],
+            ctx=ast.Store(),
+        )
+        call = ast.Call(
+            func=ast.Name(id="loop_carry_results", ctx=ast.Load()),
+            args=[
+                ast.Call(
+                    func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]
+                ),
+                ast.Tuple(
+                    elts=[ast.Constant(value=name) for name in classical_candidates],
+                    ctx=ast.Load(),
+                ),
+            ],
+            keywords=[],
+        )
+        return ast.Assign(targets=[targets], value=call, lineno=lineno)
 
     def visit_While(self, node: ast.While) -> Any:
         if node.orelse:
@@ -846,7 +914,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
-        return with_stmt
+        rebind_stmt = self._loop_carry_rebind_stmt(
+            classical_rebind_candidates, node.lineno
+        )
+        if rebind_stmt is None:
+            return with_stmt
+        return [with_stmt, rebind_stmt]
 
     def _is_range_call(self, node: ast.expr) -> bool:
         """Check if node is a range() or qm.range() call."""
@@ -1114,10 +1187,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Dispatch to the appropriate transform.
         # Sequence iteration is already rejected by _validate_for_loop.
         if self._is_items_call(node.iter):
-            return self._transform_for_items(node, flattened_body)
+            return self._transform_for_items(
+                node, flattened_body, classical_rebind_candidates
+            )
 
         if self._is_range_call(node.iter):
-            return self._transform_for_range(node, flattened_body)
+            return self._transform_for_range(
+                node, flattened_body, classical_rebind_candidates
+            )
 
         # [FOR DEVELOPER]
         # Since _validate_for_loop should have rejected any non-items, non-range loops,
@@ -1130,7 +1207,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
     def _transform_for_range(
-        self, node: ast.For, flattened_body: list[ast.stmt]
+        self,
+        node: ast.For,
+        flattened_body: list[ast.stmt],
+        classical_rebind_candidates: list[str],
     ) -> ast.stmt:
         """Transform 'for i in range(...)' to 'with for_loop(...)'.
 
@@ -1138,6 +1218,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
             for i in range(stop):  ->  for_loop(0, stop, 1)
             for i in range(start, stop):  ->  for_loop(start, stop, 1)
             for i in range(start, stop, step):  ->  for_loop(start, stop, step)
+
+        When the body has classical rebind candidates, a post-loop
+        ``loop_carry_results`` assignment follows the with-statement
+        inside the zero-trip trace guard (see
+        :meth:`_loop_carry_rebind_stmt`).
         """
 
         # Read range() arguments (arity already validated in _validate_for_loop)
@@ -1182,6 +1267,13 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
+        guard_body: list[ast.stmt] = [with_stmt]
+        rebind_stmt = self._loop_carry_rebind_stmt(
+            classical_rebind_candidates, node.lineno
+        )
+        if rebind_stmt is not None:
+            guard_body.append(rebind_stmt)
+
         return ast.If(
             test=ast.Call(
                 func=ast.Name(id="should_trace_for_loop", ctx=ast.Load()),
@@ -1192,20 +1284,25 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ],
                 keywords=[],
             ),
-            body=[with_stmt],
+            body=guard_body,
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
         )
 
     def _transform_for_items(
-        self, node: ast.For, flattened_body: list[ast.stmt]
+        self,
+        node: ast.For,
+        flattened_body: list[ast.stmt],
+        classical_rebind_candidates: list[str],
     ) -> ast.stmt:
         """Transform 'for (k, v) in items(d)' or 'for (k, v) in d.items()' to 'with for_items(d, [...], "v")'.
 
         The with-statement is wrapped in ``if should_trace_items_loop(d):``
         so a compile-time-known EMPTY dict skips tracing the body, exactly
-        like the ``qmc.range`` zero-trip guard.
+        like the ``qmc.range`` zero-trip guard. When the body has
+        classical rebind candidates, a post-loop ``loop_carry_results``
+        assignment follows the with-statement inside that guard.
 
         Supports patterns:
             for key, value in items(d):  ->  for_items(d, ["key"], "value")
@@ -1259,6 +1356,13 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
+        guard_body: list[ast.stmt] = [with_stmt]
+        rebind_stmt = self._loop_carry_rebind_stmt(
+            classical_rebind_candidates, node.lineno
+        )
+        if rebind_stmt is not None:
+            guard_body.append(rebind_stmt)
+
         # Mirror the qmc.range zero-trip guard: a compile-time-known
         # EMPTY dict must not trace the body at all, so post-loop code
         # keeps the pre-loop handles exactly like Python's zero-pass
@@ -1269,7 +1373,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 args=[copy.deepcopy(dict_arg)],
                 keywords=[],
             ),
-            body=[with_stmt],
+            body=guard_body,
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
@@ -1667,6 +1771,8 @@ def transform_control_flow(func: Callable):
             "dead_rebind_binding": dead_rebind_binding,
             "loop_rebind_snapshot": loop_rebind_snapshot,
             "record_loop_rebinds": record_loop_rebinds,
+            "promote_loop_carry": promote_loop_carry,
+            "loop_carry_results": loop_carry_results,
             "Any": Any,  # For type annotations in generated code
         }
     )

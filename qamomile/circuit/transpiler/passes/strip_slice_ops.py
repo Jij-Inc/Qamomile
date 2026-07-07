@@ -64,13 +64,19 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
             ) -> list[Operation]:
                 """Transform operations and drop marker-only loop shells.
 
+                A loop whose body held only slice markers is an empty
+                shell — unless it carries classical values: a carried
+                loop with an empty body still computes its results (a
+                pure swap ``a, b = b, a`` traces to no body operations
+                at all), so it must survive.
+
                 Args:
                     operations (list[Operation]): Operations to rewrite.
 
                 Returns:
                     list[Operation]: Rewritten operations with slice
-                    markers and newly-empty ``For`` / ``ForItems``
-                    operations removed.
+                    markers and newly-empty carry-free ``For`` /
+                    ``ForItems`` operations removed.
                 """
                 result: list[Operation] = []
                 for op in operations:
@@ -78,8 +84,10 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
                     if transformed is None:
                         continue
                     transformed = self._transform_control_flow(transformed)
-                    if isinstance(transformed, (ForOperation, ForItemsOperation)) and (
-                        not transformed.operations
+                    if (
+                        isinstance(transformed, (ForOperation, ForItemsOperation))
+                        and not transformed.operations
+                        and not transformed.carried_names
                     ):
                         continue
                     result.append(transformed)

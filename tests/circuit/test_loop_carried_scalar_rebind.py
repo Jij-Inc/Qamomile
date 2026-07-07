@@ -1,18 +1,21 @@
-"""Regression tests for loop-carried classical scalar rebind rejection.
+"""Tests for loop-carried classical scalar values (iter_args/yield semantics).
 
-A qkernel loop body is traced exactly once, so a Python-level reassignment
-like ``total = total + i`` inside ``qmc.range`` / ``while`` / ``qmc.items``
-produces IR whose right-hand side reads the fixed pre-loop value instead of
-the previous iteration's value. Every executor (the classical segment
-interpreter and emit-time unrolling) re-runs the same traced operations per
-iteration, so the compiled program silently diverged from Python semantics
-(e.g. ``sum(range(4))`` compiled to ``0 + 3 == 3`` instead of ``6``). The
-frontend now records such rebinds on the loop operations and the transpiler
-rejects them with a targeted ``ValidationError`` instead of miscompiling.
+A qkernel loop body is traced exactly once. A Python-level reassignment
+like ``total = total + i`` inside ``qmc.range`` / ``qmc.items`` is
+promoted at trace time into a loop-carry slot (``LoopCarry``): the loop
+enters with the initializer (``iter_arg``), each iteration reads the
+previous iteration's value through a fresh body formal (``body_arg``),
+the post-body value becomes the next iteration's input (``body_yield``),
+and post-loop code reads the loop's carry ``result`` — matching Python
+semantics on every executor (the classical segment interpreter and
+emit-time unrolling).
 
-Legal patterns — read-only outer values, quantum rebinds, per-iteration
-re-measurement of a Bit (the loop-carried while-condition machinery), and
-rebinds confined to compile-time-dead branches — must keep compiling.
+Shapes no carry slot can express stay rejected with the targeted
+``ValidationError``: while-loop carries (a runtime loop cannot thread a
+classical value between iterations), measurement-backed Bit rebinds
+(no clbit re-routing between iterations), and while-condition snapshots
+(the clbit aliasing makes post-loop reads observe the final
+measurement).
 """
 
 import pytest
@@ -61,30 +64,15 @@ def _find_loops(ops):
 
 
 # ---------------------------------------------------------------------------
-# Rejected: loop-carried classical scalar rebinds
+# Supported: loop-carried classical scalars compute Python semantics
 # ---------------------------------------------------------------------------
 
 
-class TestRejectedRebinds:
-    """Loop-carried classical rebinds fail with the targeted error."""
+class TestCarriedAccumulation:
+    """Loop-carried classical scalar updates compile and match Python."""
 
-    def test_for_accumulation_rejected(self):
-        """`total = total + i` in qmc.range is rejected, not miscompiled."""
-
-        @qmc.qkernel
-        def kernel(n: qmc.UInt) -> qmc.UInt:
-            q = qmc.qubit("q")
-            qmc.measure(q)
-            total = qmc.uint(0)
-            for i in qmc.range(n):
-                total = total + i
-            return total
-
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 4})
-
-    def test_for_accumulation_symbolic_bound_rejected(self):
-        """The rejection also fires when the loop bound stays a parameter."""
+    def test_for_accumulation(self):
+        """`total = total + i` in qmc.range computes sum(range(4)) == 6."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.UInt:
@@ -95,11 +83,10 @@ class TestRejectedRebinds:
                 total = total + i
             return total
 
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, parameters=["n"], bindings={})
+        assert _sample_single(kernel, bindings={"n": 4}) == 6
 
-    def test_builtin_range_accumulation_rejected(self):
-        """builtin range() is transformed like qmc.range and is equally rejected."""
+    def test_builtin_range_accumulation(self):
+        """builtin range() is transformed like qmc.range and carries equally."""
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.UInt:
@@ -110,11 +97,10 @@ class TestRejectedRebinds:
                 total = total + i
             return total
 
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"dummy": 0})
+        assert _sample_single(kernel, bindings={"dummy": 0}) == 6
 
-    def test_for_if_accumulation_rejected(self):
-        """Accumulation guarded by a runtime if (phi-mediated) is rejected."""
+    def test_for_if_accumulation(self):
+        """Accumulation guarded by a per-iteration if computes 2 + 3 == 5."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.UInt:
@@ -126,11 +112,15 @@ class TestRejectedRebinds:
                     total = total + i
             return total
 
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 4})
+        assert _sample_single(kernel, bindings={"n": 4}) == 5
 
-    def test_all_constant_accumulation_rejected(self):
-        """`total = total + 1` folds at trace time; the pre-fold hook catches it."""
+    def test_all_constant_accumulation(self):
+        """`total = total + 1` carries despite the all-constant update.
+
+        The initializer promotion wraps the constant handle in a
+        symbolic one, so trace-time constant folding cannot collapse
+        the update and erase the loop-carried dependency.
+        """
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.UInt:
@@ -141,11 +131,10 @@ class TestRejectedRebinds:
                 total = total + 1
             return total
 
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 3})
+        assert _sample_single(kernel, bindings={"n": 3}) == 3
 
-    def test_plain_python_int_init_rejected(self):
-        """A plain `total = 0` initialization (synthesized before) is rejected."""
+    def test_plain_python_int_init(self):
+        """A plain `total = 0` initialization is promoted and carried."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.UInt:
@@ -156,11 +145,15 @@ class TestRejectedRebinds:
                 total = total + i
             return total
 
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 4})
+        assert _sample_single(kernel, bindings={"n": 4}) == 6
 
-    def test_float_angle_accumulation_rejected(self):
-        """A non-escaping Float accumulation driving a gate angle is rejected."""
+    def test_float_angle_accumulation(self):
+        """A Float accumulation driving a gate angle emits rx(2*pi).
+
+        The classical carried loop is absorbed into the quantum segment
+        and evaluated at emit time; rx(2*pi) leaves |0> invariant (up to
+        global phase), so the measurement is deterministically 0.
+        """
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.Bit:
@@ -171,11 +164,10 @@ class TestRejectedRebinds:
             q = qmc.rx(q, total * 3.141592653589793)
             return qmc.measure(q)
 
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 2})
+        assert _sample_single(kernel, bindings={"n": 2}) == 0
 
-    def test_nested_loop_accumulation_rejected(self):
-        """Accumulating an outer variable inside nested loops is rejected."""
+    def test_nested_loop_accumulation(self):
+        """Accumulating an outer variable inside nested loops counts i == j."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.UInt:
@@ -188,11 +180,177 @@ class TestRejectedRebinds:
                         total = total + 1
             return total
 
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 3})
+        assert _sample_single(kernel, bindings={"n": 3}) == 3
+
+    def test_accumulation_as_range_bound(self):
+        """An accumulated total drives a later qmc.range bound: x^5 flips.
+
+        The carried loop feeds the second loop's bound, so it is
+        absorbed into the quantum segment and evaluated at emit time;
+        total == 2 + 3 == 5 applies five X gates, flipping |0> to |1>.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                if i > 1:
+                    total = total + i
+            q = qmc.qubit("q")
+            for _j in qmc.range(total):
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": 4}) == 1
+
+    def test_subkernel_loop_accumulation(self):
+        """Accumulation inside a called sub-kernel carries after inlining.
+
+        The carry slots ride the sub-kernel's ForOperation and are
+        remapped by inline cloning (all_input_values / replace_values),
+        so the executors still see consistent UUIDs.
+        """
+
+        @qmc.qkernel
+        def helper(n: qmc.UInt) -> qmc.UInt:
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                total = total + i
+            return total
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            return helper(n)
+
+        assert _sample_single(kernel, bindings={"n": 4}) == 6
+
+    def test_augassign_accumulation(self):
+        """`total += i` (AugAssign) carries like the explicit form."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                total += i
+            return total
+
+        assert _sample_single(kernel, bindings={"n": 4}) == 6
+
+    def test_swap_rotation(self):
+        """`a, b = b, a` in a loop swaps per iteration: three swaps land on (2, 1)."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> tuple[qmc.UInt, qmc.UInt]:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            a = qmc.uint(1)
+            b = qmc.uint(2)
+            for _i in qmc.range(n):
+                a, b = b, a
+            return a, b
+
+        assert _sample_single(kernel, bindings={"n": 3}) == (2, 1)
+
+    def test_items_loop_accumulation(self):
+        """A qmc.items loop accumulates dict coefficients into a Float carry."""
+
+        @qmc.qkernel
+        def kernel(
+            coeffs: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            n: qmc.UInt,
+        ) -> qmc.Bit:
+            total = qmc.float_(0.0)
+            for (_i, _j), coeff in qmc.items(coeffs):
+                total = total + coeff
+            q = qmc.qubit("q")
+            q = qmc.rx(q, total)
+            return qmc.measure(q)
+
+        # total == 2*pi: rx(2*pi) leaves |0> invariant up to global phase.
+        assert (
+            _sample_single(
+                kernel,
+                bindings={
+                    "coeffs": {(0, 1): 3.141592653589793, (1, 2): 3.141592653589793},
+                    "n": 0,
+                },
+            )
+            == 0
+        )
+
+    def test_zero_trip_static_loop_keeps_initializer(self):
+        """A statically-zero-trip loop is never traced: rx(0.0) measures 0."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            total = 0.0
+            for _i in qmc.range(n):
+                total = total + 3.141592653589793
+            q = qmc.qubit("q")
+            q = qmc.rx(q, total)
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": 0}) == 0
+
+    def test_one_trip_loop_carries_once(self):
+        """A single-iteration loop yields exactly one update: rx(pi) flips."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            total = 0.0
+            for _i in qmc.range(n):
+                total = total + 3.141592653589793
+            q = qmc.qubit("q")
+            q = qmc.rx(q, total)
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"n": 1}) == 1
+
+    def test_carry_slots_on_built_block(self):
+        """build() promotes the classical rebind into a carry slot."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            qmc.measure(q)
+            total = qmc.uint(0)
+            for i in qmc.range(n):
+                total = total + i
+            return total
+
+        block = kernel.build(parameters=["n"])
+        loops = _find_loops(block.operations)
+        assert loops, "expected a ForOperation in the built block"
+        (loop,) = loops
+        carries = list(loop.iter_carries())
+        assert [c.var_name for c in carries] == ["total"]
+        (carry,) = carries
+        assert carry.iter_arg.get_const() == 0
+        assert carry.result is loop.results[0]
+        # The promoted classical rebind is gone; the carry slot is the
+        # single representation of the back-edge.
+        assert not loop.loop_carried_rebinds
+
+
+# ---------------------------------------------------------------------------
+# Rejected: shapes no carry slot can express
+# ---------------------------------------------------------------------------
+
+
+class TestRejectedRebinds:
+    """Unsupported loop-carried shapes fail with the targeted error."""
 
     def test_while_counter_rejected(self):
-        """A classical counter inside a measurement-conditioned while is rejected."""
+        """A classical counter inside a measurement-conditioned while is rejected.
+
+        A while loop's trip count is a runtime measurement outcome, so
+        the loop cannot unroll, and no backend can thread a classical
+        value between runtime-loop iterations.
+        """
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.UInt:
@@ -210,65 +368,27 @@ class TestRejectedRebinds:
         with pytest.raises(ValidationError, match=LOOP_CARRIED):
             _transpile(kernel, bindings={"dummy": 0})
 
-    def test_accumulation_as_range_bound_rejected(self):
-        """Accumulation feeding a later qmc.range bound gets the targeted error.
+    def test_carried_loop_with_runtime_bound_rejected(self):
+        """A carried loop whose bound stays a runtime parameter is rejected.
 
-        Previously this failed at emit with the confusing "Cannot unroll
-        loop: bounds could not be resolved (stop='_phi_0')".
+        The carry forces unrolling (a native runtime loop cannot thread
+        classical values between iterations), and the pre-emit
+        symbolic-bound diagnostic rejects unrollable loops whose bounds
+        depend on runtime parameters.
         """
+        from qamomile.circuit.transpiler.errors import QamomileCompileError
 
         @qmc.qkernel
-        def kernel(n: qmc.UInt) -> qmc.Bit:
-            total = qmc.uint(0)
-            for i in qmc.range(n):
-                if i > 1:
-                    total = total + i
+        def kernel(n: qmc.UInt) -> qmc.UInt:
             q = qmc.qubit("q")
-            for _j in qmc.range(total):
-                q = qmc.x(q)
-            return qmc.measure(q)
-
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 4})
-
-    def test_subkernel_loop_accumulation_rejected(self):
-        """Accumulation inside a called sub-kernel is detected after inlining.
-
-        The rebind records ride the sub-kernel's ForOperation and are
-        remapped by inline cloning (all_input_values / replace_values),
-        so the transpile-time check still sees consistent UUIDs.
-        """
-
-        @qmc.qkernel
-        def helper(n: qmc.UInt) -> qmc.UInt:
+            qmc.measure(q)
             total = qmc.uint(0)
             for i in qmc.range(n):
                 total = total + i
             return total
 
-        @qmc.qkernel
-        def kernel(n: qmc.UInt) -> qmc.UInt:
-            q = qmc.qubit("q")
-            qmc.measure(q)
-            return helper(n)
-
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 4})
-
-    def test_augassign_accumulation_rejected(self):
-        """`total += i` (AugAssign) is detected like the explicit form."""
-
-        @qmc.qkernel
-        def kernel(n: qmc.UInt) -> qmc.UInt:
-            q = qmc.qubit("q")
-            qmc.measure(q)
-            total = qmc.uint(0)
-            for i in qmc.range(n):
-                total += i
-            return total
-
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 4})
+        with pytest.raises(QamomileCompileError, match="depends on runtime parameter"):
+            _transpile(kernel, parameters=["n"])
 
     def test_while_condition_snapshot_saved_in_body_rejected(self):
         """Saving the while condition's entry value in the body is rejected.
@@ -344,22 +464,6 @@ class TestRejectedRebinds:
         with pytest.raises(ValidationError, match=LOOP_CARRIED):
             _transpile(kernel, bindings={"flag": 1})
 
-    def test_swap_rotation_rejected(self):
-        """`a, b = b, a` in a loop leaves stale one-shot swaps and is rejected."""
-
-        @qmc.qkernel
-        def kernel(n: qmc.UInt) -> qmc.UInt:
-            q = qmc.qubit("q")
-            qmc.measure(q)
-            a = qmc.uint(1)
-            b = qmc.uint(2)
-            for _i in qmc.range(n):
-                a, b = b, a
-            return a
-
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 3})
-
 
 # ---------------------------------------------------------------------------
 # Allowed: legal loop patterns keep compiling (and computing correctly)
@@ -430,7 +534,7 @@ class TestAllowedPatterns:
         wrong for an unrelated pre-existing reason (a fresh
         ``qmc.qubit(...)`` allocated inside a runtime loop is not reset
         per iteration, so gates accumulate on the same physical qubit).
-        That gap is outside the loop-carried rebind check's scope.
+        That gap is outside the loop-carried machinery's scope.
         """
 
         @qmc.qkernel
@@ -449,12 +553,14 @@ class TestAllowedPatterns:
 
         Only ``WhileOperation.operands[1]`` gets loop-carried clbit
         aliasing from the resource allocator; a for-loop has no such
-        machinery, so the ``if state:`` condition keeps addressing the
-        pre-loop clbit while the branch measurements write elsewhere
-        (measured divergence: with fresh-per-iteration Python semantics
-        ``n=2`` yields ``out == 1``, but the emitted ForLoopOp circuit
-        returns ``0``). Rejecting is the honest behavior until real
-        aliasing lands.
+        machinery, and a Bit is not a promotable carry (a measurement
+        result has no emit-time value to thread through unrolled
+        iterations), so the ``if state:`` condition would keep
+        addressing the pre-loop clbit while the branch measurements
+        write elsewhere (measured divergence: with fresh-per-iteration
+        Python semantics ``n=2`` yields ``out == 1``, but the emitted
+        ForLoopOp circuit returns ``0``). Rejecting is the honest
+        behavior until real aliasing lands.
         """
 
         @qmc.qkernel
@@ -492,10 +598,11 @@ class TestAllowedPatterns:
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 0
 
-    def test_dead_branch_accumulation_allowed_taken_rejected(self):
-        """A rebind confined to a compile-time-dead branch is allowed.
+    def test_dead_branch_accumulation_both_sides(self):
+        """A rebind under a compile-time if carries only when taken.
 
-        The same kernel with the branch taken is rejected.
+        With the branch dead the loop keeps the initializer; with the
+        branch taken the accumulation carries and matches Python.
         """
 
         @qmc.qkernel
@@ -508,10 +615,8 @@ class TestAllowedPatterns:
                     total = total + i
             return total
 
-        _transpile(kernel, bindings={"n": 4, "flag": 0})
-
-        with pytest.raises(ValidationError, match=LOOP_CARRIED):
-            _transpile(kernel, bindings={"n": 4, "flag": 1})
+        assert _sample_single(kernel, bindings={"n": 4, "flag": 0}) == 0
+        assert _sample_single(kernel, bindings={"n": 4, "flag": 1}) == 6
 
     def test_iteration_local_fresh_name_allowed(self):
         """A fresh per-iteration local feeding a gate angle compiles."""
@@ -544,23 +649,6 @@ class TestAllowedPatterns:
             bindings={"ising": {(0, 1): 1.0}, "gamma": 0.3},
         )
 
-    def test_build_does_not_raise(self):
-        """kernel.build() only records; rejection happens at transpile."""
-
-        @qmc.qkernel
-        def kernel(n: qmc.UInt) -> qmc.UInt:
-            q = qmc.qubit("q")
-            qmc.measure(q)
-            total = qmc.uint(0)
-            for i in qmc.range(n):
-                total = total + i
-            return total
-
-        block = kernel.build(parameters=["n"])
-        loops = _find_loops(block.operations)
-        assert loops, "expected a ForOperation in the built block"
-        assert any(loop.loop_carried_rebinds for loop in loops)
-
     def test_undecorated_helper_accumulation_allowed(self):
         """Accumulation inside an undecorated Python helper runs natively."""
 
@@ -582,15 +670,30 @@ class TestAllowedPatterns:
 
 
 # ---------------------------------------------------------------------------
-# IR plumbing: records survive serialization
+# IR plumbing: carry slots and rebind records survive serialization
 # ---------------------------------------------------------------------------
 
 
-class TestRebindRecordSerialization:
-    """LoopCarriedRebind records round-trip through both wire formats."""
+class TestCarrySerialization:
+    """Carry slots and rebind records round-trip through both wire formats."""
 
-    def _build_block_with_records(self):
-        """Build a block whose ForOperation carries rebind records."""
+    @staticmethod
+    def _roundtrip(block, fmt):
+        """Serialize and deserialize a block through the given format."""
+        from qamomile.circuit.ir.serialize import (
+            dump_json,
+            dump_msgpack,
+            load_json,
+            load_msgpack,
+        )
+
+        if fmt == "json":
+            return load_json(dump_json(block))
+        return load_msgpack(dump_msgpack(block))
+
+    @pytest.mark.parametrize("fmt", ["json", "msgpack"])
+    def test_carries_roundtrip(self, fmt):
+        """Carry slots survive a serialize/deserialize cycle."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.UInt:
@@ -601,38 +704,61 @@ class TestRebindRecordSerialization:
                 total = total + i
             return total
 
-        return kernel.build(parameters=["n"])
-
-    @pytest.mark.parametrize("fmt", ["json", "msgpack"])
-    def test_records_roundtrip(self, fmt):
-        """Records survive a serialize/deserialize cycle."""
-        from qamomile.circuit.ir.serialize import (
-            dump_json,
-            dump_msgpack,
-            load_json,
-            load_msgpack,
-        )
-
-        block = self._build_block_with_records()
+        block = kernel.build(parameters=["n"])
         transpiler = QiskitTranspiler()
         affine = transpiler.inline(block)
-
-        if fmt == "json":
-            restored = load_json(dump_json(affine))
-        else:
-            restored = load_msgpack(dump_msgpack(affine))
+        restored = self._roundtrip(affine, fmt)
 
         original_loops = _find_loops(affine.operations)
         restored_loops = _find_loops(restored.operations)
-        assert len(original_loops) == len(restored_loops)
-        for orig, rest in zip(original_loops, restored_loops, strict=True):
-            assert len(orig.loop_carried_rebinds) == len(rest.loop_carried_rebinds)
-            for orig_rec, rest_rec in zip(
-                orig.loop_carried_rebinds,
-                rest.loop_carried_rebinds,
-                strict=True,
-            ):
-                assert orig_rec.var_name == rest_rec.var_name
-                assert orig_rec.before.uuid == rest_rec.before.uuid
-                assert orig_rec.after.uuid == rest_rec.after.uuid
-                assert orig_rec.before_synthesized == rest_rec.before_synthesized
+        assert len(original_loops) == len(restored_loops) == 1
+        original_carries = list(original_loops[0].iter_carries())
+        restored_carries = list(restored_loops[0].iter_carries())
+        assert len(original_carries) == len(restored_carries) == 1
+        for orig, rest in zip(original_carries, restored_carries, strict=True):
+            assert orig.var_name == rest.var_name
+            assert orig.iter_arg.uuid == rest.iter_arg.uuid
+            assert orig.body_arg.uuid == rest.body_arg.uuid
+            assert orig.body_yield.uuid == rest.body_yield.uuid
+            assert orig.result.uuid == rest.result.uuid
+
+    @pytest.mark.parametrize("fmt", ["json", "msgpack"])
+    def test_records_roundtrip(self, fmt):
+        """Residual rebind records survive a serialize/deserialize cycle.
+
+        Bit rebinds are not promotable carries, so this kernel keeps
+        genuine ``LoopCarriedRebind`` records on its loop.
+        """
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            init_q = qmc.qubit("init")
+            state = qmc.measure(init_q)
+            for _i in qmc.range(n):
+                if state:
+                    q_zero = qmc.qubit("zero")
+                    state = qmc.measure(q_zero)
+                else:
+                    q_one = qmc.qubit("one")
+                    q_one = qmc.x(q_one)
+                    state = qmc.measure(q_one)
+            return state
+
+        block = kernel.build(parameters=["n"])
+        transpiler = QiskitTranspiler()
+        affine = transpiler.inline(block)
+        restored = self._roundtrip(affine, fmt)
+
+        original_loops = _find_loops(affine.operations)
+        restored_loops = _find_loops(restored.operations)
+        assert len(original_loops) == len(restored_loops) == 1
+        assert original_loops[0].loop_carried_rebinds, "expected residual records"
+        for orig_rec, rest_rec in zip(
+            original_loops[0].loop_carried_rebinds,
+            restored_loops[0].loop_carried_rebinds,
+            strict=True,
+        ):
+            assert orig_rec.var_name == rest_rec.var_name
+            assert orig_rec.before.uuid == rest_rec.before.uuid
+            assert orig_rec.after.uuid == rest_rec.after.uuid
+            assert orig_rec.before_synthesized == rest_rec.before_synthesized

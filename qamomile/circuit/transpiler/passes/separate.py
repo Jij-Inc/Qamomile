@@ -10,6 +10,8 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
     HasNestedOps,
     IfOperation,
 )
@@ -504,6 +506,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 hybrid operation.
         """
 
+        effective_kind = self._effective_kind
+
         class QuantumInputCollector(ControlFlowVisitor):
             """Collect input-value UUIDs of every quantum / hybrid operation."""
 
@@ -514,13 +518,22 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             def visit_operation(self, op: Operation) -> None:
                 """Record the input-value UUIDs of a quantum / hybrid op.
 
+                Control-flow ops whose bodies contain quantum work count
+                too: their structural inputs (loop bounds, loop-carried
+                ``iter_args``) must be resolvable at emit time, so a
+                classical op computing them feeds the quantum segment
+                exactly like a gate-angle expression.
+
                 Args:
                     op (Operation): The operation being visited.
 
                 Returns:
                     None: Mutates ``self.inputs`` in place.
                 """
-                if op.operation_kind in (
+                kind = op.operation_kind
+                if kind == OperationKind.CONTROL:
+                    kind = effective_kind(op)
+                if kind in (
                     OperationKind.QUANTUM,
                     OperationKind.HYBRID,
                 ):
@@ -706,6 +719,16 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         result: list[Operation] = []
         for op in operations:
             if op.operation_kind == OperationKind.CLASSICAL:
+                result.append(op)
+            elif (
+                isinstance(op, (ForOperation, ForItemsOperation))
+                and self._effective_kind(op) == OperationKind.CLASSICAL
+            ):
+                # A classical-body loop is one classical computation from
+                # the segmentation's point of view — with loop-carried
+                # value slots it can produce a gate parameter (e.g. an
+                # accumulated angle) exactly like a BinOp chain, and emit
+                # evaluates it inside the quantum segment the same way.
                 result.append(op)
             if isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():

@@ -17,12 +17,16 @@ from qamomile.circuit.ir.operation.control_flow import (
     BranchRebind,
     ForItemsOperation,
     ForOperation,
+    HasNestedOps,
     IfOperation,
     LoopCarriedRebind,
+    LoopCarry,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
 
 class WhileLoop:
@@ -64,6 +68,12 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     control-flow discard check, because the runtime loop re-executes its
     body on one persistent register without reset and cannot realize
     "fresh per iteration" semantics for the rebound name.
+
+    Classical scalar updates (``count = count + 1``) are likewise
+    rejected on while loops: the trip count is a runtime measurement
+    outcome, so the loop cannot unroll, and no backend can thread a
+    classical value between runtime-loop iterations. Use a
+    compile-time-bounded ``qmc.range`` loop for carried reductions.
     """
     # 1. Get the PARENT tracer (the one active before entering the while loop)
     parent_tracer = get_current_tracer()
@@ -110,6 +120,12 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     if condition_after is not condition_result:
         while_op.operands.append(condition_after_value)
 
+    # Promote classical rebind records into carry slots. While-loop
+    # carries are rejected later with a targeted error (a runtime loop
+    # cannot thread classical values between iterations), but the slots
+    # keep the IR uniform and the error precise.
+    _promote_classical_carries(while_op, body_tracer)
+
     # 8. Add the WhileOperation to the PARENT tracer (not a local one)
     parent_tracer.add_operation(while_op)
 
@@ -143,6 +159,13 @@ def for_loop(
                 qubits[i] = h(qubits[i])
             return qubits
         ```
+
+    Classical scalar updates (``total = total + i``) become loop-carry
+    slots on the ``ForOperation`` (see ``_promote_classical_carries``):
+    the loop enters with the initializer, each iteration reads the
+    previous iteration's value, and post-loop code reads the loop's
+    carry result — matching Python semantics. Carried loops are always
+    unrolled at emit, so their bounds must be compile-time-resolvable.
     """
     parent_tracer = get_current_tracer()
     body_tracer = Tracer()
@@ -170,6 +193,10 @@ def for_loop(
     for_op.operands.append(_value_to_ir_value(start, "start"))
     for_op.operands.append(_value_to_ir_value(stop, "stop"))
     for_op.operands.append(_value_to_ir_value(step, "step"))
+
+    # Promote classical rebind records into loop-carry slots so
+    # per-iteration accumulation compiles with iter_args semantics.
+    _promote_classical_carries(for_op, body_tracer)
 
     parent_tracer.add_operation(for_op)
 
@@ -468,6 +495,306 @@ def record_loop_rebinds(
     if records:
         tracer = get_current_tracer()
         tracer.loop_carried_rebinds = tracer.loop_carried_rebinds + tuple(records)
+
+
+def promote_loop_carry(value: typing.Any) -> typing.Any:
+    """Promote a constant loop-carry initializer to a symbolic handle.
+
+    Called from AST-injected code as one of the first statements of a
+    traced loop body, once per classical rebind candidate. Two
+    initializer shapes need the promotion:
+
+    - A plain Python number (``total = 0``) has no IR identity, so the
+      body's reads would embed untraceable constants.
+    - A constant-carrying handle (``total = qmc.uint(0)``) lets
+      trace-time constant folding collapse an all-constant update
+      (``total = total + 1``) into a bare constant, erasing the
+      loop-carried dependency the carry slot must reconstruct.
+
+    Both are wrapped in a fresh SYMBOLIC handle (no const metadata) and
+    the initial Python value is registered on the active body tracer,
+    where the loop builder picks it up as the carry slot's ``iter_arg``
+    constant. Symbolic handles, booleans, ``Bit`` handles, and any
+    other value pass through unchanged (Bit rebinds are not promotable
+    carries, and quantum handles are the quantum discard check's
+    domain).
+
+    Args:
+        value (typing.Any): The candidate variable's binding at
+            loop-body entry.
+
+    Returns:
+        typing.Any: A fresh symbolic ``UInt`` / ``Float`` handle for a
+            plain-number or constant-handle input; ``value`` itself
+            otherwise.
+    """
+    python_init: int | float
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        python_init = value
+        wrap_as_float = isinstance(value, float)
+    elif type(value) in (UInt, Float):
+        const = value.value.get_const()
+        if const is None or isinstance(const, bool):
+            return value
+        python_init = const
+        wrap_as_float = isinstance(value, Float)
+    else:
+        return value
+    handle: Handle
+    if wrap_as_float:
+        ir_value = Value(type=FloatType(), name="carry_init")
+        handle = Float(value=ir_value, init_value=float(python_init))
+    else:
+        ir_value = Value(type=UIntType(), name="carry_init")
+        handle = UInt(value=ir_value, init_value=int(python_init))
+    tracer = get_current_tracer()
+    tracer.promoted_carry_inits[ir_value.uuid] = python_init
+    return handle
+
+
+def _classical_handle_for_value(value: Value) -> Handle:
+    """Wrap a loop-carry result value in its classical handle family.
+
+    Args:
+        value (Value): Carry ``result`` value (``UIntType`` /
+            ``FloatType`` / ``BitType`` typed).
+
+    Returns:
+        Handle: A fresh handle of the family matching ``value.type``.
+
+    Raises:
+        TypeError: If the value's type has no classical handle family.
+            Carry slots are built from UInt / Float scalars only, so
+            this indicates an internal invariant break.
+    """
+    from qamomile.circuit.frontend.handle.primitives import Bit
+
+    if isinstance(value.type, FloatType):
+        return Float(value=value, init_value=0.0)
+    if isinstance(value.type, UIntType):
+        return UInt(value=value, init_value=0)
+    if isinstance(value.type, BitType):
+        return Bit(value=value)
+    raise TypeError(
+        f"[FOR DEVELOPER] Loop-carried value of type {value.type} has no "
+        "classical handle family for post-loop rebinding."
+    )
+
+
+def loop_carry_results(
+    frame_locals: dict[str, typing.Any],
+    names: tuple[str, ...],
+) -> tuple[typing.Any, ...]:
+    """Rebind post-loop variables to the loop's carried results.
+
+    Called from AST-injected code immediately after a traced loop's
+    ``with`` block (inside the zero-trip trace guard, so a
+    statically-zero-trip loop keeps its pre-loop bindings untouched).
+    The loop builder has just appended the loop operation to the active
+    tracer; each carried variable's post-loop binding must switch from
+    the traced body's last value to the loop's ``result`` — which the
+    executors resolve to the final iteration's yield, or to the
+    ``iter_arg`` for zero runtime trips. Names without a carry slot
+    keep their current binding.
+
+    Args:
+        frame_locals (dict[str, typing.Any]): The caller's ``locals()``
+            after the loop.
+        names (tuple[str, ...]): Classical rebind candidate names, in
+            the order the generated assignment unpacks them.
+
+    Returns:
+        tuple[typing.Any, ...]: One binding per name — a fresh handle
+            wrapping the carry result when the loop carries the name,
+            otherwise the name's current binding.
+    """
+    tracer = get_current_tracer()
+    carries: dict[str, LoopCarry] = {}
+    if tracer.operations:
+        loop_op = tracer.operations[-1]
+        if isinstance(loop_op, (ForOperation, ForItemsOperation, WhileOperation)):
+            carries = {c.var_name: c for c in loop_op.iter_carries()}
+    rebindings: list[typing.Any] = []
+    for name in names:
+        carry = carries.get(name)
+        if carry is None:
+            rebindings.append(frame_locals.get(name))
+        else:
+            rebindings.append(_classical_handle_for_value(carry.result))
+    return tuple(rebindings)
+
+
+def _substitute_operations(
+    operations: list[Operation],
+    substitutor: ValueSubstitutor,
+) -> list[Operation]:
+    """Substitute values across an operation list, recursing into bodies.
+
+    ``ValueSubstitutor.substitute_operation`` rewrites one operation's
+    own fields (operands, results, yields, records, carry slots) but
+    does not descend into nested control-flow bodies; this walker adds
+    the recursion.
+
+    Args:
+        operations (list[Operation]): Operations to rewrite.
+        substitutor (ValueSubstitutor): The substitution to apply.
+
+    Returns:
+        list[Operation]: Rewritten operations (originals are not
+            mutated).
+    """
+    new_ops: list[Operation] = []
+    for op in operations:
+        if isinstance(op, HasNestedOps):
+            new_lists = [
+                _substitute_operations(body, substitutor)
+                for body in op.nested_op_lists()
+            ]
+            op = op.rebuild_nested(new_lists)
+        new_ops.append(substitutor.substitute_operation(op))
+    return new_ops
+
+
+def _collect_referenced_uuids(operations: list[Operation]) -> set[str]:
+    """Collect every value UUID an operation list references, recursively.
+
+    Args:
+        operations (list[Operation]): Operations to scan (nested
+            control-flow bodies included).
+
+    Returns:
+        set[str]: UUIDs of all input values referenced anywhere in the
+            list.
+    """
+    uuids: set[str] = set()
+    for op in operations:
+        for value in op.all_input_values():
+            uuids.add(value.uuid)
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                uuids |= _collect_referenced_uuids(body)
+    return uuids
+
+
+def _carry_eligible_record(
+    record: LoopCarriedRebind,
+    promoted_inits: dict[str, typing.Any],
+    referenced_uuids: set[str],
+    record_after_uuids: set[str],
+) -> bool:
+    """Decide whether a classical rebind record can become a carry slot.
+
+    Promotable records are same-type UInt / Float scalar updates whose
+    pre-loop value the body actually references — directly in its
+    operations, through another record's post-body value (the swap
+    shape), or as a promoted plain-number initializer. Everything else
+    stays a rebind record for the transpiler's rejection checks: Bit
+    rebinds (the measurement-backed shapes have no emit-time value),
+    quantum records, array values, mixed-type updates, and updates
+    whose trace-time constant fold erased the dependency (nothing in
+    the body references the pre-loop value, so no back-edge can be
+    reconstructed).
+
+    Args:
+        record (LoopCarriedRebind): The record to classify.
+        promoted_inits (dict[str, typing.Any]): Promoted plain-number
+            initializers, keyed by promoted Value UUID.
+        referenced_uuids (set[str]): Every UUID the loop body
+            references.
+        record_after_uuids (set[str]): The post-body value UUIDs of all
+            records on the same loop.
+
+    Returns:
+        bool: True when the record can be promoted to a carry slot.
+    """
+    before, after = record.before, record.after
+    if isinstance(before, ArrayValue) or isinstance(after, ArrayValue):
+        return False
+    if before.type.is_quantum() or after.type.is_quantum():
+        return False
+    if isinstance(before.type, BitType) or isinstance(after.type, BitType):
+        return False
+    if before.type != after.type:
+        return False
+    if record.before_synthesized:
+        return False
+    if before.uuid in promoted_inits:
+        return True
+    return before.uuid in referenced_uuids or before.uuid in record_after_uuids
+
+
+def _promote_classical_carries(
+    loop_op: ForOperation | ForItemsOperation | WhileOperation,
+    body_tracer: Tracer,
+) -> None:
+    """Promote a loop's classical rebind records into carry slots.
+
+    Formalizes the loop-carried back-edge the records captured: for
+    each promotable record, the pre-loop value becomes the carry's
+    ``iter_arg`` (or a synthesized constant for a promoted plain-number
+    initializer), every body reference to it is substituted with a
+    fresh ``body_arg`` formal, the post-body value becomes the
+    ``body_yield``, and a fresh ``result`` is appended for post-loop
+    readers. Promoted records are removed — the carry slot is the
+    single representation of the back-edge — while non-promotable
+    records stay for the transpiler's rejection checks.
+
+    Args:
+        loop_op (ForOperation | ForItemsOperation | WhileOperation): The
+            just-built loop operation; mutated in place (operations
+            list, carry lists, results, rebind records).
+        body_tracer (Tracer): The tracer that captured the loop body,
+            holding the records and the promoted initializers.
+    """
+    records = loop_op.loop_carried_rebinds
+    if not records:
+        return
+    promoted_inits = body_tracer.promoted_carry_inits
+    referenced_uuids = _collect_referenced_uuids(loop_op.operations)
+    record_after_uuids = {r.after.uuid for r in records}
+    promotable = [
+        record
+        for record in records
+        if _carry_eligible_record(
+            record, promoted_inits, referenced_uuids, record_after_uuids
+        )
+    ]
+    if not promotable:
+        return
+
+    body_args: dict[str, Value] = {
+        record.before.uuid: Value(
+            type=record.before.type, name=f"{record.var_name}_prev"
+        )
+        for record in promotable
+    }
+    substitutor = ValueSubstitutor(typing.cast("dict[str, ValueBase]", dict(body_args)))
+    loop_op.operations = _substitute_operations(loop_op.operations, substitutor)
+
+    for record in promotable:
+        if record.before.uuid in promoted_inits:
+            iter_arg = _value_to_ir_value(
+                promoted_inits[record.before.uuid], record.var_name
+            )
+        else:
+            iter_arg = record.before
+        # A yield that is another carried variable's pre-loop value (the
+        # swap shape) must read that variable's body formal instead.
+        body_yield = body_args.get(record.after.uuid, record.after)
+        loop_op.add_carry(
+            var_name=record.var_name,
+            iter_arg=iter_arg,
+            body_arg=body_args[record.before.uuid],
+            body_yield=body_yield,
+            result=Value(type=record.after.type, name=record.var_name),
+        )
+    loop_op.loop_carried_rebinds = tuple(
+        record
+        for record in records
+        if not any(record is promoted for promoted in promotable)
+    )
 
 
 def _create_phi_for_values(
@@ -1406,5 +1733,9 @@ def for_items(
         loop_carried_rebinds=body_tracer.loop_carried_rebinds,
     )
     for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand
+
+    # Promote classical rebind records into loop-carry slots so
+    # per-item accumulation compiles with iter_args semantics.
+    _promote_classical_carries(for_items_op, body_tracer)
 
     parent_tracer.add_operation(for_items_op)

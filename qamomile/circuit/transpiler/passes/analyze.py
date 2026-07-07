@@ -573,6 +573,11 @@ _LOOP_KIND_NAMES: dict[type, str] = {
 def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError:
     """Build the targeted loop-carried rebind rejection error.
 
+    Fires only for the rebind shapes the loop-carry slots cannot
+    express (see ``_carry_eligible_record`` in the frontend): plain
+    UInt / Float scalar updates are promoted to carries at trace time
+    and compile correctly, so they never reach this error.
+
     Args:
         var_name (str): Display name of the rebound variable.
         loop_kind (str): Human-readable loop kind ("for" / "while" /
@@ -583,15 +588,38 @@ def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError
     """
     return ValidationError(
         f"Loop-carried update of classical variable '{var_name}' inside a "
-        f"qkernel {loop_kind} loop is not supported: the loop body is "
-        f"traced once, so '{var_name}' on the right-hand side is fixed to "
-        f"its pre-loop value instead of the previous iteration's value, "
-        f"and the compiled program would silently diverge from Python "
-        f"semantics. Compute the reduction in ordinary Python instead — "
-        f"outside the qkernel or in an undecorated helper function — or "
-        f"express each iteration's value directly from the loop index. "
-        f"Note: builtin range() inside qkernel is traced exactly like "
-        f"qmc.range()."
+        f"qkernel {loop_kind} loop is not supported for this update's "
+        f"shape: the loop body is traced once, and only same-type UInt / "
+        f"Float scalar updates can be promoted to loop-carried value "
+        f"slots. Measurement-backed Bit rebinds (the loop cannot re-route "
+        f"the classical bit between iterations), mixed-type updates, and "
+        f"updates whose trace-time constant fold erased the loop-carried "
+        f"dependency are rejected because the compiled program would "
+        f"silently diverge from Python semantics. Restructure the update "
+        f"into a supported scalar shape, or compute the reduction in "
+        f"ordinary Python — outside the qkernel or in an undecorated "
+        f"helper function. Note: builtin range() inside qkernel is traced "
+        f"exactly like qmc.range()."
+    )
+
+
+def _while_carried_value_error(var_name: str) -> ValidationError:
+    """Build the targeted while-loop carried-value rejection error.
+
+    Args:
+        var_name (str): Display name of the carried variable.
+
+    Returns:
+        ValidationError: The error to raise.
+    """
+    return ValidationError(
+        f"Loop-carried update of classical variable '{var_name}' inside a "
+        f"qkernel while loop is not supported: a while loop's trip count "
+        f"is a runtime measurement outcome, so the loop must stay a "
+        f"runtime loop, and no backend can carry a classical value "
+        f"between runtime-loop iterations (the emitted body is one static "
+        f"circuit). Move the update outside the while loop, or express "
+        f"the computation with a compile-time-bounded qmc.range loop."
     )
 
 
@@ -961,6 +989,13 @@ def reject_loop_carried_classical_rebinds(
     }
     _reject_stale_while_condition_reads(pruned, output_uuids)
     for op in flatten_ops(pruned.operations):
+        if isinstance(op, WhileOperation) and op.carried_names:
+            # A carried while loop has a well-formed back-edge in the IR,
+            # but no execution path can realize it: the trip count is a
+            # runtime measurement outcome, so the loop cannot unroll, and
+            # a native runtime loop re-executes one static body that
+            # cannot thread a classical value between iterations.
+            raise _while_carried_value_error(op.carried_names[0])
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             _check_loop_carried_rebinds(op, pruned.aliases_for_loop(op))
 
