@@ -96,13 +96,13 @@ def _fix_ansatz_rx(thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
 
 @qmc.qkernel
 def _fix_superposition() -> qmc.Vector[qmc.Qubit]:
-    """``algorithm.basic.superposition_vector`` via a wrapper — covers CallBlockOperation inline."""
+    """``algorithm.basic.superposition_vector`` via a wrapper — covers InvokeOperation inline."""
     return superposition_vector(4)  # type: ignore[arg-type]
 
 
 @qmc.qkernel
 def _fix_qft() -> qmc.Vector[qmc.Qubit]:
-    """QFT on 3 qubits — covers CompositeGateOperation + nested implementation_block."""
+    """QFT on 3 qubits — covers InvokeOperation + nested body."""
     qs = qmc.qubit_array(3, "qs")
     return qft(qs)
 
@@ -173,7 +173,7 @@ FIXTURE_KERNELS: list[tuple[str, Callable[[], Block], dict[str, Any]]] = [
         lambda: InlinePass().run(_fix_qft.block),
         {
             "kind": BlockKind.AFFINE,
-            "op_types": ["QInitOperation", "CompositeGateOperation"],
+            "op_types": ["QInitOperation", "InvokeOperation"],
             "param_slot_count": 0,
         },
     ),

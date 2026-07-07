@@ -1,5 +1,6 @@
 """Tests for the CompositeGate API."""
 
+import dataclasses
 from typing import Any
 
 import numpy as np
@@ -11,8 +12,14 @@ from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.frontend.tracer import Tracer
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation import InvokeOperation
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallPolicy,
+    CallTransform,
     CompositeGateType,
     ResourceMetadata,
 )
@@ -21,6 +28,8 @@ from qamomile.circuit.ir.types import FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
+    emit_composite_fallback,
+    emit_invoke_operation,
     emit_iqft_with_strategy,
     emit_qft_with_strategy,
     emit_qpe_manual,
@@ -108,8 +117,721 @@ def apply_gate_to_array(qs: Vector[Qubit], gate: CompositeGate) -> Vector[Qubit]
     return qs
 
 
+def _invoke_ops(operations: list[object]) -> list[InvokeOperation]:
+    """Return callable invocation operations from an operation list."""
+    return [op for op in operations if isinstance(op, InvokeOperation)]
+
+
+def _assert_composite_invoke(
+    op: object,
+    *,
+    name: str,
+    num_targets: int,
+    num_controls: int = 0,
+    gate_type: CompositeGateType = CompositeGateType.CUSTOM,
+) -> InvokeOperation:
+    """Assert that an operation is a composite invocation."""
+    assert isinstance(op, InvokeOperation)
+    assert op.attrs["custom_name"] == name
+    assert op.attrs["gate_type"] == gate_type.name
+    assert op.target.name == name
+    assert op.num_target_qubits == num_targets
+    assert op.num_control_qubits == num_controls
+    return op
+
+
+class TestCallableDefinitionSignatures:
+    """Verify public callable APIs preserve compiler-facing signatures."""
+
+    def test_qkernel_call_records_callable_signature(self):
+        """qkernel calls attach a CallableDef signature derived from the body."""
+
+        @qmc.qkernel
+        def helper(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit("q")
+            q = helper(q)
+            return q
+
+        op = _invoke_ops(circuit.build().operations)[0]
+
+        assert op.definition is not None
+        assert op.definition.signature is not None
+        assert op.signature is op.definition.signature
+        assert op.definition.signature.operands[0].name == "q"
+        assert isinstance(op.definition.signature.operands[0].type, QubitType)
+        assert isinstance(op.definition.signature.results[0].type, QubitType)
+
+    def test_composite_call_records_callable_signature(self):
+        """composite calls attach a CallableDef signature derived from the body."""
+
+        @qmc.composite_gate(name="encode")
+        @qmc.qkernel
+        def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            q[0] = qmc.h(q[0])
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(2, "q")
+            q = encode(q)
+            return q
+
+        op = _invoke_ops(circuit.build().operations)[0]
+
+        assert op.definition is not None
+        assert op.definition.signature is not None
+        assert op.signature is op.definition.signature
+        assert op.definition.signature.operands[0].name == "q"
+        assert len(op.definition.signature.results) == 1
+
+    def test_composite_decorator_records_implementation_candidates(self):
+        """composite decorators attach user-supplied implementation candidates."""
+        native_resource = ResourceMetadata(total_gates=7)
+        implementation = CallableImplementation(
+            backend="qiskit",
+            strategy="native",
+            resource=native_resource,
+        )
+
+        @qmc.composite_gate(name="encode", implementations=[implementation])
+        @qmc.qkernel
+        def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(2, "q")
+            q = encode(q)
+            return q
+
+        op = _invoke_ops(circuit.build().operations)[0]
+
+        assert op.definition is not None
+        assert op.definition.implementations[0] is implementation
+
+    def test_composite_decorator_exposes_qkernel_like_surface(self):
+        """composite decorators keep the wrapped qkernel inspection surface."""
+
+        @qmc.composite_gate(name="encode")
+        @qmc.qkernel
+        def encode(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            return q
+
+        assert encode.name == "encode"
+        assert encode.qkernel.name == "encode"
+        assert "q" in encode.signature.parameters
+        assert encode.input_types == encode.qkernel.input_types
+        assert encode.output_types == encode.qkernel.output_types
+        assert encode.block is encode.qkernel.block
+        assert list(encode.build(parameters=[]).label_args) == ["q"]
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit("q")
+            q = encode(q)
+            return q
+
+        op = _invoke_ops(circuit.build().operations)[0]
+        assert op.default_policy is CallPolicy.PRESERVE_BOX
+
+    def test_fixed_arity_composite_decorator_selects_strategy_resource(self):
+        """fixed-arity composite decorators use implementation resource hints."""
+        fast_resource = ResourceMetadata(total_gates=3)
+
+        @qmc.composite_gate(
+            name="encode",
+            implementations=[
+                CallableImplementation(strategy="fast", resource=fast_resource)
+            ],
+        )
+        @qmc.qkernel
+        def encode(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit("q")
+            q = encode(q, strategy="fast")
+            return q
+
+        op = _invoke_ops(circuit.build().operations)[0]
+
+        assert op.strategy_name == "fast"
+        assert op.effective_resource() is fast_resource
+
+    def test_composite_decorator_rejects_missing_declared_controls(self):
+        """A fixed-control decorator call must not emit inconsistent IR."""
+
+        @qmc.composite_gate(name="controlled_encode", num_controls=1)
+        @qmc.qkernel
+        def controlled_encode(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit("q")
+            q = controlled_encode(q)
+            return q
+
+        with pytest.raises(ValueError, match="declares 1 control qubits"):
+            circuit.build()
+
+    def test_opaque_call_records_callable_signature_without_user_signature(self):
+        """opaque calls synthesize a CallableDef signature from call values."""
+        black_box = qmc.opaque("black_box", 1)
+
+        @qmc.qkernel
+        def circuit(q: qmc.Qubit) -> qmc.Qubit:
+            (q,) = black_box(q)
+            return q
+
+        op = _invoke_ops(circuit.build().operations)[0]
+
+        assert op.definition is not None
+        assert op.definition.signature is not None
+        assert op.signature is op.definition.signature
+        assert op.definition.signature.operands[0].name == "target_0"
+        assert isinstance(op.definition.signature.operands[0].type, QubitType)
+        assert isinstance(op.definition.signature.results[0].type, QubitType)
+
+    def test_manual_invoke_auto_definition_records_signature(self):
+        """InvokeOperation auto-definitions preserve operand/result types."""
+        operand = Value(type=QubitType(), name="q")
+        result = operand.next_version()
+
+        op = InvokeOperation(
+            operands=[operand],
+            results=[result],
+            target=CallableRef(namespace="user", name="manual"),
+        )
+
+        assert op.definition is not None
+        assert op.definition.signature is not None
+        assert op.signature is op.definition.signature
+        assert op.definition.signature.operands[0].name == "arg_0"
+        assert isinstance(op.definition.signature.operands[0].type, QubitType)
+        assert isinstance(op.definition.signature.results[0].type, QubitType)
+
+
 class TestCompositeGate:
     """Test the CompositeGate API: definition, application, and error handling."""
+
+    def test_invoke_stores_body_and_resource_only_on_definition(self):
+        """InvokeOperation exposes body/resource without duplicating fields."""
+        body = Block()
+        resource = ResourceMetadata(total_gates=1)
+        ref = CallableRef(namespace="user", name="callable")
+        op = InvokeOperation(
+            target=ref,
+            definition=CallableDef(ref=ref, body=body, resource=resource),
+        )
+
+        field_names = {field.name for field in dataclasses.fields(InvokeOperation)}
+
+        assert "body" not in field_names
+        assert "resource" not in field_names
+        assert op.definition is not None
+        assert op.definition.body is body
+        assert op.definition.resource is resource
+        assert op.body is body
+        assert op.resource is resource
+
+    def test_invoke_effective_body_uses_selected_strategy(self):
+        """InvokeOperation selects a strategy-specific implementation body."""
+        ref = CallableRef(namespace="user", name="selectable")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.CUSTOM.name,
+            "custom_name": "selectable",
+            "strategy_name": "fast",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        default_body = Block(name="default")
+        fast_body = Block(name="fast")
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                body=default_body,
+                implementations=[
+                    CallableImplementation(strategy="fast", body=fast_body),
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+
+        assert op.effective_body() is fast_body
+
+    def test_invoke_effective_body_does_not_guess_strategy(self):
+        """InvokeOperation does not pick a strategy body without strategy_name."""
+        ref = CallableRef(namespace="user", name="selectable")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.CUSTOM.name,
+            "custom_name": "selectable",
+            "strategy_name": None,
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        default_body = Block(name="default")
+        fast_body = Block(name="fast")
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                body=default_body,
+                implementations=[
+                    CallableImplementation(strategy="fast", body=fast_body),
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+
+        assert op.effective_body() is default_body
+
+    @pytest.mark.parametrize(
+        "transform",
+        [CallTransform.INVERSE, CallTransform.CONTROLLED],
+    )
+    def test_transformed_invoke_does_not_fallback_to_direct_body(
+        self,
+        transform: CallTransform,
+    ):
+        """Transformed InvokeOperation requires a matching implementation body."""
+        ref = CallableRef(namespace="user", name="selectable")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.CUSTOM.name,
+            "custom_name": "selectable",
+            "strategy_name": None,
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        direct_body = Block(name="direct")
+        transformed_body = Block(name="transformed")
+        op_without_transform = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            transform=transform,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                body=direct_body,
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+        op_with_transform = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            transform=transform,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                body=direct_body,
+                implementations=[
+                    CallableImplementation(
+                        transform=transform,
+                        body=transformed_body,
+                    ),
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+
+        assert op_without_transform.effective_body() is None
+        assert op_with_transform.effective_body() is transformed_body
+
+    def test_controlled_invoke_does_not_fallback_to_direct_resource(self):
+        """Controlled InvokeOperation requires controlled resource metadata."""
+        ref = CallableRef(namespace="user", name="selectable")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.CUSTOM.name,
+            "custom_name": "selectable",
+            "strategy_name": None,
+            "num_control_qubits": 1,
+            "num_target_qubits": 1,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        direct_resource = ResourceMetadata(total_gates=1, single_qubit_gates=1)
+        controlled_resource = ResourceMetadata(total_gates=3, two_qubit_gates=3)
+        op_without_controlled_resource = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            transform=CallTransform.CONTROLLED,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                resource=direct_resource,
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+        op_with_controlled_resource = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            transform=CallTransform.CONTROLLED,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                resource=direct_resource,
+                implementations=[
+                    CallableImplementation(
+                        transform=CallTransform.CONTROLLED,
+                        resource=controlled_resource,
+                    ),
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+
+        assert op_without_controlled_resource.effective_resource() is None
+        assert op_with_controlled_resource.effective_resource() is controlled_resource
+
+    def test_invoke_vector_target_keeps_parameters_after_quantum_operands(self):
+        """InvokeOperation separates vector targets from classical parameters."""
+        dim = Value(type=UIntType(), name="n").with_const(3)
+        target = ArrayValue(type=QubitType(), name="q", shape=(dim,))
+        theta = Value(type=FloatType(), name="theta")
+        ref = CallableRef(namespace="user", name="vector_gate")
+        op = InvokeOperation(
+            operands=[target, theta],
+            results=[target.next_version()],
+            target=ref,
+            attrs={
+                "kind": "composite",
+                "gate_type": CompositeGateType.CUSTOM.name,
+                "custom_name": "vector_gate",
+                "num_control_qubits": 0,
+                "num_target_qubits": 3,
+                "default_policy": CallPolicy.PRESERVE_BOX.name,
+            },
+        )
+
+        assert op.target_qubits == [target]
+        assert op.parameters == [theta]
+
+    def test_emit_fallback_uses_selected_implementation_body(self):
+        """Composite fallback emits the selected implementation body."""
+        ref = CallableRef(namespace="user", name="selectable")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.CUSTOM.name,
+            "custom_name": "selectable",
+            "strategy_name": "fast",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        default_body = Block(name="default")
+        fast_body = Block(name="fast")
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                body=default_body,
+                implementations=[
+                    CallableImplementation(strategy="fast", body=fast_body),
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+
+        class EmitPassStub:
+            """Capture the implementation passed to custom composite emission."""
+
+            emitted_impl: Block | None = None
+
+            def _emit_custom_composite(
+                self,
+                circuit: Any,
+                op: InvokeOperation,
+                impl: Block,
+                qubit_indices: list[int],
+                bindings: dict[str, Any],
+            ) -> None:
+                """Record the selected implementation body."""
+                del circuit, op, qubit_indices, bindings
+                self.emitted_impl = impl
+
+        emit_pass = EmitPassStub()
+        emit_composite_fallback(emit_pass, object(), op, [], {})
+
+        assert emit_pass.emitted_impl is fast_body
+
+    def test_emit_invoke_allows_bodyless_oracle_with_native_emitter(self):
+        """Bodyless oracle invocation can execute through a native emitter."""
+        ref = CallableRef(namespace="user", name="native_oracle")
+        attrs = {
+            "kind": "oracle",
+            "custom_name": "native_oracle",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.NATIVE_FIRST.name,
+        }
+
+        class NativeEmitter:
+            """Capture a native callable emission."""
+
+            emitted: bool = False
+
+            def emit(
+                self,
+                circuit: Any,
+                op: InvokeOperation,
+                qubit_indices: list[int],
+                bindings: dict[str, Any],
+            ) -> bool:
+                """Record that native emission was used."""
+                del circuit, op, qubit_indices, bindings
+                self.emitted = True
+                return True
+
+        class EmitPassStub:
+            """Provide the minimal fields used by invoke emission."""
+
+            def __init__(self) -> None:
+                """Initialize the stub with no global composite emitters."""
+                self._composite_emitters: list[Any] = []
+
+        native = NativeEmitter()
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                implementations=[
+                    CallableImplementation(emitter=native),
+                ],
+                default_policy=CallPolicy.NATIVE_FIRST,
+                attrs=attrs,
+            ),
+        )
+
+        emit_invoke_operation(EmitPassStub(), object(), op, {}, {})
+
+        assert native.emitted is True
+
+    def test_emit_invoke_selects_backend_specific_callable_emitter(self):
+        """Backend-specific callable emitters are selected by emit backend name."""
+        ref = CallableRef(namespace="user", name="native_oracle")
+        attrs = {
+            "kind": "oracle",
+            "custom_name": "native_oracle",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.NATIVE_FIRST.name,
+        }
+
+        class NativeEmitter:
+            """Capture backend-specific native callable emission."""
+
+            emitted: bool = False
+
+            def emit(
+                self,
+                circuit: Any,
+                op: InvokeOperation,
+                qubit_indices: list[int],
+                bindings: dict[str, Any],
+            ) -> bool:
+                """Record that native emission was used."""
+                del circuit, op, qubit_indices, bindings
+                self.emitted = True
+                return True
+
+        class EmitPassStub:
+            """Provide a qiskit backend name and no global emitters."""
+
+            backend_name = "qiskit"
+
+            def __init__(self) -> None:
+                """Initialize the stub with no global composite emitters."""
+                self._composite_emitters: list[Any] = []
+
+        native = NativeEmitter()
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                implementations=[
+                    CallableImplementation(backend="qiskit", emitter=native),
+                ],
+                default_policy=CallPolicy.NATIVE_FIRST,
+                attrs=attrs,
+            ),
+        )
+
+        emit_invoke_operation(EmitPassStub(), object(), op, {}, {})
+
+        assert native.emitted is True
+
+    def test_emit_invoke_rejects_bodyless_oracle_when_backend_impl_mismatches(self):
+        """Backend-specific callable emitters do not match another backend."""
+        ref = CallableRef(namespace="user", name="native_oracle")
+        attrs = {
+            "kind": "oracle",
+            "custom_name": "native_oracle",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.NATIVE_FIRST.name,
+        }
+
+        class NativeEmitter:
+            """Backend-specific native callable emitter stand-in."""
+
+            def emit(
+                self,
+                circuit: Any,
+                op: InvokeOperation,
+                qubit_indices: list[int],
+                bindings: dict[str, Any],
+            ) -> bool:
+                """Fail if the mismatched emitter is incorrectly selected."""
+                del circuit, op, qubit_indices, bindings
+                raise AssertionError("mismatched backend emitter should not run")
+
+        class EmitPassStub:
+            """Provide a different backend name from the implementation."""
+
+            backend_name = "quri_parts"
+
+            def __init__(self) -> None:
+                """Initialize the stub with no global composite emitters."""
+                self._composite_emitters: list[Any] = []
+
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                implementations=[
+                    CallableImplementation(backend="qiskit", emitter=NativeEmitter()),
+                ],
+                default_policy=CallPolicy.NATIVE_FIRST,
+                attrs=attrs,
+            ),
+        )
+
+        with pytest.raises(EmitError, match="has no implementation"):
+            emit_invoke_operation(EmitPassStub(), object(), op, {}, {})
+
+    def test_callable_implementation_emitter_precedes_global_composite_emitter(self):
+        """Callable-specific emitters take priority over type-wide emitters."""
+        ref = CallableRef(namespace="user", name="custom")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.CUSTOM.name,
+            "custom_name": "custom",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.NATIVE_FIRST.name,
+        }
+
+        class NativeEmitter:
+            """Capture callable-specific emission."""
+
+            emitted: bool = False
+
+            def emit(
+                self,
+                circuit: Any,
+                op: InvokeOperation,
+                qubit_indices: list[int],
+                bindings: dict[str, Any],
+            ) -> bool:
+                """Record callable-specific emission."""
+                del circuit, op, qubit_indices, bindings
+                self.emitted = True
+                return True
+
+        class GlobalEmitter:
+            """Capture whether the global composite emitter was used."""
+
+            emitted: bool = False
+
+            def can_emit(self, gate_type: CompositeGateType) -> bool:
+                """Return true for all composite gate types."""
+                del gate_type
+                return True
+
+            def emit(
+                self,
+                circuit: Any,
+                op: InvokeOperation,
+                qubit_indices: list[int],
+                bindings: dict[str, Any],
+            ) -> bool:
+                """Record global emission."""
+                del circuit, op, qubit_indices, bindings
+                self.emitted = True
+                return True
+
+        class EmitPassStub:
+            """Provide a backend name and global composite emitter."""
+
+            backend_name = "qiskit"
+
+            def __init__(self, global_emitter: GlobalEmitter) -> None:
+                """Initialize the stub with one global composite emitter."""
+                self._composite_emitters = [global_emitter]
+
+        native = NativeEmitter()
+        global_emitter = GlobalEmitter()
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                implementations=[
+                    CallableImplementation(backend="qiskit", emitter=native),
+                ],
+                default_policy=CallPolicy.NATIVE_FIRST,
+                attrs=attrs,
+            ),
+        )
+
+        emit_invoke_operation(EmitPassStub(global_emitter), object(), op, {}, {})
+
+        assert native.emitted is True
+        assert global_emitter.emitted is False
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_simple_composite_gate_definition(self, n):
@@ -180,10 +902,7 @@ class TestCompositeGate:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].custom_name == "double_h"
-        assert ops[1].num_target_qubits == 1
-        assert ops[1].num_control_qubits == 0
+        _assert_composite_invoke(ops[1], name="double_h", num_targets=1)
 
     def test_apply_multi_qubit_composite_gate(self):
         """Multi-qubit CompositeGate works correctly."""
@@ -200,10 +919,7 @@ class TestCompositeGate:
         assert len(ops) == 3
         assert isinstance(ops[0], QInitOperation)
         assert isinstance(ops[1], QInitOperation)
-        assert isinstance(ops[2], CompositeGateOperation)
-        assert ops[2].custom_name == "bell_pair"
-        assert ops[2].num_target_qubits == 2
-        assert ops[2].num_control_qubits == 0
+        _assert_composite_invoke(ops[2], name="bell_pair", num_targets=2)
 
     def test_wrong_num_qubits_raises_error(self):
         """Passing wrong number of qubits raises ValueError."""
@@ -226,36 +942,174 @@ class TestCompositeGate:
         with pytest.raises(ValueError, match="requires 2 target qubits"):
             circuit.build()
 
-    def test_stub_gate_without_decomposition(self):
-        """Stub gate (no _decompose) has no implementation."""
+    def test_composite_without_decomposition_raises(self):
+        """CompositeGate without a body points users to Oracle."""
 
-        class StubOracle(CompositeGate):
+        class MissingBodyGate(CompositeGate):
             custom_name = "oracle"
 
             @property
             def num_target_qubits(self) -> int:
                 return 2
 
-        oracle = StubOracle()
+        gate = MissingBodyGate()
 
         @qkernel
         def circuit() -> Vector[Qubit]:
             qs = qubit_array(2, "qs")
-            q0 = qs[0]
-            q1 = qs[1]
-            q0, q1 = oracle(q0, q1)
+            q0, q1 = gate(qs[0], qs[1])
             qs[0] = q0
             qs[1] = q1
             return qs
 
-        block = circuit.build()
+        with pytest.raises(ValueError, match="Use Oracle"):
+            circuit.build()
 
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
-        ]
-        assert len(composite_ops) == 1
-        assert composite_ops[0].has_implementation is False
-        assert composite_ops[0].implementation is None
+    def test_opaque_helper_emits_bodyless_invoke(self):
+        """opaque() creates an Oracle backed by a bodyless InvokeOperation."""
+        resource = ResourceMetadata(query_complexity=3, ancilla_qubits=2)
+        black_box = qmc.opaque("black_box", 1, resource=resource)
+
+        assert isinstance(black_box, qmc.Oracle)
+
+        @qkernel
+        def circuit(q: Qubit) -> Qubit:
+            (q,) = black_box(q)
+            return q
+
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.attrs["kind"] == "oracle"
+        assert op.target.name == "black_box"
+        assert op.body is None
+        assert op.resource is resource
+
+    def test_controlled_opaque_records_controlled_transform(self):
+        """Controlled opaque calls use the controlled Invoke transform."""
+        resource = ResourceMetadata(query_complexity=1, t_gates=4)
+        black_box = qmc.Oracle(
+            "controlled_black_box",
+            num_qubits=1,
+            num_control_qubits=1,
+            resource=resource,
+        )
+
+        @qkernel
+        def circuit(ctrl: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
+            ctrl, target = black_box(target, controls=(ctrl,))
+            return ctrl, target
+
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.attrs["kind"] == "oracle"
+        assert op.transform is CallTransform.CONTROLLED
+        assert op.num_control_qubits == 1
+        assert op.effective_resource() is resource
+
+    def test_opaque_accepts_callable_signature(self):
+        """opaque() accepts a vector CallableSignature without fixed arity."""
+        black_box = qmc.opaque(
+            "vector_black_box",
+            signature=qmc.CallableSignature(
+                inputs=[qmc.Vector[qmc.Qubit]],
+                outputs=[qmc.Vector[qmc.Qubit]],
+            ),
+        )
+
+        @qkernel
+        def circuit() -> Vector[Qubit]:
+            qs = qubit_array(2, "qs")
+            qs = black_box(qs)
+            return qs
+
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.attrs["kind"] == "oracle"
+        assert op.num_target_qubits == 2
+        assert op.definition is not None
+        assert op.definition.signature is not None
+        assert op.body is None
+
+    def test_composite_alias_attaches_resource_metadata(self):
+        """Compatibility alias still attaches resource metadata."""
+        resource = qmc.ResourceMetadata(total_gates=1, single_qubit_gates=1)
+
+        @qmc.composite(name="boxed_h", resource=resource)
+        @qkernel
+        def boxed_h(q: Qubit) -> Qubit:
+            q = qmc.h(q)
+            return q
+
+        @qkernel
+        def circuit(q: Qubit) -> Qubit:
+            q = boxed_h(q)
+            return q
+
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.attrs["kind"] == "composite"
+        assert op.target.namespace == "user.composite"
+        assert op.target.name == "boxed_h"
+        assert op.resource is resource
+
+    def test_composite_gate_accepts_raw_function(self):
+        """Decorator can qkernel-wrap a raw function before boxing it."""
+        resource = qmc.ResourceMetadata(total_gates=1, single_qubit_gates=1)
+
+        @qmc.composite_gate(name="raw_boxed_h", resource=resource)
+        def raw_boxed_h(q: Qubit) -> Qubit:
+            q = qmc.h(q)
+            return q
+
+        @qkernel
+        def circuit(q: Qubit) -> Qubit:
+            q = raw_boxed_h(q)
+            return q
+
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.attrs["kind"] == "composite"
+        assert op.target.namespace == "user.composite"
+        assert op.target.name == "raw_boxed_h"
+        assert op.body is not None
+        assert op.resource is resource
+
+    def test_composite_gate_direct_form_accepts_raw_function(self):
+        """@composite_gate without arguments can box a raw function."""
+
+        @qmc.composite_gate
+        def raw_entangle(a: Qubit, b: Qubit) -> tuple[Qubit, Qubit]:
+            a, b = qmc.cx(a, b)
+            return a, b
+
+        @qkernel
+        def circuit(a: Qubit, b: Qubit) -> tuple[Qubit, Qubit]:
+            a, b = raw_entangle(a, b)
+            return a, b
+
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.attrs["kind"] == "composite"
+        assert op.target.name == "raw_entangle"
+        assert op.body is not None
 
     def test_decompose_called_during_call(self, mocker):
         """_decompose is called exactly once when gate is invoked."""
@@ -289,7 +1143,7 @@ class TestCompositeGate:
 
         mock_strategy = mocker.MagicMock()
         mock_strategy.name = "mock_strat"
-        mock_strategy.decompose.return_value = None
+        mock_strategy.decompose.side_effect = lambda qubits: (qmc.x(qubits[0]),)
         mock_strategy.resources.return_value = None
 
         TestGateForStrategy.register_strategy("mock_strat", mock_strategy)
@@ -317,13 +1171,11 @@ class TestCompositeGate:
             return q0, q1
 
         block = circuit.build()
-        # Block should have QInit ops + 1 CompositeGateOperation only
+        # Block should have QInit ops + 1 InvokeOperation only
         # (no inner H/CX ops leaked from decomposition)
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
-        ]
-        assert len(composite_ops) == 1
-        assert composite_ops[0].custom_name == "bell_pair"
+        invoke_ops = _invoke_ops(block.operations)
+        assert len(invoke_ops) == 1
+        assert invoke_ops[0].attrs["custom_name"] == "bell_pair"
 
     def test_output_qubit_versions_incremented(self):
         """Output qubits have version = input version + 1 with same logical_id."""
@@ -339,8 +1191,7 @@ class TestCompositeGate:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        op = ops[1]
+        op = _assert_composite_invoke(ops[1], name="double_h", num_targets=1)
         # Target operand is the last operand.
         target_operand = op.operands[-1]
         target_result = op.results[-1]
@@ -379,9 +1230,13 @@ class TestCompositeGate:
         assert len(ops) == 3
         assert isinstance(ops[0], QInitOperation)
         assert isinstance(ops[1], QInitOperation)
-        assert isinstance(ops[2], CompositeGateOperation)
-        op = ops[2]
-        assert op.implementation is not None
+        op = _assert_composite_invoke(
+            ops[2],
+            name="ctrl_gate",
+            num_targets=1,
+            num_controls=1,
+        )
+        assert op.body is not None
         # operands[0] = control qubit value, operands[1] = target qubit value
         ctrl_value = ops[0].results[0]
         tgt_value = ops[1].results[0]
@@ -389,6 +1244,9 @@ class TestCompositeGate:
         assert op.operands[1].logical_id == tgt_value.logical_id
         assert op.num_control_qubits == 1
         assert op.num_target_qubits == 1
+        assert op.transform is CallTransform.CONTROLLED
+        assert op.implementation_for() is not None
+        assert op.effective_body() is op.body
 
     def test_resource_metadata_in_operation(self):
         """_resources() metadata flows through to the emitted operation."""
@@ -421,19 +1279,18 @@ class TestCompositeGate:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        op = ops[1]
-        assert op.resource_metadata is not None
-        assert op.resource_metadata.t_gates == 42
-        assert op.resource_metadata.query_complexity == 7
-        assert op.resource_metadata.custom_metadata["key"] == "value"
+        op = _assert_composite_invoke(ops[1], name="res_gate", num_targets=1)
+        assert op.resource is not None
+        assert op.resource.t_gates == 42
+        assert op.resource.query_complexity == 7
+        assert op.resource.custom_metadata["key"] == "value"
         # Unspecified typed fields default to None
-        assert op.resource_metadata.total_gates is None
-        assert op.resource_metadata.single_qubit_gates is None
-        assert op.resource_metadata.two_qubit_gates is None
-        assert op.resource_metadata.multi_qubit_gates is None
-        assert op.resource_metadata.clifford_gates is None
-        assert op.resource_metadata.rotation_gates is None
+        assert op.resource.total_gates is None
+        assert op.resource.single_qubit_gates is None
+        assert op.resource.two_qubit_gates is None
+        assert op.resource.multi_qubit_gates is None
+        assert op.resource.clifford_gates is None
+        assert op.resource.rotation_gates is None
 
     def test_strategy_resource_metadata(self, mocker):
         """Strategy's resources() is used instead of _resources() when strategy is active."""
@@ -456,7 +1313,7 @@ class TestCompositeGate:
         strategy_meta = ResourceMetadata(t_gates=5, query_complexity=3)
         mock_strategy = mocker.MagicMock()
         mock_strategy.name = "efficient"
-        mock_strategy.decompose.return_value = None
+        mock_strategy.decompose.side_effect = lambda qubits: (qmc.x(qubits[0]),)
         mock_strategy.resources.return_value = strategy_meta
 
         GateForStratRes.register_strategy("efficient", mock_strategy)
@@ -470,10 +1327,19 @@ class TestCompositeGate:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        op = ops[1]
-        assert op.resource_metadata is strategy_meta
-        assert op.resource_metadata.t_gates == 5
+        op = _assert_composite_invoke(
+            ops[1],
+            name="strat_res_gate",
+            num_targets=1,
+        )
+        assert op.resource is strategy_meta
+        assert op.resource.t_gates == 5
+        impl = op.implementation_for()
+        assert impl is not None
+        assert impl.strategy == "efficient"
+        assert impl.resource is strategy_meta
+        assert op.effective_resource() is strategy_meta
+        assert op.effective_body() is op.body
 
         del GateForStratRes._strategies["efficient"]
 
@@ -511,7 +1377,7 @@ class TestCompositeGate:
         del GateA._strategies["fake"]
 
     def test_tracer_add_operation_called(self, mocker):
-        """Gate invocation calls tracer.add_operation with CompositeGateOperation."""
+        """Gate invocation calls tracer.add_operation with InvokeOperation."""
         spy = mocker.spy(Tracer, "add_operation")
         double_h = DoubleH()
 
@@ -522,14 +1388,12 @@ class TestCompositeGate:
 
         circuit.build()
 
-        # add_operation is called for QInitOperation + CompositeGateOperation
-        composite_calls = [
-            c
-            for c in spy.call_args_list
-            if isinstance(c.args[1], CompositeGateOperation)
+        # add_operation is called for QInitOperation + InvokeOperation
+        invoke_calls = [
+            c for c in spy.call_args_list if isinstance(c.args[1], InvokeOperation)
         ]
-        assert len(composite_calls) == 1
-        assert composite_calls[0].args[1].custom_name == "double_h"
+        assert len(invoke_calls) == 1
+        assert invoke_calls[0].args[1].attrs["custom_name"] == "double_h"
 
     def test_output_preserves_parent_indices(self):
         """Output qubit handles preserve parent_array from array elements."""
@@ -547,8 +1411,7 @@ class TestCompositeGate:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        op = ops[1]
+        op = _assert_composite_invoke(ops[1], name="bell_pair", num_targets=2)
         # Result values should have parent_array set (from array elements)
         for index, r in enumerate(op.results):
             assert isinstance(r.parent_array, ArrayValue)
@@ -595,6 +1458,31 @@ class TestQFTAndIQFTClasses:
         assert metadata.rotation_gates == 6
         assert metadata.custom_metadata["num_h_gates"] == 4
 
+    def test_qft_strategy_is_callable_implementation(self):
+        """QFT strategy body and resources are selected implementations."""
+        from qamomile.circuit.stdlib.qft import QFT
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            qft = QFT(3)
+            q0, q1, q2 = qft(q0, q1, q2, strategy="approximate_k2")
+            return q0, q1, q2
+
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.gate_type is CompositeGateType.QFT
+        assert op.strategy_name == "approximate_k2"
+        impl = op.implementation_for()
+        assert impl is not None
+        assert impl.strategy == "approximate_k2"
+        assert impl.body is op.body
+        assert impl.resource is op.resource
+        assert op.effective_body() is op.body
+        assert op.effective_resource() is op.resource
+
     def test_qft_in_qkernel(self):
         """QFT can be used in a qkernel."""
         from qamomile.circuit.stdlib.qft import QFT
@@ -638,6 +1526,23 @@ class TestQFTAndIQFTClasses:
 class TestCompositeGateTranspilation:
     """Test CompositeGate IR generation and transpilation (requires Qiskit)."""
 
+    def test_composite_decorator_can_be_compiler_entrypoint(self, qiskit_transpiler):
+        """composite-decorated qkernels are accepted as qkernel-like entrypoints."""
+
+        @qmc.composite_gate(name="bell_entry")
+        @qmc.qkernel
+        def bell_entry() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.h(q[0])
+            q[0], q[1] = qmc.cx(q[0], q[1])
+            return qmc.measure(q)
+
+        executable = qiskit_transpiler.transpile(bell_entry)
+        circuit = executable.get_first_circuit()
+
+        assert circuit is not None
+        assert circuit.num_qubits == 2
+
     def test_custom_gate_builds_ir(self, qiskit_transpiler):
         """Custom CompositeGate builds correct IR."""
         bell = BellPair()
@@ -655,8 +1560,11 @@ class TestCompositeGateTranspilation:
         block = qiskit_transpiler.to_block(circuit)
         inlined = qiskit_transpiler.inline(block)
 
-        op_types = [type(op).__name__ for op in inlined.operations]
-        assert "GateOperation" in op_types
+        invoke_ops = _invoke_ops(inlined.operations)
+        assert len(invoke_ops) == 1
+        assert invoke_ops[0].body is not None
+        body_op_types = [type(op).__name__ for op in invoke_ops[0].body.operations]
+        assert "GateOperation" in body_op_types
 
     def test_qft_builds_ir(self, qiskit_transpiler):
         """QFT builds correct IR with native gate type."""
@@ -677,11 +1585,9 @@ class TestCompositeGateTranspilation:
 
         block = qiskit_transpiler.to_block(circuit)
 
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
-        ]
-        assert len(composite_ops) == 1
-        assert composite_ops[0].gate_type == CompositeGateType.QFT
+        invoke_ops = _invoke_ops(block.operations)
+        assert len(invoke_ops) == 1
+        assert invoke_ops[0].attrs["gate_type"] == CompositeGateType.QFT.name
 
     def test_iqft_builds_ir(self, qiskit_transpiler):
         """IQFT builds correct IR with native gate type."""
@@ -700,11 +1606,9 @@ class TestCompositeGateTranspilation:
 
         block = qiskit_transpiler.to_block(circuit)
 
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
-        ]
-        assert len(composite_ops) == 1
-        assert composite_ops[0].gate_type == CompositeGateType.IQFT
+        invoke_ops = _invoke_ops(block.operations)
+        assert len(invoke_ops) == 1
+        assert invoke_ops[0].attrs["gate_type"] == CompositeGateType.IQFT.name
 
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_hadamard_all_transpile_circuit(self, qiskit_transpiler, n):
@@ -719,14 +1623,13 @@ class TestCompositeGateTranspilation:
 
         qc = qiskit_transpiler.to_circuit(circuit)
         assert qc.num_qubits == n
-        assert len(qc.data) == n * 2  # n H gates + |measurement|, no extra qubits
+        assert len(qc.data) == n + 1  # boxed composite + |measurement|
         data = qc.data
         from qiskit.circuit import Measure
-        from qiskit.circuit.library import HGate
 
-        for i in range(n):
-            assert isinstance(data[i].operation, HGate)
-        for i in range(n, 2 * n):
+        assert data[0].operation.num_qubits == n
+        assert not isinstance(data[0].operation, Measure)
+        for i in range(1, n + 1):
             assert isinstance(data[i].operation, Measure)
 
     def test_bell_pair_transpile_circuit(self, qiskit_transpiler):
@@ -741,15 +1644,14 @@ class TestCompositeGateTranspilation:
 
         qc = qiskit_transpiler.to_circuit(circuit)
         assert qc.num_qubits == 2
-        assert len(qc.data) == 4  # H + CX + |measurement|, no extra qubits
+        assert len(qc.data) == 3  # boxed composite + |measurement|
         data = qc.data
         from qiskit.circuit import Measure
-        from qiskit.circuit.library import CXGate, HGate
 
-        assert isinstance(data[0].operation, HGate)
-        assert isinstance(data[1].operation, CXGate)
+        assert data[0].operation.num_qubits == 2
+        assert not isinstance(data[0].operation, Measure)
+        assert isinstance(data[1].operation, Measure)
         assert isinstance(data[2].operation, Measure)
-        assert isinstance(data[3].operation, Measure)
 
     def test_double_h_transpile_circuit(self, qiskit_transpiler):
         """DoubleH transpiles to a 1-qubit circuit."""
@@ -763,14 +1665,13 @@ class TestCompositeGateTranspilation:
 
         qc = qiskit_transpiler.to_circuit(circuit)
         assert qc.num_qubits == 1
-        assert len(qc.data) == 3  # H + H + |measurement|, no extra qubits
+        assert len(qc.data) == 2  # boxed composite + |measurement|
         data = qc.data
         from qiskit.circuit import Measure
-        from qiskit.circuit.library import HGate
 
-        assert isinstance(data[0].operation, HGate)
-        assert isinstance(data[1].operation, HGate)
-        assert isinstance(data[2].operation, Measure)
+        assert data[0].operation.num_qubits == 1
+        assert not isinstance(data[0].operation, Measure)
+        assert isinstance(data[1].operation, Measure)
 
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_hadamard_all_statevector(self, qiskit_transpiler, n):
@@ -1350,7 +2251,7 @@ class TestQPEPhaseExtraction:
         )()
 
     @staticmethod
-    def _qpe_op(phase_operand: Value) -> CompositeGateOperation:
+    def _qpe_op(phase_operand: Value) -> InvokeOperation:
         """Create a block-free QPE operation with one phase operand.
 
         Args:
@@ -1358,41 +2259,57 @@ class TestQPEPhaseExtraction:
                 target qubit operand.
 
         Returns:
-            CompositeGateOperation: QPE operation that exercises manual
+            InvokeOperation: QPE operation that exercises manual
                 fallback phase extraction.
         """
         target = Value(type=QubitType(), name="target")
-        return CompositeGateOperation(
+        ref = CallableRef(namespace="qamomile.stdlib", name="qpe")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.QPE.name,
+            "num_control_qubits": 0,
+            "num_target_qubits": 1,
+            "custom_name": "qpe",
+        }
+        return InvokeOperation(
             operands=[target, phase_operand],
             results=[],
-            gate_type=CompositeGateType.QPE,
-            num_target_qubits=1,
-            has_implementation=False,
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(ref=ref, attrs=attrs),
         )
 
     @staticmethod
-    def _typed_op(gate_type: CompositeGateType) -> CompositeGateOperation:
+    def _typed_op(gate_type: CompositeGateType) -> InvokeOperation:
         """Create a minimal operation with the requested composite gate type.
 
         Args:
             gate_type (CompositeGateType): Composite gate type to assign.
 
         Returns:
-            CompositeGateOperation: Block-free composite operation for direct
+            InvokeOperation: Block-free composite operation for direct
                 helper validation tests.
         """
         target = Value(type=QubitType(), name="target")
         phase = Value(type=FloatType(), name="phase").with_const(0.25)
-        return CompositeGateOperation(
+        ref = CallableRef(namespace="qamomile.stdlib", name=gate_type.value)
+        attrs = {
+            "kind": "composite",
+            "gate_type": gate_type.name,
+            "num_control_qubits": 0,
+            "num_target_qubits": 1,
+            "custom_name": gate_type.value,
+        }
+        return InvokeOperation(
             operands=[target, phase],
             results=[],
-            gate_type=gate_type,
-            num_target_qubits=1,
-            has_implementation=False,
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(ref=ref, attrs=attrs),
         )
 
     @staticmethod
-    def _qpe_op_with_params(params: list[Value]) -> CompositeGateOperation:
+    def _qpe_op_with_params(params: list[Value]) -> InvokeOperation:
         """Create a block-free QPE operation with explicit parameter operands.
 
         Args:
@@ -1400,16 +2317,24 @@ class TestQPEPhaseExtraction:
                 the target qubit operand.
 
         Returns:
-            CompositeGateOperation: QPE operation with the supplied parameter
+            InvokeOperation: QPE operation with the supplied parameter
                 operands.
         """
         target = Value(type=QubitType(), name="target")
-        return CompositeGateOperation(
+        ref = CallableRef(namespace="qamomile.stdlib", name="qpe")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.QPE.name,
+            "num_control_qubits": 0,
+            "num_target_qubits": 1,
+            "custom_name": "qpe",
+        }
+        return InvokeOperation(
             operands=[target, *params],
             results=[],
-            gate_type=CompositeGateType.QPE,
-            num_target_qubits=1,
-            has_implementation=False,
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(ref=ref, attrs=attrs),
         )
 
     def test_extract_phase_from_bound_array_element(self):
@@ -1637,40 +2562,57 @@ class TestQPEPhaseExtraction:
             )
 
 
-class TestVectorQubitParamRejection:
-    """A function-form @composite_gate decorator wrapping a @qkernel that
-    takes a Vector[Qubit] parameter must raise a clear TypeError pointing
-    users to supported alternatives. Without this, the decorator silently
-    computed num_target_qubits=0 and the call site failed with a confusing
-    arity-mismatch error.
-    """
+class TestVectorQubitCompositeDecorator:
+    """Verify vector qkernels can be wrapped as boxed composites."""
 
-    def test_vector_qubit_param_raises_typeerror(self):
-        """Decorating a Vector[Qubit] qkernel raises with helpful message."""
+    def test_vector_qubit_param_emits_composite_invoke(self):
+        """Decorating a Vector[Qubit] qkernel preserves it as a box."""
         import qamomile.circuit as qmc
 
-        with pytest.raises(TypeError) as excinfo:
+        resource = qmc.ResourceMetadata(total_gates=1, single_qubit_gates=1)
 
-            @qmc.composite_gate
-            @qmc.qkernel
-            def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-                return q
+        @qmc.composite_gate(name="encode", resource=resource)
+        @qmc.qkernel
+        def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            q[0] = qmc.h(q[0])
+            return q
 
-        msg = str(excinfo.value)
-        # Both supported alternatives should be surfaced.
-        assert "@qkernel directly" in msg
-        assert "subclass CompositeGate" in msg
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(2, "q")
+            q = encode(q)
+            return q
 
-    def test_vector_qubit_with_decorator_args_raises_typeerror(self):
-        """Same rejection through the parameterized decorator form."""
+        block = circuit.build()
+        invokes = _invoke_ops(block.operations)
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.attrs["kind"] == "composite"
+        assert op.target.namespace == "user.composite"
+        assert op.target.name == "encode"
+        assert op.default_policy is CallPolicy.PRESERVE_BOX
+        assert op.num_target_qubits == 2
+        assert op.body is not None
+        assert op.resource is resource
+
+    def test_vector_qubit_direct_decorator_form_uses_qkernel_name(self):
+        """Direct @composite_gate form supports Vector[Qubit] qkernels."""
         import qamomile.circuit as qmc
 
-        with pytest.raises(TypeError, match="array-of-qubit"):
+        @qmc.composite_gate
+        @qmc.qkernel
+        def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            return q
 
-            @qmc.composite_gate(name="enc")
-            @qmc.qkernel
-            def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-                return q
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(3, "q")
+            q = encode(q)
+            return q
+
+        op = _invoke_ops(circuit.build().operations)[0]
+        assert op.target.name == "encode"
+        assert op.num_target_qubits == 3
 
     def test_fixed_arity_qubit_params_still_work(self):
         """Regression: fixed-arity Qubit-only signatures still decorate cleanly."""

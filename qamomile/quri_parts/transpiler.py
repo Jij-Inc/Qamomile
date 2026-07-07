@@ -12,9 +12,7 @@ from typing import TYPE_CHECKING, Any, Sequence, cast
 import numpy as np
 
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-)
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
@@ -481,7 +479,7 @@ def _emit_quri_controlled_gate(
 
 
 def _map_quri_composite_results(
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     control_indices: list[int],
     target_index_groups: list[list[int]],
     qubit_map: QubitMap,
@@ -489,7 +487,7 @@ def _map_quri_composite_results(
     """Map composite result values back to their physical qubits.
 
     Args:
-        op (CompositeGateOperation): Composite operation that was emitted.
+        op (InvokeOperation): Invocation that was emitted.
         control_indices (list[int]): Physical qubits for the composite's
             own control operands.
         target_index_groups (list[list[int]]): Physical qubits for each
@@ -599,17 +597,17 @@ def _emit_quri_inverse_operation(
 def _emit_quri_composite_operation(
     emit_pass: StandardEmitPass[Any],
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     outer_control_indices: list[int],
     qubit_map: QubitMap,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a composite operation under accumulated controls.
+    """Emit a boxed invocation under accumulated controls.
 
     Args:
         emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
         circuit (Any): QURI Parts circuit being built.
-        op (CompositeGateOperation): Composite operation from the block
+        op (InvokeOperation): Composite or oracle invocation from the block
             currently being walked.
         outer_control_indices (list[int]): Controls accumulated from
             enclosing controlled-U operations.
@@ -618,13 +616,13 @@ def _emit_quri_composite_operation(
             block.
 
     Raises:
-        EmitError: If the composite has no implementation block or cannot
+        EmitError: If the invocation has no implementation block or cannot
             be routed through the guarded recursive fallback.
     """
-    impl = op.implementation
+    impl = op.effective_body()
     if impl is None:
         raise EmitError(
-            "QURI Parts controlled fallback cannot emit a composite gate "
+            "QURI Parts controlled fallback cannot emit an invocation "
             "without an implementation block.",
             operation="ControlledUOperation",
         )
@@ -754,9 +752,17 @@ def _emit_quri_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
             continue
-        if isinstance(op, CompositeGateOperation):
+        if isinstance(op, InvokeOperation) and op.attrs.get("kind") in {
+            "composite",
+            "oracle",
+        }:
             _emit_quri_composite_operation(
-                emit_pass, circuit, op, control_indices, qubit_map, bindings
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
             )
             continue
         if isinstance(op, InverseBlockOperation):
@@ -802,7 +808,8 @@ def _emit_quri_controlled_operations(
         raise EmitError(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
-            "CompositeGateOperation values, InverseBlockOperation values, "
+            "InvokeOperation values, "
+            "InverseBlockOperation values, "
             "PauliEvolveOp values, "
             "ReturnOperation, and statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
@@ -889,7 +896,13 @@ class QuriPartsEmitPass(
         emitter = QuriPartsGateEmitter()
         # QURI Parts has no native composite gate emitters
         composite_emitters: list[Any] = []
-        super().__init__(emitter, bindings, parameters, composite_emitters)  # type: ignore[arg-type]
+        super().__init__(
+            cast(Any, emitter),
+            bindings,
+            parameters,
+            composite_emitters,
+            backend_name="quri_parts",
+        )
 
     def _blockvalue_to_gate(
         self,

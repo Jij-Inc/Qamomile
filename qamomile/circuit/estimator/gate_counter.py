@@ -13,9 +13,8 @@ import sympy as sp
 from sympy import Sum
 
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -45,9 +44,9 @@ from ._engine import (
     build_for_loop_scope,
     build_if_scopes,
     build_while_scope,
-    resolve_composite_gate,
     resolve_controlled_u,
     resolve_for_items_cardinality,
+    resolve_invoke_resource,
 )
 from ._gate_count import GateCount
 from ._loop_executor import symbolic_iterations
@@ -106,6 +105,7 @@ def _count_from_operations(
     resolver: ExprResolver,
     num_controls: int | sp.Expr = 0,
     bindings: dict[str, Any] | None = None,
+    backend: str | None = None,
 ) -> GateCount:
     """Count gates from a list of operations.
 
@@ -120,7 +120,13 @@ def _count_from_operations(
                 count = count + classify_gate(op, num_controls=num_controls)
 
             case ForOperation():
-                count = count + _handle_for(op, resolver, num_controls, bindings)
+                count = count + _handle_for(
+                    op,
+                    resolver,
+                    num_controls,
+                    bindings,
+                    backend,
+                )
 
             case WhileOperation():
                 child, trip_count = build_while_scope(op, resolver)
@@ -129,6 +135,7 @@ def _count_from_operations(
                     child,
                     num_controls,
                     bindings,
+                    backend,
                 )
                 count = count + inner * trip_count
 
@@ -139,12 +146,14 @@ def _count_from_operations(
                     true_child,
                     num_controls,
                     bindings,
+                    backend,
                 )
                 false_count = _count_from_operations(
                     op.false_operations,
                     false_child,
                     num_controls,
                     bindings,
+                    backend,
                 )
                 count = count + true_count.max(false_count)
 
@@ -155,23 +164,23 @@ def _count_from_operations(
                     child,
                     num_controls,
                     bindings,
+                    backend,
                 )
                 cardinality = resolve_for_items_cardinality(op)
                 count = count + inner * cardinality
 
-            case CallBlockOperation():
-                count = count + _handle_call(op, resolver, num_controls, bindings)
+            case InvokeOperation():
+                count = count + _handle_invoke(
+                    op,
+                    resolver,
+                    num_controls,
+                    bindings,
+                    backend,
+                )
 
             case ControlledUOperation():
                 nc, nt = resolve_controlled_u(op, resolver)
                 count = count + classify_controlled_u(nc, nt)
-
-            case CompositeGateOperation():
-                count = count + _handle_composite(
-                    op,
-                    resolver,
-                    num_controls,
-                )
 
             case InverseBlockOperation():
                 count = count + _handle_inverse_block(
@@ -206,6 +215,7 @@ def _handle_for(
     resolver: ExprResolver,
     num_controls: int | sp.Expr,
     bindings: dict[str, Any] | None = None,
+    backend: str | None = None,
 ) -> GateCount:
     """Handle ForOperation: multiply or Sum depending on loop-var dependency."""
     if len(op.operands) < 2:
@@ -214,7 +224,13 @@ def _handle_for(
 
     child, start, stop, step, loop_sym = build_for_loop_scope(op, resolver)
 
-    inner = _count_from_operations(op.operations, child, num_controls, bindings)
+    inner = _count_from_operations(
+        op.operations,
+        child,
+        num_controls,
+        bindings,
+        backend,
+    )
 
     # Check if inner count depends on the loop variable
     all_free: set[sp.Symbol] = set()
@@ -232,48 +248,49 @@ def _handle_for(
     return inner * iterations
 
 
-# ------------------------------------------------------------------ #
-#  CallBlockOperation handler                                         #
-# ------------------------------------------------------------------ #
-
-
-def _handle_call(
-    op: CallBlockOperation,
+def _handle_invoke(
+    op: InvokeOperation,
     resolver: ExprResolver,
     num_controls: int | sp.Expr,
     bindings: dict[str, Any] | None = None,
+    backend: str | None = None,
 ) -> GateCount:
-    """Handle CallBlockOperation: recurse into callee with mapped scope."""
-    called_block = op.block
-    if not isinstance(called_block, Block):
-        return GateCount.zero()  # type: ignore[unreachable]
+    """Handle InvokeOperation through resource metadata or an embedded body.
 
-    child = resolver.call_child_scope(op)
-    return _count_from_operations(
-        called_block.operations,
-        child,
-        num_controls,
-        bindings,
-    )
+    Args:
+        op (InvokeOperation): Invocation to estimate.
+        resolver (ExprResolver): Resolver for the current scope.
+        num_controls (int | sp.Expr): Number of enclosing controls.
+        bindings (dict[str, Any] | None): Optional compile-time bindings.
+
+    Returns:
+        GateCount: Estimated gate count.
+
+    Raises:
+        ValueError: If the invocation has neither metadata nor body.
+    """
+    return _handle_boxed_callable(op, resolver, num_controls, bindings, backend)
 
 
 # ------------------------------------------------------------------ #
-#  CompositeGateOperation handler                                     #
+#  Boxed callable handler                                             #
 # ------------------------------------------------------------------ #
 
 
-def _handle_composite(
-    op: CompositeGateOperation,
+def _handle_boxed_callable(
+    op: InvokeOperation,
     resolver: ExprResolver,
     num_controls: int | sp.Expr,
+    bindings: dict[str, Any] | None = None,
+    backend: str | None = None,
 ) -> GateCount:
-    """Handle CompositeGateOperation: metadata > implementation > formula."""
-    res = resolve_composite_gate(op, resolver)
+    """Handle a boxed invocation: metadata > implementation > formula."""
+    res = resolve_invoke_resource(op, resolver, backend=backend)
 
     if res.kind == "metadata":
         assert res.metadata is not None
         gc = extract_gate_count_from_metadata(res.metadata)
-        if res.is_stub and res.oracle_name:
+        if res.is_opaque and res.oracle_name:
             gc.oracle_calls[res.oracle_name] = sp.Integer(1)
             if res.query_complexity is not None:
                 gc.oracle_queries[res.oracle_name] = sp.Integer(
@@ -288,6 +305,8 @@ def _handle_composite(
             res.impl_block.operations,
             res.impl_resolver,
             num_controls,
+            bindings,
+            backend,
         )
 
     if res.kind == "qft_iqft":
@@ -409,6 +428,7 @@ def _handle_pauli_evolve(
 def count_gates(
     block: Block | list[Operation],
     bindings: dict[str, Any] | None = None,
+    backend: str | None = None,
 ) -> GateCount:
     """Count gates in a quantum circuit.
 
@@ -420,7 +440,7 @@ def count_gates(
     - GateOperation: Single gate counts
     - ForOperation: Multiplies inner count by iterations
     - IfOperation: Takes maximum of branches
-    - CallBlockOperation: Recursively counts called blocks
+    - InvokeOperation: Counts callable bodies or callable resource metadata
     - ControlledUOperation: Counts as a single opaque gate
     - PauliEvolveOp: Counts decomposition gates (requires bindings)
 
@@ -428,6 +448,8 @@ def count_gates(
         block: Block or list of Operations to analyze
         bindings: Optional parameter bindings. Required for PauliEvolveOp
             gate counting (must contain the Hamiltonian).
+        backend: Optional backend name used to select backend-specific
+            callable implementation resources or bodies.
 
     Returns:
         GateCount with total, single_qubit, two_qubit, t_gates, clifford_gates
@@ -446,4 +468,4 @@ def count_gates(
         ops = block
 
     resolver = ExprResolver(block=block_ref)
-    return _count_from_operations(ops, resolver, bindings=bindings)
+    return _count_from_operations(ops, resolver, bindings=bindings, backend=backend)

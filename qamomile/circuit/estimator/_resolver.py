@@ -124,7 +124,7 @@ class ExprResolver:
         """Create a child resolver for an inner scope (loop body, branch).
 
         Propagates parent_blocks so values from outer scopes remain
-        traceable.  For *callee* scopes (CallBlockOperation), use
+        traceable.  For callee invocation scopes, use
         :meth:`call_child_scope` instead — callees get a fresh scope.
 
         Args:
@@ -155,8 +155,13 @@ class ExprResolver:
             parent_blocks=new_parents,
         )
 
-    def call_child_scope(self, call_op: Any) -> ExprResolver:
-        """Create a child resolver for a ``CallBlockOperation``.
+    def call_child_scope(
+        self,
+        call_op: Any,
+        *,
+        called_block: Block | None = None,
+    ) -> ExprResolver:
+        """Create a child resolver for an inline callable invocation.
 
         Maps formal parameter UUIDs → resolved actual arguments,
         **including array shape dimension UUIDs** (critical for
@@ -166,14 +171,26 @@ class ExprResolver:
         its own scope plus values propagated through ``call_context``.
 
         Args:
-            call_op (Any): A CallBlockOperation whose ``block`` field
-                is the called Block and ``operands`` are actuals.
+            call_op (Any): An invocation carrying either a legacy
+                ``block`` field, an ``InvokeOperation.effective_body()``
+                method, or an ``InvokeOperation.body`` field, plus
+                ``operands`` containing actual arguments.
+            called_block (Block | None): Already-selected callable body.
+                Pass this when another resolver has selected a backend- or
+                strategy-specific implementation. Defaults to ``None``.
 
         Returns:
             ExprResolver: A new resolver scoped to the callee block with
                 formal→actual bindings in context and empty parent blocks.
         """
-        called_block = call_op.block
+        if called_block is None:
+            called_block = getattr(call_op, "block", None)
+        if not isinstance(called_block, Block):
+            effective_body = getattr(call_op, "effective_body", None)
+            if callable(effective_body):
+                called_block = effective_body()
+        if not isinstance(called_block, Block):
+            called_block = getattr(call_op, "body", None)
         if not isinstance(called_block, Block):
             # Not a nested Block input — use child_scope as fallback
             return self.child_scope(called_block)

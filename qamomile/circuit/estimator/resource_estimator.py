@@ -169,6 +169,7 @@ def estimate_resources(
     block: Block | list[Operation],
     *,
     bindings: dict[str, Any] | None = None,
+    backend: str | None = None,
 ) -> ResourceEstimate:
     """Estimate all resources for a quantum circuit.
 
@@ -178,6 +179,8 @@ def estimate_resources(
     Args:
         block: Block or list of Operations to analyze
         bindings: Optional concrete parameter bindings (scalars and dicts).
+        backend: Optional backend name used to select backend-specific
+            callable implementation resources or bodies.
 
     Returns:
         ResourceEstimate with qubits, gates, and parameters
@@ -218,10 +221,10 @@ def estimate_resources(
         >>> print(concrete.gates.total)  # 100
     """
     # Count qubits
-    qubit_count = qubits_counter(block)
+    qubit_count = qubits_counter(block, backend=backend)
 
     # Count gates
-    gate_count = count_gates(block)
+    gate_count = count_gates(block, bindings=bindings, backend=backend)
 
     # Substitute dict cardinality and scalar symbols if bindings provided
     if bindings is not None:

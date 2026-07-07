@@ -1,7 +1,12 @@
-"""Quantum Fourier Transform implementation using CompositeGate.
+"""Implement Quantum Fourier Transform stdlib callables.
 
-This module provides QFT and IQFT as CompositeGate classes, serving as
-a reference for implementing custom composite gates using the frontend API.
+The public qkernel-facing entry points are :func:`qft` and :func:`iqft`. They
+emit named callables that carry a standard Qamomile body, resource metadata,
+and a native-first lowering policy. The ``QFT`` and ``IQFT`` classes are the
+advanced strategy-backed implementation objects behind those functions; custom
+user-defined named operations should normally use
+``qamomile.circuit.composite_gate`` rather than subclassing these patterns
+directly.
 
 Multiple decomposition strategies are available:
     - "standard": Full precision QFT with O(n^2) gates
@@ -9,37 +14,38 @@ Multiple decomposition strategies are available:
     - "approximate_k2": Truncated rotations with k=2
 
 Example:
-    from qamomile.circuit.stdlib.qft import QFT, IQFT, qft, iqft
+    import qamomile.circuit as qmc
 
     @qmc.qkernel
-    def my_algorithm(qubits: Vector[Qubit]) -> Vector[Qubit]:
-        # Using factory function
-        qubits = qft(qubits)
+    def my_algorithm(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        qubits = qmc.qft(qubits)
         # ... some operations ...
-        qubits = iqft(qubits)
-        return qubits
+        return qmc.iqft(qubits)
 
-    # Or using class directly with strategy selection
+    # Advanced strategy selection remains available through the class API.
     qft_gate = QFT(3)
     result = qft_gate(q0, q1, q2, strategy="approximate")
-
-    # Compare resources
-    standard_resources = qft_gate.get_resources_for_strategy("standard")
-    approx_resources = qft_gate.get_resources_for_strategy("approximate")
 """
 
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Any, overload
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Qubit, Vector, VectorView
 from qamomile.circuit.frontend.handle.utils import get_size as _get_size
-from qamomile.circuit.ir.operation.composite_gate import (
+from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.operation.callable import (
+    CallableBodyRef,
+    CallableDef,
+    CallableRef,
+    CallPolicy,
     CompositeGateType,
+    InvokeOperation,
     ResourceMetadata,
+    signature_from_values,
 )
 
 # Import strategies
@@ -283,6 +289,82 @@ class IQFT(CompositeGate):
 def qft(qubits: VectorView[Qubit]) -> VectorView[Qubit]: ...
 @overload
 def qft(qubits: Vector[Qubit]) -> Vector[Qubit]: ...
+
+
+def _emit_vector_qft_invoke(
+    qubits: Vector[Qubit],
+    *,
+    gate_type: CompositeGateType,
+    name: str,
+) -> Vector[Qubit]:
+    """Emit a vector-width QFT/IQFT invoke for symbolic-shape registers.
+
+    Args:
+        qubits (Vector[Qubit]): Vector register whose length is not concrete
+            during the current trace.
+        gate_type (CompositeGateType): The stdlib callable classification to
+            record on the invocation.
+        name (str): Stable stdlib callable name, such as ``"qft"`` or
+            ``"iqft"``.
+
+    Returns:
+        Vector[Qubit]: Next-version vector handle backed by the invoke result.
+    """
+    consumed = qubits.consume(operation_name=f"{name}[target]")
+    result = consumed.value.next_version()
+    callable_ref = CallableRef(namespace="qamomile.stdlib", name=name)
+    body_ref = CallableBodyRef(
+        ref=callable_ref,
+        kind="symbolic_vector",
+        attrs={
+            "gate_type": gate_type.name,
+            "width_source": "operand_shape",
+        },
+    )
+    attrs = {
+        "kind": "composite",
+        "gate_type": gate_type.name,
+        "num_control_qubits": 0,
+        "num_target_qubits": 0,
+        "custom_name": name,
+        "strategy_name": None,
+        "default_policy": CallPolicy.NATIVE_FIRST.name,
+    }
+    op = InvokeOperation(
+        operands=[consumed.value],
+        results=[result],
+        target=callable_ref,
+        attrs=attrs,
+        definition=CallableDef(
+            ref=callable_ref,
+            signature=signature_from_values(
+                [consumed.value],
+                [result],
+                operand_names=["qubits"],
+                result_names=["qubits"],
+            ),
+            body=None,
+            body_ref=body_ref,
+            resource=None,
+            default_policy=CallPolicy.NATIVE_FIRST,
+            attrs=attrs,
+        ),
+    )
+    get_current_tracer().add_operation(op)
+    consumed_any: Any = consumed
+    if isinstance(consumed_any, VectorView):
+        new_view = VectorView._wrap_unregistered(
+            parent=consumed_any._slice_parent,
+            sliced_av=result,
+            length=consumed_any.shape[0],
+            start_uint=consumed_any._slice_start,
+            step_uint=consumed_any._slice_step,
+        )
+        consumed_any._transfer_borrow_to(new_view, name)
+        return new_view
+    return type(qubits)._create_from_value(value=result, shape=qubits.shape)
+
+
 def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     """Apply Quantum Fourier Transform to a vector of qubits.
 
@@ -290,16 +372,12 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     and applies it to the qubits.
 
     When *qubits* has a concrete (compile-time known) shape this emits
-    the standard ``O(n^2)`` QFT decomposition.  When *qubits* is a
-    sub-kernel parameter whose shape is still symbolic at trace time
-    (e.g. ``def apply_qft(qs: Vector[Qubit]): return qft(qs)`` traced
-    standalone) the function silently returns *qubits* unchanged: with
-    no concrete ``n`` we cannot decide how many controlled-phase gates
-    to emit, so we leave the sub-kernel block empty and let the outer
-    composition layer re-trace once the shape is resolved.  This is
-    the only acceptable fallback while ``get_size`` is strict and the
-    composition machinery does not yet propagate concrete shapes back
-    into already-built sub-kernel blocks.
+    the standard ``O(n^2)`` QFT decomposition. When *qubits* is a
+    sub-kernel parameter whose shape is still symbolic at trace time,
+    the function emits a boxed stdlib ``InvokeOperation`` over the
+    vector operand. Later emit/resource passes resolve the vector
+    width from the call-site shape instead of silently dropping the
+    operation.
 
     Args:
         qubits (Vector[Qubit]): Vector of qubits to transform.
@@ -317,7 +395,11 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     try:
         n = _get_size(qubits)
     except ValueError:
-        return qubits
+        return _emit_vector_qft_invoke(
+            qubits,
+            gate_type=CompositeGateType.QFT,
+            name="qft",
+        )
     qft_gate = QFT(n)
 
     # Get individual qubits from vector
@@ -344,9 +426,9 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     and applies it to the qubits.
 
     The same symbolic-shape contract as :func:`qft` applies here:
-    when *qubits* has no compile-time-known shape (a sub-kernel
-    parameter traced standalone) the function silently returns
-    *qubits* unchanged, leaving the sub-kernel block empty.
+    when *qubits* has no compile-time-known shape, the function emits
+    a boxed stdlib ``InvokeOperation`` over the vector operand so the
+    operation remains visible to later compiler stages.
 
     Args:
         qubits (Vector[Qubit]): Vector of qubits to transform.
@@ -364,7 +446,11 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     try:
         n = _get_size(qubits)
     except ValueError:
-        return qubits
+        return _emit_vector_qft_invoke(
+            qubits,
+            gate_type=CompositeGateType.IQFT,
+            name="iqft",
+        )
     iqft_gate = IQFT(n)
 
     # Get individual qubits from vector

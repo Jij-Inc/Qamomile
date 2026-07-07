@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import sympy as sp
 
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.circuit.ir.operation.callable import ResourceMetadata
 from qamomile.circuit.ir.operation.gate import GateOperation
 
 from ._gate_count import GateCount

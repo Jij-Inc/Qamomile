@@ -1,7 +1,8 @@
-"""Composite gate emission helpers extracted from StandardEmitPass.
+"""Boxed callable emission helpers extracted from StandardEmitPass.
 
-This module provides module-level functions for emitting composite gates
-(QFT, IQFT, QPE) and their approximate variants. Each function takes an
+This module provides module-level functions for emitting boxed callables
+(QFT, IQFT, QPE, custom composites, and opaque oracles) and their approximate
+variants. Each function takes an
 ``emit_pass`` parameter (a ``StandardEmitPass`` instance) in place of
 ``self``.
 """
@@ -11,11 +12,14 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
+    InvokeOperation,
 )
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
+    map_array_result_group,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
     QubitMap,
@@ -33,7 +37,7 @@ def _ensure_composite_gate_type(
     """Validate that a specialized composite helper received its gate type.
 
     Args:
-        op (Any): Operation-like object passed to the specialized helper.
+        op (Any): Operation passed to the specialized helper.
         expected (CompositeGateType): Gate type that the helper knows how to
             process.
         helper_name (str): Name of the helper reporting the validation error.
@@ -41,31 +45,32 @@ def _ensure_composite_gate_type(
     Raises:
         EmitError: If ``op`` is not the expected composite gate type.
     """
-    if not isinstance(op, CompositeGateOperation):
+    if isinstance(op, InvokeOperation) and op.gate_type == expected:
+        return
+
+    if not isinstance(op, InvokeOperation):
+        got_name = type(op).__name__
         raise EmitError(
             f"{helper_name} only supports {expected.name} composite gates, "
-            f"got {type(op).__name__}.",
-            operation=type(op).__name__,
+            f"got {got_name}.",
+            operation=got_name,
         )
-
-    if op.gate_type == expected:
-        return
 
     raise EmitError(
         f"{helper_name} only supports {expected.name} composite gates, "
         f"got {op.gate_type.name}.",
-        operation=f"CompositeGateOperation[{op.gate_type.name}]",
+        operation=f"InvokeOperation[{op.gate_type.name}]",
     )
 
 
 def emit_composite_gate(
     emit_pass: "StandardEmitPass",
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     qubit_map: QubitMap,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a composite gate operation.
+    """Emit a boxed composite/oracle invocation.
 
     Resolves each qubit operand through ``resolve_qubit_index_detailed``
     so that view-local operands (``qft(q[1::2])``) walk the ``slice_of``
@@ -77,37 +82,84 @@ def emit_composite_gate(
         EmitError: If any control or target qubit operand fails to
             resolve to a physical qubit index.
     """
-    all_qubits = op.control_qubits + op.target_qubits
-    qubit_indices: list[int] = []
-    for q in all_qubits:
-        result = emit_pass._resolver.resolve_qubit_index_detailed(
-            q, qubit_map, bindings
-        )
-        if not result.success or result.index is None:
-            raise EmitError(
-                f"Cannot resolve qubit operand '{q.name}' for composite gate "
-                f"{op.gate_type.name}. "
-                f"{result.failure_details or 'Qubit not found in qubit_map.'}",
-                operation=f"CompositeGateOperation[{op.gate_type.name}]",
-            )
-        qubit_indices.append(result.index)
+    from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+        _expand_quantum_operands_to_phys,
+    )
 
-    # Try native emitters first
+    all_qubits = op.control_qubits + op.target_qubits
+    qubit_groups = [
+        _expand_quantum_operands_to_phys(
+            emit_pass,
+            q,
+            qubit_map,
+            bindings,
+            operation=f"InvokeOperation[{op.gate_type.name}]",
+        )
+        for q in all_qubits
+    ]
+    qubit_indices: list[int] = []
+    for group in qubit_groups:
+        qubit_indices.extend(group)
+
+    if emit_callable_implementation_emitter(
+        emit_pass,
+        circuit,
+        op,
+        qubit_indices,
+        bindings,
+    ):
+        update_composite_result_mapping(op, qubit_groups, qubit_map)
+        return
+
+    # Try backend-global native emitters after callable-specific implementations.
     for emitter in emit_pass._composite_emitters:
         if emitter.can_emit(op.gate_type):
             if emitter.emit(circuit, op, qubit_indices, bindings):
-                update_composite_result_mapping(op, qubit_indices, qubit_map)
+                update_composite_result_mapping(op, qubit_groups, qubit_map)
                 return
 
     # Fall back to decomposition
     emit_composite_fallback(emit_pass, circuit, op, qubit_indices, bindings)
-    update_composite_result_mapping(op, qubit_indices, qubit_map)
+    update_composite_result_mapping(op, qubit_groups, qubit_map)
+
+
+def emit_invoke_operation(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: InvokeOperation,
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit an invoke operation.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted.
+        op (InvokeOperation): Invocation to emit.
+        qubit_map (QubitMap): Current qubit allocation map.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Raises:
+        EmitError: If the invocation is opaque and has neither an executable
+            body nor a selected native emitter.
+    """
+    backend_name = getattr(emit_pass, "backend_name", None)
+    body = op.effective_body(backend=backend_name)
+    impl = op.implementation_for(backend=backend_name)
+    has_native_emitter = impl is not None and impl.emitter is not None
+    if body is None and op.attrs.get("kind") == "oracle" and not has_native_emitter:
+        raise EmitError(
+            f"Oracle '{op.target.name}' has no implementation for execution.",
+            operation=f"InvokeOperation[{op.target.name}]",
+        )
+
+    emit_composite_gate(emit_pass, circuit, op, qubit_map, bindings)
 
 
 def emit_composite_fallback(
     emit_pass: "StandardEmitPass",
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     qubit_indices: list[int],
     bindings: dict[str, Any],
 ) -> None:
@@ -122,11 +174,9 @@ def emit_composite_fallback(
         emit_qft_with_strategy(emit_pass, circuit, op, qubit_indices)
     elif op.gate_type == CompositeGateType.IQFT:
         emit_iqft_with_strategy(emit_pass, circuit, op, qubit_indices)
-    elif not op.has_implementation:
-        if qubit_indices:
-            emit_pass._emitter.emit_barrier(circuit, qubit_indices)
-    elif op.has_implementation:
-        impl = op.implementation
+    else:
+        backend_name = getattr(emit_pass, "backend_name", None)
+        impl = op.effective_body(backend=backend_name)
         if impl is not None:
             # _emit_custom_composite lives in controlled_emission module;
             # call via emit_pass so CudaqEmitPass overrides are respected.
@@ -135,10 +185,48 @@ def emit_composite_fallback(
             emit_pass._emitter.emit_barrier(circuit, qubit_indices)
 
 
+def emit_callable_implementation_emitter(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: InvokeOperation,
+    qubit_indices: list[int],
+    bindings: dict[str, Any],
+) -> bool:
+    """Emit using a selected callable implementation emitter, if present.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted.
+        op (InvokeOperation): Invocation to emit.
+        qubit_indices (list[int]): Physical qubit indices in operand order.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Returns:
+        bool: ``True`` when the implementation emitter handled the operation.
+
+    Raises:
+        EmitError: If the selected emitter object does not provide a callable
+            ``emit`` method.
+    """
+    backend_name = getattr(emit_pass, "backend_name", None)
+    impl = op.implementation_for(backend=backend_name)
+    if impl is None or impl.emitter is None:
+        return False
+
+    emit = getattr(impl.emitter, "emit", None)
+    if not callable(emit):
+        raise EmitError(
+            f"Callable implementation for '{op.target.name}' has a native "
+            "emitter without an emit() method.",
+            operation=f"InvokeOperation[{op.target.name}]",
+        )
+    return bool(emit(circuit, op, qubit_indices, bindings))
+
+
 def emit_qft_with_strategy(
     emit_pass: "StandardEmitPass",
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     qubit_indices: list[int],
 ) -> None:
     """Emit QFT considering strategy selection.
@@ -150,7 +238,7 @@ def emit_qft_with_strategy(
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed QFT gates.
         circuit (Any): Backend circuit being emitted.
-        op (CompositeGateOperation): Composite operation expected to be a QFT.
+        op (InvokeOperation): Invocation expected to be a QFT.
         qubit_indices (list[int]): Physical qubit indices for the QFT target
             register.
 
@@ -178,7 +266,7 @@ def emit_qft_with_strategy(
 def emit_iqft_with_strategy(
     emit_pass: "StandardEmitPass",
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     qubit_indices: list[int],
 ) -> None:
     """Emit IQFT considering strategy selection.
@@ -190,8 +278,7 @@ def emit_iqft_with_strategy(
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed IQFT gates.
         circuit (Any): Backend circuit being emitted.
-        op (CompositeGateOperation): Composite operation expected to be an
-            IQFT.
+        op (InvokeOperation): Invocation expected to be an IQFT.
         qubit_indices (list[int]): Physical qubit indices for the IQFT target
             register.
 
@@ -357,7 +444,7 @@ def emit_iqft_manual(
 def emit_qpe_manual(
     emit_pass: "StandardEmitPass",
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     qubit_indices: list[int],
     bindings: dict[str, Any],
 ) -> None:
@@ -367,7 +454,7 @@ def emit_qpe_manual(
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed QPE gates.
         circuit (Any): Backend circuit being emitted.
-        op (CompositeGateOperation): Composite operation expected to be a QPE.
+        op (InvokeOperation): Invocation expected to be a QPE.
         qubit_indices (list[int]): Physical qubit indices for counting and
             target registers, in operation operand order.
         bindings (dict[str, Any]): Emit-time concrete bindings used to resolve
@@ -418,19 +505,33 @@ def emit_qpe_manual(
 
 
 def update_composite_result_mapping(
-    op: CompositeGateOperation,
-    qubit_indices: list[int],
+    op: InvokeOperation,
+    qubit_groups: list[list[int]],
     qubit_map: QubitMap,
 ) -> None:
-    """Update qubit_map for composite gate results."""
-    for i, result in enumerate(op.results):
-        if i < len(qubit_indices):
-            qubit_map[QubitAddress(result.uuid)] = qubit_indices[i]
+    """Update qubit_map for composite gate results.
+
+    Args:
+        op (InvokeOperation): Invocation whose quantum results should be
+            mapped onto the unchanged physical slots of its operands.
+        qubit_groups (list[list[int]]): Physical indices grouped per quantum
+            operand. A scalar qubit contributes one index; a vector operand
+            contributes one index per element.
+        qubit_map (QubitMap): Mutable map updated in place.
+    """
+    from qamomile.circuit.ir.value import ArrayValue
+
+    quantum_results = [result for result in op.results if result.type.is_quantum()]
+    for result, group in zip(quantum_results, qubit_groups, strict=False):
+        if isinstance(result, ArrayValue):
+            map_array_result_group(result.uuid, group, qubit_map)
+        elif group:
+            qubit_map[QubitAddress(result.uuid)] = group[0]
 
 
 def extract_phase_from_params(
     emit_pass: "StandardEmitPass",
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     bindings: dict[str, Any],
 ) -> float | None:
     """Extract a concrete phase parameter from a QPE operation.
@@ -442,7 +543,7 @@ def extract_phase_from_params(
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose resolver
             should resolve bound scalar and array-element operands.
-        op (CompositeGateOperation): The QPE composite operation.
+        op (InvokeOperation): The QPE invocation.
         bindings (dict[str, Any]): Emit-time concrete bindings keyed by
             parameter name, value UUID, or loop-local variable name.
 
@@ -468,7 +569,7 @@ def extract_phase_from_params(
                         "QPE manual fallback requires exactly one concrete "
                         "phase parameter, but multiple numeric parameters "
                         "were resolved.",
-                        operation="CompositeGateOperation[QPE]",
+                        operation="InvokeOperation[QPE]",
                     )
                 phase = resolved
         elif operand.is_constant():
@@ -479,7 +580,7 @@ def extract_phase_from_params(
                         "QPE manual fallback requires exactly one concrete "
                         "phase parameter, but multiple numeric parameters "
                         "were resolved.",
-                        operation="CompositeGateOperation[QPE]",
+                        operation="InvokeOperation[QPE]",
                     )
                 phase = float(const_val)
 

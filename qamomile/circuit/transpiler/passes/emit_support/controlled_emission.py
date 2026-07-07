@@ -24,9 +24,7 @@ from qamomile.circuit.ir.operation import (
     SliceArrayOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-)
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -230,14 +228,17 @@ def emit_controlled_operations(
             _emit_nested_controlled_u(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
-        elif isinstance(op, CompositeGateOperation):
+        elif isinstance(op, InvokeOperation) and op.attrs.get("kind") in {
+            "composite",
+            "oracle",
+        }:
             composite_control_groups = [
                 _expand_quantum_operands_to_phys(
                     emit_pass,
                     operand,
                     qubit_map,
                     bindings,
-                    operation="CompositeGateOperation",
+                    operation="InvokeOperation",
                 )
                 for operand in op.control_qubits
             ]
@@ -247,7 +248,7 @@ def emit_controlled_operations(
                     operand,
                     qubit_map,
                     bindings,
-                    operation="CompositeGateOperation",
+                    operation="InvokeOperation",
                 )
                 for operand in op.target_qubits
             ]
@@ -2157,7 +2158,7 @@ def emit_custom_composite(
         num_qubits,
         bindings,
         input_operands=op.operands,
-        operation_name="CompositeGateOperation",
+        operation_name="InvokeOperation",
     )
 
     if custom_gate is not None and _gate_matches_qubit_count(custom_gate, num_qubits):
@@ -2173,7 +2174,7 @@ def emit_custom_composite(
             bindings,
             local_qubit_map,
             parent_qubits=qubit_indices,
-            operation_name="CompositeGateOperation",
+            operation_name="InvokeOperation",
         )
 
         if hasattr(impl, "operations"):
@@ -2190,7 +2191,7 @@ def emit_custom_composite(
 def emit_controlled_composite_at_indices(
     emit_pass: "StandardEmitPass",
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     control_indices: list[int],
     qubit_indices: list[int],
     bindings: dict[str, Any],
@@ -2200,7 +2201,7 @@ def emit_controlled_composite_at_indices(
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
         circuit (Any): Backend circuit being emitted into.
-        op (CompositeGateOperation): Composite operation to emit.
+        op (InvokeOperation): Composite or oracle invocation to emit.
         control_indices (list[int]): Physical outer control qubits.
         qubit_indices (list[int]): Physical qubits occupied by ``op``'s
             own control and target operands.
@@ -2213,11 +2214,11 @@ def emit_controlled_composite_at_indices(
         EmitError: If the composite has no implementation block or the
             fallback cannot represent the controlled composite.
     """
-    impl = op.implementation
+    impl = op.effective_body()
     if impl is None:
         raise EmitError(
-            "Cannot emit controlled composite without an implementation block.",
-            operation="CompositeGateOperation",
+            "Cannot emit controlled invocation without an implementation block.",
+            operation="InvokeOperation",
         )
 
     num_qubits = len(qubit_indices)
@@ -2226,7 +2227,7 @@ def emit_controlled_composite_at_indices(
         num_qubits,
         bindings,
         input_operands=op.operands,
-        operation_name="CompositeGateOperation",
+        operation_name="InvokeOperation",
     )
     if custom_gate is not None:
         controlled_gate = custom_gate
@@ -2254,7 +2255,7 @@ def emit_controlled_composite_at_indices(
         num_qubits,
         bindings,
         local_qubit_map,
-        operation_name="CompositeGateOperation",
+        operation_name="InvokeOperation",
     )
     emit_pass._emit_controlled_fallback(
         circuit,

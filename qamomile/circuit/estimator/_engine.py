@@ -3,7 +3,7 @@
 Provides resolution and scoping utilities used by the estimators
 (gate_counter, qubits_counter).  Each estimator has
 its own dispatch loop but calls these shared helpers to avoid
-duplicating CompositeGate priority logic, QFT/IQFT n resolution,
+duplicating callable resource-priority logic, QFT/IQFT n resolution,
 ControlledU resolution, loop scoping, etc.
 
 This module does NOT own traversal policy (unroll vs. multiply vs.
@@ -18,9 +18,9 @@ from typing import Any, Literal
 import sympy as sp
 
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
+    InvokeOperation,
     ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -34,17 +34,17 @@ from qamomile.circuit.ir.value import ArrayValue
 from ._resolver import ExprResolver
 
 # ------------------------------------------------------------------ #
-#  CompositeGate resolution                                           #
+#  Invoke resource resolution                                         #
 # ------------------------------------------------------------------ #
 
 
 @dataclass
-class CompositeGateResolution:
-    """Result of resolving a CompositeGateOperation's resource source.
+class InvokeResourceResolution:
+    """Result of resolving an InvokeOperation's resource source.
 
     Exactly one of the four branches holds useful data:
 
-    - ``"metadata"``       → *metadata*, *is_stub*, *oracle_name* etc.
+    - ``"metadata"``       → *metadata*, *is_opaque*, *oracle_name* etc.
     - ``"implementation"`` → *impl_block*, *impl_resolver*
     - ``"qft_iqft"``      → *n_qubits*
     - ``"error"``          → *error_message*
@@ -54,7 +54,7 @@ class CompositeGateResolution:
 
     # metadata branch
     metadata: ResourceMetadata | None = None
-    is_stub: bool = False
+    is_opaque: bool = False
     oracle_name: str | None = None
     query_complexity: int | None = None
     num_control_qubits: int = 0
@@ -70,85 +70,92 @@ class CompositeGateResolution:
     error_message: str | None = None
 
 
-def resolve_composite_gate(
-    op: CompositeGateOperation,
+def resolve_invoke_resource(
+    op: InvokeOperation,
     resolver: ExprResolver,
-) -> CompositeGateResolution:
-    """Resolve a CompositeGateOperation to its resource source.
+    *,
+    backend: str | None = None,
+) -> InvokeResourceResolution:
+    """Resolve an InvokeOperation to its resource source.
 
     Priority (deterministic, not fallback):
 
-    1. ``resource_metadata`` — always preferred when present
-    2. ``implementation`` (has_implementation + Block)
-    3. Known formula (QFT / IQFT)
-    4. Error — no resource info available
+    1. Selected implementation resource metadata, when available.
+    2. Callable fallback resource metadata, when available.
+    3. Selected implementation body or direct callable body.
+    4. Bodyless oracle call/query accounting.
+    5. Known formula (QFT / IQFT).
+    6. Error — no resource info available.
 
     Args:
-        op (CompositeGateOperation): The operation to resolve.
+        op (InvokeOperation): The invocation to resolve.
         resolver (ExprResolver): Resolver for the current scope.
+        backend (str | None): Optional backend name used to select
+            backend-specific callable implementations. Defaults to ``None``.
 
     Returns:
-        CompositeGateResolution: Exactly one of its four branches is populated.
+        InvokeResourceResolution: Exactly one of its branches is populated.
     """
+    resource = op.effective_resource(backend=backend)
+    body = op.effective_body(backend=backend)
+
     # 1. metadata
-    if op.resource_metadata is not None:
+    if isinstance(resource, ResourceMetadata):
         oracle_name = None
         qc = None
-        if not op.has_implementation:
+        if body is None:
             oracle_name = op.custom_name or op.gate_type.value
-            qc = op.resource_metadata.query_complexity
-        return CompositeGateResolution(
+            qc = resource.query_complexity
+        return InvokeResourceResolution(
             kind="metadata",
-            metadata=op.resource_metadata,
-            is_stub=not op.has_implementation,
+            metadata=resource,
+            is_opaque=body is None,
             oracle_name=oracle_name,
             query_complexity=qc,
             num_control_qubits=op.num_control_qubits,
         )
 
+    # Bodyless oracles remain meaningful without explicit metadata: they
+    # contribute one opaque oracle call and zero concrete gate counts.
+    if body is None and op.attrs.get("kind") == "oracle":
+        oracle_name = op.custom_name or op.gate_type.value
+        return InvokeResourceResolution(
+            kind="metadata",
+            metadata=ResourceMetadata(),
+            is_opaque=True,
+            oracle_name=oracle_name,
+            query_complexity=None,
+            num_control_qubits=op.num_control_qubits,
+        )
+
     # 2. implementation
-    if op.has_implementation and op.implementation is not None:
-        impl = op.implementation
-        if isinstance(impl, Block):
-            extra: dict[str, sp.Expr] = {}
-            for idx, formal in enumerate(impl.input_values):
-                if idx < len(op.operands):
-                    actual = op.operands[idx]
-                    extra[formal.uuid] = resolver.resolve(actual)
-            # Callee-style scope (fresh parent blocks)
-            ctx = resolver.context
-            ctx.update(extra)
-            child = ExprResolver(
-                block=impl,
-                context=ctx,
-                loop_var_names=resolver.loop_var_names,
-                parent_blocks=[],
-            )
-            return CompositeGateResolution(
+    if body is not None:
+        if isinstance(body, Block):
+            return InvokeResourceResolution(
                 kind="implementation",
-                impl_block=impl,
-                impl_resolver=child,
+                impl_block=body,
+                impl_resolver=resolver.call_child_scope(op, called_block=body),
             )
 
     # 3. QFT / IQFT
     if op.gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT):
         n = _resolve_qft_iqft_n(op, resolver)
-        return CompositeGateResolution(kind="qft_iqft", n_qubits=n)
+        return InvokeResourceResolution(kind="qft_iqft", n_qubits=n)
 
     # 4. Error
     gate_name = op.custom_name or op.gate_type.value
-    return CompositeGateResolution(
+    return InvokeResourceResolution(
         kind="error",
         error_message=(
-            f"Cannot estimate resources for CompositeGateOperation "
-            f"'{gate_name}': No resource_metadata or implementation "
-            f"available."
+            f"Cannot estimate resources for InvokeOperation '{gate_name}': "
+            f"No resource metadata, implementation body, or known formula "
+            f"is available."
         ),
     )
 
 
 def _resolve_qft_iqft_n(
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     resolver: ExprResolver,
 ) -> sp.Expr:
     """Resolve qubit count *n* for QFT / IQFT.
@@ -160,7 +167,7 @@ def _resolve_qft_iqft_n(
       4. ``sp.Symbol("n")`` fallback
 
     Args:
-        op (CompositeGateOperation): A QFT or IQFT operation.
+        op (InvokeOperation): A QFT or IQFT invocation.
         resolver (ExprResolver): Resolver for the current scope.
 
     Returns:
@@ -171,6 +178,8 @@ def _resolve_qft_iqft_n(
 
     if n_qubits > 0:
         first = target_qubits[0]
+        if isinstance(first, ArrayValue) and first.shape:
+            return resolver.resolve(first.shape[0])
         if hasattr(first, "parent_array") and first.parent_array is not None:
             parent = first.parent_array
             if isinstance(parent, ArrayValue) and parent.shape:

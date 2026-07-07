@@ -193,7 +193,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 can resolve bound/constant ``if`` conditions on a freshly
                 traced block before the transpiler pipeline runs; ``HIERARCHICAL``
                 is accepted during the self-recursion unroll loop. Surviving
-                ``CallBlockOperation``s are passed through untouched in both cases.
+                inline callable invocations are passed through untouched in both
+                cases.
 
         Returns:
             Block: New block with compile-time ``if``s replaced by their

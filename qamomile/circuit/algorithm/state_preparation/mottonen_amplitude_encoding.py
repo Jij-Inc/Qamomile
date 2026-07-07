@@ -87,11 +87,11 @@ instance pays only the normalisation cost.
 
 In practice the surrounding ``CompositeGate.__call__`` framework
 eagerly invokes ``_decompose()`` when the gate is invoked inside a
-``@qkernel`` (to populate the operation's ``implementation_block``),
-so kernel-side ``estimate_resources()`` does still pay the angle
-cost today.  The lazy aspect is the right shape for a future
-framework refactor that defers ``_build_decomposition_block`` until
-emit time, and is verified standalone by
+``@qkernel`` (to populate the invocation's ``CallableDef.body``), so
+kernel-side ``estimate_resources()`` does still pay the angle cost
+today.  The lazy aspect is the right shape for a future framework
+refactor that defers decomposition-body construction until emit time,
+and is verified standalone by
 ``tests.circuit.algorithm.state_preparation.test_mottonen_amplitude_encoding.TestLazyConstruction``.
 """
 
@@ -105,7 +105,7 @@ from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.qubit_gates import cx, ry, rz
-from qamomile.circuit.ir.operation.composite_gate import (
+from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     ResourceMetadata,
 )

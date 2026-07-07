@@ -1,13 +1,19 @@
+from .callable import (
+    CallableBodyRef,
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallPolicy,
+    CallTransform,
+    CompositeGateType,
+    InvokeOperation,
+    ResourceMetadata,
+)
 from .cast import CastOperation
 from .classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
     StoreArrayElementOperation,
-)
-from .composite_gate import (
-    CompositeGateOperation,
-    CompositeGateType,
-    ResourceMetadata,
 )
 from .control_flow import ForItemsOperation, HasNestedOps, LoopCarriedRebind
 from .expval import ExpvalOp
@@ -29,7 +35,13 @@ from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
 __all__ = [
     "Operation",
     "ReturnOperation",
-    "CompositeGateOperation",
+    "CallableBodyRef",
+    "CallableDef",
+    "CallableImplementation",
+    "CallableRef",
+    "CallPolicy",
+    "CallTransform",
+    "InvokeOperation",
     "InverseBlockOperation",
     "CompositeGateType",
     "ResourceMetadata",

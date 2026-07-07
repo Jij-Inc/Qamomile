@@ -7,10 +7,8 @@ import qamomile.circuit as qmc
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Matrix, Qubit, Vector
 from qamomile.circuit.frontend.qkernel import qkernel
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-    CompositeGateType,
-)
+from qamomile.circuit.ir.operation import InvokeOperation
+from qamomile.circuit.ir.operation.callable import CompositeGateType
 from qamomile.circuit.ir.operation.gate import MeasureVectorOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -42,6 +40,48 @@ def _rec_iqft_top(depth: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     qs = qmc.qubit_array(3, "qs")
     qs = _rec_iqft(depth, qs)
     return qmc.measure(qs)
+
+
+def _assert_invoke_gate(
+    op: object,
+    *,
+    gate_type: CompositeGateType,
+    name: str,
+    num_target_qubits: int,
+) -> None:
+    """Assert that an operation is a preserved callable gate."""
+    assert isinstance(op, InvokeOperation)
+    assert op.num_target_qubits == num_target_qubits
+    assert op.num_control_qubits == 0
+    assert op.attrs["gate_type"] == gate_type.name
+    assert op.attrs["custom_name"] == name
+    assert op.target.namespace == "qamomile.stdlib"
+    assert op.target.name == name
+
+
+def _invoke_ops_with_gate_type(
+    operations: list[object],
+    gate_type: CompositeGateType,
+) -> list[InvokeOperation]:
+    """Return invoke operations carrying a given composite gate type."""
+    return [
+        op
+        for op in operations
+        if isinstance(op, InvokeOperation)
+        and op.attrs.get("gate_type") == gate_type.name
+    ]
+
+
+def _invoke_target_width(op: InvokeOperation) -> int:
+    """Return the concrete target width represented by an invoke."""
+    if op.num_target_qubits > 0:
+        return op.num_target_qubits
+    targets = op.target_qubits
+    if len(targets) == 1 and targets[0].shape:
+        const = targets[0].shape[0].get_const()
+        if const is not None:
+            return int(const)
+    return len(targets)
 
 
 class TestQFT:
@@ -98,11 +138,12 @@ class TestQFT:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.QFT
-        assert ops[1].custom_name == "qft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.QFT,
+            name="qft",
+            num_target_qubits=n,
+        )
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_in_qkernel(self, n):
@@ -119,11 +160,12 @@ class TestQFT:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.QFT
-        assert ops[1].custom_name == "qft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.QFT,
+            name="qft",
+            num_target_qubits=n,
+        )
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_in_qkernel_symbolic(self, n):
@@ -140,11 +182,12 @@ class TestQFT:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.QFT
-        assert ops[1].custom_name == "qft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.QFT,
+            name="qft",
+            num_target_qubits=n,
+        )
 
     def test_builds_ir(self, qiskit_transpiler):
         """QFT builds correct IR with native gate type."""
@@ -161,11 +204,12 @@ class TestQFT:
         ops = block.operations
         assert len(ops) == 3
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == 3
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.QFT
-        assert ops[1].custom_name == "qft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.QFT,
+            name="qft",
+            num_target_qubits=3,
+        )
         assert isinstance(ops[2], ReturnOperation)
 
     @pytest.mark.parametrize("n", [1, 2, 3, 4])
@@ -302,11 +346,12 @@ class TestIQFT:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.IQFT
-        assert ops[1].custom_name == "iqft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.IQFT,
+            name="iqft",
+            num_target_qubits=n,
+        )
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_in_qkernel(self, n):
@@ -323,11 +368,12 @@ class TestIQFT:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.IQFT
-        assert ops[1].custom_name == "iqft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.IQFT,
+            name="iqft",
+            num_target_qubits=n,
+        )
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_in_qkernel_symbolic(self, n):
@@ -344,11 +390,12 @@ class TestIQFT:
         ops = block.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.IQFT
-        assert ops[1].custom_name == "iqft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.IQFT,
+            name="iqft",
+            num_target_qubits=n,
+        )
 
     def test_builds_ir(self, qiskit_transpiler):
         """IQFT builds correct IR with native gate type."""
@@ -365,11 +412,12 @@ class TestIQFT:
         ops = block.operations
         assert len(ops) == 3
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].num_target_qubits == 3
-        assert ops[1].num_control_qubits == 0
-        assert ops[1].gate_type == CompositeGateType.IQFT
-        assert ops[1].custom_name == "iqft"
+        _assert_invoke_gate(
+            ops[1],
+            gate_type=CompositeGateType.IQFT,
+            name="iqft",
+            num_target_qubits=3,
+        )
         assert isinstance(ops[2], ReturnOperation)
 
     @pytest.mark.parametrize("n", [1, 2, 3, 4])
@@ -558,9 +606,9 @@ class TestNestedShapeDependentStdlib:
     (QFT / IQFT) emitted by the inner kernel — even when the inner
     kernel's register size depends on a classical scalar argument or a
     ``Vector[Qubit]`` whose size is only known at the outer call site.
-    Before the fix, ``QKernel.__call__`` reused the inner kernel's
-    cached symbolic block, where ``qmc.iqft`` had silently no-op'd, and
-    the IQFT vanished from the transpiled circuit.
+    Symbolic-shape stdlib helpers now emit vector-operand boxed
+    invocations so those operations stay visible until call-site shape
+    resolution and emit/resource passes can resolve the width.
     """
 
     @pytest.mark.parametrize("n", [1, 2, 3, 4])
@@ -639,29 +687,28 @@ class TestNestedShapeDependentStdlib:
         assert len(qinits) == 1
 
     @pytest.mark.parametrize("depth", [0, 1, 2])
-    def test_self_recursive_with_shape_dependent_stdlib_limitation(
+    def test_self_recursive_shape_dependent_stdlib_preserves_each_iqft(
         self, qiskit_transpiler, depth
     ):
-        """Documents a known limitation of call-time specialization.
+        """Self-recursive symbolic-shape IQFT calls remain boxed callables.
 
         ``_rec_iqft(depth, qs)`` applies ``qmc.iqft`` once and then
         recurses ``depth`` more times, so the program semantically
-        applies IQFT ``(depth + 1)`` times. The call-time
-        specialization in :meth:`QKernel.__call__` only fires for the
-        *outermost* call: the body's recursive self-call sees
-        ``self._specializing == True`` and falls back to the cached
-        symbolic ``self.block`` where the inner ``qmc.iqft`` had no-op'd
-        on the symbolic-shape register. After ``inline ↔ partial_eval``
-        unrolling the recursion, only the outer IQFT remains in the IR.
-
-        This test pins that limitation down. If a future change relaxes
-        the ``_specializing`` guard (e.g. allows bounded
-        re-specialization for self-recursive callees with concrete
-        bindings), the expected IQFT count will rise to ``depth + 1``
-        and this test should be updated to match — the goal here is to
-        flag the behavior change consciously, not to enforce the
-        current shortcut forever.
+        applies IQFT ``(depth + 1)`` times. The cached symbolic self
+        block must therefore carry a vector-operand ``InvokeOperation``
+        rather than silently no-op'ing when the vector width is unknown
+        during standalone tracing.
         """
+        cached_iqft_ops = _invoke_ops_with_gate_type(
+            _rec_iqft.block.operations,
+            CompositeGateType.IQFT,
+        )
+        assert cached_iqft_ops
+        assert all(op.body is None for op in cached_iqft_ops)
+        assert all(op.body_ref is not None for op in cached_iqft_ops)
+        assert all(op.body_ref.ref.name == "iqft" for op in cached_iqft_ops)
+        assert all(op.body_ref.kind == "symbolic_vector" for op in cached_iqft_ops)
+
         block = qiskit_transpiler.to_block(_rec_iqft_top, bindings={"depth": depth})
         block = qiskit_transpiler.substitute(block)
         block = qiskit_transpiler.resolve_parameter_shapes(
@@ -669,17 +716,13 @@ class TestNestedShapeDependentStdlib:
         )
         block = qiskit_transpiler.inline(block)
         block = qiskit_transpiler.unroll_recursion(block, bindings={"depth": depth})
-        iqft_ops = [
-            op
-            for op in block.operations
-            if isinstance(op, CompositeGateOperation)
-            and op.gate_type == CompositeGateType.IQFT
-        ]
-        # Documented limitation: exactly one IQFT survives regardless
-        # of ``depth``. Mathematically the kernel applies IQFT
-        # ``depth + 1`` times.
-        assert len(iqft_ops) == 1
-        assert iqft_ops[0].num_target_qubits == 3
+        iqft_ops = _invoke_ops_with_gate_type(
+            block.operations,
+            CompositeGateType.IQFT,
+        )
+        assert len(iqft_ops) == depth + 1
+        assert [_invoke_target_width(op) for op in iqft_ops] == [3] * (depth + 1)
+        assert all(op.body is not None or op.body_ref is not None for op in iqft_ops)
 
     @pytest.mark.parametrize("n", [2, 3])
     def test_runtime_vector_bit_arg_does_not_block_other_specialization(
@@ -722,12 +765,10 @@ class TestNestedShapeDependentStdlib:
         block = qiskit_transpiler.substitute(block)
         block = qiskit_transpiler.resolve_parameter_shapes(block)
         block = qiskit_transpiler.inline(block)
-        iqft_ops = [
-            op
-            for op in block.operations
-            if isinstance(op, CompositeGateOperation)
-            and op.gate_type == CompositeGateType.IQFT
-        ]
+        iqft_ops = _invoke_ops_with_gate_type(
+            block.operations,
+            CompositeGateType.IQFT,
+        )
         assert len(iqft_ops) == 1, (
             f"expected IQFT specialization to fire despite runtime "
             f"Vector[Bit] co-argument, got {len(iqft_ops)} IQFT op(s)"
@@ -878,7 +919,7 @@ class TestNestedShapeDependentStdlib:
         the IR after :meth:`Transpiler.inline`. Asserts both halves of
         the original failure mode:
 
-        - The inner ``CompositeGateOperation`` (``gate_type=IQFT``) must
+        - The inner ``InvokeOperation`` (``gate_type=IQFT``) must
           appear exactly once with the expected concrete
           ``num_target_qubits`` (the original symptom).
         - The outer ``MeasureVectorOperation`` must survive inlining,
@@ -905,12 +946,10 @@ class TestNestedShapeDependentStdlib:
         block = qiskit_transpiler.substitute(block)
         block = qiskit_transpiler.resolve_parameter_shapes(block, bindings={"m": n})
         block = qiskit_transpiler.inline(block)
-        iqft_ops = [
-            op
-            for op in block.operations
-            if isinstance(op, CompositeGateOperation)
-            and op.gate_type == CompositeGateType.IQFT
-        ]
+        iqft_ops = _invoke_ops_with_gate_type(
+            block.operations,
+            CompositeGateType.IQFT,
+        )
         assert len(iqft_ops) == 1
         assert iqft_ops[0].num_target_qubits == n
 

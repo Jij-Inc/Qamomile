@@ -53,7 +53,7 @@ Qamomileを基礎から学ぶステップバイステップガイドです。
 :::{card}
 :header: **8. 再利用パターン**
 :link: 08_reuse_patterns
-ヘルパー量子カーネル、コンポジットゲート、スタブを扱います。
+ヘルパー量子カーネル、composite gate callable、opaque callableを扱います。
 :::
 
 :::{card}

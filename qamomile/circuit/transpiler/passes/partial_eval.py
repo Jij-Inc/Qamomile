@@ -45,10 +45,10 @@ class PartialEvaluationPass(Pass[Block, Block]):
                 loop reads an element of the array it writes.
         """
         # HIERARCHICAL is accepted so that the self-recursion unroll loop
-        # can interleave inline (which leaves one CallBlockOperation per
+        # can interleave inline (which leaves one inline InvokeOperation per
         # self-ref per iteration) with partial_eval (which folds the
-        # base-case `if` before the next unroll).  The inner passes
-        # ignore CallBlockOperations, so this is safe.
+        # base-case `if` before the next unroll).  The inner passes leave
+        # unresolved inline calls untouched, so this is safe.
         if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
                 f"PartialEvaluationPass expects AFFINE or HIERARCHICAL "

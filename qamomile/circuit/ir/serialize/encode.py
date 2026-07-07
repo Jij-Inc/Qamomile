@@ -19,16 +19,21 @@ import numpy as np
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
-    CompositeGateOperation,
+    CallableBodyRef,
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
     ControlledUOperation,
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
     InverseBlockOperation,
+    InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ResourceMetadata,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -39,14 +44,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     PhiOp,
     RuntimeClassicalExpr,
 )
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
     StoreArrayElementOperation,
 )
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
@@ -57,7 +60,11 @@ from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
+from qamomile.circuit.ir.operation.operation import (
+    CInitOperation,
+    QInitOperation,
+    Signature,
+)
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
@@ -117,8 +124,6 @@ def to_dict(block: Block) -> dict[str, Any]:
 
     Raises:
         ValueError: If ``block.kind`` is not ``AFFINE`` / ``ANALYZED``.
-        NotImplementedError: If the block contains a
-            ``CallBlockOperation`` (HIERARCHICAL holdover).
         TypeError: If a payload (e.g., ``ParamSlot.bound_value``)
             cannot be encoded with a known wire representation.
     """
@@ -219,7 +224,7 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
 
     Covers operands, results, subclass-extra Value fields (via
     ``all_input_values``), nested control-flow op bodies, and nested
-    Blocks inside ``CompositeGateOperation`` /
+    Blocks inside ``InvokeOperation`` /
     ``InverseBlockOperation`` /
     ``ControlledUOperation``.
 
@@ -238,9 +243,8 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _walk_op_values(child, ctx)
-    if isinstance(op, CompositeGateOperation):
-        if op.implementation_block is not None:
-            _walk_block_values(op.implementation_block, ctx)
+    if isinstance(op, InvokeOperation):
+        _walk_callable_def_values(op.definition, ctx)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             _walk_block_values(op.source_block, ctx)
@@ -265,6 +269,24 @@ def _walk_block_values(sub: Block, ctx: _EncodeContext) -> None:
         _walk_op_values(op, ctx)
     for v in sub.output_values:
         ctx.register_value(v)
+
+
+def _walk_callable_def_values(
+    definition: CallableDef | None, ctx: _EncodeContext
+) -> None:
+    """Walk Values inside a callable definition.
+
+    Args:
+        definition (CallableDef | None): Definition embedded in an invocation.
+        ctx (_EncodeContext): The active encoding context.
+    """
+    if definition is None:
+        return
+    if definition.body is not None:
+        _walk_block_values(definition.body, ctx)
+    for impl in definition.implementations:
+        if impl.body is not None:
+            _walk_block_values(impl.body, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -669,14 +691,8 @@ def _encode_operation(op: Operation, ctx: _EncodeContext) -> dict[str, Any]:
         dict[str, Any]: A tagged op dict.
 
     Raises:
-        NotImplementedError: If ``op`` is a ``CallBlockOperation``
-            (HIERARCHICAL-only).
         TypeError: If ``op`` has no encoder in the dispatch table.
     """
-    if isinstance(op, CallBlockOperation):
-        raise NotImplementedError(
-            "Cannot serialize CallBlockOperation; the block must be inlined first."
-        )
     encoder = _OP_ENCODERS.get(type(op))
     if encoder is None:
         raise TypeError(
@@ -1178,6 +1194,10 @@ def _encode_concrete_controlled(
     d = _base_op_dict("ConcreteControlledU", op)
     d["num_controls"] = op.num_controls
     d["power"] = _encode_power(op.power)
+    if op.callable_ref is not None:
+        d["callable_ref"] = _encode_callable_ref(op.callable_ref)
+    if op.callable_attrs:
+        d["callable_attrs"] = _encode_payload(op.callable_attrs)
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
 
@@ -1204,6 +1224,10 @@ def _encode_symbolic_controlled(
     ctx.register_value(op.num_controls)
     d["num_controls_ref"] = op.num_controls.uuid
     d["power"] = _encode_power(op.power)
+    if op.callable_ref is not None:
+        d["callable_ref"] = _encode_callable_ref(op.callable_ref)
+    if op.callable_attrs:
+        d["callable_attrs"] = _encode_payload(op.callable_attrs)
     if op.control_indices is not None:
         for v in op.control_indices:
             ctx.register_value(v)
@@ -1246,36 +1270,148 @@ def _encode_power(power: Any) -> Any:
     )
 
 
-def _encode_composite_gate(
-    op: CompositeGateOperation, ctx: _EncodeContext
-) -> dict[str, Any]:
-    """Encode :class:`CompositeGateOperation`.
+def _encode_callable_ref(ref: CallableRef) -> dict[str, str]:
+    """Encode a callable reference.
 
     Args:
-        op (CompositeGateOperation): The op.
+        ref (CallableRef): Callable reference to encode.
+
+    Returns:
+        dict[str, str]: Dict with namespace, name, and version.
+    """
+    return {
+        "namespace": ref.namespace,
+        "name": ref.name,
+        "version": ref.version,
+    }
+
+
+def _encode_callable_body_ref(
+    body_ref: CallableBodyRef | None,
+) -> dict[str, Any] | None:
+    """Encode a deferred callable body reference.
+
+    Args:
+        body_ref (CallableBodyRef | None): Body reference to encode.
+
+    Returns:
+        dict[str, Any] | None: Encoded reference payload, or ``None`` when
+        absent.
+    """
+    if body_ref is None:
+        return None
+    return {
+        "ref": _encode_callable_ref(body_ref.ref),
+        "kind": body_ref.kind,
+        "attrs": _encode_payload(body_ref.attrs),
+    }
+
+
+def _encode_callable_implementation(
+    impl: CallableImplementation,
+    ctx: _EncodeContext,
+) -> dict[str, Any]:
+    """Encode a callable implementation candidate.
+
+    Args:
+        impl (CallableImplementation): Implementation to encode.
         ctx (_EncodeContext): The active encoding context.
 
     Returns:
-        dict[str, Any]: Base op dict plus gate-type enum, control /
-            target counts, custom name, strategy, resource metadata,
-            and the nested implementation Block dict (or ``None``).
+        dict[str, Any]: Serialized implementation.
     """
-    d = _base_op_dict("CompositeGateOperation", op)
-    d["gate_type"] = op.gate_type.name
-    d["num_control_qubits"] = op.num_control_qubits
-    d["num_target_qubits"] = op.num_target_qubits
-    d["custom_name"] = op.custom_name
-    d["has_implementation"] = op.has_implementation
-    d["strategy_name"] = op.strategy_name
-    d["resource_metadata"] = _encode_resource_metadata(op.resource_metadata)
-    d["implementation_block"] = (
-        _encode_block(op.implementation_block, ctx)
-        if op.implementation_block is not None
-        else None
-    )
-    # ``composite_gate_instance`` is an opaque Python callable; it is
-    # intentionally not serialized. The receiver reconstructs the gate
-    # from the implementation block (or via a registry, future work).
+    return {
+        "transform": impl.transform.name,
+        "backend": impl.backend,
+        "strategy": impl.strategy,
+        "body": _encode_block(impl.body, ctx) if impl.body is not None else None,
+        "body_ref": _encode_callable_body_ref(impl.body_ref),
+        "resource": _encode_resource_metadata(impl.resource),
+        "attrs": _encode_payload(impl.attrs),
+    }
+
+
+def _encode_signature(signature: Signature | None) -> dict[str, Any] | None:
+    """Encode an operation signature carried by a callable definition.
+
+    Args:
+        signature (Signature | None): Signature to encode.
+
+    Returns:
+        dict[str, Any] | None: Encoded signature or ``None``.
+    """
+    if signature is None:
+        return None
+    return {
+        "operands": [
+            None
+            if hint is None
+            else {
+                "name": hint.name,
+                "type": _encode_value_type(hint.type),
+            }
+            for hint in signature.operands
+        ],
+        "results": [
+            {
+                "name": hint.name,
+                "type": _encode_value_type(hint.type),
+            }
+            for hint in signature.results
+        ],
+    }
+
+
+def _encode_callable_def(
+    definition: CallableDef | None,
+    ctx: _EncodeContext,
+) -> dict[str, Any] | None:
+    """Encode a callable definition.
+
+    Args:
+        definition (CallableDef | None): Definition to encode.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any] | None: Serialized definition, or ``None``.
+    """
+    if definition is None:
+        return None
+    return {
+        "ref": _encode_callable_ref(definition.ref),
+        "signature": _encode_signature(definition.signature),
+        "body": (
+            _encode_block(definition.body, ctx) if definition.body is not None else None
+        ),
+        "body_ref": _encode_callable_body_ref(definition.body_ref),
+        "implementations": [
+            _encode_callable_implementation(impl, ctx)
+            for impl in definition.implementations
+        ],
+        "resource": _encode_resource_metadata(definition.resource),
+        "default_policy": definition.default_policy.name,
+        "attrs": _encode_payload(definition.attrs),
+    }
+
+
+def _encode_invoke_operation(
+    op: InvokeOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`InvokeOperation`.
+
+    Args:
+        op (InvokeOperation): The invocation op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus callable identity, transform,
+            attrs, resource metadata, and optional nested body.
+    """
+    d = _base_op_dict("InvokeOperation", op)
+    d["target"] = _encode_callable_ref(op.target)
+    d["transform"] = op.transform.name
+    d["attrs"] = _encode_payload(op.attrs)
+    d["definition"] = _encode_callable_def(op.definition, ctx)
     return d
 
 
@@ -1296,6 +1432,10 @@ def _encode_inverse_block(
     d["num_control_qubits"] = op.num_control_qubits
     d["num_target_qubits"] = op.num_target_qubits
     d["custom_name"] = op.custom_name
+    if op.callable_ref is not None:
+        d["callable_ref"] = _encode_callable_ref(op.callable_ref)
+    if op.callable_attrs:
+        d["callable_attrs"] = _encode_payload(op.callable_attrs)
     d["source_block"] = (
         _encode_block(op.source_block, ctx) if op.source_block is not None else None
     )
@@ -1364,6 +1504,6 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     IfOperation: _encode_if,
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
-    CompositeGateOperation: _encode_composite_gate,
+    InvokeOperation: _encode_invoke_operation,
     InverseBlockOperation: _encode_inverse_block,
 }

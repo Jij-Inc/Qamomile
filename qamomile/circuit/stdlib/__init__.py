@@ -1,48 +1,30 @@
-"""Standard library of quantum algorithms.
+"""Expose standard-library quantum callables.
 
-Available:
-    Classes:
-        - QFT: Quantum Fourier Transform (CompositeGate class)
-        - IQFT: Inverse Quantum Fourier Transform (CompositeGate class)
+The reader-facing API is function-oriented: use :func:`qft`, :func:`iqft`,
+and :func:`qpe` inside qkernels. Internally these functions emit named
+callables with Qamomile bodies, resource metadata, and optional backend-native
+implementations.
 
-    Strategies:
-        - StandardQFTStrategy: Full precision QFT
-        - ApproximateQFTStrategy: Truncated rotations QFT
-        - StandardIQFTStrategy: Full precision IQFT
-        - ApproximateIQFTStrategy: Truncated rotations IQFT
-
-    Functions:
-        - qft: Apply QFT to a vector of qubits
-        - iqft: Apply IQFT to a vector of qubits
-        - qpe: Quantum Phase Estimation
+The ``QFT`` and ``IQFT`` classes remain public for advanced strategy selection
+and backend tests, but custom user-defined named operations should normally use
+the ``qamomile.circuit.composite_gate`` decorator rather than subclassing
+``CompositeGate`` directly.
 
 Example:
-    # Using class-based API (recommended for custom gates)
-    from qamomile.circuit.stdlib import QFT, IQFT
-
-    class MyCustomGate(CompositeGate):
-        def _decompose(self, qubits):
-            # Use QFT as building block
-            ...
-
-    # Using function-based API (recommended for kernels)
-    from qamomile.circuit.stdlib import qft, iqft
+    ```python
+    import qamomile.circuit as qmc
 
     @qmc.qkernel
-    def my_algorithm(qubits: Vector[Qubit]) -> Vector[Qubit]:
-        qubits = qft(qubits)
-        return qubits
-
-    # Using strategies
-    qft_gate = QFT(5)
-    result = qft_gate(q0, q1, q2, q3, q4, strategy="approximate")
+    def my_algorithm(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        qubits = qmc.qft(qubits)
+        return qmc.iqft(qubits)
+    ```
 """
 
-# Class-based API (new)
-# Function-based API (kept for compatibility, using new class-based impl)
+# Advanced class-based stdlib implementations.
 from .qft import IQFT, QFT, iqft, qft
 
-# Strategies
+# Strategy objects for advanced stdlib configuration.
 from .qft_strategies import (
     ApproximateIQFTStrategy,
     ApproximateQFTStrategy,

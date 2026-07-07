@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.handle.primitives import Qubit
-    from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+    from qamomile.circuit.ir.operation.callable import ResourceMetadata
 
 
 @runtime_checkable

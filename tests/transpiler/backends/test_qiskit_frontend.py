@@ -3734,7 +3734,7 @@ class TestTranspilerPassesPipeline:
         assert len(block.operations) > 0
 
     def test_inline(self, transpiler):
-        """inline() flattens CallBlockOperations from sub-kernel calls."""
+        """inline() flattens inline invocations from sub-kernel calls."""
 
         @qmc.qkernel
         def sub_kernel(q: qmc.Qubit) -> qmc.Qubit:
@@ -3923,7 +3923,7 @@ class TestTranspilerConfigAndSubstitution:
         assert transpiler.config is config
 
     def test_substitute_pass_sets_strategy(self):
-        """substitute() pass sets strategy_name on CompositeGateOperation."""
+        """substitute() pass sets strategy_name on InvokeOperation."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4645,7 +4645,7 @@ class TestCustomCompositeGate:
     """Test custom CompositeGate through the full pipeline."""
 
     def test_custom_gate_transpiles(self):
-        """Custom CompositeGate decomposes and transpiles."""
+        """Custom CompositeGate is boxed, decomposable, and executable."""
         from qamomile.circuit.frontend.composite_gate import CompositeGate
 
         class BellPair(CompositeGate):
@@ -4670,7 +4670,7 @@ class TestCustomCompositeGate:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        sv = _run_statevector(qc, decompose=True)
         # CompositeGate may allocate extra qubits internally
         num_q = qc.num_qubits
         # This test assumes the Bell pair occupies the only two qubits.

@@ -64,7 +64,7 @@ How the codebase already follows this:
 
 - **Vector measurement** is a single `MeasureVectorOperation` ([qamomile/circuit/ir/operation/gate.py#L410](qamomile/circuit/ir/operation/gate.py#L410)) — never expanded into N per-qubit `MeasureOperation`s at IR level. How a vector measurement turns into actual measurement instructions is delegated entirely to emit time: a backend with a native vector-measurement primitive can emit it as one operation, while backends without one can iterate per-qubit. The IR does not commit to per-qubit semantics.
 - **`MeasureQFixedOperation`** lives at an even higher abstraction (HYBRID quantum measurement + classical decode). At `plan`'s pre-segmentation lowering, it is split into `MeasureVectorOperation + DecodeQFixedOperation` so segmentation can route the halves into the right (quantum / classical) segment — but **each half stays abstract**: `MeasureVectorOperation` still represents "measure this whole Vector" (not per-qubit), `DecodeQFixedOperation` is a clean classical op.
-- **Composite gates** (QFT / QPE / IQFT) stay as `CompositeGateOperation` boxes; backends with a native `CompositeGateEmitter` emit a single high-level gate, others fall back to library decomposition. The IR is identical either way.
+- **Composite gates and oracles** (QFT / QPE / IQFT / user callables) stay as `InvokeOperation` boxes with an optional `body`; backends with a native `CompositeGateEmitter` emit a single high-level gate, others fall back to the embedded body or shared decomposition. The IR is identical either way.
 - **Loops** (`qmc.range(...)`) stay as `ForOperation`s with symbolic bounds when possible; `LoopAnalyzer` decides unroll vs. runtime loop at emit time.
 
 When introducing a new IR op or pass:
@@ -146,7 +146,7 @@ QKernel
 Block [HIERARCHICAL]
    │  substitute                  (optional rule-based block / strategy replacement)
    │  resolve_parameter_shapes    (concretize Vector shape dims from bindings)
-   │  inline                      (remove CallBlockOperations)
+   │  inline                      (remove inline InvokeOperations)
    ▼
 Block [AFFINE]
    │  unroll_recursion            (iterated inline ↔ partial_eval for self-recursive kernels)
@@ -187,7 +187,7 @@ The kernel's full classical parameter contract is also recorded on the IR itself
 
 Key contract:
 
-- **Scope**: `canonicalize` / `canonicalize_and_remap` / `to_canonical_bytes` / `content_hash` accept only `BlockKind.AFFINE` and `BlockKind.ANALYZED`. `HIERARCHICAL` blocks still contain `CallBlockOperation`s that point at sibling `Block`s by Python identity; inline them first. The function raises `ValueError` (kind mismatch) or `NotImplementedError` (residual `CallBlockOperation`) when these preconditions are violated.
+- **Scope**: `canonicalize` / `canonicalize_and_remap` / `to_canonical_bytes` / `content_hash` accept only `BlockKind.AFFINE` and `BlockKind.ANALYZED`. `HIERARCHICAL` blocks may still contain inline-policy `InvokeOperation`s or legacy `CallBlockOperation`s that reference nested `Block`s before inlining; inline them first. The function raises `ValueError` (kind mismatch) or `NotImplementedError` (residual inline call) when these preconditions are violated.
 - **Stage neutrality**: canonicalize is a normalization, not a pipeline-stage advance. `Block.kind` is preserved. `classical_lowering` and `plan` MUST NOT be run before canonicalize if the canonical form is meant to be portable — those passes commit to qamomile-internal representations.
 - **Content-only equivalence**: display-only fields (`Block.name`, `Block.output_names`, `Value.name`) are **excluded** from `to_canonical_bytes`. Two structurally-identical kernels with different function names hash equally. `Block.label_args` is functional (it names input ports by position) and is included.
 - **Counter-based UUIDs**: the first `Value` visited gets `00000000-0000-0000-0000-000000000000`, then `…0001`, and so on. `uuid` and `logical_id` share the same monotonically increasing counter; their separate remap tables are exposed via `canonicalize_and_remap`.
@@ -200,7 +200,7 @@ Key contract:
 
 Key contract:
 
-- **Scope**: only `BlockKind.AFFINE` and `BlockKind.ANALYZED` are accepted at the top level. Inline `HIERARCHICAL` first. A residual `CallBlockOperation` raises `NotImplementedError`; nested Blocks embedded in `ControlledUOperation.block` or `CompositeGateOperation.implementation_block` may legitimately be `HIERARCHICAL` (e.g., the cached `kernel.block` of a leaf kernel passed to `qmc.controlled`) and pass through.
+- **Scope**: only `BlockKind.AFFINE` and `BlockKind.ANALYZED` are accepted at the top level. Inline `HIERARCHICAL` first. A residual inline call raises `NotImplementedError`; nested Blocks embedded in `ControlledUOperation.block` or `InvokeOperation.body` may legitimately be `HIERARCHICAL` (e.g., the cached `kernel.block` of a leaf kernel passed to `qmc.controlled`) and pass through.
 - **Closed dispatch tables**: every `$type` tag is routed through a hard-coded factory map; the decoder NEVER does `importlib.import_module` or `getattr` on user data. Unknown tags raise `ValueError`. This is the load-bearing security invariant — the wire formats are safe in the same sense as JSON / msgpack themselves (no pickle-style arbitrary code execution).
 - **Numpy payloads**: `ParamSlot.bound_value` and metadata fields may carry `numpy.ndarray`s. They are wrapped as `{"$np_array": True, "dtype": ..., "shape": ..., "data": <bytes>}` with `dtype` restricted to an explicit allow-list (`float64`, `float32`, `int64`, `int32`, `uint8`, `complex128`, ...). The JSON path base64-encodes `data` at the wire boundary; msgpack passes the bytes through natively. msgpack output is therefore typically more compact than JSON for numpy-heavy IR.
 - **Schema version negotiation**: `from_dict` rejects payloads whose `schema_version` does not exactly match the loader's `SCHEMA_VERSION`. A migration table is reserved for a future PR; until then the receiver and sender must agree on the version.

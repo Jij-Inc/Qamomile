@@ -3,9 +3,11 @@
 from typing import Any
 
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
     CompositeGateType,
+    InvokeOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
     GateOperation,
@@ -108,23 +110,31 @@ def test_controlled_dispatch_accepts_inverse_block(monkeypatch) -> None:
     assert qubit_map[QubitAddress(q_out.uuid)] == 3
 
 
-def test_controlled_dispatch_accepts_composite_gate(monkeypatch) -> None:
-    """Controlled dispatch resolves composite operands via the map."""
+def test_controlled_dispatch_accepts_composite_invocation(monkeypatch) -> None:
+    """Controlled dispatch resolves composite invocation operands via the map."""
     q = Value(type=QubitType(), name="q")
     q_out = q.next_version()
-    op = CompositeGateOperation(
+    ref = CallableRef(namespace="user.composite", name="custom")
+    attrs = {
+        "kind": "composite",
+        "gate_type": CompositeGateType.CUSTOM.name,
+        "num_control_qubits": 0,
+        "num_target_qubits": 1,
+        "custom_name": "custom",
+    }
+    op = InvokeOperation(
         operands=[q],
         results=[q_out],
-        gate_type=CompositeGateType.CUSTOM,
-        num_target_qubits=1,
-        implementation_block=Block(),
+        target=ref,
+        attrs=attrs,
+        definition=CallableDef(ref=ref, body=Block(), attrs=attrs),
     )
     calls: list[tuple[list[int], list[int]]] = []
 
     def fake_emit_composite(
         emit_pass: Any,
         circuit: Any,
-        op: CompositeGateOperation,
+        op: InvokeOperation,
         control_indices: list[int],
         qubit_indices: list[int],
         bindings: dict[str, Any],

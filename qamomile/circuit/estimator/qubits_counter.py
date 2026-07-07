@@ -12,9 +12,9 @@ from typing import overload
 import sympy as sp
 
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    InvokeOperation,
+    ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -171,41 +171,6 @@ def _build_controlled_u_child_resolver(
 
 
 # ------------------------------------------------------------------ #
-#  CompositeGate qubit counting                                       #
-# ------------------------------------------------------------------ #
-
-
-def _count_composite_split(
-    op: CompositeGateOperation,
-    resolver: ExprResolver,
-) -> tuple[sp.Expr, bool]:
-    """Count qubits from a CompositeGateOperation.
-
-    Returns (alloc, is_reusable):
-        alloc: Total qubit allocation (implementation + metadata ancilla)
-        is_reusable: True if the allocation can be reused across loop iterations
-    """
-
-    impl = op.implementation
-    meta_ancilla: sp.Expr = sp.Integer(0)
-    impl_alloc: sp.Expr = sp.Integer(0)
-
-    if isinstance(impl, Block):
-        impl_alloc = _count_from_operations(impl.operations, resolver)
-
-    if op.resource_metadata is not None:
-        meta_ancilla = sp.Integer(op.resource_metadata.ancilla_qubits)
-
-    total_alloc = impl_alloc + meta_ancilla
-
-    if isinstance(impl, Block) and _is_clean_call(impl):
-        return total_alloc, True
-    if impl is None and op.resource_metadata is not None:
-        # Stub with metadata only: ancilla are reusable by definition
-        return meta_ancilla, True
-    return total_alloc, False
-
-
 def _count_inverse_block_split(
     op: InverseBlockOperation,
     resolver: ExprResolver,
@@ -229,19 +194,62 @@ def _count_inverse_block_split(
     return impl_alloc, False
 
 
-def _count_composite_total(
-    op: CompositeGateOperation,
+def _count_invoke_split(
+    op: InvokeOperation,
     resolver: ExprResolver,
-) -> sp.Expr:
-    """Count qubits from a CompositeGateOperation (non-split)."""
+    *,
+    backend: str | None = None,
+) -> tuple[sp.Expr, bool]:
+    """Count reusable qubits from an InvokeOperation.
 
-    count: sp.Expr = sp.Integer(0)
-    impl = op.implementation
-    if isinstance(impl, Block):
-        count += _count_from_operations(impl.operations, resolver)
-    if op.resource_metadata is not None:
-        count += sp.Integer(op.resource_metadata.ancilla_qubits)
-    return count
+    Args:
+        op (InvokeOperation): Invocation operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+        backend (str | None): Optional backend name used to select
+            backend-specific callable implementation resources or bodies.
+
+    Returns:
+        tuple[sp.Expr, bool]: Allocation count and whether it is reusable.
+    """
+    body = op.effective_body(backend=backend)
+    resource = op.effective_resource(backend=backend)
+    body_alloc: sp.Expr = sp.Integer(0)
+    meta_ancilla: sp.Expr = sp.Integer(0)
+    if isinstance(body, Block):
+        child = resolver.call_child_scope(op, called_block=body)
+        body_alloc = _count_from_operations(body.operations, child, backend=backend)
+    if isinstance(resource, ResourceMetadata):
+        meta_ancilla = sp.Integer(resource.ancilla_qubits)
+
+    total = body_alloc + meta_ancilla
+    if isinstance(body, Block) and _is_clean_call(body):
+        return total, True
+    if body is None and isinstance(resource, ResourceMetadata):
+        return total, True
+    if body is None and op.attrs.get("kind") == "oracle":
+        return total, True
+    return total, False
+
+
+def _count_invoke_total(
+    op: InvokeOperation,
+    resolver: ExprResolver,
+    *,
+    backend: str | None = None,
+) -> sp.Expr:
+    """Count qubits from an InvokeOperation.
+
+    Args:
+        op (InvokeOperation): Invocation operation to count.
+        resolver (ExprResolver): Resolver for the current estimator scope.
+        backend (str | None): Optional backend name used to select
+            backend-specific callable implementation resources or bodies.
+
+    Returns:
+        sp.Expr: Additional qubit allocation required by the invocation.
+    """
+    alloc, _ = _count_invoke_split(op, resolver, backend=backend)
+    return alloc
 
 
 def _count_inverse_block_total(
@@ -272,6 +280,8 @@ def _count_inverse_block_total(
 def _count_loop_body_split(
     operations: list[Operation],
     resolver: ExprResolver,
+    *,
+    backend: str | None = None,
 ) -> tuple[sp.Expr, sp.Expr]:
     """Split loop body qubit count into (persistent, reusable).
 
@@ -292,31 +302,27 @@ def _count_loop_body_split(
             case QInitOperation():
                 persistent += _count_qinit(op, resolver)  # type: ignore
 
-            case CallBlockOperation():
-                called_block = op.block
-                if isinstance(called_block, Block):
-                    child = resolver.call_child_scope(op)
-                    inner_alloc = _count_from_operations(called_block.operations, child)
-                    if _is_clean_call(called_block):
-                        reusable = sp.Max(reusable, inner_alloc)
-                    else:
-                        persistent += inner_alloc  # type: ignore
-
             case ControlledUOperation():
                 controlled_block, child = _build_controlled_u_child_resolver(
                     op, resolver
                 )
                 if controlled_block is not None and child is not None:
                     inner_alloc = _count_from_operations(
-                        controlled_block.operations, child
+                        controlled_block.operations,
+                        child,
+                        backend=backend,
                     )
                     if _is_clean_call(controlled_block):
                         reusable = sp.Max(reusable, inner_alloc)
                     else:
                         persistent += inner_alloc  # type: ignore
 
-            case CompositeGateOperation():
-                alloc, is_reusable = _count_composite_split(op, resolver)
+            case InvokeOperation():
+                alloc, is_reusable = _count_invoke_split(
+                    op,
+                    resolver,
+                    backend=backend,
+                )
                 if is_reusable:
                     reusable = sp.Max(reusable, alloc)
                 else:
@@ -333,7 +339,11 @@ def _count_loop_body_split(
                 if len(op.operands) < 2:
                     continue
                 child, start, stop, step, _ = build_for_loop_scope(op, resolver)
-                inner_p, inner_r = _count_loop_body_split(op.operations, child)
+                inner_p, inner_r = _count_loop_body_split(
+                    op.operations,
+                    child,
+                    backend=backend,
+                )
                 iterations = symbolic_iterations(start, stop, step)
                 reusable_factor = sp.Piecewise(
                     (sp.Integer(1), sp.Gt(iterations, 0)),
@@ -344,22 +354,36 @@ def _count_loop_body_split(
 
             case WhileOperation():
                 child, _ = build_while_scope(op, resolver)
-                inner_p, inner_r = _count_loop_body_split(op.operations, child)
+                inner_p, inner_r = _count_loop_body_split(
+                    op.operations,
+                    child,
+                    backend=backend,
+                )
                 persistent += inner_p * WHILE_SYMBOL  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
 
             case IfOperation():
                 true_child, false_child = build_if_scopes(op, resolver)
-                true_p, true_r = _count_loop_body_split(op.true_operations, true_child)
+                true_p, true_r = _count_loop_body_split(
+                    op.true_operations,
+                    true_child,
+                    backend=backend,
+                )
                 false_p, false_r = _count_loop_body_split(
-                    op.false_operations, false_child
+                    op.false_operations,
+                    false_child,
+                    backend=backend,
                 )
                 persistent += sp.Max(true_p, false_p)  # type: ignore
                 reusable = sp.Max(reusable, true_r, false_r)
 
             case ForItemsOperation():
                 child = build_for_items_scope(op, resolver)
-                inner_p, inner_r = _count_loop_body_split(op.operations, child)
+                inner_p, inner_r = _count_loop_body_split(
+                    op.operations,
+                    child,
+                    backend=backend,
+                )
                 cardinality = resolve_for_items_cardinality(op)
                 persistent += inner_p * cardinality  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
@@ -395,6 +419,8 @@ def _count_loop_body_split(
 def _count_from_operations(
     operations: list[Operation],
     resolver: ExprResolver,
+    *,
+    backend: str | None = None,
 ) -> sp.Expr:
     """Count qubits from a list of operations.
 
@@ -413,7 +439,11 @@ def _count_from_operations(
                 if len(op.operands) < 2:
                     continue
                 child, start, stop, step, _ = build_for_loop_scope(op, resolver)
-                persistent, reusable = _count_loop_body_split(op.operations, child)
+                persistent, reusable = _count_loop_body_split(
+                    op.operations,
+                    child,
+                    backend=backend,
+                )
                 iterations = symbolic_iterations(start, stop, step)
                 reusable_factor = sp.Piecewise(
                     (sp.Integer(1), sp.Gt(iterations, 0)),
@@ -423,22 +453,26 @@ def _count_from_operations(
 
             case WhileOperation():
                 child, _ = build_while_scope(op, resolver)
-                persistent, reusable = _count_loop_body_split(op.operations, child)
+                persistent, reusable = _count_loop_body_split(
+                    op.operations,
+                    child,
+                    backend=backend,
+                )
                 count += persistent * WHILE_SYMBOL + reusable  # type: ignore
 
             case IfOperation():
                 true_child, false_child = build_if_scopes(op, resolver)
-                true_count = _count_from_operations(op.true_operations, true_child)
-                false_count = _count_from_operations(op.false_operations, false_child)
+                true_count = _count_from_operations(
+                    op.true_operations,
+                    true_child,
+                    backend=backend,
+                )
+                false_count = _count_from_operations(
+                    op.false_operations,
+                    false_child,
+                    backend=backend,
+                )
                 count += sp.Max(true_count, false_count)  # type: ignore
-
-            case CallBlockOperation():
-                called_block = op.block
-                if isinstance(called_block, Block):
-                    child = resolver.call_child_scope(op)
-                    count += _count_from_operations(  # type: ignore
-                        called_block.operations, child
-                    )
 
             case ControlledUOperation():
                 controlled_block, child = _build_controlled_u_child_resolver(
@@ -446,17 +480,23 @@ def _count_from_operations(
                 )
                 if controlled_block is not None and child is not None:
                     count += _count_from_operations(  # type: ignore
-                        controlled_block.operations, child
+                        controlled_block.operations,
+                        child,
+                        backend=backend,
                     )
 
             case ForItemsOperation():
                 child = build_for_items_scope(op, resolver)
-                persistent, reusable = _count_loop_body_split(op.operations, child)
+                persistent, reusable = _count_loop_body_split(
+                    op.operations,
+                    child,
+                    backend=backend,
+                )
                 cardinality = resolve_for_items_cardinality(op)
                 count += persistent * cardinality + reusable  # type: ignore
 
-            case CompositeGateOperation():
-                count += _count_composite_total(op, resolver)  # type: ignore
+            case InvokeOperation():
+                count += _count_invoke_total(op, resolver, backend=backend)  # type: ignore
 
             case InverseBlockOperation():
                 count += _count_inverse_block_total(op, resolver)  # type: ignore
@@ -486,14 +526,30 @@ def _count_from_operations(
 
 
 @overload
-def qubits_counter(block: Block) -> sp.Expr: ...
+def qubits_counter(block: Block, *, backend: str | None = None) -> sp.Expr: ...
 
 
 @overload
-def qubits_counter(block: list[Operation]) -> sp.Expr: ...
+def qubits_counter(
+    block: list[Operation],
+    *,
+    backend: str | None = None,
+) -> sp.Expr: ...
 
 
-def qubits_counter(block: Block | list[Operation]) -> sp.Expr:
+@overload
+def qubits_counter(
+    block: Block | list[Operation],
+    *,
+    backend: str | None = None,
+) -> sp.Expr: ...
+
+
+def qubits_counter(
+    block: Block | list[Operation],
+    *,
+    backend: str | None = None,
+) -> sp.Expr:
     """Count the number of qubits required by a Block.
 
     This function analyzes the operations in a Block and counts
@@ -502,11 +558,13 @@ def qubits_counter(block: Block | list[Operation]) -> sp.Expr:
     - QInitOperation: Counts single qubits and qubit arrays
     - ForOperation/WhileOperation: Counts inner resources (assumes uncomputation)
     - IfOperation: Takes the maximum of both branches
-    - CallBlockOperation: Recursively counts called blocks
+    - InvokeOperation: Counts callable bodies and callable resource metadata
     - ControlledUOperation: Recursively counts the unitary block
 
     Args:
         block: The Block to analyze.
+        backend: Optional backend name used to select backend-specific
+            callable implementation resources or bodies.
 
     Returns:
         The qubit count as a sympy expression. May contain symbols
@@ -522,7 +580,11 @@ def qubits_counter(block: Block | list[Operation]) -> sp.Expr:
     if isinstance(block, Block):
         resolver = ExprResolver(block=block)
         input_qubits = _count_input_qubits(block.input_values, resolver)
-        ops_qubits = _count_from_operations(block.operations, resolver)
+        ops_qubits = _count_from_operations(
+            block.operations,
+            resolver,
+            backend=backend,
+        )
         return sp.simplify(input_qubits + ops_qubits)
     resolver = ExprResolver()
-    return _count_from_operations(block, resolver)
+    return _count_from_operations(block, resolver, backend=backend)

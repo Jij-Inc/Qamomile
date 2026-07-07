@@ -17,16 +17,15 @@
 # tags: [tutorial]
 # ---
 #
-# # 再利用パターン：QKernelの合成とコンポジットゲート
+# # 再利用パターン:QKernel、composite gate、opaque callable
 #
-# 回路が大きくなると、ゲート列のコピー＆ペーストを避けたくなります。Qamomileは2つの再利用メカニズムを提供しています：
+# Qamomileには3つの再利用パターンがあります。
 #
-# 1. **ヘルパーQKernel** — ある`@qkernel`を別の`@qkernel`から呼び出す、通常の関数合成と同じ方法です。
-# 2. `@composite_gate` — 量子カーネルをカスタム可能な名前付きゲートに昇格させ、図中で単一のボックスとして表示します。
+# ヘルパー`qkernel`は、通常のプログラム構造として使います。
 #
-# さらにトップダウン設計のための第3のパターンもあります：
+# `composite_gate()`は、Qamomileの本体を持つ名前付きの量子操作を作ります。
 #
-# 3. **スタブゲート** — 実装本体を持たないゲートで、リソース推定に使います。例えば、グローバー探索アルゴリズムを設計しており、オラクルが約40個のTゲートを使用することはわかっているが、まだ実装していないとします。スタブゲートを使用すると、完全なオラクル実装なしでアルゴリズムの総コストを推定できます。
+# `opaque()`は、トップダウンのアルゴリズム設計とリソース推定に使う本体を持たないcallableを作ります。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -34,15 +33,17 @@
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
+
 # %% [markdown]
 # ## パターン1:ヘルパーQKernel
 #
-# どの`@qkernel`関数も別の`@qkernel`から呼び出せます。トランスパイル時にインライン展開されるため、トランスパイル結果はフラットな回路になります。
+# 通常のコード再利用をしたい場合は、ヘルパーqkernelを使います。
+#
+# コンパイル時には、ヘルパー呼び出しは呼び出し元へインライン展開されます。
 
 
 # %%
@@ -78,23 +79,14 @@ result = (
 print("GHZ result:", result.results)
 assert result.shots == 128
 assert sum(count for _, count in result.results) == 128
-# 4 量子ビット GHZ 状態 → (0, 0, 0, 0) と (1, 1, 1, 1) のみ出現。
-assert all(
-    outcome in {(0, 0, 0, 0), (1, 1, 1, 1)}
-    for outcome, _ in result.results
-)
-
-# %% [markdown]
-# ヘルパー`entangle_once`により、呼び出し側のコードが読みやすくなります。トランスパイル後の回路ではインライン展開されるため、サブブロックではなく個々のCXゲートが見えます。
-
-# %%
-qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
-print(qc.draw())
+assert all(outcome in {(0, 0, 0, 0), (1, 1, 1, 1)} for outcome, _ in result.results)
 
 # %% [markdown]
 # ### ヘルパーへのスカラーリテラルの受け渡し
 #
-# ヘルパーqkernelがスカラー型(`UInt`,`Float`,`Bit`)のパラメータを宣言している場合、呼び出し側ではPythonの生のリテラルをそのまま渡せます。Qamomileが`int`を`UInt`、`float`を`Float`、`bool`を`Bit`に自動昇格します。`helper(q, 0, 0.5)`は`helper(q, qmc.uint(0), qmc.float_(0.5))`と等価です。明示的な`qmc.uint`/`qmc.float_`/`qmc.bit`コンストラクタは、値に名前を付けたい場合や複数の呼び出し箇所で共有したい場合にのみ使えば十分です。
+# ヘルパーqkernelでは、`UInt`、`Float`、`Bit`のようなスカラーハンドルを宣言できます。
+#
+# 呼び出し側では、生のPythonリテラルが期待されるハンドル型へ昇格されます。
 
 
 # %%
@@ -111,9 +103,6 @@ def rotate_first(
 @qmc.qkernel
 def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
-    # int / float リテラルは runtime で ``qmc.UInt`` / ``qmc.Float`` に
-    # auto-promote されるが、kernel の静的シグネチャは Qamomile ハンドル型を
-    # そのまま要求する。下の ignore はその意図的なギャップを明示するもの。
     q = rotate_first(q, 0, 0.5)  # type: ignore[arg-type]
     return qmc.measure(q)
 
@@ -121,183 +110,155 @@ def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 helper_with_literals.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
-# ## パターン2：`@composite_gate`
+# ## パターン2:composite gate
 #
-# 再利用可能なブロックを回路図で**名前付きボックス**として表示したい場合`@composite_gate`でを使うこともできます。また、より高度な内容としてコンポジットゲートにすることで複数の実装方式を与えるといったカスタム設定を与えることも可能です。
+# 再利用する単位を名前付きの量子操作として残したい場合は、composite gate callableを使います。
 #
-# `@qkernel`の上に`@composite_gate(name="...")`を重ねて書きます：
-
-
-# %%
-@qmc.composite_gate(name="entangle")
-@qmc.qkernel
-def entangle_link(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-    q0, q1 = qmc.cx(q0, q1)
-    return q0, q1
-
-
-@qmc.qkernel
-def ghz_with_composite(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, name="q")
-    q[0] = qmc.h(q[0])
-
-    for i in qmc.range(n - 1):
-        q[i], q[i + 1] = entangle_link(q[i], q[i + 1])
-
-    return qmc.measure(q)
-
-
-# %%
-ghz_with_composite.draw(n=4, fold_loops=False)
-
-# %% [markdown]
-# ### どちらを使うべきか?
+# ユーザー向けの公開された書き方は、型付きPython関数に`@qmc.composite_gate`を付ける形です。
 #
-# | パターン | `draw()`での表示 | 使用場面 |
-# |---------|-------------------|--------------------------|
-# | ヘルパー`@qkernel` | インライン展開(フラット) | コードの整理 |
-# | `@composite_gate` | 名前付きボックス | ドメインレベルの抽象化/高度なカスタム |
-
-# %% [markdown]
-# ## パターン3:トップダウン設計のためのスタブゲート
-#
-# オラクルなどを想定する量子アルゴリズムを設計する場合に内部は未知のまま回路を組みたいこともあると思います。**スタブゲート**は実装本体を持たず、名前・量子ビット数・オプションのリソースメタデータだけを持ちます。
-#
-# オラクルあるいはサブルーチンが開発中でも、アルゴリズム全体のコストを推定できます。
-#
-# スタブゲートを使うためには`@composite_gate`の引数として`stub=True`を指定します。このとき同時にリソース情報を`ResrouceMetadata`として与えられます。
+# Qamomileはその関数を内部でqkernel本体に変換し、呼び出し側では名前付きboxとして残します。
 
 
 # %%
 @qmc.composite_gate(
-    stub=True,
-    name="oracle",
-    num_qubits=3,
-    resource_metadata=ResourceMetadata(
+    name="h_layer",
+    resource=qmc.ResourceMetadata(total_gates=3, single_qubit_gates=3),
+)
+def h_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    for i in qmc.range(q.shape[0]):
+        q[i] = qmc.h(q[i])
+    return q
+
+
+@qmc.qkernel
+def custom_composite_layer() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, name="q")
+    q = h_layer(q)
+    return qmc.measure(q)
+
+
+block = custom_composite_layer.build()
+assert block.name == "custom_composite_layer"
+
+composite_est = custom_composite_layer.estimate_resources().simplify()
+assert composite_est.gates.total == 3
+
+custom_composite_layer.draw(fold_loops=False)
+
+# %% [markdown]
+# QFTは組み込みの例です。
+#
+# QFTはQamomileの本体を持ちますが、backendによってはnativeにemitできます。
+
+
+# %%
+@qmc.qkernel
+def qft_round_trip() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, name="q")
+    q = qmc.h(q)
+    q = qmc.qft(q)
+    q = qmc.iqft(q)
+    return qmc.measure(q)
+
+
+block = qft_round_trip.build()
+assert block.name == "qft_round_trip"
+
+qft_est = qft_round_trip.estimate_resources().simplify()
+print("QFT round-trip gates:", qft_est.gates.total)
+assert qft_est.gates.total == 17
+
+qft_round_trip.draw(fold_loops=False)
+
+# %%
+qft_result = (
+    transpiler.transpile(qft_round_trip)
+    .sample(
+        transpiler.executor(),
+        shots=64,
+    )
+    .result()
+)
+print("QFT round-trip result:", qft_result.results)
+assert sum(count for _, count in qft_result.results) == 64
+
+# %% [markdown]
+# ## パターン3:opaque callable
+#
+# 実装がまだない段階で、アルゴリズムに名前付き操作が必要な場合はopaque callableを使います。
+#
+# opaque callableは本体を持ちません。
+#
+# それでもresource metadataを持てるため、リソース推定では呼び出しを数えられます。
+
+
+# %%
+marked_state_oracle = qmc.opaque(
+    "marked_state_oracle",
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Qubit]],
+    ),
+    resource=qmc.ResourceMetadata(
         query_complexity=1,
         t_gates=40,
     ),
 )
-def oracle_box():
-    pass
 
 
 @qmc.qkernel
-def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
+def grover_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(3, name="q")
     q = qmc.h(q)
 
-    q[0], q[1], q[2] = oracle_box(q[0], q[1], q[2])
+    for _ in qmc.range(rounds):
+        q = marked_state_oracle(q)
+        q = qmc.h(q)
+
     return q
 
 
 # %%
-algorithm_skeleton.draw(fold_loops=False)
+grover_skeleton.draw(rounds=2, fold_loops=False)
 
 # %% [markdown]
-# ### スタブゲートを含むqkernelのリソース推定
+# callableはopaqueなので、このqkernelはまだ実行できません。
 #
-# `estimate_resources()`は、オラクル内部が未実装でもqkernel全体を解析できます。既知の回路部分は通常どおり集計され、未知のスタブ部分は`est.gates.oracle_calls` / `est.gates.oracle_queries`として追跡されます。
+# それでもリソース推定には有用です。
 
 # %%
-est = algorithm_skeleton.estimate_resources().simplify()
+est = grover_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
-assert est.qubits == 3
 print("total gates:", est.gates.total)
-# H ゲート 3 個(qubit_array(3) へのブロードキャスト); stub の `oracle_box`
-# は gates.total ではなく gates.oracle_calls にカウントされる。
-assert est.gates.total == 3
-
-# %% [markdown]
-# 次に、通常ゲートと複数スタブオラクルを混在させたqkernelで確認します。
-
-
-# %%
-@qmc.composite_gate(
-    stub=True,
-    name="oracle",
-    num_qubits=3,
-    resource_metadata=ResourceMetadata(query_complexity=2),
-)
-def phase_oracle():
-    pass
-
-
-@qmc.composite_gate(
-    stub=True,
-    name="mixing",
-    num_qubits=3,
-    resource_metadata=ResourceMetadata(query_complexity=1),
-)
-def mixing_oracle():
-    pass
-
-
-@qmc.qkernel
-def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.qubit_array(3, name="q")
-
-    # 既知の回路部分（非オラクル）
-    q[0] = qmc.h(q[0])
-    q[1] = qmc.h(q[1])
-    q[0], q[1] = qmc.cx(q[0], q[1])
-
-    # ループ外で 1 回オラクル呼び出し
-    q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
-
-    # 各ラウンドで既知ゲートと未知オラクルを混在
-    for i in qmc.range(rounds):
-        q[1] = qmc.ry(q[1], 0.3)
-        q[1], q[2] = qmc.cx(q[1], q[2])
-        q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
-        q[0], q[1], q[2] = mixing_oracle(q[0], q[1], q[2])
-        q[1], q[2] = qmc.cx(q[1], q[2])
-
-    return q
-
-
-iterative_oracle_skeleton.draw(rounds=4, fold_loops=False)
-
-
-# %%
-oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
-print("total gates:", oracle_est.gates.total)
-assert str(oracle_est.gates.total) == "3*rounds + 3"
-print("two-qubit gates:", oracle_est.gates.two_qubit)
-assert str(oracle_est.gates.two_qubit) == "2*rounds + 1"
-print("oracle_calls:", oracle_est.gates.oracle_calls)
-assert {k: str(v) for k, v in oracle_est.gates.oracle_calls.items()} == {
-    "oracle": "rounds + 1",
-    "mixing": "rounds",
+print("T gates:", est.gates.t_gates)
+print("oracle calls:", est.gates.oracle_calls)
+print("oracle queries:", est.gates.oracle_queries)
+assert est.qubits == 3
+assert str(est.gates.total) == "3*rounds + 3"
+assert str(est.gates.t_gates) == "40*rounds"
+assert {k: str(v) for k, v in est.gates.oracle_calls.items()} == {
+    "marked_state_oracle": "rounds"
 }
-print("oracle_queries:", oracle_est.gates.oracle_queries)
-assert {k: str(v) for k, v in oracle_est.gates.oracle_queries.items()} == {
-    "oracle": "2*rounds + 2",
-    "mixing": "rounds",
+assert {k: str(v) for k, v in est.gates.oracle_queries.items()} == {
+    "marked_state_oracle": "rounds"
 }
 
 # %% [markdown]
-# `rounds`に具体的な値を代入して、数値的なカウントを確認します：
+# 具体的なループ回数を代入すると、数値的な見積もりを確認できます。
 
 # %%
-oracle_est_4 = oracle_est.substitute(rounds=4)
-print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
-assert oracle_est_4.gates.oracle_calls == {"oracle": 5, "mixing": 4}
-print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
-assert oracle_est_4.gates.oracle_queries == {"oracle": 10, "mixing": 4}
-
-# %% [markdown]
-# この例のように、オラクル内部が不明でも回路解析を進められます。既知部分は通常通りカウントされ、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。
-
-# %% [markdown]
-# このように完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
+est_4 = est.substitute(rounds=4)
+print("T gates for 4 rounds:", est_4.gates.t_gates)
+assert est_4.gates.t_gates == 160
+assert est_4.gates.oracle_calls == {"marked_state_oracle": 4}
 
 # %% [markdown]
 # ## まとめ
 #
-# - ヘルパー`@qkernel`：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。トランスパイラがインライン展開し、結果はフラットな回路になります。
-# - `@composite_gate`：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。`@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
-# - **スタブゲート**：`stub=True`と`ResourceMetadata`で、実装なしにトップダウン設計とリソース推定が可能です。
-# - `est.gates.oracle_calls`：オラクル内部が不明な状態でも、呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
+# 通常のコード構造には、ヘルパー`qkernel`を使います。
 #
-# 制御ゲート（`qmc.control`）については[チュートリアル04 — 制御ゲート](04_controlled_gates.ipynb)を参照してください。
+# 呼び出しに本体があり、名前付き操作として可視化したい場合は`composite_gate()`を使います。
+#
+# 本体がまだない呼び出しを、図やリソース推定に含めたい場合は`opaque()`を使います。
+#
+# 制御ゲート(`qmc.control`)については、[チュートリアル04:制御ゲート](04_controlled_gates.ipynb)を参照してください。

@@ -49,9 +49,11 @@ Block dict
 
 Only ``BlockKind.AFFINE`` and ``BlockKind.ANALYZED`` are accepted.
 ``HIERARCHICAL`` and ``TRACED`` raise on encode because they may
-embed ``CallBlockOperation`` references to sibling Blocks by Python
-identity; cross-process module references will be addressed
-separately.
+embed inline-policy ``InvokeOperation`` references to nested Blocks before
+inlining; cross-process module references will be addressed separately.
+Box-preserved ``InvokeOperation`` definitions may embed a concrete
+``body`` Block or an optional ``body_ref`` for deferred stdlib bodies
+whose width is resolved later.
 
 Type tags
 ---------

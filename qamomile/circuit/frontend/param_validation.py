@@ -273,7 +273,7 @@ def _validate_quantum_param_handle(
     * **A scalar ``Qubit`` declaration receiving a quantum array** is a
       *broadcast* in the control path (the controlled gate is applied
       once per target qubit -- see ``controlled_native_broadcast_target``)
-      but a silent miscompile in a plain ``CallBlockOperation`` call
+      but a silent miscompile in a plain qkernel callable invocation
       (the whole register collapses onto one scalar dummy input).
       ``allow_broadcast`` selects which contract applies. Only a 1-D
       ``Vector`` / ``VectorView`` is a valid broadcast source; a

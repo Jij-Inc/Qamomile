@@ -13,10 +13,11 @@ than build-local Python state.
 
 Supported scope:
     Only ``BlockKind.AFFINE`` and ``BlockKind.ANALYZED`` are accepted.
-    ``HIERARCHICAL`` Blocks still contain ``CallBlockOperation``s that
-    reference sibling Blocks by Python identity; their canonical
-    treatment is deferred (see backlog ``[IR design] Add named/versioned
-    module references for cross-process kernel composition``).
+    ``HIERARCHICAL`` Blocks may still contain inline-policy
+    ``InvokeOperation``s that reference nested Blocks before inlining;
+    canonical treatment for those pre-inline references is deferred (see
+    backlog ``[IR design] Add named/versioned module references for
+    cross-process kernel composition``).
 
 Output guarantees:
     1. ``canonicalize`` does not change ``Block.kind``; it is a
@@ -67,11 +68,8 @@ import numpy as np
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-)
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
@@ -110,8 +108,7 @@ def canonicalize(block: Block) -> Block:
 
     Raises:
         ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
-        NotImplementedError: If a ``CallBlockOperation`` is encountered
-            (typically because ``inline`` has not been run yet).
+        NotImplementedError: If an unsupported operation is encountered.
 
     Example:
         >>> from qamomile.qiskit import QiskitTranspiler
@@ -147,7 +144,7 @@ def canonicalize_and_remap(
 
     Raises:
         ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
-        NotImplementedError: If a ``CallBlockOperation`` is encountered.
+        NotImplementedError: If an unsupported operation is encountered.
     """
     if block.kind not in _SUPPORTED_KINDS:
         raise ValueError(
@@ -230,8 +227,8 @@ class _Canonicalizer:
 
     A single ``_Canonicalizer`` covers one ``canonicalize`` invocation
     and may recurse into nested Blocks (for example via
-    ``CompositeGateOperation.implementation_block`` and
-    ``InverseBlockOperation`` source/fallback blocks). A shared counter
+    ``InvokeOperation.body`` and ``InverseBlockOperation`` source/fallback
+    blocks). A shared counter
     across nested Blocks guarantees no UUID string collisions within
     the returned canonical tree.
     """
@@ -387,15 +384,8 @@ class _Canonicalizer:
                 and canonicalized nested op lists / implementation Blocks.
 
         Raises:
-            NotImplementedError: If ``op`` is a ``CallBlockOperation``.
-                Canonicalize requires the input Block to be inlined first.
+            NotImplementedError: If ``op`` contains unsupported nested data.
         """
-        if isinstance(op, CallBlockOperation):
-            raise NotImplementedError(
-                "canonicalize() does not support HIERARCHICAL blocks "
-                "(CallBlockOperation present). Run inline() first."
-            )
-
         sub_map: dict[str, ValueBase] = {}
         for v in op.all_input_values():
             sub_map[v.uuid] = self.canonical_value(v)
@@ -421,12 +411,11 @@ class _Canonicalizer:
                 ],
             )
 
-        if (
-            isinstance(new_op, CompositeGateOperation)
-            and new_op.implementation_block is not None
-        ):
-            sub = self.canonical_block(new_op.implementation_block)
-            new_op = dataclasses.replace(new_op, implementation_block=sub)
+        if isinstance(new_op, InvokeOperation) and new_op.body is not None:
+            sub = self.canonical_block(new_op.body)
+            assert new_op.definition is not None
+            definition = dataclasses.replace(new_op.definition, body=sub)
+            new_op = dataclasses.replace(new_op, definition=definition)
         if isinstance(new_op, InverseBlockOperation):
             if new_op.source_block is not None:
                 sub = self.canonical_block(new_op.source_block)
@@ -651,7 +640,7 @@ def _token(obj: Any) -> str:
         return "{" + ",".join(f"{_token(k)}:{_token(v)}" for k, v in items) + "}"
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         # Dataclass instances (e.g. ``ResourceMetadata`` on
-        # ``CompositeGateOperation``) get serialized field-by-field in
+        # ``InvokeOperation``) get serialized field-by-field in
         # name-sorted order so canonical bytes are independent of the
         # declared-field order and of any nested ``dict``'s insertion
         # order (handled transitively via the dict branch above).
@@ -809,11 +798,11 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _collect_from_operation(child, visit)
-    if isinstance(op, CompositeGateOperation):
-        if op.implementation_block is not None:
+    if isinstance(op, InvokeOperation):
+        if op.body is not None:
             # Nested block's values participate in the same canonical
             # universe; recurse to ensure they are declared too.
-            _collect_from_subblock(op.implementation_block, visit)
+            _collect_from_subblock(op.body, visit)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             _collect_from_subblock(op.source_block, visit)
@@ -827,7 +816,7 @@ def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """Walk the Values declared inside a nested Block.
 
     Used for nested operation Blocks such as
-    ``CompositeGateOperation.implementation_block``,
+    ``InvokeOperation.body``,
     ``InverseBlockOperation.source_block``, and
     ``ControlledUOperation.block``. Mirrors the top-level
     ``_collect_values`` walk order so declarations remain
@@ -857,12 +846,10 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
     {
         "operands",
         "results",
-        # CompositeGateOperation extras: opaque Python references that
-        # do not reflect IR-level structure.
-        "composite_gate_instance",
         # Nested-Block fields. These are emitted separately by
         # ``_emit_operation`` so they are not rendered through ``repr``
         # here.
+        "body",
         "implementation_block",
         "source_block",
         "block",
@@ -991,9 +978,9 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
             for child in child_list:
                 _emit_operation(child, out, indent + 2)
 
-    if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
-        out.append(f"{pad}{_INLINE_INDENT}implementation:")
-        _emit_block(op.implementation_block, out, indent + 2)
+    if isinstance(op, InvokeOperation) and op.body is not None:
+        out.append(f"{pad}{_INLINE_INDENT}body:")
+        _emit_block(op.body, out, indent + 2)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             out.append(f"{pad}{_INLINE_INDENT}source:")

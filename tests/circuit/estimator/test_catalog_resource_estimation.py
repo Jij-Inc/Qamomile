@@ -266,7 +266,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         clifford_gates=2 * n + sp.floor(n / 2),
         rotation_gates=n * (n - 1) / 2,  # type:ignore
     ),
-    "stub_oracle_qpe": resource(
+    "opaque_oracle_qpe": resource(
         # Ref: Nielsen & Chuang (circuit)
         n + 1,
         total=n + (2**n - 1) + (n * (n + 1)) / 2 + sp.floor(n / 2),

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.circuit.ir.operation.callable import ResourceMetadata
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.handle.primitives import Qubit

@@ -53,7 +53,7 @@
 # Block [HIERARCHICAL]
 #    │  substitute                  (optional rule-based replacement)
 #    │  resolve_parameter_shapes    (concretise Vector shape dims)
-#    │  inline                      (remove CallBlockOperations)
+#    │  inline                      (remove inline InvokeOperations)
 #    ▼
 # Block [AFFINE]
 #    │  unroll_recursion            (iterated inline ↔ partial_eval)
@@ -148,7 +148,7 @@
 # | `GateOperation` | `H`, `RX`, `CX`, … | `ir/operation/gate.py` |
 # | `MeasureOperation` | Measurement | `ir/operation/measurement.py` |
 # | `ForOperation`, `IfOperation`, `WhileOperation` | Control flow | `ir/operation/control_flow.py` |
-# | `CallBlockOperation` | Call to another `Block` (removed by `inline`) | `ir/operation/call_block_ops.py` |
+# | `InvokeOperation` | Call to a QKernel, composite gate callable, or opaque callable | `ir/operation/callable.py` |
 #
 # All control-flow ops implement the `HasNestedOps` protocol
 # (`nested_op_lists()` / `rebuild_nested()`) so passes can walk into loop and
@@ -161,7 +161,7 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
 
@@ -218,13 +218,24 @@ def summarise(block):
     )
 
 
+def count_invokes(ops):
+    """Count InvokeOperation nodes recursively through control-flow bodies."""
+    total = 0
+    for op in ops:
+        if isinstance(op, InvokeOperation):
+            total += 1
+        for child in getattr(op, "nested_op_lists", lambda: [])():
+            total += count_invokes(child)
+    return total
+
+
 # %% [markdown]
 # When the one-line summary is not enough,
 # `qamomile.circuit.ir.pretty_print_block` returns an MLIR-style textual
 # dump of the block — the fastest way to see *what changed* between two
-# passes. The `depth` argument controls how many layers of
-# `CallBlockOperation` to expand inline, so e.g. `depth=1` previews what
-# `inline` will produce without running it.
+# passes. The `depth` argument controls how many layers of callable
+# invocations to expand inline, so e.g. `depth=1` previews what `inline`
+# will produce without running it.
 
 # %% [markdown]
 # ## 4. Stage-by-Stage Walkthrough
@@ -238,7 +249,7 @@ def summarise(block):
 # `to_block` executes the decorated function under a tracer context. Every
 # `qmc.h(...)`, `qmc.range(...)`, and `entangle_pair(...)` call records an
 # `Operation` into the Block. Calls to other `@qkernel`s become
-# `CallBlockOperation`s — the body is **not** inlined yet.
+# inline-policy `InvokeOperation`s — the body is **not** inlined yet.
 
 # %%
 bindings = {"n": 3}
@@ -250,22 +261,22 @@ assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
 assert list(block.parameters) == ["theta"]
 print(
-    "CallBlockOps:     ",
-    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+    "InvokeOps (deep): ",
+    count_invokes(block.operations),
 )
-# Note: `CallBlockOperation`s may live inside a `ForOperation` body too —
-# they are not necessarily in the top-level list.
+# Note: helper calls may live inside a `ForOperation` body too — they are not
+# necessarily in the top-level list.
 
 # %% [markdown]
 # Let's look at the block itself. `pretty_print_block` renders it as
 # MLIR-style text; you can see that the `for` body still contains a live
-# `call entangle_pair(...)`.
+# `invoke entangle_pair(...)`.
 
 # %%
 print(pretty_print_block(block))
 
 # %% [markdown]
-# With `depth=1`, the `CallBlockOperation` is expanded inside its call line
+# With `depth=1`, the inline invocation is expanded inside its call line
 # — the same shape `inline` will produce in the next stage, so you can
 # preview it without actually running the pass.
 
@@ -273,40 +284,29 @@ print(pretty_print_block(block))
 print(pretty_print_block(block, depth=1))
 
 # %% [markdown]
-# The block is `HIERARCHICAL`: it may still contain calls to other blocks and
-# composite gates. `block.parameters` mirrors the `parameters=["theta"]`
+# The block is `HIERARCHICAL`: it may still contain inline helper calls and
+# boxed callables. `block.parameters` mirrors the `parameters=["theta"]`
 # argument we passed in. Any input **not** in `parameters` must either be bound
 # in `bindings` (like `n`) or consumed by trace-time Python code.
 #
-# ### 4.2 `inline` — flattening nested block calls
+# ### 4.2 `inline` — flattening inline helper calls
 #
-# `inline` replaces every `CallBlockOperation` with the operations of the
-# target block, substituting SSA values so the result stays well-formed. Once
-# no `CallBlockOperation` remains, the block transitions to `AFFINE`.
+# `inline` replaces every inline-policy `InvokeOperation` with the operations
+# of the target body, substituting SSA values so the result stays well-formed.
+# Once no inline invocations remain, the block transitions to `AFFINE`.
 
 
 # %%
-def count_calls(ops):
-    total = 0
-    for op in ops:
-        if isinstance(op, CallBlockOperation):
-            total += 1
-        # Walk nested control-flow bodies so we count calls inside loops.
-        for child in getattr(op, "nested_op_lists", lambda: [])():
-            total += count_calls(child)
-    return total
-
-
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
 assert block.kind.name == "AFFINE"
-print("CallBlockOps (deep):", count_calls(block.operations))
-assert count_calls(block.operations) == 0
+print("InvokeOps (deep):", count_invokes(block.operations))
+assert count_invokes(block.operations) == 0
 print("is_affine:        ", block.is_affine())
 assert block.is_affine()
 
 # %% [markdown]
-# Pretty-printing again confirms that `call entangle_pair(...)` has vanished
+# Pretty-printing again confirms that `invoke entangle_pair(...)` has vanished
 # and its body (`h` / `cx`) sits directly inside the `for`. The block's
 # `kind` has advanced to `AFFINE`.
 
@@ -437,7 +437,7 @@ print(executable.quantum_circuit)
 # Seven passes are part of `transpile()` but we did not call them explicitly:
 #
 # - **`substitute`** — applies user-configured `SubstitutionRule`s to replace
-#   block targets or override composite-gate strategies. No-op when the
+#   block targets or override boxed-callable strategies. No-op when the
 #   `TranspilerConfig` has no rules.
 # - **`resolve_parameter_shapes`** — fills in `{name}_dim{i}` shape dims when
 #   `bindings` provides a concrete `Vector` or `Matrix` value, so that
@@ -682,7 +682,7 @@ print(pretty_print_block(qfixed_block))
 # directly on the analyzed block.
 
 # %%
-from qamomile.circuit.transpiler.passes.separate import lower_operations
+from qamomile.circuit.transpiler.passes.separate import lower_operations  # noqa: E402
 
 lowered = lower_operations(qfixed_block)
 print(pretty_print_block(lowered))
@@ -745,7 +745,7 @@ print(pretty_print_block(lowered))
 #   | `RUNNABLE` | Backend supports mid-circuit measurement with runtime control flow. | CUDA-Q (`cudaq.run()` path) |
 #
 # - **`CompositeGateEmitter[C]`** (`passes/emit.py`): optional. Lets a
-#   backend short-circuit composite gates (QFT, QPE, …) with a native
+#   backend short-circuit boxed stdlib callables (QFT, QPE, …) with a native
 #   implementation. The `can_emit(gate_type) -> bool` / `emit(...) -> bool`
 #   contract returns `False` to opt out, in which case the emit pass falls
 #   back to the library-level decomposition.
@@ -791,7 +791,7 @@ except ModuleNotFoundError:
 #    (`measurement_mode=NATIVE`). QURI Parts' circuit has no measurement gates
 #    — its executor handles sampling at run time
 #    (`measurement_mode=STATIC`).
-# 3. **Composite gates.** If the kernel used `qmc.qft(...)`, Qiskit's
+# 3. **Boxed callables.** If the kernel used `qmc.qft(...)`, Qiskit's
 #    `QiskitQFTEmitter` would drop in a `QFTGate` box, whereas the QURI Parts
 #    backend decomposes via the library pass — same IR, different realised
 #    circuit. You can override this per kernel via
@@ -840,8 +840,8 @@ except ModuleNotFoundError:
 #
 # The pipeline is an SSA-style IR moving through four kinds:
 #
-# - `HIERARCHICAL` — the raw trace, with block calls still unexpanded
-# - `AFFINE` — flat operations + control flow, no block calls
+# - `HIERARCHICAL` — the raw trace, with inline helper calls still unexpanded
+# - `AFFINE` — flat operations + control flow, no inline helper calls
 # - `ANALYZED` — validated, dependency-graphed, ready to segment
 # - `ProgramPlan` → `ExecutableProgram[T]` — segmented and emitted
 #

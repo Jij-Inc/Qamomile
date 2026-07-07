@@ -73,7 +73,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
     def run(self, input: Block) -> Block:
         """Run constant folding on the block."""
         # HIERARCHICAL is accepted during the self-recursion unroll loop;
-        # CallBlockOperations are passed through untouched.
+        # unresolved inline callable invocations are passed through untouched.
         if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
                 f"ConstantFoldingPass expects AFFINE or HIERARCHICAL "
@@ -666,6 +666,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                             num_controls=new_nc,
                             power=power,
                             block=result_op.block,
+                            callable_ref=result_op.callable_ref,
                         )
                         extra_kwargs = {}  # Already applied
                     else:

@@ -9,9 +9,11 @@ import sympy as sp
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
     CompositeGateType,
+    InvokeOperation,
     ResourceMetadata,
 )
 
@@ -38,24 +40,29 @@ def __emit_oracle(
     name: str,
     resource_metadata: ResourceMetadata,
 ) -> None:
-    """Emit a stub oracle CompositeGateOperation directly to the tracer.
+    """Emit an opaque oracle invocation directly to the tracer.
 
-    Uses the QPE-style factory pattern (see qpe.py:99-110) to create a
-    CompositeGateOperation, bypassing _StubCompositeGate.__call__ which
-    requires individual Qubit unpacking.
+    Uses a lightweight marker invocation for catalog-only resource tests where
+    the qubit handles intentionally pass through unchanged.
 
     Accepts any mix of Vector[Qubit] and Qubit arguments.
     """
     tracer = get_current_tracer()
     operands = [q.value for q in qubits]
-    op = CompositeGateOperation(
+    ref = CallableRef(namespace="user.oracle", name=name)
+    attrs = {
+        "kind": "oracle",
+        "gate_type": CompositeGateType.CUSTOM.name,
+        "num_control_qubits": 0,
+        "num_target_qubits": 0,
+        "custom_name": name,
+    }
+    op = InvokeOperation(
         operands=operands,
         results=[],
-        gate_type=CompositeGateType.CUSTOM,
-        custom_name=name,
-        num_target_qubits=0,
-        has_implementation=False,
-        resource_metadata=resource_metadata,
+        target=ref,
+        attrs=attrs,
+        definition=CallableDef(ref=ref, resource=resource_metadata, attrs=attrs),
     )
     tracer.add_operation(op)
 
@@ -442,39 +449,30 @@ def iqft(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 # ============================================================
 
 
-@qmc.composite_gate(
-    stub=True,
+_controlled_oracle = qmc.Oracle(
     name="controlled_oracle",
     num_qubits=1,
-    num_controls=1,
-    resource_metadata=ResourceMetadata(
+    num_control_qubits=1,
+    resource=ResourceMetadata(
         query_complexity=1,
         total_gates=1,
         two_qubit_gates=1,
     ),
 )
-def _controlled_oracle():
-    pass
 
 
-@qmc.composite_gate(
-    stub=True,
+_one_qubit_oracle = qmc.Oracle(
     name="one_qubit_oracle",
     num_qubits=1,
-    resource_metadata=ResourceMetadata(query_complexity=1),
+    resource=ResourceMetadata(query_complexity=1),
 )
-def _one_qubit_oracle():
-    pass
 
 
-@qmc.composite_gate(
-    stub=True,
+_two_qubit_oracle = qmc.Oracle(
     name="two_qubit_oracle",
     num_qubits=2,
-    resource_metadata=ResourceMetadata(query_complexity=1, two_qubit_gates=1),
+    resource=ResourceMetadata(query_complexity=1, two_qubit_gates=1),
 )
-def _two_qubit_oracle():
-    pass
 
 
 @qmc.qkernel
@@ -625,23 +623,20 @@ def phase_gate_qpe(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Qubit]:
     return qs
 
 
-@qmc.composite_gate(
-    stub=True,
+_controlled_u = qmc.Oracle(
     name="controlled_u",
     num_qubits=1,
-    num_controls=1,
-    resource_metadata=ResourceMetadata(
+    num_control_qubits=1,
+    resource=ResourceMetadata(
         query_complexity=1,
         total_gates=1,
         two_qubit_gates=1,
     ),
 )
-def _controlled_u():
-    pass
 
 
 @qmc.qkernel
-def stub_oracle_qpe(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+def opaque_oracle_qpe(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     qs = qmc.qubit_array(n, name="qs")
     target = qmc.qubit(name="target")
 
@@ -1426,7 +1421,7 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
     QKernelEntry(
         id="hadamard_test",
         qkernel=hadamard_test,
-        description="Hadamard test with a stub controlled oracle",
+        description="Hadamard test with an opaque controlled oracle",
         tags=("oracle",),
     ),
     QKernelEntry(
@@ -1478,9 +1473,9 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         tags=("parametric",),
     ),
     QKernelEntry(
-        id="stub_oracle_qpe",
-        qkernel=stub_oracle_qpe,
-        description="QPE with stub oracle (controlled-U as black-box)",
+        id="opaque_oracle_qpe",
+        qkernel=opaque_oracle_qpe,
+        description="QPE with opaque oracle (controlled-U as black-box)",
         param_names=("n",),
         min_params={"n": 1},
         tags=("parametric", "oracle"),

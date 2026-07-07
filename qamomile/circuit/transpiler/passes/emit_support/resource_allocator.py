@@ -7,10 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-)
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -355,7 +353,7 @@ class ResourceAllocator:
             elif isinstance(op, PauliEvolveOp):
                 self._allocate_pauli_evolve(op, qubit_map)
 
-            elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
+            elif isinstance(op, (InverseBlockOperation, InvokeOperation)):
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
@@ -747,7 +745,7 @@ class ResourceAllocator:
 
     def _allocate_composite(
         self,
-        op: CompositeGateOperation | InverseBlockOperation,
+        op: InverseBlockOperation | InvokeOperation,
         qubit_map: QubitMap,
     ) -> None:
         """Allocate resources for a composite-like quantum operation."""

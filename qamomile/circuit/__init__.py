@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # Frontend API
-from .frontend.composite_gate import CompositeGate, composite_gate
+from .frontend.callable_signature import CallableSignature
+from .frontend.composite_gate import (
+    CompositeGate as CompositeGate,
+    composite as composite,
+    composite_gate as composite_gate,
+)
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,
@@ -47,7 +52,9 @@ from .frontend.operation.qubit_gates import (
     y,
     z,
 )
+from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
+from .ir.operation.callable import ResourceMetadata
 
 # Standard library circuits
 from .stdlib import iqft, qft, qpe
@@ -94,7 +101,10 @@ from .algorithm.arithmetic.modular_incdec import (  # noqa: E402, I001
 __all__ = [
     "qkernel",
     "composite_gate",
-    "CompositeGate",
+    "Oracle",
+    "opaque",
+    "CallableSignature",
+    "ResourceMetadata",
     "control",
     "inverse",
     "cast",

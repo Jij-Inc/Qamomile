@@ -2515,7 +2515,7 @@ class TestTranspilerPassesPipeline:
         assert len(block.operations) == 4
 
     def test_inline(self, transpiler):
-        """inline() flattens CallBlockOperations from sub-kernel calls."""
+        """inline() flattens inline invocations from sub-kernel calls."""
 
         @qmc.qkernel
         def sub_kernel(q: qmc.Qubit) -> qmc.Qubit:

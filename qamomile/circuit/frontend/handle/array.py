@@ -1345,9 +1345,10 @@ class Vector(ArrayBase[T]):
         #       fully replaced the outer.  In that case root assignment
         #       can release the inner directly, and we retire the
         #       skipped outer below so it cannot be reused afterward.
-        if value._slice_outer_view is not None:
-            if value._slice_outer_view is not self:
-                outer_view = value._slice_outer_view
+        value_outer_view = getattr(value, "_slice_outer_view", None)
+        if value_outer_view is not None:
+            if value_outer_view is not self:
+                outer_view = value_outer_view
                 outer_chain: list[VectorView[T]] = []
                 chain_matches_full_coverage = True
                 while outer_view is not None:
@@ -2098,9 +2099,9 @@ class VectorView(Vector[T]):
     index.  No affine translation happens in the view itself.
 
     Because the sliced ``ArrayValue`` is a first-class IR ``Value``,
-    the view can be passed as an operand of ``CallBlockOperation`` to
-    another ``@qkernel`` without the inline-trace special-case path
-    that earlier iterations required.  Passing views through
+    the view can be passed as an operand of an inline callable invocation
+    to another qkernel without the inline-trace special-case path that
+    earlier iterations required.  Passing views through
     ``expval`` / ``measure`` likewise operates on the sliced qubit
     subset, not the root parent as a whole.
 

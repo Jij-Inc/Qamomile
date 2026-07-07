@@ -42,10 +42,11 @@ from qamomile.circuit.frontend.operation.inverse import (
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
     CompositeGateType,
+    InvokeOperation,
     ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import ForOperation
@@ -281,7 +282,7 @@ _custom_composite_gate = qmc.composite_gate(name="custom_h")(_custom_composite_i
 @qmc.qkernel
 def _inverse_custom_composite_layer(q: qmc.Qubit) -> qmc.Qubit:
     """Apply a custom composite gate for inverse tests."""
-    (q,) = _custom_composite_gate(q)
+    q = _custom_composite_gate(q)
     return q
 
 
@@ -810,13 +811,20 @@ def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:
         return q
 
     block = circuit.build(parameters=["rotation_angle"])
-    call_ops = [op for op in block.operations if isinstance(op, CallBlockOperation)]
+    call_ops = [
+        op
+        for op in block.operations
+        if isinstance(op, InvokeOperation)
+        and op.body is not None
+        and op.body.name == "_inverse_layer"
+    ]
     inverse_ops = [
         op for op in block.operations if isinstance(op, InverseBlockOperation)
     ]
 
     assert len(call_ops) == 1
     assert len(inverse_ops) == 1
+    assert call_ops[0].body is _inverse_layer.block
     assert inverse_ops[0].source_block is _inverse_layer.block
     assert inverse_ops[0].implementation_block is not None
 
@@ -1617,7 +1625,7 @@ def test_inverse_controlled_index_substitutes_symbolic_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Composite gates (QFT / IQFT / custom / stub / QPE)
+# Composite gates and opaque oracles (QFT / IQFT / custom / QPE)
 # ---------------------------------------------------------------------------
 
 
@@ -1638,14 +1646,10 @@ def test_inverse_qft_emits_iqft_composite() -> None:
         return qs
 
     block = circuit.build()
-    composites = [
-        op for op in block.operations if isinstance(op, CompositeGateOperation)
-    ]
+    invokes = [op for op in block.operations if isinstance(op, InvokeOperation)]
 
-    assert [op.gate_type for op in composites] == [
-        CompositeGateType.QFT,
-        CompositeGateType.IQFT,
-    ]
+    assert [op.attrs["gate_type"] for op in invokes] == ["QFT", "IQFT"]
+    assert [op.target.name for op in invokes] == ["qft", "iqft"]
 
 
 def test_inverse_qft_rejects_strategy_without_iqft_counterpart(monkeypatch) -> None:
@@ -1679,13 +1683,20 @@ def test_inverse_qft_copies_resource_metadata() -> None:
         custom_metadata={"strategy": {"name": "test"}},
         total_gates=1,
     )
-    op = CompositeGateOperation(
+    ref = CallableRef(namespace="qamomile.stdlib", name="qft")
+    attrs = {
+        "kind": "composite",
+        "gate_type": CompositeGateType.QFT.name,
+        "num_control_qubits": 0,
+        "num_target_qubits": 1,
+        "custom_name": "qft",
+    }
+    op = InvokeOperation(
         operands=[q],
         results=[q_after],
-        gate_type=CompositeGateType.QFT,
-        num_target_qubits=1,
-        resource_metadata=metadata,
-        has_implementation=False,
+        target=ref,
+        attrs=attrs,
+        definition=CallableDef(ref=ref, resource=metadata, attrs=attrs),
     )
     block = Block(
         name="qft_layer",
@@ -1698,10 +1709,10 @@ def test_inverse_qft_copies_resource_metadata() -> None:
     inverted = _BlockInverter().invert_block(block)
     inverse_op = inverted.operations[0]
 
-    assert isinstance(inverse_op, CompositeGateOperation)
-    assert inverse_op.resource_metadata is not metadata
-    assert inverse_op.resource_metadata is not None
-    inverse_op.resource_metadata.custom_metadata["strategy"]["name"] = "mutated"
+    assert isinstance(inverse_op, InvokeOperation)
+    assert inverse_op.resource is not metadata
+    assert isinstance(inverse_op.resource, ResourceMetadata)
+    inverse_op.resource.custom_metadata["strategy"]["name"] = "mutated"
     assert metadata.custom_metadata["strategy"]["name"] == "test"
 
 
@@ -1735,39 +1746,35 @@ def test_inverse_custom_composite_gate_inverts_implementation() -> None:
     assert inner_inverse_ops[0].implementation_block.name.endswith("_inverse")
 
 
-# The stub gate and its metadata stay module-level: they are shared by the
-# opaque-inverse test below and by the direct-instance rejection parametrize
-# table, which needs the gate to exist at import time.
-_STUB_RESOURCE_METADATA = ResourceMetadata(
+# The oracle and its metadata stay module-level so the opaque-inverse test
+# can assert that resource hints survive inversion.
+_OPAQUE_RESOURCE_METADATA = ResourceMetadata(
     query_complexity=7,
     t_gates=3,
     total_gates=5,
 )
 
 
-@qmc.composite_gate(
-    stub=True,
-    name="stub_inverse_gate",
+_opaque_oracle = qmc.Oracle(
+    name="opaque_inverse_gate",
     num_qubits=1,
-    resource_metadata=_STUB_RESOURCE_METADATA,
+    resource=_OPAQUE_RESOURCE_METADATA,
 )
-def _stub_composite_gate() -> None:
-    """Define a stub composite gate for inverse tests."""
 
 
-def test_inverse_stub_composite_gate_builds_opaque_inverse() -> None:
-    """inverse(qkernel) keeps stub composite resources on an opaque inverse."""
+def test_inverse_oracle_builds_opaque_inverse() -> None:
+    """inverse(qkernel) keeps oracle resources on an opaque inverse."""
 
     @qmc.qkernel
-    def stub_composite_layer(q: qmc.Qubit) -> qmc.Qubit:
-        """Apply a stub composite gate for inverse tests."""
-        (q,) = _stub_composite_gate(q)
+    def oracle_layer(q: qmc.Qubit) -> qmc.Qubit:
+        """Apply an oracle for inverse tests."""
+        (q,) = _opaque_oracle(q)
         return q
 
     @qmc.qkernel
     def circuit() -> qmc.Qubit:
         q = qmc.qubit("q")
-        q = qmc.inverse(stub_composite_layer)(q)
+        q = qmc.inverse(oracle_layer)(q)
         return q
 
     block = circuit.build()
@@ -1778,16 +1785,46 @@ def test_inverse_stub_composite_gate_builds_opaque_inverse() -> None:
     assert len(inverse_ops) == 1
     outer = inverse_ops[0]
     assert outer.implementation_block is not None
-    inner_composites = [
+    inner_invokes = [
         op
         for op in outer.implementation_block.operations
-        if isinstance(op, CompositeGateOperation)
+        if isinstance(op, InvokeOperation)
     ]
-    assert len(inner_composites) == 1
-    assert inner_composites[0].custom_name == "stub_inverse_gate_inv"
-    assert not inner_composites[0].has_implementation
-    assert inner_composites[0].implementation_block is None
-    assert inner_composites[0].resource_metadata == _STUB_RESOURCE_METADATA
+    assert len(inner_invokes) == 1
+    assert inner_invokes[0].attrs["custom_name"] == "opaque_inverse_gate_inv"
+    assert inner_invokes[0].body is None
+    assert inner_invokes[0].resource == _OPAQUE_RESOURCE_METADATA
+
+
+def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
+    """inverse(composite-decorated qkernel) follows the qkernel-like path."""
+
+    @qmc.composite_gate(name="boxed_h")
+    @qmc.qkernel
+    def boxed_h(q: qmc.Qubit) -> qmc.Qubit:
+        q = qmc.h(q)
+        return q
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        q = qmc.qubit("q")
+        q = qmc.inverse(boxed_h)(q)
+        return q
+
+    block = circuit.build()
+    inverse_ops = [
+        op for op in block.operations if isinstance(op, InverseBlockOperation)
+    ]
+
+    assert len(inverse_ops) == 1
+    assert inverse_ops[0].source_block is boxed_h.block
+    assert inverse_ops[0].implementation_block is not None
+    assert inverse_ops[0].callable_ref is not None
+    assert inverse_ops[0].callable_ref.namespace == "user.composite"
+    assert inverse_ops[0].callable_ref.name == "boxed_h"
+    assert inverse_ops[0].callable_attrs["kind"] == "composite"
+    assert inverse_ops[0].callable_attrs["custom_name"] == "boxed_h"
+    assert inverse_ops[0].callable_attrs["default_policy"] == "PRESERVE_BOX"
 
 
 @pytest.mark.parametrize(
@@ -1795,15 +1832,13 @@ def test_inverse_stub_composite_gate_builds_opaque_inverse() -> None:
     [
         pytest.param(QFT(2), id="qft-instance"),
         pytest.param(IQFT(2), id="iqft-instance"),
-        pytest.param(_custom_composite_gate, id="custom-composite"),
-        pytest.param(_stub_composite_gate, id="stub-composite"),
     ],
 )
 def test_inverse_rejects_direct_composite_gate_instances(
     gate: qmc.CompositeGate,
 ) -> None:
     """inverse() rejects direct CompositeGate instances with guidance."""
-    with pytest.raises(TypeError, match="direct CompositeGate instances"):
+    with pytest.raises(TypeError, match="CompositeGate objects"):
         qmc.inverse(gate)
 
 
@@ -1813,14 +1848,20 @@ def test_inverse_rejects_native_qpe_composite_marker() -> None:
     def emit_native_qpe_marker(q: qmc.Qubit) -> qmc.Qubit:
         """Emit a synthetic native QPE composite marker for inverse tests."""
         result = q.value.next_version()
-        op = CompositeGateOperation(
+        ref = CallableRef(namespace="qamomile.stdlib", name="qpe")
+        attrs = {
+            "kind": "composite",
+            "gate_type": CompositeGateType.QPE.name,
+            "num_control_qubits": 0,
+            "num_target_qubits": 1,
+            "custom_name": "qpe",
+        }
+        op = InvokeOperation(
             operands=[q.value],
             results=[result],
-            gate_type=CompositeGateType.QPE,
-            num_control_qubits=0,
-            num_target_qubits=1,
-            custom_name="qpe",
-            has_implementation=False,
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(ref=ref, attrs=attrs),
         )
         get_current_tracer().add_operation(op)
         return qmc.Qubit(result)
@@ -1836,7 +1877,7 @@ def test_inverse_rejects_native_qpe_composite_marker() -> None:
         q = qmc.inverse(qpe_marker_layer)(q)
         return q
 
-    with pytest.raises(NotImplementedError, match="native CompositeGateOperation"):
+    with pytest.raises(NotImplementedError, match="opaque native InvokeOperation"):
         circuit.build()
 
 

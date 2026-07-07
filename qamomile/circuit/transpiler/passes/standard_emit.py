@@ -26,13 +26,11 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DictGetItemOperation,
     StoreArrayElementOperation,
-)
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -68,7 +66,7 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
     handle_cast,
 )
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
-    emit_composite_gate,
+    emit_invoke_operation,
 )
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
     emit_for,
@@ -121,10 +119,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         composite_emitters: list[CompositeGateEmitter[T]] | None = None,
+        backend_name: str | None = None,
     ):
         super().__init__(bindings, parameters)
         self._emitter = gate_emitter
         self._composite_emitters = composite_emitters or []
+        self.backend_name = backend_name
 
         # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
         self._allocator = ResourceAllocator(self._resolver)
@@ -246,8 +246,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, WhileOperation):
                 self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
-            elif isinstance(op, CompositeGateOperation):
-                emit_composite_gate(self, circuit, op, qubit_map, bindings)
+            elif isinstance(op, InvokeOperation):
+                emit_invoke_operation(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):

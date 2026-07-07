@@ -70,7 +70,13 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         """
         emitter = QiskitGateEmitter()
         composite_emitters = self._init_emitters() if use_native_composite else []
-        super().__init__(emitter, bindings, parameters, composite_emitters)
+        super().__init__(
+            emitter,
+            bindings,
+            parameters,
+            composite_emitters,
+            backend_name="qiskit",
+        )
         self._use_native_composite = use_native_composite
 
     def _init_emitters(self) -> list:

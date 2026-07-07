@@ -11,8 +11,8 @@ schema (see :mod:`qamomile.circuit.ir.serialize.schema`):
 want to operate on the intermediate Python dict directly.
 
 Scope: ``BlockKind.AFFINE`` and ``BlockKind.ANALYZED`` only.
-``HIERARCHICAL`` blocks still hold ``CallBlockOperation`` references
-by Python identity and are deferred.
+``HIERARCHICAL`` blocks may still hold inline-policy ``InvokeOperation``
+references to nested Blocks and are deferred.
 """
 
 from qamomile.circuit.ir.serialize.decode import from_dict

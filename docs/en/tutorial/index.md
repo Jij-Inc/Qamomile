@@ -53,7 +53,7 @@ Loops, sparse data, conditional branching.
 :::{card}
 :header: **8. Reuse Patterns**
 :link: 08_reuse_patterns
-Helper kernels, composite gates, stubs.
+Helper kernels, composite gate callables, opaque oracles.
 :::
 
 :::{card}

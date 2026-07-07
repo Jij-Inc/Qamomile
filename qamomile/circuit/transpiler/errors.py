@@ -11,7 +11,7 @@ class QamomileCompileError(Exception):
 
 
 class InliningError(QamomileCompileError):
-    """Error during inline pass (inlining CallBlockOperations)."""
+    """Error during inline pass for callable invocations."""
 
     pass
 

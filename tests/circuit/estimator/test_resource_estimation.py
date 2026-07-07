@@ -12,11 +12,212 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qsvt,
     estimate_trotter,
 )
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallPolicy,
+    InvokeOperation,
+    ResourceMetadata,
+)
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.types.primitives import QubitType
+from qamomile.circuit.ir.value import Value
 
 
 class TestBasicCircuitEstimation:
     """Test basic circuit resource estimation."""
+
+    def test_invoke_strategy_implementation_resource_is_selected(self):
+        """Resource estimation uses the selected callable implementation metadata."""
+        ref = CallableRef(namespace="user", name="strategy_oracle")
+        attrs = {
+            "kind": "oracle",
+            "custom_name": "strategy_oracle",
+            "strategy_name": "fast",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                resource=ResourceMetadata(
+                    total_gates=1,
+                    single_qubit_gates=1,
+                    ancilla_qubits=1,
+                ),
+                implementations=[
+                    CallableImplementation(
+                        strategy="fast",
+                        resource=ResourceMetadata(
+                            total_gates=7,
+                            single_qubit_gates=7,
+                            ancilla_qubits=4,
+                            query_complexity=3,
+                        ),
+                    )
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+        block = Block(
+            operations=[op],
+            input_values=[],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+
+        est = estimate_resources(block)
+
+        assert est.gates.total == 7
+        assert est.gates.oracle_calls["strategy_oracle"] == 1
+        assert est.gates.oracle_queries["strategy_oracle"] == 3
+        assert est.qubits == 4
+
+    def test_invoke_backend_implementation_resource_is_selected(self):
+        """Resource estimation can select backend-specific callable metadata."""
+        ref = CallableRef(namespace="user", name="backend_oracle")
+        attrs = {
+            "kind": "oracle",
+            "custom_name": "backend_oracle",
+            "num_control_qubits": 0,
+            "num_target_qubits": 0,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        op = InvokeOperation(
+            operands=[],
+            results=[],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                implementations=[
+                    CallableImplementation(
+                        resource=ResourceMetadata(
+                            total_gates=2,
+                            single_qubit_gates=2,
+                            ancilla_qubits=1,
+                            query_complexity=1,
+                        ),
+                    ),
+                    CallableImplementation(
+                        backend="qiskit",
+                        resource=ResourceMetadata(
+                            total_gates=5,
+                            single_qubit_gates=5,
+                            ancilla_qubits=3,
+                            query_complexity=4,
+                        ),
+                    ),
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+        block = Block(
+            operations=[op],
+            input_values=[],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+
+        generic_est = estimate_resources(block)
+        qiskit_est = estimate_resources(block, backend="qiskit")
+
+        assert generic_est.gates.total == 2
+        assert generic_est.gates.oracle_queries["backend_oracle"] == 1
+        assert generic_est.qubits == 1
+        assert qiskit_est.gates.total == 5
+        assert qiskit_est.gates.oracle_queries["backend_oracle"] == 4
+        assert qiskit_est.qubits == 3
+
+    def test_composite_decorator_implementation_resource_is_selected(self):
+        """Decorator-supplied implementation metadata reaches estimation."""
+        fast_resource = ResourceMetadata(total_gates=11, single_qubit_gates=11)
+
+        @qm.composite(
+            name="fast_h",
+            implementations=[
+                CallableImplementation(strategy="fast", resource=fast_resource)
+            ],
+        )
+        @qm.qkernel
+        def fast_h(q: qm.Qubit) -> qm.Qubit:
+            return qm.h(q)
+
+        @qm.qkernel
+        def circuit() -> qm.Qubit:
+            q = qm.qubit("q")
+            q = fast_h(q, strategy="fast")
+            return q
+
+        est = estimate_resources(circuit.build())
+
+        assert est.gates.total == 11
+        assert est.gates.single_qubit == 11
+
+    def test_invoke_implementation_resource_preempts_body_count(self):
+        """Selected implementation metadata takes priority over body traversal."""
+        q0 = Value(type=QubitType(), name="q0")
+        q1 = q0.next_version()
+        q2 = q1.next_version()
+        body = Block(
+            operations=[
+                GateOperation.fixed(GateOperationType.H, [q0], [q1]),
+                GateOperation.fixed(GateOperationType.H, [q1], [q2]),
+            ],
+            input_values=[q0],
+            output_values=[q2],
+            kind=BlockKind.AFFINE,
+        )
+        ref = CallableRef(namespace="user", name="resourceful")
+        attrs = {
+            "kind": "composite",
+            "custom_name": "resourceful",
+            "strategy_name": "fast",
+            "num_control_qubits": 0,
+            "num_target_qubits": 1,
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        }
+        op = InvokeOperation(
+            operands=[q0],
+            results=[q1],
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                body=body,
+                implementations=[
+                    CallableImplementation(
+                        strategy="fast",
+                        resource=ResourceMetadata(
+                            total_gates=9,
+                            single_qubit_gates=9,
+                        ),
+                    )
+                ],
+                default_policy=CallPolicy.PRESERVE_BOX,
+                attrs=attrs,
+            ),
+        )
+        block = Block(
+            operations=[op],
+            input_values=[q0],
+            output_values=[q1],
+            kind=BlockKind.AFFINE,
+        )
+
+        est = estimate_resources(block)
+
+        assert est.gates.total == 9
+        assert est.gates.single_qubit == 9
 
     def test_bell_state_estimation(self):
         """Test resource estimation for Bell state circuit."""
@@ -470,7 +671,7 @@ class TestResourceEstimateOperations:
 
 
 class TestCompositeGateEstimation:
-    """Test resource estimation for CompositeGateOperation."""
+    """Test resource estimation for boxed composite invocations."""
 
     def test_qpe_builtin_estimation(self):
         """Test built-in qmc.qpe() resource estimation with concrete size."""
@@ -587,32 +788,29 @@ class TestCompositeGateEstimation:
         assert est.gates.total == 21
 
 
-class TestStubGateEstimation:
-    """Test resource estimation for stub composite gates."""
+class TestOracleEstimation:
+    """Test resource estimation for opaque oracles."""
 
-    def test_stub_gate_resource_estimation(self):
-        """Test that stub gate metadata is correctly propagated to estimate_resources."""
+    def test_oracle_resource_estimation(self):
+        """Test that oracle metadata is propagated to estimate_resources."""
 
-        @qm.composite_gate(
-            stub=True,
+        black_box_oracle = qm.Oracle(
             name="black_box_oracle",
             num_qubits=3,
-            resource_metadata=ResourceMetadata(t_gates=10, query_complexity=1),
+            resource=ResourceMetadata(t_gates=10, query_complexity=1),
         )
-        def black_box_oracle():
-            pass
 
         @qm.qkernel
-        def circuit_with_stub() -> qm.Vector[qm.Qubit]:
+        def circuit_with_oracle() -> qm.Vector[qm.Qubit]:
             q = qm.qubit_array(3, name="q")
             for i in qm.range(3):
                 q[i] = qm.h(q[i])
             q[0], q[1], q[2] = black_box_oracle(q[0], q[1], q[2])
             return q
 
-        est = estimate_resources(circuit_with_stub.block)
+        est = estimate_resources(circuit_with_oracle.block)
         assert est.gates.t_gates == 10
-        # 3 H gates from circuit, stub contributes 0 for unspecified fields
+        # 3 H gates from circuit, oracle contributes 0 for unspecified fields
         assert est.gates.single_qubit == 3
         assert est.gates.clifford_gates == 3
         assert est.gates.two_qubit == 0
@@ -621,17 +819,14 @@ class TestStubGateEstimation:
         assert "black_box_oracle" in est.gates.oracle_calls
         assert est.gates.oracle_calls["black_box_oracle"] == 1
 
-    def test_stub_gate_multiple_calls(self):
-        """Test oracle_calls counts multiple invocations of the same stub gate."""
+    def test_oracle_multiple_calls(self):
+        """Test oracle_calls counts multiple invocations of the same oracle."""
 
-        @qm.composite_gate(
-            stub=True,
+        repeated_oracle = qm.Oracle(
             name="repeated_oracle",
             num_qubits=2,
-            resource_metadata=ResourceMetadata(t_gates=5),
+            resource=ResourceMetadata(t_gates=5),
         )
-        def repeated_oracle():
-            pass
 
         @qm.qkernel
         def circuit_multi() -> qm.Vector[qm.Qubit]:
@@ -645,26 +840,75 @@ class TestStubGateEstimation:
         assert est.gates.oracle_calls["repeated_oracle"] == 3
         assert est.gates.t_gates == 15
 
-    def test_multiple_different_oracle_calls(self):
-        """Test tracking multiple different stub gates in one circuit."""
+    def test_oracle_without_metadata_counts_as_opaque_call(self):
+        """Test that a bodyless oracle without metadata still counts calls."""
 
-        @qm.composite_gate(
-            stub=True,
+        no_metadata_oracle = qm.Oracle(name="no_metadata_oracle", num_qubits=1)
+
+        @qm.qkernel
+        def circuit_with_opaque_call() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(1, name="q")
+            (q0,) = no_metadata_oracle(q[0])
+            q[0] = q0
+            return q
+
+        est = estimate_resources(circuit_with_opaque_call.block)
+        assert est.gates.oracle_calls["no_metadata_oracle"] == 1
+        assert est.gates.total == 0
+
+    def test_controlled_oracle_uses_controlled_invoke_resource(self):
+        """Test controlled opaque oracle resources stay attached to Invoke."""
+        controlled_oracle = qm.Oracle(
+            name="controlled_resource_oracle",
+            num_qubits=1,
+            num_control_qubits=1,
+            resource=ResourceMetadata(t_gates=11, query_complexity=1),
+        )
+
+        @qm.qkernel
+        def circuit_with_controlled_oracle() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(2, name="q")
+            q[0], q[1] = controlled_oracle(q[1], controls=(q[0],))
+            return q
+
+        est = estimate_resources(circuit_with_controlled_oracle.block)
+        assert est.gates.t_gates == 11
+        assert est.gates.oracle_calls["controlled_resource_oracle"] == 1
+        assert est.gates.oracle_queries["controlled_resource_oracle"] == 1
+
+    def test_control_helper_oracle_uses_controlled_invoke_resource(self):
+        """Test control(Oracle) uses the same controlled Invoke resource path."""
+        oracle = qm.Oracle(
+            name="control_helper_oracle",
+            num_qubits=1,
+            resource=ResourceMetadata(t_gates=13, query_complexity=2),
+        )
+
+        @qm.qkernel
+        def circuit_with_control_helper_oracle() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(2, name="q")
+            q[0], q[1] = qm.control(oracle)(q[0], q[1])
+            return q
+
+        est = estimate_resources(circuit_with_control_helper_oracle.block)
+        assert est.gates.t_gates == 13
+        assert est.gates.oracle_calls["control_helper_oracle"] == 1
+        assert est.gates.oracle_queries["control_helper_oracle"] == 2
+
+    def test_multiple_different_oracle_calls(self):
+        """Test tracking multiple different oracles in one circuit."""
+
+        oracle_a = qm.Oracle(
             name="oracle_A",
             num_qubits=2,
-            resource_metadata=ResourceMetadata(t_gates=3),
+            resource=ResourceMetadata(t_gates=3),
         )
-        def oracle_a():
-            pass
 
-        @qm.composite_gate(
-            stub=True,
+        oracle_b = qm.Oracle(
             name="oracle_B",
             num_qubits=2,
-            resource_metadata=ResourceMetadata(t_gates=7),
+            resource=ResourceMetadata(t_gates=7),
         )
-        def oracle_b():
-            pass
 
         @qm.qkernel
         def circuit_two_oracles() -> qm.Vector[qm.Qubit]:
@@ -679,8 +923,8 @@ class TestStubGateEstimation:
         assert est.gates.oracle_calls["oracle_B"] == 1
         assert est.gates.t_gates == 3 + 7 + 3
 
-    def test_no_oracle_calls_for_non_stub(self):
-        """Test that non-stub circuits have empty oracle_calls."""
+    def test_no_oracle_calls_for_non_opaque(self):
+        """Test that non-opaque circuits have empty oracle_calls."""
 
         @qm.qkernel
         def bell_state() -> qm.Vector[qm.Qubit]:

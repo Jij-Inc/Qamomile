@@ -294,19 +294,16 @@ class TestQftOnView:
         _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        """``qft`` is wrapped as a composite gate; the top-level block reports 0 leaf gates.
+        """``qft`` on a view estimates resources through the composite formula.
 
-        ``estimate_resources`` walks the IR ``Block`` at the level the
-        kernel produced it.  ``CompositeGateOperation`` is one logical
-        op, not a tree of H / CP, so leaf gate counters return zero.
-        The qubit count (8 — the full ``qubit_array`` size) is still
-        reported correctly.  This is intentional behaviour, not a slice
-        regression; we pin it so any future estimator change that
-        starts unpacking composite gates is noticed.
+        The boxed QFT stays visible as an ``InvokeOperation``, but the
+        resource estimator resolves the symbolic slice width from the
+        bindings and applies the stdlib QFT formula. The qubit count
+        remains the full allocated register size.
         """
         est = estimate_resources(self._kern.block, bindings={"lo": 1, "hi": 4})
         assert int(est.qubits) == 8
-        assert int(est.gates.total) == 0
+        assert int(est.gates.total) == 7
 
 
 class TestCastSliceToQFixed:

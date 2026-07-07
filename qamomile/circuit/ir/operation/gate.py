@@ -5,6 +5,7 @@ import enum
 import typing
 
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import CallableRef
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -179,11 +180,16 @@ class ControlledUOperation(Operation):
             (``ConcreteControlledU``: ``int = 1`` matches the single-control
             shape; ``SymbolicControlledU``: a ``UIntType`` ``Value`` placeholder
             via ``default_factory``).
+        callable_ref: Stable identity of the controlled callable.
+        callable_attrs: Serializer-friendly attrs copied from the controlled
+            callable definition.
     """
 
     power: int | Value = 1
     block: Block | None = None
     num_controls: int | Value = 1
+    callable_ref: CallableRef | None = None
+    callable_attrs: dict[str, typing.Any] = dataclasses.field(default_factory=dict)
 
     @property
     def is_symbolic_num_controls(self) -> bool:

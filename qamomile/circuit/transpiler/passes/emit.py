@@ -7,9 +7,9 @@ from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
+    InvokeOperation,
 )
 from qamomile.circuit.ir.value import Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.executable import (
@@ -44,9 +44,9 @@ C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 @runtime_checkable
 class CompositeGateEmitter(Protocol[C]):
-    """Protocol for backend-specific CompositeGate emitters.
+    """Protocol for backend-specific boxed-call emitters.
 
-    Each backend can implement emitters for specific composite gate types
+    Each backend can implement emitters for specific boxed callable types
     (QPE, QFT, IQFT, etc.) using native backend libraries.
 
     The emitter pattern allows:
@@ -80,15 +80,15 @@ class CompositeGateEmitter(Protocol[C]):
     def emit(
         self,
         circuit: C,
-        op: CompositeGateOperation,
+        op: InvokeOperation,
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> bool:
-        """Emit the composite gate to the circuit.
+        """Emit the boxed callable to the circuit.
 
         Args:
             circuit: The backend-specific circuit to emit to
-            op: The CompositeGateOperation to emit
+            op: The invocation to emit
             qubit_indices: Physical qubit indices for the operation
             bindings: Parameter bindings for the operation
 

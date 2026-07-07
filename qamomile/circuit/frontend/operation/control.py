@@ -19,6 +19,7 @@ from typing import (
     get_args,
     get_origin,
     get_type_hints,
+    overload,
 )
 
 from qamomile.circuit.frontend.handle import Handle, Observable
@@ -31,7 +32,15 @@ from qamomile.circuit.frontend.param_validation import (
     _validate_bound_handles,
     _validate_classical_param_handle,
 )
+from qamomile.circuit.frontend.qkernel_callable import (
+    qkernel_callable_attrs,
+    qkernel_callable_ref,
+)
+from qamomile.circuit.frontend.qkernel_specialization import (
+    select_specialized_block,
+)
 from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.operation.callable import CallableRef, CallPolicy
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
@@ -41,7 +50,9 @@ from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
 if TYPE_CHECKING:
-    from qamomile.circuit.frontend.qkernel import QKernel
+    from qamomile.circuit.frontend.oracle import Oracle
+from qamomile.circuit.frontend.qkernel import QKernel
+from qamomile.circuit.frontend.qkernel_like import QKernelLike
 
 # Type alias for parameter values
 ParamValue = Union[float, int, Handle]
@@ -189,7 +200,14 @@ class ControlledGate:
         c0, c1, tgt = cc_phase(ctrl0, ctrl1, target, theta=0.5)
     """
 
-    def __init__(self, qkernel: "QKernel", num_controls: int | UInt = 1) -> None:
+    def __init__(
+        self,
+        qkernel: "QKernel",
+        num_controls: int | UInt = 1,
+        *,
+        callable_ref: CallableRef | None = None,
+        callable_attrs: dict[str, Any] | None = None,
+    ) -> None:
         """Wrap a ``QKernel`` as a controlled operation.
 
         Args:
@@ -204,6 +222,11 @@ class ControlledGate:
                 to emit time. Defaults to 1. A ``bool`` is rejected: it is
                 not a valid control count even though ``bool`` subclasses
                 ``int``.
+            callable_ref (CallableRef | None): Optional source callable
+                identity to record on emitted ``ControlledUOperation`` nodes.
+                Defaults to the wrapped qkernel's callable ref.
+            callable_attrs (dict[str, Any] | None): Optional serializer-friendly
+                attrs for the source callable. Defaults to qkernel attrs.
 
         Raises:
             TypeError: If ``num_controls`` is a ``bool``, or if ``qkernel``
@@ -262,6 +285,10 @@ class ControlledGate:
 
         self._qkernel = qkernel
         self._num_controls = num_controls
+        self._target_callable_ref = callable_ref
+        self._target_callable_attrs = (
+            dict(callable_attrs) if callable_attrs is not None else None
+        )
 
     @staticmethod
     def _normalize_power(power: int | UInt) -> int | Value:
@@ -460,6 +487,8 @@ class ControlledGate:
                 num_controls=num_controls,
                 power=power,
                 block=block,
+                callable_ref=self._callable_ref(),
+                callable_attrs=self._callable_attrs(),
             )
         else:
             op = ConcreteControlledU(
@@ -468,21 +497,43 @@ class ControlledGate:
                 num_controls=num_controls,
                 power=power,
                 block=block,
+                callable_ref=self._callable_ref(),
+                callable_attrs=self._callable_attrs(),
             )
         tracer = get_current_tracer()
         tracer.add_operation(op)
         return op
 
+    def _callable_ref(self) -> Any:
+        """Return the wrapped qkernel's compiler-facing callable reference.
+
+        Returns:
+            Any: Callable reference when the wrapped object exposes one,
+            otherwise ``None``.
+        """
+        if self._target_callable_ref is not None:
+            return self._target_callable_ref
+        return qkernel_callable_ref(self._qkernel.name)
+
+    def _callable_attrs(self) -> dict[str, Any]:
+        """Return attrs copied from the controlled source callable.
+
+        Returns:
+            dict[str, Any]: Serializer-friendly callable attrs.
+        """
+        if self._target_callable_attrs is not None:
+            return dict(self._target_callable_attrs)
+        return qkernel_callable_attrs()
+
     def _block_for_sub_call(self, sub_args_resolved: dict[str, Any]) -> Any:
         """Return the controlled block specialized for this call site.
 
-        ``QKernel.__call__`` re-traces sub-kernels when the caller has
-        concrete ``Vector[Qubit]`` sizes so shape-dependent stdlib
-        helpers (``qmc.qft`` / ``qmc.iqft`` / ``qmc.qpe``) do not
-        silently no-op on the cached symbolic block.  ``qmc.control``
-        embeds the same sub-kernel block inside ``ControlledU`` instead
-        of emitting a ``CallBlockOperation``, so it must perform the
-        same specialization before constructing the controlled op.
+        Call-site specialization re-traces sub-kernels when the caller has
+        concrete ``Vector[Qubit]`` sizes so shape-dependent stdlib helpers
+        (``qmc.qft`` / ``qmc.iqft`` / ``qmc.qpe``) do not silently no-op on
+        the cached symbolic block. ``qmc.control`` embeds that selected
+        sub-kernel block inside ``ControlledU``, so it uses the same selector
+        as plain and inverse qkernel calls.
 
         Args:
             sub_args_resolved (dict[str, Any]): Wrapped sub-kernel
@@ -492,26 +543,7 @@ class ControlledGate:
             Any: Specialized block when specialization data is available,
             otherwise the wrapped qkernel's cached block.
         """
-        qkernel = self._qkernel
-        if qkernel._specializing:
-            return qkernel.block
-        if not all(isinstance(arg, Handle) for arg in sub_args_resolved.values()):
-            return qkernel.block
-
-        spec = qkernel._extract_calltime_specialization(sub_args_resolved)
-        if spec is None:
-            return qkernel.block
-
-        sub_parameters, sub_bindings, sub_qubit_sizes = spec
-        qkernel._specializing = True
-        try:
-            return qkernel._build_specialized(
-                parameters=sub_parameters,
-                bindings=sub_bindings,
-                qubit_sizes=sub_qubit_sizes,
-            )
-        finally:
-            qkernel._specializing = False
+        return select_specialized_block(self._qkernel, sub_args_resolved)
 
     # ------------------------------------------------------------------
     # Helpers for ``__call__``'s concrete and symbolic paths.
@@ -1595,6 +1627,8 @@ class ControlledGate:
             power=power,
             block=self._block_for_sub_call(sub_args_resolved),
             num_control_args=len(consumed_controls),
+            callable_ref=self._callable_ref(),
+            callable_attrs=self._callable_attrs(),
         )
         get_current_tracer().add_operation(op)
 
@@ -1722,7 +1756,10 @@ def _classify_callable_param(annotation: Any) -> str:
     return "unknown"
 
 
-def _qkernel_for_callable(fn: Callable[..., Any], caller: str = "control") -> QKernel:
+def _qkernel_for_callable(
+    fn: QKernelLike | Callable[..., Any],
+    caller: str = "control",
+) -> QKernel:
     """Synthesize a ``@qkernel`` wrapper around a built-in gate callable.
 
     Inspects the callable's signature to classify each parameter, then
@@ -1752,13 +1789,13 @@ def _qkernel_for_callable(fn: Callable[..., Any], caller: str = "control") -> QK
     module lock so we never compile the same wrapper twice.
 
     Args:
-        fn (Callable[..., Any]): The callable to wrap.  Each parameter
-            must have a type annotation that resolves to ``Qubit``,
-            ``Float``/``float``, or ``UInt``/``int`` — possibly inside a
-            ``Union`` (e.g., the ``Union[Qubit, Vector[Qubit]]`` used by
-            broadcast gate functions).  A qkernel-backed
-            ``CompositeGate`` produced by the function-form decorator is
-            accepted by reusing its implementation qkernel.
+        fn (QKernelLike | Callable[..., Any]): The qkernel-like object or
+            callable to wrap.  Each plain callable parameter must have a type
+            annotation that resolves to ``Qubit``, ``Float``/``float``, or
+            ``UInt``/``int`` — possibly inside a ``Union`` (e.g., the
+            ``Union[Qubit, Vector[Qubit]]`` used by broadcast gate functions).
+            A qkernel-backed composite gate callable produced by the decorator
+            is accepted by reusing its implementation qkernel.
         caller (str): Public helper name to use in diagnostics.
 
     Returns:
@@ -1791,11 +1828,11 @@ def _qkernel_for_callable(fn: Callable[..., Any], caller: str = "control") -> QK
         if isinstance(qkernel_impl, QKernel):
             return qkernel_impl
         raise TypeError(
-            "control(): CompositeGate objects are supported only when "
-            "they were created from a qkernel implementation. Stub gates "
-            "and CompositeGate subclasses without a qkernel implementation "
-            "cannot be auto-wrapped; call the gate with its controls= "
-            "argument or expose a qkernel implementation explicitly."
+            f"{caller}(): CompositeGate objects are supported only when "
+            "they were created from a qkernel implementation. Opaque "
+            "or body-free callables cannot be auto-wrapped; call the gate "
+            "with its controls= argument or expose a qkernel implementation "
+            "explicitly."
         )
 
     # Duck-typed kernel-like objects (e.g. test mocks with a stubbed
@@ -2087,26 +2124,166 @@ def _qkernel_for_callable(fn: Callable[..., Any], caller: str = "control") -> QK
     return qkernel_inst
 
 
+def _control_callable_metadata(
+    fn: Any,
+    qkernel_impl: QKernel,
+) -> tuple[CallableRef | None, dict[str, Any] | None]:
+    """Return source callable metadata for a controlled target.
+
+    Args:
+        fn (Any): Object passed to ``control`` before any qkernel wrapping.
+        qkernel_impl (QKernel): QKernel implementation selected for the target.
+
+    Returns:
+        tuple[CallableRef | None, dict[str, Any] | None]: Optional callable
+        ref and attrs to record on emitted ``ControlledUOperation`` nodes.
+    """
+    from qamomile.circuit.frontend.composite_gate import CompositeGate
+
+    if not isinstance(fn, CompositeGate):
+        return None, None
+
+    is_stdlib_gate = fn.gate_type.name != "CUSTOM"
+    gate_name = fn.custom_name or qkernel_impl.name
+    callable_ref = CallableRef(
+        namespace="qamomile.stdlib" if is_stdlib_gate else "user.composite",
+        name=gate_name,
+    )
+    default_policy = (
+        CallPolicy.NATIVE_FIRST if is_stdlib_gate else CallPolicy.PRESERVE_BOX
+    )
+    attrs = {
+        "kind": "composite",
+        "gate_type": fn.gate_type.name,
+        "custom_name": gate_name,
+        "num_control_qubits": fn.num_control_qubits,
+        "num_target_qubits": fn.num_target_qubits,
+        "default_policy": default_policy.name,
+    }
+    return callable_ref, attrs
+
+
+@dataclasses.dataclass
+class _ControlledOracle:
+    """Wrap an opaque Oracle behind the ``control`` call protocol.
+
+    Args:
+        oracle (Any): Source ``Oracle`` object to control.
+        num_controls (int): Number of new leading control qubits.
+
+    Raises:
+        TypeError: If the source oracle only supports vector calls.
+    """
+
+    oracle: Any
+    num_controls: int
+
+    def __post_init__(self) -> None:
+        """Validate that the wrapped oracle supports scalar controls.
+
+        Raises:
+            TypeError: If the oracle has no fixed scalar target arity.
+        """
+        if self.oracle.num_qubits is None:
+            raise TypeError(
+                "control(Oracle) supports fixed-width scalar oracles only. "
+                "Vector-signature oracles should be called directly."
+            )
+
+    def __call__(self, *qubits: Qubit) -> tuple[Qubit, ...]:
+        """Apply the controlled oracle.
+
+        Args:
+            *qubits (Qubit): Leading control qubits followed by target qubits.
+
+        Returns:
+            tuple[Qubit, ...]: Output controls followed by target outputs.
+
+        Raises:
+            ValueError: If too few qubits are supplied.
+        """
+        total_controls = self.oracle.num_control_qubits + self.num_controls
+        if len(qubits) < total_controls:
+            raise ValueError(
+                f"Controlled Oracle '{self.oracle.name}' requires "
+                f"{total_controls} control qubits, got {len(qubits)}."
+            )
+        controls = qubits[:total_controls]
+        targets = qubits[total_controls:]
+        from qamomile.circuit.frontend.oracle import Oracle
+
+        controlled = Oracle(
+            self.oracle.name,
+            self.oracle.num_qubits,
+            num_control_qubits=total_controls,
+            signature=self.oracle.signature,
+            resource=self.oracle.resource,
+        )
+        return cast(tuple[Qubit, ...], controlled(*targets, controls=controls))
+
+
+def _validate_concrete_control_count(num_controls: int | UInt) -> int:
+    """Return a concrete control count for wrappers that cannot be symbolic.
+
+    Args:
+        num_controls (int | UInt): Requested control count.
+
+    Returns:
+        int: Positive concrete control count.
+
+    Raises:
+        TypeError: If ``num_controls`` is ``bool`` or ``UInt``.
+        ValueError: If ``num_controls`` is less than one.
+    """
+    if isinstance(num_controls, bool):
+        raise TypeError(
+            f"num_controls must be a positive integer, got bool ({num_controls})."
+        )
+    if isinstance(num_controls, UInt):
+        raise TypeError("control(Oracle) does not support symbolic num_controls yet.")
+    if num_controls < 1:
+        raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
+    return num_controls
+
+
+@overload
 def control(
-    qkernel: QKernel | Callable[..., Any],
+    qkernel: Oracle,
+    num_controls: int = 1,
+) -> _ControlledOracle:
+    """Create a controlled wrapper for an opaque Oracle."""
+    ...
+
+
+@overload
+def control(
+    qkernel: QKernelLike | Callable[..., Any],
     num_controls: int | UInt = 1,
 ) -> ControlledGate:
+    """Create a controlled wrapper for a qkernel or gate callable."""
+    ...
+
+
+def control(
+    qkernel: Oracle | QKernelLike | Callable[..., Any],
+    num_controls: int | UInt = 1,
+) -> ControlledGate | _ControlledOracle:
     """Create a controlled version of a quantum gate.
 
     Accepts a ``@qmc.qkernel``-decorated function, a qkernel-backed
-    ``CompositeGate`` created by the function-form decorator, or a plain
-    built-in gate callable (``qmc.rx``, ``qmc.h``, ``qmc.cp``, ...).  When
-    given a plain callable, a thin ``@qkernel`` wrapper is synthesized
-    automatically by inspecting the callable's signature, so users no
-    longer need to write a one-line wrapper just to control a primitive
-    gate.
+    composite gate callable created by the decorator, an opaque ``Oracle``, or
+    a plain built-in gate callable (``qmc.rx``, ``qmc.h``, ``qmc.cp``, ...).
+    When given a plain callable, a thin ``@qkernel``
+    wrapper is synthesized automatically by inspecting the callable's
+    signature, so users no longer need to write a one-line wrapper just to
+    control a primitive gate.
 
     Args:
-        qkernel: A ``QKernel`` defining the gate to control, a
-            qkernel-backed ``CompositeGate``, or a built-in gate callable
-            whose parameters are annotated with ``Qubit``, ``Float`` /
-            ``float``, or ``UInt`` / ``int`` (possibly inside a ``Union``
-            such as ``Union[Qubit, Vector[Qubit]]``).
+        qkernel: A qkernel-like object defining the gate to control, an
+            ``Oracle``, or a built-in
+            gate callable whose parameters are annotated with ``Qubit``,
+            ``Float`` / ``float``, or ``UInt`` / ``int`` (possibly inside a
+            ``Union`` such as ``Union[Qubit, Vector[Qubit]]``).
         num_controls: Number of control qubits (default: 1).  Can be ``int``
             (concrete) or ``UInt`` (symbolic).
 
@@ -2117,7 +2294,7 @@ def control(
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
             (missing annotations, unsupported types, or no qubit
-            parameters).
+            parameters), or if an ``Oracle`` control count is symbolic.
         ValueError: If ``num_controls`` is a concrete ``int`` less than 1.
 
     Example:
@@ -2140,9 +2317,24 @@ def control(
 
             ctrl_out, tgt_out = qmc.control(rx_then_h)(ctrl, target, theta=0.5)
 
-        Qkernel-backed composite gates can also be controlled directly::
+        Qkernel-backed composite gate callables can also be controlled directly::
 
             controlled_gate = qmc.control(my_composite_gate)
             ctrl_out, tgt0_out, tgt1_out = controlled_gate(ctrl, tgt0, tgt1)
     """
-    return ControlledGate(_qkernel_for_callable(qkernel), num_controls=num_controls)
+    from qamomile.circuit.frontend.oracle import Oracle
+
+    if isinstance(qkernel, Oracle):
+        return _ControlledOracle(
+            qkernel,
+            num_controls=_validate_concrete_control_count(num_controls),
+        )
+
+    qkernel_impl = _qkernel_for_callable(qkernel)
+    callable_ref, callable_attrs = _control_callable_metadata(qkernel, qkernel_impl)
+    return ControlledGate(
+        qkernel_impl,
+        num_controls=num_controls,
+        callable_ref=callable_ref,
+        callable_attrs=callable_attrs,
+    )

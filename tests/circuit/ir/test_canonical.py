@@ -23,7 +23,6 @@ from qamomile.circuit.ir.canonical import (
     to_canonical_bytes,
 )
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import dump_json, load_json
@@ -59,7 +58,7 @@ def _to_affine(kernel: qmc.QKernel) -> Block:
 
     Returns:
         Block: The kernel's traced block after running ``InlinePass``,
-            so all ``CallBlockOperation``s are removed and the block is
+            so all inline-policy ``InvokeOperation``s are removed and the block is
             ready for canonicalize().
     """
     return InlinePass().run(kernel.block)
@@ -159,8 +158,18 @@ def _controlled_phase_a(
 def _controlled_phase_b(
     ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
 ) -> tuple[qmc.Qubit, qmc.Qubit]:
-    """Twin of ``_controlled_phase_a`` for cross-build ControlledU determinism."""
+    """Variant that controls a different callable with the same structure."""
     op = qmc.control(_phase_b)
+    ctrl, target = op(ctrl, target, theta=theta)
+    return ctrl, target
+
+
+@qmc.qkernel
+def _controlled_phase_a_twin(
+    ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Twin that controls the same callable as ``_controlled_phase_a``."""
+    op = qmc.control(_phase_a)
     ctrl, target = op(ctrl, target, theta=theta)
     return ctrl, target
 
@@ -236,9 +245,22 @@ class TestCanonicalizeDeterminism:
         disagree.
         """
         a = _to_affine(_controlled_phase_a)
-        b = _to_affine(_controlled_phase_b)
+        b = _to_affine(_controlled_phase_a_twin)
         assert to_canonical_bytes(a) == to_canonical_bytes(b)
         assert content_hash(a) == content_hash(b)
+
+    def test_controlled_u_callable_ref_affects_canonical_bytes(self):
+        """Controlled-U callable identity participates in content hashing.
+
+        ``_phase_a`` and ``_phase_b`` have the same body shape, but they are
+        distinct qkernel callables.  QPE and other higher-level routines rely
+        on this identity, so the canonical form must not collapse the two
+        controlled calls merely because their decompositions happen to match.
+        """
+        a = _to_affine(_controlled_phase_a)
+        b = _to_affine(_controlled_phase_b)
+        assert to_canonical_bytes(a) != to_canonical_bytes(b)
+        assert content_hash(a) != content_hash(b)
 
 
 class TestCanonicalizeIdempotence:
@@ -346,17 +368,6 @@ class TestUnsupportedBlockKind:
         traced = dataclasses.replace(_h_then_rx.block, kind=BlockKind.TRACED)
         with pytest.raises(ValueError, match="AFFINE"):
             canonicalize(traced)
-
-    def test_explicit_call_block_raises(self):
-        """A Block carrying a CallBlockOperation surfaces NotImplementedError."""
-        block = _to_affine(_h_then_rx)
-        # Inject a synthetic CallBlockOperation to force the runtime check.
-        bad = dataclasses.replace(
-            block,
-            operations=[*block.operations, CallBlockOperation(block=block)],
-        )
-        with pytest.raises(NotImplementedError, match="CallBlockOperation"):
-            canonicalize(bad)
 
 
 # ---------------------------------------------------------------------------

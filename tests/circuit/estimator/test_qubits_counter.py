@@ -5,8 +5,24 @@ import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator import qubits_counter
-from qamomile.circuit.frontend.composite_gate import CompositeGate, _StubCompositeGate
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.circuit.frontend.composite_gate import CompositeGate
+from qamomile.circuit.ir.operation.callable import ResourceMetadata
+
+
+def _opaque_oracle(
+    *,
+    _num_targets: int,
+    _custom_name: str,
+    _num_controls: int = 0,
+    _resource_metadata: ResourceMetadata | None = None,
+) -> qmc.Oracle:
+    """Create an opaque oracle for qubit-counting fixtures."""
+    return qmc.Oracle(
+        name=_custom_name,
+        num_qubits=_num_targets,
+        num_control_qubits=_num_controls,
+        resource=_resource_metadata,
+    )
 
 
 class TestQInitOp:
@@ -1036,13 +1052,13 @@ def _apply_multi_controlled_gate(gate, qs, n_targets, ctrls, n_controls):
         qs[i] = result[n_controls + i]
 
 
-class TestCompositeGateOperation:
-    """Verify that resource estimation correctly counts qubits from composite gate operations."""
+class TestBoxedCallableQubitCounting:
+    """Verify qubit counting for composite gates and opaque oracles."""
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10])
-    def test_stub_int_qubits(self, n):
-        """Stub gate on n qubits → qubits == n."""
-        gate = _StubCompositeGate(_num_targets=n, _custom_name="stub")
+    def test_opaque_int_qubits(self, n):
+        """Opaque gate on n qubits → qubits == n."""
+        gate = _opaque_oracle(_num_targets=n, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Qubit]:
@@ -1054,11 +1070,11 @@ class TestCompositeGateOperation:
         assert resource == n
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10])
-    def test_stub_ancilla_int_qubits(self, n):
-        """Stub gate with ancilla on n qubits → qubits == n + 2."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_int_qubits(self, n):
+        """Opaque gate with ancilla on n qubits → qubits == n + 2."""
+        gate = _opaque_oracle(
             _num_targets=n,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1072,11 +1088,11 @@ class TestCompositeGateOperation:
         assert resource == n + 2
 
     @pytest.mark.parametrize("k", [1, 2, 5, 10])
-    def test_stub_ancilla_parametrize(self, k):
-        """Stub gate with variable ancilla count → qubits == 3 + k."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_parametrize(self, k):
+        """Opaque gate with variable ancilla count → qubits == 3 + k."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=k),
         )
 
@@ -1118,9 +1134,9 @@ class TestCompositeGateOperation:
         assert resource == n + 1
 
     @pytest.mark.parametrize("m", [1, 2, 5, 10, 100])
-    def test_stub_and_extra_int_qubits(self, m):
-        """Stub gate on 3 qubits + extra m qubits → qubits == 3 + m."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_and_extra_int_qubits(self, m):
+        """Opaque gate on 3 qubits + extra m qubits → qubits == 3 + m."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit() -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1133,11 +1149,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + m
 
     @pytest.mark.parametrize("m", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_and_extra_int_qubits(self, m):
-        """Stub gate with ancilla + extra m qubits → qubits == 5 + m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_and_extra_int_qubits(self, m):
+        """Opaque gate with ancilla + extra m qubits → qubits == 5 + m."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1182,9 +1198,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + m
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_add_int_qubits(self, a):
-        """Stub: n + a."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_add_int_qubits(self, a):
+        """Opaque: n + a."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1198,11 +1214,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + n_sym + a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_add_int_qubits(self, a):
-        """Stub with ancilla: n + a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_add_int_qubits(self, a):
+        """Opaque with ancilla: n + a."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1250,9 +1266,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym + a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_radd_int_qubits(self, a):
-        """Stub: a + n."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_radd_int_qubits(self, a):
+        """Opaque: a + n."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1266,11 +1282,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + a + n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_radd_int_qubits(self, a):
-        """Stub with ancilla: a + n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_radd_int_qubits(self, a):
+        """Opaque with ancilla: a + n."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1317,9 +1333,9 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 4 + a + n_sym
 
-    def test_stub_symbolic_add_symbol_qubits(self):
-        """Stub: n + m."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_add_symbol_qubits(self):
+        """Opaque: n + m."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(
@@ -1335,11 +1351,11 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 3 + n_sym + m_sym
 
-    def test_stub_ancilla_symbolic_add_symbol_qubits(self):
-        """Stub with ancilla: n + m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_add_symbol_qubits(self):
+        """Opaque with ancilla: n + m."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1394,9 +1410,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym + m_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_sub_int_qubits(self, a):
-        """Stub: n - a."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_sub_int_qubits(self, a):
+        """Opaque: n - a."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1410,11 +1426,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + n_sym - a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_sub_int_qubits(self, a):
-        """Stub with ancilla: n - a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_sub_int_qubits(self, a):
+        """Opaque with ancilla: n - a."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1462,9 +1478,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym - a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_rsub_int_qubits(self, a):
-        """Stub: a - n."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_rsub_int_qubits(self, a):
+        """Opaque: a - n."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1478,11 +1494,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + a - n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_rsub_int_qubits(self, a):
-        """Stub with ancilla: a - n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_rsub_int_qubits(self, a):
+        """Opaque with ancilla: a - n."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1529,9 +1545,9 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 4 + a - n_sym
 
-    def test_stub_symbolic_sub_symbol_qubits(self):
-        """Stub: n - m."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_sub_symbol_qubits(self):
+        """Opaque: n - m."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(
@@ -1547,11 +1563,11 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 3 + n_sym - m_sym
 
-    def test_stub_ancilla_symbolic_sub_symbol_qubits(self):
-        """Stub with ancilla: n - m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_sub_symbol_qubits(self):
+        """Opaque with ancilla: n - m."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1606,9 +1622,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym - m_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_mul_int_qubits(self, a):
-        """Stub: n * a."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_mul_int_qubits(self, a):
+        """Opaque: n * a."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1622,11 +1638,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + n_sym * a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_mul_int_qubits(self, a):
-        """Stub with ancilla: n * a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_mul_int_qubits(self, a):
+        """Opaque with ancilla: n * a."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1674,9 +1690,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym * a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_rmul_int_qubits(self, a):
-        """Stub: a * n."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_rmul_int_qubits(self, a):
+        """Opaque: a * n."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1690,11 +1706,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + a * n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_rmul_int_qubits(self, a):
-        """Stub with ancilla: a * n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_rmul_int_qubits(self, a):
+        """Opaque with ancilla: a * n."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1741,9 +1757,9 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 4 + a * n_sym
 
-    def test_stub_symbolic_mul_symbol_qubits(self):
-        """Stub: n * m."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_mul_symbol_qubits(self):
+        """Opaque: n * m."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(
@@ -1759,11 +1775,11 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 3 + n_sym * m_sym
 
-    def test_stub_ancilla_symbolic_mul_symbol_qubits(self):
-        """Stub with ancilla: n * m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_mul_symbol_qubits(self):
+        """Opaque with ancilla: n * m."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1818,9 +1834,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym * m_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_floordiv_int_qubits(self, a):
-        """Stub: n // a."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_floordiv_int_qubits(self, a):
+        """Opaque: n // a."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1834,11 +1850,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + sp.floor(n_sym / a)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_floordiv_int_qubits(self, a):
-        """Stub with ancilla: n // a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_floordiv_int_qubits(self, a):
+        """Opaque with ancilla: n // a."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1886,9 +1902,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + sp.floor(n_sym / a)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_rfloordiv_int_qubits(self, a):
-        """Stub: a // n."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_rfloordiv_int_qubits(self, a):
+        """Opaque: a // n."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -1902,11 +1918,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + sp.floor(a / n_sym)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_rfloordiv_int_qubits(self, a):
-        """Stub with ancilla: a // n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_rfloordiv_int_qubits(self, a):
+        """Opaque with ancilla: a // n."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -1953,9 +1969,9 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 4 + sp.floor(a / n_sym)
 
-    def test_stub_symbolic_floordiv_symbol_qubits(self):
-        """Stub: n // m."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_floordiv_symbol_qubits(self):
+        """Opaque: n // m."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(
@@ -1971,11 +1987,11 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 3 + sp.floor(n_sym / m_sym)
 
-    def test_stub_ancilla_symbolic_floordiv_symbol_qubits(self):
-        """Stub with ancilla: n // m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_floordiv_symbol_qubits(self):
+        """Opaque with ancilla: n // m."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2030,9 +2046,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + sp.floor(n_sym / m_sym)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_pow_int_qubits(self, a):
-        """Stub: n ** a."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_pow_int_qubits(self, a):
+        """Opaque: n ** a."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -2046,11 +2062,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + n_sym**a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_pow_int_qubits(self, a):
-        """Stub with ancilla: n ** a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_pow_int_qubits(self, a):
+        """Opaque with ancilla: n ** a."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2098,9 +2114,9 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym**a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_symbolic_rpow_int_qubits(self, a):
-        """Stub: a ** n."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_rpow_int_qubits(self, a):
+        """Opaque: a ** n."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
@@ -2114,11 +2130,11 @@ class TestCompositeGateOperation:
         assert resource == 3 + a**n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_symbolic_rpow_int_qubits(self, a):
-        """Stub with ancilla: a ** n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_rpow_int_qubits(self, a):
+        """Opaque with ancilla: a ** n."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2165,9 +2181,9 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 4 + a**n_sym
 
-    def test_stub_symbolic_pow_symbol_qubits(self):
-        """Stub: n ** m."""
-        gate = _StubCompositeGate(_num_targets=3, _custom_name="stub")
+    def test_opaque_symbolic_pow_symbol_qubits(self):
+        """Opaque: n ** m."""
+        gate = _opaque_oracle(_num_targets=3, _custom_name="opaque")
 
         @qmc.qkernel
         def circuit(
@@ -2183,11 +2199,11 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 3 + n_sym**m_sym
 
-    def test_stub_ancilla_symbolic_pow_symbol_qubits(self):
-        """Stub with ancilla: n ** m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_symbolic_pow_symbol_qubits(self):
+        """Opaque with ancilla: n ** m."""
+        gate = _opaque_oracle(
             _num_targets=3,
-            _custom_name="stub",
+            _custom_name="opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2244,10 +2260,10 @@ class TestCompositeGateOperation:
     # --- Control qubit tests ---
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10])
-    def test_stub_control_int_qubits(self, n):
-        """Stub gate with 1 control on n targets → qubits == n + 1."""
-        gate = _StubCompositeGate(
-            _num_targets=n, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_int_qubits(self, n):
+        """Opaque gate with 1 control on n targets → qubits == n + 1."""
+        gate = _opaque_oracle(
+            _num_targets=n, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2261,12 +2277,12 @@ class TestCompositeGateOperation:
         assert resource == n + 1
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10])
-    def test_stub_ancilla_control_int_qubits(self, n):
-        """Stub gate with ancilla + 1 control on n targets → qubits == n + 3."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_int_qubits(self, n):
+        """Opaque gate with ancilla + 1 control on n targets → qubits == n + 3."""
+        gate = _opaque_oracle(
             _num_targets=n,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2313,10 +2329,10 @@ class TestCompositeGateOperation:
     # --- Multi-control tests ---
 
     @pytest.mark.parametrize("c", [1, 2, 3])
-    def test_stub_multi_control_int_qubits(self, c):
-        """Stub gate with c controls on 3 targets → qubits == 3 + c."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=c, _custom_name="mctrl_stub"
+    def test_opaque_multi_control_int_qubits(self, c):
+        """Opaque gate with c controls on 3 targets → qubits == 3 + c."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=c, _custom_name="mctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2330,12 +2346,12 @@ class TestCompositeGateOperation:
         assert resource == 3 + c
 
     @pytest.mark.parametrize("c", [1, 2, 3])
-    def test_stub_ancilla_multi_control_int_qubits(self, c):
-        """Stub gate with ancilla + c controls on 3 targets → qubits == 5 + c."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_multi_control_int_qubits(self, c):
+        """Opaque gate with ancilla + c controls on 3 targets → qubits == 5 + c."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=c,
-            _custom_name="mctrl_stub",
+            _custom_name="mctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2382,10 +2398,10 @@ class TestCompositeGateOperation:
     # --- Mixed control + extra qubit tests ---
 
     @pytest.mark.parametrize("m", [1, 2, 5, 10, 100])
-    def test_stub_control_and_extra_int_qubits(self, m):
-        """Stub gate with 1 control on 3 targets + extra m → qubits == 4 + m."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_and_extra_int_qubits(self, m):
+        """Opaque gate with 1 control on 3 targets + extra m → qubits == 4 + m."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2402,12 +2418,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + m
 
     @pytest.mark.parametrize("m", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_and_extra_int_qubits(self, m):
-        """Stub gate with ancilla + 1 control on 3 targets + extra m → qubits == 6 + m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_and_extra_int_qubits(self, m):
+        """Opaque gate with ancilla + 1 control on 3 targets + extra m → qubits == 6 + m."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2463,10 +2479,10 @@ class TestCompositeGateOperation:
     # --- Control qubit symbolic arithmetic tests ---
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_add_int_qubits(self, a):
-        """Stub with control: n + a."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_add_int_qubits(self, a):
+        """Opaque with control: n + a."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2486,12 +2502,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym + a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_add_int_qubits(self, a):
-        """Stub with ancilla + control: n + a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_add_int_qubits(self, a):
+        """Opaque with ancilla + control: n + a."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2554,10 +2570,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym + a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_radd_int_qubits(self, a):
-        """Stub with control: a + n."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_radd_int_qubits(self, a):
+        """Opaque with control: a + n."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2577,12 +2593,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + a + n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_radd_int_qubits(self, a):
-        """Stub with ancilla + control: a + n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_radd_int_qubits(self, a):
+        """Opaque with ancilla + control: a + n."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2644,10 +2660,10 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 5 + a + n_sym
 
-    def test_stub_control_symbolic_add_symbol_qubits(self):
-        """Stub with control: n + m."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_add_symbol_qubits(self):
+        """Opaque with control: n + m."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2667,12 +2683,12 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 4 + n_sym + m_sym
 
-    def test_stub_ancilla_control_symbolic_add_symbol_qubits(self):
-        """Stub with ancilla + control: n + m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_add_symbol_qubits(self):
+        """Opaque with ancilla + control: n + m."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2736,10 +2752,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym + m_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_sub_int_qubits(self, a):
-        """Stub with control: n - a."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_sub_int_qubits(self, a):
+        """Opaque with control: n - a."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2759,12 +2775,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym - a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_sub_int_qubits(self, a):
-        """Stub with ancilla + control: n - a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_sub_int_qubits(self, a):
+        """Opaque with ancilla + control: n - a."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2827,10 +2843,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym - a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_rsub_int_qubits(self, a):
-        """Stub with control: a - n."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_rsub_int_qubits(self, a):
+        """Opaque with control: a - n."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2850,12 +2866,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + a - n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_rsub_int_qubits(self, a):
-        """Stub with ancilla + control: a - n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_rsub_int_qubits(self, a):
+        """Opaque with ancilla + control: a - n."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -2917,10 +2933,10 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 5 + a - n_sym
 
-    def test_stub_control_symbolic_sub_symbol_qubits(self):
-        """Stub with control: n - m."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_sub_symbol_qubits(self):
+        """Opaque with control: n - m."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -2940,12 +2956,12 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 4 + n_sym - m_sym
 
-    def test_stub_ancilla_control_symbolic_sub_symbol_qubits(self):
-        """Stub with ancilla + control: n - m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_sub_symbol_qubits(self):
+        """Opaque with ancilla + control: n - m."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3009,10 +3025,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym - m_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_mul_int_qubits(self, a):
-        """Stub with control: n * a."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_mul_int_qubits(self, a):
+        """Opaque with control: n * a."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3032,12 +3048,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym * a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_mul_int_qubits(self, a):
-        """Stub with ancilla + control: n * a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_mul_int_qubits(self, a):
+        """Opaque with ancilla + control: n * a."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3100,10 +3116,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym * a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_rmul_int_qubits(self, a):
-        """Stub with control: a * n."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_rmul_int_qubits(self, a):
+        """Opaque with control: a * n."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3123,12 +3139,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + a * n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_rmul_int_qubits(self, a):
-        """Stub with ancilla + control: a * n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_rmul_int_qubits(self, a):
+        """Opaque with ancilla + control: a * n."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3190,10 +3206,10 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 5 + a * n_sym
 
-    def test_stub_control_symbolic_mul_symbol_qubits(self):
-        """Stub with control: n * m."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_mul_symbol_qubits(self):
+        """Opaque with control: n * m."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3213,12 +3229,12 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 4 + n_sym * m_sym
 
-    def test_stub_ancilla_control_symbolic_mul_symbol_qubits(self):
-        """Stub with ancilla + control: n * m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_mul_symbol_qubits(self):
+        """Opaque with ancilla + control: n * m."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3282,10 +3298,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym * m_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_floordiv_int_qubits(self, a):
-        """Stub with control: n // a."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_floordiv_int_qubits(self, a):
+        """Opaque with control: n // a."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3305,12 +3321,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + sp.floor(n_sym / a)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_floordiv_int_qubits(self, a):
-        """Stub with ancilla + control: n // a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_floordiv_int_qubits(self, a):
+        """Opaque with ancilla + control: n // a."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3373,10 +3389,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + sp.floor(n_sym / a)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_rfloordiv_int_qubits(self, a):
-        """Stub with control: a // n."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_rfloordiv_int_qubits(self, a):
+        """Opaque with control: a // n."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3396,12 +3412,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + sp.floor(a / n_sym)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_rfloordiv_int_qubits(self, a):
-        """Stub with ancilla + control: a // n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_rfloordiv_int_qubits(self, a):
+        """Opaque with ancilla + control: a // n."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3463,10 +3479,10 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 5 + sp.floor(a / n_sym)
 
-    def test_stub_control_symbolic_floordiv_symbol_qubits(self):
-        """Stub with control: n // m."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_floordiv_symbol_qubits(self):
+        """Opaque with control: n // m."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3486,12 +3502,12 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 4 + sp.floor(n_sym / m_sym)
 
-    def test_stub_ancilla_control_symbolic_floordiv_symbol_qubits(self):
-        """Stub with ancilla + control: n // m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_floordiv_symbol_qubits(self):
+        """Opaque with ancilla + control: n // m."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3555,10 +3571,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + sp.floor(n_sym / m_sym)
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_pow_int_qubits(self, a):
-        """Stub with control: n ** a."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_pow_int_qubits(self, a):
+        """Opaque with control: n ** a."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3578,12 +3594,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + n_sym**a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_pow_int_qubits(self, a):
-        """Stub with ancilla + control: n ** a."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_pow_int_qubits(self, a):
+        """Opaque with ancilla + control: n ** a."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3646,10 +3662,10 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym**a
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_control_symbolic_rpow_int_qubits(self, a):
-        """Stub with control: a ** n."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_rpow_int_qubits(self, a):
+        """Opaque with control: a ** n."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3669,12 +3685,12 @@ class TestCompositeGateOperation:
         assert resource == 4 + a**n_sym
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
-    def test_stub_ancilla_control_symbolic_rpow_int_qubits(self, a):
-        """Stub with ancilla + control: a ** n."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_rpow_int_qubits(self, a):
+        """Opaque with ancilla + control: a ** n."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3736,10 +3752,10 @@ class TestCompositeGateOperation:
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 5 + a**n_sym
 
-    def test_stub_control_symbolic_pow_symbol_qubits(self):
-        """Stub with control: n ** m."""
-        gate = _StubCompositeGate(
-            _num_targets=3, _num_controls=1, _custom_name="ctrl_stub"
+    def test_opaque_control_symbolic_pow_symbol_qubits(self):
+        """Opaque with control: n ** m."""
+        gate = _opaque_oracle(
+            _num_targets=3, _num_controls=1, _custom_name="ctrl_opaque"
         )
 
         @qmc.qkernel
@@ -3759,12 +3775,12 @@ class TestCompositeGateOperation:
         m_sym = sp.Symbol("m", integer=True, positive=True)
         assert resource == 4 + n_sym**m_sym
 
-    def test_stub_ancilla_control_symbolic_pow_symbol_qubits(self):
-        """Stub with ancilla + control: n ** m."""
-        gate = _StubCompositeGate(
+    def test_opaque_ancilla_control_symbolic_pow_symbol_qubits(self):
+        """Opaque with ancilla + control: n ** m."""
+        gate = _opaque_oracle(
             _num_targets=3,
             _num_controls=1,
-            _custom_name="ctrl_stub",
+            _custom_name="ctrl_opaque",
             _resource_metadata=ResourceMetadata(ancilla_qubits=2),
         )
 
@@ -3828,8 +3844,8 @@ class TestCompositeGateOperation:
         assert resource == 5 + n_sym**m_sym
 
 
-class TestCallBlockOperation:
-    """Verify that resource estimation correctly counts qubits from CallBlockOperation."""
+class TestInlineInvokeOperation:
+    """Verify that resource estimation counts inline qkernel invocations."""
 
     def test_no_inner_alloc_single_qubit(self):
         """Inner kernel applies gate to passed qubit, no new allocation → total == 1."""
@@ -5170,8 +5186,8 @@ class TestInputQubits:
         assert resource == 1 + n_sym
 
 
-class TestCallBlockInForOperation:
-    """Verify ancilla qubit reuse for clean CallBlockOperation inside loops."""
+class TestInlineInvokeInForOperation:
+    """Verify ancilla qubit reuse for clean inline invocations inside loops."""
 
     def test_clean_call_no_alloc_in_for(self):
         """Clean call with no inner alloc inside for loop -> no extra qubits."""

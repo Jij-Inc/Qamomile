@@ -1229,12 +1229,12 @@ class TestVectorQubitPatterns:
             bad_circuit.build()
 
 
-class TestStubCompositeGateAffine:
-    """Stub composite gates must enforce affine usage on their qubit arguments."""
+class TestCustomCompositeGateAffine:
+    """Custom composite gates must enforce affine usage on their qubit arguments."""
 
     def _make_single_qubit_composite(self):
-        class StubSingleQubit(CompositeGate):
-            custom_name = "stub_h"
+        class CustomSingleQubit(CompositeGate):
+            custom_name = "custom_h"
 
             @property
             def num_target_qubits(self) -> int:
@@ -1244,11 +1244,11 @@ class TestStubCompositeGateAffine:
                 (q,) = qubits
                 return (qm.h(q),)
 
-        return StubSingleQubit()
+        return CustomSingleQubit()
 
     def _make_two_qubit_composite(self):
-        class StubTwoQubit(CompositeGate):
-            custom_name = "stub_cx"
+        class CustomTwoQubit(CompositeGate):
+            custom_name = "custom_cx"
 
             @property
             def num_target_qubits(self) -> int:
@@ -1259,11 +1259,11 @@ class TestStubCompositeGateAffine:
                 q0, q1 = qm.cx(q0, q1)
                 return (q0, q1)
 
-        return StubTwoQubit()
+        return CustomTwoQubit()
 
     def _make_controlled_composite(self):
-        class StubControlled(CompositeGate):
-            custom_name = "stub_ctrl_h"
+        class CustomControlled(CompositeGate):
+            custom_name = "custom_ctrl_h"
             num_control_qubits = 1
 
             @property
@@ -1274,7 +1274,7 @@ class TestStubCompositeGateAffine:
                 (q,) = qubits
                 return (qm.h(q),)
 
-        return StubControlled()
+        return CustomControlled()
 
     def test_single_qubit_composite_double_use_raises(self):
         """Reusing qubit after single-qubit composite gate should raise QubitConsumedError."""
@@ -3383,10 +3383,11 @@ class TestDuplicateQuantumCallArgs:
         assert block is not None
 
     def test_inline_rejects_duplicate_quantum_call_operands(self):
-        """InlinePass rejects a hand-built CallBlockOperation that binds one
-        quantum value to two parameters (defense in depth for IR that did
-        not come from ``QKernel.__call__``)."""
-        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+        """InlinePass rejects a hand-built InvokeOperation with duplicate args.
+
+        This defends against IR that did not come from ``QKernel.__call__``.
+        """
+        from qamomile.circuit.ir.operation.callable import InvokeOperation
         from qamomile.circuit.ir.value import Value
         from qamomile.circuit.transpiler.passes.inline import InlinePass
 
@@ -3401,7 +3402,7 @@ class TestDuplicateQuantumCallArgs:
             return qm.measure(q)
 
         block = circuit.block
-        call_ops = [op for op in block.operations if isinstance(op, CallBlockOperation)]
+        call_ops = [op for op in block.operations if isinstance(op, InvokeOperation)]
         assert len(call_ops) == 1
         call_op = call_ops[0]
 
