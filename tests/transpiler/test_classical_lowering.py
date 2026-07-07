@@ -1949,6 +1949,70 @@ class TestMeasurementDerivedOutputSegmentation:
         ]
         assert not any(isinstance(op, RuntimeClassicalExpr) for op in classical_ops)
 
+    def test_dynamic_if_merge_lowers_to_select_in_post_segment(self, transpiler):
+        """A host-needed merge of a quantum-effective runtime if becomes a
+        SELECT expression placed in a post-quantum classical segment; the
+        quantum if no longer carries the merge result."""
+        from qamomile.circuit.transpiler.segments import ClassicalSegment
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            target = qmc.qubit("target")
+            qa = qmc.x(qa)
+            a = qmc.measure(qa)
+            out = a
+            if a:
+                target = qmc.x(target)
+                out = ~a
+            else:
+                out = a
+            return out
+
+        plan = transpiler.transpile(kernel).plan
+        classical_ops = [
+            op
+            for s in plan.steps
+            if isinstance(s.segment, ClassicalSegment)
+            for op in s.segment.operations
+        ]
+        selects = [
+            op
+            for op in classical_ops
+            if isinstance(op, RuntimeClassicalExpr)
+            and op.kind is RuntimeOpKind.SELECT
+        ]
+        assert selects, "the merge must surface as a SELECT expression"
+        assert len(selects[0].operands) == 3
+
+    def test_loop_varying_merge_output_rejected(self, transpiler):
+        """A merge whose sources are measured per loop iteration cannot be
+        recomputed host-side; returning it fails loudly instead of
+        resolving to ``None``."""
+        from qamomile.circuit.transpiler.errors import SeparationError
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            qa = qmc.qubit("qa")
+            selq = qmc.qubit("sel")
+            target = qmc.qubit("target")
+            a = qmc.measure(qa)
+            out = a
+            for _ in qmc.range(2):
+                sel = qmc.measure(selq)
+                if sel:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = ~sel
+                else:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = sel
+            return out
+
+        with pytest.raises(SeparationError, match="varies across iterations"):
+            transpiler.transpile(kernel)
+
 
 class TestRuntimeExprHostDispatch:
     """Unit coverage of ``ClassicalExecutor``'s ``RuntimeClassicalExpr``

@@ -37,6 +37,9 @@ from qamomile.circuit.transpiler.passes.analyze import (
     find_measurement_derived_values,
     find_measurement_results,
 )
+from qamomile.circuit.transpiler.passes.classical_lowering import (
+    _collect_while_operand_uuids,
+)
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
 from qamomile.circuit.transpiler.segments import (
@@ -313,6 +316,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         for value in block.output_values:
             self._block_output_uuids.update(collect_value_like_uuids(value))
 
+        # While-condition chain UUIDs: merges carrying a while condition
+        # keep their phi (the clbit-aliasing machinery owns them), so the
+        # host-needed rejection below must exempt them.
+        self._while_condition_uuids = _collect_while_operand_uuids(block.operations)
+
         # Absorbable set: classical ops (top-level or nested) whose results are
         # consumed exclusively by quantum / hybrid ops, or by other absorbable
         # classical ops that themselves ultimately feed quantum — never by a
@@ -539,12 +547,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 pending_post = []
 
             if op_kind == OperationKind.QUANTUM:
-                op, shadow_ops = self._rewrite_post_shadow_control_flow(
-                    op,
-                    self._current_block_operations,
-                )
-                if shadow_ops:
-                    pending_post.extend(shadow_ops)
+                self._reject_host_needed_phi_outputs(op)
 
             current_ops.append(op)
 
@@ -818,290 +821,6 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         collector.visit_operations(operations)
         return collector.consumers
 
-    def _build_producer_map(
-        self,
-        operations: list[Operation],
-    ) -> dict[str, Operation]:
-        """Map each produced value UUID to the operation that writes it.
-
-        Args:
-            operations (list[Operation]): Top-level operations of the block.
-
-        Returns:
-            dict[str, Operation]: Mapping from result UUID to the producing
-                operation.
-        """
-
-        class ProducerCollector(ControlFlowVisitor):
-            """Collect result producers across nested operation trees."""
-
-            def __init__(self) -> None:
-                """Initialize the empty producer map."""
-                self.producers: dict[str, Operation] = {}
-
-            def visit_operation(self, op: Operation) -> None:
-                """Record result producers for ``op``.
-
-                Args:
-                    op (Operation): Operation being visited.
-
-                Returns:
-                    None: Mutates ``self.producers`` in place.
-                """
-                for result in op.results:
-                    if isinstance(result, ValueBase):
-                        self.producers[result.uuid] = op
-
-        collector = ProducerCollector()
-        collector.visit_operations(operations)
-        return collector.producers
-
-    def _rewrite_post_shadow_control_flow(
-        self,
-        op: Operation,
-        scope_operations: list[Operation],
-    ) -> tuple[Operation, list[Operation]]:
-        """Rewrite quantum control flow and build host-side shadow ops.
-
-        Args:
-            op (Operation): Quantum-segment operation to inspect.
-            scope_operations (list[Operation]): Operations in the lexical
-                scope that contains ``op``. Used to collect pure-classical
-                producers for runtime conditions.
-
-        Returns:
-            tuple[Operation, list[Operation]]: The operation with host-only
-                Phi outputs removed from nested quantum ``IfOperation`` nodes,
-                plus classical shadow operations that recompute those Phi
-                outputs after the quantum segment.
-        """
-        if isinstance(op, IfOperation):
-            true_operations, true_shadows = self._rewrite_post_shadow_body(
-                op.true_operations
-            )
-            false_operations, false_shadows = self._rewrite_post_shadow_body(
-                op.false_operations
-            )
-            rewritten: IfOperation = dataclasses.replace(
-                op,
-                true_operations=true_operations,
-                false_operations=false_operations,
-            )
-
-            shadow_ops: list[Operation] = []
-            if true_shadows or false_shadows:
-                condition_prelude = self._collect_classical_dependency_ops(
-                    [op.condition],
-                    self._shadow_condition_scope(scope_operations),
-                )
-                if condition_prelude is None:
-                    condition_prelude = []
-                shadow_ops.extend(condition_prelude)
-                shadow_ops.append(
-                    dataclasses.replace(
-                        op,
-                        true_operations=true_shadows,
-                        false_operations=false_shadows,
-                        phi_ops=[],
-                        results=[],
-                    )
-                )
-
-            if self._effective_kind(rewritten) == OperationKind.QUANTUM:
-                local_shadow_ops = self._build_post_shadow_if_ops(
-                    rewritten,
-                    scope_operations,
-                )
-                if local_shadow_ops:
-                    shadow_ops.extend(local_shadow_ops)
-                    rewritten = self._drop_host_only_phi_outputs(
-                        rewritten,
-                        local_shadow_ops,
-                    )
-            return rewritten, shadow_ops
-
-        if isinstance(op, HasNestedOps):
-            shadow_lists: list[list[Operation]] = []
-            rewritten_lists: list[list[Operation]] = []
-            has_shadow = False
-            changed = False
-            for body in op.nested_op_lists():
-                rewritten_body, body_shadows = self._rewrite_post_shadow_body(body)
-                rewritten_lists.append(rewritten_body)
-                shadow_lists.append(body_shadows)
-                has_shadow = has_shadow or bool(body_shadows)
-                changed = changed or any(
-                    new is not old for new, old in zip(rewritten_body, body)
-                )
-            rewritten_op = op.rebuild_nested(rewritten_lists) if changed else op
-            if not has_shadow:
-                return rewritten_op, []
-            return rewritten_op, [op.rebuild_nested(shadow_lists)]
-
-        return op, []
-
-    def _rewrite_post_shadow_body(
-        self,
-        operations: list[Operation],
-    ) -> tuple[list[Operation], list[Operation]]:
-        """Rewrite a control-flow body and collect its shadow operations.
-
-        Args:
-            operations (list[Operation]): Operations in one lexical body.
-
-        Returns:
-            tuple[list[Operation], list[Operation]]: Rewritten body for the
-                quantum segment and classical-only shadow body for the
-                post-quantum segment.
-        """
-        rewritten_body: list[Operation] = []
-        shadow_body: list[Operation] = []
-        for body_op in operations:
-            rewritten_op, shadow_ops = self._rewrite_post_shadow_control_flow(
-                body_op,
-                operations,
-            )
-            rewritten_body.append(rewritten_op)
-            shadow_body.extend(shadow_ops)
-        return rewritten_body, shadow_body
-
-    def _drop_host_only_phi_outputs(
-        self,
-        op: IfOperation,
-        shadow_ops: list[Operation],
-    ) -> IfOperation:
-        """Remove host-only Phi outputs from a quantum ``IfOperation``.
-
-        Args:
-            op (IfOperation): Rewritten ``IfOperation`` candidate.
-            shadow_ops (list[Operation]): Shadow operations returned by
-                :meth:`_build_post_shadow_if_ops`.
-
-        Returns:
-            IfOperation: ``op`` with host-only Phi outputs removed when
-                applicable.
-        """
-        shadow_if = shadow_ops[-1]
-        if not isinstance(shadow_if, IfOperation):
-            return op
-        host_phi_output_ids = {
-            result.uuid
-            for result in shadow_if.results
-            if result.uuid not in self._quantum_needed
-        }
-        if not host_phi_output_ids:
-            return op
-        return dataclasses.replace(
-            op,
-            results=[
-                result
-                for result in op.results
-                if result.uuid not in host_phi_output_ids
-            ],
-            phi_ops=[
-                phi for phi in op.phi_ops if phi.output.uuid not in host_phi_output_ids
-            ],
-        )
-
-    def _build_post_shadow_if_ops(
-        self,
-        op: IfOperation,
-        condition_scope: list[Operation] | None = None,
-    ) -> list[Operation]:
-        """Build host-side operations that recompute selected Phi outputs.
-
-        Args:
-            op (IfOperation): Quantum-effective ``IfOperation`` whose Phi
-                outputs may be needed after the quantum segment.
-            condition_scope (list[Operation] | None): Lexical scope used to
-                collect pure-classical producers for the condition. Defaults
-                to the whole block for top-level compatibility.
-
-        Returns:
-            list[Operation]: Pure-classical operations to append to the
-                post-quantum segment.
-        """
-        target_phis: list[PhiOp] = []
-        true_seeds: list[ValueBase] = []
-        false_seeds: list[ValueBase] = []
-
-        for phi in op.phi_ops:
-            if not self._phi_needs_host_value(phi):
-                continue
-            if not isinstance(phi.true_value, ValueBase) or not isinstance(
-                phi.false_value, ValueBase
-            ):
-                continue
-            true_ops = self._collect_classical_dependency_ops(
-                [phi.true_value],
-                op.true_operations,
-            )
-            false_ops = self._collect_classical_dependency_ops(
-                [phi.false_value],
-                op.false_operations,
-            )
-            if true_ops is None or false_ops is None:
-                continue
-            target_phis.append(phi)
-            true_seeds.append(phi.true_value)
-            false_seeds.append(phi.false_value)
-
-        if not target_phis:
-            return []
-
-        condition_prelude = self._collect_classical_dependency_ops(
-            [op.condition],
-            self._shadow_condition_scope(condition_scope)
-            if condition_scope is not None
-            else self._current_block_operations,
-        )
-        if condition_prelude is None:
-            condition_prelude = []
-
-        true_operations = self._collect_classical_dependency_ops(
-            true_seeds,
-            op.true_operations,
-        )
-        false_operations = self._collect_classical_dependency_ops(
-            false_seeds,
-            op.false_operations,
-        )
-        if true_operations is None or false_operations is None:
-            return []
-
-        shadow_if = dataclasses.replace(
-            op,
-            true_operations=true_operations,
-            false_operations=false_operations,
-            phi_ops=target_phis,
-            results=[phi.output for phi in target_phis],
-        )
-        return [*condition_prelude, shadow_if]
-
-    def _shadow_condition_scope(
-        self,
-        scope_operations: list[Operation],
-    ) -> list[Operation]:
-        """Return operations visible to a nested shadow condition.
-
-        Args:
-            scope_operations (list[Operation]): Operations from the immediate
-                lexical body that contains the shadowed ``IfOperation``.
-
-        Returns:
-            list[Operation]: Top-level block operations followed by immediate
-                scope operations, deduplicated by object identity.
-        """
-        combined: list[Operation] = []
-        seen: set[int] = set()
-        for candidate in [*self._current_block_operations, *scope_operations]:
-            candidate_id = id(candidate)
-            if candidate_id in seen:
-                continue
-            seen.add(candidate_id)
-            combined.append(candidate)
-        return combined
-
     def _phi_needs_host_value(self, phi: PhiOp) -> bool:
         """Return whether a Phi output must be available host-side.
 
@@ -1128,52 +847,85 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 return True
         return False
 
-    def _collect_classical_dependency_ops(
-        self,
-        seeds: list[ValueBase],
-        operations: list[Operation],
-    ) -> list[Operation] | None:
-        """Collect pure-classical producers needed by ``seeds``.
+    def _reject_host_needed_phi_outputs(
+        self, op: Operation, nested: bool = False
+    ) -> None:
+        """Reject host-needed values stranded inside quantum control flow.
+
+        ``ClassicalLoweringPass`` lowers every representable scalar
+        classical merge of a runtime ``IfOperation`` to a ``SELECT``
+        expression, and loop-invariant expressions float past their loop,
+        so the normal runtime-expression routing surfaces them host-side.
+        Two shapes remain unrepresentable and would otherwise silently
+        resolve to ``None``:
+
+        - a merge that still carries its phi (a branch value produced by
+          nested control flow), and
+        - a host-needed runtime expression stranded inside a
+          quantum-effective loop body (a loop-varying value — e.g. a
+          ``SELECT`` whose sources are measured per iteration), which no
+          classical segment will ever execute.
+
+        Fail loudly for both. While-condition merges are exempt: the while
+        clbit-aliasing machinery owns them and the orchestrator reads them
+        through the aliased clbit. Identity merges are exempt too — they
+        resolve through their common source.
 
         Args:
-            seeds (list[ValueBase]): Values whose producers should be
-                available.
-            operations (list[Operation]): Operation scope from which producers
-                may be copied.
+            op (Operation): Quantum-segment operation to scan. The
+                top-level call receives the routed quantum op; recursion
+                sets ``nested``.
+            nested (bool): Whether ``op`` sits inside a control-flow body
+                (only nested expressions are stranded — the routing loop
+                places top-level ones). Defaults to False.
 
-        Returns:
-            list[Operation] | None: Ordered pure-classical producer operations,
-                or ``None`` when a needed producer is a nested operation that
-                cannot be copied safely.
+        Raises:
+            SeparationError: If a host-needed merge or nested runtime
+                expression cannot be surfaced host-side.
         """
-        local_producers = self._build_producer_map(operations)
-        required_ids: set[int] = set()
+        from qamomile.circuit.transpiler.errors import SeparationError
 
-        def require(value: ValueBase) -> bool:
-            producer = local_producers.get(value.uuid)
-            if producer is None:
-                return True
-            if self._effective_kind(producer) != OperationKind.CLASSICAL:
-                return True
-            required_ids.add(id(producer))
-            for operand in producer.all_input_values():
-                if not require(operand):
-                    return False
-            return True
-
-        for seed in seeds:
-            if not require(seed):
-                return None
-
-        ordered: list[Operation] = []
-        remaining = set(required_ids)
-        for candidate in operations:
-            if id(candidate) in required_ids:
-                ordered.append(candidate)
-                remaining.discard(id(candidate))
-        if remaining:
-            return None
-        return ordered
+        if (
+            nested
+            and isinstance(op, RuntimeClassicalExpr)
+            and id(op) in self._host_evaluated_expr_ids
+        ):
+            output_name = op.results[0].name if op.results else "<unnamed>"
+            raise SeparationError(
+                f"The measurement-derived classical value '{output_name}' is "
+                f"returned or used by host-side classical work, but it is "
+                f"computed inside a quantum loop body and varies across "
+                f"iterations, so no classical segment can recompute it "
+                f"(not representable until loop-carried values are "
+                f"formalized). Compute it from values measured outside the "
+                f"loop, or return the underlying measurements and "
+                f"post-process outside the kernel."
+            )
+        if isinstance(op, IfOperation):
+            for phi in op.phi_ops:
+                output = phi.output
+                if isinstance(output, ArrayValue) or output.type.is_quantum():
+                    continue
+                if phi.true_value.uuid == phi.false_value.uuid:
+                    continue
+                if output.uuid in self._while_condition_uuids:
+                    continue
+                if self._phi_needs_host_value(phi):
+                    raise SeparationError(
+                        f"The measurement-dependent branch merge producing "
+                        f"'{output.name}' is returned or used by host-side "
+                        f"classical work, but its value cannot be recomputed "
+                        f"host-side: a branch value is produced by nested "
+                        f"control flow, or the merge varies across loop "
+                        f"iterations (not representable until loop-carried "
+                        f"values are formalized). Compute the branch values "
+                        f"before the branch, or return the underlying "
+                        f"measurements and post-process outside the kernel."
+                    )
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested_op in body:
+                    self._reject_host_needed_phi_outputs(nested_op, nested=True)
 
     def _classify_runtime_exprs(
         self,

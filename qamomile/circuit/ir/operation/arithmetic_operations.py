@@ -181,6 +181,11 @@ class RuntimeOpKind(enum.Enum):
     FLOORDIV = enum.auto()
     MOD = enum.auto()
     POW = enum.auto()
+    # Branch merge: ``select(condition, true_value, false_value)``.
+    # Synthesized by ``ClassicalLoweringPass`` from a runtime
+    # ``IfOperation``'s scalar classical merge slot; has no compile-time
+    # per-family counterpart.
+    SELECT = enum.auto()
 
 
 @dataclasses.dataclass
@@ -198,6 +203,9 @@ class RuntimeClassicalExpr(Operation):
     - Binary kinds (EQ/NEQ/LT/LE/GT/GE/AND/OR/ADD/SUB/MUL/DIV/FLOORDIV/MOD/POW):
       ``operands = [lhs, rhs]``.
     - Unary kind (NOT): ``operands = [val]``.
+    - Ternary kind (SELECT): ``operands = [condition, true_value,
+      false_value]`` — the runtime form of a branch merge
+      (``result = true_value if condition else false_value``).
     - Result: ``results = [output_value]``.
 
     The single-node + unified-kind shape (vs four parallel subclasses)
@@ -218,6 +226,15 @@ class RuntimeClassicalExpr(Operation):
         if self.kind is RuntimeOpKind.NOT:
             return Signature(
                 operands=[ParamHint(name="input", type=self.operands[0].type)],
+                results=[ParamHint(name="output", type=self.results[0].type)],
+            )
+        if self.kind is RuntimeOpKind.SELECT:
+            return Signature(
+                operands=[
+                    ParamHint(name="condition", type=self.operands[0].type),
+                    ParamHint(name="true_value", type=self.operands[1].type),
+                    ParamHint(name="false_value", type=self.operands[2].type),
+                ],
                 results=[ParamHint(name="output", type=self.results[0].type)],
             )
         return Signature(

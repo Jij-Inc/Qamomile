@@ -17,7 +17,11 @@ from __future__ import annotations
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    PhiOp,
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -144,6 +148,19 @@ def is_measurement_backed(
         result = is_measurement_backed(
             producer.true_value, producer_map, visiting
         ) and is_measurement_backed(producer.false_value, producer_map, visiting)
+        visiting.discard(value.uuid)
+        return result
+
+    if (
+        isinstance(producer, RuntimeClassicalExpr)
+        and producer.kind is RuntimeOpKind.SELECT
+    ):
+        # ``ClassicalLoweringPass`` lowers a runtime-if merge to
+        # ``select(cond, t, f)``; like the phi it replaces, the value is
+        # measurement-backed when both branch sources are.
+        result = is_measurement_backed(
+            producer.operands[1], producer_map, visiting
+        ) and is_measurement_backed(producer.operands[2], producer_map, visiting)
         visiting.discard(value.uuid)
         return result
 

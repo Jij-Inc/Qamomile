@@ -286,7 +286,8 @@ class ClassicalExecutor:
         Args:
             op (RuntimeClassicalExpr): The runtime expression to evaluate.
                 Binary kinds read ``operands[0]`` / ``operands[1]``; the
-                unary NOT kind reads ``operands[0]`` only.
+                unary NOT kind reads ``operands[0]`` only; the ternary
+                SELECT kind reads ``[condition, true_value, false_value]``.
             context (ExecutionContext): Execution context holding measured
                 bit values and bound parameters.
             results (dict[str, Any]): Segment-local results keyed by value
@@ -310,6 +311,15 @@ class ClassicalExecutor:
         if kind is RuntimeOpKind.NOT:
             operand = self._get_value(op.operands[0], context, results, scoped_locals)
             result_value = evaluate_notop_value(operand)
+        elif kind is RuntimeOpKind.SELECT:
+            condition = self._get_value(op.operands[0], context, results, scoped_locals)
+            true_value = self._get_value(
+                op.operands[1], context, results, scoped_locals
+            )
+            false_value = self._get_value(
+                op.operands[2], context, results, scoped_locals
+            )
+            result_value = true_value if bool(condition) else false_value
         else:
             lhs = self._get_value(op.operands[0], context, results, scoped_locals)
             rhs = self._get_value(op.operands[1], context, results, scoped_locals)

@@ -248,3 +248,15 @@ The runtime output, ordinary qkernel-call paths, IR serialization, inline loweri
 **Workaround**: avoid returning structural `Tuple` / `Dict` values directly from `qmc.if_else` branches, avoid relying on nested tuple runtime bindings as public inputs, and flatten nested tuple inputs into separate scalar or direct tuple arguments when the elements must be used in post-classical expressions.
 
 **Future fix**: teach the frontend Phi merge to rebuild structural handles from merged structural `ValueLike` results. Runtime binding alias seeding should recurse through nested `TupleValue` elements while preserving the current top-level-name collision protections.
+
+## Loop-varying branch merges cannot surface as host-side values
+
+A measurement-dependent branch merge (`if bit: out = x else: out = y`) whose result is returned or post-processed host-side is lowered to a `SELECT` runtime expression and recomputed per shot from the measurement record. When the merge sits inside a loop body and its condition or branch values are measured *inside* that loop, the value differs per iteration, and the trace-once IR has no loop-carried representation for "the value from the last executed iteration". Rather than silently resolving the output to `None` (or a stale iteration's value), segmentation raises `SeparationError` ("varies across iterations").
+
+**When it bites**: returning (or classically post-processing) a variable rebound in a branch inside `qmc.range` / `qmc.items` / `while` when the branch condition or branch values come from measurements taken inside the loop body. Merges over values measured *before* the loop are unaffected — they are loop-invariant, float past the loop, and evaluate correctly.
+
+**Why this trade-off was chosen**: representing the escape value of a loop-varying merge requires loop-carried yields (the `iter_args` / `body_yields` extension planned for the loop-carried-values work). Until loops can yield per-iteration results, any host-side recomputation would have to guess which iteration's measurements to read; failing loudly is the only honest behavior.
+
+**Workaround**: measure into distinct qubits/bits outside the loop and select over those, or return the underlying measurement results and compute the reduction in ordinary Python outside the kernel.
+
+**Future fix**: when loops gain `iter_args` / `body_yields`, promote the loop-varying merge into a loop yield and lower the yield to the same `SELECT` / runtime-expression machinery.

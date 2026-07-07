@@ -19,7 +19,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     CondOpKind,
     NotOp,
-    PhiOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
@@ -153,129 +152,6 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             self._emit_operations(
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
-
-        self._register_runtime_bit_phi_exprs(circuit, op, clbit_map, bindings)
-
-    def _register_runtime_bit_phi_exprs(
-        self,
-        circuit: "QuantumCircuit",
-        op: IfOperation,
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-    ) -> None:
-        """Register scalar Bit Phi outputs as Qiskit runtime expressions.
-
-        Dynamic scalar Bit Phi outputs cannot always be represented by a
-        single physical clbit alias: the true/false sources may be distinct
-        measurements that are still observable under their own UUIDs.  Qiskit
-        can express the selected value directly as
-        ``(condition and true) or ((not condition) and false)``.
-
-        Args:
-            circuit (QuantumCircuit): The Qiskit circuit being emitted.
-            op (IfOperation): The runtime if operation whose Phi outputs
-                should be registered.
-            clbit_map (ClbitMap): Mapping from IR bit addresses to physical
-                clbit indices.
-            bindings (dict[str, Any]): Active emit bindings; mutated with
-                runtime expressions keyed by Phi output UUID.
-
-        Returns:
-            None: Mutates ``bindings`` in place.
-
-        Raises:
-            EmitError: If a scalar Bit Phi that remains in the quantum segment
-                cannot be resolved to Qiskit runtime-expression operands.
-        """
-        from qiskit.circuit.classical import expr
-
-        condition_expr = self._resolve_runtime_bit_operand(
-            circuit, op.condition, clbit_map, bindings
-        )
-        if condition_expr is None:
-            raise EmitError(
-                "Cannot build runtime Bit Phi expression because the "
-                "IfOperation condition is not backed by a clbit or runtime expr.",
-                operation="PhiOp",
-            )
-
-        for phi in op.phi_ops:
-            if not isinstance(phi, PhiOp):
-                continue
-            output = phi.output
-            if isinstance(output, ArrayValue) or not isinstance(output.type, BitType):
-                continue
-            if QubitAddress(output.uuid) in clbit_map:
-                continue
-
-            true_expr = self._resolve_runtime_bit_operand(
-                circuit, phi.true_value, clbit_map, bindings
-            )
-            false_expr = self._resolve_runtime_bit_operand(
-                circuit, phi.false_value, clbit_map, bindings
-            )
-            if true_expr is None or false_expr is None:
-                raise EmitError(
-                    "Cannot build runtime Bit Phi expression because one of "
-                    "the branch values is not backed by a clbit or runtime expr.",
-                    operation="PhiOp",
-                )
-
-            phi_expr = expr.logic_or(
-                expr.logic_and(condition_expr, true_expr),
-                expr.logic_and(expr.logic_not(condition_expr), false_expr),
-            )
-            set_runtime_expr = getattr(bindings, "set_runtime_expr", None)
-            if callable(set_runtime_expr):
-                set_runtime_expr(output.uuid, phi_expr)
-            else:
-                bindings[output.uuid] = phi_expr
-
-    def _resolve_runtime_bit_operand(
-        self,
-        circuit: "QuantumCircuit",
-        value: Any,
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-    ) -> Any:
-        """Resolve a Bit-like operand to a Qiskit expr operand.
-
-        Args:
-            circuit (QuantumCircuit): The Qiskit circuit being emitted.
-            value (Any): IR Value, Python boolean, or integer boolean-like
-                operand to resolve.
-            clbit_map (ClbitMap): Mapping from IR bit addresses to physical
-                clbit indices.
-            bindings (dict[str, Any]): Active emit bindings.
-
-        Returns:
-            Any: Qiskit ``Clbit`` / ``expr.Expr`` / Python bool operand, or
-                ``None`` when the value cannot be resolved.
-        """
-        if not hasattr(value, "uuid"):
-            return bool(value) if isinstance(value, (bool, int)) else None
-
-        get_runtime_expr = getattr(bindings, "get_runtime_expr", None)
-        if callable(get_runtime_expr):
-            stored = get_runtime_expr(value.uuid)
-        else:
-            stored = bindings.get(value.uuid) if hasattr(bindings, "get") else None
-        if stored is not None and not isinstance(stored, (bool, int, float)):
-            return stored
-
-        if hasattr(value, "is_constant") and value.is_constant():
-            return bool(value.get_const())
-
-        if isinstance(value, Value):
-            addr = resolve_condition_address(value, bindings, self._resolver)
-        else:
-            addr = QubitAddress(value.uuid)
-        if addr in clbit_map:
-            return circuit.clbits[clbit_map[addr]]
-
-        if isinstance(stored, (bool, int)):
-            return bool(stored)
-        return None
 
     def _emit_while(
         self,
@@ -475,6 +351,32 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     f"{op.operands[0]!r}"
                 )
             result = expr.logic_not(inner)
+        elif kind is RuntimeOpKind.SELECT:
+            # ``select(cond, t, f)`` has no direct Qiskit equivalent; for
+            # Bit values it is exactly ``(cond and t) or (not cond and f)``.
+            # Wider types have no Qiskit classical-expr select, so the gap
+            # is loud (mirroring the FLOORDIV/MOD/POW contract).
+            if not isinstance(op.results[0].type, BitType):
+                raise NotImplementedError(
+                    "RuntimeOpKind.SELECT is only supported in-circuit for "
+                    "Bit values on the Qiskit backend (Qiskit's classical "
+                    "expr has no integer/float select). Return the value "
+                    "instead of branching on it in-circuit, or reduce it to "
+                    "a Bit."
+                )
+            resolved = [resolve_operand(operand) for operand in op.operands[:3]]
+            if any(operand is None for operand in resolved):
+                raise EmitError(
+                    f"Cannot resolve operands for RuntimeClassicalExpr({kind!r})"
+                )
+            condition, true_value, false_value = (
+                bool(operand) if isinstance(operand, (bool, int)) else operand
+                for operand in resolved
+            )
+            result = expr.logic_or(
+                expr.logic_and(condition, true_value),
+                expr.logic_and(expr.logic_not(condition), false_value),
+            )
         else:
             assert kind is not None
             lhs = resolve_operand(op.operands[0])
@@ -706,7 +608,6 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         # evolution gate onto only its declared qubits below.
         input_array = op.qubits
         num_h_qubits = hamiltonian.num_qubits
-        from qamomile.circuit.ir.value import ArrayValue
 
         if isinstance(input_array, ArrayValue) and input_array.shape:
             n_resolved = self._resolver.resolve_int_value(

@@ -6,6 +6,13 @@ instances whose operand dataflow traces back to a ``MeasureOperation``
 by ``compile_time_if_lowering``), and replaces them with the equivalent
 ``RuntimeClassicalExpr``.
 
+It also lowers the scalar classical merge slots of measurement-conditioned
+runtime ``IfOperation``s to ``RuntimeClassicalExpr(SELECT)`` expressions
+(``result = true if cond else false``), so branch merges ride the same
+runtime-expression machinery as every other measurement-derived classical
+op: consumer-based segment placement, host-side per-shot evaluation, and
+backend runtime-expression emission. See :meth:`_lower_if_merges`.
+
 Why this pass exists:
 
 The pre-``RuntimeClassicalExpr`` design left runtime classical ops in
@@ -38,13 +45,22 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    PhiOp,
     RuntimeClassicalExpr,
+    RuntimeOpKind,
     runtime_kind_from_binop,
     runtime_kind_from_compop,
     runtime_kind_from_condop,
 )
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps
-from qamomile.circuit.ir.value import ValueBase
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    IfOperation,
+    WhileOperation,
+)
+from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
@@ -94,6 +110,8 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         tainted = find_measurement_derived_values(dep_graph, measurement_uuids)
 
         new_ops = self._rewrite_operations(input.operations, tainted)
+        while_protected = _collect_while_operand_uuids(new_ops)
+        new_ops = self._lower_if_merges(new_ops, tainted, while_protected)
         return dataclasses.replace(input, operations=new_ops)
 
     # ------------------------------------------------------------------
@@ -168,3 +186,451 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             results=list(op.results),
             kind=kind,
         )
+
+    # ------------------------------------------------------------------
+    # Runtime-if merge lowering (phi → SELECT)
+    # ------------------------------------------------------------------
+
+    def _lower_if_merges(
+        self,
+        operations: list[Operation],
+        tainted: set[str],
+        while_protected: set[str],
+    ) -> list[Operation]:
+        """Lower runtime-if scalar classical merges to ``SELECT`` expressions.
+
+        A runtime ``IfOperation``'s merge slot means ``result =
+        true_value if condition else false_value`` — exactly a ternary
+        classical expression over measurement-derived values. Representing
+        it as ``RuntimeClassicalExpr(SELECT)`` right after the ``IfOperation``
+        lets every existing ``RuntimeClassicalExpr`` mechanism apply
+        unchanged: consumer-based segment placement, host-side evaluation by
+        ``ClassicalExecutor``, and backend runtime-expression emission.
+        Without this, the merge value is only reachable through emit-time
+        clbit aliasing, which silently collapses to one branch's bit when
+        the branch sources differ.
+
+        Bodies are lowered bottom-up so an outer merge whose branch value is
+        an inner merge sees the inner ``SELECT`` (an ordinary pure classical
+        producer) instead of a ``PhiOp``. Merges recorded inside ``For`` /
+        ``ForItems`` bodies float past the loop when loop-invariant (see
+        :meth:`_float_loop_invariant_exprs`); zero-trip semantics make
+        ``While`` bodies ineligible for floating.
+
+        Args:
+            operations (list[Operation]): Operations of one lexical body.
+            tainted (set[str]): Measurement-derived value UUIDs.
+            while_protected (set[str]): UUIDs consumed as ``WhileOperation``
+                condition operands; merges producing them keep their phi so
+                the while-condition clbit machinery stays in charge.
+
+        Returns:
+            list[Operation]: The rewritten operation list.
+        """
+        new_ops: list[Operation] = []
+        for op in operations:
+            if isinstance(op, IfOperation):
+                rewritten_if, appended = self._lower_single_if(
+                    op, tainted, while_protected
+                )
+                new_ops.append(rewritten_if)
+                new_ops.extend(appended)
+                continue
+            if isinstance(op, HasNestedOps):
+                rebuilt = op.rebuild_nested(
+                    [
+                        self._lower_if_merges(body, tainted, while_protected)
+                        for body in op.nested_op_lists()
+                    ]
+                )
+                if isinstance(rebuilt, (ForOperation, ForItemsOperation)):
+                    rebuilt, floated = self._float_loop_invariant_exprs(rebuilt)
+                    new_ops.append(rebuilt)
+                    new_ops.extend(floated)
+                else:
+                    new_ops.append(rebuilt)
+                continue
+            new_ops.append(op)
+        return new_ops
+
+    def _lower_single_if(
+        self,
+        op: IfOperation,
+        tainted: set[str],
+        while_protected: set[str],
+    ) -> tuple[IfOperation, list[Operation]]:
+        """Lower one ``IfOperation``'s eligible merges to ``SELECT`` exprs.
+
+        Args:
+            op (IfOperation): The if operation to process. Its bodies are
+                lowered recursively first.
+            tainted (set[str]): Measurement-derived value UUIDs.
+            while_protected (set[str]): While-condition operand UUIDs.
+
+        Returns:
+            tuple[IfOperation, list[Operation]]: The if with lowered merges
+                removed, and the operations to append right after it
+                (fresh copies of branch-local pure producers followed by
+                the ``SELECT`` expressions).
+        """
+        true_ops = self._lower_if_merges(op.true_operations, tainted, while_protected)
+        false_ops = self._lower_if_merges(op.false_operations, tainted, while_protected)
+
+        condition = op.operands[0] if op.operands else None
+        appended: list[Operation] = []
+        lowered_uuids: set[str] = set()
+        if (
+            isinstance(condition, ValueBase)
+            and not isinstance(condition, ArrayValue)
+            and condition.uuid in tainted
+        ):
+            for phi in op.phi_ops:
+                if not self._is_lowerable_merge(phi, while_protected):
+                    continue
+                true_group = self._copy_pure_closure([phi.true_value], true_ops)
+                false_group = self._copy_pure_closure([phi.false_value], false_ops)
+                if true_group is None or false_group is None:
+                    continue
+                true_copies, true_map = true_group
+                false_copies, false_map = false_group
+                appended.extend(true_copies)
+                appended.extend(false_copies)
+                appended.append(
+                    RuntimeClassicalExpr(
+                        operands=cast(
+                            "list[Value]",
+                            [
+                                condition,
+                                true_map.get(phi.true_value.uuid, phi.true_value),
+                                false_map.get(phi.false_value.uuid, phi.false_value),
+                            ],
+                        ),
+                        results=[phi.output],
+                        kind=RuntimeOpKind.SELECT,
+                    )
+                )
+                lowered_uuids.add(phi.output.uuid)
+
+        rewritten = dataclasses.replace(
+            op,
+            true_operations=true_ops,
+            false_operations=false_ops,
+            phi_ops=[phi for phi in op.phi_ops if phi.output.uuid not in lowered_uuids],
+            results=[
+                result
+                for result in op.results
+                if not (isinstance(result, ValueBase) and result.uuid in lowered_uuids)
+            ],
+        )
+        return rewritten, appended
+
+    def _is_lowerable_merge(self, phi: PhiOp, while_protected: set[str]) -> bool:
+        """Return whether a merge slot can lower to a ``SELECT`` expression.
+
+        Args:
+            phi (PhiOp): The merge to classify.
+            while_protected (set[str]): While-condition operand UUIDs.
+
+        Returns:
+            bool: ``True`` for a non-identity scalar classical merge that
+                does not carry a while condition. Quantum and array merges
+                keep their phi (emit-side physical-resource checks own
+                them), identity merges resolve through their common source,
+                and while-condition merges stay on the clbit-aliasing path.
+        """
+        output = phi.output
+        if isinstance(output, ArrayValue) or output.type.is_quantum():
+            return False
+        true_value = phi.true_value
+        false_value = phi.false_value
+        if isinstance(true_value, ArrayValue) or isinstance(false_value, ArrayValue):
+            return False
+        if true_value.uuid == false_value.uuid:
+            return False
+        if output.uuid in while_protected:
+            return False
+        return True
+
+    def _copy_pure_closure(
+        self,
+        seeds: list[ValueBase],
+        body_ops: list[Operation],
+    ) -> tuple[list[Operation], dict[str, ValueBase]] | None:
+        """Copy the pure-classical producer closure of ``seeds`` out of a body.
+
+        Branch-local pure classical producers (e.g. the ``~a`` behind
+        ``out = ~a``) are duplicated with fresh result UUIDs so the
+        ``SELECT`` synthesized after the ``IfOperation`` reads values that
+        are visible outside the branch. The originals stay in the branch
+        for any in-branch consumers; SSA holds because the copies produce
+        new UUIDs. Values without a producer in the body (pre-branch
+        values) and non-classical producers (branch-local measurements)
+        are left as leaf references — the per-shot execution context
+        resolves them.
+
+        Args:
+            seeds (list[ValueBase]): Values the ``SELECT`` needs.
+            body_ops (list[Operation]): The branch body to copy from.
+
+        Returns:
+            tuple[list[Operation], dict[str, ValueBase]] | None: Ordered
+                fresh copies and the old-to-fresh value mapping, or ``None``
+                when a needed producer is a nested control-flow op that
+                cannot be copied (the merge then keeps its phi and
+                segmentation reports it if a host consumer needs it).
+        """
+        producers: dict[str, Operation] = {}
+        for body_op in body_ops:
+            for result in body_op.results:
+                if isinstance(result, ValueBase):
+                    producers[result.uuid] = body_op
+
+        needed_ids: set[int] = set()
+        visited: set[str] = set()
+
+        def require(value: ValueBase) -> bool:
+            """Mark ``value``'s in-body pure producer chain as needed.
+
+            Args:
+                value (ValueBase): Value the closure must resolve.
+
+            Returns:
+                bool: ``False`` when the chain hits an uncopyable producer.
+            """
+            if value.uuid in visited:
+                return True
+            visited.add(value.uuid)
+            producer = producers.get(value.uuid)
+            if producer is None:
+                return True
+            if isinstance(producer, IfOperation):
+                for nested_phi in producer.phi_ops:
+                    if (
+                        isinstance(nested_phi, PhiOp)
+                        and nested_phi.output.uuid == value.uuid
+                    ):
+                        nested_true = nested_phi.true_value
+                        nested_false = nested_phi.false_value
+                        if (
+                            isinstance(nested_true, ValueBase)
+                            and isinstance(nested_false, ValueBase)
+                            and nested_true.uuid == nested_false.uuid
+                        ):
+                            return require(nested_true)
+                        return False
+                return False
+            if isinstance(producer, HasNestedOps):
+                return False
+            if producer.operation_kind != OperationKind.CLASSICAL:
+                return True
+            needed_ids.add(id(producer))
+            for operand in producer.all_input_values():
+                if isinstance(operand, ValueBase) and not require(operand):
+                    return False
+            return True
+
+        for seed in seeds:
+            if not require(seed):
+                return None
+
+        mapping: dict[str, ValueBase] = {}
+        copies: list[Operation] = []
+        for body_op in body_ops:
+            if id(body_op) not in needed_ids:
+                continue
+            for result in body_op.results:
+                if isinstance(result, ValueBase):
+                    mapping[result.uuid] = result.next_version()
+            copies.append(body_op.replace_values(mapping))
+        return copies, mapping
+
+    def _float_loop_invariant_exprs(
+        self,
+        loop_op: Operation,
+    ) -> tuple[Operation, list[Operation]]:
+        """Float loop-invariant runtime expressions past a ``For`` loop.
+
+        A ``SELECT`` synthesized for an if nested in a loop body reads
+        loop-invariant operands in every supported shape (the merge sources
+        are defined before the loop), so evaluating it once after the loop
+        is equivalent to the traced last-iteration value — and makes the
+        expression visible to top-level segment routing. An expression
+        stays in the body when any transitive operand is produced inside
+        the loop subtree or its result is consumed inside it. ``While``
+        loops are never floated: a zero-trip while must leave the pre-loop
+        value observable, which an unconditionally evaluated ``SELECT``
+        would overwrite.
+
+        Args:
+            loop_op (Operation): A ``ForOperation`` / ``ForItemsOperation``
+                whose bodies were already merge-lowered.
+
+        Returns:
+            tuple[Operation, list[Operation]]: The loop with floated
+                expressions removed, and those expressions in body order.
+        """
+        assert isinstance(loop_op, (ForOperation, ForItemsOperation))
+        body_lists = loop_op.nested_op_lists()
+
+        subtree_produced: set[str] = set()
+
+        def collect_produced(operations: list[Operation]) -> None:
+            """Collect result UUIDs across the loop subtree.
+
+            Args:
+                operations (list[Operation]): Body operations to scan.
+            """
+            for body_op in operations:
+                for result in body_op.results:
+                    if isinstance(result, ValueBase):
+                        subtree_produced.add(result.uuid)
+                if isinstance(body_op, HasNestedOps):
+                    for nested in body_op.nested_op_lists():
+                        collect_produced(nested)
+
+        for body in body_lists:
+            collect_produced(body)
+
+        candidates = [
+            body_op
+            for body in body_lists
+            for body_op in body
+            if isinstance(body_op, RuntimeClassicalExpr)
+        ]
+        floating = {id(body_op) for body_op in candidates}
+
+        def reads(operations: list[Operation], uuids: set[str]) -> bool:
+            """Return whether any non-floating subtree op reads ``uuids``.
+
+            Args:
+                operations (list[Operation]): Body operations to scan.
+                uuids (set[str]): Result UUIDs of the floating set.
+            """
+            for body_op in operations:
+                if id(body_op) not in floating:
+                    for operand in body_op.all_input_values():
+                        if isinstance(operand, ValueBase) and operand.uuid in uuids:
+                            return True
+                if isinstance(body_op, HasNestedOps) and any(
+                    reads(nested, uuids) for nested in body_op.nested_op_lists()
+                ):
+                    return True
+            return False
+
+        changed = True
+        while changed:
+            changed = False
+            floating_results = {
+                result.uuid
+                for body_op in candidates
+                if id(body_op) in floating
+                for result in body_op.results
+                if isinstance(result, ValueBase)
+            }
+            for body_op in candidates:
+                if id(body_op) not in floating:
+                    continue
+                for operand in body_op.all_input_values():
+                    if (
+                        isinstance(operand, ValueBase)
+                        and operand.uuid in subtree_produced
+                        and operand.uuid not in floating_results
+                    ):
+                        floating.discard(id(body_op))
+                        changed = True
+                        break
+            floating_results = {
+                result.uuid
+                for body_op in candidates
+                if id(body_op) in floating
+                for result in body_op.results
+                if isinstance(result, ValueBase)
+            }
+            if floating and any(reads(body, floating_results) for body in body_lists):
+                # Some in-loop op reads a floating result; conservatively
+                # keep every candidate whose result is read in-loop.
+                for body_op in candidates:
+                    if id(body_op) not in floating:
+                        continue
+                    result_uuids = {
+                        result.uuid
+                        for result in body_op.results
+                        if isinstance(result, ValueBase)
+                    }
+                    if any(reads(body, result_uuids) for body in body_lists):
+                        floating.discard(id(body_op))
+                        changed = True
+
+        if not floating:
+            return loop_op, []
+
+        floated = [
+            body_op
+            for body in body_lists
+            for body_op in body
+            if id(body_op) in floating
+        ]
+        rebuilt = loop_op.rebuild_nested(
+            [
+                [body_op for body_op in body if id(body_op) not in floating]
+                for body in body_lists
+            ]
+        )
+        return rebuilt, floated
+
+
+def _collect_while_operand_uuids(operations: list[Operation]) -> set[str]:
+    """Collect UUIDs carrying a ``WhileOperation`` loop-carried condition.
+
+    The loop-carried condition update (``operands[1]``) is resolved by the
+    emit-time clbit-aliasing machinery, which follows phi chains down to
+    the underlying measurements (``validate_while`` /
+    ``ResourceAllocator``). Every merge on such a chain must therefore
+    keep its phi instead of lowering to a ``SELECT`` expression: the set
+    contains the carried operands plus, transitively, the branch sources
+    of every phi whose output is already protected. The *initial*
+    condition (``operands[0]``) is deliberately not protected — a
+    phi-merged initial condition lowers to a ``SELECT`` and reaches the
+    backend as an ordinary runtime expression, exactly like an ``if``
+    condition.
+
+    Args:
+        operations (list[Operation]): Operations to scan recursively.
+
+    Returns:
+        set[str]: UUIDs of every value on a carried while-condition chain.
+    """
+    uuids: set[str] = set()
+    phi_sources: dict[str, tuple[str, str]] = {}
+
+    def scan(operations: list[Operation]) -> None:
+        """Collect carried while operands and phi source pairs in one walk.
+
+        Args:
+            operations (list[Operation]): Operations to scan.
+        """
+        for op in operations:
+            if isinstance(op, WhileOperation):
+                for operand in op.operands[1:]:
+                    if isinstance(operand, ValueBase):
+                        uuids.add(operand.uuid)
+            if isinstance(op, IfOperation):
+                for phi in op.phi_ops:
+                    phi_sources[phi.output.uuid] = (
+                        phi.true_value.uuid,
+                        phi.false_value.uuid,
+                    )
+            if isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    scan(body)
+
+    scan(operations)
+
+    worklist = [uuid for uuid in uuids if uuid in phi_sources]
+    while worklist:
+        current = worklist.pop()
+        for source_uuid in phi_sources.get(current, ()):
+            if source_uuid not in uuids:
+                uuids.add(source_uuid)
+                worklist.append(source_uuid)
+    return uuids
