@@ -989,16 +989,39 @@ def _collect_branch_rebinds(
 
     Returns:
         tuple[BranchRebind, ...]: One record per quantum variable whose
-            binding changed in at least one branch. Empty when the
-            result tuples do not align with the name lists (defensive —
-            the AST transformer guarantees alignment).
+            binding changed in at least one branch. Empty when there are
+            no rebind candidates at all.
+
+    Raises:
+        AssertionError: If the branch result tuples do not align
+            positionally with the name lists. This is an internal
+            invariant the AST transformer guarantees; raising loudly
+            keeps a future alignment regression from silently disabling
+            the branch-discard check (whose sole input is these records).
     """
     if not rebind_pre_bindings:
         return ()
+    # These records are the branch-discard check's SOLE input, so a
+    # silent empty return on misalignment would fail open — it would
+    # disable discard detection and let a rejectable kernel compile
+    # silently. The AST transformer builds the branch return tuples and
+    # ``emit_if`` slices them to match ``output_names`` / ``dead_names``
+    # by construction, so a mismatch is an internal invariant break, not
+    # a legitimate input; fail loud so a future change that breaks the
+    # alignment is caught in tests rather than reopening the hole.
     if not (len(output_names) == len(true_result) == len(false_result)):
-        return ()
+        raise AssertionError(
+            "Branch output alignment broken in _collect_branch_rebinds: "
+            "expected len(output_names) == len(true_result) == "
+            f"len(false_result), got {len(output_names)} / "
+            f"{len(true_result)} / {len(false_result)}."
+        )
     if not (len(dead_names) == len(dead_true) == len(dead_false)):
-        return ()
+        raise AssertionError(
+            "Dead-probe alignment broken in _collect_branch_rebinds: "
+            "expected len(dead_names) == len(dead_true) == len(dead_false), "
+            f"got {len(dead_names)} / {len(dead_true)} / {len(dead_false)}."
+        )
     positions = {name: index for index, name in enumerate(output_names)}
     dead_positions = {name: index for index, name in enumerate(dead_names)}
     records: list[BranchRebind] = []
