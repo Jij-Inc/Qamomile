@@ -40,9 +40,11 @@ stopped by the emit-level physical-resource guard pin that emit failure so
 a future silent-pass regression is caught.
 """
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.transpiler.errors import (
     AffineTypeError,
     EmitError,
@@ -50,6 +52,7 @@ from qamomile.circuit.transpiler.errors import (
     QubitRebindError,
 )
 from qamomile.circuit.transpiler.passes.analyze import (
+    _static_loop_trip_count,
     reject_control_flow_quantum_discard,
 )
 from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
@@ -1078,6 +1081,70 @@ class TestAllowedPatterns:
 # ---------------------------------------------------------------------------
 # Rejected: loop-body quantum discards (for / for-items / while)
 # ---------------------------------------------------------------------------
+
+
+def _for_op_from(kernel, bindings=None):
+    """Extract the first ForOperation from a kernel's inlined block.
+
+    Args:
+        kernel (QKernel): The qkernel to build.
+        bindings (dict[str, Any] | None): Compile-time bindings. Defaults
+            to None (empty bindings).
+
+    Returns:
+        ForOperation: The first ForOperation found, depth-first.
+    """
+    operations = _inlined_block(kernel, bindings=bindings).operations
+
+    def find(ops):
+        for op in ops:
+            if isinstance(op, ForOperation):
+                return op
+            if hasattr(op, "nested_op_lists"):
+                for body in op.nested_op_lists():
+                    found = find(body)
+                    if found is not None:
+                        return found
+        return None
+
+    return find(operations)
+
+
+class TestStaticLoopTripCount:
+    """`_static_loop_trip_count` resolves any non-bool Integral bound."""
+
+    @pytest.mark.parametrize("stop", [0, 5])
+    def test_numpy_bound_resolves_like_python_int(self, stop):
+        """A numpy integer loop bound resolves to the same trip count as the
+        equivalent Python int, keeping the zero-trip defense-in-depth
+        effective for numpy-typed bindings (Copilot review)."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _ in qmc.range(n):
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        for_op = _for_op_from(kernel)
+        py_count = _static_loop_trip_count(for_op, {}, {"n": stop})
+        np_count = _static_loop_trip_count(for_op, {}, {"n": np.int64(stop)})
+        assert py_count == stop
+        assert np_count == py_count
+
+    def test_bool_bound_rejected(self):
+        """A bool bound resolves to None — bool is an Integral subclass but
+        never a valid loop bound."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _ in qmc.range(n):
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        for_op = _for_op_from(kernel)
+        assert _static_loop_trip_count(for_op, {}, {"n": True}) is None
 
 
 class TestRejectedLoopDiscards:

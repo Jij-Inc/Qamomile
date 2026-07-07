@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import numbers
 from typing import Any
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -985,11 +986,7 @@ def _static_loop_trip_count(
     for bound in loop_op.operands[:3]:
         value = bound.value if hasattr(bound, "value") else bound
         const: Any = None
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            const = value
-        elif isinstance(value, Value):
+        if isinstance(value, Value):
             const = value.get_const()
             if const is None and value.uuid in concrete_values:
                 const = concrete_values[value.uuid]
@@ -998,9 +995,14 @@ def _static_loop_trip_count(
                 parameter_name = scalar.parameter_name if scalar else None
                 if parameter_name is not None and parameter_name in bindings:
                     const = bindings[parameter_name]
-        if isinstance(const, bool) or not isinstance(const, int):
+        else:
+            const = value
+        # Accept any non-bool Integral (Python int, numpy.int64, ...) and
+        # coerce, matching the transpiler's other bound/size resolvers
+        # (bool is an Integral subclass but is never a valid loop bound).
+        if isinstance(const, bool) or not isinstance(const, numbers.Integral):
             return None
-        resolved.append(const)
+        resolved.append(int(const))
     try:
         return len(range(resolved[0], resolved[1], resolved[2]))
     except ValueError:
