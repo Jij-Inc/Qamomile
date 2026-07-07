@@ -252,6 +252,8 @@ def prune_compile_time_ifs(
     ops: list[Operation],
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
+    *,
+    walk_runtime_branches: bool = False,
 ) -> PrunedIfView:
     """Replace compile-time-decidable ``IfOperation``s by their taken branch.
 
@@ -263,8 +265,11 @@ def prune_compile_time_ifs(
     branch's operations are inlined (recursively pruned) and each merge
     output is recorded as a ``(result, selected_source)`` alias pair, so
     phi-mediated dataflow out of the branch stays visible to dependency
-    scans without dead-branch edges. Runtime ``IfOperation``s are kept
-    intact (their branches are not walked).
+    scans without dead-branch edges. Runtime ``IfOperation``s are kept by
+    default with their branches untouched; with
+    ``walk_runtime_branches=True`` their branch bodies are pruned in
+    place (each side with its own copy of the accumulated state, exactly
+    like the lowering pass) while the if itself and its merges stay.
 
     Shared by ``reject_self_referential_loop_stores`` and
     ``reject_loop_carried_classical_rebinds`` — both checks must classify
@@ -278,6 +283,14 @@ def prune_compile_time_ifs(
             matching the lowering pass's scoping).
         bindings (dict[str, Any]): Compile-time parameter bindings used
             to resolve conditions.
+        walk_runtime_branches (bool): When ``True``, descend into kept
+            runtime ``IfOperation`` branches so compile-time ifs nested
+            inside them are pruned (and their merge aliases recorded)
+            too — the lowering pass lowers those, so scans that must
+            match its output need this. ``False`` (default) preserves
+            the historical view where runtime branches pass through
+            verbatim, which the quantum discard checks rely on for
+            their own position-aware classification. Defaults to False.
 
     Returns:
         PrunedIfView: The pruned operations together with the recorded
@@ -311,6 +324,19 @@ def prune_compile_time_ifs(
                     op.condition, concrete_values, bindings
                 )
                 if taken is None:
+                    if walk_runtime_branches:
+                        # Mirror the lowering pass: each runtime branch is
+                        # classified with its own copy of the accumulated
+                        # state; the if itself and its merges stay.
+                        op = dataclasses.replace(
+                            op,
+                            true_operations=walk(
+                                op.true_operations, dict(concrete_values), sink
+                            ),
+                            false_operations=walk(
+                                op.false_operations, dict(concrete_values), sink
+                            ),
+                        )
                     pruned.append(op)
                     continue
                 branch = op.true_operations if taken else op.false_operations
@@ -906,7 +932,10 @@ def reject_loop_carried_classical_rebinds(
     only path is a compile-time-dead branch canonicalizes back to the
     pre-loop value and is allowed. Unlike the array-store check, loops
     nested inside *runtime* if branches are scanned too — a loop-carried
-    scalar rebind there miscompiles all the same.
+    scalar rebind there miscompiles all the same — and the pruning walk
+    descends into those branches (``walk_runtime_branches=True``) so
+    dead-branch canonicalization applies to them exactly as the lowering
+    pass will lower them.
 
     The one exempted rebind — the while loop-carried condition pair —
     additionally requires that the condition's pre-loop value is not
@@ -941,7 +970,9 @@ def reject_loop_carried_classical_rebinds(
             a while condition's pre-loop value is read after the loop.
     """
     resolved_bindings = bindings or {}
-    pruned = prune_compile_time_ifs(operations, {}, resolved_bindings)
+    pruned = prune_compile_time_ifs(
+        operations, {}, resolved_bindings, walk_runtime_branches=True
+    )
     output_uuids = {
         v.uuid for v in (output_values or []) if getattr(v, "uuid", None) is not None
     }

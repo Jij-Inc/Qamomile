@@ -344,6 +344,24 @@ class TestRejectedRebinds:
         with pytest.raises(ValidationError, match=LOOP_CARRIED):
             _transpile(kernel, bindings={"flag": 1})
 
+    def test_live_rebind_in_loop_inside_runtime_if_rejected(self):
+        """A live accumulation in a loop under a runtime if stays rejected."""
+
+        @qmc.qkernel
+        def kernel(flag: qmc.UInt, n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            total = qmc.uint(0)
+            if bit:
+                for i in qmc.range(n):
+                    if flag == 1:
+                        total = total + i
+            return bit
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"flag": 1, "n": 3})
+
     def test_swap_rotation_rejected(self):
         """`a, b = b, a` in a loop leaves stale one-shot swaps and is rejected."""
 
@@ -395,6 +413,29 @@ class TestAllowedPatterns:
 
         # n=3: odd number of X gates flips |0> to |1>.
         assert _sample_single(kernel, bindings={"n": 3}) == 1
+
+    def test_dead_branch_rebind_in_loop_inside_runtime_if_allowed(self):
+        """A dead-branch-only rebind in a loop under a runtime if compiles.
+
+        The pruning walk descends into runtime-if branches with the same
+        per-branch state scoping as the lowering pass, so the
+        compile-time-dead `total = total + i` canonicalizes away and the
+        loop carries no live rebind.
+        """
+
+        @qmc.qkernel
+        def kernel(flag: qmc.UInt, n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            total = qmc.uint(0)
+            if bit:
+                for i in qmc.range(n):
+                    if flag == 1:
+                        total = total + i
+            return bit
+
+        _transpile(kernel, bindings={"flag": 0, "n": 3})
 
     def test_unobserved_post_loop_merge_of_condition_snapshot_allowed(self):
         """A dead post-loop compile-time merge of the condition compiles.
