@@ -254,16 +254,23 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
     # Block I/O may legitimately carry ``DictValue`` / ``TupleValue``:
     # a ``qmc.Dict`` / ``qmc.Tuple`` kernel argument lands in
     # ``input_values`` and a container pass-through return lands in
-    # ``output_values``. Parameters remain scalar / array ``Value``s.
+    # ``output_values``. Parameters are scalar / array ``Value``s plus the
+    # one structural exception: a runtime-parameter ``Dict`` keeps its
+    # ``DictValue`` in ``Block.parameters`` (paired with a ``DictType``
+    # slot in ``param_slots``).
     input_values = [
         _materialize_as_value_like(ctx, ref) for ref in d["input_value_refs"]
     ]
     output_values = [
         _materialize_as_value_like(ctx, ref) for ref in d["output_value_refs"]
     ]
-    parameters = {
-        k: _materialize_as_value(ctx, ref) for k, ref in d["parameters"].items()
-    }
+    # The cast mirrors the frontend: ``Block.parameters`` is annotated
+    # ``dict[str, Value]`` while a runtime-parameter ``Dict`` stores its
+    # ``DictValue`` there (the same widening #562 applies at build time).
+    parameters = cast(
+        "dict[str, Value]",
+        {k: _materialize_as_parameter(ctx, ref) for k, ref in d["parameters"].items()},
+    )
     param_slots = tuple(_decode_param_slot(s, ctx) for s in d.get("param_slots", ()))
 
     operations = [_decode_operation(op_dict, ctx) for op_dict in d["operations"]]
@@ -285,10 +292,10 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     """Materialize a UUID reference and assert it resolves to a ``Value``.
 
     Used in positions that must hold a scalar / array ``Value`` (e.g.
-    ``Block.parameters``, operation results, ``ForOperation.loop_var_value``,
-    and slice refs). Block-level I/O goes through
-    ``_materialize_as_value_like`` instead, because it may carry ``DictValue``
-    / ``TupleValue``.
+    operation results, ``ForOperation.loop_var_value``, and slice refs).
+    Block-level I/O goes through ``_materialize_as_value_like`` and
+    ``Block.parameters`` through ``_materialize_as_parameter`` instead,
+    because those positions may carry structural container values.
 
     Args:
         ctx (_DecodeContext): The active decode context.
@@ -309,12 +316,43 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     return v
 
 
+def _materialize_as_parameter(ctx: _DecodeContext, uuid: str) -> Value | DictValue:
+    """Materialize a UUID reference for a ``Block.parameters`` entry.
+
+    Parameters are scalar / array ``Value``s with one structural exception:
+    a ``Dict`` kept as a runtime parameter stays in ``Block.parameters`` as
+    a ``DictValue`` (its per-key values are rebound per call, mirrored by a
+    ``DictType`` ``RUNTIME_PARAMETER`` entry in ``param_slots``).
+    ``TupleValue`` never appears here — tuples cannot be runtime parameters.
+
+    Args:
+        ctx (_DecodeContext): The active decode context.
+        uuid (str): The parameter Value UUID.
+
+    Returns:
+        Value | DictValue: The materialized scalar, array, or dict parameter
+            value.
+
+    Raises:
+        ValueError: If the materialized object is neither a ``Value`` nor a
+            ``DictValue``.
+    """
+    v = ctx.materialize(uuid)
+    if not isinstance(v, (Value, DictValue)):
+        raise ValueError(
+            f"expected Value, ArrayValue, or DictValue at parameter uuid "
+            f"{uuid!r}, got {type(v).__name__}"
+        )
+    return v
+
+
 def _materialize_as_value_like(ctx: _DecodeContext, uuid: str) -> ValueLike:
     """Materialize a UUID reference as any block-output value type.
 
     Block inputs and outputs can be structural values such as ``TupleValue``
     and ``DictValue`` in addition to scalar ``Value`` / ``ArrayValue``.
-    Parameters remain restricted to ``Value`` via ``_materialize_as_value``.
+    ``Block.parameters`` goes through ``_materialize_as_parameter`` instead,
+    which additionally rejects ``TupleValue``.
 
     Args:
         ctx (_DecodeContext): The active decode context.

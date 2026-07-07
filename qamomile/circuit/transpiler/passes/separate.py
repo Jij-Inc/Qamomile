@@ -26,11 +26,10 @@ from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
-    DictValue,
-    TupleValue,
     Value,
     ValueBase,
     ValueLike,
+    collect_value_like_uuids,
 )
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
@@ -140,27 +139,6 @@ def lower_operations(block: Block) -> Block:
         else:
             lowered_ops.append(op)
     return dataclasses.replace(block, operations=lowered_ops)
-
-
-def collect_value_like_uuids(value: ValueLike) -> set[str]:
-    """Collect UUIDs contained in a value-like IR object.
-
-    Args:
-        value (ValueLike): Value-like object to inspect.
-
-    Returns:
-        set[str]: UUIDs for ``value`` itself and any recursively contained
-            tuple/dict elements.
-    """
-    uuids = {value.uuid}
-    if isinstance(value, TupleValue):
-        for element in value.elements:
-            uuids.update(collect_value_like_uuids(element))
-    elif isinstance(value, DictValue):
-        for key, entry_value in value.entries:
-            uuids.update(collect_value_like_uuids(key))
-            uuids.update(collect_value_like_uuids(entry_value))
-    return uuids
 
 
 def _is_public_runtime_input(value: ValueLike) -> bool:

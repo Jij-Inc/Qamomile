@@ -830,3 +830,24 @@ class DictValue(_MetadataValueMixin):
 
     def __len__(self) -> int:
         return len(self.entries)
+
+
+def collect_value_like_uuids(value: "ValueLike") -> set[str]:
+    """Collect UUIDs contained in a value-like IR object.
+
+    Args:
+        value (ValueLike): Value-like object to inspect.
+
+    Returns:
+        set[str]: UUIDs for ``value`` itself and any recursively contained
+            tuple/dict elements.
+    """
+    uuids = {value.uuid}
+    if isinstance(value, TupleValue):
+        for element in value.elements:
+            uuids.update(collect_value_like_uuids(element))
+    elif isinstance(value, DictValue):
+        for key, entry_value in value.entries:
+            uuids.update(collect_value_like_uuids(key))
+            uuids.update(collect_value_like_uuids(entry_value))
+    return uuids

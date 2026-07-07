@@ -24,7 +24,13 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    ValueLike,
+    collect_value_like_uuids,
+)
 from qamomile.circuit.transpiler.errors import (
     DependencyError,
     QubitRebindError,
@@ -681,7 +687,7 @@ def _check_loop_carried_rebinds(
 def reject_loop_carried_classical_rebinds(
     operations: list[Operation],
     bindings: dict[str, Any] | None = None,
-    output_values: list[Value] | None = None,
+    output_values: list[ValueLike] | None = None,
 ) -> None:
     """Reject in-loop classical scalar rebinds that cannot compile correctly.
 
@@ -727,9 +733,12 @@ def reject_loop_carried_classical_rebinds(
             used to resolve ``IfOperation`` conditions, matching what
             ``CompileTimeIfLoweringPass`` will later resolve. Defaults to
             None (no bindings).
-        output_values (list[Value] | None): The block's output values;
+        output_values (list[ValueLike] | None): The block's output values;
             a while condition's pre-loop value escaping through them is
-            a post-loop read. Defaults to None (no outputs known).
+            a post-loop read. Structural outputs (``TupleValue`` /
+            ``DictValue``) are searched recursively so a condition
+            returned inside a tuple is still detected. Defaults to None
+            (no outputs known).
 
     Raises:
         ValidationError: If a loop body rebinds a classical scalar whose
@@ -740,9 +749,9 @@ def reject_loop_carried_classical_rebinds(
     """
     resolved_bindings = bindings or {}
     pruned_operations = prune_compile_time_ifs(operations, {}, resolved_bindings)
-    output_uuids = {
-        v.uuid for v in (output_values or []) if getattr(v, "uuid", None) is not None
-    }
+    output_uuids: set[str] = set()
+    for v in output_values or []:
+        output_uuids.update(collect_value_like_uuids(v))
     _reject_stale_while_condition_reads(pruned_operations, output_uuids)
     for op in flatten_ops(pruned_operations):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
@@ -2377,7 +2386,7 @@ class AnalyzePass(Pass[Block, Block]):
     def _reject_loop_carried_classical_rebinds(
         self,
         operations: list[Operation],
-        output_values: list[Value],
+        output_values: list[ValueLike],
     ) -> None:
         """Reject in-loop classical scalar rebinds (loop-carried updates).
 
@@ -2391,7 +2400,7 @@ class AnalyzePass(Pass[Block, Block]):
 
         Args:
             operations (list[Operation]): Operations to scan recursively.
-            output_values (list[Value]): Block output values, used to
+            output_values (list[ValueLike]): Block output values, used to
                 detect a while condition's pre-loop value escaping the
                 loop through the return path.
 
