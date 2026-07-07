@@ -72,6 +72,22 @@ class TestAddMerge:
 class TestIterMerges:
     """Read contract and strict checks of ``IfOperation.iter_merges``."""
 
+    def test_iter_merges_on_bare_if_yields_nothing(self) -> None:
+        """A condition-less, merge-less IfOperation iterates cleanly."""
+        assert list(IfOperation().iter_merges()) == []
+
+    def test_dependency_graph_tolerates_condition_less_if(self) -> None:
+        """The dependency graph builder skips a missing condition operand.
+
+        A partially-constructed IfOperation (no operands, no merges) must
+        not crash the explicit merge-edge pass with an IndexError.
+        """
+        from qamomile.circuit.transpiler.passes.analyze import (
+            build_dependency_graph,
+        )
+
+        assert build_dependency_graph([IfOperation()]) == {}
+
     def test_iter_merges_yields_slots_in_result_order(self) -> None:
         """Each merge slot exposes its index, branch sources, and result."""
         if_op, triples = _if_with_merges(3)

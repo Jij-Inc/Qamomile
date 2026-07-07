@@ -93,8 +93,10 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
                 # Explicit merge edges: each merged output depends on the
                 # condition and both branch sources. A compile-time-constant
                 # condition may be a raw Python bool (closure constant)
-                # with no IR identity — it contributes no edge.
-                condition = op.condition
+                # with no IR identity — and malformed IR may lack the
+                # operand entirely — so it contributes no edge in either
+                # case.
+                condition = op.operands[0] if op.operands else None
                 condition_uuid = (
                     condition.uuid if isinstance(condition, ValueBase) else None
                 )
@@ -320,8 +322,12 @@ def prune_compile_time_ifs(
         for op in ops:
             evaluate_classical_op_concrete(op, concrete_values, bindings)
             if isinstance(op, IfOperation):
+                # A malformed condition-less if resolves as runtime (None
+                # coerces to no compile-time value) and passes through.
                 taken = resolve_compile_time_condition(
-                    op.condition, concrete_values, bindings
+                    op.operands[0] if op.operands else None,
+                    concrete_values,
+                    bindings,
                 )
                 if taken is None:
                     if walk_runtime_branches:
