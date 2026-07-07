@@ -478,10 +478,12 @@ def _create_phi_for_values(
     """Create a branch-merge slot for a pair of branch values.
 
     Args:
-        true_val (typing.Any): Value from the true branch (Handle, Value,
-            or primitive).
-        false_val (typing.Any): Value from the false branch (Handle,
-            Value, or primitive).
+        true_val (typing.Any): The true branch's value. Must be a
+            frontend ``Handle`` at runtime — its family determines how
+            the merge output is wrapped (via ``_wrap_phi_result``); any
+            other object is rejected.
+        false_val (typing.Any): The false branch's value (Handle, Value,
+            or primitive); only its IR value participates in the merge.
         if_operation (IfOperation): The if-else the merge is added to via
             ``add_merge``. Its condition operand must already be attached.
 
@@ -490,8 +492,9 @@ def _create_phi_for_values(
             frontend handle wrapping it.
 
     Raises:
-        TypeError: If the branch value types differ, or the branch handle
-            family does not support phi merging.
+        TypeError: If the branch value types differ, if ``true_val`` is
+            not a frontend ``Handle``, or if its handle family does not
+            support phi merging.
     """
     # Convert both values to IR Values
     true_v = _value_to_ir_value(true_val, "true_const")
