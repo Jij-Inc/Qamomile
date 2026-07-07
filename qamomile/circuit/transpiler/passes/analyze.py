@@ -1008,6 +1008,37 @@ def _static_loop_trip_count(
         return None
 
 
+def _root_wire_family(
+    root_uuid: str,
+    value_table: dict[str, ValueBase],
+) -> set[str]:
+    """Return a lineage root's UUID together with its array ancestry.
+
+    Resolves a root UUID (from :func:`_pre_branch_root_candidates`) back
+    to its ``Value`` so its ``slice_of`` / ``parent_array`` ancestry can
+    be walked — a re-sliced view's root reaches the shared base array,
+    which is how a slice-view refresh proves same-wire. A root with no
+    entry in ``value_table`` (e.g. a value whose producer was stripped
+    and that is not itself a record endpoint) contributes only its own
+    UUID.
+
+    Args:
+        root_uuid (str): The lineage root UUID.
+        value_table (dict[str, ValueBase]): UUID-to-value map over the
+            loop body plus the record endpoints.
+
+    Returns:
+        set[str]: The root's UUID and its array-ancestry UUIDs.
+    """
+    family: set[str] = set()
+    value = value_table.get(root_uuid)
+    if value is not None:
+        _add_uuid_with_ancestry(value, family)
+    else:
+        family.add(root_uuid)
+    return family
+
+
 def _pre_branch_root_candidates(
     value: Value,
     branch_producers: dict[str, Operation],
@@ -1776,11 +1807,22 @@ def _check_loop_quantum_discards(
         raise _zero_trip_static_loop_rebind_error(
             quantum_records[0].var_name, loop_kind
         )
+    # Build the producer map and value table over the COMPILE-TIME-PRUNED
+    # body: a compile-time-dead ``if`` inside the body must contribute no
+    # fresh-allocation root (its branch never executes), so its collapsed
+    # phi resolves the post-body value straight through to the incoming
+    # wire — while a runtime ``if`` keeps both branches, so a conditional
+    # rebind's phi still unions in the fresh root and is rejected. Without
+    # pruning here, the two are indistinguishable at the pre-fold hook.
     body_producers: dict[str, Operation] = {}
+    value_table: dict[str, ValueBase] = {}
     for body in loop_op.nested_op_lists():
-        for body_op in flatten_ops(body):
+        pruned_body = prune_compile_time_ifs(body, dict(concrete_values), bindings)
+        for body_op in flatten_ops(pruned_body):
             for result in body_op.results:
                 body_producers[result.uuid] = body_op
+            for value in (*body_op.all_input_values(), *body_op.results):
+                value_table.setdefault(value.uuid, value)
 
     def body_reads(uuid: str) -> bool:
         """Whether any pruned body op reads the value (ancestry included).
@@ -1809,10 +1851,23 @@ def _check_loop_quantum_discards(
         if record.after.type.is_quantum():
             before_family: set[str] = set()
             _add_uuid_with_ancestry(record.before, before_family)
-            after_family: set[str] = set()
-            _add_uuid_with_ancestry(record.after, after_family)
-            after_family |= _pre_branch_root_candidates(record.after, body_producers)
-            carried = bool(after_family & before_family)
+            value_table.setdefault(record.after.uuid, record.after)
+            # Carried iff EVERY possible root source of the post-body
+            # value is same-wire as the incoming value — i.e. each root's
+            # own ancestry intersects the incoming value's family. A mere
+            # OVERLAP of the unioned root set with the family is unsound:
+            # a conditional rebind whose phi unions the incoming wire
+            # with a fresh allocation (``if bit: q = qmc.qubit(...)``)
+            # produces roots {incoming, fresh}, of which only the
+            # incoming root overlaps, yet some paths discard the incoming
+            # state (Copilot review). Requiring ALL roots to be same-wire
+            # rejects that while still exempting slice-view refreshes,
+            # whose single re-sliced root shares the base array.
+            roots = _pre_branch_root_candidates(record.after, body_producers)
+            carried = bool(roots) and all(
+                bool(_root_wire_family(root, value_table) & before_family)
+                for root in roots
+            )
         if (
             isinstance(loop_op, WhileOperation)
             and record.after.uuid != record.before.uuid

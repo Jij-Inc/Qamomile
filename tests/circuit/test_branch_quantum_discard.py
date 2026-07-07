@@ -1314,6 +1314,69 @@ class TestRejectedLoopDiscards:
         with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
             _transpile(kernel, bindings={"n": 2})
 
+    def test_loop_scalar_constant_overwrite_unowned_rejected(self):
+        """A scalar constant overwrite in a loop, with the register unused
+        afterward, is rejected — the non-quantum-overwrite path. Pinned
+        alongside the vector counterpart to document the granularity
+        asymmetry (LIMITATIONS)."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            for _ in qmc.range(n):
+                q = 0  # noqa: F841 — overwrite under test
+            r = qmc.qubit("r")
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2})
+
+    def test_loop_vector_overwrite_untouched_rejected(self):
+        """A whole-register overwrite of an UNTOUCHED register in a loop is
+        rejected: with no element ever accessed there is no spurious
+        outside owner, so it behaves like the scalar form (forwarded
+        review finding)."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            qs = qmc.qubit_array(2, name="qs")
+            for _ in qmc.range(n):
+                qs = None  # noqa: F841 — overwrite under test
+            r = qmc.qubit("r")
+            return qmc.measure(r)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2})
+
+    def test_loop_conditional_rebind_union_roots_rejected(self):
+        """A loop body that conditionally rebinds to a fresh register is
+        rejected even when the rebinding branch consumes the incoming
+        state (so the branch check passes). The post-body phi unions the
+        incoming wire with the fresh allocation; a mere overlap of that
+        union with the incoming family would wrongly mark it carried, so
+        the carried exemption requires EVERY root to be same-wire
+        (Copilot review). Before the fix this reached the emit-level
+        physical-resource error instead of the targeted rejection."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            b = qmc.bit(0)
+            for _ in qmc.range(n):
+                p = qmc.qubit("p")
+                bit = qmc.measure(p)
+                if bit:
+                    b = qmc.measure(q)  # noqa: F841 — consume q so the branch check passes
+                    q = qmc.qubit("fresh")
+                else:
+                    q = q
+            return qmc.measure(q)
+
+        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
+            _transpile(kernel, bindings={"n": 2})
+
     def test_loop_measure_overwrite_rejected(self):
         """Consuming the register INTO its own name (q = qmc.measure(q))
         inside a loop is rejected: the classical result cannot carry the
@@ -1681,6 +1744,29 @@ class TestAllowedLoopPatterns:
             return b
 
         assert _sample_single(kernel, bindings={"dummy": 0}) == 1
+
+    def test_loop_vector_overwrite_element_touched_tolerated(self):
+        """A whole-register overwrite whose register had ONE element touched
+        before the loop is tolerated (missed rejection, not miscompile):
+        the element access is over-approximated as an outside reference of
+        the whole register, satisfying the invariant-arm owner. The
+        discarded register is genuinely dead here, so the emitted circuit
+        still matches Python semantics — the fresh return register
+        measures 0. This is the documented element-granularity
+        conservative corner (LIMITATIONS); pinned so a future tightening
+        of the granularity flips it to a rejection knowingly, and the
+        scalar analogue (rejected) is one test above."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            qs = qmc.qubit_array(2, name="qs")
+            qs[0] = qmc.x(qs[0])
+            for _ in qmc.range(n):
+                qs = None  # noqa: F841 — overwrite under test
+            r = qmc.qubit("r")
+            return qmc.measure(r)
+
+        assert _sample_single(kernel, bindings={"n": 2}) == 0
 
     def test_empty_items_rebind_allowed_and_executes(self):
         """A bound-EMPTY qmc.items loop never traces its body (the
