@@ -351,12 +351,10 @@ class CallResources:
         """
         return CallResources(
             calls_by_name={
-                name: sp.simplify(count)
-                for name, count in self.calls_by_name.items()
+                name: sp.simplify(count) for name, count in self.calls_by_name.items()
             },
             queries_by_name={
-                name: sp.simplify(count)
-                for name, count in self.queries_by_name.items()
+                name: sp.simplify(count) for name, count in self.queries_by_name.items()
             },
         )
 
@@ -728,8 +726,7 @@ class ResourceEstimate:
             },
             "calls": {
                 "calls_by_name": {
-                    name: str(value)
-                    for name, value in self.calls.calls_by_name.items()
+                    name: str(value) for name, value in self.calls.calls_by_name.items()
                 },
                 "queries_by_name": {
                     name: str(value)
@@ -740,7 +737,9 @@ class ResourceEstimate:
                 {"message": assumption.message, "source": assumption.source}
                 for assumption in self.assumptions
             ],
-            "parameters": {name: str(symbol) for name, symbol in self.parameters.items()},
+            "parameters": {
+                name: str(symbol) for name, symbol in self.parameters.items()
+            },
         }
 
     def _map_expr(self, fn: Any) -> ResourceEstimate:
@@ -782,8 +781,7 @@ class ResourceEstimate:
             ),
             calls=CallResources(
                 calls_by_name={
-                    name: fn(value)
-                    for name, value in self.calls.calls_by_name.items()
+                    name: fn(value) for name, value in self.calls.calls_by_name.items()
                 },
                 queries_by_name={
                     name: fn(value)
@@ -902,9 +900,9 @@ class FixedResourceModel:
             ValueError: If a complete estimate and explicit parts are both
                 supplied.
         """
-        has_parts = any(part is not None for part in (width, gates, depth, calls)) or bool(
-            assumptions
-        )
+        has_parts = any(
+            part is not None for part in (width, gates, depth, calls)
+        ) or bool(assumptions)
         if estimate_value is not None and has_parts:
             raise ValueError(
                 "FixedResourceModel accepts either estimate_value or resource "
@@ -1167,7 +1165,9 @@ class ResourceInterpreter:
                 return self.eval_gate(operation, controls=controls)
             case QInitOperation():
                 return self.eval_qinit(operation, resolver)
-            case MeasureOperation() | MeasureVectorOperation() | MeasureQFixedOperation():
+            case (
+                MeasureOperation() | MeasureVectorOperation() | MeasureQFixedOperation()
+            ):
                 return self.eval_measure(operation)
             case ForOperation():
                 return self.eval_for(operation, resolver, controls=controls)
@@ -1837,7 +1837,9 @@ def build_for_loop_scope(
     )
     start = child.resolve(operation.operands[0])
     stop = child.resolve(operation.operands[1])
-    step = child.resolve(operation.operands[2]) if len(operation.operands) >= 3 else _ONE
+    step = (
+        child.resolve(operation.operands[2]) if len(operation.operands) >= 3 else _ONE
+    )
     return child, start, stop, step, loop_symbol
 
 
@@ -1975,7 +1977,9 @@ def _resolve_controlled_u(
         controls = _expr(cast(int, operation.num_controls))
 
     if isinstance(operation.block, Block):
-        targets = sum(1 for value in operation.block.input_values if value.type.is_quantum())
+        targets = sum(
+            1 for value in operation.block.input_values if value.type.is_quantum()
+        )
     else:
         target_operands = getattr(operation, "target_operands", [])
         targets = len(target_operands) if target_operands else 1
@@ -2078,7 +2082,9 @@ def _classify_controlled_gate(
     else:
         base_qubits = _GATE_BASE_QUBITS.get(gate_name, 1)
     total_qubits = num_controls + base_qubits
-    two = cast(ResourceExpr, sp.Piecewise((_ONE, sp.Eq(total_qubits, 2)), (_ZERO, True)))
+    two = cast(
+        ResourceExpr, sp.Piecewise((_ONE, sp.Eq(total_qubits, 2)), (_ZERO, True))
+    )
     multi = cast(ResourceExpr, sp.Piecewise((_ONE, total_qubits > 2), (_ZERO, True)))
     if gate_name in _CONTROLLED_CLIFFORD_GATES:
         clifford = cast(
@@ -2383,7 +2389,9 @@ def _scale_calls(calls: CallResources, factor: ResourceExpr) -> CallResources:
         CallResources: Scaled resources.
     """
     return CallResources(
-        calls_by_name={name: value * factor for name, value in calls.calls_by_name.items()},
+        calls_by_name={
+            name: value * factor for name, value in calls.calls_by_name.items()
+        },
         queries_by_name={
             name: value * factor for name, value in calls.queries_by_name.items()
         },
@@ -2505,7 +2513,9 @@ def _sum_gates(
     """
     return GateResources(
         total=_sum_expr(gates.total, loop_symbol, start, step, iterations),
-        single_qubit=_sum_expr(gates.single_qubit, loop_symbol, start, step, iterations),
+        single_qubit=_sum_expr(
+            gates.single_qubit, loop_symbol, start, step, iterations
+        ),
         two_qubit=_sum_expr(gates.two_qubit, loop_symbol, start, step, iterations),
         multi_qubit=_sum_expr(gates.multi_qubit, loop_symbol, start, step, iterations),
         clifford=_sum_expr(gates.clifford, loop_symbol, start, step, iterations),
@@ -2778,7 +2788,9 @@ def _substitute_bindings(
     return estimate.substitute(**values)
 
 
-def _count_input_qubits(values: Sequence[Value], resolver: ExprResolver) -> ResourceExpr:
+def _count_input_qubits(
+    values: Sequence[Value], resolver: ExprResolver
+) -> ResourceExpr:
     """Count quantum input values in a block signature.
 
     Args:

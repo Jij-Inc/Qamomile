@@ -111,6 +111,7 @@ class TestQFTStrategies:
         assert strategy is not None
         assert "approximate" in strategy.name
 
+
 class TestCompositeGateStrategyRegistry:
     """Tests for CompositeGate strategy registry."""
 

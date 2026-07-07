@@ -345,6 +345,7 @@ class SubstitutionPass(Pass[Block, Block]):
             definition=new_definition,
         )
 
+
 def create_substitution_pass(
     *,
     block_replacements: dict[str, "Block | QKernel"] | None = None,

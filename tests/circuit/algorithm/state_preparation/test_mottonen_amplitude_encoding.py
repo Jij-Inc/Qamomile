@@ -248,9 +248,7 @@ class TestCompositeGateMetadata:
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_complex(self, n_qubits: int) -> None:
         """Complex input: two-stage RY + RZ counts double the gate budget."""
-        amplitudes = np.ones(2**n_qubits, dtype=complex) + 1j * np.arange(
-            2**n_qubits
-        )
+        amplitudes = np.ones(2**n_qubits, dtype=complex) + 1j * np.arange(2**n_qubits)
 
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Qubit]:

@@ -393,6 +393,7 @@ class MottonenAmplitudeEncoding(CompositeGate):
             _emit_mottonen_gates(qubit_list, self._num_qubits, rz_angles, gate="rz")
         return tuple(qubit_list)
 
+
 # ---------------------------------------------------------------------------
 # Convenience function wrappers
 # ---------------------------------------------------------------------------

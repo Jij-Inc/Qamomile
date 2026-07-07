@@ -144,6 +144,7 @@ class QFT(CompositeGate):
 
         return tuple(qubits_list)
 
+
 class IQFT(CompositeGate):
     """Inverse Quantum Fourier Transform composite gate.
 
@@ -229,6 +230,7 @@ class IQFT(CompositeGate):
             qubits_list[j] = qmc.h(qubits_list[j])
 
         return tuple(qubits_list)
+
 
 @overload
 def qft(qubits: VectorView[Qubit]) -> VectorView[Qubit]: ...

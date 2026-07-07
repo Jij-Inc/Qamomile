@@ -84,6 +84,7 @@ class StandardQFTStrategy:
 
         return tuple(qubits_list)
 
+
 @dataclass
 class ApproximateQFTStrategy:
     """Approximate QFT decomposition with truncated rotations.
@@ -145,6 +146,7 @@ class ApproximateQFTStrategy:
 
         return tuple(qubits_list)
 
+
 @dataclass
 class StandardIQFTStrategy:
     """Standard inverse QFT decomposition (full precision).
@@ -188,6 +190,7 @@ class StandardIQFTStrategy:
             qubits_list[j] = qmc.h(qubits_list[j])
 
         return tuple(qubits_list)
+
 
 @dataclass
 class ApproximateIQFTStrategy:
