@@ -3023,10 +3023,12 @@ class TestQuantumRebindBranchScopeContract:
     The analyzer suppresses violations detected inside an ``if`` /
     ``for`` / ``while`` body so that legitimate compile-time-if
     dead-branch patterns (``if flag: ... ; else: alt = qubit_array(...);
-    q = alt``) decorate successfully. The IR-level
-    ``AffineValidationPass`` does NOT detect "silent discard" inside
-    runtime branches, so the suppression is a deliberate coverage gap
-    rather than a deferred check — see ``QubitRebindError`` and
+    q = alt``) decorate successfully. Runtime-branch and loop-body
+    silent discards are rejected later, at the IR layer, by
+    ``reject_control_flow_quantum_discard`` (see
+    ``tests/circuit/test_branch_quantum_discard.py``); decoration time
+    must stay silent for both so the compile-time idiom keeps working —
+    see ``QubitRebindError`` and
     ``QuantumRebindAnalyzer._visit_branch_scope`` docstrings. These
     tests lock that contract in so a future change that re-enables
     branch-internal raising (or breaks the legitimate dead-branch
