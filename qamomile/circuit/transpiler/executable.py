@@ -132,14 +132,18 @@ class ExecutableProgram(Generic[T]):
         """Execute with multiple shots and return counts.
 
         Args:
-            executor: Backend-specific quantum executor.
-            shots: Number of shots to run.
-            bindings: Parameter bindings. Supports two formats:
+            executor (QuantumExecutor[T]): Backend-specific quantum executor.
+            shots (int): Number of shots to run.
+            bindings (dict[str, Any] | None): Parameter bindings. Supports
+                three formats:
                 - Vector: {"gammas": [0.1, 0.2], "betas": [0.3, 0.4]}
-                - Indexed: {"gammas[0]": 0.1, "gammas[1]": 0.2}
+                - Dict parameter: {"coeffs": {0: 0.1, (0, 1): 0.2}},
+                  decomposed per key onto the emitted parameters
+                - Indexed: {"gammas[0]": 0.1, "coeffs[(0, 1)]": 0.2}
 
         Returns:
-            SampleJob that resolves to SampleResult with results.
+            SampleJob[Any]: A job that resolves to a SampleResult with the
+                per-bitstring counts.
 
         Raises:
             ExecutionError: If no quantum circuit to execute
@@ -164,14 +168,18 @@ class ExecutableProgram(Generic[T]):
         """Execute once and return single result.
 
         Args:
-            executor: Backend-specific quantum executor.
-            bindings: Parameter bindings. Supports two formats:
+            executor (QuantumExecutor[T]): Backend-specific quantum executor.
+            bindings (dict[str, Any] | None): Parameter bindings. Supports
+                three formats:
                 - Vector: {"gammas": [0.1, 0.2], "betas": [0.3, 0.4]}
-                - Indexed: {"gammas[0]": 0.1, "gammas[1]": 0.2}
+                - Dict parameter: {"coeffs": {0: 0.1, (0, 1): 0.2}},
+                  decomposed per key onto the emitted parameters
+                - Indexed: {"gammas[0]": 0.1, "coeffs[(0, 1)]": 0.2}
 
         Returns:
-            RunJob that resolves to the kernel's return type, or
-            ExpvalJob if the program contains expectation value computation.
+            RunJob[Any] | ExpvalJob: A RunJob that resolves to the kernel's
+                return type, or an ExpvalJob when the program contains an
+                expectation-value computation.
 
         Raises:
             ExecutionError: If no quantum circuit to execute

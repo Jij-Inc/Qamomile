@@ -26,6 +26,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.param_keys import dict_param_key
 
 from .cast_binop_emission import _set_emit_value
 from .condition_resolution import (
@@ -270,6 +271,21 @@ def emit_for_items(
     This handles iteration over Dict items, e.g.:
         for (i, j), Jij in qmc.items(ising):
             ...
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        circuit (Any): The backend circuit being built.
+        op (ForItemsOperation): The for-items loop being unrolled.
+        qubit_map (QubitMap): Current qubit address mapping.
+        clbit_map (ClbitMap): Current classical bit address mapping.
+        bindings (dict[str, Any]): Current emit-time bindings.
+
+    Raises:
+        EmitError: If the iterated dict is a runtime parameter — its key
+            structure is unknown at compile time, so the loop cannot be
+            unrolled.
+        ValueError: If the dict entries cannot be resolved for any other
+            reason.
     """
     if not op.operands:
         return
@@ -278,6 +294,15 @@ def emit_for_items(
     entries = resolve_dict_entries(emit_pass, dict_value, bindings)
 
     if entries is None:
+        dict_name = getattr(dict_value, "name", None)
+        if dict_name and dict_name in emit_pass._resolver.parameters:
+            raise EmitError(
+                f"Dict '{dict_name}' is a runtime parameter, so its key "
+                f"structure is unknown at compile time and an items() "
+                f"loop cannot be unrolled. Bind the dict via "
+                f"bindings={{...}} instead, or restrict the kernel to "
+                f"constant-key subscript lookups (d[key])."
+            )
         raise ValueError(
             f"Cannot unroll for-items loop: dict entries could not be resolved. "
             f"Dict value: {dict_value.name if hasattr(dict_value, 'name') else dict_value}"
@@ -368,9 +393,16 @@ def resolve_dict_entries(
     Returns:
         List of (key, value) tuples, or None if cannot be resolved
     """
-    bound_items = dict_value.get_bound_data_items()
-    if bound_items:
-        return list(bound_items)
+    # A dict carrying dict_runtime metadata is compile-time-bound and
+    # authoritative even when its data is empty: presence of the metadata
+    # (not non-emptiness of the data) is what marks it bound, mirroring
+    # Dict.__getitem__ / __len__. Returning its (possibly empty) items lets
+    # an empty bound dict — e.g. a Python signature default of ``{}`` —
+    # unroll to a zero-iteration loop instead of falling through to the
+    # "entries could not be resolved" error path below.
+    metadata = getattr(dict_value, "metadata", None)
+    if getattr(metadata, "dict_runtime", None) is not None:
+        return list(dict_value.get_bound_data_items())
 
     # Check if dict_value is a parameter that should be bound
     if hasattr(dict_value, "is_parameter") and dict_value.is_parameter():
@@ -425,6 +457,13 @@ def evaluate_dict_getitem(
     result UUID so downstream ops (BinOps feeding gate angles) can
     consume it.
 
+    When the dict is a declared runtime parameter
+    (``transpile(..., parameters=["coeffs"])``), there are no entries to
+    look up; the resolved key instead names one backend parameter
+    (``coeffs[3]`` / ``coeffs[(0, 1)]``) which is stored under the
+    result UUID. Repeated lookups of the same key share one backend
+    parameter via ``_get_or_create_parameter``.
+
     Args:
         emit_pass (StandardEmitPass): The emit pass (for resolver access).
         op (DictGetItemOperation): The lookup op being evaluated.
@@ -445,6 +484,21 @@ def evaluate_dict_getitem(
             )
         resolved_key.append(int(resolved))
 
+    lookup_key: Any = tuple(resolved_key) if op.key_arity > 1 else resolved_key[0]
+
+    # Runtime-parameter dict: there is no bound data to look the key up
+    # in — each resolved key becomes one backend parameter instead. The
+    # key itself is still fully concrete here (loop unrolling has bound
+    # any symbolic components), so the circuit structure stays static
+    # while the looked-up value remains symbolic until execution time.
+    dict_name = getattr(dict_value, "name", None)
+    if dict_name and dict_name in emit_pass._resolver.parameters:
+        param = emit_pass._get_or_create_parameter(
+            dict_param_key(dict_name, lookup_key), op.results[0].uuid
+        )
+        _set_emit_value(bindings, op.results[0].uuid, param)
+        return
+
     entries = resolve_dict_entries(emit_pass, dict_value, bindings)
     if entries is None:
         raise EmitError(
@@ -452,7 +506,6 @@ def evaluate_dict_getitem(
             f"be resolved for subscript lookup"
         )
 
-    lookup_key: Any = tuple(resolved_key) if op.key_arity > 1 else resolved_key[0]
     for entry_key, entry_value in entries:
         if isinstance(entry_key, (tuple, list)):
             entry_key = tuple(entry_key)

@@ -33,6 +33,102 @@ class HasNestedOps:
         raise NotImplementedError
 
 
+@dataclasses.dataclass(frozen=True)
+class LoopCarriedRebind:
+    """Trace-time record of a variable rebound inside a loop body.
+
+    Two rebind families share this record type, distinguished by the
+    type of ``before``:
+
+    - **Classical scalar** (``before`` classical): the frontend traces a
+      loop body exactly once, so a Python-level reassignment like
+      ``total = total + i`` produces IR whose right-hand side reads the
+      fixed pre-loop value instead of the previous iteration's value — a
+      loop-carried dependency the IR cannot represent. The transpiler's
+      classical loop-carried check rejects these with a targeted error
+      instead of silently miscompiling.
+    - **Quantum** (``before`` quantum): the loop body left the variable
+      bound to a different quantum resource (``logical_id`` change — a
+      fresh allocation or another register, not a gate self-update).
+      The transpiler's control-flow discard check
+      (``reject_control_flow_quantum_discard``) rejects the ones whose
+      incoming state the body never consumes.
+
+    Attributes:
+        var_name (str): Display name of the rebound Python variable.
+            Used only for error messages.
+        before (Value): The variable's IR value before the loop body ran
+            (for classical records, the stale value the traced body
+            reads; for quantum records, the incoming state a rebinding
+            iteration would discard).
+        after (Value): The variable's IR value after the loop body ran
+            (typically a ``BinOp`` result, an ``IfOperation`` phi
+            output, or a fresh quantum allocation).
+        before_synthesized (bool): True when the pre-loop value was a
+            plain Python number with no IR identity (e.g. ``total = 0``),
+            in which case ``before`` is a synthesized constant ``Value``
+            that does not appear in the body's dataflow. Always False
+            for quantum records.
+    """
+
+    var_name: str
+    before: Value
+    after: Value
+    before_synthesized: bool = False
+
+
+def _rebind_input_values(
+    rebinds: tuple[LoopCarriedRebind, ...],
+) -> list[ValueBase]:
+    """Collect the Value fields of loop-carried rebind records.
+
+    Args:
+        rebinds (tuple[LoopCarriedRebind, ...]): Records attached to a
+            loop operation.
+
+    Returns:
+        list[ValueBase]: ``before`` and ``after`` values of every record,
+            in order.
+    """
+    values: list[ValueBase] = []
+    for rebind in rebinds:
+        values.append(rebind.before)
+        values.append(rebind.after)
+    return values
+
+
+def _replace_rebind_values(
+    rebinds: tuple[LoopCarriedRebind, ...],
+    mapping: dict[str, ValueBase],
+) -> tuple[LoopCarriedRebind, ...] | None:
+    """Substitute rebind record values through a UUID mapping.
+
+    Args:
+        rebinds (tuple[LoopCarriedRebind, ...]): Records to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        tuple[LoopCarriedRebind, ...] | None: Rewritten records, or
+            ``None`` when nothing changed.
+    """
+    new_rebinds: list[LoopCarriedRebind] = []
+    changed = False
+    for rebind in rebinds:
+        before = rebind.before
+        after = rebind.after
+        mapped_before = mapping.get(before.uuid)
+        if isinstance(mapped_before, Value):
+            before = mapped_before
+        mapped_after = mapping.get(after.uuid)
+        if isinstance(mapped_after, Value):
+            after = mapped_after
+        if before is not rebind.before or after is not rebind.after:
+            rebind = dataclasses.replace(rebind, before=before, after=after)
+            changed = True
+        new_rebinds.append(rebind)
+    return tuple(new_rebinds) if changed else None
+
+
 @dataclasses.dataclass
 class WhileOperation(HasNestedOps, Operation):
     """Represents a while loop operation.
@@ -65,12 +161,43 @@ class WhileOperation(HasNestedOps, Operation):
 
     operations: list[Operation] = dataclasses.field(default_factory=list)
     max_iterations: int | None = None
+    loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(self, operations=new_lists[0])
+
+    def all_input_values(self) -> list[ValueBase]:
+        """Include loop-carried rebind records for cloning/substitution.
+
+        Same rationale as ``ForOperation.all_input_values``: rebind
+        records reference body/pre-loop values by identity, so inline
+        cloning must remap them in lockstep with body operands.
+
+        Returns:
+            list[ValueBase]: Base input values plus rebind-record values.
+        """
+        values = super().all_input_values()
+        values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        """Substitute operand and rebind-record values.
+
+        Args:
+            mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+        Returns:
+            Operation: The rewritten operation.
+        """
+        result = super().replace_values(mapping)
+        assert isinstance(result, WhileOperation)
+        new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        return result
 
     @property
     def signature(self) -> Signature:
@@ -117,6 +244,7 @@ class ForOperation(HasNestedOps, Operation):
     loop_var: str = ""
     loop_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
+    loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -131,10 +259,12 @@ class ForOperation(HasNestedOps, Operation):
         reference to the loop variable to a fresh UUID, but leave
         ``loop_var_value`` pointing at the un-cloned original — emit-time
         UUID-keyed lookups for the loop variable would then miss.
+        Loop-carried rebind records are included for the same reason.
         """
         values = super().all_input_values()
         if self.loop_var_value is not None:
             values.append(self.loop_var_value)
+        values.extend(_rebind_input_values(self.loop_carried_rebinds))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -144,6 +274,9 @@ class ForOperation(HasNestedOps, Operation):
             mapped = mapping[result.loop_var_value.uuid]
             if isinstance(mapped, Value):
                 result = dataclasses.replace(result, loop_var_value=mapped)
+        new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
         return result
 
     @property
@@ -196,6 +329,7 @@ class ForItemsOperation(HasNestedOps, Operation):
     key_var_values: tuple[Value, ...] | None = None
     value_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
+    loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -208,13 +342,15 @@ class ForItemsOperation(HasNestedOps, Operation):
 
         Same rationale as ``ForOperation.all_input_values``: keep the IR
         identity fields in lockstep with body references so UUID-keyed
-        lookups stay valid after inline cloning.
+        lookups stay valid after inline cloning. Loop-carried rebind
+        records are included for the same reason.
         """
         values = super().all_input_values()
         if self.key_var_values is not None:
             values.extend(self.key_var_values)
         if self.value_var_value is not None:
             values.append(self.value_var_value)
+        values.extend(_rebind_input_values(self.loop_carried_rebinds))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -242,6 +378,9 @@ class ForItemsOperation(HasNestedOps, Operation):
             mapped = mapping[result.value_var_value.uuid]
             if isinstance(mapped, Value):
                 result = dataclasses.replace(result, value_var_value=mapped)
+        new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
         return result
 
     @property
@@ -255,6 +394,81 @@ class ForItemsOperation(HasNestedOps, Operation):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.CONTROL
+
+
+@dataclasses.dataclass(frozen=True)
+class BranchRebind:
+    """Trace-time record of a quantum variable rebound inside an if branch.
+
+    The frontend's branch tracing merges only the *new* branch values
+    through phi operations; when both branches rebind a variable, the
+    value the variable held before the branch no longer appears anywhere
+    in the ``IfOperation``. These records preserve that pre-branch
+    binding so the transpiler's control-flow discard check
+    (``reject_control_flow_quantum_discard`` in
+    ``qamomile.circuit.transpiler.passes.analyze``) can verify that the
+    pre-branch quantum state is consumed or carried on every runtime
+    execution path instead of being silently dropped.
+
+    Attributes:
+        var_name (str): Display name of the rebound Python variable.
+            Used only for error messages.
+        before (Value): The variable's IR value at branch entry (the
+            state that is dropped on a rebinding path unless that branch
+            consumes it or merges it out through a phi).
+        rebound_in_true (bool): True when the true branch left the
+            variable bound to a different IR value.
+        rebound_in_false (bool): True when the false branch left the
+            variable bound to a different IR value.
+    """
+
+    var_name: str
+    before: Value
+    rebound_in_true: bool
+    rebound_in_false: bool
+
+
+def _branch_rebind_input_values(
+    rebinds: tuple[BranchRebind, ...],
+) -> list[ValueBase]:
+    """Collect the Value fields of branch rebind records.
+
+    Args:
+        rebinds (tuple[BranchRebind, ...]): Records attached to an
+            ``IfOperation``.
+
+    Returns:
+        list[ValueBase]: The ``before`` value of every record, in order.
+    """
+    return [rebind.before for rebind in rebinds]
+
+
+def _replace_branch_rebind_values(
+    rebinds: tuple[BranchRebind, ...],
+    mapping: dict[str, ValueBase],
+) -> tuple[BranchRebind, ...] | None:
+    """Substitute branch rebind record values through a UUID mapping.
+
+    Args:
+        rebinds (tuple[BranchRebind, ...]): Records to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        tuple[BranchRebind, ...] | None: Rewritten records, or ``None``
+            when nothing changed.
+    """
+    new_rebinds: list[BranchRebind] = []
+    changed = False
+    for rebind in rebinds:
+        mapped_before = mapping.get(rebind.before.uuid)
+        if isinstance(mapped_before, Value):
+            new_rebinds.append(dataclasses.replace(rebind, before=mapped_before))
+            changed = True
+        else:
+            new_rebinds.append(rebind)
+    if not changed:
+        return None
+    return tuple(new_rebinds)
 
 
 @dataclasses.dataclass
@@ -271,6 +485,9 @@ class IfOperation(HasNestedOps, Operation):
         true_operations: List of operations in the true branch
         false_operations: List of operations in the false branch (may be empty)
         phi_ops: List of PhiOp instances merging values from both branches
+        branch_rebinds: Trace-time records of quantum variables whose
+            binding changed in a branch (see ``BranchRebind``); consumed
+            by the transpiler's branch-discard check
         operands[0]: condition (Bit type from measurement or comparison)
         results: Phi-merged output values from both branches
     """
@@ -278,6 +495,7 @@ class IfOperation(HasNestedOps, Operation):
     true_operations: list[Operation] = dataclasses.field(default_factory=list)
     false_operations: list[Operation] = dataclasses.field(default_factory=list)
     phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
+    branch_rebinds: tuple[BranchRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [
@@ -293,6 +511,38 @@ class IfOperation(HasNestedOps, Operation):
             false_operations=new_lists[1],
             phi_ops=cast("list[PhiOp]", new_lists[2]),
         )
+
+    def all_input_values(self) -> list[ValueBase]:
+        """Include branch rebind records for cloning/substitution.
+
+        Same rationale as the loop operations' rebind records: the
+        recorded pre-branch values reference program values by identity,
+        so inline cloning must remap them in lockstep with operands.
+        Read-based checks must not treat them as reads (see
+        ``_op_read_uuids`` in the analyze pass module).
+
+        Returns:
+            list[ValueBase]: Base input values plus rebind-record values.
+        """
+        values = super().all_input_values()
+        values.extend(_branch_rebind_input_values(self.branch_rebinds))
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        """Substitute operand and rebind-record values.
+
+        Args:
+            mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+        Returns:
+            Operation: The rewritten operation.
+        """
+        result = super().replace_values(mapping)
+        assert isinstance(result, IfOperation)
+        new_rebinds = _replace_branch_rebind_values(result.branch_rebinds, mapping)
+        if new_rebinds is not None:
+            result = dataclasses.replace(result, branch_rebinds=new_rebinds)
+        return result
 
     @property
     def condition(self) -> Value:

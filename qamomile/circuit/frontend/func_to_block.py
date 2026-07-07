@@ -95,9 +95,12 @@ def build_param_slots(
 
     Mirrors the argument-classification logic in
     ``QKernel._create_traced_block`` so the resulting slot list reflects
-    the same decisions that drive symbolic-vs-bound input creation. Only
-    classical (non-quantum, non-Tuple, non-Dict) arguments are included;
-    pure-quantum arguments live in ``Block.input_values`` instead.
+    the same decisions that drive symbolic-vs-bound input creation.
+    Classical scalar / array arguments are always included; a ``Dict``
+    argument is included only when it is a runtime parameter (its slot
+    carries a ``DictType``). Pure-quantum arguments, ``Tuple`` arguments,
+    and compile-time-bound ``Dict`` arguments are excluded and live in
+    ``Block.input_values`` instead.
 
     Args:
         signature (inspect.Signature): The kernel function's signature.
@@ -134,8 +137,8 @@ def build_param_slots(
     for name, param in signature.parameters.items():
         param_type = input_types.get(name, param.annotation)
 
-        # Skip pure-quantum and structural-container arguments. These
-        # do not participate in the classical parameter contract.
+        # Skip pure-quantum arguments. These do not participate in the
+        # classical parameter contract.
         if param_type is Qubit:
             continue
         if name in qubit_sizes_set:
@@ -144,7 +147,32 @@ def build_param_slots(
             elem_handle_type = _array_element_type(param_type)
             if elem_handle_type is Qubit:
                 continue
-        if is_tuple_type(param_type) or is_dict_type(param_type):
+        # Tuple arguments are purely structural (multi-index keys) and are
+        # never runtime parameters, so they stay out of the manifest.
+        if is_tuple_type(param_type):
+            continue
+        # A Dict kept as a runtime parameter DOES participate in the
+        # contract: its per-key values are rebound per call, which is
+        # exactly what the manifest exists to describe. Emit a slot whose
+        # ``type`` is the ``DictType`` (it already captures the key and
+        # value types, so no extra ParamSlot fields are needed). A
+        # compile-time-bound Dict has no rebind role and — like Tuple —
+        # stays out; its ``DictValue`` lives in ``Block.input_values``.
+        if is_dict_type(param_type):
+            if name not in parameters_set:
+                continue
+            dict_default = (
+                param.default if param.default is not inspect.Parameter.empty else None
+            )
+            slots.append(
+                ParamSlot(
+                    name=name,
+                    type=handle_type_map(param_type),
+                    kind=ParamKind.RUNTIME_PARAMETER,
+                    ndim=0,
+                    default=dict_default,
+                )
+            )
             continue
 
         # Decide the slot's kind. ``Observable`` semantics mirror the

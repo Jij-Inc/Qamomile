@@ -130,7 +130,14 @@ rejected today; a future PR may add a migration table.
 
 from __future__ import annotations
 
-# The current schema version. Bump on every breaking change.
+# The current schema version.
+#
+# Project policy (2026-07): the wire format is NOT yet stable and no
+# cross-version compatibility is promised. Format changes — including
+# breaking ones that drop or reshape fields — land under version 1
+# without a bump; producers and consumers are expected to run the same
+# qamomile revision. Version negotiation / migration is deferred until
+# the format is declared stable.
 #
 # Note: ``SymbolicControlledU`` gained an optional
 # ``control_index_refs`` slot during the controlled-API redesign,
@@ -150,5 +157,9 @@ from __future__ import annotations
 # ``$hamiltonian`` payload wrapper (with its ``$complex`` coefficient
 # sub-wrapper) is additive too: pre-existing payloads contain no such
 # wrapper (encoding a Hamiltonian used to raise ``TypeError``), so v1
-# readers that know the tag can still read every older payload.
+# readers that know the tag can still read every older payload.  The
+# ``loop_carried_rebinds`` records on loop operations follow the same
+# additive encoding (safety caveat: a reader that predates them drops
+# the records and with them the loop-carried rebind rejection — accepted
+# under the same-revision policy above).
 SCHEMA_VERSION: int = 1
