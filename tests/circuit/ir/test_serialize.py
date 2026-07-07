@@ -28,11 +28,13 @@ from qamomile.circuit.algorithm.basic import (  # noqa: E402
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.canonical import content_hash
 from qamomile.circuit.ir.operation import (
+    ForItemsOperation,
     GateOperation,
     GateOperationType,
     InverseBlockOperation,
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
     SCHEMA_VERSION,
@@ -54,12 +56,18 @@ from qamomile.circuit.ir.types.primitives import (
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
+    DictValue,
     ScalarMetadata,
     Value,
     ValueMetadata,
 )
 from qamomile.circuit.stdlib.qft import iqft, qft  # noqa: E402
+from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
+from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
+from qamomile.circuit.transpiler.passes.slice_borrow_check import SliceBorrowCheckPass
+from qamomile.circuit.transpiler.passes.strip_slice_ops import StripSliceArrayOpsPass
 
 # ---------------------------------------------------------------------------
 # Fixture kernels (representative IR shapes)
@@ -76,6 +84,27 @@ def _to_affine(kernel: qmc.QKernel) -> Block:
         Block: The kernel's traced block after running ``InlinePass``.
     """
     return InlinePass().run(kernel.block)
+
+
+def _to_analyzed(block: Block) -> Block:
+    """Advance an AFFINE block to ANALYZED without a backend transpiler.
+
+    Mirrors the canonical pipeline order (affine_validate →
+    partial_eval → slice_borrow_check → strip_slice_ops → analyze) so
+    the resulting block matches what ``Transpiler.transpile`` hands to
+    serialization-stage consumers.
+
+    Args:
+        block (Block): An AFFINE block (e.g. from :func:`_to_affine`).
+
+    Returns:
+        Block: The block with ``BlockKind.ANALYZED``.
+    """
+    block = AffineValidationPass().run(block)
+    block = PartialEvaluationPass().run(block)
+    block = SliceBorrowCheckPass().run(block)
+    block = StripSliceArrayOpsPass().run(block)
+    return AnalyzePass().run(block)
 
 
 @qmc.qkernel
@@ -166,6 +195,16 @@ def _controlled_phase(
 
 
 @qmc.qkernel
+def _controlled_phase_symbolic_power(
+    ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float, power: qmc.UInt
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Top-level kernel with a controlled-U symbolic power operand."""
+    op = qmc.control(_phase)
+    ctrl, target = op(ctrl, target, theta=theta, power=power)
+    return ctrl, target
+
+
+@qmc.qkernel
 def _symbolic_multi_arg_controlled(
     ctrl_main: qmc.Qubit,
     prefix: qmc.Vector[qmc.Qubit],
@@ -186,6 +225,198 @@ def _symbolic_multi_arg_controlled(
     op = qmc.control(qmc.x, num_controls=nc)
     ctrl_main, prefix, target = op(ctrl_main, prefix, target)
     return ctrl_main, prefix, target
+
+
+@qmc.qkernel
+def _symbolic_control_indices_controlled(
+    pool: qmc.Vector[qmc.Qubit],
+    target: qmc.Qubit,
+    nc: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    """Top-level kernel that embeds ``control_indices`` on SymbolicControlledU."""
+    op = qmc.control(qmc.x, num_controls=nc)
+    pool, target = op(pool, target, control_indices=[0, 1, 3])
+    return pool, target
+
+
+@qmc.qkernel
+def _while_measure_kernel() -> qmc.Bit:
+    """Kernel that exercises a loop-carried measurement condition."""
+    q = qmc.qubit("q")
+    q = qmc.h(q)
+    bit = qmc.measure(q)
+    while bit:
+        q2 = qmc.qubit("q2")
+        q2 = qmc.h(q2)
+        bit = qmc.measure(q2)
+    return bit
+
+
+@qmc.qkernel
+def _if_branch_rebind_kernel() -> qmc.Bit:
+    """Kernel whose IfOperation carries a non-empty ``branch_rebinds``.
+
+    ``q`` is measured before the if, so rebinding it to the external
+    ``fresh`` register in both branches is legal variable reuse (the
+    pre-branch value is owned outside the if) rather than a discard.
+    Because both branches rebind ``q`` to a value whose old binding is
+    dead, the pre-branch value survives only on the recorded
+    ``BranchRebind``, giving the serializer a non-empty record list to
+    round-trip.
+    """
+    q = qmc.qubit("q")
+    fresh = qmc.qubit("fresh")
+    qmc.measure(q)
+    p = qmc.qubit("p")
+    cond = qmc.measure(p)
+    if cond:
+        q = fresh
+    else:
+        q = fresh
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _loop_quantum_rebind_kernel(n: qmc.UInt) -> qmc.Bit:
+    """Kernel whose ForOperation carries a quantum ``LoopCarriedRebind``.
+
+    Gives the serializer a quantum-``before`` loop record to round-trip.
+    The kernel is only built to AFFINE here — transpiling it would be
+    rejected by the control-flow discard check (unrolled loops carry no
+    register between iterations), which is irrelevant to the wire
+    format under test.
+    """
+    q = qmc.qubit("q")
+    b = qmc.bit(0)
+    for _ in qmc.range(n):
+        b = qmc.measure(q)
+        q = qmc.qubit("fresh")
+    return b
+
+
+@qmc.qkernel
+def _for_items_ising_kernel(
+    n_qubits: qmc.UInt,
+    ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Kernel that exercises ForItemsOperation over a DictValue operand."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for (i, j), jij in qmc.items(ising):
+        q[i], q[j] = qmc.rzz(q[i], q[j], gamma * jij)
+    return q
+
+
+@qmc.qkernel
+def _slice_assignment_kernel() -> qmc.Vector[qmc.Bit]:
+    """Kernel that exercises literal slice assignment markers."""
+    q = qmc.qubit_array(4, name="q")
+    q[1::2] = qmc.h(q[1::2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _nested_slice_assignment_kernel() -> qmc.Vector[qmc.Bit]:
+    """Kernel that exercises nested slice views and releases."""
+    q = qmc.qubit_array(8, name="q")
+    evens = q[0::2]
+    evens[0:2] = qmc.x(evens[0:2])
+    q[0::2] = evens
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _for_items_vector_key_kernel(
+    n_qubits: qmc.UInt,
+    interactions: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Kernel that exercises ``key_is_vector=True`` ForItemsOperation."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for key, coeff in qmc.items(interactions):
+        for step in qmc.range(key.shape[0] - 1):
+            q[key[step]], q[key[step + 1]] = qmc.rzz(
+                q[key[step]], q[key[step + 1]], gamma * coeff
+            )
+    return q
+
+
+@qmc.qkernel
+def _for_items_classical_kernel(
+    n_qubits: qmc.UInt,
+    ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Measure-terminated for-items kernel (classical I/O for analyze)."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for (i, j), jij in qmc.items(ising):
+        q[i], q[j] = qmc.rzz(q[i], q[j], gamma * jij)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _dict_getitem_kernel(
+    n_qubits: qmc.UInt,
+    ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    gammas: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    biases: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Kernel that exercises DictGetItemOperation with 1- and 2-ary keys."""
+    q = qmc.qubit_array(n_qubits, name="q")
+    for (i, j), jij in qmc.items(ising):
+        q[i] = qmc.rz(q[i], angle=biases[i])
+        q[i], q[j] = qmc.rzz(q[i], q[j], jij * gammas[(i, j)])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _inverse_dict_param_layer(
+    q: qmc.Qubit,
+    angles: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Qubit:
+    """Layer whose unused dict parameter rides along as a DictValue operand."""
+    q = qmc.h(q)
+    return q
+
+
+@qmc.qkernel
+def _inverse_dict_param_kernel(
+    angles: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Qubit:
+    """Kernel whose InverseBlockOperation carries a DictValue operand."""
+    q = qmc.qubit("q")
+    q = qmc.inverse(_inverse_dict_param_layer)(q, angles)
+    return q
+
+
+@qmc.qkernel
+def _controlled_nonleaf_inner(q: qmc.Qubit) -> qmc.Qubit:
+    """Leaf helper called by the non-leaf controlled unitary."""
+    q = qmc.h(q)
+    return q
+
+
+@qmc.qkernel
+def _controlled_nonleaf_unitary(q: qmc.Qubit) -> qmc.Qubit:
+    """Non-leaf unitary: its cached block contains a CallBlockOperation."""
+    q = _controlled_nonleaf_inner(q)
+    q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def _controlled_nonleaf_kernel(
+    ctrl: qmc.Qubit, target: qmc.Qubit
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Kernel controlling a non-leaf sub-kernel.
+
+    Before InlinePass descended into ``ControlledUOperation.block``,
+    the nested call survived inlining, the block was still reported as
+    AFFINE, and serialization died on the residual CallBlockOperation.
+    """
+    op = qmc.control(_controlled_nonleaf_unitary)
+    ctrl, target = op(ctrl, target)
+    return ctrl, target
 
 
 @qmc.qkernel
@@ -350,6 +581,13 @@ class TestRoundTripIRFeatures:
         op_names = [type(op).__name__ for op in restored.operations]
         assert any(name.endswith("ControlledU") for name in op_names), op_names
 
+    def test_controlled_u_symbolic_power_round_trip(self):
+        """Controlled-U symbolic ``power`` survives both wire formats."""
+        block = _to_affine(_controlled_phase_symbolic_power)
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+
     def test_symbolic_controlled_u_preserves_num_control_args(self):
         """Multi-arg ``SymbolicControlledU`` keeps its operand layout across encode/decode.
 
@@ -377,6 +615,31 @@ class TestRoundTripIRFeatures:
                 op for op in restored.operations if isinstance(op, SymbolicControlledU)
             ]
             assert [op.num_control_args for op in restored_sym] == original_args
+
+    def test_symbolic_controlled_u_preserves_control_indices(self):
+        """``control_indices`` keeps its selected control slots across round-trip."""
+        from qamomile.circuit.ir.operation.gate import SymbolicControlledU
+
+        block = _to_affine(_symbolic_control_indices_controlled)
+        sym_ops = [op for op in block.operations if isinstance(op, SymbolicControlledU)]
+        assert sym_ops, [type(op).__name__ for op in block.operations]
+        original_indices = [
+            tuple(v.get_const() for v in op.control_indices or ()) for op in sym_ops
+        ]
+        assert original_indices == [(0, 1, 3)]
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            restored_sym = [
+                op for op in restored.operations if isinstance(op, SymbolicControlledU)
+            ]
+            restored_indices = [
+                tuple(v.get_const() for v in op.control_indices or ())
+                for op in restored_sym
+            ]
+            assert restored_indices == original_indices
 
     def test_symbolic_controlled_u_legacy_payload_decodes_as_single_pool(self):
         """A payload missing ``num_control_args`` decodes as the legacy form.
@@ -409,6 +672,241 @@ class TestRoundTripIRFeatures:
         """
         block = _to_affine(_loop_kernel)
         assert len(dump_msgpack(block)) <= len(dump_json(block))
+
+    def test_while_operation_round_trip(self):
+        """Loop-carried while conditions survive both wire formats."""
+        block = _to_affine(_while_measure_kernel)
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    def test_for_items_operation_round_trip(self):
+        """Dict-backed ForItemsOperation survives both wire formats."""
+        block = _to_affine(_for_items_ising_kernel)
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    def test_if_branch_rebinds_round_trip(self):
+        """IfOperation branch-rebind records survive both wire formats."""
+        block = _to_affine(_if_branch_rebind_kernel)
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert if_ops and if_ops[0].branch_rebinds, (
+            "expected a non-empty branch_rebinds to exercise the round-trip"
+        )
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_ifs = [
+                op for op in restored.operations if isinstance(op, IfOperation)
+            ]
+            assert restored_ifs
+            restored_records = restored_ifs[0].branch_rebinds
+            assert [
+                (r.var_name, r.before.uuid, r.rebound_in_true, r.rebound_in_false)
+                for r in restored_records
+            ] == [
+                (r.var_name, r.before.uuid, r.rebound_in_true, r.rebound_in_false)
+                for r in if_ops[0].branch_rebinds
+            ]
+            assert content_hash(restored) == content_hash(block)
+
+    def test_loop_quantum_rebind_records_round_trip(self):
+        """Quantum-``before`` loop rebind records survive both wire formats."""
+        block = _to_affine(_loop_quantum_rebind_kernel)
+        for_ops = [op for op in block.operations if isinstance(op, ForOperation)]
+        assert for_ops and any(
+            r.before.type.is_quantum() for r in for_ops[0].loop_carried_rebinds
+        ), "expected a quantum loop rebind record to exercise the round-trip"
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_fors = [
+                op for op in restored.operations if isinstance(op, ForOperation)
+            ]
+            assert restored_fors
+            assert [
+                (r.var_name, r.before.uuid, r.after.uuid, r.before_synthesized)
+                for r in restored_fors[0].loop_carried_rebinds
+            ] == [
+                (r.var_name, r.before.uuid, r.after.uuid, r.before_synthesized)
+                for r in for_ops[0].loop_carried_rebinds
+            ]
+            assert content_hash(restored) == content_hash(block)
+
+    def test_for_items_vector_key_round_trip(self):
+        """``key_is_vector=True`` ForItemsOperation survives both formats."""
+        block = _to_affine(_for_items_vector_key_kernel)
+        for_items_ops = [
+            op for op in block.operations if isinstance(op, ForItemsOperation)
+        ]
+        assert for_items_ops and for_items_ops[0].key_is_vector
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_ops = [
+                op for op in restored.operations if isinstance(op, ForItemsOperation)
+            ]
+            assert restored_ops and restored_ops[0].key_is_vector
+
+    def test_dict_getitem_round_trip(self):
+        """DictGetItemOperation survives both wire formats with key_arity."""
+        from qamomile.circuit.ir.operation.classical_ops import (
+            DictGetItemOperation,
+        )
+
+        block = _to_affine(_dict_getitem_kernel)
+
+        def collect_arities(blk: Block) -> list[int]:
+            arities: list[int] = []
+            for op in blk.operations:
+                if isinstance(op, ForItemsOperation):
+                    arities.extend(
+                        nested.key_arity
+                        for nested in op.operations
+                        if isinstance(nested, DictGetItemOperation)
+                    )
+            return sorted(arities)
+
+        assert collect_arities(block) == [1, 2]
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            assert collect_arities(restored) == [1, 2]
+            assert content_hash(restored) == content_hash(block)
+
+    def test_bound_dict_metadata_round_trip(self):
+        """Bound-dict tuple keys survive decode as real tuples.
+
+        The wire formats flatten tuples to lists; the decoder must
+        re-freeze ``dict_runtime.bound_data`` so a deserialized block
+        still supports ``DictValue.get_bound_data()`` (dict keys must
+        be hashable) and ``content_hash``.
+        """
+        bound = {(0, 1): 0.5, (1, 2): -0.3}
+        block = InlinePass().run(
+            _for_items_classical_kernel.build(n_qubits=3, ising=bound, gamma=0.7)
+        )
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == to_dict(block)
+            dict_values = [v for v in restored.input_values if isinstance(v, DictValue)]
+            assert dict_values
+            assert dict_values[0].get_bound_data() == bound
+            assert content_hash(restored) == content_hash(block)
+
+    def test_inverse_block_dict_parameter_round_trip(self):
+        """InverseBlockOperation with a DictValue operand survives decode."""
+        block = _to_affine(_inverse_dict_param_kernel)
+        inverse_ops = [
+            op for op in block.operations if isinstance(op, InverseBlockOperation)
+        ]
+        assert inverse_ops
+        assert any(
+            isinstance(operand, DictValue) for operand in inverse_ops[0].operands
+        )
+
+        original = to_dict(block)
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            assert to_dict(restored) == original
+            restored_inverse = [
+                op
+                for op in restored.operations
+                if isinstance(op, InverseBlockOperation)
+            ]
+            assert restored_inverse
+            assert any(
+                isinstance(operand, DictValue)
+                for operand in restored_inverse[0].operands
+            )
+
+    def test_controlled_u_nonleaf_kernel_round_trip(self):
+        """A controlled non-leaf kernel inlines fully and round-trips.
+
+        InlinePass must descend into ``ControlledUOperation.block`` so
+        AFFINE keeps meaning "no residual CallBlockOperation anywhere
+        reachable"; the serializer rejects residual calls.
+        """
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+
+        block = _to_affine(_controlled_nonleaf_kernel)
+        assert block.kind is BlockKind.AFFINE
+        controlled_ops = [
+            op for op in block.operations if isinstance(op, ControlledUOperation)
+        ]
+        assert controlled_ops
+        nested = controlled_ops[0].block
+        assert nested is not None
+        assert not any(isinstance(op, CallBlockOperation) for op in nested.operations)
+
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            _slice_assignment_kernel,
+            _nested_slice_assignment_kernel,
+        ],
+    )
+    def test_slice_view_operations_round_trip(self, kernel: qmc.QKernel):
+        """Frontend slice views survive both wire formats."""
+        block = _to_affine(kernel)
+        op_names = [type(op).__name__ for op in block.operations]
+        assert "SliceArrayOperation" in op_names
+        assert "ReleaseSliceViewOperation" in op_names
+
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            _while_measure_kernel,
+            _for_items_classical_kernel,
+        ],
+    )
+    def test_round_trip_at_analyzed_stage(self, kernel: qmc.QKernel):
+        """The ANALYZED half of the serialization contract also round-trips.
+
+        ``from_dict`` accepts AFFINE and ANALYZED; the while / for-items
+        fixtures must survive both formats after the analyze pass, not
+        just right after inline.
+        """
+        block = _to_analyzed(_to_affine(kernel))
+        assert block.kind is BlockKind.ANALYZED
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+        assert content_hash(load_json(dump_json(block))) == content_hash(block)
 
 
 class TestCastCarrierKeyRoundTrip:
@@ -1233,3 +1731,118 @@ class TestRealAlgorithmRoundTrip:
             if op["$type"] == "CompositeGateOperation"
         )
         assert composite["implementation_block"] == composite_r["implementation_block"]
+
+
+# ---------------------------------------------------------------------------
+# Dict runtime parameter round-trip
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _dict_runtime_param_layer(
+    n: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Ising-style layer whose coefficient dicts are runtime parameters."""
+    q = qmc.qubit_array(n, name="q")
+    q = qmc.h(q)
+    for i in qmc.range(n):
+        q[i] = qmc.rz(q[i], angle=2.0 * linear[i])
+    for i in qmc.range(n - 1):
+        q[i], q[i + 1] = qmc.rzz(q[i], q[i + 1], angle=2.0 * quad[(i, i + 1)])
+    return qmc.measure(q)
+
+
+def _analyzed_with_params(kernel: qmc.QKernel, parameters: list[str], **bindings):
+    """Return an ANALYZED block for a kernel built with runtime parameters.
+
+    Unlike :func:`_to_affine`, which uses ``kernel.block`` (auto-detected
+    parameters), this builds the block with an explicit ``parameters``
+    list so a ``Dict`` argument is created on the runtime-parameter path.
+
+    Args:
+        kernel (qmc.QKernel): The kernel to build.
+        parameters (list[str]): Argument names kept as runtime parameters.
+        **bindings (Any): Compile-time bindings (e.g. register sizes).
+
+    Returns:
+        Block: The kernel's block advanced to ``BlockKind.ANALYZED``.
+    """
+    block = kernel.build(parameters=parameters, **bindings)
+    return _to_analyzed(InlinePass().run(block))
+
+
+class TestDictRuntimeParameterRoundTrip:
+    """A runtime-parameter Dict survives serialize -> deserialize intact.
+
+    The runtime-parameter identity is carried on two channels, both of
+    which serialize: the ``DictValue`` in ``Block.parameters`` (parameter
+    marker plus absence of ``dict_runtime`` bound data) and the
+    ``DictType``-typed ``RUNTIME_PARAMETER`` entry in
+    ``Block.param_slots``. These tests pin that both round-trip. In
+    particular ``dict_runtime`` must stay ``None`` across the round-trip;
+    were it to decode as an empty-but-present ``DictRuntimeMetadata``,
+    re-emit would misread the dict as compile-time-bound and drop the
+    per-key parameters.
+    """
+
+    _PARAMS = ["quad", "linear"]
+
+    def _assert_dict_param_signature(self, block) -> None:
+        """Assert both dict arguments kept their runtime-parameter signature.
+
+        Checks both channels that carry the runtime-parameter identity: the
+        ``DictValue`` in ``Block.parameters`` (marker plus absent
+        ``dict_runtime``) and the ``DictType``-typed ``RUNTIME_PARAMETER``
+        entry in ``Block.param_slots``.
+
+        Args:
+            block (Block): The deserialized block to inspect.
+        """
+        from qamomile.circuit.ir.types.primitives import DictType
+
+        slots = {s.name: s for s in block.param_slots}
+        for name in self._PARAMS:
+            dv = block.parameters.get(name)
+            assert dv is not None, f"{name} missing from Block.parameters"
+            assert dv.is_parameter(), f"{name} lost its parameter marker"
+            assert dv.metadata.dict_runtime is None, (
+                f"{name} gained dict_runtime metadata (would be misread as a "
+                f"compile-time-bound dict on re-emit)"
+            )
+            assert name in slots, f"{name} missing from Block.param_slots"
+            assert slots[name].kind is ParamKind.RUNTIME_PARAMETER
+            assert isinstance(slots[name].type, DictType), (
+                f"{name} param slot type is {type(slots[name].type).__name__}, "
+                f"expected DictType"
+            )
+
+    def test_json_round_trip_preserves_runtime_dict(self):
+        """JSON round-trip keeps content hash and the dict parameter signature."""
+        block = _analyzed_with_params(_dict_runtime_param_layer, self._PARAMS, n=3)
+        restored = load_json(dump_json(block))
+        assert content_hash(restored) == content_hash(block)
+        self._assert_dict_param_signature(restored)
+
+    def test_msgpack_round_trip_preserves_runtime_dict(self):
+        """msgpack round-trip mirrors the JSON one."""
+        block = _analyzed_with_params(_dict_runtime_param_layer, self._PARAMS, n=3)
+        restored = load_msgpack(dump_msgpack(block))
+        assert content_hash(restored) == content_hash(block)
+        self._assert_dict_param_signature(restored)
+
+    def test_reemit_after_round_trip_matches_parameters(self):
+        """Re-emitting a deserialized block yields identical per-key parameters."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        t = QiskitTranspiler()
+        exe_ref = t.transpile(
+            _dict_runtime_param_layer, bindings={"n": 3}, parameters=self._PARAMS
+        )
+        block = _analyzed_with_params(_dict_runtime_param_layer, self._PARAMS, n=3)
+        restored = load_json(dump_json(block))
+        lowered = t.validate_symbolic_shapes(t.classical_lowering(restored))
+        exe = t.emit(t.plan(lowered), bindings={"n": 3}, parameters=self._PARAMS)
+        assert sorted(exe.parameter_names) == sorted(exe_ref.parameter_names)

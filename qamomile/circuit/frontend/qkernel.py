@@ -24,6 +24,7 @@ from qamomile.circuit.frontend.ast_transform import (
 )
 from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
+    _get_ndim,
     build_param_slots,
     create_dummy_input,
     func_to_block,
@@ -46,6 +47,7 @@ from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntTy
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 from qamomile.circuit.transpiler.errors import (
     FrontendTransformError,
+    QubitConsumedError,
     QubitRebindError,
 )
 
@@ -117,6 +119,118 @@ def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
         if is_bool:
             return bit(value)
     return value
+
+
+def _quantum_handle_display_name(handle: Handle) -> str:
+    """Return a human-readable name for a quantum handle in error messages.
+
+    Args:
+        handle (Handle): Handle to name. Falls back from the handle's own
+            name to its backing value's name to a shortened handle id.
+
+    Returns:
+        str: Non-empty display name for the handle.
+    """
+    return handle.name or handle.value.name or f"qubit_{handle.id[:8]}"
+
+
+def _reject_aliased_quantum_args(kernel_name: str, arguments: dict[str, Any]) -> None:
+    """Reject two call arguments backed by the same quantum register.
+
+    ``QKernel.__call__`` defers ``VectorView`` consumption until after the
+    call is recorded, so binding the same view to two parameters would
+    bypass the per-handle ``consume()`` check that plain ``Qubit`` /
+    ``Vector`` arguments hit, silently aliasing both formal registers onto
+    the same physical qubits.  This guard runs before any handle is
+    consumed and compares the backing ``Value.uuid``, mirroring
+    ``composite_gate._reject_duplicate_targets``.
+
+    Keying on ``uuid`` (a single ``Value`` instance bound twice) rather
+    than ``logical_id`` (stable across SSA versions) is deliberate and
+    complete.  The affine invariant forbids two *live* handles of one
+    wire, so two arguments that share a ``logical_id`` but not a ``uuid``
+    always include a stale (already-consumed) version, which the
+    consumption loop below rejects anyway — a stale view via
+    :func:`_reject_consumed_view_arg`, a stale whole register via
+    ``Handle.consume()``.  (A broadcast gate on a full view keeps the same
+    backing ``Value``, so a view and its post-gate successor collide on
+    ``uuid`` here directly.)
+
+    Args:
+        kernel_name (str): Name of the called kernel, used in the error
+            message.
+        arguments (dict[str, Any]): Bound call arguments keyed by parameter
+            name.  Non-``Handle`` entries and classical handles are
+            ignored.
+
+    Returns:
+        None.
+
+    Raises:
+        QubitConsumedError: If two quantum arguments are backed by the same
+            ``Value`` instance (the same live handle passed twice).
+    """
+    seen: dict[str, str] = {}
+    for name, handle in arguments.items():
+        if not isinstance(handle, Handle) or not handle._should_enforce_linear():
+            continue
+        backing_uuid = handle.value.uuid
+        first_name = seen.get(backing_uuid)
+        if first_name is not None:
+            display_name = _quantum_handle_display_name(handle)
+            raise QubitConsumedError(
+                f"Arguments '{first_name}' and '{name}' of "
+                f"'QKernel[{kernel_name}]' are backed by the same qubit "
+                f"register ('{display_name}').\n\n"
+                f"Affine type rule: Each qubit handle can be passed to a "
+                f"kernel call at most once — binding one register to two "
+                f"parameters would alias both onto the same physical "
+                f"qubits.\n\n"
+                f"Fix: pass disjoint registers, e.g.:\n"
+                f"  x, y = {kernel_name}(q[0:2], q[2:4])  # disjoint slices",
+                handle_name=display_name,
+                operation_name=f"QKernel[{kernel_name}]",
+            )
+        seen[backing_uuid] = name
+
+
+def _reject_consumed_view_arg(kernel_name: str, handle: Handle) -> None:
+    """Reject an already-consumed ``VectorView`` passed as a call argument.
+
+    View consumption is deferred until after the call is recorded, and the
+    deferred loop only consumes views that are still live — so a view that
+    was already consumed before the call would slip through without the
+    ``QubitConsumedError`` that a plain handle gets from ``consume()``.
+    This guard restores that error at the call boundary.
+
+    Args:
+        kernel_name (str): Name of the called kernel, used in the error
+            message.
+        handle (Handle): View argument to check.
+
+    Returns:
+        None.
+
+    Raises:
+        QubitConsumedError: If ``handle`` was already consumed.
+    """
+    if not handle._consumed:
+        return
+    display_name = _quantum_handle_display_name(handle)
+    raise QubitConsumedError(
+        f"Qubit view '{display_name}' was already consumed by "
+        f"'{handle._consumed_by}' and cannot be used again in "
+        f"'QKernel[{kernel_name}]'.\n\n"
+        f"Affine type rule: Each qubit handle can only be used once. "
+        f"After a gate operation, reassign the result to use the new "
+        f"handle.\n\n"
+        f"Fix:\n"
+        f"  v = qm.h(v)  # Reassign to capture the new handle\n"
+        f"  {kernel_name}(v)  # Pass the reassigned handle",
+        handle_name=display_name,
+        operation_name=f"QKernel[{kernel_name}]",
+        first_use_location=handle._consumed_by,
+    )
 
 
 def _const_int(value: Value | None) -> int | None:
@@ -602,6 +716,13 @@ class QKernel(Generic[P, R]):
             self.input_types, bound_args.arguments, context=f"{self.name}()"
         )
 
+        # Two parameters bound to the same quantum register would make the
+        # deferred view consumption below silently alias both formal
+        # registers onto the same physical qubits (the identical views
+        # collapse to a single ``input_view_metas`` entry); reject before
+        # any handle is consumed.
+        _reject_aliased_quantum_args(self.name, bound_args.arguments)
+
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map: dict[str, Value] = {}
         # Track borrow provenance for input-derived quantum scalar handles.
@@ -686,6 +807,7 @@ class QKernel(Generic[P, R]):
             # handle.  Everything else takes the regular ``consume``
             # path to enforce affine type.
             if isinstance(handle, VectorView) and handle._should_enforce_linear():
+                _reject_consumed_view_arg(self.name, handle)
                 inputs_map[name] = handle.value
                 continue
             if handle._should_enforce_linear():
@@ -911,17 +1033,58 @@ class QKernel(Generic[P, R]):
         return detected
 
     def _validate_parameters(self, parameters: list[str]) -> None:
-        """Validate that parameter names exist and have valid types."""
+        """Validate that parameter names exist and have valid types.
+
+        Args:
+            parameters (list[str]): Argument names requested as runtime
+                parameters via ``parameters=[...]``.
+
+        Raises:
+            ValueError: If a name does not match any kernel argument.
+            TypeError: If the named argument's type cannot be kept as a
+                runtime parameter. Scalars/arrays of float/int/UInt and
+                ``Dict[K, Float]`` (values decomposed into per-key
+                backend parameters) are allowed; a ``Dict`` without
+                explicit key/value type arguments, or with a
+                non-``Float`` value type, is not.
+        """
         for name in parameters:
             if name not in self.input_types:
                 raise ValueError(f"Unknown parameter: '{name}'")
 
             param_type = self.input_types[name]
 
+            # Dict is allowed only as an explicit opt-in (never
+            # auto-detected): each constant-key subscript lookup becomes
+            # one backend parameter, so the value type must be Float —
+            # UInt/Bit dict values feed structural decisions (loop
+            # bounds, branch predicates) that cannot stay symbolic. The
+            # annotation must carry explicit key/value types, mirroring
+            # the bound-input path (``create_dummy_input`` rejects a bare
+            # ``Dict`` the same way).
+            if is_dict_type(param_type):
+                args = getattr(param_type, "__args__", None)
+                if not args or len(args) < 2:
+                    raise TypeError(
+                        f"Parameter '{name}' must be annotated as "
+                        f"Dict[K, Float] with explicit key and value "
+                        f"types to be kept as a runtime parameter; got "
+                        f"{param_type}"
+                    )
+                value_type = args[1]
+                if value_type not in (float, Float):
+                    raise TypeError(
+                        f"Parameter '{name}' is a Dict with value type "
+                        f"{value_type}; only Dict[K, Float] can be kept "
+                        f"as a runtime parameter"
+                    )
+                continue
+
             if not self._is_parameterizable_type(param_type):
                 raise TypeError(
                     f"Parameter '{name}' has type {param_type}, "
-                    f"but only float, int, UInt, and their arrays can be parameters"
+                    f"but only float, int, UInt, their arrays, and "
+                    f"Dict[K, Float] can be parameters"
                 )
 
     def _validate_kwargs(self, parameters: list[str], kwargs: dict[str, Any]) -> None:
@@ -977,7 +1140,26 @@ class QKernel(Generic[P, R]):
                     )
 
     def _create_parameter_input(self, param_type: Any, name: str) -> Handle:
-        """Create a Handle for a parameter (unbound value)."""
+        """Create a Handle for a parameter (unbound value).
+
+        Args:
+            param_type (Any): The frontend type annotation of the
+                argument (``Float``, ``UInt``, ``Vector[Float]``,
+                ``Dict[K, Float]``, ...).
+            name (str): The kernel argument name; becomes the public
+                parameter name.
+
+        Returns:
+            Handle: A symbolic handle whose ``Value`` carries the
+                parameter marker (``with_parameter``) so emit-time
+                resolution creates backend parameters instead of
+                folding constants.
+
+        Raises:
+            TypeError: If ``param_type`` cannot be kept symbolic (e.g.
+                an array with a non-scalar element type, or a type with
+                no parameter representation).
+        """
         if param_type in (float, Float):
             value = Value(type=FloatType(), name=name).with_parameter(name)
             return Float(value=value)
@@ -1016,6 +1198,19 @@ class QKernel(Generic[P, R]):
             # the top level. emit_init=False because Float/UInt arrays never
             # emit QInitOperation regardless.
             return create_dummy_input(param_type, name, emit_init=False)
+
+        # Runtime-parameter Dict: same shape as the bound-input handle but
+        # WITHOUT dict_runtime metadata — the absence of bound data is what
+        # routes d[key] lookups onto the DictGetItemOperation path, where
+        # emit resolves each constant key into one backend parameter.
+        if is_dict_type(param_type):
+            dict_value = DictValue(name=name, entries=()).with_parameter(name)
+            dict_handle = Dict(value=dict_value, _entries=[], _runtime_parameter=True)
+            if hasattr(param_type, "__args__") and param_type.__args__:
+                dict_handle._key_type = param_type.__args__[0]
+                if len(param_type.__args__) >= 2:
+                    dict_handle._value_type = param_type.__args__[1]
+            return dict_handle
 
         raise TypeError(f"Cannot create parameter for type {param_type}")
 
@@ -1181,6 +1376,8 @@ class QKernel(Generic[P, R]):
             dict_handle = Dict(value=dict_value, _entries=[])
             if hasattr(param_type, "__args__") and param_type.__args__:
                 dict_handle._key_type = param_type.__args__[0]
+                if len(param_type.__args__) >= 2:
+                    dict_handle._value_type = param_type.__args__[1]
             return dict_handle
 
         raise TypeError(f"Cannot create bound value for type {param_type}")
@@ -1333,25 +1530,13 @@ class QKernel(Generic[P, R]):
                     bindings[name] = const_array
                 continue
 
-            # Quantum array. ``Vector[Qubit]`` is the fully supported
-            # case: we extract the first-axis size via ``get_size`` and
-            # carry it in ``qubit_sizes`` so the callee re-traces with
-            # a concrete shape. ``Matrix[Qubit]`` / ``Tensor[Qubit]``
-            # are higher-rank registers; we do not yet extract their
-            # multi-dim shape nor have the ``create_dummy_input
-            # (shape=...)`` plumbing for them, so we treat them like
-            # ``Dict`` / ``Tuple`` — leave the argument out of all
-            # three buckets and ``continue``. ``_create_traced_block``
-            # falls through to ``create_dummy_input`` for that
-            # position (matching the cached block), and the rest of
-            # the call still benefits from specialization. The
-            # trade-off: if the callee applies shape-dependent stdlib
-            # to the higher-rank register, that op continues to
-            # silently no-op — same as the pre-#392 baseline for
-            # that specific case. Raising here instead would forbid
-            # any nested call that takes a ``Matrix[Qubit]`` /
-            # ``Tensor[Qubit]``, even kernels that never touch
-            # shape-dependent stdlib on it.
+            # Quantum array. ``Vector[Qubit]`` is the only reachable
+            # case — rank>1 quantum registers are rejected at
+            # construction / trace time (see ``qubit_array`` and
+            # ``create_dummy_input``), so the non-``Vector`` ``continue``
+            # below is defensive only. Extract the first-axis size via
+            # ``get_size`` and carry it in ``qubit_sizes`` so the callee
+            # re-traces with a concrete shape.
             if (
                 is_array_type(param_type)
                 and _get_array_element_type(param_type) is Qubit
@@ -1676,12 +1861,22 @@ class QKernel(Generic[P, R]):
         """Build a traced Block by tracing this kernel.
 
         Args:
-            parameters: List of argument names to keep as unbound parameters.
+            parameters (list[str] | None): List of argument names to keep as
+                unbound parameters.
                        - None (default): Auto-detect parameters (non-Qubit args without value/default)
                        - []: No parameters (all non-Qubit args must have value/default)
                        - ["name"]: Explicit parameter list
-                       Only float, int, UInt, and their arrays are allowed as parameters.
-            **kwargs: Concrete values for non-parameter arguments.
+                       Only float, int, UInt, their arrays, and Dict[K, Float]
+                       are allowed as parameters. Dict is never auto-detected;
+                       it must be listed explicitly, and only constant-key
+                       subscript lookups (``d[key]``) are supported on a
+                       runtime-parameter dict (items() iteration needs the
+                       key structure at compile time). A runtime-parameter
+                       Dict is recorded in ``Block.param_slots`` as a slot
+                       whose type is a ``DictType``; compile-time-bound
+                       Dicts and ``Tuple`` arguments stay out of the slot
+                       manifest.
+            **kwargs (Any): Concrete values for non-parameter arguments.
 
         Returns:
             Block: The traced block ready for transpilation, estimation,
@@ -1766,7 +1961,40 @@ class QKernel(Generic[P, R]):
         Separates integer-valued kwargs for Qubit array parameters (used as
         array sizes via ``qubit_array()``) from other kwargs, then traces the
         kernel to produce a Block.
+
+        Args:
+            kwargs (dict[str, Any]): Concrete values for kernel arguments.
+                Integer values for ``Vector[Qubit]`` parameters are
+                interpreted as register sizes.
+
+        Returns:
+            Block: The traced block with quantum-array parameters realized
+                as concrete 1-D registers.
+
+        Raises:
+            NotImplementedError: If the kernel declares a rank>1 quantum
+                array parameter (``Matrix[Qubit]`` / ``Tensor[Qubit]``).
+                This path realizes quantum-array parameters via
+                ``qubit_array(size)``, which would otherwise collapse a
+                higher-rank register into a 1-D one.
+            ValueError: If a ``Vector[Qubit]`` parameter is missing its
+                integer size in ``kwargs``.
         """
+        for name, param in self.signature.parameters.items():
+            pt = self.input_types.get(name, param.annotation)
+            if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
+                ndim = _get_ndim(pt)
+                if ndim > 1:
+                    raise NotImplementedError(
+                        f"Parameter {name!r} is a rank-{ndim} quantum "
+                        f"register: the quantum addressing path is rank-1, "
+                        f"so a higher-rank register would silently alias "
+                        f"distinct elements onto the same physical qubit. "
+                        f"Declare a 1-D Vector[Qubit] parameter and compute "
+                        f"flat indices explicitly instead "
+                        f"(e.g. q[i * ncols + j])."
+                    )
+
         qubit_sizes: dict[str, int] = {}
         build_kwargs: dict[str, Any] = {}
         for key, val in kwargs.items():
@@ -1808,6 +2036,7 @@ class QKernel(Generic[P, R]):
         fold_loops: bool = True,
         expand_composite: bool = False,
         inline_depth: int | None = None,
+        fold_ifs: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Visualize the circuit using Matplotlib.
@@ -1817,23 +2046,32 @@ class QKernel(Generic[P, R]):
         are shown as symbolic parameters.
 
         Args:
-            inline: If True, expand CallBlockOperation contents (inlining).
-                   If False (default), show CallBlockOperation as boxes.
-            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
-                       If False, expand loops and show all iterations.
-            expand_composite: If True, expand CompositeGateOperation (QFT, IQFT, etc.).
-                            If False (default), show as boxes. Independent of inline.
-            inline_depth: Maximum nesting depth for inline expansion. None means
-                         unlimited (default). 0 means no inlining, 1 means top-level
-                         only, etc. Only affects CallBlock/ControlledU, not CompositeGate.
-            **kwargs: Concrete values for arguments. Arguments not provided here
-                     (and without defaults) will be shown as symbolic parameters.
+            inline (bool): If True, expand CallBlockOperation contents
+                (inlining). If False (default), show CallBlockOperation as
+                boxes.
+            fold_loops (bool): If True (default), display ForOperation as
+                blocks instead of unrolling. If False, expand loops and show
+                all iterations.
+            expand_composite (bool): If True, expand CompositeGateOperation
+                nodes. If False (default), show them as boxes.
+            inline_depth (int | None): Maximum nesting depth for inline
+                expansion. None means unlimited. Only affects CallBlock and
+                ControlledU nodes, not CompositeGate.
+            fold_ifs (bool): If True, display IfOperation as folded summary
+                blocks. If False (default), show if/else branches side by side.
+            **kwargs (Any): Concrete values for arguments. Arguments not
+                provided here and without defaults will be shown as symbolic
+                parameters.
 
         Returns:
-            matplotlib.figure.Figure object.
+            Any: Matplotlib figure object.
 
         Raises:
             ImportError: If matplotlib is not installed.
+            ValueError: If a ``Vector[Qubit]`` parameter requires a concrete
+                size for visualization and no size is provided.
+            ValidationError: If visualization-time compile-time if lowering
+                rejects the traced graph.
 
         Example:
             ```python
@@ -1865,6 +2103,9 @@ class QKernel(Generic[P, R]):
             # Draw with loops folded (shown as blocks)
             fig = circuit.draw(fold_loops=True)
 
+            # Draw with if/else folded into a summary box
+            fig = circuit.draw(fold_ifs=True)
+
             # Draw with composite gates expanded
             fig = circuit.draw(expand_composite=True)
             ```
@@ -1875,6 +2116,7 @@ class QKernel(Generic[P, R]):
             self,
             inline=inline,
             fold_loops=fold_loops,
+            fold_ifs=fold_ifs,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
             **kwargs,

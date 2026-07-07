@@ -21,7 +21,7 @@ from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOpe
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
-from qamomile.circuit.transpiler.errors import InliningError
+from qamomile.circuit.transpiler.errors import InliningError, QubitConsumedError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.value_mapping import (
     UUIDRemapper,
@@ -353,6 +353,29 @@ class InlinePass(Pass[Block, Block]):
 
         Creates a fresh value_map for the called block's scope,
         mapping block inputs to call arguments.
+
+        Args:
+            call_op (CallBlockOperation): The call to dissolve into the
+                caller's operation stream.
+            value_map (dict[str, Value]): Caller-scope value substitutions
+                accumulated so far; updated in place with the mappings for
+                this call's results.
+            visiting_blocks (set[int]): ids of blocks currently being
+                expanded, used to leave self-recursive calls intact.
+
+        Returns:
+            list[Operation]: The callee's operations, cloned and rewritten
+                into the caller's value scope.
+
+        Raises:
+            InliningError: If ``call_op.block`` is unset.
+            QubitConsumedError: If two of the call's quantum operands
+                resolve to the same value — inlining would silently alias
+                two formal registers onto the same qubits, and this pass
+                dissolves the call before ``affine_validate`` could see the
+                duplicate.  Frontend-traced kernels reject this earlier in
+                ``QKernel.__call__``; this guard covers hand-built or
+                deserialized IR.
         """
         if call_op.block is None:
             raise InliningError("CallBlockOperation.block must be set")
@@ -379,9 +402,37 @@ class InlinePass(Pass[Block, Block]):
         # ``quad_``, and ``emit_for_items`` could not find the dict in
         # bindings. Always trust the substituted result.
         arg_substitutor = ValueSubstitutor(local_map, transitive=True)
-        for block_input, call_arg in zip(block.input_values, call_args):
+        # Same-uuid duplicates among the resolved quantum operands mean the
+        # call binds one register to two parameters.  Distinct SSA versions
+        # of one wire are legitimate IR values, so this deliberately keys on
+        # ``uuid`` (not ``logical_id``); wire-level linearity is enforced by
+        # the frontend.
+        seen_quantum_args: dict[str, str] = {}
+        for arg_index, (block_input, call_arg) in enumerate(
+            zip(block.input_values, call_args)
+        ):
             substituted_arg = arg_substitutor.substitute_value(call_arg)
             resolved_arg = cast(Value, substituted_arg)
+            if isinstance(resolved_arg, Value) and resolved_arg.type.is_quantum():
+                label = (
+                    block.label_args[arg_index]
+                    if arg_index < len(block.label_args)
+                    else f"argument {arg_index}"
+                )
+                first_label = seen_quantum_args.get(resolved_arg.uuid)
+                if first_label is not None:
+                    raise QubitConsumedError(
+                        f"Call into block '{block.name}' binds the same "
+                        f"quantum value ('{resolved_arg.name}') to parameters "
+                        f"'{first_label}' and '{label}'.\n\n"
+                        f"Affine type rule: Each qubit register can be passed "
+                        f"to a kernel call at most once — binding one register "
+                        f"to two parameters would alias both onto the same "
+                        f"physical qubits.",
+                        handle_name=resolved_arg.name,
+                        operation_name=f"inline[{block.name}]",
+                    )
+                seen_quantum_args[resolved_arg.uuid] = label
             local_map[block_input.uuid] = resolved_arg
 
             # If both are ArrayValues, also map shape dimensions

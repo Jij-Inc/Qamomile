@@ -3023,10 +3023,12 @@ class TestQuantumRebindBranchScopeContract:
     The analyzer suppresses violations detected inside an ``if`` /
     ``for`` / ``while`` body so that legitimate compile-time-if
     dead-branch patterns (``if flag: ... ; else: alt = qubit_array(...);
-    q = alt``) decorate successfully. The IR-level
-    ``AffineValidationPass`` does NOT detect "silent discard" inside
-    runtime branches, so the suppression is a deliberate coverage gap
-    rather than a deferred check — see ``QubitRebindError`` and
+    q = alt``) decorate successfully. Runtime-branch and loop-body
+    silent discards are rejected later, at the IR layer, by
+    ``reject_control_flow_quantum_discard`` (see
+    ``tests/circuit/test_branch_quantum_discard.py``); decoration time
+    must stay silent for both so the compile-time idiom keeps working —
+    see ``QubitRebindError`` and
     ``QuantumRebindAnalyzer._visit_branch_scope`` docstrings. These
     tests lock that contract in so a future change that re-enables
     branch-internal raising (or breaks the legitimate dead-branch
@@ -3236,3 +3238,185 @@ class TestQuantumRebindErrorMessageDispatch:
             "q = some_classical_func(q, ...)"
         ) in msg
         assert "Or bind the new value to a different name" in msg
+
+
+class TestDuplicateQuantumCallArgs:
+    """Binding the same qubit register to two sub-kernel parameters must raise.
+
+    Regression tests for the deferred-view-consumption hole: identical
+    ``VectorView`` arguments used to collapse to a single
+    ``input_view_metas`` entry in ``QKernel.__call__``, silently aliasing
+    both formal registers onto the same physical qubits (or crashing with
+    a raw backend error once the callee entangled them).
+    """
+
+    @staticmethod
+    def _pair_kernel():
+        """Build a fresh two-register sub-kernel (H on ``a``, X on ``b``)."""
+
+        @qkernel
+        def pair(
+            a: qm.Vector[qm.Qubit], b: qm.Vector[qm.Qubit]
+        ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+            a = qm.h(a)
+            b = qm.x(b)
+            return a, b
+
+        return pair
+
+    def test_same_view_twice_raises(self):
+        """The same VectorView bound to two parameters raises instead of
+        silently aliasing both formal registers onto the same qubits."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            x, _y = pair(v, v)  # same view twice
+            q[0:2] = x
+            return qm.measure(q)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ) as exc_info:
+            circuit.build()
+        assert "'a' and 'b'" in str(exc_info.value)
+
+    def test_same_view_twice_entangling_callee_raises(self):
+        """An entangling callee with an aliased view pair raises a Qamomile
+        affine error at trace time, not a raw backend error deep in emit."""
+
+        @qkernel
+        def entangle(
+            a: qm.Vector[qm.Qubit], b: qm.Vector[qm.Qubit]
+        ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+            a0 = a[0]
+            b0 = b[0]
+            a0, b0 = qm.cx(a0, b0)
+            a[0] = a0
+            b[0] = b0
+            return a, b
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            x, _y = entangle(v, v)  # same view twice
+            q[0:2] = x
+            return qm.measure(q)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ):
+            circuit.build()
+
+    def test_stale_and_live_view_versions_raise(self):
+        """A stale SSA version and its live successor passed together raise.
+
+        A broadcast gate on a full view keeps the same backing ``Value``
+        (uuid preserved), so ``v`` and ``v2`` collide on the same-uuid
+        alias guard; either way the program is rejected (previously it
+        emitted the caller's gate twice on the same wires)."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            v2 = qm.h(v)
+            x, _y = pair(v, v2)  # stale + live version of one register
+            q[0:2] = x
+            return qm.measure(q)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ):
+            circuit.build()
+
+    def test_consumed_view_arg_raises(self):
+        """An already-consumed view passed as a call argument raises the
+        standard consumed error instead of slipping past deferred
+        consumption."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            _v2 = qm.h(v)  # consumes v
+            x, y = pair(v, q[2:4])
+            q[0:2] = x
+            q[2:4] = y
+            return qm.measure(q)
+
+        with pytest.raises(QubitConsumedError, match="already consumed by 'H'"):
+            circuit.build()
+
+    def test_same_vector_twice_raises(self):
+        """A whole Vector bound to two parameters is rejected with the
+        argument-aliasing wording."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            x, _y = pair(q, q)  # same Vector twice
+            return qm.measure(x)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ):
+            circuit.build()
+
+    def test_disjoint_views_accepted(self):
+        """Disjoint views of one array remain a valid argument pair."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            x, y = pair(q[0:2], q[2:4])
+            q[0:2] = x
+            q[2:4] = y
+            return qm.measure(q)
+
+        block = circuit.build()
+        assert block is not None
+
+    def test_inline_rejects_duplicate_quantum_call_operands(self):
+        """InlinePass rejects a hand-built CallBlockOperation that binds one
+        quantum value to two parameters (defense in depth for IR that did
+        not come from ``QKernel.__call__``)."""
+        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            x, y = pair(q[0:2], q[2:4])
+            q[0:2] = x
+            q[2:4] = y
+            return qm.measure(q)
+
+        block = circuit.block
+        call_ops = [op for op in block.operations if isinstance(op, CallBlockOperation)]
+        assert len(call_ops) == 1
+        call_op = call_ops[0]
+
+        # Positive control: the untampered block inlines cleanly.
+        InlinePass().run(block)
+
+        quantum_indices = [
+            i
+            for i, operand in enumerate(call_op.operands)
+            if isinstance(operand, Value) and operand.type.is_quantum()
+        ]
+        assert len(quantum_indices) == 2
+        call_op.operands[quantum_indices[1]] = call_op.operands[quantum_indices[0]]
+
+        with pytest.raises(QubitConsumedError, match="binds the same quantum value"):
+            InlinePass().run(block)

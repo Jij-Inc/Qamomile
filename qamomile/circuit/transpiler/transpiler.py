@@ -486,13 +486,26 @@ class Transpiler(ABC, Generic[T]):
         return ClassicalLoweringPass().run(block)
 
     def validate_symbolic_shapes(self, block: Block) -> Block:
-        """Pass 2.5: Reject unresolved parameter shape dims in loop bounds.
+        """Pass 2.5: Reject unresolvable ``ForOperation`` loop bounds.
 
         Runs after ``analyze`` so dependency info is complete. Raises
         ``QamomileCompileError`` with an actionable message when a
         ``gamma_dim0``-style symbolic Value reaches a ``ForOperation``
         bound without being folded to a constant by
-        ``ParameterShapeResolutionPass``.
+        ``ParameterShapeResolutionPass``, or when a loop bound depends
+        (directly or through classical arithmetic) on a runtime
+        parameter — loop bounds are compile-time structure and must be
+        provided via ``bindings``, not ``parameters``.
+
+        Args:
+            block (Block): The analyzed block to validate.
+
+        Returns:
+            Block: ``block``, unchanged, when validation succeeds.
+
+        Raises:
+            QamomileCompileError: If a loop bound is an unresolved
+                parameter shape dim or depends on a runtime parameter.
         """
         return SymbolicShapeValidationPass().run(block)
 
@@ -531,15 +544,28 @@ class Transpiler(ABC, Generic[T]):
         """Full compilation pipeline from QKernel to executable.
 
         Args:
-            kernel: The QKernel to compile
-            bindings: Parameter values to bind (also resolves array shapes).
-                Names in ``bindings`` and ``parameters`` must be disjoint —
-                a name is either compile-time bound or runtime symbolic,
-                never both.
-            parameters: Parameter names to preserve as backend parameters
+            kernel (QKernel): The QKernel to compile
+            bindings (dict[str, Any] | None): Parameter values to bind
+                (also resolves array shapes). Names in ``bindings`` and
+                ``parameters`` must be disjoint — a name is either
+                compile-time bound or runtime symbolic, never both.
+            parameters (list[str] | None): Parameter names to preserve as
+                backend parameters. Scalars/arrays of float/int/UInt are
+                supported, plus ``Dict[K, Float]``: each constant-key
+                subscript lookup (``d[key]``) becomes one backend
+                parameter named ``"d[<key>]"``, and the execution-time
+                binding ``bindings={"d": {...}}`` is decomposed per key
+                onto those parameters. A Dict runtime parameter is
+                recorded in ``Block.param_slots`` as a slot whose type is
+                a ``DictType`` (compile-time-bound Dicts and ``Tuple``
+                arguments stay out of the slot manifest); its emitted
+                per-key parameters are visible via
+                ``ExecutableProgram.parameter_names``.
 
         Returns:
-            ExecutableProgram ready for execution
+            ExecutableProgram[T]: Executable wrapping the backend circuit
+                and the parameter metadata needed to re-bind runtime
+                parameters, ready for execution.
 
         Raises:
             ValueError: If a name appears in both ``bindings`` and
